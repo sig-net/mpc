@@ -4,8 +4,7 @@ use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
-use crate::protocol::signature::SignRequest;
-use crate::protocol::{Chain, Governance, ProtocolState, SignRequestType};
+use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, SignRequestType};
 use crate::util::AffinePointExt as _;
 
 use solana_sdk::commitment_config::CommitmentConfig;
@@ -80,7 +79,7 @@ type EthContractInstance = ContractInstance<EthContractFillProvider>;
 #[derive(Clone)]
 pub struct PublishAction {
     pub public_key: mpc_crypto::PublicKey,
-    pub request: SignRequest,
+    pub indexed: IndexedSignRequest,
     output: FullSignature<Secp256k1>,
     pub participants: Vec<Participant>,
     timestamp: Instant,
@@ -100,7 +99,7 @@ impl RpcChannel {
     pub fn publish(
         &self,
         public_key: mpc_crypto::PublicKey,
-        request: SignRequest,
+        indexed: IndexedSignRequest,
         output: FullSignature<Secp256k1>,
         participants: Vec<Participant>,
     ) {
@@ -110,7 +109,7 @@ impl RpcChannel {
                 .tx
                 .send(RpcAction::Publish(PublishAction {
                     public_key,
-                    request,
+                    indexed,
                     output,
                     participants,
                     timestamp: Instant::now(),
@@ -383,7 +382,7 @@ impl RpcExecutor {
                 return;
             };
 
-            let chain = action.request.indexed.chain;
+            let chain = action.indexed.chain;
             let client = self.client(&chain);
             let near_account_id = self.near.my_account_id.clone();
             let eth_rpc_tx = eth_rpc_tx.clone(); // clone for task use
@@ -687,8 +686,8 @@ async fn execute_publish(
     near_account_id: AccountId,
     backlog: Backlog,
 ) {
-    let chain = action.request.indexed.chain;
-    let sign_id = action.request.indexed.id;
+    let chain = action.indexed.chain;
+    let sign_id = action.indexed.id;
     tracing::info!(
         ?sign_id,
         ?chain,
@@ -696,17 +695,17 @@ async fn execute_publish(
         "trying to publish signature",
     );
     let expected_public_key =
-        mpc_crypto::derive_key(action.public_key, action.request.indexed.args.epsilon);
+        mpc_crypto::derive_key(action.public_key, action.indexed.args.epsilon);
 
     // We do this here, rather than on the client side, so we can use the ecrecover system function on NEAR to validate our signature
     let Ok(signature) = crate::kdf::into_eth_sig(
         &expected_public_key,
         &action.output.big_r,
         &action.output.s,
-        action.request.indexed.args.payload,
+        action.indexed.args.payload,
     ) else {
         tracing::error!(
-            sign_id = ?action.request.indexed.id,
+            ?sign_id,
             "failed to generate a recovery id; trashing publish request",
         );
         return;
@@ -751,14 +750,14 @@ async fn execute_publish(
         tokio::time::sleep(Duration::from_millis(100)).await;
         if action.retry_count >= MAX_PUBLISH_RETRY {
             tracing::info!(
-                sign_id = ?action.request.indexed.id,
+                ?sign_id,
                 elapsed = ?action.timestamp.elapsed(),
                 "exceeded max retries, trashing publish request",
             );
             break publish;
         } else {
             tracing::info!(
-                sign_id = ?action.request.indexed.id,
+                ?sign_id,
                 retry_count = action.retry_count,
                 elapsed = ?action.timestamp.elapsed(),
                 "failed to publish, retrying"
@@ -768,7 +767,7 @@ async fn execute_publish(
 
     // Mark completion in Backlog for SignBidirectional requests
     if matches!(
-        action.request.indexed.sign_request_type,
+        action.indexed.sign_request_type,
         SignRequestType::SignBidirectional(_)
     ) {
         let success = publish_result.is_ok();
@@ -818,13 +817,13 @@ async fn try_publish_near(
     timestamp: &Instant,
     signature: &Signature,
 ) -> Result<(), near_fetch::Error> {
-    let chain = action.request.indexed.chain;
+    let chain = action.indexed.chain;
     let outcome = near
-        .call_respond(&action.request.indexed.id, signature)
+        .call_respond(&action.indexed.id, signature)
         .await
         .inspect_err(|err| {
             tracing::error!(
-                sign_id = ?action.request.indexed.id,
+                sign_id = ?action.indexed.id,
                 ?err,
                 "failed to publish signature",
             );
@@ -835,7 +834,7 @@ async fn try_publish_near(
 
     let _: () = outcome.json().inspect_err(|err| {
         tracing::error!(
-            sign_id = ?action.request.indexed.id,
+            sign_id = ?action.indexed.id,
             big_r = signature.big_r.to_base58(),
             s = ?signature.s,
             ?err,
@@ -846,14 +845,14 @@ async fn try_publish_near(
             .inc();
     })?;
     tracing::info!(
-        sign_id = ?action.request.indexed.id,
+        sign_id = ?action.indexed.id,
         big_r = signature.big_r.to_base58(),
         s = ?signature.s,
         elapsed = ?timestamp.elapsed(),
         "published signature sucessfully",
     );
 
-    let elapsed = action.request.indexed.timestamp_sign_queue.elapsed();
+    let elapsed = action.indexed.timestamp_sign_queue.elapsed();
     crate::metrics::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .inc();
@@ -1086,8 +1085,10 @@ async fn try_publish_eth(
     signature: &Signature,
     near_account_id: &AccountId,
 ) -> Result<(), ()> {
+    let chain = action.indexed.chain;
+    let sign_id = action.indexed.id;
     let params = [DynSolValue::Array(vec![DynSolValue::Tuple(vec![
-        DynSolValue::FixedBytes(action.request.indexed.id.request_id.into(), 32),
+        DynSolValue::FixedBytes(action.indexed.id.request_id.into(), 32),
         DynSolValue::Tuple(vec![
             DynSolValue::Tuple(vec![
                 DynSolValue::from(U256::from_be_slice(&signature.big_r.x())),
@@ -1104,7 +1105,7 @@ async fn try_publish_eth(
         &eth.contract,
         &params,
         40000,
-        std::slice::from_ref(&action.request.indexed.id),
+        std::slice::from_ref(&action.indexed.id),
         near_account_id,
     )
     .await?;
@@ -1113,7 +1114,7 @@ async fn try_publish_eth(
         eth.contract.provider(),
         tx_hash,
         near_account_id,
-        vec![action.request.indexed.id],
+        vec![action.indexed.id],
         ETH_TX_RECEIPT_MAX_ATTEMPTS,
     )
     .await?;
@@ -1121,23 +1122,19 @@ async fn try_publish_eth(
     // Check if transaction was successful
     if !receipt.status() {
         tracing::error!(
-            sign_id = ?action.request.indexed.id,
+            ?sign_id,
             tx_hash = ?receipt.transaction_hash,
             "transaction failed"
         );
         crate::metrics::SIGNATURE_PUBLISH_FAILURES
-            .with_label_values(&[
-                action.request.indexed.chain.as_str(),
-                near_account_id.as_str(),
-            ])
+            .with_label_values(&[action.indexed.chain.as_str(), near_account_id.as_str()])
             .inc();
         return Err(());
     }
 
-    let chain = action.request.indexed.chain;
     let tx_hash = receipt.transaction_hash;
     tracing::info!(
-        sign_id = ?action.request.indexed.id,
+        ?sign_id,
         tx_hash = ?tx_hash,
         elapsed = ?timestamp.elapsed(),
         "published ethereum signature successfully"
@@ -1146,7 +1143,7 @@ async fn try_publish_eth(
     crate::metrics::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .inc();
-    let elapsed = action.request.indexed.timestamp_sign_queue.elapsed();
+    let elapsed = action.indexed.timestamp_sign_queue.elapsed();
     crate::metrics::SIGN_TOTAL_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(elapsed.as_secs_f64());
@@ -1175,15 +1172,15 @@ async fn try_batch_publish_eth(
     let num_requests = actions.len();
     let sign_ids = actions
         .iter()
-        .map(|action| action.request.indexed.id)
+        .map(|action| action.indexed.id)
         .collect::<Vec<_>>();
     tracing::info!(?sign_ids, "will send eth batch tx");
     for action in actions {
         let signature = signatures
-            .get(&action.request.indexed.id)
+            .get(&action.indexed.id)
             .expect("signature not found in map");
         params_vec.push(DynSolValue::Tuple(vec![
-            DynSolValue::FixedBytes(action.request.indexed.id.request_id.into(), 32),
+            DynSolValue::FixedBytes(action.indexed.id.request_id.into(), 32),
             DynSolValue::Tuple(vec![
                 DynSolValue::Tuple(vec![
                     DynSolValue::from(U256::from_be_slice(&signature.big_r.x())),
@@ -1251,7 +1248,7 @@ async fn try_batch_publish_eth(
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .inc_by(num_requests as f64);
     for action in actions {
-        let elapsed = action.request.indexed.timestamp_sign_queue.elapsed();
+        let elapsed = action.indexed.timestamp_sign_queue.elapsed();
         crate::metrics::SIGN_TOTAL_LATENCY
             .with_label_values(&[chain.as_str(), near_account_id.as_str()])
             .observe(elapsed.as_secs_f64());
@@ -1278,21 +1275,22 @@ async fn execute_batch_publish(
 
     for action in actions.iter() {
         let expected_public_key =
-            mpc_crypto::derive_key(action.public_key, action.request.indexed.args.epsilon);
+            mpc_crypto::derive_key(action.public_key, action.indexed.args.epsilon);
 
+        let sign_id = action.indexed.id;
         let Ok(signature) = crate::kdf::into_eth_sig(
             &expected_public_key,
             &action.output.big_r,
             &action.output.s,
-            action.request.indexed.args.payload,
+            action.indexed.args.payload,
         ) else {
             tracing::error!(
-                sign_id = ?action.request.indexed.id,
+                ?sign_id,
                 "failed to generate a recovery id; trashing publish request",
             );
             return;
         };
-        signatures.insert(action.request.indexed.id, signature);
+        signatures.insert(sign_id, signature);
     }
 
     let mut retry_count = 0;
@@ -1347,10 +1345,11 @@ async fn try_publish_sol(
     signature: &Signature,
     near_account_id: &AccountId,
 ) -> Result<(), ()> {
-    let chain = action.request.indexed.chain;
+    let chain = action.indexed.chain;
     let program = sol.client.program(sol.program_id).map_err(|_| ())?;
 
-    let request_ids = vec![action.request.indexed.id.request_id];
+    let sign_id = action.indexed.id;
+    let request_ids = vec![action.indexed.id.request_id];
     let big_r = signature.big_r.to_encoded_point(false);
     let signature = SolanaContractSignature {
         big_r: SolanaContractAffinePoint {
@@ -1362,12 +1361,12 @@ async fn try_publish_sol(
     };
 
     tracing::debug!(
-        sign_id = ?action.request.indexed.id,
-        request_type = ?action.request.indexed.sign_request_type,
+        ?sign_id,
+        request_type = ?action.indexed.sign_request_type,
         "try_publish_sol: dispatching request"
     );
 
-    match &action.request.indexed.sign_request_type {
+    match &action.indexed.sign_request_type {
         SignRequestType::Sign | SignRequestType::SignBidirectional(_) => {
             let (event_authority, _) =
                 Pubkey::find_program_address(&[b"__event_authority"], &sol.program_id);
@@ -1387,7 +1386,7 @@ async fn try_publish_sol(
                 .await
                 .map_err(|err| {
                     tracing::error!(
-                        sign_id = ?action.request.indexed.id,
+                        sign_id = ?action.indexed.id,
                         error = ?err,
                         "failed to publish solana signature"
                     );
@@ -1397,7 +1396,7 @@ async fn try_publish_sol(
                 })?;
 
             tracing::info!(
-                sign_id = ?action.request.indexed.id,
+                ?sign_id,
                 tx_hash = ?tx,
                 elapsed = ?timestamp.elapsed(),
                 "published solana signature successfully"
@@ -1405,7 +1404,7 @@ async fn try_publish_sol(
         }
         SignRequestType::RespondBidirectional(respond_bidirectional_tx) => {
             tracing::debug!(
-                sign_id = ?action.request.indexed.id,
+                ?sign_id,
                 request_id = ?request_ids[0],
                 serialized_output_len = respond_bidirectional_tx.output.len(),
                 "try_publish_sol: entering RespondBidirectional arm"
@@ -1426,7 +1425,7 @@ async fn try_publish_sol(
                 .await
                 .map_err(|err| {
                     tracing::error!(
-                        sign_id = ?action.request.indexed.id,
+                        ?sign_id,
                         error = ?err,
                         "failed to publish respond bidirectional solana signature"
                     );
@@ -1436,7 +1435,7 @@ async fn try_publish_sol(
                 })?;
 
             tracing::info!(
-                sign_id = ?action.request.indexed.id,
+                ?sign_id,
                 tx_hash = ?tx,
                 elapsed = ?timestamp.elapsed(),
                 "published respond bidirectional solana signature successfully"
@@ -1448,7 +1447,7 @@ async fn try_publish_sol(
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .inc();
     let sign_latency_in_secs = crate::util::duration_between_unix(
-        action.request.indexed.unix_timestamp_indexed,
+        action.indexed.unix_timestamp_indexed,
         crate::util::current_unix_timestamp(),
     )
     .as_secs();

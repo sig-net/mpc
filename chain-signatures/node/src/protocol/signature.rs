@@ -34,6 +34,9 @@ use tokio::task::JoinHandle;
 
 use near_account_id::AccountId;
 
+/// The round interval to search for a proposer in the organizing phase.
+const ROUND_INTERVAL: usize = 512;
+
 /// All relevant info pertaining to an Indexed sign request from an indexer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexedSignRequest {
@@ -51,17 +54,6 @@ pub struct IndexedSignRequest {
 pub enum Sign {
     Request(IndexedSignRequest),
     Completion(SignId),
-}
-
-/// The sign request for the node to process. This contains relevant info for the node
-/// to generate a signature such as what has been indexed and what the node needs to maintain
-/// metadata-wise to generate the signature.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SignRequest {
-    pub indexed: IndexedSignRequest,
-    pub proposer: Participant,
-    pub stable: BTreeSet<Participant>,
-    pub round: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -102,7 +94,6 @@ struct SignPositor {
 
 struct SignGenerating {
     proposer: Participant,
-    stable: BTreeSet<Participant>,
     presignature_id: PresignatureId,
     presignature: Option<PresignatureTaken>,
     accepted_participants: Vec<Participant>,
@@ -149,7 +140,7 @@ impl SignOrganizer {
         ctx: &SignTask,
         state: &mut SignState,
         threshold: usize,
-    ) -> BTreeSet<Participant> {
+    ) -> Option<BTreeSet<Participant>> {
         let sign_id = ctx.sign_id;
         let mut once = true;
 
@@ -157,7 +148,7 @@ impl SignOrganizer {
             let stable_count = {
                 let stable = &state.mesh_state.borrow().stable;
                 if stable.len() >= threshold {
-                    return stable.clone();
+                    return Some(stable.clone());
                 }
                 stable.len()
             };
@@ -173,7 +164,7 @@ impl SignOrganizer {
             }
 
             if state.mesh_state.changed().await.is_err() {
-                return BTreeSet::new();
+                return None;
             }
         }
     }
@@ -187,14 +178,13 @@ impl SignOrganizer {
 
         tracing::info!(?sign_id, round = ?state.round, "entering organizing phase");
         let (stable, proposer) = {
-            let stable = self.wait_stable(ctx, state, threshold).await;
-            if stable.is_empty() {
+            let Some(stable) = self.wait_stable(ctx, state, threshold).await else {
                 tracing::warn!(?sign_id, round = ?state.round, "no stable participants, reorganizing");
                 state.bump_round();
                 return SignPhase::Organizing(self);
-            }
+            };
 
-            let max_rounds = state.round + 512;
+            let max_rounds = state.round + ROUND_INTERVAL;
             let (selected_round, proposer) = (state.round..max_rounds)
                 .map(|r| (r, Self::proposer_per_round(r, &participants, &entropy)))
                 .find(|(_, potential_proposer)| stable.contains(potential_proposer))
@@ -417,6 +407,8 @@ impl SignPositor {
         let round = state.round;
         let is_proposer = proposer == ctx.me;
         let is_deliberator = !is_proposer;
+
+        // GUARANTEE: at least threshold participants from organizing phase.
         let posit_participants = stable.iter().copied().collect::<Vec<_>>();
 
         // Get the presignature participants - only these nodes participated in generating it
@@ -434,16 +426,6 @@ impl SignPositor {
             is_proposer,
             "entering posit phase"
         );
-
-        if posit_participants.is_empty() {
-            tracing::warn!(
-                ?sign_id,
-                ?round,
-                "posit phase has no participants, reorganizing"
-            );
-            state.bump_round();
-            return SignPhase::Organizing(SignOrganizer);
-        }
 
         if is_deliberator {
             tracing::info!(
@@ -596,7 +578,6 @@ impl SignPositor {
 
         SignPhase::Generating(SignGenerating {
             proposer,
-            stable,
             presignature_id,
             presignature,
             accepted_participants,
@@ -626,20 +607,12 @@ impl SignGenerating {
             )
         };
 
-        let request = SignRequest {
-            indexed: state.indexed().clone(),
-            proposer: self.proposer,
-            stable: self.stable.clone(),
-            round,
-        };
-
-        let participants = self.accepted_participants.clone();
-
         let generator = match SignGenerator::new(
             ctx,
-            request,
+            self.proposer,
+            state.indexed().clone(),
             presignature_pending,
-            participants.clone(),
+            self.accepted_participants.clone(),
         )
         .await
         {
@@ -682,7 +655,8 @@ struct SignGenerator {
     protocol: SignatureProtocol,
     dropper: PresignatureTakenDropper,
     participants: Vec<Participant>,
-    request: SignRequest,
+    proposer: Participant,
+    indexed: IndexedSignRequest,
     created: Instant,
     timeout: Duration,
     inbox: mpsc::Receiver<SignatureMessage>,
@@ -695,7 +669,8 @@ struct SignGenerator {
 impl SignGenerator {
     async fn new(
         ctx: &SignTask,
-        request: SignRequest,
+        proposer: Participant,
+        indexed: IndexedSignRequest,
         presignature: PendingPresignature,
         participants: Vec<Participant>,
     ) -> Result<Self, InitializationError> {
@@ -712,7 +687,6 @@ impl SignGenerator {
                 ))
             })?;
 
-        let indexed = &request.indexed;
         let sign_id = indexed.id;
         tracing::info!(
             me = ?ctx.me,
@@ -742,7 +716,8 @@ impl SignGenerator {
             protocol,
             dropper,
             participants,
-            request,
+            proposer,
+            indexed,
             created: Instant::now(),
             timeout: Duration::from_millis(ctx.cfg.signature.generation_timeout),
             inbox,
@@ -757,7 +732,7 @@ impl SignGenerator {
 
     /// Receive the next message for the signature protocol; error out on the timeout being reached
     async fn recv(&mut self) -> Result<SignatureMessage, SignError> {
-        let sign_id = self.request.indexed.id;
+        let sign_id = self.indexed.id;
         let presignature_id = self.dropper.id;
         match tokio::time::timeout(
             self.timeout.saturating_sub(self.created.elapsed()),
@@ -791,7 +766,7 @@ impl SignGenerator {
         let poke_latency =
             crate::metrics::SIGNATURE_POKE_CPU_TIME.with_label_values(&[my_account_id.as_str()]);
 
-        let sign_id = self.request.indexed.id;
+        let sign_id = self.indexed.id;
         let presignature_id = self.dropper.id;
 
         let mut total_wait = Duration::from_millis(0);
@@ -826,7 +801,7 @@ impl SignGenerator {
                 Action::Wait => {
                     // Wait for the next set of messages to arrive.
                     let msg = self.recv().await.inspect_err(|_| {
-                        if self.request.proposer == me {
+                        if self.proposer == me {
                             signature_generator_failures_metric.inc();
                         }
                     })?;
@@ -843,7 +818,7 @@ impl SignGenerator {
                                 to,
                                 SignatureMessage {
                                     id: sign_id,
-                                    proposer: self.request.proposer,
+                                    proposer: self.proposer,
                                     presignature_id: self.dropper.id,
                                     epoch,
                                     from: me,
@@ -861,7 +836,7 @@ impl SignGenerator {
                             to,
                             SignatureMessage {
                                 id: sign_id,
-                                proposer: self.request.proposer,
+                                proposer: self.proposer,
                                 presignature_id,
                                 epoch,
                                 from: me,
@@ -890,27 +865,25 @@ impl SignGenerator {
                         .with_label_values(&[my_account_id.as_str()])
                         .observe(self.created.elapsed().as_secs_f64());
 
-                    if self.request.proposer == me {
+                    if self.proposer == me {
                         ctx.rpc.publish(
                             ctx.public_key,
-                            self.request.clone(),
+                            self.indexed.clone(),
                             output,
                             self.participants.clone(),
                         );
                     }
 
                     if let SignRequestType::SignBidirectional(event) =
-                        &self.request.indexed.sign_request_type
+                        &self.indexed.sign_request_type
                     {
-                        let source_chain = self.request.indexed.chain;
-
                         // Note: The promotion to Bidirectional will happen when we receive the
                         // SignatureRespondedEvent in the Solana indexer, which has the signature data.
                         // For now, we just complete the signature generation. The indexer will handle the promotion.
-                        tracing::debug!(
+                        tracing::info!(
                             ?sign_id,
-                            ?source_chain,
-                            ?event.dest,
+                            source_chain = ?self.indexed.chain,
+                            target_chain = ?event.dest,
                             "generated signature for bidirectional request, awaiting indexer to process"
                         );
                     }
@@ -933,7 +906,7 @@ impl SignGenerator {
 impl Drop for SignGenerator {
     fn drop(&mut self) {
         let msg = self.msg.clone();
-        let sign_id = self.request.indexed.id;
+        let sign_id = self.indexed.id;
         let presignature_id = self.dropper.id;
         tokio::spawn(async move {
             msg.unsubscribe_signature(sign_id, presignature_id).await;
