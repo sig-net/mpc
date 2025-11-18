@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::backlog::Backlog;
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::node_client::NodeClient;
-use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::rpc::ContractStateWatcher;
 #[cfg(not(feature = "light_client"))]
 use crate::sign_bidirectional::BidirectionalTx;
@@ -488,7 +488,7 @@ fn finalized_block_channel() -> (mpsc::Sender<BlockNumber>, mpsc::Receiver<Block
 #[cfg(feature = "light_client")]
 pub async fn run(
     eth: Option<EthConfig>,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    sign_tx: mpsc::Sender<Sign>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
     backlog: Backlog,
@@ -615,6 +615,7 @@ pub async fn run(
         eth_contract_addr,
         node_near_account_id.clone(),
         requests_indexed_send.clone(),
+        sign_tx.clone(),
         total_timeout,
         backlog.clone(),
     ));
@@ -673,6 +674,7 @@ pub async fn run(
             eth_contract_addr,
             node_near_account_id.clone(),
             requests_indexed_send_clone.clone(),
+            sign_tx.clone(),
             total_timeout,
             backlog.clone(),
             &near_client,
@@ -705,6 +707,7 @@ async fn retry_failed_blocks(
     eth_contract_addr: Address,
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
+    sign_tx: mpsc::Sender<Sign>,
     total_timeout: Duration,
     backlog: Backlog,
 ) {
@@ -720,6 +723,7 @@ async fn retry_failed_blocks(
             eth_contract_addr,
             node_near_account_id.clone(),
             requests_indexed.clone(),
+            sign_tx.clone(),
             total_timeout,
             backlog.clone(),
             &near_client,
@@ -929,6 +933,7 @@ async fn process_block(
     eth_contract_addr: Address,
     node_near_account_id: AccountId,
     requests_indexed: mpsc::Sender<BlockAndRequests>,
+    sign_tx: mpsc::Sender<Sign>,
     total_timeout: Duration,
     backlog: Backlog,
     near_client: &NearClient,
@@ -1078,7 +1083,7 @@ async fn process_block(
         });
 
     if !respond_logs.is_empty() {
-        process_respond_events(&respond_logs, &backlog).await;
+        process_respond_events(&respond_logs, &backlog, &sign_tx).await;
     }
 
     let request_logs: Vec<Log> = potential_request_logs
@@ -1142,7 +1147,7 @@ async fn send_requests_when_final(
     helios_client: Arc<EthereumClient>,
     mut requests_indexed: mpsc::Receiver<BlockAndRequests>,
     mut finalized_block_rx: mpsc::Receiver<BlockNumber>,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    sign_tx: mpsc::Sender<Sign>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
     optimistic_requests: bool,
@@ -1240,9 +1245,17 @@ fn parse_filtered_logs(logs: Vec<Log>, total_timeout: Duration) -> Vec<IndexedSi
     indexed_requests
 }
 
-async fn process_respond_events(logs: &[Log], backlog: &Backlog) {
+async fn process_respond_events(logs: &[Log], backlog: &Backlog, sign_tx: &mpsc::Sender<Sign>) {
     for log in logs {
         if let Some(sign_id) = sign_id_from_signature_responded_log(log) {
+            if let Err(err) = sign_tx.send(Sign::Completion(sign_id)).await {
+                tracing::error!(
+                    ?sign_id,
+                    ?err,
+                    "failed to send completion for respond event"
+                );
+            }
+
             // Check the sign request type to determine if it's a bidirectional request
             if let Some(sign_type) = backlog.sign_type(Chain::Ethereum, &sign_id).await {
                 match sign_type {
@@ -1295,14 +1308,14 @@ fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
 
 fn send_indexed_requests(
     requests: Vec<IndexedSignRequest>,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    sign_tx: mpsc::Sender<Sign>,
     node_near_account_id: AccountId,
 ) {
     for request in requests {
         let sign_tx = sign_tx.clone();
         let node_near_account_id = node_near_account_id.clone();
         tokio::spawn(async move {
-            match sign_tx.send(request).await {
+            match sign_tx.send(Sign::Request(request)).await {
                 Ok(_) => {
                     crate::metrics::NUM_SIGN_REQUESTS
                         .with_label_values(&[
@@ -1357,7 +1370,7 @@ impl SignatureRequestedEvent {
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     eth: Option<EthConfig>,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    sign_tx: mpsc::Sender<Sign>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
     backlog: Backlog,
@@ -1476,7 +1489,7 @@ async fn process_block(
     block_number: u64,
     contract_address: Address,
     node_near_account_id: AccountId,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    sign_tx: mpsc::Sender<Sign>,
     total_timeout: Duration,
     backlog: &Backlog,
 ) -> anyhow::Result<()> {
@@ -1503,7 +1516,7 @@ async fn process_block(
         });
 
     if !respond_logs.is_empty() {
-        process_respond_events(&respond_logs, backlog).await;
+        process_respond_events(&respond_logs, backlog, &sign_tx).await;
     }
 
     let request_logs: Vec<Log> = potential_request_logs

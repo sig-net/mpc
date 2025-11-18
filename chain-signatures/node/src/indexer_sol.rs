@@ -1,7 +1,7 @@
 use crate::backlog::{Backlog, BacklogTransaction, SignTx};
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::node_client::NodeClient;
-use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::{
     hash_rlp_data, BidirectionalTx, BidirectionalTxId, PendingRequestStatus,
@@ -337,7 +337,7 @@ type Result<T> = anyhow::Result<T>;
 
 pub async fn run(
     sol: Option<SolConfig>,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    sign_tx: mpsc::Sender<Sign>,
     node_near_account_id: AccountId,
     backlog: Backlog,
     mut contract_watcher: ContractStateWatcher,
@@ -382,6 +382,7 @@ pub async fn run(
     let sol_for_respond = sol.clone();
     let backlog_for_respond = backlog.clone();
     let contract_watcher_for_respond = contract_watcher.clone();
+    let sign_tx_for_respond = sign_tx.clone();
 
     tokio::spawn(subscribe_and_process_sign_events(
         program_id,
@@ -402,6 +403,7 @@ pub async fn run(
                 &sol_for_respond.rpc_ws_url,
                 backlog_for_respond.clone(),
                 contract_watcher_for_respond.clone(),
+                sign_tx_for_respond.clone(),
             )
             .await
             {
@@ -438,7 +440,7 @@ pub async fn run(
 
 async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>(
     program: &Program<C>,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    sign_tx: mpsc::Sender<Sign>,
     node_near_account_id: AccountId,
     total_timeout: Duration,
     backlog: Backlog,
@@ -477,7 +479,7 @@ async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>
 async fn process_anchor_sign_event(
     sign_event: SignatureEventBox,
     tx_sig: Vec<u8>,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    sign_tx: mpsc::Sender<Sign>,
     node_near_account_id: AccountId,
     total_timeout: Duration,
     backlog: Backlog,
@@ -513,7 +515,7 @@ async fn process_anchor_sign_event(
         .insert(Chain::Solana, sign_id, backlog_tx, sign_request_type)
         .await;
 
-    if let Err(err) = sign_tx.send(sign_request).await {
+    if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
         // TODO: handle error to ensure 100% success rate
         tracing::error!(?err, "Failed to send Solana sign request into queue");
     } else {
@@ -531,7 +533,7 @@ async fn subscribe_and_process_sign_events(
     program_id: Pubkey,
     rpc_url: String,
     ws_url: String,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    sign_tx: mpsc::Sender<Sign>,
     node_near_account_id: AccountId,
     total_timeout: Duration,
     backlog: Backlog,
@@ -877,6 +879,7 @@ async fn subscribe_to_program_respond_events(
     ws_url: &str,
     backlog: Backlog,
     mut contract_watcher: ContractStateWatcher,
+    sign_tx: mpsc::Sender<Sign>,
 ) -> Result<()> {
     let rpc_client = RpcClient::new(rpc_url.to_string());
     let pubsub_client = PubsubClient::new(ws_url).await?;
@@ -928,6 +931,14 @@ async fn subscribe_to_program_respond_events(
             } else {
                 tracing::warn!(?sign_id, "bidirectional tx not found on completion");
             }
+
+            if let Err(err) = sign_tx.send(Sign::Completion(sign_id)).await {
+                tracing::error!(
+                    ?sign_id,
+                    ?err,
+                    "failed to send completion for respond bidirectional"
+                );
+            }
         }
 
         for ev in respond_events {
@@ -945,6 +956,13 @@ async fn subscribe_to_program_respond_events(
                 SignRequestType::Sign => {
                     tracing::info!(?sign_id, "sign request completed successfully");
                     backlog.remove(Chain::Solana, &sign_id).await;
+                    if let Err(err) = sign_tx.send(Sign::Completion(sign_id)).await {
+                        tracing::error!(
+                            ?sign_id,
+                            ?err,
+                            "failed to send completion for respond event"
+                        );
+                    }
                     continue;
                 }
                 SignRequestType::RespondBidirectional(_) => {

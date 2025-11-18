@@ -8,7 +8,6 @@ pub mod debug;
 
 use self::error::Error;
 use crate::backlog::{Backlog, Checkpoint};
-use crate::indexer::NearIndexer;
 use crate::metrics::WEB_ENDPOINT_LATENCY;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus, ResharingStatus};
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
@@ -35,7 +34,6 @@ use std::time::Instant;
 
 struct AxumState {
     node: NodeStateWatcher,
-    indexer: Option<NearIndexer>,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
@@ -49,7 +47,6 @@ pub async fn run(
     port: u16,
     msg_channel: MessageChannel,
     node: NodeStateWatcher,
-    indexer: Option<NearIndexer>,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
@@ -60,7 +57,6 @@ pub async fn run(
     let axum_state = AxumState {
         msg_channel,
         node,
-        indexer,
         triple_storage,
         presignature_storage,
         sync_channel,
@@ -154,12 +150,10 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
     let start = Instant::now();
     tracing::debug!("fetching state");
 
-    // TODO: remove once we have integration tests built using other chains
-    let latest_block_height = if let Some(indexer) = &web.indexer {
-        indexer.last_processed_block().await.unwrap_or(0)
-    } else {
-        0
-    };
+    // TODO: decide whether to keep latest_block_height in /state or not. We could use it for showing
+    // whatever block height our governance chain is on but with multiple chains, it doesn't have much
+    // of a use.
+    let latest_block_height = 0;
 
     let result = match web.node.status() {
         NodeStatus::Running {

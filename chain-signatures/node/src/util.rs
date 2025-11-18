@@ -124,13 +124,7 @@ impl<T, U> JoinMap<T, U> {
             tasks: JoinSet::new(),
         }
     }
-}
 
-impl<T, U> JoinMap<T, U>
-where
-    T: Copy + Hash + Eq,
-    U: Send + 'static,
-{
     pub fn len(&self) -> usize {
         self.mapping.len()
     }
@@ -138,7 +132,13 @@ where
     pub fn is_empty(&self) -> bool {
         self.mapping.is_empty()
     }
+}
 
+impl<T, U> JoinMap<T, U>
+where
+    T: Copy + Hash + Eq,
+    U: Send + 'static,
+{
     pub fn contains_key(&self, key: &T) -> bool {
         self.mapping.contains_key(key)
     }
@@ -148,6 +148,24 @@ where
         let task_id = handle.id();
         self.mapping.insert(key, handle);
         self.mapping_id.insert(task_id, key);
+    }
+
+    pub fn abort(&mut self, key: T) -> bool {
+        if let Some(handle) = self.mapping.remove(&key) {
+            handle.abort();
+
+            if let Some(task_id) = self
+                .mapping_id
+                .iter()
+                .find_map(|(id, mapped_key)| (*mapped_key == key).then_some(*id))
+            {
+                self.mapping_id.remove(&task_id);
+            }
+
+            true
+        } else {
+            false
+        }
     }
 
     pub async fn join_next(&mut self) -> Option<Result<(T, U), T>> {

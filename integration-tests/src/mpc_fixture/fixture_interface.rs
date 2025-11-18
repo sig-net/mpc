@@ -8,7 +8,7 @@ use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol::state::NodeStateWatcher;
 use mpc_node::protocol::sync::SyncChannel;
-use mpc_node::protocol::{IndexedSignRequest, MessageChannel, ProtocolState};
+use mpc_node::protocol::{MessageChannel, ProtocolState, Sign};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use near_sdk::AccountId;
 use std::collections::HashSet;
@@ -30,7 +30,7 @@ pub struct MpcFixtureNode {
     pub mesh: watch::Sender<MeshState>,
     pub config: watch::Sender<Config>,
 
-    pub sign_tx: Sender<IndexedSignRequest>,
+    pub sign_tx: Sender<Sign>,
     pub msg_channel: MessageChannel,
 
     pub triple_storage: TripleStorage,
@@ -102,7 +102,6 @@ impl MpcFixtureNode {
             8200 + u32::from(self.me) as u16,
             self.msg_channel.clone(),
             self.state.clone(),
-            None,
             self.triple_storage.clone(),
             self.presignature_storage.clone(),
             // unused but needed to call the web interface

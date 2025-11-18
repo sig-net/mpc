@@ -18,7 +18,7 @@ pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
 pub use mpc_primitives::Chain;
-pub use signature::IndexedSignRequest;
+pub use signature::{IndexedSignRequest, Sign};
 use signet_program::SignBidirectionalEvent;
 pub use state::{Node, NodeState};
 
@@ -48,7 +48,7 @@ pub struct MpcSignProtocol {
     pub(crate) secret_storage: SecretNodeStorageBox,
     pub(crate) triple_storage: TripleStorage,
     pub(crate) presignature_storage: PresignatureStorage,
-    pub(crate) sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
+    pub(crate) sign_rx: Arc<RwLock<mpsc::Receiver<Sign>>>,
     pub(crate) generating: mpsc::Receiver<GeneratingMessage>,
     pub(crate) resharing: mpsc::Receiver<ResharingMessage>,
     pub(crate) ready: mpsc::Receiver<ReadyMessage>,
