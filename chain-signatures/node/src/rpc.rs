@@ -288,6 +288,16 @@ impl ContractStateWatcher {
         }
     }
 
+    /// Waits till the contract is in the running state.
+    pub async fn wait_running(&mut self) -> RunningContractState {
+        loop {
+            if let Some(ProtocolState::Running(state)) = self.borrow_state().as_ref() {
+                return state.clone();
+            }
+            let _ = self.contract_state.changed().await;
+        }
+    }
+
     /// Create a list of contract states that share a single channel but use different account ids.
     #[cfg(feature = "test-feature")]
     pub fn test_batch(
