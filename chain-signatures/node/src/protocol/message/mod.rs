@@ -2,8 +2,10 @@ mod filter;
 mod sub;
 mod types;
 
+pub use sub::Subscriber;
+
 use crate::protocol::message::sub::{
-    SubscribeId, SubscribeRequest, SubscribeRequestAction, SubscribeResponse, Subscriber,
+    SubscribeId, SubscribeRequest, SubscribeRequestAction, SubscribeResponse,
 };
 pub use crate::protocol::message::types::{
     GeneratingMessage, Message, MessageError, MessageFilterId, PositMessage, PositProtocolId,
