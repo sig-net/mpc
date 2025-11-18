@@ -1,14 +1,11 @@
 use crate::backlog::Backlog;
-use crate::protocol::Chain;
-use crate::protocol::IndexedSignRequest;
+use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use mpc_contract::primitives::PendingRequest;
 use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
-use near_primitives::types::BlockHeight;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 /// Configures indexer.
@@ -29,46 +26,57 @@ impl Options {
     }
 }
 
-#[derive(Clone)]
 pub struct NearIndexer {
-    last_updated_timestamp: Arc<RwLock<Instant>>,
+    last_updated_timestamp: Instant,
     running_threshold: Duration,
-    processed_requests: Arc<RwLock<HashMap<SignId, Instant>>>,
+    processed_requests: HashMap<SignId, Instant>,
 }
 
 impl NearIndexer {
     fn new(options: &Options) -> Self {
         Self {
-            last_updated_timestamp: Arc::new(RwLock::new(Instant::now())),
+            last_updated_timestamp: Instant::now(),
             running_threshold: Duration::from_secs(options.running_threshold),
-            processed_requests: Arc::new(RwLock::new(HashMap::new())),
+            processed_requests: HashMap::new(),
         }
     }
 
     /// Check whether the indexer is on track with polling.
-    pub async fn is_running(&self) -> bool {
-        self.last_updated_timestamp.read().await.elapsed() <= self.running_threshold
+    pub fn is_running(&self) -> bool {
+        self.last_updated_timestamp.elapsed() <= self.running_threshold
     }
 
-    async fn update_timestamp(&self) {
-        *self.last_updated_timestamp.write().await = Instant::now();
+    fn update_timestamp(&mut self) {
+        self.last_updated_timestamp = Instant::now();
     }
 
-    async fn seen_request(&self, sign_id: &SignId) -> bool {
-        self.processed_requests.read().await.contains_key(sign_id)
+    fn seen_request(&self, sign_id: &SignId) -> bool {
+        self.processed_requests.contains_key(sign_id)
     }
 
-    async fn mark_request_seen(&self, sign_id: SignId) {
-        self.processed_requests
-            .write()
-            .await
-            .insert(sign_id, Instant::now());
+    fn mark_request_seen(&mut self, sign_id: SignId) {
+        self.processed_requests.insert(sign_id, Instant::now());
     }
 
-    async fn cleanup_old_requests(&self) {
-        let mut processed = self.processed_requests.write().await;
+    async fn cleanup_old_requests(&mut self) {
         let cutoff = Instant::now() - Duration::from_secs(3600); // Keep for 1 hour
-        processed.retain(|_, timestamp| *timestamp > cutoff);
+        self.processed_requests
+            .retain(|_, timestamp| *timestamp > cutoff);
+    }
+
+    fn completed_requests(&mut self, currently_pending: &HashSet<SignId>) -> Vec<SignId> {
+        let mut completed = Vec::new();
+
+        self.processed_requests.retain(|sign_id, _| {
+            if currently_pending.contains(sign_id) {
+                true
+            } else {
+                completed.push(*sign_id);
+                false
+            }
+        });
+
+        completed
     }
 
     /// Fetch pending requests from the smart contract
@@ -125,26 +133,18 @@ impl NearIndexer {
         hasher.update(format!("{:?}", sign_id).as_bytes());
         hasher.finalize().into()
     }
-
-    /// Compatibility method for web module
-    pub async fn last_processed_block(&self) -> Option<BlockHeight> {
-        // Since we're no longer tracking block heights in the polling approach,
-        // we return a default value. The web module uses this for status reporting.
-        Some(0)
-    }
 }
 
-#[derive(Clone)]
 struct Context {
     mpc_contract_id: AccountId,
     node_account_id: AccountId,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    sign_tx: mpsc::Sender<Sign>,
     indexer: NearIndexer,
     rpc_client: near_fetch::Client,
     backlog: Backlog,
 }
 
-async fn poll_pending_requests(ctx: &Context) -> anyhow::Result<()> {
+async fn poll_pending_requests(ctx: &mut Context) -> anyhow::Result<()> {
     let latest_block = ctx.rpc_client.view_block().await?;
     let latest_height = latest_block.header.height;
 
@@ -155,9 +155,12 @@ async fn poll_pending_requests(ctx: &Context) -> anyhow::Result<()> {
         .await?;
 
     let mut new_requests = Vec::new();
+    let mut current_pending = HashSet::new();
 
     for (sign_id, pending_request) in pending_requests.into_iter() {
-        if ctx.indexer.seen_request(&sign_id).await {
+        current_pending.insert(sign_id);
+
+        if ctx.indexer.seen_request(&sign_id) {
             continue;
         }
 
@@ -174,11 +177,13 @@ async fn poll_pending_requests(ctx: &Context) -> anyhow::Result<()> {
         );
 
         new_requests.push(indexed_request);
-        ctx.indexer.mark_request_seen(sign_id).await;
+        ctx.indexer.mark_request_seen(sign_id);
     }
 
+    let completed_requests = ctx.indexer.completed_requests(&current_pending);
+
     // Update timestamp to indicate we're still running
-    ctx.indexer.update_timestamp().await;
+    ctx.indexer.update_timestamp();
 
     // Update metrics
     crate::metrics::LATEST_BLOCK_NUMBER
@@ -191,12 +196,23 @@ async fn poll_pending_requests(ctx: &Context) -> anyhow::Result<()> {
             sign_id = ?request.id,
             "sending new sign request to processing queue"
         );
-        if let Err(err) = ctx.sign_tx.send(request).await {
+        if let Err(err) = ctx.sign_tx.send(Sign::Request(request)).await {
             tracing::error!(?err, "failed to send the sign request into sign queue");
         } else {
             crate::metrics::NUM_SIGN_REQUESTS
                 .with_label_values(&[Chain::NEAR.as_str(), ctx.node_account_id.as_str()])
                 .inc();
+        }
+    }
+
+    for sign_id in completed_requests {
+        tracing::info!(?sign_id, "detected completed NEAR sign request");
+        if let Err(err) = ctx.sign_tx.send(Sign::Completion(sign_id)).await {
+            tracing::error!(
+                ?err,
+                ?sign_id,
+                "failed to send completion event into sign queue"
+            );
         }
     }
 
@@ -214,10 +230,10 @@ pub fn run(
     options: &Options,
     mpc_contract_id: &AccountId,
     node_account_id: &AccountId,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    sign_tx: mpsc::Sender<Sign>,
     rpc_client: near_fetch::Client,
     backlog: Backlog,
-) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, NearIndexer)> {
+) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
     tracing::info!(
         %mpc_contract_id,
         %node_account_id,
@@ -225,27 +241,24 @@ pub fn run(
     );
 
     let indexer = NearIndexer::new(options);
-    let context = Context {
+    let mut context = Context {
         mpc_contract_id: mpc_contract_id.clone(),
         node_account_id: node_account_id.clone(),
         sign_tx,
-        indexer: indexer.clone(),
+        indexer,
         rpc_client,
         backlog,
     };
 
-    let join_handle = tokio::spawn(run_polling_loop(context));
-    Ok((join_handle, indexer))
-}
+    Ok(tokio::spawn(async move {
+        tracing::info!("starting polling loop for pending requests");
 
-async fn run_polling_loop(context: Context) -> anyhow::Result<()> {
-    tracing::info!("starting polling loop for pending requests");
-
-    let mut interval = tokio::time::interval(Duration::from_secs(3));
-    loop {
-        interval.tick().await;
-        if let Err(err) = poll_pending_requests(&context).await {
-            tracing::error!(%err, "failed to poll pending requests");
+        let mut interval = tokio::time::interval(Duration::from_millis(750));
+        loop {
+            interval.tick().await;
+            if let Err(err) = poll_pending_requests(&mut context).await {
+                tracing::error!(%err, "failed to poll pending requests");
+            }
         }
-    }
+    }))
 }

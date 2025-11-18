@@ -5,7 +5,7 @@ use integration_tests::mpc_fixture::MpcFixtureBuilder;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::protocol::SignRequestType;
-use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState};
+use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState, Sign};
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use test_log::test;
 
@@ -173,9 +173,21 @@ async fn test_basic_sign() {
 
     tracing::info!("sending requests now");
     let request = sign_request(0);
-    network[0].sign_tx.send(request.clone()).await.unwrap();
-    network[1].sign_tx.send(request.clone()).await.unwrap();
-    network[2].sign_tx.send(request.clone()).await.unwrap();
+    network[0]
+        .sign_tx
+        .send(Sign::Request(request.clone()))
+        .await
+        .unwrap();
+    network[1]
+        .sign_tx
+        .send(Sign::Request(request.clone()))
+        .await
+        .unwrap();
+    network[2]
+        .sign_tx
+        .send(Sign::Request(request.clone()))
+        .await
+        .unwrap();
 
     let timeout = Duration::from_secs(10);
 

@@ -45,6 +45,14 @@ pub struct IndexedSignRequest {
     pub sign_request_type: SignRequestType,
 }
 
+/// Message types that can be sent over the sign processing channel.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub enum Sign {
+    Request(IndexedSignRequest),
+    Completion(SignId),
+}
+
 /// The sign request for the node to process. This contains relevant info for the node
 /// to generate a signature such as what has been indexed and what the node needs to maintain
 /// metadata-wise to generate the signature.
@@ -1028,7 +1036,7 @@ pub struct SignatureSpawner {
     /// Presignature storage that maintains all presignatures.
     presignatures: PresignatureStorage,
     /// Receiver for incoming sign requests from indexer
-    sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
+    sign_rx: Arc<RwLock<mpsc::Receiver<Sign>>>,
     /// Track which sign requests we've seen and spawned tasks for
     seen_requests: HashSet<SignId>,
     /// Consolidated signature tasks - one per sign_id, each task is an async task handling complete lifecycle
@@ -1060,7 +1068,7 @@ impl SignatureSpawner {
         threshold: usize,
         public_key: PublicKey,
         epoch: u64,
-        sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
+        sign_rx: Arc<RwLock<mpsc::Receiver<Sign>>>,
         presignatures: &PresignatureStorage,
         mesh_state: watch::Receiver<MeshState>,
         msg: MessageChannel,
@@ -1174,6 +1182,25 @@ impl SignatureSpawner {
         }
     }
 
+    fn handle_completion(&mut self, sign_id: SignId) {
+        let request_seen = self.seen_requests.remove(&sign_id);
+        if self.tasks.abort(sign_id) {
+            tracing::info!(?sign_id, "aborting signature task due to completion event");
+        } else {
+            tracing::info!(?sign_id, "task already completed or unable to be aborted");
+        }
+
+        self.task_channels.remove(&sign_id);
+        self.pending_posit_messages.remove(&sign_id);
+
+        if !request_seen {
+            tracing::debug!(
+                ?sign_id,
+                "received completion event for unknown sign request"
+            );
+        }
+    }
+
     async fn handle_requests(
         &mut self,
         stable: &BTreeSet<Participant>,
@@ -1192,8 +1219,9 @@ impl SignatureSpawner {
         // Receive new sign requests from indexer
         let mut sign_rx = self.sign_rx.write().await;
         let mut new_requests = Vec::new();
+        let mut completions = Vec::new();
 
-        while let Ok(indexed) = {
+        while let Ok(sign) = {
             match sign_rx.try_recv() {
                 err @ Err(TryRecvError::Disconnected) => {
                     tracing::error!("sign request channel disconnected");
@@ -1202,22 +1230,33 @@ impl SignatureSpawner {
                 other => other,
             }
         } {
-            let sign_id = indexed.id;
+            match sign {
+                Sign::Completion(sign_id) => {
+                    completions.push(sign_id);
+                }
+                Sign::Request(indexed) => {
+                    let sign_id = indexed.id;
 
-            // Skip if we've already seen this request
-            if self.seen_requests.contains(&sign_id) {
-                tracing::debug!(?sign_id, "skipping duplicate sign request");
-                continue;
+                    // Skip if we've already seen this request
+                    if self.seen_requests.contains(&sign_id) {
+                        tracing::debug!(?sign_id, "skipping duplicate sign request");
+                        continue;
+                    }
+
+                    self.seen_requests.insert(sign_id);
+                    crate::metrics::NUM_UNIQUE_SIGN_REQUESTS
+                        .with_label_values(&[indexed.chain.as_str(), self.my_account_id.as_str()])
+                        .inc();
+
+                    new_requests.push(indexed);
+                }
             }
-
-            self.seen_requests.insert(sign_id);
-            crate::metrics::NUM_UNIQUE_SIGN_REQUESTS
-                .with_label_values(&[indexed.chain.as_str(), self.my_account_id.as_str()])
-                .inc();
-
-            new_requests.push(indexed);
         }
         drop(sign_rx);
+
+        for sign_id in completions {
+            self.handle_completion(sign_id);
+        }
 
         // Create tasks for all new requests
         for indexed in new_requests {
@@ -1233,43 +1272,14 @@ impl SignatureSpawner {
     async fn run(mut self, contract: ContractStateWatcher, cfg: watch::Receiver<Config>) {
         let mut check_requests_interval = tokio::time::interval(Duration::from_millis(100));
         let mut posits = self.msg.subscribe_signature_posit().await;
-        let current_epoch = self.epoch;
+        let _current_epoch = self.epoch;
 
         loop {
             tokio::select! {
                 Some((sign_id, presignature_id, from, action)) = posits.recv() => {
-                    // Check if epoch has changed or we're resharing - abort all tasks
-                    // if let Some(state) = contract.state() {
-                    //     match state {
-                    //         crate::protocol::ProtocolState::Resharing(_) => {
-                    //             tracing::info!("contract is resharing, aborting all signature tasks");
-                    //             return;
-                    //         }
-                    //         crate::protocol::ProtocolState::Running(running) if running.epoch != current_epoch => {
-                    //             tracing::info!(old_epoch = current_epoch, new_epoch = running.epoch, "epoch changed, aborting all signature tasks");
-                    //             return;
-                    //         }
-                    //         _ => {}
-                    //     }
-                    // }
                     self.handle_posit(sign_id, presignature_id, from, action).await;
                 }
                 Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
-                    // // Check if epoch has changed or we're resharing - abort all tasks
-                    // if let Some(state) = contract.state() {
-                    //     match state {
-                    //         crate::protocol::ProtocolState::Resharing(_) => {
-                    //             tracing::info!("contract is resharing, aborting all signature tasks");
-                    //             return;
-                    //         }
-                    //         crate::protocol::ProtocolState::Running(running) if running.epoch != current_epoch => {
-                    //             tracing::info!(old_epoch = current_epoch, new_epoch = running.epoch, "epoch changed, aborting all signature tasks");
-                    //             return;
-                    //         }
-                    //         _ => {}
-                    //     }
-                    // }
-
                     let (sign_id, result) = match result {
                         Ok(outcome) => outcome,
                         Err(sign_id) => {
@@ -1294,27 +1304,11 @@ impl SignatureSpawner {
                     }
                 }
                 _ = check_requests_interval.tick() => {
-                    // // Check if epoch has changed or we're resharing - abort all tasks
-                    // if let Some(state) = contract.state() {
-                    //     match state {
-                    //         crate::protocol::ProtocolState::Resharing(_) => {
-                    //             tracing::info!("contract is resharing, aborting all signature tasks");
-                    //             return;
-                    //         }
-                    //         crate::protocol::ProtocolState::Running(running) if running.epoch != current_epoch => {
-                    //             tracing::info!(old_epoch = current_epoch, new_epoch = running.epoch, "epoch changed, aborting all signature tasks");
-                    //             return;
-                    //         }
-                    //         _ => {}
-                    //     }
-                    // }
-
                     // Don't process requests until contract has participants
                     let Some(participants) = contract.participants() else {
                         continue;
                     };
-                    let participants = participants.keys().cloned().collect::<BTreeSet<_>>();
-
+                    let participants = participants.keys().cloned().collect();
                     let stable = self.mesh_state.borrow().stable.clone();
                     let protocol = cfg.borrow().protocol.clone();
                     self.handle_requests(&stable, &protocol, &participants).await;
