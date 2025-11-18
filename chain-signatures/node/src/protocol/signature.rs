@@ -29,7 +29,6 @@ use rand::SeedableRng;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{mpsc, watch, RwLock};
 use tokio::task::JoinHandle;
 
@@ -1030,8 +1029,6 @@ enum SignTaskMessage {
 pub struct SignatureSpawner {
     /// Presignature storage that maintains all presignatures.
     presignatures: PresignatureStorage,
-    /// Receiver for incoming sign requests from indexer
-    sign_rx: Arc<RwLock<mpsc::Receiver<Sign>>>,
     /// Consolidated signature tasks - one per sign_id, each task is an async task handling complete lifecycle
     tasks: JoinMap<SignId, Result<(), SignError>>,
     /// Buffered inboxes for posit messages, allowing us to queue before tasks spawn
@@ -1056,7 +1053,7 @@ impl SignatureSpawner {
         indexed: IndexedSignRequest,
         participants: BTreeSet<Participant>,
         contract: ContractStateWatcher,
-        cfg: &ProtocolConfig,
+        cfg: ProtocolConfig,
     ) {
         let sign_id = indexed.id;
         tracing::info!(?sign_id, "spawning signature task");
@@ -1076,7 +1073,7 @@ impl SignatureSpawner {
             msg: self.msg.clone(),
             rpc: self.rpc.clone(),
             backlog: self.backlog.clone(),
-            cfg: cfg.clone(),
+            cfg,
             contract,
         };
 
@@ -1118,64 +1115,33 @@ impl SignatureSpawner {
         }
     }
 
-    async fn handle_requests(
+    async fn handle_request(
         &mut self,
-        stable: &BTreeSet<Participant>,
+        sign: Sign,
         cfg: &ProtocolConfig,
         participants: &BTreeSet<Participant>,
         contract: &ContractStateWatcher,
     ) {
-        if stable.len() < self.threshold {
-            tracing::warn!(
-                ?stable,
-                threshold = self.threshold,
-                "not enough stable participants to handle requests"
-            );
-            return;
-        }
-
-        // Receive new sign requests from indexer
-        let mut sign_rx = self.sign_rx.write().await;
-        let mut new_requests = Vec::new();
-        let mut completions = Vec::new();
-
-        while let Ok(sign) = {
-            match sign_rx.try_recv() {
-                err @ Err(TryRecvError::Disconnected) => err,
-                other => other,
+        match sign {
+            Sign::Completion(sign_id) => {
+                self.handle_completion(sign_id);
             }
-        } {
-            match sign {
-                Sign::Completion(sign_id) => {
-                    completions.push(sign_id);
+            Sign::Request(indexed) => {
+                let sign_id = indexed.id;
+
+                // Skip if we've already seen this request
+                if self.inboxes.contains_key(&sign_id) {
+                    tracing::info!(?sign_id, "skipping duplicate sign request");
+                    return;
                 }
-                Sign::Request(indexed) => {
-                    let sign_id = indexed.id;
 
-                    // Skip if we've already seen this request
-                    if self.inboxes.contains_key(&sign_id) {
-                        tracing::info!(?sign_id, "skipping duplicate sign request");
-                        continue;
-                    }
+                crate::metrics::NUM_UNIQUE_SIGN_REQUESTS
+                    .with_label_values(&[indexed.chain.as_str(), self.my_account_id.as_str()])
+                    .inc();
 
-                    crate::metrics::NUM_UNIQUE_SIGN_REQUESTS
-                        .with_label_values(&[indexed.chain.as_str(), self.my_account_id.as_str()])
-                        .inc();
-
-                    new_requests.push(indexed);
-                }
+                self.spawn_task(indexed, participants.clone(), contract.clone(), cfg.clone())
+                    .await;
             }
-        }
-        drop(sign_rx);
-
-        for sign_id in completions {
-            self.handle_completion(sign_id);
-        }
-
-        // Create tasks for all new requests
-        for indexed in new_requests {
-            self.spawn_task(indexed, participants.clone(), contract.clone(), cfg)
-                .await;
         }
 
         // Update metrics
@@ -1184,15 +1150,31 @@ impl SignatureSpawner {
             .set(self.tasks.len() as i64);
     }
 
-    async fn run(mut self, mut contract: ContractStateWatcher, cfg: watch::Receiver<Config>) {
-        let mut check_requests_interval = tokio::time::interval(Duration::from_millis(100));
+    async fn run(
+        mut self,
+        sign_rx: Arc<RwLock<mpsc::Receiver<Sign>>>,
+        mut contract: ContractStateWatcher,
+        mut cfg: watch::Receiver<Config>,
+    ) {
         let mut posits = self.msg.subscribe_signature_posit().await;
 
         let running = contract.wait_running().await;
         let all_participants = running.participants.keys().copied().collect();
+        let mut protocol = cfg.borrow().protocol.clone();
+
+        // we acquire the lock but since this is a tokio lock, aborting the task while holding
+        // the lock is safe and will not deadlock other tasks trying to acquire the lock
+        let mut sign_rx = sign_rx.write().await;
 
         loop {
             tokio::select! {
+                sign = sign_rx.recv() => {
+                    let Some(sign) = sign else {
+                        tracing::warn!("signature spawner sign_rx closed, terminating");
+                        break;
+                    };
+                    self.handle_request(sign, &protocol, &all_participants, &contract).await;
+                }
                 Some((sign_id, presignature_id, from, action)) = posits.recv() => {
                     self.handle_posit(sign_id, presignature_id, from, action).await;
                 }
@@ -1216,10 +1198,8 @@ impl SignatureSpawner {
                         }
                     }
                 }
-                _ = check_requests_interval.tick() => {
-                    let stable = self.mesh_state.borrow().stable.clone();
-                    let protocol = cfg.borrow().protocol.clone();
-                    self.handle_requests(&stable, &protocol, &all_participants, &contract).await;
+                Ok(()) = cfg.changed() => {
+                    protocol = cfg.borrow().protocol.clone();
                 }
             }
         }
@@ -1253,7 +1233,6 @@ impl SignatureSpawnerTask {
             threshold,
             public_key,
             epoch,
-            sign_rx: ctx.sign_rx.clone(),
             presignatures: ctx.presignature_storage.clone(),
             mesh_state: ctx.mesh_state.clone(),
             msg: ctx.msg_channel.clone(),
@@ -1262,7 +1241,11 @@ impl SignatureSpawnerTask {
         };
 
         Self {
-            handle: tokio::spawn(spawner.run(ctx.contract.clone(), ctx.config.clone())),
+            handle: tokio::spawn(spawner.run(
+                ctx.sign_rx.clone(),
+                ctx.contract.clone(),
+                ctx.config.clone(),
+            )),
         }
     }
 
