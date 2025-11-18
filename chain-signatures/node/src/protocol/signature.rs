@@ -26,7 +26,7 @@ use mpc_primitives::{SignArgs, SignId};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TryRecvError;
@@ -47,7 +47,6 @@ pub struct IndexedSignRequest {
     pub sign_request_type: SignRequestType,
 }
 
-/// Message types that can be sent over the sign processing channel.
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Sign {
@@ -174,8 +173,7 @@ impl SignOrganizer {
                 once = false;
             }
 
-            if let Err(err) = state.mesh_state.changed().await {
-                tracing::error!(?sign_id, ?err, "mesh state watch channel closed");
+            if state.mesh_state.changed().await.is_err() {
                 return BTreeSet::new();
             }
         }
@@ -232,9 +230,7 @@ impl SignOrganizer {
             (stable, proposer)
         };
 
-        // let posit_participants = stable.iter().copied().collect::<Vec<_>>();
         let is_proposer = proposer == ctx.me;
-
         let (presignature_id, presignature) = if is_proposer {
             tracing::info!(?sign_id, round = ?state.round, "proposer waiting for presignature");
             let fetch = tokio::time::timeout(Duration::from_secs(30), async {
@@ -761,7 +757,6 @@ impl SignGenerator {
     }
 
     /// Receive the next message for the signature protocol; error out on the timeout being reached
-    /// or the channel having been closed (aborted).
     async fn recv(&mut self) -> Result<SignatureMessage, SignError> {
         let sign_id = self.request.indexed.id;
         let presignature_id = self.dropper.id;
@@ -1037,13 +1032,10 @@ pub struct SignatureSpawner {
     presignatures: PresignatureStorage,
     /// Receiver for incoming sign requests from indexer
     sign_rx: Arc<RwLock<mpsc::Receiver<Sign>>>,
-    /// Track which sign requests we've seen and spawned tasks for
-    seen_requests: HashSet<SignId>,
     /// Consolidated signature tasks - one per sign_id, each task is an async task handling complete lifecycle
     tasks: JoinMap<SignId, Result<(), SignError>>,
     /// Buffered inboxes for posit messages, allowing us to queue before tasks spawn
     inboxes: HashMap<SignId, Subscriber<SignTaskMessage>>,
-    /// Watch channel for stable participants (needed for task reorganization)
     mesh_state: watch::Receiver<MeshState>,
 
     me: Participant,
@@ -1070,11 +1062,7 @@ impl SignatureSpawner {
         tracing::info!(?sign_id, "spawning signature task");
 
         // Subscribe to (or create) the posit inbox for this sign request
-        let rx = self
-            .inboxes
-            .entry(sign_id)
-            .or_insert_with(Subscriber::unsubscribed)
-            .subscribe();
+        let rx = self.inboxes.entry(sign_id).or_default().subscribe();
 
         let task = SignTask {
             me: self.me,
@@ -1122,20 +1110,11 @@ impl SignatureSpawner {
     }
 
     fn handle_completion(&mut self, sign_id: SignId) {
-        let request_seen = self.seen_requests.remove(&sign_id);
+        self.inboxes.remove(&sign_id);
         if self.tasks.abort(sign_id) {
             tracing::info!(?sign_id, "aborting signature task due to completion event");
         } else {
             tracing::info!(?sign_id, "task already completed or unable to be aborted");
-        }
-
-        self.inboxes.remove(&sign_id);
-
-        if !request_seen {
-            tracing::debug!(
-                ?sign_id,
-                "received completion event for unknown sign request"
-            );
         }
     }
 
@@ -1162,10 +1141,7 @@ impl SignatureSpawner {
 
         while let Ok(sign) = {
             match sign_rx.try_recv() {
-                err @ Err(TryRecvError::Disconnected) => {
-                    tracing::error!("sign request channel disconnected");
-                    err
-                }
+                err @ Err(TryRecvError::Disconnected) => err,
                 other => other,
             }
         } {
@@ -1177,12 +1153,11 @@ impl SignatureSpawner {
                     let sign_id = indexed.id;
 
                     // Skip if we've already seen this request
-                    if self.seen_requests.contains(&sign_id) {
-                        tracing::debug!(?sign_id, "skipping duplicate sign request");
+                    if self.inboxes.contains_key(&sign_id) {
+                        tracing::info!(?sign_id, "skipping duplicate sign request");
                         continue;
                     }
 
-                    self.seen_requests.insert(sign_id);
                     crate::metrics::NUM_UNIQUE_SIGN_REQUESTS
                         .with_label_values(&[indexed.chain.as_str(), self.my_account_id.as_str()])
                         .inc();
@@ -1206,7 +1181,7 @@ impl SignatureSpawner {
         // Update metrics
         crate::metrics::SIGN_QUEUE_SIZE
             .with_label_values(&[self.my_account_id.as_str()])
-            .set(self.seen_requests.len() as i64);
+            .set(self.tasks.len() as i64);
     }
 
     async fn run(mut self, mut contract: ContractStateWatcher, cfg: watch::Receiver<Config>) {
@@ -1227,15 +1202,11 @@ impl SignatureSpawner {
                         Err(sign_id) => {
                             tracing::warn!(?sign_id, "signature task interrupted");
                             self.inboxes.remove(&sign_id);
-                            self.seen_requests.remove(&sign_id);
                             continue;
                         }
                     };
 
-                    // Clean up channel
                     self.inboxes.remove(&sign_id);
-                    self.seen_requests.remove(&sign_id);
-
                     match result {
                         Ok(()) => {
                             tracing::info!(?sign_id, "signature task completed successfully");
@@ -1276,7 +1247,6 @@ impl SignatureSpawnerTask {
     ) -> Self {
         let spawner = SignatureSpawner {
             me,
-            seen_requests: HashSet::new(),
             tasks: JoinMap::new(),
             inboxes: HashMap::new(),
             my_account_id: ctx.my_account_id.clone(),
@@ -1332,7 +1302,7 @@ impl PendingPresignature {
 
         let presignature = tokio::time::timeout(timeout, async {
             // TODO: we can make storage wait for presignature to be available instead of here
-            let mut interval = tokio::time::interval(Duration::from_millis(50));
+            let mut interval = tokio::time::interval(Duration::from_millis(250));
             loop {
                 interval.tick().await;
                 if let Some(presignature) = storage.take(id, owner, me).await {
