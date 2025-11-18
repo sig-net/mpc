@@ -112,7 +112,7 @@ impl SignPhase {
         self,
         ctx: &SignTask,
         state: &mut SignState,
-        task_rx: &mut mpsc::Receiver<SignatureTaskMessage>,
+        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
     ) -> SignPhase {
         match self {
             SignPhase::Organizing(phase) => phase.advance(ctx, state).await,
@@ -222,7 +222,7 @@ impl SignOrganizer {
             (stable, proposer)
         };
 
-        let posit_participants = stable.iter().copied().collect::<Vec<_>>();
+        // let posit_participants = stable.iter().copied().collect::<Vec<_>>();
         let is_proposer = proposer == ctx.me;
 
         let (presignature_id, presignature) = if is_proposer {
@@ -253,7 +253,8 @@ impl SignOrganizer {
             let presignature_id = taken.presignature.id;
             tracing::info!(?sign_id, presignature_id, "proposer got presignature");
 
-            for &p in &posit_participants {
+            // broadcast to stable and let them reject if they don't have the presignature.
+            for &p in &stable {
                 if p == ctx.me {
                     continue;
                 }
@@ -289,24 +290,17 @@ impl SignPositor {
     async fn wait_propose(
         ctx: &SignTask,
         state: &mut SignState,
-        task_rx: &mut mpsc::Receiver<SignatureTaskMessage>,
+        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
         proposer: Participant,
     ) -> Result<PresignatureId, SignPhase> {
         let sign_id = ctx.sign_id;
         let round = state.round;
-
-        tracing::info!(
-            ?sign_id,
-            ?round,
-            ?proposer,
-            "deliberator waiting for Propose"
-        );
         let outcome = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let Some(task_msg) = task_rx.recv().await else {
                     continue;
                 };
-                let SignatureTaskMessage::PositMessage {
+                let SignTaskMessage::PositMessage {
                     presignature_id,
                     from,
                     action,
@@ -323,6 +317,28 @@ impl SignPositor {
                         ?from,
                         "deliberator received Propose"
                     );
+
+                    // Check if we have access to this presignature (in storage or generating)
+                    if !ctx.presignatures.contains(*presignature_id).await {
+                        tracing::warn!(
+                            ?sign_id,
+                            presignature_id,
+                            "deliberator does not have access to proposed presignature, rejecting"
+                        );
+                        ctx.msg
+                            .send(
+                                ctx.me,
+                                proposer,
+                                PositMessage {
+                                    id: PositProtocolId::Signature(sign_id, *presignature_id),
+                                    from: ctx.me,
+                                    action: PositAction::Reject,
+                                },
+                            )
+                            .await;
+                        continue;
+                    }
+
                     break *presignature_id;
                 } else {
                     // reject
@@ -383,7 +399,7 @@ impl SignPositor {
         self,
         ctx: &SignTask,
         state: &mut SignState,
-        task_rx: &mut mpsc::Receiver<SignatureTaskMessage>,
+        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
     ) -> SignPhase {
         let SignPositor {
             proposer,
@@ -397,6 +413,14 @@ impl SignPositor {
         let is_proposer = proposer == ctx.me;
         let is_deliberator = !is_proposer;
         let posit_participants = stable.iter().copied().collect::<Vec<_>>();
+
+        // Get the presignature participants - only these nodes participated in generating it
+        let presignature_participants = if let Some(ref taken) = presignature {
+            taken.presignature.participants.clone()
+        } else {
+            // Deliberators don't have the presignature yet, will verify when they receive Propose
+            Vec::new()
+        };
 
         tracing::info!(
             ?sign_id,
@@ -417,6 +441,13 @@ impl SignPositor {
         }
 
         if is_deliberator {
+            tracing::info!(
+                ?sign_id,
+                ?round,
+                ?proposer,
+                "deliberator waiting for Propose"
+            );
+
             presignature_id = match Self::wait_propose(ctx, state, task_rx, proposer).await {
                 Ok(id) => id,
                 Err(phase) => return phase,
@@ -432,8 +463,8 @@ impl SignPositor {
         let accepted_participants = loop {
             tokio::select! {
                 Some(task_msg) = task_rx.recv() => {
-                    let SignatureTaskMessage::PositMessage { presignature_id: _, from, action } = task_msg;
-                    if !is_proposer {
+                    let SignTaskMessage::PositMessage { presignature_id: _, from, action } = task_msg;
+                    if is_deliberator {
                         if let PositAction::Start(participants) = action {
                             if from != proposer {
                                 tracing::warn!(?sign_id, ?from, ?proposer, "received Start from non-proposer, ignoring");
@@ -454,7 +485,25 @@ impl SignPositor {
                         }
 
                         if counter.meets_totality() {
-                            let participants = counter.accepts.iter().copied().collect::<Vec<_>>();
+                            // Only include participants who both accepted AND were part of the presignature generation
+                            let mut participants = counter.accepts.iter().copied().collect::<Vec<_>>();
+                            if !presignature_participants.is_empty() {
+                                participants.retain(|p| presignature_participants.contains(p));
+                            }
+
+                            if participants.len() < ctx.threshold {
+                                tracing::warn!(
+                                    ?sign_id,
+                                    presig_participants = ?presignature_participants,
+                                    accepts = ?counter.accepts,
+                                    filtered_participants = ?participants,
+                                    threshold = ctx.threshold,
+                                    "not enough presignature participants accepted, reorganizing"
+                                );
+                                state.bump_round();
+                                return SignPhase::Organizing(SignOrganizer);
+                            }
+
                             tracing::info!(?sign_id, me = ?ctx.me, ?participants, "proposer broadcasting Start");
                             for &p in &participants {
                                 if p == ctx.me {
@@ -479,7 +528,25 @@ impl SignPositor {
                 _ = &mut posit_deadline => {
                     if is_proposer {
                         if counter.enough_accepts(ctx.threshold) {
-                            let participants = counter.accepts.iter().copied().collect::<Vec<_>>();
+                            // Only include participants who both accepted AND were part of the presignature generation
+                            let mut participants = counter.accepts.iter().copied().collect::<Vec<_>>();
+                            if !presignature_participants.is_empty() {
+                                participants.retain(|p| presignature_participants.contains(p));
+                            }
+
+                            if participants.len() < ctx.threshold {
+                                tracing::warn!(
+                                    ?sign_id,
+                                    presig_participants = ?presignature_participants,
+                                    accepts = ?counter.accepts,
+                                    filtered_participants = ?participants,
+                                    threshold = ctx.threshold,
+                                    "posit timeout: not enough presignature participants accepted, reorganizing"
+                                );
+                                state.bump_round();
+                                return SignPhase::Organizing(SignOrganizer);
+                            }
+
                             tracing::info!(?sign_id, "posit timeout with enough accepts, broadcasting Start");
                             for &p in &participants {
                                 if p == ctx.me {
@@ -889,6 +956,7 @@ struct SignTask {
     backlog: Backlog,
 
     cfg: ProtocolConfig,
+    contract: ContractStateWatcher,
 }
 
 impl SignTask {
@@ -896,12 +964,14 @@ impl SignTask {
         self,
         indexed: IndexedSignRequest,
         mesh_state: watch::Receiver<MeshState>,
-        mut task_rx: mpsc::Receiver<SignatureTaskMessage>,
+        mut task_rx: mpsc::Receiver<SignTaskMessage>,
     ) -> Result<(), SignError> {
         let sign_id = self.sign_id;
+        let task_epoch = self.epoch;
         tracing::info!(
             ?sign_id,
             me = ?self.me,
+            epoch = task_epoch,
             "signature task starting with organizing loop"
         );
 
@@ -909,6 +979,32 @@ impl SignTask {
         let mut phase = SignPhase::Organizing(SignOrganizer);
 
         loop {
+            // Check if we should abort due to resharing or epoch change
+            if let Some(contract_state) = self.contract.state() {
+                match contract_state {
+                    crate::protocol::ProtocolState::Resharing(_) => {
+                        tracing::info!(
+                            ?sign_id,
+                            epoch = task_epoch,
+                            "signature task interrupted: contract is resharing"
+                        );
+                        return Err(SignError::Aborted);
+                    }
+                    crate::protocol::ProtocolState::Running(running)
+                        if running.epoch != task_epoch =>
+                    {
+                        tracing::info!(
+                            ?sign_id,
+                            old_epoch = task_epoch,
+                            new_epoch = running.epoch,
+                            "signature task interrupted: epoch changed"
+                        );
+                        return Err(SignError::Aborted);
+                    }
+                    _ => {}
+                }
+            }
+
             match phase.advance(&self, &mut state, &mut task_rx).await {
                 SignPhase::Complete(result) => return result,
                 other => {
@@ -920,7 +1016,7 @@ impl SignTask {
 }
 
 /// Message types that can be sent to a running signature task
-enum SignatureTaskMessage {
+enum SignTaskMessage {
     PositMessage {
         presignature_id: PresignatureId,
         from: Participant,
@@ -938,7 +1034,7 @@ pub struct SignatureSpawner {
     /// Consolidated signature tasks - one per sign_id, each task is an async task handling complete lifecycle
     tasks: JoinMap<SignId, Result<(), SignError>>,
     /// Channels to send messages to running tasks
-    task_channels: HashMap<SignId, mpsc::Sender<SignatureTaskMessage>>,
+    task_channels: HashMap<SignId, mpsc::Sender<SignTaskMessage>>,
     /// Buffer for posit messages that arrived before the task was created
     /// Maps sign_id -> list of (presignature_id, from, action)
     pending_posit_messages: HashMap<SignId, Vec<(PresignatureId, Participant, PositAction)>>,
@@ -953,6 +1049,7 @@ pub struct SignatureSpawner {
     msg: MessageChannel,
     rpc: RpcChannel,
     backlog: Backlog,
+    contract: ContractStateWatcher,
 }
 
 impl SignatureSpawner {
@@ -969,6 +1066,7 @@ impl SignatureSpawner {
         msg: MessageChannel,
         rpc: RpcChannel,
         backlog: Backlog,
+        contract: ContractStateWatcher,
     ) -> Self {
         Self {
             presignatures: presignatures.clone(),
@@ -986,6 +1084,7 @@ impl SignatureSpawner {
             msg,
             rpc,
             backlog,
+            contract,
         }
     }
 
@@ -1013,7 +1112,7 @@ impl SignatureSpawner {
             );
             for (msg_presignature_id, msg_from, msg_action) in pending_messages {
                 let _ = tx
-                    .send(SignatureTaskMessage::PositMessage {
+                    .send(SignTaskMessage::PositMessage {
                         presignature_id: msg_presignature_id,
                         from: msg_from,
                         action: msg_action,
@@ -1035,6 +1134,7 @@ impl SignatureSpawner {
             rpc: self.rpc.clone(),
             backlog: self.backlog.clone(),
             cfg: cfg.clone(),
+            contract: self.contract.clone(),
         };
 
         // Spawn the async task with organizing loop
@@ -1058,7 +1158,7 @@ impl SignatureSpawner {
         // If task channel exists, forward message to it
         if let Some(ch) = self.task_channels.get(&sign_id) {
             let _ = ch
-                .send(SignatureTaskMessage::PositMessage {
+                .send(SignTaskMessage::PositMessage {
                     presignature_id,
                     from,
                     action,
@@ -1133,13 +1233,43 @@ impl SignatureSpawner {
     async fn run(mut self, contract: ContractStateWatcher, cfg: watch::Receiver<Config>) {
         let mut check_requests_interval = tokio::time::interval(Duration::from_millis(100));
         let mut posits = self.msg.subscribe_signature_posit().await;
+        let current_epoch = self.epoch;
 
         loop {
             tokio::select! {
                 Some((sign_id, presignature_id, from, action)) = posits.recv() => {
+                    // Check if epoch has changed or we're resharing - abort all tasks
+                    // if let Some(state) = contract.state() {
+                    //     match state {
+                    //         crate::protocol::ProtocolState::Resharing(_) => {
+                    //             tracing::info!("contract is resharing, aborting all signature tasks");
+                    //             return;
+                    //         }
+                    //         crate::protocol::ProtocolState::Running(running) if running.epoch != current_epoch => {
+                    //             tracing::info!(old_epoch = current_epoch, new_epoch = running.epoch, "epoch changed, aborting all signature tasks");
+                    //             return;
+                    //         }
+                    //         _ => {}
+                    //     }
+                    // }
                     self.handle_posit(sign_id, presignature_id, from, action).await;
                 }
                 Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
+                    // // Check if epoch has changed or we're resharing - abort all tasks
+                    // if let Some(state) = contract.state() {
+                    //     match state {
+                    //         crate::protocol::ProtocolState::Resharing(_) => {
+                    //             tracing::info!("contract is resharing, aborting all signature tasks");
+                    //             return;
+                    //         }
+                    //         crate::protocol::ProtocolState::Running(running) if running.epoch != current_epoch => {
+                    //             tracing::info!(old_epoch = current_epoch, new_epoch = running.epoch, "epoch changed, aborting all signature tasks");
+                    //             return;
+                    //         }
+                    //         _ => {}
+                    //     }
+                    // }
+
                     let (sign_id, result) = match result {
                         Ok(outcome) => outcome,
                         Err(sign_id) => {
@@ -1164,6 +1294,21 @@ impl SignatureSpawner {
                     }
                 }
                 _ = check_requests_interval.tick() => {
+                    // // Check if epoch has changed or we're resharing - abort all tasks
+                    // if let Some(state) = contract.state() {
+                    //     match state {
+                    //         crate::protocol::ProtocolState::Resharing(_) => {
+                    //             tracing::info!("contract is resharing, aborting all signature tasks");
+                    //             return;
+                    //         }
+                    //         crate::protocol::ProtocolState::Running(running) if running.epoch != current_epoch => {
+                    //             tracing::info!(old_epoch = current_epoch, new_epoch = running.epoch, "epoch changed, aborting all signature tasks");
+                    //             return;
+                    //         }
+                    //         _ => {}
+                    //     }
+                    // }
+
                     // Don't process requests until contract has participants
                     let Some(participants) = contract.participants() else {
                         continue;
@@ -1210,6 +1355,7 @@ impl SignatureSpawnerTask {
             ctx.msg_channel.clone(),
             ctx.rpc_channel.clone(),
             ctx.backlog.clone(),
+            ctx.contract.clone(),
         );
 
         Self {
