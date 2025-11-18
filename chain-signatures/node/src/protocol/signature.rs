@@ -3,7 +3,9 @@ use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
-use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId, SignatureMessage};
+use crate::protocol::message::{
+    MessageChannel, PositMessage, PositProtocolId, SignatureMessage, Subscriber,
+};
 use crate::protocol::posit::{PositAction, SinglePositCounter};
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::Chain;
@@ -1013,11 +1015,9 @@ impl SignTask {
                 }
             }
 
-            match phase.advance(&self, &mut state, &mut task_rx).await {
+            phase = match phase.advance(&self, &mut state, &mut task_rx).await {
                 SignPhase::Complete(result) => return result,
-                other => {
-                    phase = other;
-                }
+                other => other,
             }
         }
     }
@@ -1041,11 +1041,8 @@ pub struct SignatureSpawner {
     seen_requests: HashSet<SignId>,
     /// Consolidated signature tasks - one per sign_id, each task is an async task handling complete lifecycle
     tasks: JoinMap<SignId, Result<(), SignError>>,
-    /// Channels to send messages to running tasks
-    task_channels: HashMap<SignId, mpsc::Sender<SignTaskMessage>>,
-    /// Buffer for posit messages that arrived before the task was created
-    /// Maps sign_id -> list of (presignature_id, from, action)
-    pending_posit_messages: HashMap<SignId, Vec<(PresignatureId, Participant, PositAction)>>,
+    /// Buffered inboxes for posit messages, allowing us to queue before tasks spawn
+    inboxes: HashMap<SignId, Subscriber<SignTaskMessage>>,
     /// Watch channel for stable participants (needed for task reorganization)
     mesh_state: watch::Receiver<MeshState>,
 
@@ -1081,8 +1078,7 @@ impl SignatureSpawner {
             sign_rx,
             seen_requests: HashSet::new(),
             tasks: JoinMap::new(),
-            task_channels: HashMap::new(),
-            pending_posit_messages: HashMap::new(),
+            inboxes: HashMap::new(),
             mesh_state,
             me,
             my_account_id: my_account_id.clone(),
@@ -1107,27 +1103,12 @@ impl SignatureSpawner {
         let sign_id = indexed.id;
         tracing::info!(?sign_id, "spawning signature task");
 
-        // Create channel for task communication
-        let (tx, rx) = mpsc::channel(256);
-        self.task_channels.insert(sign_id, tx.clone());
-
-        // Process any pending posit messages
-        if let Some(pending_messages) = self.pending_posit_messages.remove(&sign_id) {
-            tracing::debug!(
-                ?sign_id,
-                count = pending_messages.len(),
-                "sending pending posit messages to task"
-            );
-            for (msg_presignature_id, msg_from, msg_action) in pending_messages {
-                let _ = tx
-                    .send(SignTaskMessage::PositMessage {
-                        presignature_id: msg_presignature_id,
-                        from: msg_from,
-                        action: msg_action,
-                    })
-                    .await;
-            }
-        }
+        // Subscribe to (or create) the posit inbox for this sign request
+        let rx = self
+            .inboxes
+            .entry(sign_id)
+            .or_insert_with(Subscriber::unsubscribed)
+            .subscribe();
 
         let task = SignTask {
             me: self.me,
@@ -1164,22 +1145,18 @@ impl SignatureSpawner {
         }
 
         // If task channel exists, forward message to it
-        if let Some(ch) = self.task_channels.get(&sign_id) {
-            let _ = ch
-                .send(SignTaskMessage::PositMessage {
-                    presignature_id,
-                    from,
-                    action,
-                })
-                .await;
-        } else {
-            // No task yet - buffer message for when task is created
-            tracing::trace!(?sign_id, ?from, ?action, "buffering message - no task yet");
-            self.pending_posit_messages
-                .entry(sign_id)
-                .or_default()
-                .push((presignature_id, from, action));
-        }
+        let inbox = self
+            .inboxes
+            .entry(sign_id)
+            .or_insert_with(Subscriber::unsubscribed);
+
+        let _ = inbox
+            .send(SignTaskMessage::PositMessage {
+                presignature_id,
+                from,
+                action,
+            })
+            .await;
     }
 
     fn handle_completion(&mut self, sign_id: SignId) {
@@ -1190,8 +1167,7 @@ impl SignatureSpawner {
             tracing::info!(?sign_id, "task already completed or unable to be aborted");
         }
 
-        self.task_channels.remove(&sign_id);
-        self.pending_posit_messages.remove(&sign_id);
+        self.inboxes.remove(&sign_id);
 
         if !request_seen {
             tracing::debug!(
@@ -1272,7 +1248,6 @@ impl SignatureSpawner {
     async fn run(mut self, contract: ContractStateWatcher, cfg: watch::Receiver<Config>) {
         let mut check_requests_interval = tokio::time::interval(Duration::from_millis(100));
         let mut posits = self.msg.subscribe_signature_posit().await;
-        let _current_epoch = self.epoch;
 
         loop {
             tokio::select! {
@@ -1284,13 +1259,13 @@ impl SignatureSpawner {
                         Ok(outcome) => outcome,
                         Err(sign_id) => {
                             tracing::warn!(?sign_id, "signature task interrupted");
-                            self.task_channels.remove(&sign_id);
+                            self.inboxes.remove(&sign_id);
                             continue;
                         }
                     };
 
                     // Clean up channel
-                    self.task_channels.remove(&sign_id);
+                    self.inboxes.remove(&sign_id);
 
                     match result {
                         Ok(()) => {
