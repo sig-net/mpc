@@ -21,7 +21,7 @@ use mpc_node::protocol::contract::{InitializingContractState, RunningContractSta
 use mpc_node::protocol::message::{MessageInbox, MessageOutbox};
 use mpc_node::protocol::state::NodeKeyInfo;
 use mpc_node::protocol::triple::Triple;
-use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState, Sign};
+use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
 use mpc_node::storage::{
@@ -417,7 +417,7 @@ impl MpcFixtureNodeBuilder {
         let presignature_storage = storage.presignature_storage.clone();
 
         // prepare all channels for the node
-        let (sign_tx, sign_rx) = mpsc::channel::<Sign>(1024);
+        let (sign_tx, sign_rx) = mpsc::channel(1024);
         const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
         let (rpc_tx, rpc_rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
         let rpc_channel = RpcChannel { tx: rpc_tx };

@@ -6,7 +6,7 @@ use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
-use crate::protocol::{spawn_system_metrics, MpcSignProtocol, Sign};
+use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
@@ -19,7 +19,7 @@ use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
 use std::sync::Arc;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{mpsc, watch, RwLock};
 use url::Url;
 
 use mpc_keys::hpke;
@@ -201,7 +201,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 .with_label_values(&[account_id.as_str()])
                 .set(digest);
 
-            let (sign_tx, sign_rx) = tokio::sync::mpsc::channel::<Sign>(1024);
+            let (sign_tx, sign_rx) = mpsc::channel(1024);
 
             let gcp_service = GcpService::init(&account_id, &storage_options).await?;
 

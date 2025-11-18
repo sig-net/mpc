@@ -14,7 +14,7 @@ use near_sdk::AccountId;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc;
 use tokio::sync::{watch, Mutex};
 
 pub struct MpcFixture {
@@ -30,7 +30,7 @@ pub struct MpcFixtureNode {
     pub mesh: watch::Sender<MeshState>,
     pub config: watch::Sender<Config>,
 
-    pub sign_tx: Sender<Sign>,
+    pub sign_tx: mpsc::Sender<Sign>,
     pub msg_channel: MessageChannel,
 
     pub triple_storage: TripleStorage,

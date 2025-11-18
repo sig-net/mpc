@@ -336,7 +336,6 @@ impl SignPositor {
 
                     break *presignature_id;
                 } else {
-                    // reject
                     tracing::warn!(
                         ?sign_id,
                         ?from,
@@ -408,9 +407,6 @@ impl SignPositor {
         let is_proposer = proposer == ctx.me;
         let is_deliberator = !is_proposer;
 
-        // GUARANTEE: at least threshold participants from organizing phase.
-        let posit_participants = stable.iter().copied().collect::<Vec<_>>();
-
         // Get the presignature participants - only these nodes participated in generating it
         let presignature_participants = if let Some(ref taken) = presignature {
             taken.presignature.participants.clone()
@@ -441,6 +437,8 @@ impl SignPositor {
             }
         }
 
+        // GUARANTEE: at least threshold participants from organizing phase.
+        let posit_participants = stable.iter().copied().collect::<Vec<_>>();
         let mut counter = SinglePositCounter::new(ctx.me, &posit_participants);
 
         let posit_timeout = Duration::from_secs(60);
@@ -1102,8 +1100,11 @@ impl SignatureSpawner {
             Sign::Request(indexed) => {
                 let sign_id = indexed.id;
 
-                // Skip if we've already seen this request
-                if self.inboxes.contains_key(&sign_id) {
+                // Skip if we already have a task handling this request.
+                // Use tasks instead of inbox map since it may already contain buffered messages
+                // (e.g. a Propose arriving before the indexer notifies us), so we must only look
+                // at the task map to decide whether the request is truly a duplicate.
+                if self.tasks.contains_key(&sign_id) {
                     tracing::info!(?sign_id, "skipping duplicate sign request");
                     return;
                 }
