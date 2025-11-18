@@ -1,3 +1,5 @@
+pub use mpc_primitives::{Chain, Checkpoint, PendingTx};
+
 use mpc_primitives::{bytes::borsh_scalar, SignId, Signature};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
@@ -355,4 +357,41 @@ pub struct SignRequest {
 pub enum SignPoll {
     Ready(Signature),
     Timeout,
+}
+
+/// Manages votes for checkpoints
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct CheckpointVotes {
+    pub votes: HashMap<Checkpoint, HashSet<AccountId>>,
+}
+
+impl Default for CheckpointVotes {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CheckpointVotes {
+    pub fn new() -> Self {
+        CheckpointVotes {
+            votes: HashMap::new(),
+        }
+    }
+
+    pub fn entry(&mut self, checkpoint: Checkpoint) -> &mut HashSet<AccountId> {
+        self.votes.entry(checkpoint).or_default()
+    }
+
+    pub fn get(&self, checkpoint: &Checkpoint) -> Option<&HashSet<AccountId>> {
+        self.votes.get(checkpoint)
+    }
+
+    pub fn len(&self) -> usize {
+        self.votes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.votes.is_empty()
+    }
 }

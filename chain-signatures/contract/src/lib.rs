@@ -715,8 +715,10 @@ impl VersionedMpcContract {
     #[init(ignore_state)]
     #[handle_result]
     pub fn migrate() -> Result<Self, Error> {
-        let old: MpcContract = env::state_read().ok_or(InvalidState::ContractStateIsMissing)?;
-        Ok(VersionedMpcContract::V0(old))
+        // If old state read failed, try reading as new state (no migration needed)
+        let new_contract: MpcContract =
+            env::state_read().ok_or(InvalidState::ContractStateIsMissing)?;
+        Ok(VersionedMpcContract::V0(new_contract))
     }
 
     pub fn state(&self) -> &ProtocolContractState {

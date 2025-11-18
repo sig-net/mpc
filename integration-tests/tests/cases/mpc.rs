@@ -197,9 +197,8 @@ fn sign_request(seed: u8) -> IndexedSignRequest {
         args: sign_arg(seed),
         chain: Chain::NEAR,
         unix_timestamp_indexed: 0,
-        timestamp_sign_queue: None,
+        timestamp_sign_queue: std::time::Instant::now(),
         total_timeout: Duration::from_secs(45),
-        participants: None,
         sign_request_type: SignRequestType::Sign,
     }
 }

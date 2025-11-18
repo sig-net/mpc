@@ -5,10 +5,12 @@ use std::sync::LazyLock;
 use std::time::Instant;
 
 use crate::backlog::Backlog;
+use crate::mesh::{wait_threshold_active, MeshState};
+use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+use crate::rpc::ContractStateWatcher;
 #[cfg(not(feature = "light_client"))]
 use crate::sign_bidirectional::BidirectionalTx;
-#[cfg(not(feature = "light_client"))]
 use crate::sign_bidirectional::BidirectionalTxId;
 use crate::sign_bidirectional::PendingRequestStatus;
 use crate::storage::app_data_storage::AppDataStorage;
@@ -25,6 +27,7 @@ use alloy::rpc::types::Log;
 use alloy::rpc::types::Transaction;
 #[cfg(not(feature = "light_client"))]
 use alloy::rpc::types::TransactionReceipt;
+use tokio::sync::watch;
 
 #[cfg(not(feature = "light_client"))]
 use crate::respond_bidirectional::{
@@ -33,6 +36,7 @@ use crate::respond_bidirectional::{
 };
 #[cfg(not(feature = "light_client"))]
 use crate::sign_bidirectional::TransactionOutput;
+
 use alloy::sol_types::{sol, SolEvent};
 #[cfg(feature = "light_client")]
 use helios::common::types::{SubscriptionEvent, SubscriptionType};
@@ -312,6 +316,18 @@ sol! {
         string dest,
         string params
     );
+
+    struct Signature {
+        uint8 v;
+        bytes32 r;
+        bytes32 s;
+    }
+
+    event SignatureResponded(
+        bytes32 indexed requestId,
+        address responder,
+        Signature signature
+    );
 }
 
 fn sign_request_from_filtered_log(
@@ -367,10 +383,9 @@ fn sign_request_from_filtered_log(
         },
         chain: Chain::Ethereum,
         unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-        timestamp_sign_queue: None,
+        timestamp_sign_queue: Instant::now(),
         total_timeout,
         sign_request_type: SignRequestType::Sign,
-        participants: None,
     })
 }
 // Helper function to parse event logs
@@ -477,11 +492,23 @@ pub async fn run(
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
     backlog: Backlog,
+    mut contract_watcher: ContractStateWatcher,
+    mesh_state: watch::Receiver<MeshState>,
+    node_client: NodeClient,
 ) {
     let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
         return;
     };
+
+    // Wait for threshold to be available
+    let threshold = contract_watcher.wait_threshold().await;
+    if threshold > 0 {
+        let mesh_state = mesh_state.borrow().clone();
+        backlog
+            .recover(&mesh_state, &node_client, threshold, &[Chain::Ethereum])
+            .await;
+    }
 
     let last_processed_block = app_data_storage
         .last_processed_block_eth()
@@ -648,6 +675,7 @@ pub async fn run(
             requests_indexed_send_clone.clone(),
             total_timeout,
             backlog.clone(),
+            &near_client,
         )
         .await
         {
@@ -694,6 +722,7 @@ async fn retry_failed_blocks(
             requests_indexed.clone(),
             total_timeout,
             backlog.clone(),
+            &near_client,
         )
         .await
         {
@@ -902,6 +931,7 @@ async fn process_block(
     requests_indexed: mpsc::Sender<BlockAndRequests>,
     total_timeout: Duration,
     backlog: Backlog,
+    near_client: &NearClient,
 ) -> anyhow::Result<()> {
     tracing::info!(
         "Processing block number {} with hash {:?}",
@@ -926,115 +956,142 @@ async fn process_block(
         return Ok(());
     };
 
-    let pending_txs = backlog
-        .get_by_status(Chain::Ethereum, PendingRequestStatus::PendingExecution)
-        .await;
+    let pending_watchers = backlog.pending_execution(Chain::Ethereum).await;
+
+    tracing::info!(
+        pending_watchers_count = pending_watchers.len(),
+        block_number,
+        "checking pending watchers for bidirectional execution"
+    );
 
     let mut respond_bidirectional_requests: Vec<IndexedSignRequest> = Vec::new();
 
     for receipt in &block_receipts {
-        let tx_id = receipt.transaction_hash.into();
-        let Some(pending_tx) = pending_txs.get(&tx_id) else {
+        let tx_id: BidirectionalTxId = receipt.transaction_hash.into();
+        tracing::debug!(?tx_id, "checking receipt against pending watchers");
+        let Some((sign_id, pending_tx)) = pending_watchers.get(&tx_id).cloned() else {
             continue;
         };
-        let status = receipt.status();
-        tracing::info!(
-            "Tx {} found in block {block_number}: {}",
-            receipt.transaction_hash,
-            if status { "success" } else { "failed" }
-        );
-        let client_clone = client.clone();
-        let mut pending_tx = pending_tx.clone();
-        pending_tx.status = if status {
+        let status = if receipt.status() {
             PendingRequestStatus::Success
         } else {
             PendingRequestStatus::Failed
         };
+        tracing::info!(
+            ?tx_id,
+            ?sign_id,
+            block_number,
+            "observed bidirectional execution on destination chain"
+        );
 
-        let pending_tx_clone = pending_tx.clone();
+        let mut updated_tx = pending_tx.clone();
+        updated_tx.status = status;
+
         let completed_tx =
-            crate::respond_bidirectional::CompletedTx::new(pending_tx_clone, block_number);
+            crate::respond_bidirectional::CompletedTx::new(updated_tx.clone(), block_number);
 
-        let respond_bidirectional_sign_request: Option<IndexedSignRequest> = completed_tx
-            .create_sign_request_from_completed_tx(&client_clone, 6, total_timeout)
-            .await;
-        if let Some(respond_bidirectional_sign_request) = respond_bidirectional_sign_request {
-            respond_bidirectional_requests.push(respond_bidirectional_sign_request);
-            tracing::info!(?tx_id, "eth/inserting updated tx with new status into map");
-            backlog.insert(Chain::Ethereum, *sign_id, pending_tx).await;
+        if let Some(respond_request) = completed_tx
+            .create_sign_request_from_completed_tx(client, Chain::Ethereum, 6, total_timeout)
+            .await
+        {
+            respond_bidirectional_requests.push(respond_request);
         } else {
-            // failed to create sign request from completed tx, remove the tx from the map
-            // TODO: we need to implement a better solution for not finding such txs in helios. possible: https://github.com/sig-net/mpc/issues/499
             tracing::warn!(
-                "Failed to create sign request from completed tx, removing tx from map: {:?}",
-                receipt.transaction_hash
+                ?tx_id,
+                ?sign_id,
+                "failed to create respond_bidirectional request from executed tx"
             );
-            backlog.remove(Chain::Ethereum, sign_id).await;
         }
+
+        backlog
+            .set_status(pending_tx.source_chain, &sign_id, status)
+            .await;
+        backlog.unwatch_execution(Chain::Ethereum, &tx_id).await;
     }
 
-    let remaining_pending_txs = backlog
-        .get_by_status(Chain::Ethereum, PendingRequestStatus::PendingExecution)
-        .await;
+    let remaining_watchers = backlog.pending_execution(Chain::Ethereum).await;
 
-    for (tx_id, mut tx) in remaining_pending_txs {
-        let current_nonce = client
+    for (tx_id, (sign_id, tx)) in remaining_watchers {
+        let current_nonce = match client
             .get_nonce(
                 tx.from_address,
                 BlockId::Number(BlockNumberOrTag::Number(block_number)),
             )
-            .await;
-        if current_nonce.is_err() {
-            tracing::warn!("Failed to get current nonce: {:?}", current_nonce.err());
-            continue;
-        }
-        let current_nonce = current_nonce.unwrap();
+            .await
+        {
+            Ok(nonce) => nonce,
+            Err(err) => {
+                tracing::warn!(?tx_id, ?sign_id, ?err, "failed to get current nonce");
+                continue;
+            }
+        };
+
         if tx.nonce < current_nonce {
             tracing::warn!(
+                ?tx_id,
                 ?sign_id,
                 expected_nonce = tx.nonce,
                 actual_nonce = current_nonce,
                 "nonce too low for tx",
             );
-            tx.status = PendingRequestStatus::Failed;
-            let pending_tx = tx.clone();
 
+            let mut failed_tx = tx.clone();
+            failed_tx.status = PendingRequestStatus::Failed;
             let completed_tx =
-                crate::respond_bidirectional::CompletedTx::new(pending_tx, block_number);
+                crate::respond_bidirectional::CompletedTx::new(failed_tx.clone(), block_number);
 
-            let respond_bidirectional_sign_request: Option<IndexedSignRequest> = completed_tx
+            if let Some(request) = completed_tx
                 .create_sign_request_from_completed_tx(client, Chain::Ethereum, 6, total_timeout)
-                .await;
-            if let Some(request) = respond_bidirectional_sign_request {
+                .await
+            {
                 respond_bidirectional_requests.push(request);
-                backlog.insert(Chain::Ethereum, sign_id, tx).await;
             } else {
-                // failed to create sign request from completed tx, remove the tx from the map
                 tracing::warn!(
+                    ?tx_id,
                     ?sign_id,
-                    "failed to create sign request from completed tx, removing tx from map",
+                    "failed to create sign request from completed tx"
                 );
-                backlog.remove(Chain::Ethereum, &sign_id).await;
             }
+
+            backlog
+                .set_status(tx.source_chain, &sign_id, PendingRequestStatus::Failed)
+                .await;
+            backlog.unwatch_execution(Chain::Ethereum, &tx_id).await;
         }
     }
 
-    let filtered_logs: Vec<Log> = block_receipts
+    let relevant_logs: Vec<Log> = block_receipts
         .into_iter()
         .filter_map(|receipt| receipt.as_ref().as_receipt().cloned())
         .flat_map(|receipt| {
-            receipt.logs.into_iter().filter(|log| {
-                log.address() == eth_contract_addr
-                    && log
-                        .topic0()
-                        .is_some_and(|topic0| *topic0 == SignatureRequested::SIGNATURE_HASH)
-            })
+            receipt
+                .logs
+                .into_iter()
+                .filter(|log| log.address() == eth_contract_addr)
+        })
+        .collect();
+
+    let (respond_logs, potential_request_logs): (Vec<Log>, Vec<Log>) =
+        relevant_logs.into_iter().partition(|log| {
+            log.topic0()
+                .is_some_and(|topic| *topic == SignatureResponded::SIGNATURE_HASH)
+        });
+
+    if !respond_logs.is_empty() {
+        process_respond_events(&respond_logs, &backlog).await;
+    }
+
+    let request_logs: Vec<Log> = potential_request_logs
+        .into_iter()
+        .filter(|log| {
+            log.topic0()
+                .is_some_and(|topic| *topic == SignatureRequested::SIGNATURE_HASH)
         })
         .collect();
 
     let mut all_sign_requests = Vec::new();
-    if !filtered_logs.is_empty() {
-        all_sign_requests.extend(parse_filtered_logs(filtered_logs, total_timeout));
+    if !request_logs.is_empty() {
+        all_sign_requests.extend(parse_filtered_logs(request_logs, total_timeout));
     }
     if !respond_bidirectional_requests.is_empty() {
         all_sign_requests.extend(respond_bidirectional_requests);
@@ -1183,6 +1240,59 @@ fn parse_filtered_logs(logs: Vec<Log>, total_timeout: Duration) -> Vec<IndexedSi
     indexed_requests
 }
 
+async fn process_respond_events(logs: &[Log], backlog: &Backlog) {
+    for log in logs {
+        if let Some(sign_id) = sign_id_from_signature_responded_log(log) {
+            // Check the sign request type to determine if it's a bidirectional request
+            if let Some(sign_type) = backlog.sign_type(Chain::Ethereum, &sign_id).await {
+                match sign_type {
+                    SignRequestType::SignBidirectional(_) => {
+                        // This is a bidirectional request, keep it in the backlog.
+                        // It will be removed when we receive the respond_bidirectional event.
+                        tracing::info!(
+                            ?sign_id,
+                            "observed SignatureResponded event for bidirectional request, keeping in backlog"
+                        );
+                    }
+                    SignRequestType::Sign => {
+                        tracing::info!(
+                            ?sign_id,
+                            "observed SignatureResponded event for regular sign request, removing from backlog"
+                        );
+                        backlog.remove(Chain::Ethereum, &sign_id).await;
+                    }
+                    SignRequestType::RespondBidirectional(_) => {
+                        tracing::warn!(
+                            ?sign_id,
+                            "observed SignatureResponded event for respond_bidirectional request, which should not happen"
+                        );
+                    }
+                }
+            } else {
+                // If we don't have the type tracked, just remove it (fallback behavior for backward compatibility)
+                tracing::debug!(
+                    ?sign_id,
+                    "sign request type not found, removing from backlog"
+                );
+                backlog.remove(Chain::Ethereum, &sign_id).await;
+            }
+        }
+    }
+}
+
+fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
+    if log
+        .topic0()
+        .is_none_or(|topic| *topic != SignatureResponded::SIGNATURE_HASH)
+    {
+        return None;
+    }
+
+    let request_topic = log.topics().get(1)?;
+    let request_id: [u8; 32] = (*request_topic).into();
+    Some(SignId { request_id })
+}
+
 fn send_indexed_requests(
     requests: Vec<IndexedSignRequest>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
@@ -1192,16 +1302,6 @@ fn send_indexed_requests(
         let sign_tx = sign_tx.clone();
         let node_near_account_id = node_near_account_id.clone();
         tokio::spawn(async move {
-            let request = IndexedSignRequest {
-                id: request.id,
-                chain: request.chain,
-                args: request.args,
-                unix_timestamp_indexed: request.unix_timestamp_indexed,
-                timestamp_sign_queue: Some(Instant::now()),
-                total_timeout: request.total_timeout,
-                sign_request_type: request.sign_request_type,
-                participants: request.participants,
-            };
             match sign_tx.send(request).await {
                 Ok(_) => {
                     crate::metrics::NUM_SIGN_REQUESTS
@@ -1254,17 +1354,33 @@ impl SignatureRequestedEvent {
 }
 
 #[cfg(not(feature = "light_client"))]
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     eth: Option<EthConfig>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
     backlog: Backlog,
+    mut contract_watcher: ContractStateWatcher,
+    mut mesh_state: watch::Receiver<MeshState>,
+    node_client: NodeClient,
 ) {
     let Some(eth) = eth else {
         tracing::warn!("ethereum indexer is disabled");
         return;
     };
+
+    // Recover backlog before doing anything.
+    // Wait for threshold to be available
+    let threshold = contract_watcher.wait_threshold().await;
+    if threshold > 0 {
+        wait_threshold_active(&mut mesh_state, threshold).await;
+
+        let mesh_state = mesh_state.borrow().clone();
+        backlog
+            .recover(&mesh_state, &node_client, threshold, &[Chain::Ethereum])
+            .await;
+    }
 
     let client = RpcEthereumClient::new(&eth.execution_rpc_http_url);
 
@@ -1380,11 +1496,29 @@ async fn process_block(
     let mut sign_requests = Vec::new();
 
     let logs = client.get_logs(block_hash, contract_address).await?;
-    if !logs.is_empty() {
-        sign_requests.extend(parse_filtered_logs(logs, total_timeout));
+    let (respond_logs, potential_request_logs): (Vec<Log>, Vec<Log>) =
+        logs.into_iter().partition(|log| {
+            log.topic0()
+                .is_some_and(|topic| *topic == SignatureResponded::SIGNATURE_HASH)
+        });
+
+    if !respond_logs.is_empty() {
+        process_respond_events(&respond_logs, backlog).await;
     }
 
-    let mut respond_requests = process_bidirectional_requests(
+    let request_logs: Vec<Log> = potential_request_logs
+        .into_iter()
+        .filter(|log| {
+            log.topic0()
+                .is_some_and(|topic| *topic == SignatureRequested::SIGNATURE_HASH)
+        })
+        .collect();
+
+    if !request_logs.is_empty() {
+        sign_requests.extend(parse_filtered_logs(request_logs, total_timeout));
+    }
+
+    let respond_requests = process_bidirectional_requests(
         client,
         block_number,
         total_timeout,
@@ -1392,26 +1526,32 @@ async fn process_block(
         &node_near_account_id,
     )
     .await?;
+    sign_requests.extend(respond_requests);
 
-    sign_requests.append(&mut respond_requests);
+    if !sign_requests.is_empty() {
+        let timestamps = sign_requests
+            .iter()
+            .map(|r| r.unix_timestamp_indexed)
+            .collect::<Vec<_>>();
 
-    if sign_requests.is_empty() {
-        return Ok(());
+        send_indexed_requests(sign_requests, sign_tx.clone(), node_near_account_id.clone());
+
+        for request_timestamp in timestamps {
+            crate::metrics::INDEXER_DELAY
+                .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
+                .observe(
+                    crate::util::duration_between_unix(block_timestamp, request_timestamp).as_secs()
+                        as f64,
+                );
+        }
     }
 
-    send_indexed_requests(
-        sign_requests.clone(),
-        sign_tx.clone(),
-        node_near_account_id.clone(),
-    );
-
-    for request in &sign_requests {
-        crate::metrics::INDEXER_DELAY
-            .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
-            .observe(
-                crate::util::duration_between_unix(block_timestamp, request.unix_timestamp_indexed)
-                    .as_secs() as f64,
-            );
+    // Create checkpoint if one was created at this block height
+    if let Some(checkpoint) = backlog
+        .set_processed_block(Chain::Ethereum, block_number)
+        .await
+    {
+        tracing::info!(block_number, ?checkpoint, "created Ethereum checkpoint");
     }
 
     Ok(())
@@ -1425,13 +1565,17 @@ async fn process_bidirectional_requests(
     backlog: &Backlog,
     node_near_account_id: &AccountId,
 ) -> anyhow::Result<Vec<IndexedSignRequest>> {
-    let pending_txs = backlog
-        .get_by_status(Chain::Ethereum, PendingRequestStatus::PendingExecution)
-        .await;
-
     let mut respond_requests = Vec::new();
 
-    for (tx_id, pending_tx) in pending_txs {
+    let watchers = backlog.pending_execution(Chain::Ethereum).await;
+    tracing::info!(
+        watchers_count = watchers.len(),
+        block_number,
+        "process_bidirectional_requests checking watchers"
+    );
+
+    for (tx_id, (sign_id, pending_tx)) in watchers {
+        tracing::info!(?tx_id, ?sign_id, "querying receipt for bidirectional tx");
         let start = Instant::now();
         let receipt = client.transaction_receipt(pending_tx.id).await;
         crate::metrics::ETH_BLOCK_RECEIPT_LATENCY
@@ -1442,25 +1586,31 @@ async fn process_bidirectional_requests(
             continue;
         };
 
-        let status = receipt.status();
-        tracing::info!(
-            "Tx {:?} found in block {block_number}: {}",
-            tx_id,
-            if status { "success" } else { "failed" }
-        );
-
-        let mut updated_tx = pending_tx.clone();
-        updated_tx.status = if status {
+        let status = if receipt.status() {
             PendingRequestStatus::Success
         } else {
             PendingRequestStatus::Failed
         };
+        tracing::info!(
+            ?tx_id,
+            ?sign_id,
+            block_number,
+            "bidirectional execution observed via rpc"
+        );
+
+        let mut updated_tx = pending_tx.clone();
+        updated_tx.status = status;
 
         let completed_tx = CompletedTx::new(updated_tx.clone(), block_number);
         let source_chain = updated_tx.source_chain;
-        if status {
+        if status == PendingRequestStatus::Success {
             match extract_success_output_with_rpc(client, &updated_tx, block_number).await {
                 Ok(serialized_output) => {
+                    tracing::info!(
+                        ?tx_id,
+                        ?sign_id,
+                        "extracted transaction output for bidirectional tx"
+                    );
                     match completed_tx.create_sign_request_from_serialized_output(
                         source_chain,
                         serialized_output,
@@ -1469,6 +1619,7 @@ async fn process_bidirectional_requests(
                         Ok(sign_request) => respond_requests.push(sign_request),
                         Err(err) => tracing::warn!(
                             ?tx_id,
+                            ?sign_id,
                             ?err,
                             "Failed to build bidirectional respond sign request"
                         ),
@@ -1477,9 +1628,24 @@ async fn process_bidirectional_requests(
                 Err(err) => {
                     tracing::warn!(
                         ?tx_id,
+                        ?sign_id,
                         ?err,
-                        "Failed to extract transaction output for bidirectional tx"
+                        "Failed to extract transaction output for bidirectional tx, using empty output"
                     );
+                    // If output extraction fails (e.g., empty schema), use empty output
+                    match completed_tx.create_sign_request_from_serialized_output(
+                        source_chain,
+                        vec![], // empty serialized output
+                        total_timeout,
+                    ) {
+                        Ok(sign_request) => respond_requests.push(sign_request),
+                        Err(err) => tracing::warn!(
+                            ?tx_id,
+                            ?sign_id,
+                            ?err,
+                            "Failed to build bidirectional respond sign request with empty output"
+                        ),
+                    }
                 }
             }
         } else {
@@ -1490,50 +1656,67 @@ async fn process_bidirectional_requests(
                 Ok(sign_request) => respond_requests.push(sign_request),
                 Err(err) => tracing::warn!(
                     ?tx_id,
+                    ?sign_id,
                     ?err,
                     "Failed to build failed bidirectional sign request"
                 ),
             }
         }
 
-        backlog.insert(Chain::Ethereum, tx_id, updated_tx).await;
+        backlog
+            .set_status(pending_tx.source_chain, &sign_id, status)
+            .await;
+        backlog.unwatch_execution(Chain::Ethereum, &tx_id).await;
     }
 
-    let remaining_pending = backlog
-        .get_by_status(Chain::Ethereum, PendingRequestStatus::PendingExecution)
-        .await;
+    let remaining_pending = backlog.pending_execution(Chain::Ethereum).await;
 
-    for (tx_id, mut tx) in remaining_pending {
+    for (tx_id, (sign_id, tx)) in remaining_pending {
         let current_nonce = match client
             .transaction_count(tx.from_address, block_number)
             .await
         {
             Ok(nonce) => nonce,
             Err(err) => {
-                tracing::warn!(?tx_id, ?err, "Failed to fetch nonce for bidirectional tx");
+                tracing::warn!(
+                    ?tx_id,
+                    ?sign_id,
+                    ?err,
+                    "Failed to fetch nonce for bidirectional tx"
+                );
                 continue;
             }
         };
 
         if tx.nonce < current_nonce {
             tracing::warn!(
+                ?sign_id,
                 "Nonce too low for tx {:?}: expected {}, got {}",
                 tx_id,
                 tx.nonce,
                 current_nonce
             );
-            tx.status = PendingRequestStatus::Failed;
-            let completed_tx = CompletedTx::new(tx.clone(), block_number);
+            let mut failed_tx = tx.clone();
+            failed_tx.status = PendingRequestStatus::Failed;
+            let completed_tx = CompletedTx::new(failed_tx.clone(), block_number);
             match completed_tx
                 .create_failed_sign_request_without_light_client(tx.source_chain, total_timeout)
                 .await
             {
                 Ok(sign_request) => respond_requests.push(sign_request),
                 Err(err) => {
-                    tracing::warn!(?tx_id, ?err, "Failed to build sign request for stale nonce")
+                    tracing::warn!(
+                        ?tx_id,
+                        ?sign_id,
+                        ?err,
+                        "Failed to build sign request for stale nonce"
+                    )
                 }
             }
-            backlog.insert(Chain::Ethereum, tx_id, tx).await;
+            backlog
+                .set_status(tx.source_chain, &sign_id, PendingRequestStatus::Failed)
+                .await;
+            backlog.unwatch_execution(Chain::Ethereum, &tx_id).await;
         }
     }
 
@@ -1647,11 +1830,12 @@ impl RpcEthereumClient {
         block_hash: alloy::primitives::B256,
         contract_address: Address,
     ) -> anyhow::Result<Vec<Log>> {
-        let topic = format!("0x{}", SignatureRequested::SIGNATURE_HASH.encode_hex());
+        let topic_requested = format!("0x{}", SignatureRequested::SIGNATURE_HASH.encode_hex());
+        let topic_responded = format!("0x{}", SignatureResponded::SIGNATURE_HASH.encode_hex());
         let filter = json!({
             "address": format_address(contract_address),
             "blockHash": format!("{:#x}", block_hash),
-            "topics": [topic],
+            "topics": [[topic_requested, topic_responded]],
         });
         self.rpc_call("eth_getLogs", vec![filter]).await
     }

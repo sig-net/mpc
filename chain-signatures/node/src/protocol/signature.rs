@@ -10,7 +10,6 @@ use crate::protocol::posit::{PositAction, PositInternalAction, Positor, Posits};
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
-use crate::sign_bidirectional::{BidirectionalTx, SignBidirectionalSignature};
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
@@ -46,10 +45,9 @@ pub struct IndexedSignRequest {
     pub args: SignArgs,
     pub chain: Chain,
     pub unix_timestamp_indexed: u64,
-    pub timestamp_sign_queue: Option<Instant>,
+    pub timestamp_sign_queue: Instant,
     pub total_timeout: Duration,
     pub sign_request_type: SignRequestType,
-    pub participants: Option<Vec<Participant>>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -171,11 +169,7 @@ impl SignQueue {
     ) -> SignRequest {
         let sign_id = indexed.id;
         let reorganize = initial_round > 0;
-        let mut participants = if indexed.participants.is_some() {
-            indexed.participants.clone().unwrap()
-        } else {
-            participants.keys().cloned().collect()
-        };
+        let mut participants = participants.keys().copied().collect::<Vec<_>>();
         participants.sort();
 
         // Simple round-robin selection of the proposer, using only inputs that
@@ -339,9 +333,8 @@ impl SignQueue {
 
     pub fn expire(&mut self, cfg: &ProtocolConfig) {
         self.requests.retain(|_, request| {
-            request.indexed.timestamp_sign_queue.is_none_or(|t| {
-                t.elapsed() < Duration::from_millis(cfg.signature.generation_timeout_total)
-            })
+            request.indexed.timestamp_sign_queue.elapsed()
+                < Duration::from_millis(cfg.signature.generation_timeout_total)
         });
         self.my_requests.retain(|id| {
             let Some(request) = self.requests.get(id) else {
@@ -389,6 +382,10 @@ struct SignatureGenerator {
     inbox: mpsc::Receiver<SignatureMessage>,
     msg: MessageChannel,
     rpc: RpcChannel,
+
+    // TODO: will be used in the future when we move requests channels
+    // into the backlog.
+    #[allow(dead_code)]
     backlog: Backlog,
 
     #[cfg(feature = "debug-page")]
@@ -476,13 +473,7 @@ impl SignatureGenerator {
     }
 
     fn timeout_total(&self) -> bool {
-        let timestamp = self
-            .request
-            .indexed
-            .timestamp_sign_queue
-            .as_ref()
-            .unwrap_or(&self.created);
-        timestamp.elapsed() >= self.timeout_total
+        self.request.indexed.timestamp_sign_queue.elapsed() >= self.timeout_total
     }
 
     /// Receive the next message for the signature protocol; error out on the timeout being reached
@@ -654,60 +645,16 @@ impl SignatureGenerator {
                         &self.request.indexed.sign_request_type
                     {
                         let source_chain = self.request.indexed.chain;
-                        let dest = event.dest.clone();
-                        let expected_public_key = mpc_crypto::derive_key(
-                            self.public_key,
-                            self.request.indexed.args.epsilon,
+
+                        // Note: The promotion to Bidirectional will happen when we receive the
+                        // SignatureRespondedEvent in the Solana indexer, which has the signature data.
+                        // For now, we just complete the signature generation. The indexer will handle the promotion.
+                        tracing::debug!(
+                            ?sign_id,
+                            ?source_chain,
+                            ?event.dest,
+                            "generated signature for bidirectional request, awaiting indexer to process"
                         );
-
-                        let signature = match crate::kdf::into_eth_sig(
-                            &expected_public_key,
-                            &big_r,
-                            &s,
-                            self.request.indexed.args.payload,
-                        ) {
-                            Ok(sig) => sig,
-                            Err(err) => {
-                                tracing::error!(
-                                    ?sign_id,
-                                    ?source_chain,
-                                    target_chain = ?dest,
-                                    ?err,
-                                    "failed to generate a valid signature"
-                                );
-                                break Ok(());
-                            }
-                        };
-
-                        let signature = SignBidirectionalSignature {
-                            public_key: self.public_key,
-                            request: self.request.clone(),
-                            signature,
-                            participants: self.participants.clone(),
-                        };
-
-                        match BidirectionalTx::new(signature) {
-                            Ok(tx) => {
-                                let target_chain = tx.target_chain;
-                                let source_chain = tx.source_chain;
-                                self.backlog.insert(target_chain, sign_id, tx).await;
-                                tracing::info!(
-                                    ?sign_id,
-                                    ?source_chain,
-                                    ?target_chain,
-                                    "inserted SignRespond tx into backlog with Pending status"
-                                );
-                            }
-                            Err(err) => {
-                                tracing::error!(
-                                    ?sign_id,
-                                    ?source_chain,
-                                    target_chain = ?dest,
-                                    ?err,
-                                    "failed to create SignRespondTx",
-                                );
-                            }
-                        }
                     }
 
                     break Ok(());

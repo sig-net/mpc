@@ -1,4 +1,5 @@
 pub mod backlog;
+pub mod checkpoint_consensus;
 pub mod cli;
 pub mod config;
 pub mod gcp;

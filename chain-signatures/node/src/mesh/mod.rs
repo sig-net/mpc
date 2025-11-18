@@ -178,6 +178,15 @@ impl Mesh {
     }
 }
 
+pub async fn wait_threshold_active(mesh_state: &mut watch::Receiver<MeshState>, threshold: usize) {
+    loop {
+        if mesh_state.borrow().active.len() >= threshold {
+            return;
+        }
+        let _ = mesh_state.changed().await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;

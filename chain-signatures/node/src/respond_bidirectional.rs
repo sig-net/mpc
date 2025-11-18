@@ -1,4 +1,3 @@
-use crate::backlog::Backlog;
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::BidirectionalTx;
 use crate::sign_bidirectional::BidirectionalTxId;
@@ -20,7 +19,6 @@ use helios::ethereum::EthereumClient;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::{SignArgs, SignId};
-use tokio::sync::mpsc;
 use tokio::time::Duration;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
@@ -239,7 +237,7 @@ impl CompletedTx {
                 key_version: self.tx.key_version,
             },
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            timestamp_sign_queue: None,
+            timestamp_sign_queue: std::time::Instant::now(),
             total_timeout: signature_generation_total_timeout,
             sign_request_type: crate::protocol::SignRequestType::RespondBidirectional(
                 RespondBidirectionalTx {
@@ -247,7 +245,6 @@ impl CompletedTx {
                     output: serialized_output,
                 },
             ),
-            participants: Some(self.tx.participants.clone()),
         })
     }
 
@@ -358,54 +355,6 @@ async fn fetch_tx_from_helios(
                 tracing::warn!("Failed to fecth tx from helios: {err:?}, retrying...");
                 attempts += 1;
                 tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct RespondBidirectionalTxChannel {
-    tx: mpsc::Sender<(Chain, SignId)>,
-}
-
-impl RespondBidirectionalTxChannel {
-    pub fn send(&self, chain: Chain, sign_id: SignId) {
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            if let Err(err) = tx.send((chain, sign_id)).await {
-                tracing::error!(%err, "failed to send respond bidirectional tx id");
-            }
-        });
-    }
-}
-
-pub struct RespondBidirectionalTxProcessor {
-    rx: mpsc::Receiver<(Chain, SignId)>,
-}
-
-const MAX_CONCURRENT_RESPOND_BIDIRECTIONAL_TX_REQUESTS: usize = 1024;
-
-impl RespondBidirectionalTxProcessor {
-    pub fn new() -> (RespondBidirectionalTxChannel, Self) {
-        let (tx, rx) = mpsc::channel(MAX_CONCURRENT_RESPOND_BIDIRECTIONAL_TX_REQUESTS);
-        (RespondBidirectionalTxChannel { tx }, Self { rx })
-    }
-
-    pub async fn run(mut self, backlog: Backlog, max_attempts: u8) {
-        while let Some((chain, sign_id)) = self.rx.recv().await {
-            for attempt in 1..=max_attempts {
-                if backlog.remove(chain, &sign_id).await.is_some() {
-                    tracing::info!(?sign_id, ?chain, "removed bidirectional tx from backlog");
-                    break;
-                } else if attempt == max_attempts {
-                    tracing::error!(
-                        ?sign_id,
-                        ?chain,
-                        "failed to remove bidirectional tx from backlog after {max_attempts} attempts"
-                    );
-                } else {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                }
             }
         }
     }

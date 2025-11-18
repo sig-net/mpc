@@ -7,22 +7,24 @@ pub mod local;
 pub mod mpc_fixture;
 pub mod utils;
 
-use cluster::spawner::ClusterSpawner;
-use deadpool_redis::Pool;
-use mpc_node::indexer_eth::EthConfig;
-use mpc_node::indexer_sol::SolConfig;
 use std::collections::HashMap;
 use std::time::Duration;
 
 use self::local::NodeEnvConfig;
 use crate::containers::DockerClient;
+
 use anyhow::Context as _;
+use cluster::spawner::ClusterSpawner;
+use deadpool_redis::Pool;
 use ethers::types::{Address, U256};
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
+use mpc_node::indexer_eth::EthConfig;
+use mpc_node::indexer_sol::SolConfig;
 use mpc_node::storage::triple_storage::TripleStorage;
 use mpc_node::{logs, mesh, node_client, storage};
+use mpc_primitives::{Chain, Checkpoint};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{KeyType, SecretKey};
 use near_workspaces::{Account, AccountId, Contract, Worker};
@@ -241,6 +243,38 @@ impl Nodes {
 
     pub fn contract(&self) -> &Contract {
         &self.ctx().mpc_contract
+    }
+
+    pub async fn fetch_checkpoint(&self, id: usize, chain: Chain) -> anyhow::Result<Checkpoint> {
+        let url = format!("{}/checkpoint?query={chain}", self.url(id));
+        let response = reqwest::get(&url).await?;
+        let status = response.status();
+        let body = response.bytes().await?;
+        let mut value: HashMap<Chain, Checkpoint> =
+            ciborium::from_reader(body.as_ref()).context("failed to decode checkpoint CBOR")?;
+        if let Ok(pretty) = serde_json::to_string(&value) {
+            tracing::info!(?status, raw_body = %pretty, "checkpoint response body");
+        } else {
+            tracing::info!(?status, raw_body = %hex::encode(&body), "checkpoint response body");
+        }
+        value
+            .remove(&chain)
+            .context("checkpoint not found for chain")
+    }
+
+    pub async fn fetch_checkpoints(&self, id: usize) -> anyhow::Result<HashMap<Chain, Checkpoint>> {
+        let url = format!("{}/checkpoint", self.url(id));
+        let response = reqwest::get(&url).await?;
+        let status = response.status();
+        let body = response.bytes().await?;
+        let value: HashMap<Chain, Checkpoint> =
+            ciborium::from_reader(body.as_ref()).context("failed to decode checkpoint CBOR")?;
+        if let Ok(pretty) = serde_json::to_string(&value) {
+            tracing::info!(?status, raw_body = %pretty, "checkpoint response body");
+        } else {
+            tracing::info!(?status, raw_body = %hex::encode(&body), "checkpoint response body");
+        }
+        Ok(value)
     }
 }
 

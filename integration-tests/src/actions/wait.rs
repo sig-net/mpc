@@ -1,15 +1,18 @@
 use std::future::{Future, IntoFuture};
+use std::time::Duration;
 
 use anyhow::Context;
 use backon::{ConstantBuilder, Retryable};
 use mpc_contract::{ProtocolContractState, RunningContractState};
 use mpc_node::web::StateView;
+use mpc_primitives::{Chain, Checkpoint};
 use near_account_id::AccountId;
 
 use crate::cluster::Cluster;
 
 type Epoch = u64;
 type Present = bool;
+type BlockHeight = u64;
 
 enum ContractState {
     Candidate(AccountId, Present),
@@ -31,6 +34,7 @@ enum WaitActions {
     Signable(usize),
     NodeState(NodeState, usize),
     ContractState(ContractState),
+    Checkpoint(usize, Chain, BlockHeight),
 }
 
 pub struct WaitAction<'a, R> {
@@ -127,6 +131,21 @@ impl<'a, R> WaitAction<'a, R> {
         self
     }
 
+    pub fn node_checkpoint(
+        mut self,
+        id: usize,
+        chain: Chain,
+        block_height: BlockHeight,
+    ) -> WaitAction<'a, Checkpoint> {
+        self.actions
+            .push(WaitActions::Checkpoint(id, chain, block_height));
+        WaitAction {
+            nodes: self.nodes,
+            actions: self.actions,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
     pub fn candidate_present(mut self, candidate: &AccountId) -> Self {
         self.actions
             .push(WaitActions::ContractState(ContractState::Candidate(
@@ -183,6 +202,9 @@ impl<'a, R> WaitAction<'a, R> {
                 }
                 WaitActions::ContractState(state) => {
                     require_contract_state(self.nodes, state).await?;
+                }
+                WaitActions::Checkpoint(id, chain, block_height) => {
+                    require_checkpoint(self.nodes, id, chain, block_height).await?;
                 }
             }
         }
@@ -399,4 +421,26 @@ pub async fn require_triples(
     })?;
 
     Ok(state_views)
+}
+
+async fn require_checkpoint(
+    nodes: &Cluster,
+    id: usize,
+    chain: Chain,
+    block_height: u64,
+) -> anyhow::Result<Checkpoint> {
+    tokio::time::timeout(Duration::from_secs(10), async move {
+        loop {
+            let checkpoints = nodes.fetch_checkpoints(id).await?;
+            if let Some(checkpoint) = checkpoints.get(&chain) {
+                if checkpoint.block_height >= block_height {
+                    return Ok(checkpoint.clone());
+                }
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    })
+    .await
+    .unwrap()
 }

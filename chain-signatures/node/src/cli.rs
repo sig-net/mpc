@@ -7,7 +7,6 @@ use crate::protocol::message::MessageChannel;
 use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
-use crate::respond_bidirectional::RespondBidirectionalTxProcessor;
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
@@ -268,8 +267,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
 
             let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth, &sol, backlog.clone());
-            let (respond_bidirectional_tx_channel, respond_bidirectional_tx_processor) =
-                RespondBidirectionalTxProcessor::new();
+
             let (sync_channel, sync) = SyncTask::new(
                 &client,
                 triple_storage.clone(),
@@ -301,7 +299,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let node_watcher = node.watch();
 
             let msg_channel = MessageChannel::spawn(
-                client,
+                client.clone(),
                 &account_id,
                 config_rx.clone(),
                 contract_watcher.clone(),
@@ -326,17 +324,16 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tracing::info!("protocol initialized");
             tokio::spawn(sync.run());
-            tokio::spawn(rpc.run(
-                contract_state_tx,
-                config_tx.clone(),
-                respond_bidirectional_tx_channel.clone(),
-            ));
+            tokio::spawn(rpc.run(contract_state_tx, config_tx.clone()));
 
-            tokio::spawn(respond_bidirectional_tx_processor.run(backlog.clone(), 5));
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
-            let protocol_handle =
-                tokio::spawn(protocol.run(node, near_client, contract_watcher, mesh_state));
+            let protocol_handle = tokio::spawn(protocol.run(
+                node,
+                near_client,
+                contract_watcher.clone(),
+                mesh_state.clone(),
+            ));
             tracing::info!("protocol thread spawned");
             let web_handle = tokio::spawn(web::run(
                 web_port,
@@ -347,6 +344,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 presignature_storage,
                 sync_channel,
                 account_id.clone(),
+                backlog.clone(),
             ));
             tokio::spawn(indexer_eth::run(
                 eth,
@@ -354,8 +352,19 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 app_data_storage.clone(),
                 account_id.clone(),
                 backlog.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                client.clone(),
             ));
-            tokio::spawn(indexer_sol::run(sol, sign_tx, account_id, backlog));
+            tokio::spawn(indexer_sol::run(
+                sol,
+                sign_tx,
+                account_id,
+                backlog,
+                contract_watcher,
+                mesh_state,
+                client,
+            ));
             tracing::info!("protocol http server spawned");
             protocol_handle.await?;
             web_handle.await?;

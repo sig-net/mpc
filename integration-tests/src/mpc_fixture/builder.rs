@@ -13,6 +13,7 @@ use mpc_contract::primitives::{
     CandidateInfo, Candidates as CandidatesById, ParticipantInfo, Participants as ParticipantsById,
 };
 use mpc_keys::hpke::{self, Ciphered};
+use mpc_node::backlog::Backlog;
 use mpc_node::config::{Config, LocalConfig, NetworkConfig};
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes, Votes};
@@ -483,6 +484,7 @@ impl MpcFixtureNodeBuilder {
             msg_channel: self.messaging.channel,
             triple_storage,
             presignature_storage,
+            backlog: Backlog::new(),
             web_handle: None,
         };
 

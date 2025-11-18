@@ -92,6 +92,8 @@ impl Node {
     }
 
     pub async fn kill(self) -> NodeEnvConfig {
+        // Give the container a brief moment to clean up connections gracefully
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         self.container.stop().await.unwrap();
         NodeEnvConfig {
             web_port: Self::CONTAINER_PORT,

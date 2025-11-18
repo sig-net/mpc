@@ -1,9 +1,10 @@
 pub mod spawner;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use mpc_contract::primitives::Participants;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
+use mpc_primitives::{Chain, Checkpoint};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{Finality, NearToken};
 use near_workspaces::{Account, AccountId, Contract, Worker};
@@ -22,7 +23,7 @@ use mpc_node::web::{BenchMetrics, StateView};
 use anyhow::Context;
 use url::Url;
 
-const CURRENT_CONTRACT_DEPLOY_DEPOSIT: NearToken = NearToken::from_millinear(9000);
+const CURRENT_CONTRACT_DEPLOY_DEPOSIT: NearToken = NearToken::from_millinear(10000);
 const CURRENT_CONTRACT_FILE_PATH: &str =
     "../target/wasm32-unknown-unknown/release/mpc_contract.wasm";
 
@@ -335,5 +336,9 @@ impl Cluster {
             .min_mine_presignatures(self.cfg.protocol.presignature.min_presignatures as usize)
             .await
             .unwrap();
+    }
+
+    pub async fn fetch_checkpoints(&self, id: usize) -> anyhow::Result<HashMap<Chain, Checkpoint>> {
+        self.nodes.fetch_checkpoints(id).await
     }
 }
