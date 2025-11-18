@@ -87,7 +87,7 @@ pub(super) fn test_mock_network(
                         RpcAction::Publish(publish_action) => {
                             format!(
                                 "RpcAction::Publish({:?})",
-                                publish_action.request,
+                                publish_action.indexed,
                             )
                         },
                     };

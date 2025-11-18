@@ -1,6 +1,4 @@
-use crate::protocol::signature::SignRequest;
-use crate::protocol::Chain;
-use crate::protocol::SignRequestType;
+use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
 use crate::respond_bidirectional::SerDeserFormat;
 use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
@@ -71,8 +69,7 @@ pub struct BidirectionalTx {
 
 impl BidirectionalTx {
     pub fn new(signature: SignBidirectionalSignature) -> anyhow::Result<Self> {
-        let SignRequestType::SignBidirectional(event) =
-            signature.request.indexed.sign_request_type.clone()
+        let SignRequestType::SignBidirectional(event) = signature.indexed.sign_request_type.clone()
         else {
             anyhow::bail!("sign request is not a sign bidirectional");
         };
@@ -84,7 +81,7 @@ impl BidirectionalTx {
                 event.dest
             )
         })?;
-        let source_chain = signature.request.indexed.chain;
+        let source_chain = signature.indexed.chain;
 
         let (signed_transaction_hash, nonce) =
             sign_and_hash_transaction(unsigned_rlp_data, signature.signature)?;
@@ -92,7 +89,7 @@ impl BidirectionalTx {
         tracing::info!(signed_transaction_hash = ?signed_transaction_hash, "signed_transaction_hash");
 
         let from_address =
-            derive_user_address(signature.public_key, signature.request.indexed.args.epsilon);
+            derive_user_address(signature.public_key, signature.indexed.args.epsilon);
 
         tracing::info!(from_address = ?from_address, "from_address");
 
@@ -111,7 +108,7 @@ impl BidirectionalTx {
             params: event.params,
             output_deserialization_schema: event.output_deserialization_schema,
             respond_serialization_schema: event.respond_serialization_schema,
-            request_id: signature.request.indexed.id.request_id,
+            request_id: signature.indexed.id.request_id,
             from_address,
             nonce,
             status: PendingRequestStatus::AwaitingResponse,
@@ -524,6 +521,6 @@ fn parse_borsh_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<Abi
 #[derive(Clone)]
 pub struct SignBidirectionalSignature {
     pub public_key: mpc_crypto::PublicKey,
-    pub request: SignRequest,
+    pub indexed: IndexedSignRequest,
     pub signature: Signature,
 }
