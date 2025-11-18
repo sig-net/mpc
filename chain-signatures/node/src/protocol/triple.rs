@@ -4,7 +4,7 @@ use super::MpcSignProtocol;
 use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::posit::Positor;
-use crate::storage::triple_storage::{TripleSlot, TripleStorage};
+use crate::storage::triple_storage::{TriplePair, TriplePairSlot, TripleStorage};
 use crate::types::TripleProtocol;
 use crate::util::{AffinePointExt, JoinMap};
 
@@ -31,9 +31,8 @@ use std::time::{Duration, Instant};
 pub type TripleId = u64;
 
 /// A completed triple.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Triple {
-    pub id: TripleId,
     pub share: TripleShare<Secp256k1>,
     pub public: TriplePub<Secp256k1>,
 }
@@ -44,7 +43,7 @@ struct TripleGenerator {
     participants: Vec<Participant>,
     protocol: TripleProtocol,
     timeout: Duration,
-    slot: TripleSlot,
+    slot: TriplePairSlot,
     created: Instant,
     inbox: mpsc::Receiver<TripleMessage>,
     msg: MessageChannel,
@@ -60,7 +59,7 @@ impl TripleGenerator {
         threshold: usize,
         participants: &[Participant],
         timeout: Duration,
-        slot: TripleSlot,
+        slot: TriplePairSlot,
         msg: &MessageChannel,
         _my_account_id: &AccountId,
     ) -> Result<Self, InitializationError> {
@@ -70,7 +69,7 @@ impl TripleGenerator {
         participants.sort();
 
         let protocol =
-            cait_sith::triples::generate_triple::<Secp256k1>(&participants, me, threshold)?;
+            cait_sith::triples::generate_triple_many::<Secp256k1, 2>(&participants, me, threshold)?;
 
         let inbox = msg.subscribe_triple(id).await;
         Ok(Self {
@@ -197,7 +196,7 @@ impl TripleGenerator {
                     };
                     self.msg.send(self.me, to, message).await;
                 }
-                Action::Return(output) => {
+                Action::Return(outputs) => {
                     success_total_counts.inc();
                     runtime_latency.observe(start_time.elapsed().as_secs_f64());
                     // this measures from generator creation to finishing. TRIPLE_LATENCY instead starts from the first poke() on the generator
@@ -205,47 +204,55 @@ impl TripleGenerator {
                     accrued_wait_delay.observe(total_wait.as_millis() as f64);
                     poke_counts.observe(total_pokes as f64);
 
-                    let triple = Triple {
-                        id: self.id,
-                        share: output.0,
-                        public: output.1,
+                    // Assuming outputs is Vec<(TripleShare, TriplePub)> with 2 elements
+                    let [first, second, ..] = &outputs[..] else {
+                        tracing::warn!(
+                            id = self.id,
+                            triples = outputs.len(),
+                            "unexpected, not enough triples to make pair"
+                        );
+                        break;
+                    };
+                    let first = Triple {
+                        share: first.0.clone(),
+                        public: first.1.clone(),
+                    };
+                    let second = Triple {
+                        share: second.0.clone(),
+                        public: second.1.clone(),
                     };
 
-                    // After creation the triple is assigned to a random node, which is NOT necessarily the one that initiated it's creation
+                    // For simplicity, assign both triples to the same owner based on the first triple
                     let triple_owner = {
-                        // This is an entirely unpredictable value to all participants because it's a combination of big_c_i
-                        // It is the same value across all participants
-                        let big_c = triple.public.big_c;
-
-                        // We turn this into a u64 in a way not biased to the structure of the byte serialisation so we hash it
-                        // We use Highway Hash because the DefaultHasher doesn't guarantee a consistent output across versions
+                        let big_c = first.public.big_c;
                         let entropy = HighwayHasher::default().hash64(&big_c.to_bytes()) as usize;
-
                         let num_participants = self.participants.len();
-                        // This has a *tiny* bias towards lower indexed participants, they're up to (1 + num_participants / u64::MAX)^2 times more likely to be selected
-                        // This is acceptably small that it will likely never result in a biased selection happening
                         self.participants[entropy % num_participants]
                     };
-                    let triple_is_mine = triple_owner == self.me;
+                    let pair_is_mine = triple_owner == self.me;
 
                     tracing::debug!(
                         id = self.id,
                         me = ?self.me,
                         ?triple_owner,
-                        triple_is_mine,
+                        pair_is_mine,
                         participants = ?self.participants,
-                        big_a = ?triple.public.big_a.to_base58(),
-                        big_b = ?triple.public.big_b.to_base58(),
-                        big_c = ?triple.public.big_c.to_base58(),
+                        big_a0 = ?first.public.big_a.to_base58(),
+                        big_a1 = ?second.public.big_a.to_base58(),
                         elapsed = ?self.created.elapsed(),
-                        "completed triple generation"
+                        "completed triple pair generation"
                     );
 
-                    if triple_is_mine {
+                    if pair_is_mine {
                         success_owned_counts.inc();
                     }
 
-                    self.slot.insert(triple, triple_owner).await;
+                    let pair = TriplePair {
+                        id: self.id,
+                        triple0: first,
+                        triple1: second,
+                    };
+                    self.slot.insert(pair, triple_owner).await;
                     break;
                 }
             }
@@ -331,10 +338,6 @@ impl TripleSpawner {
         }
     }
 
-    async fn reserve(&self, id: TripleId) -> Option<TripleSlot> {
-        self.triple_storage.reserve(id).await
-    }
-
     pub async fn contains(&self, id: TripleId) -> bool {
         self.triple_storage.contains(id).await
     }
@@ -412,8 +415,8 @@ impl TripleSpawner {
 
     /// Propose a new triple generation protocol to the network.
     async fn propose_posit(&mut self, active: &[Participant]) {
-        let id = rand::random();
-        self.posits.propose(id, (), active);
+        let pair_id = rand::random();
+        self.posits.propose(pair_id, (), active);
         for &p in active.iter() {
             if p == self.me {
                 continue;
@@ -424,7 +427,7 @@ impl TripleSpawner {
                     self.me,
                     p,
                     PositMessage {
-                        id: PositProtocolId::Triple(id),
+                        id: PositProtocolId::Triple(pair_id),
                         from: self.me,
                         action: PositAction::Propose,
                     },
@@ -479,9 +482,9 @@ impl TripleSpawner {
         timeout: Duration,
     ) -> Result<(), InitializationError> {
         // Check if the `id` is already in the system. Error out and have the next cycle try again.
-        let Some(slot) = self.reserve(id).await else {
+        let Some(slot) = self.triple_storage.reserve(id).await else {
             return Err(InitializationError::BadParameters(format!(
-                "id collision: triple_id={id}"
+                "id collision: pair_id={id}"
             )));
         };
 

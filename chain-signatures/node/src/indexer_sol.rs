@@ -1,22 +1,31 @@
-use crate::backlog::Backlog;
-use crate::protocol::SignRequestType;
-use crate::protocol::{Chain, IndexedSignRequest};
-use crate::sign_bidirectional::hash_rlp_data;
+use crate::backlog::{Backlog, BacklogTransaction, SignTx};
+use crate::mesh::{wait_threshold_active, MeshState};
+use crate::node_client::NodeClient;
+use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+use crate::rpc::ContractStateWatcher;
+use crate::sign_bidirectional::{
+    hash_rlp_data, BidirectionalTx, BidirectionalTxId, PendingRequestStatus,
+};
+
 use alloy_sol_types::SolValue;
-use anchor_client::anchor_lang::{AnchorDeserialize, AnchorSerialize};
+use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_client::{Client, Cluster, Program};
-use anchor_lang::prelude::*;
 use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
 use ethabi::{encode, Token};
 use futures_util::StreamExt;
-use k256::Scalar;
+use k256::elliptic_curve::sec1::FromEncodedPoint;
+use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
+use signet_program::{
+    RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
+    SignatureRespondedEvent,
+};
 use solana_client::{
     nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient},
     rpc_config::{RpcTransactionLogsConfig, RpcTransactionLogsFilter},
@@ -30,12 +39,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
-
-// Needed for anchor_client/lang to operate well. They use a different version of borsh
-// than the one we use in MPC. This older version can have security implications but for
-// now only effects Solana.
-use borsh_sol as borsh;
+use tokio::sync::{mpsc, watch};
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     Scalar::from_bytes(
@@ -173,21 +177,6 @@ trait SignatureEvent: SignatureEventTrait + std::fmt::Debug {}
 
 type SignatureEventBox = Box<dyn SignatureEvent + Send>;
 
-#[event]
-#[derive(Clone, Debug)]
-pub struct SignatureRequestedEvent {
-    pub sender: Pubkey,
-    pub payload: [u8; 32],
-    pub key_version: u32,
-    pub deposit: u64,
-    pub chain_id: String,
-    pub path: String,
-    pub algo: String,
-    pub dest: String,
-    pub params: String,
-    pub fee_payer: Option<Pubkey>,
-}
-
 impl SignatureEvent for SignatureRequestedEvent {}
 
 impl SignatureEventTrait for SignatureRequestedEvent {
@@ -259,30 +248,12 @@ impl SignatureEventTrait for SignatureRequestedEvent {
                 key_version: self.key_version,
             },
             chain: Chain::Solana,
-            timestamp_sign_queue: Some(Instant::now()),
+            timestamp_sign_queue: Instant::now(),
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             total_timeout,
             sign_request_type: SignRequestType::Sign,
-            participants: None,
         })
     }
-}
-
-#[event]
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SignBidirectionalEvent {
-    pub sender: Pubkey,
-    pub serialized_transaction: Vec<u8>,
-    pub caip2_id: String,
-    pub key_version: u32,
-    pub deposit: u64,
-    pub path: String,
-    pub algo: String,
-    pub dest: String,
-    pub params: String,
-    pub program_id: Pubkey,
-    pub output_deserialization_schema: Vec<u8>,
-    pub respond_serialization_schema: Vec<u8>,
 }
 
 impl SignatureEvent for SignBidirectionalEvent {}
@@ -354,11 +325,10 @@ impl SignatureEventTrait for SignBidirectionalEvent {
                 key_version: self.key_version,
             },
             chain: Chain::Solana,
-            timestamp_sign_queue: Some(Instant::now()),
+            timestamp_sign_queue: Instant::now(),
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             total_timeout,
             sign_request_type: SignRequestType::SignBidirectional(self.clone()),
-            participants: None,
         })
     }
 }
@@ -370,6 +340,9 @@ pub async fn run(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
     backlog: Backlog,
+    mut contract_watcher: ContractStateWatcher,
+    mut mesh_state: watch::Receiver<MeshState>,
+    node_client: NodeClient,
 ) {
     let Some(sol) = sol else {
         tracing::warn!("solana indexer is disabled");
@@ -382,6 +355,15 @@ pub async fn run(
         return;
     };
 
+    // Wait for threshold to be available
+    let threshold = contract_watcher.wait_threshold().await;
+    if threshold > 0 {
+        wait_threshold_active(&mut mesh_state, threshold).await;
+        let mesh_state = mesh_state.borrow().clone();
+        backlog
+            .recover(&mesh_state, &node_client, threshold, &[Chain::Solana])
+            .await;
+    }
     let keypair = Keypair::from_base58_string(&sol.account_sk);
     let cluster = Cluster::Custom(sol.rpc_http_url.clone(), sol.rpc_ws_url.clone());
     let client =
@@ -395,6 +377,12 @@ pub async fn run(
     );
 
     let total_timeout = Duration::from_secs(sol.total_timeout);
+
+    // Clone sol for respond events subscription
+    let sol_for_respond = sol.clone();
+    let backlog_for_respond = backlog.clone();
+    let contract_watcher_for_respond = contract_watcher.clone();
+
     tokio::spawn(subscribe_and_process_sign_events(
         program_id,
         sol.rpc_http_url.clone(),
@@ -402,8 +390,26 @@ pub async fn run(
         sign_tx.clone(),
         node_near_account_id.clone(),
         total_timeout,
-        backlog,
+        backlog.clone(),
     ));
+
+    // Subscribe to respond bidirectional events
+    tokio::spawn(async move {
+        loop {
+            if let Err(err) = subscribe_to_program_respond_events(
+                program_id,
+                &sol_for_respond.rpc_http_url,
+                &sol_for_respond.rpc_ws_url,
+                backlog_for_respond.clone(),
+                contract_watcher_for_respond.clone(),
+            )
+            .await
+            {
+                tracing::warn!("Failed to subscribe to solana respond events: {:?}", err);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
 
     // Subscribe to non-CPI sign events
     loop {
@@ -417,6 +423,7 @@ pub async fn run(
             sign_tx.clone(),
             node_near_account_id.clone(),
             total_timeout,
+            backlog.clone(),
         )
         .await;
         if let Err(err) = unsub {
@@ -434,6 +441,7 @@ async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
     total_timeout: Duration,
+    backlog: Backlog,
 ) -> anyhow::Result<anchor_client::EventUnsubscriber<'_>> {
     tracing::info!("Subscribing to program events");
     let (sender, mut receiver) = mpsc::unbounded_channel();
@@ -455,6 +463,7 @@ async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>
             sign_tx.clone(),
             node_near_account_id.clone(),
             total_timeout,
+            backlog.clone(),
         )
         .await
         {
@@ -471,8 +480,38 @@ async fn process_anchor_sign_event(
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     node_near_account_id: AccountId,
     total_timeout: Duration,
+    backlog: Backlog,
 ) -> anyhow::Result<()> {
     let sign_request = sign_event.generate_sign_request(tx_sig, total_timeout)?;
+
+    // Insert the transaction into the backlog when we first see the sign request
+    let sign_id = sign_request.id;
+    let sign_request_type = sign_request.sign_request_type.clone();
+
+    // Create the appropriate BacklogTransaction based on the sign request type
+    let backlog_tx = match &sign_request_type {
+        SignRequestType::Sign => BacklogTransaction::Sign(SignTx {
+            request_id: sign_id.request_id,
+            source_chain: Chain::Solana,
+            key_version: sign_request.args.key_version,
+            status: PendingRequestStatus::AwaitingResponse,
+        }),
+        SignRequestType::SignBidirectional(_event) => {
+            // For bidirectional requests, start with a Sign transaction
+            // The protocol will advance it to Bidirectional after generating the signature
+            BacklogTransaction::Sign(SignTx {
+                request_id: sign_id.request_id,
+                source_chain: Chain::Solana,
+                key_version: sign_request.args.key_version,
+                status: PendingRequestStatus::AwaitingResponse,
+            })
+        }
+        _ => anyhow::bail!("Unexpected sign request type"),
+    };
+
+    backlog
+        .insert(Chain::Solana, sign_id, backlog_tx, sign_request_type)
+        .await;
 
     if let Err(err) = sign_tx.send(sign_request).await {
         // TODO: handle error to ensure 100% success rate
@@ -487,6 +526,7 @@ async fn process_anchor_sign_event(
 }
 
 // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L31
+#[allow(clippy::too_many_arguments)]
 async fn subscribe_and_process_sign_events(
     program_id: Pubkey,
     rpc_url: String,
@@ -499,18 +539,20 @@ async fn subscribe_and_process_sign_events(
     loop {
         let sign_tx_clone = sign_tx.clone();
         let node_near_account_id_clone = node_near_account_id.clone();
+        let backlog = backlog.clone();
 
         let result = subscribe_to_program_cpi_events(
             program_id,
             &rpc_url,
             &ws_url,
             backlog.clone(),
-            move |event, signature, _slot| {
+            move |event, signature: solana_sdk::signature::Signature, _slot| {
                 tracing::info!("got event: {:?}", event);
                 let tx_sig: Vec<u8> = signature.as_ref().to_vec();
 
                 let sign_tx_inner = sign_tx_clone.clone();
                 let node_near_account_id_inner = node_near_account_id_clone.clone();
+                let backlog = backlog.clone();
 
                 tokio::spawn(async move {
                     if let Err(err) = process_anchor_sign_event(
@@ -519,6 +561,7 @@ async fn subscribe_and_process_sign_events(
                         sign_tx_inner,
                         node_near_account_id_inner,
                         total_timeout,
+                        backlog,
                     )
                     .await
                     {
@@ -689,9 +732,17 @@ where
             }
         }
 
-        backlog
+        // Create checkpoint if one was created at this slot
+        if let Some(checkpoint) = backlog
             .set_processed_block(Chain::Solana, response.context.slot)
-            .await;
+            .await
+        {
+            tracing::info!(
+                slot = response.context.slot,
+                ?checkpoint,
+                "created Solana checkpoint"
+            );
+        }
     }
 
     Ok(())
@@ -704,4 +755,318 @@ fn looks_like_cpi_sign_event(logs: &[String]) -> bool {
 
 fn has_log_starts_with(logs: &[String], start_with: &str) -> bool {
     logs.iter().any(|l| l.starts_with(start_with))
+}
+
+async fn parse_cpi_respond_events(
+    rpc_client: &RpcClient,
+    signature: &Signature,
+    target_program_id: &Pubkey,
+) -> Result<(Vec<RespondBidirectionalEvent>, Vec<SignatureRespondedEvent>)> {
+    use solana_transaction_status::{UiInstruction, UiParsedInstruction};
+
+    let tx = rpc_client
+        .get_transaction_with_config(
+            signature,
+            solana_client::rpc_config::RpcTransactionConfig {
+                encoding: Some(solana_transaction_status::UiTransactionEncoding::JsonParsed),
+                commitment: Some(CommitmentConfig::confirmed()),
+                max_supported_transaction_version: Some(0),
+            },
+        )
+        .await?;
+
+    let Some(meta) = tx.transaction.meta else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+
+    let target_program_str = target_program_id.to_string();
+    let mut respond_bidirectional_events = Vec::<RespondBidirectionalEvent>::new();
+    let mut signature_responded_events = Vec::<SignatureRespondedEvent>::new();
+
+    // Helper closure to try decoding RespondBidirectionalEvent and SignatureRespondedEvent from raw data
+    let try_parse_respond_event =
+        |data: &str| -> Result<(Vec<RespondBidirectionalEvent>, Vec<SignatureRespondedEvent>)> {
+            let Ok(ix_data) = solana_sdk::bs58::decode(data).into_vec() else {
+                tracing::warn!("Failed to decode instruction data for target program");
+                return Ok((Vec::new(), Vec::new()));
+            };
+
+            // Ensure this is an Anchor event instruction
+            if !ix_data.starts_with(anchor_lang::event::EVENT_IX_TAG_LE) {
+                return Ok((Vec::new(), Vec::new()));
+            }
+
+            let event_discriminator = &ix_data[8..16];
+            let event_data = &ix_data[16..];
+
+            let mut respond_bdx = Vec::new();
+            let mut sig_resp = Vec::new();
+
+            // Handle RespondBidirectionalEvent
+            if event_discriminator == RespondBidirectionalEvent::DISCRIMINATOR {
+                match RespondBidirectionalEvent::deserialize(&mut &event_data[..]) {
+                    Ok(ev) => respond_bdx.push(ev),
+                    Err(e) => {
+                        tracing::warn!("Failed to deserialize RespondBidirectionalEvent: {e}")
+                    }
+                }
+            }
+
+            // Handle SignatureRespondedEvent
+            if event_discriminator == SignatureRespondedEvent::DISCRIMINATOR {
+                match SignatureRespondedEvent::deserialize(&mut &event_data[..]) {
+                    Ok(ev) => sig_resp.push(ev),
+                    Err(e) => {
+                        tracing::warn!("Failed to deserialize SignatureRespondedEvent: {e}")
+                    }
+                }
+            }
+
+            Ok((respond_bdx, sig_resp))
+        };
+
+    // Look into inner instructions for CPI calls
+    let inner_ixs = match meta.inner_instructions {
+        solana_transaction_status::option_serializer::OptionSerializer::Some(ixs) => ixs,
+        _ => return Ok((Vec::new(), Vec::new())),
+    };
+
+    for (set_idx, inner_ix_set) in inner_ixs.iter().enumerate() {
+        for (ix_idx, instruction) in inner_ix_set.instructions.iter().enumerate() {
+            if let UiInstruction::Parsed(UiParsedInstruction::PartiallyDecoded(ui)) = instruction {
+                if ui.program_id == target_program_str {
+                    match try_parse_respond_event(&ui.data) {
+                        Ok((mut r_bdx, mut s_resp)) => {
+                            if !r_bdx.is_empty() {
+                                tracing::info!(
+                                    "parsed {} RespondBidirectionalEvent(s) from {}.{}",
+                                    r_bdx.len(),
+                                    set_idx,
+                                    ix_idx
+                                );
+                            }
+                            if !s_resp.is_empty() {
+                                tracing::info!(
+                                    "parsed {} SignatureRespondedEvent(s) from {}.{}",
+                                    s_resp.len(),
+                                    set_idx,
+                                    ix_idx
+                                );
+                            }
+                            respond_bidirectional_events.append(&mut r_bdx);
+                            signature_responded_events.append(&mut s_resp);
+                        }
+                        Err(e) => tracing::warn!(
+                            "Error processing inner instruction {}.{}: {}",
+                            set_idx,
+                            ix_idx,
+                            e
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((respond_bidirectional_events, signature_responded_events))
+}
+
+async fn subscribe_to_program_respond_events(
+    program_id: Pubkey,
+    rpc_url: &str,
+    ws_url: &str,
+    backlog: Backlog,
+    mut contract_watcher: ContractStateWatcher,
+) -> Result<()> {
+    let rpc_client = RpcClient::new(rpc_url.to_string());
+    let pubsub_client = PubsubClient::new(ws_url).await?;
+
+    let filter = RpcTransactionLogsFilter::Mentions(vec![program_id.to_string()]);
+    let config = RpcTransactionLogsConfig {
+        commitment: Some(CommitmentConfig::confirmed()),
+    };
+
+    let (mut stream, _unsubscriber) = pubsub_client.logs_subscribe(filter, config).await?;
+
+    // Simple TTL cache to avoid multiple getTransaction calls for the same signature
+    let mut seen: HashMap<Signature, Instant> = HashMap::new();
+    let ttl = Duration::from_secs(30);
+
+    let program_invoke_log = format!("Program {program_id} invoke [");
+    while let Some(response) = stream.next().await {
+        if response.value.err.is_some() {
+            continue;
+        }
+
+        let logs = &response.value.logs;
+        if !has_log_starts_with(logs, &program_invoke_log) {
+            continue;
+        }
+
+        let Ok(signature) = Signature::from_str(&response.value.signature) else {
+            tracing::warn!("Invalid signature format");
+            continue;
+        };
+        let now = Instant::now();
+        // Periodic cleanup of expired entries in the TTL cache
+        seen.retain(|_, &mut timestamp| now.duration_since(timestamp) < ttl);
+        if seen.contains_key(&signature) {
+            continue;
+        }
+        seen.insert(signature, now);
+
+        let Ok((respond_bidirectional_events, respond_events)) =
+            parse_cpi_respond_events(&rpc_client, &signature, &program_id).await
+        else {
+            continue;
+        };
+        for ev in respond_bidirectional_events {
+            let sign_id = SignId::new(ev.request_id);
+            tracing::info!(?sign_id, "processing RespondBidirectionalEvent");
+            if backlog.remove(Chain::Solana, &sign_id).await.is_some() {
+                tracing::info!(?sign_id, "bidirectional tx completed");
+            } else {
+                tracing::warn!(?sign_id, "bidirectional tx not found on completion");
+            }
+        }
+
+        for ev in respond_events {
+            let sign_id = SignId::new(ev.request_id);
+
+            let Some(sign_type) = backlog.sign_type(Chain::Solana, &sign_id).await else {
+                tracing::warn!(
+                    ?sign_id,
+                    "sign type not found for respond event (may have already been processed)"
+                );
+                continue;
+            };
+            let event = match sign_type {
+                SignRequestType::SignBidirectional(event) => event,
+                SignRequestType::Sign => {
+                    tracing::info!(?sign_id, "sign request completed successfully");
+                    backlog.remove(Chain::Solana, &sign_id).await;
+                    continue;
+                }
+                SignRequestType::RespondBidirectional(_) => {
+                    tracing::warn!(?sign_id, "RespondBidirectional received respond event?");
+                    continue;
+                }
+            };
+
+            tracing::info!(?sign_id, "bidirectional processing initial respond event");
+            let Ok(target_chain) = Chain::from_str(&event.dest).inspect_err(|err| {
+                tracing::warn!(?sign_id, %err, "unable to parse target chain from dest");
+            }) else {
+                continue;
+            };
+
+            let Some(BacklogTransaction::Sign(_)) = backlog.get(Chain::Solana, &sign_id).await
+            else {
+                tracing::warn!(?sign_id, "bidirectional tx not found for advancement");
+                continue;
+            };
+
+            // Create a 65-byte uncompressed point representation (0x04 || x || y)
+            let mut big_r = [0u8; 65];
+            big_r[0] = 0x04;
+            big_r[1..33].copy_from_slice(&ev.signature.big_r.x);
+            big_r[33..65].copy_from_slice(&ev.signature.big_r.y);
+
+            let Ok(big_r) = k256::EncodedPoint::from_bytes(big_r).inspect_err(|err| {
+                tracing::warn!(?sign_id, %err, "unable to parse big_r for encoded point");
+            }) else {
+                continue;
+            };
+            let big_r_ct_opt = AffinePoint::from_encoded_point(&big_r);
+            let big_r = if bool::from(big_r_ct_opt.is_some()) {
+                big_r_ct_opt.unwrap()
+            } else {
+                tracing::warn!(?sign_id, "failed to create AffinePoint from encoded point");
+                continue;
+            };
+
+            let Some(s) = Scalar::from_bytes(ev.signature.s) else {
+                tracing::warn!(?sign_id, "failed to create Scalar from s bytes");
+                continue;
+            };
+
+            let mpc_sig = mpc_primitives::Signature {
+                big_r,
+                s,
+                recovery_id: ev.signature.recovery_id,
+            };
+
+            // Sign and hash the transaction to get the correct tx_id and nonce
+            let (signed_tx_hash, nonce) = crate::sign_bidirectional::sign_and_hash_transaction(
+                &event.serialized_transaction,
+                mpc_sig,
+            )?;
+
+            let tx_id = BidirectionalTxId(signed_tx_hash.into());
+
+            // Get the MPC public key and derive the from_address
+            let root_public_key = contract_watcher.wait_public_key().await;
+            let epsilon = mpc_crypto::kdf::derive_epsilon_sol(
+                event.key_version,
+                &ev.responder.to_string(),
+                &event.path,
+            );
+            let from_address =
+                crate::sign_bidirectional::derive_user_address(root_public_key, epsilon);
+
+            let bidirectional_tx = BidirectionalTx {
+                id: tx_id,
+                sender: ev.responder,
+                serialized_transaction: event.serialized_transaction,
+                source_chain: Chain::Solana,
+                target_chain,
+                caip2_id: event.caip2_id,
+                key_version: event.key_version,
+                deposit: event.deposit,
+                path: event.path.clone(),
+                algo: event.algo.clone(),
+                dest: event.dest.clone(),
+                params: event.params.clone(),
+                output_deserialization_schema: event.output_deserialization_schema.clone(),
+                respond_serialization_schema: event.respond_serialization_schema.clone(),
+                request_id: ev.request_id,
+                from_address,
+                nonce,
+                status: PendingRequestStatus::AwaitingResponse,
+            };
+
+            tracing::info!(
+                ?sign_id,
+                ?tx_id,
+                nonce = ?bidirectional_tx.nonce,
+                from_address = ?bidirectional_tx.from_address,
+                "bidirectional tx details before advancement",
+            );
+
+            match backlog
+                .advance(Chain::Solana, sign_id, bidirectional_tx)
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!(
+                        ?sign_id,
+                        ?tx_id,
+                        ?target_chain,
+                        "advance bidirectional tx to execution successful"
+                    );
+                }
+                Err(err) => {
+                    tracing::error!(
+                        ?sign_id,
+                        ?tx_id,
+                        ?target_chain,
+                        ?err,
+                        "advance bidirectional tx to execution failed"
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
 }

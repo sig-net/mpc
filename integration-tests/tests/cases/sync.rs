@@ -17,7 +17,7 @@ use mpc_node::protocol::sync::{SyncTask, SyncUpdate};
 use mpc_node::protocol::triple::Triple;
 use mpc_node::protocol::{ParticipantInfo, ProtocolState};
 use mpc_node::rpc::ContractStateWatcher;
-use mpc_node::storage::{PresignatureStorage, TripleStorage};
+use mpc_node::storage::{triple_storage::TriplePair, PresignatureStorage, TripleStorage};
 
 #[test_log::test(tokio::test)]
 async fn test_state_sync_update() -> anyhow::Result<()> {
@@ -186,7 +186,7 @@ async fn insert_triples(
             .reserve(id)
             .await
             .unwrap()
-            .insert(dummy_triple(id), node)
+            .insert(dummy_pair(id), node)
             .await;
     }
 }
@@ -262,9 +262,8 @@ fn dummy_presignature(id: u64) -> Presignature {
 }
 
 // TODO: cleanup and move this to a common test utils module
-fn dummy_triple(id: u64) -> Triple {
+fn dummy_triple() -> Triple {
     Triple {
-        id,
         share: TripleShare {
             a: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
             b: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
@@ -299,4 +298,12 @@ fn participants(num_nodes: usize) -> Participants {
         );
     }
     participants
+}
+
+fn dummy_pair(id: u64) -> TriplePair {
+    TriplePair {
+        id,
+        triple0: dummy_triple(),
+        triple1: dummy_triple(),
+    }
 }

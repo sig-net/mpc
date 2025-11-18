@@ -125,8 +125,7 @@ impl From<TripleMessage> for Message {
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct PresignatureMessage {
     pub id: u64,
-    pub triple0: TripleId,
-    pub triple1: TripleId,
+    pub pair_id: TripleId,
     pub epoch: Epoch,
     pub from: Participant,
     #[serde(with = "serde_bytes")]

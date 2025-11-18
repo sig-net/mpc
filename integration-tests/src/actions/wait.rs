@@ -1,15 +1,18 @@
 use std::future::{Future, IntoFuture};
+use std::time::Duration;
 
 use anyhow::Context;
 use backon::{ConstantBuilder, Retryable};
 use mpc_contract::{ProtocolContractState, RunningContractState};
 use mpc_node::web::StateView;
+use mpc_primitives::{Chain, Checkpoint};
 use near_account_id::AccountId;
 
 use crate::cluster::Cluster;
 
 type Epoch = u64;
 type Present = bool;
+type BlockHeight = u64;
 
 enum ContractState {
     Candidate(AccountId, Present),
@@ -31,6 +34,7 @@ enum WaitActions {
     Signable(usize),
     NodeState(NodeState, usize),
     ContractState(ContractState),
+    Checkpoint(usize, Chain, BlockHeight),
 }
 
 pub struct WaitAction<'a, R> {
@@ -127,6 +131,21 @@ impl<'a, R> WaitAction<'a, R> {
         self
     }
 
+    pub fn node_checkpoint(
+        mut self,
+        id: usize,
+        chain: Chain,
+        block_height: BlockHeight,
+    ) -> WaitAction<'a, Checkpoint> {
+        self.actions
+            .push(WaitActions::Checkpoint(id, chain, block_height));
+        WaitAction {
+            nodes: self.nodes,
+            actions: self.actions,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
     pub fn candidate_present(mut self, candidate: &AccountId) -> Self {
         self.actions
             .push(WaitActions::ContractState(ContractState::Candidate(
@@ -184,6 +203,9 @@ impl<'a, R> WaitAction<'a, R> {
                 WaitActions::ContractState(state) => {
                     require_contract_state(self.nodes, state).await?;
                 }
+                WaitActions::Checkpoint(id, chain, block_height) => {
+                    require_checkpoint(self.nodes, id, chain, block_height).await?;
+                }
             }
         }
 
@@ -230,8 +252,8 @@ async fn require_node_state(nodes: &Cluster, state: NodeState, id: usize) -> any
     };
 
     let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_secs(3))
-        .with_max_times(20);
+        .with_delay(std::time::Duration::from_millis(500))
+        .with_max_times(30);
 
     let state = is_ready
         .retry(&strategy)
@@ -240,7 +262,7 @@ async fn require_node_state(nodes: &Cluster, state: NodeState, id: usize) -> any
 
     if matches!(state, NodeState::Joining) {
         // wait a bit longer for voting to join
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
     }
 
     Ok(())
@@ -267,8 +289,8 @@ async fn require_contract_state(nodes: &Cluster, state: ContractState) -> anyhow
     };
 
     let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_secs(3))
-        .with_max_times(20);
+        .with_delay(std::time::Duration::from_millis(500))
+        .with_max_times(30);
 
     is_ready
         .retry(&strategy)
@@ -296,8 +318,8 @@ pub async fn running_mpc(
     };
 
     let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_secs(3))
-        .with_max_times(50);
+        .with_delay(std::time::Duration::from_millis(500))
+        .with_max_times(40);
 
     is_running.retry(&strategy).await.with_context(|| {
         format!(
@@ -346,7 +368,7 @@ pub async fn require_presignatures(
     };
 
     let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_secs(5))
+        .with_delay(std::time::Duration::from_secs(1))
         .with_max_times(expected * 100);
 
     let state_views = is_enough.retry(&strategy).await.with_context(|| {
@@ -391,7 +413,7 @@ pub async fn require_triples(
     };
 
     let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_secs(5))
+        .with_delay(std::time::Duration::from_secs(1))
         .with_max_times(expected * 100);
 
     let state_views = is_enough.retry(&strategy).await.with_context(|| {
@@ -399,4 +421,26 @@ pub async fn require_triples(
     })?;
 
     Ok(state_views)
+}
+
+async fn require_checkpoint(
+    nodes: &Cluster,
+    id: usize,
+    chain: Chain,
+    block_height: u64,
+) -> anyhow::Result<Checkpoint> {
+    tokio::time::timeout(Duration::from_secs(10), async move {
+        loop {
+            let checkpoints = nodes.fetch_checkpoints(id).await?;
+            if let Some(checkpoint) = checkpoints.get(&chain) {
+                if checkpoint.block_height >= block_height {
+                    return Ok(checkpoint.clone());
+                }
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    })
+    .await
+    .unwrap()
 }

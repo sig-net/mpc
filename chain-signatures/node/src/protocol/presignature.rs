@@ -35,23 +35,22 @@ use near_account_id::AccountId;
 /// generation messages.
 pub type PresignatureId = u64;
 
-/// The full presignature id. This encompasses the presignature id and the two triples
-/// that were used to generate it.
+/// The full presignature id. This encompasses the presignature id and the triple pair
+/// that was used to generate it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct FullPresignatureId {
     id: PresignatureId,
-    t0: TripleId,
-    t1: TripleId,
+    pair_id: TripleId,
 }
 
 impl FullPresignatureId {
-    pub fn from_triples(t0: TripleId, t1: TripleId) -> Self {
-        let id = hash_as_id(t0, t1);
-        Self { id, t0, t1 }
+    pub fn from_pair(pair_id: TripleId) -> Self {
+        let id = hash_as_id(pair_id);
+        Self { id, pair_id }
     }
 
     pub fn validate(&self) -> bool {
-        self.id == hash_as_id(self.t0, self.t1)
+        self.id == hash_as_id(self.pair_id)
     }
 }
 
@@ -229,8 +228,7 @@ impl PresignatureGenerator {
                                 *to,
                                 PresignatureMessage {
                                     id: self.id,
-                                    triple0: self.dropper.id0,
-                                    triple1: self.dropper.id1,
+                                    pair_id: self.dropper.pair_id,
                                     epoch,
                                     from: me,
                                     data: data.clone(),
@@ -247,8 +245,7 @@ impl PresignatureGenerator {
                             to,
                             PresignatureMessage {
                                 id: self.id,
-                                triple0: self.dropper.id0,
-                                triple1: self.dropper.id1,
+                                pair_id: self.dropper.pair_id,
                                 epoch,
                                 from: me,
                                 data,
@@ -426,9 +423,8 @@ impl PresignatureSpawner {
             // TODO: we can potentially wait for the triples to exist first to then be able to accept.
             // whereas we just blatantly reject here. The problem with waiting is that the other side
             // might expire their posit first.
-            (self.triples.contains_reserved(id.t0).await || self.triples.contains(id.t0).await)
-                && (self.triples.contains_reserved(id.t1).await
-                    || self.triples.contains(id.t1).await)
+            self.triples.contains_reserved(id.pair_id).await
+                || self.triples.contains(id.pair_id).await
         } {
             tracing::warn!(
                 ?id,
@@ -473,29 +469,24 @@ impl PresignatureSpawner {
         // to use the same triple as any other node.
         // TODO: have all this part be a separate task such that finding a pair of triples is done in parallel instead
         // of waiting for storage to respond here.
-        let Some(triples) = self.triples.take_two_mine(self.me).await else {
+        let Some(triples) = self.triples.take_mine(self.me).await else {
             return;
         };
 
-        let t0 = triples.triple0.id;
-        let t1 = triples.triple1.id;
-        let participants = intersect_vec(&[
-            active,
-            &triples.triple0.public.participants,
-            &triples.triple1.public.participants,
-        ]);
+        let pair_id = triples.pair.id;
+        // note: only one of the pair's participants is needed since they are the same.
+        let participants = intersect_vec(&[active, &triples.pair.triple0.public.participants]);
         if participants.len() < self.threshold {
             tracing::warn!(
-                intersection = ?participants,
+                pair_id,
+                ?active,
                 ?participants,
-                triple0 = ?(t0, &triples.triple0.public.participants),
-                triple1 = ?(t1, &triples.triple1.public.participants),
-                "intersection < threshold, trashing two triples"
+                "intersection < threshold, trashing triple pair"
             );
             return;
         }
 
-        let id = FullPresignatureId::from_triples(t0, t1);
+        let id = FullPresignatureId::from_pair(pair_id);
         tracing::info!(
             ?id,
             ?triples,
@@ -554,7 +545,7 @@ impl PresignatureSpawner {
             Positor::Proposer(proposer, triples) => (proposer, PendingTriples::Available(triples)),
             Positor::Deliberator(proposer) => (
                 proposer,
-                PendingTriples::InStorage(id.t0, id.t1, self.triples.clone()),
+                PendingTriples::InStorage(id.pair_id, self.triples.clone()),
             ),
         };
         tracing::info!(
@@ -587,7 +578,7 @@ impl PresignatureSpawner {
                 return;
             };
 
-            let (triple0, triple1, dropper) = triples.take();
+            let (pair, dropper) = triples.take();
             let protocol = match cait_sith::presign(
                 &participants,
                 me,
@@ -596,8 +587,8 @@ impl PresignatureSpawner {
                 &participants,
                 me,
                 PresignArguments {
-                    triple0: (triple0.share, triple0.public),
-                    triple1: (triple1.share, triple1.public),
+                    triple0: (pair.triple0.share, pair.triple0.public),
+                    triple1: (pair.triple1.share, pair.triple1.public),
                     keygen_out,
                     threshold,
                 },
@@ -755,10 +746,9 @@ impl Drop for PresignatureSpawner {
     }
 }
 
-pub fn hash_as_id(triple0: TripleId, triple1: TripleId) -> PresignatureId {
+pub fn hash_as_id(pair_id: TripleId) -> PresignatureId {
     let mut hasher = Sha3_256::new();
-    hasher.update(triple0.to_le_bytes());
-    hasher.update(triple1.to_le_bytes());
+    hasher.update(pair_id.to_le_bytes());
     let id: [u8; 32] = hasher.finalize().into();
     let id = u64::from_le_bytes(crate::util::first_8_bytes(id));
 
@@ -824,12 +814,12 @@ impl Drop for PresignatureSpawnerTask {
     }
 }
 
-/// Represents two triples that are either available immediately or will eventually be available within
+/// Represents a triple pair that is either available immediately or will eventually be available within
 /// the storage, in which case the `fetch` method will block until they are available alongside a timeout.
 #[allow(clippy::large_enum_variant)]
 enum PendingTriples {
     Available(TriplesTaken),
-    InStorage(TripleId, TripleId, TripleStorage),
+    InStorage(TripleId, TripleStorage),
 }
 
 impl PendingTriples {
@@ -839,8 +829,8 @@ impl PendingTriples {
         owner: Participant,
         timeout: Duration,
     ) -> Option<TriplesTaken> {
-        let (id0, id1, storage) = match self {
-            Self::InStorage(id0, id1, storage) => (id0, id1, storage),
+        let (pair_id, storage) = match self {
+            Self::InStorage(pair_id, storage) => (pair_id, storage),
             Self::Available(triples) => return Some(triples),
         };
 
@@ -848,7 +838,7 @@ impl PendingTriples {
             let mut interval = tokio::time::interval(Duration::from_millis(200));
             loop {
                 interval.tick().await;
-                if let Some(triples) = storage.take_two(id0, id1, owner, me).await {
+                if let Some(triples) = storage.take(pair_id, owner, me).await {
                     break triples;
                 };
             }
@@ -858,7 +848,7 @@ impl PendingTriples {
         match triples {
             Ok(triples) => Some(triples),
             Err(_) => {
-                tracing::warn!(id0, id1, "timeout waiting for triples to be available");
+                tracing::warn!(pair_id, "timeout waiting for triple pair to be available");
                 None
             }
         }

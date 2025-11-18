@@ -6,7 +6,6 @@ use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::signature::SignRequest;
 use crate::protocol::{Chain, Governance, ProtocolState, SignRequestType};
-use crate::respond_bidirectional::RespondBidirectionalTxChannel;
 use crate::util::AffinePointExt as _;
 
 use solana_sdk::commitment_config::CommitmentConfig;
@@ -223,15 +222,43 @@ impl ContractStateWatcher {
     }
 
     pub async fn threshold(&self) -> Option<usize> {
-        match self.state().clone()? {
+        match self.state()? {
             ProtocolState::Initializing(_) => None,
             ProtocolState::Running(state) => Some(state.threshold),
             ProtocolState::Resharing(state) => Some(state.threshold),
         }
     }
 
+    /// Wait until the MPC threshold is available and return it
+    pub async fn wait_threshold(&mut self) -> usize {
+        loop {
+            if let Some(threshold) = self.threshold().await {
+                return threshold;
+            }
+            let _ = self.contract_state.changed().await;
+        }
+    }
+
+    pub async fn public_key(&self) -> Option<AffinePoint> {
+        match self.borrow_state().as_ref()? {
+            ProtocolState::Initializing(_) => None,
+            ProtocolState::Running(state) => Some(state.public_key),
+            ProtocolState::Resharing(_) => None,
+        }
+    }
+
+    /// Wait until the public key is available and return it
+    pub async fn wait_public_key(&mut self) -> AffinePoint {
+        loop {
+            if let Some(pk) = self.public_key().await {
+                return pk;
+            }
+            let _ = self.contract_state.changed().await;
+        }
+    }
+
     pub async fn info(&self) -> Option<(usize, Participant)> {
-        match self.state().clone()? {
+        match self.state()? {
             ProtocolState::Initializing(_) => None,
             ProtocolState::Running(state) => Some((
                 state.threshold,
@@ -313,7 +340,6 @@ impl RpcExecutor {
         mut self,
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
-        respond_bidirectional_tx_channel: RespondBidirectionalTxChannel,
     ) {
         // spin up update task for updating contract state and config
         let near = self.near.clone();
@@ -353,18 +379,10 @@ impl RpcExecutor {
             let eth_rpc_tx = eth_rpc_tx.clone(); // clone for task use
             let backlog = self.backlog.clone();
 
-            let respond_bidirectional_tx_channel_clone = respond_bidirectional_tx_channel.clone();
             tokio::spawn(async move {
                 match chain {
                     Chain::NEAR | Chain::Solana => {
-                        execute_publish(
-                            client,
-                            action,
-                            near_account_id,
-                            backlog,
-                            respond_bidirectional_tx_channel_clone,
-                        )
-                        .await;
+                        execute_publish(client, action, near_account_id, backlog).await;
                     }
                     Chain::Ethereum => {
                         if let Err(err) = eth_rpc_tx.send(action).await {
@@ -658,7 +676,6 @@ async fn execute_publish(
     mut action: PublishAction,
     near_account_id: AccountId,
     backlog: Backlog,
-    respond_bidirectional_tx_channel: RespondBidirectionalTxChannel,
 ) {
     let chain = action.request.indexed.chain;
     let sign_id = action.request.indexed.id;
@@ -708,7 +725,6 @@ async fn execute_publish(
                 &action.timestamp,
                 &signature,
                 &near_account_id,
-                respond_bidirectional_tx_channel.clone(),
             )
             .await
             .map_err(|_| ()),
@@ -827,23 +843,20 @@ async fn try_publish_near(
         "published signature sucessfully",
     );
 
+    let elapsed = action.request.indexed.timestamp_sign_queue.elapsed();
     crate::metrics::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .inc();
-    if let Some(timestamp_sign_queue) = action.request.indexed.timestamp_sign_queue {
-        crate::metrics::SIGN_TOTAL_LATENCY
-            .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
-            .observe(timestamp_sign_queue.elapsed().as_secs_f64());
-    }
+    crate::metrics::SIGN_TOTAL_LATENCY
+        .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
+        .observe(elapsed.as_secs_f64());
     crate::metrics::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
-    if let Some(timestamp_sign_queue) = action.request.indexed.timestamp_sign_queue {
-        if timestamp_sign_queue.elapsed().as_secs() <= 30 {
-            crate::metrics::NUM_SIGN_SUCCESS_30S
-                .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
-                .inc();
-        }
+    if elapsed.as_secs() <= 30 {
+        crate::metrics::NUM_SIGN_SUCCESS_30S
+            .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
+            .inc();
     }
 
     Ok(())
@@ -1123,15 +1136,14 @@ async fn try_publish_eth(
     crate::metrics::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .inc();
-    if let Some(timestamp_sign_queue) = action.request.indexed.timestamp_sign_queue {
-        crate::metrics::SIGN_TOTAL_LATENCY
+    let elapsed = action.request.indexed.timestamp_sign_queue.elapsed();
+    crate::metrics::SIGN_TOTAL_LATENCY
+        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+        .observe(elapsed.as_secs_f64());
+    if elapsed.as_secs() <= 30 {
+        crate::metrics::NUM_SIGN_SUCCESS_30S
             .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-            .observe(timestamp_sign_queue.elapsed().as_secs_f64());
-        if timestamp_sign_queue.elapsed().as_secs() <= 30 {
-            crate::metrics::NUM_SIGN_SUCCESS_30S
-                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .inc();
-        }
+            .inc();
     }
 
     crate::metrics::SIGN_RESPOND_LATENCY
@@ -1229,15 +1241,14 @@ async fn try_batch_publish_eth(
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .inc_by(num_requests as f64);
     for action in actions {
-        if let Some(timestamp_sign_queue) = action.request.indexed.timestamp_sign_queue {
-            crate::metrics::SIGN_TOTAL_LATENCY
+        let elapsed = action.request.indexed.timestamp_sign_queue.elapsed();
+        crate::metrics::SIGN_TOTAL_LATENCY
+            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+            .observe(elapsed.as_secs_f64());
+        if elapsed.as_secs() <= 30 {
+            crate::metrics::NUM_SIGN_SUCCESS_30S
                 .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .observe(timestamp_sign_queue.elapsed().as_secs_f64());
-            if timestamp_sign_queue.elapsed().as_secs() <= 30 {
-                crate::metrics::NUM_SIGN_SUCCESS_30S
-                    .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                    .inc();
-            }
+                .inc();
         }
     }
     crate::metrics::SIGN_RESPOND_LATENCY
@@ -1325,7 +1336,6 @@ async fn try_publish_sol(
     timestamp: &Instant,
     signature: &Signature,
     near_account_id: &AccountId,
-    respond_bidirectional_tx_channel: RespondBidirectionalTxChannel,
 ) -> Result<(), ()> {
     let chain = action.request.indexed.chain;
     let program = sol.client.program(sol.program_id).map_err(|_| ())?;
@@ -1421,7 +1431,6 @@ async fn try_publish_sol(
                 elapsed = ?timestamp.elapsed(),
                 "published respond bidirectional solana signature successfully"
             );
-            respond_bidirectional_tx_channel.send(chain, action.request.indexed.id);
         }
     }
 

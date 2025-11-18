@@ -9,6 +9,7 @@ use mpc_crypto::PublicKey;
 use mpc_node::protocol::presignature::{Presignature, PresignatureSpawner};
 use mpc_node::protocol::triple::{Triple, TripleSpawner};
 use mpc_node::protocol::MessageChannel;
+use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::types::SecretKeyShare;
 use test_log::test;
 
@@ -42,13 +43,13 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
         .reserve(triple_id1)
         .await
         .unwrap()
-        .insert(dummy_triple(triple_id1), node1)
+        .insert(dummy_pair(triple_id1), node1)
         .await;
     triple_storage
         .reserve(triple_id2)
         .await
         .unwrap()
-        .insert(dummy_triple(triple_id2), node1)
+        .insert(dummy_pair(triple_id2), node1)
         .await;
 
     // Check that the storage contains the foreign triple
@@ -60,11 +61,9 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_storage.len_by_owner(node0).await, 0);
     assert_eq!(triple_spawner.len_potential().await, 2);
 
-    // Take triple and check that it is removed from the storage and added to used set
-    triple_storage
-        .take_two(triple_id1, triple_id2, node1, node0)
-        .await
-        .unwrap();
+    // Take triple pairs and check that they are removed from the storage and added to used set
+    triple_storage.take(triple_id1, node1, node0).await.unwrap();
+    triple_storage.take(triple_id2, node1, node0).await.unwrap();
     assert!(!triple_spawner.contains(triple_id1).await);
     assert!(!triple_spawner.contains(triple_id2).await);
     assert!(!triple_spawner.contains_mine(triple_id1).await);
@@ -93,13 +92,13 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
         .reserve(id3)
         .await
         .unwrap()
-        .insert(dummy_triple(id3), node0)
+        .insert(dummy_pair(id3), node0)
         .await;
     triple_storage
         .reserve(id4)
         .await
         .unwrap()
-        .insert(dummy_triple(id4), node0)
+        .insert(dummy_pair(id4), node0)
         .await;
     assert!(triple_spawner.contains(id3).await);
     assert!(triple_spawner.contains(id4).await);
@@ -109,8 +108,9 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_spawner.len_mine().await, 2);
     assert_eq!(triple_spawner.len_potential().await, 2);
 
-    // Take mine triple and check that it is removed from the storage and added to used set
-    triple_storage.take_two_mine(node0).await.unwrap();
+    // Take mine triple pairs and check that they are removed from the storage and added to used set
+    triple_storage.take_mine(node0).await.unwrap();
+    triple_storage.take_mine(node0).await.unwrap();
     assert!(!triple_spawner.contains(id3).await);
     assert!(!triple_spawner.contains(id4).await);
     assert!(!triple_spawner.contains_mine(id3).await);
@@ -135,7 +135,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
             .reserve(id)
             .await
             .unwrap()
-            .insert(dummy_triple(id), node1)
+            .insert(dummy_pair(id), node1)
             .await;
     }
 
@@ -145,7 +145,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
             .reserve(id)
             .await
             .unwrap()
-            .insert(dummy_triple(id), node0)
+            .insert(dummy_pair(id), node0)
             .await;
     }
 
@@ -314,9 +314,16 @@ fn dummy_presignature(id: u64) -> Presignature {
     }
 }
 
-fn dummy_triple(id: u64) -> Triple {
-    Triple {
+fn dummy_pair(id: u64) -> TriplePair {
+    TriplePair {
         id,
+        triple0: dummy_triple(),
+        triple1: dummy_triple(),
+    }
+}
+
+fn dummy_triple() -> Triple {
+    Triple {
         share: TripleShare {
             a: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
             b: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,

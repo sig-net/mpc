@@ -13,16 +13,20 @@ use mpc_contract::primitives::{
     CandidateInfo, Candidates as CandidatesById, ParticipantInfo, Participants as ParticipantsById,
 };
 use mpc_keys::hpke::{self, Ciphered};
+use mpc_node::backlog::Backlog;
 use mpc_node::config::{Config, LocalConfig, NetworkConfig};
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes, Votes};
 use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
 use mpc_node::protocol::message::{MessageInbox, MessageOutbox};
 use mpc_node::protocol::state::NodeKeyInfo;
+use mpc_node::protocol::triple::Triple;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState, SignQueue};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
-use mpc_node::storage::{presignature_storage, secret_storage, triple_storage, Options};
+use mpc_node::storage::{
+    presignature_storage, secret_storage, triple_storage, triple_storage::TriplePair, Options,
+};
 use near_sdk::AccountId;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -480,6 +484,7 @@ impl MpcFixtureNodeBuilder {
             msg_channel: self.messaging.channel,
             triple_storage,
             presignature_storage,
+            backlog: Backlog::new(),
             web_handle: None,
         };
 
@@ -517,9 +522,23 @@ impl MpcFixtureNodeBuilder {
             // removing here because we can't clone a triple
             let my_shares = fixture_config.input.triples.remove(&self.me).unwrap();
             for (owner, triple_shares) in my_shares {
-                for triple_share in triple_shares {
-                    let mut slot = triple_storage.reserve(triple_share.id).await.unwrap();
-                    slot.insert(triple_share, owner).await;
+                // Group triples into pairs
+                for pair in triple_shares.chunks_exact(2) {
+                    // Use the id from the fixture data as the pair ID
+                    let pair_id = pair[0].id;
+                    let pair = TriplePair {
+                        id: pair_id,
+                        triple0: Triple {
+                            share: pair[0].share.clone(),
+                            public: pair[0].public.clone(),
+                        },
+                        triple1: Triple {
+                            share: pair[1].share.clone(),
+                            public: pair[1].public.clone(),
+                        },
+                    };
+                    let mut slot = triple_storage.reserve(pair_id).await.unwrap();
+                    slot.insert(pair, owner).await;
                 }
             }
         }
