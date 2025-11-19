@@ -538,13 +538,16 @@ impl TripleSpawner {
 
     async fn run(
         mut self,
-        mesh_state: watch::Receiver<MeshState>,
-        config: watch::Receiver<Config>,
+        mut mesh_state: watch::Receiver<MeshState>,
+        mut cfg: watch::Receiver<Config>,
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
         let mut stockpile_interval = tokio::time::interval(Duration::from_millis(100));
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(60));
         let mut posits = self.msg.subscribe_triple_posit().await;
+
+        let mut active = mesh_state.borrow().active.keys_vec();
+        let mut protocol = cfg.borrow().protocol.clone();
 
         loop {
             tokio::select! {
@@ -553,13 +556,13 @@ impl TripleSpawner {
                         let (id, PositInternalAction::StartProtocol(participants, positor)) = action else {
                             continue;
                         };
-                        let timeout = config.borrow().protocol.triple.generation_timeout;
-                        self.start_generation(id, participants, positor, Duration::from_millis(timeout)).await;
+                        let timeout = Duration::from_millis(protocol.triple.generation_timeout);
+                        self.start_generation(id, participants, positor, timeout).await;
                     }
                 }
                 Some((id, from, action)) = posits.recv() => {
-                    let timeout = config.borrow().protocol.triple.generation_timeout;
-                    self.process_posit(id, from, action, Duration::from_millis(timeout)).await;
+                    let timeout = Duration::from_millis(protocol.triple.generation_timeout);
+                    self.process_posit(id, from, action, timeout).await;
                 }
                 // `join_next` returns None on the set being empty, so don't handle that case
                 Some(result) = self.ongoing.join_next(), if !self.ongoing.is_empty() => {
@@ -573,12 +576,7 @@ impl TripleSpawner {
                     self.ongoing_introduced.remove(&id);
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
                 }
-                _ = stockpile_interval.tick() => {
-                    // TODO: eventually we should use all participants, and let nodes replying with
-                    // accept/reject determine who is a participant. The messaging layer should
-                    // rely more on active.
-                    let active = mesh_state.borrow().active.keys_vec();
-                    let protocol = config.borrow().protocol.clone();
+                _ = stockpile_interval.tick(), if active.len() >= self.threshold => {
                     self.stockpile(&active, &protocol).await;
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
 
@@ -594,6 +592,12 @@ impl TripleSpawner {
                     crate::metrics::NUM_TRIPLE_GENERATORS_TOTAL
                         .with_label_values(&[self.my_account_id.as_str()])
                         .set(self.len_ongoing() as i64);
+                }
+                Ok(()) = cfg.changed() => {
+                    protocol = cfg.borrow().protocol.clone();
+                }
+                Ok(()) = mesh_state.changed() => {
+                    active = mesh_state.borrow().active.keys_vec();
                 }
             }
         }

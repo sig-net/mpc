@@ -679,13 +679,16 @@ impl PresignatureSpawner {
 
     async fn run(
         mut self,
-        mesh_state: watch::Receiver<MeshState>,
-        config: watch::Receiver<Config>,
+        mut mesh_state: watch::Receiver<MeshState>,
+        mut cfg: watch::Receiver<Config>,
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
         let mut stockpile_interval = time::interval(Duration::from_millis(100));
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(20));
         let mut posits = self.msg.subscribe_presignature_posit().await;
+
+        let mut protocol = cfg.borrow().protocol.clone();
+        let mut active = mesh_state.borrow().active.keys_vec();
 
         loop {
             tokio::select! {
@@ -698,13 +701,13 @@ impl PresignatureSpawner {
                             );
                             continue;
                         };
-                        let timeout = config.borrow().protocol.presignature.generation_timeout;
-                        self.start_generation(id, positor, participants, Duration::from_millis(timeout)).await;
+                        let timeout = Duration::from_millis(protocol.presignature.generation_timeout);
+                        self.start_generation(id, positor, participants, timeout).await;
                     }
                 }
                 Some((id, from, action)) = posits.recv() => {
-                    let timeout = config.borrow().protocol.presignature.generation_timeout;
-                    self.process_posit(id, from, action, Duration::from_millis(timeout)).await;
+                    let timeout = Duration::from_millis(protocol.presignature.generation_timeout);
+                    self.process_posit(id, from, action, timeout).await;
                 }
                 // `join_next` returns None on the set being empty, so don't handle that case
                 Some(result) = self.ongoing.join_next(), if !self.ongoing.is_empty() => {
@@ -718,10 +721,8 @@ impl PresignatureSpawner {
                     self.ongoing_owned.remove(&id);
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
                 }
-                _ = stockpile_interval.tick() => {
-                    let active = mesh_state.borrow().active.keys_vec();
-                    let protocol_cfg = config.borrow().protocol.clone();
-                    self.stockpile(&active, &protocol_cfg).await;
+                _ = stockpile_interval.tick(), if active.len() >= self.threshold => {
+                    self.stockpile(&active, &protocol).await;
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
 
                     crate::metrics::NUM_PRESIGNATURES_MINE
@@ -733,6 +734,12 @@ impl PresignatureSpawner {
                     crate::metrics::NUM_PRESIGNATURE_GENERATORS_TOTAL
                         .with_label_values(&[self.my_account_id.as_str()])
                         .set(self.len_potential().await as i64 - self.len_generated().await as i64);
+                }
+                Ok(()) = cfg.changed() => {
+                    protocol = cfg.borrow().protocol.clone();
+                }
+                Ok(()) = mesh_state.changed() => {
+                    active = mesh_state.borrow().active.keys_vec();
                 }
             }
         }
