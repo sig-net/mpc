@@ -9,7 +9,7 @@ use crate::backlog::Checkpoint;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::Chain;
-use cait_sith::protocol::Participant;
+use threshold_signatures::protocol::Participant;
 use std::collections::HashMap;
 
 /// Queries all participants for their checkpoints and returns a consensus checkpoint

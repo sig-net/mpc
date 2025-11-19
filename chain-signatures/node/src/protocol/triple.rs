@@ -10,8 +10,10 @@ use crate::util::{AffinePointExt, JoinMap};
 
 use mpc_contract::config::ProtocolConfig;
 
-use cait_sith::protocol::{Action, InitializationError, Participant};
-use cait_sith::triples::{TriplePub, TripleShare};
+use threshold_signatures::protocol::{Action, MessageData};
+use threshold_signatures::errors::InitializationError;
+use threshold_signatures::participants::Participant;
+use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
 use chrono::Utc;
 use highway::{HighwayHash, HighwayHasher};
 use k256::elliptic_curve::group::GroupEncoding;
@@ -69,7 +71,7 @@ impl TripleGenerator {
         participants.sort();
 
         let protocol =
-            cait_sith::triples::generate_triple_many::<Secp256k1, 2>(&participants, me, threshold)?;
+            threshold_signatures::triples::generate_triple_many::<Secp256k1, 2>(&participants, me, threshold)?;
 
         let inbox = msg.subscribe_triple(id).await;
         Ok(Self {

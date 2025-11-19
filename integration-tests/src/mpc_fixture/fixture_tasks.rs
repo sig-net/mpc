@@ -2,7 +2,7 @@
 //! passing between nodes and updates to the governance smart contract.
 
 use crate::mpc_fixture::fixture_interface::SharedOutput;
-use cait_sith::protocol::Participant;
+use threshold_signatures::protocol::Participant;
 use mpc_keys::hpke::Ciphered;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;

@@ -13,9 +13,9 @@ use bollard::network::CreateNetworkOptions;
 use bollard::secret::Ipam;
 use bollard::Docker;
 use borsh::{BorshDeserialize, BorshSerialize};
-use cait_sith::protocol::Participant;
-use cait_sith::triples::{TriplePub, TripleShare};
-use cait_sith::FullSignature;
+use threshold_signatures::protocol::Participant;
+use threshold_signatures::triples::{TriplePub, TripleShare};
+use threshold_signatures::ecdsa::ot_based_ecdsa::FullSignature;
 use elliptic_curve::rand_core::OsRng;
 use futures::StreamExt as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
@@ -400,7 +400,7 @@ impl Redis {
             .map(|id| Participant::from(*id))
             .collect::<Vec<_>>();
         let (public, shares): (TriplePub<Secp256k1>, Vec<TripleShare<Secp256k1>>) =
-            cait_sith::triples::deal(&mut OsRng, &participant_ids, cfg.threshold);
+            threshold_signatures::triples::deal(&mut OsRng, &participant_ids, cfg.threshold);
 
         // - first/second loop add at least min_triples per node
         // - third loop: for each pair, store the shares as pairs per node

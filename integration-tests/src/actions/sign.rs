@@ -13,7 +13,7 @@ use alloy::sol_types::SolEvent;
 use anchor_client::anchor_lang::{AnchorDeserialize, Discriminator};
 use anchor_client::{Client, Cluster as AnchorCluster};
 use anyhow::Context as _;
-use cait_sith::FullSignature;
+use threshold_signatures::ecdsa::ot_based_ecdsa::FullSignature;
 use elliptic_curve::sec1::FromEncodedPoint;
 use futures::StreamExt;
 use generic_array::GenericArray;

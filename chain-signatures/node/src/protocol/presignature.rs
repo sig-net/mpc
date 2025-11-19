@@ -12,8 +12,10 @@ use crate::storage::TripleStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
 use crate::util::{AffinePointExt, JoinMap};
 
-use cait_sith::protocol::{Action, InitializationError, Participant};
-use cait_sith::{KeygenOutput, PresignArguments, PresignOutput};
+use threshold_signatures::protocol::{Action, MessageData};
+use threshold_signatures::errors::InitializationError;
+use threshold_signatures::participants::Participant;
+use threshold_signatures::ecdsa::ot_based_ecdsa::{KeygenOutput, PresignArguments, PresignOutput};
 use chrono::Utc;
 use k256::{AffinePoint, Scalar, Secp256k1};
 use mpc_contract::config::ProtocolConfig;
@@ -31,7 +33,7 @@ use tokio::time;
 use near_account_id::AccountId;
 
 /// Unique number used to identify a specific ongoing presignature generation protocol.
-/// Without `PresignatureId` it would be unclear where to route incoming cait-sith presignature
+/// Without `PresignatureId` it would be unclear where to route incoming threshold-signatures presignature
 /// generation messages.
 pub type PresignatureId = u64;
 
@@ -579,7 +581,8 @@ impl PresignatureSpawner {
             };
 
             let (pair, dropper) = triples.take();
-            let protocol = match cait_sith::presign(
+            use threshold_signatures::ecdsa::ot_based_ecdsa::presign::presign as ts_presign;
+            let protocol = match ts_presign(
                 &participants,
                 me,
                 // These paramaters appear to be to make it easier to use different indexing schemes for triples
@@ -864,7 +867,7 @@ impl PendingTriples {
 
 #[cfg(test)]
 mod tests {
-    use cait_sith::{protocol::Participant, PresignOutput};
+    use threshold_signatures::{protocol::Participant, PresignOutput};
     use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
 
     use crate::protocol::presignature::Presignature;

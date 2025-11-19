@@ -1,7 +1,7 @@
 use alloy::primitives::{keccak256, Address as AlloyAddress, U256};
 use anyhow::Context as _;
 use anyhow::Result;
-use cait_sith::FullSignature;
+use threshold_signatures::ecdsa::ot_based_ecdsa::FullSignature;
 use integration_tests::{actions, cluster};
 use k256::ecdsa::SigningKey;
 use k256::elliptic_curve::ops::Reduce;

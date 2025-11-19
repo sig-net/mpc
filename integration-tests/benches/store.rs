@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use cait_sith::{
+use threshold_signatures::{
     protocol::Participant,
     triples::{TriplePub, TripleShare},
     PresignOutput,

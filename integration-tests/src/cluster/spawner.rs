@@ -1,4 +1,4 @@
-use cait_sith::protocol::Participant;
+use threshold_signatures::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
 use mpc_node::protocol::state::NodeKeyInfo;
 use near_account_id::AccountId;

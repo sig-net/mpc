@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash as _};
 
-use cait_sith::protocol::{MessageData, Participant};
+use threshold_signatures::protocol::{MessageData, Participant};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::posit::PositAction;

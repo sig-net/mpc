@@ -13,7 +13,9 @@ use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
 use crate::types::{ReshareProtocol, SecretKeyShare};
 
-use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
+use threshold_signatures::protocol::{Action, MessageData};
+use threshold_signatures::errors::{InitializationError, ProtocolError};
+use threshold_signatures::participants::Participant;
 use k256::elliptic_curve::group::GroupEncoding;
 use k256::sha2::{Digest, Sha256};
 use mpc_crypto::PublicKey;
@@ -31,7 +33,7 @@ pub fn set_resharing_running_timeout(duration: Duration) {
 
 #[derive(thiserror::Error, Debug)]
 pub enum CryptographicError {
-    #[error("cait-sith initialization error: {0}")]
+    #[error("threshold-signatures initialization error: {0}")]
     CaitSithInitializationError(#[from] InitializationError),
     #[error("cait-sith protocol error: {0}")]
     CaitSithProtocolError(#[from] ProtocolError),
@@ -93,7 +95,7 @@ impl CryptographicProtocol for GeneratingState {
                     tracing::debug!("generating: sending a message to many participants");
                     for p in &participants {
                         if p == &self.me {
-                            // Skip yourself, cait-sith never sends messages to oneself
+                            // Skip yourself, threshold-signatures never sends messages to oneself
                             continue;
                         }
 

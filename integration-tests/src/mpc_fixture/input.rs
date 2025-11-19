@@ -1,5 +1,5 @@
-use cait_sith::protocol::Participant;
-use cait_sith::triples::{TriplePub, TripleShare};
+use threshold_signatures::protocol::Participant;
+use threshold_signatures::triples::{TriplePub, TripleShare};
 use k256::Secp256k1;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::state::NodeKeyInfo;

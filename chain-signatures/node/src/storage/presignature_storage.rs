@@ -1,4 +1,4 @@
-use cait_sith::protocol::Participant;
+use threshold_signatures::protocol::Participant;
 use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;

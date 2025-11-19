@@ -1,4 +1,4 @@
-use cait_sith::protocol::Participant;
+use threshold_signatures::protocol::Participant;
 use mockito::ServerGuard;
 use near_sdk::AccountId;
 

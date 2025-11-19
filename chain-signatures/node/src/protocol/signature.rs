@@ -16,8 +16,10 @@ use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap};
 
 use crate::protocol::SignRequestType;
-use cait_sith::protocol::{Action, InitializationError, Participant};
-use cait_sith::PresignOutput;
+use threshold_signatures::protocol::{Action, MessageData};
+use threshold_signatures::errors::InitializationError;
+use threshold_signatures::participants::Participant;
+use threshold_signatures::ecdsa::ot_based_ecdsa::PresignOutput;
 use chrono::Utc;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
@@ -702,7 +704,8 @@ impl SignGenerator {
             k: k * delta.invert().unwrap(),
             sigma: (sigma + indexed.args.epsilon * k) * delta.invert().unwrap(),
         };
-        let protocol = Box::new(cait_sith::sign(
+    use threshold_signatures::ecdsa::ot_based_ecdsa::sign::sign as ts_sign;
+    let protocol = Box::new(ts_sign(
             &participants,
             ctx.me,
             derive_key(ctx.public_key, indexed.args.epsilon),

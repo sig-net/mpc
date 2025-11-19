@@ -1,6 +1,10 @@
-use cait_sith::protocol::{Action, InitializationError, MessageData, Participant, ProtocolError};
-use cait_sith::{protocol::Protocol, KeygenOutput};
-use cait_sith::{FullSignature, PresignOutput};
+use threshold_signatures::protocol::{Action, MessageData};
+use threshold_signatures::errors::{InitializationError, ProtocolError};
+use threshold_signatures::participants::Participant;
+use threshold_signatures::protocol::Protocol;
+use threshold_signatures::ecdsa::ot_based_ecdsa::KeygenOutput;
+use threshold_signatures::ecdsa::ot_based_ecdsa::PresignOutput;
+use threshold_signatures::ecdsa::ot_based_ecdsa::FullSignature;
 use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
 
 use crate::protocol::contract::ResharingContractState;
@@ -9,8 +13,8 @@ pub type SecretKeyShare = <Secp256k1 as CurveArithmetic>::Scalar;
 pub type TripleProtocol = Box<
     dyn Protocol<
             Output = Vec<(
-                cait_sith::triples::TripleShare<Secp256k1>,
-                cait_sith::triples::TriplePub<Secp256k1>,
+                threshold_signatures::triples::TripleShare<Secp256k1>,
+                threshold_signatures::triples::TriplePub<Secp256k1>,
             )>,
         > + Send
         + Sync,
@@ -37,15 +41,22 @@ impl KeygenProtocol {
             threshold,
             me,
             participants: participants.into(),
-            protocol: Box::new(cait_sith::keygen::<Secp256k1>(participants, me, threshold)?),
+            protocol: Box::new(threshold_signatures::keygen::<threshold_signatures::Secp256K1Sha256>(
+                participants,
+                me,
+                self.threshold,
+                // RNG param required by the new implementation - use the thread RNG for simplicity
+                rand::rngs::OsRng,
+            )?),
         })
     }
 
     pub async fn refresh(&mut self) -> Result<(), InitializationError> {
-        self.protocol = Box::new(cait_sith::keygen::<Secp256k1>(
+        self.protocol = Box::new(threshold_signatures::keygen::<threshold_signatures::Secp256K1Sha256>(
             &self.participants,
             self.me,
             self.threshold,
+            rand::rngs::OsRng,
         )?);
         Ok(())
     }
@@ -77,7 +88,7 @@ impl ReshareProtocol {
             new_participants,
             me
         );
-        let protocol = Box::new(cait_sith::reshare::<Secp256k1>(
+    let protocol = Box::new(threshold_signatures::reshare::<Secp256k1>(
             &old_participants,
             contract_state.threshold,
             &new_participants,

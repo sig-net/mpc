@@ -354,7 +354,7 @@ pub fn sign_and_hash_legacy_from_unsigned(
 }
 
 /// Get the x coordinate of a point, as a scalar
-fn x_coordinate<C: cait_sith::CSCurve>(point: &C::AffinePoint) -> C::Scalar {
+fn x_coordinate<C: threshold_signatures::CSCurve>(point: &C::AffinePoint) -> C::Scalar {
     <C::Scalar as k256::elliptic_curve::ops::Reduce<<C as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(&point.x())
 }
 

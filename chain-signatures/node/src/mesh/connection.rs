@@ -2,7 +2,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use cait_sith::protocol::Participant;
+use threshold_signatures::protocol::Participant;
 use near_account_id::AccountId;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;

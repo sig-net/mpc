@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::Context;
 use backon::ConstantBuilder;
 use backon::Retryable;
-use cait_sith::FullSignature;
+use threshold_signatures::ecdsa::ot_based_ecdsa::FullSignature;
 use k256::Secp256k1;
 use mpc_primitives::Signature;
 use near_fetch::ops::AsyncTransactionStatus;
@@ -60,7 +60,7 @@ pub async fn signature_responded(
         let result: Signature = outcome
             .json()
             .map_err(|err| WaitForError::SerdeJson(format!("{err:?}")))?;
-        Ok(Outcome::Signature(cait_sith::FullSignature::<Secp256k1> {
+            Ok(Outcome::Signature(threshold_signatures::FullSignature::<Secp256k1> {
             big_r: result.big_r,
             s: result.s,
         }))
@@ -190,7 +190,7 @@ pub async fn batch_signature_responded(
                         ExecutionStatusView::SuccessValue(value) => {
                             let result: Signature = serde_json::from_slice(&value)
                                 .map_err(|err| WaitForError::SerdeJson(format!("{err:?}")))?;
-                            let signature = cait_sith::FullSignature::<Secp256k1> {
+                            let signature = threshold_signatures::FullSignature::<Secp256k1> {
                                 big_r: result.big_r,
                                 s: result.s,
                             };
