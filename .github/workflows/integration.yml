@@ -86,7 +86,7 @@ jobs:
         run: npm i && npx hardhat compile
 
       - name: Build Chain-Signatures Node
-        run: cargo build -p mpc-node --release
+        run: cargo build-node
 
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.

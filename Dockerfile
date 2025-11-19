@@ -20,7 +20,7 @@ COPY integration-tests/ ./integration-tests
 COPY Cargo.toml .
 COPY Cargo.lock .
 COPY --from=eth-builder /usr/src/app/contract-eth/artifacts chain-signatures/contract-eth/artifacts
-RUN cargo build --release --package mpc-node
+RUN cargo build -p mpc-node --profile node
 
 FROM debian:stable-slim AS runtime
 RUN apt-get update && apt-get install --assume-yes libssl-dev ca-certificates curl
@@ -28,7 +28,7 @@ RUN apt-get update && apt-get install --assume-yes libssl-dev ca-certificates cu
 RUN update-ca-certificates
 
 COPY --from=redis-bin /usr/local/bin/redis-server /usr/local/bin/redis-server
-COPY --from=node-builder /usr/src/app/target/release/mpc-node /usr/local/bin/mpc-node
+COPY --from=node-builder /usr/src/app/target/node/mpc-node /usr/local/bin/mpc-node
 COPY chain-signatures/node/redis.conf /etc/redis/redis.conf
 
 # Create a script to start both Redis and the Rust app

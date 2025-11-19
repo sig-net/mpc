@@ -83,3 +83,10 @@ x25519-dalek = { git = "https://github.com/dalek-cryptography/curve25519-dalek",
 # big optimization even in test builds for math heavy crates
 [profile.dev.package.curve25519-dalek]
 opt-level = 3
+
+# big optimization, will make node slow to build but fast as possible to run.
+[profile.node]
+inherits = "release"
+opt-level = 3
+codegen-units = 1
+lto = "fat"

@@ -97,7 +97,7 @@ jobs:
         run: npm i && npx hardhat compile
 
       - name: Build Chain-Signatures Node
-        run: cargo build -p mpc-node --release
+        run: cargo build-node
 
       - name: Build nightly
         run: cargo build -p integration-tests --tests
