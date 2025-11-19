@@ -29,7 +29,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 /// Unique number used to identify a specific ongoing triple generation protocol.
-/// Without `TripleId` it would be unclear where to route incoming cait-sith triple generation
+/// Without `TripleId` it would be unclear where to route incoming triple generation
 /// messages.
 pub type TripleId = u64;
 

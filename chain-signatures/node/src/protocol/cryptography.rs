@@ -33,10 +33,10 @@ pub fn set_resharing_running_timeout(duration: Duration) {
 
 #[derive(thiserror::Error, Debug)]
 pub enum CryptographicError {
-    #[error("threshold-signatures initialization error: {0}")]
-    CaitSithInitializationError(#[from] InitializationError),
-    #[error("cait-sith protocol error: {0}")]
-    CaitSithProtocolError(#[from] ProtocolError),
+    #[error("initialization error: {0}")]
+    Init(#[from] InitializationError),
+    #[error("protocol error: {0}")]
+    Protocol(#[from] ProtocolError),
 }
 
 pub(crate) trait CryptographicProtocol {

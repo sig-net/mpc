@@ -896,7 +896,7 @@ impl PendingTriples {
 #[cfg(test)]
 mod tests {
     use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
-    use threshold_signatures::{protocol::Participant, PresignOutput};
+    use threshold_signatures::{ecdsa::ot_based_ecdsa::PresignOutput, participants::Participant};
 
     use crate::protocol::presignature::Presignature;
 

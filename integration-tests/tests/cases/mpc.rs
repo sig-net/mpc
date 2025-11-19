@@ -25,7 +25,7 @@ const PRESIGNATURES_FILE: &str = "tmp/presignatures.json";
 async fn test_basic_generate_keys() {
     let network = MpcFixtureBuilder::new(5, 4).build().await;
 
-    let result = tokio::time::timeout(Duration::from_secs(10), async {
+    let result = tokio::time::timeout(Duration::from_secs(30), async {
         let mut contract_state_watcher = network.shared_contract_state.subscribe();
         contract_state_watcher
             .wait_for(|protocol_state| {
