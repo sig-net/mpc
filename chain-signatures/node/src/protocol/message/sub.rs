@@ -1,4 +1,4 @@
-use threshold_signatures::protocol::Participant;
+use threshold_signatures::participants::Participant;
 use mpc_primitives::SignId;
 use tokio::sync::{mpsc, oneshot};
 

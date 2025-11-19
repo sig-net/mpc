@@ -1,6 +1,5 @@
-use threshold_signatures::protocol::Participant;
-use threshold_signatures::triples::{TriplePub, TripleShare};
-use k256::Secp256k1;
+use threshold_signatures::participants::Participant;
+use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::state::NodeKeyInfo;
 use mpc_node::protocol::triple::Triple;
@@ -9,8 +8,8 @@ use std::collections::BTreeMap;
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct FixtureTriple {
     pub id: u64,
-    pub share: TripleShare<Secp256k1>,
-    pub public: TriplePub<Secp256k1>,
+    pub share: TripleShare,
+    pub public: TriplePub,
 }
 
 impl From<FixtureTriple> for Triple {

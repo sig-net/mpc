@@ -5,12 +5,12 @@ pub mod wait_for;
 use crate::cluster::Cluster;
 
 use anyhow::Context as _;
-use threshold_signatures::ecdsa::ot_based_ecdsa::FullSignature;
+use cait_sith::FullSignature;
 use elliptic_curve::sec1::ToEncodedPoint;
 use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
-use k256::{AffinePoint, EncodedPoint, Scalar, Secp256k1};
+use k256::{AffinePoint, EncodedPoint, Scalar};
 use mpc_contract::errors::SignError;
 use mpc_contract::primitives::SignRequest;
 use mpc_crypto::ScalarExt;
@@ -105,7 +105,7 @@ pub async fn validate_signature(
     account_id: &near_workspaces::AccountId,
     mpc_pk_bytes: &[u8],
     payload: [u8; 32],
-    signature: &FullSignature<Secp256k1>,
+    signature: &FullSignature,
 ) -> anyhow::Result<()> {
     let mpc_point = EncodedPoint::from_bytes(mpc_pk_bytes).unwrap();
     let mpc_pk = AffinePoint::from_encoded_point(&mpc_point).unwrap();
@@ -309,7 +309,7 @@ mod tests {
         let s = k256::Scalar::from_bytes(s).unwrap();
         let r = x_coordinate::<k256::Secp256k1>(&big_r);
 
-    let signature = threshold_signatures::FullSignature::<k256::Secp256k1> { big_r, s };
+    let signature = cait_sith::FullSignature { big_r, s };
 
         let multichain_sig = mpc_node::kdf::into_eth_sig(
             &user_pk,

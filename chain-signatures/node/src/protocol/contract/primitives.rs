@@ -1,4 +1,4 @@
-use threshold_signatures::protocol::Participant;
+use threshold_signatures::participants::Participant;
 use mpc_keys::hpke;
 use near_primitives::{borsh::BorshDeserialize, types::AccountId};
 use serde::{Deserialize, Serialize};

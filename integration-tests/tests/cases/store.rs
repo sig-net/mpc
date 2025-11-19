@@ -1,6 +1,6 @@
-use threshold_signatures::protocol::Participant;
-use threshold_signatures::triples::{TriplePub, TripleShare};
-use threshold_signatures::PresignOutput;
+use threshold_signatures::participants::Participant;
+use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
+use cait_sith::PresignOutput;
 use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;

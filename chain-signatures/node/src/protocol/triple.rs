@@ -10,14 +10,15 @@ use crate::util::{AffinePointExt, JoinMap};
 
 use mpc_contract::config::ProtocolConfig;
 
-use threshold_signatures::protocol::{Action, MessageData};
+use threshold_signatures::protocol::Action;
 use threshold_signatures::errors::InitializationError;
 use threshold_signatures::participants::Participant;
 use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
 use chrono::Utc;
+use rand::rngs::OsRng;
 use highway::{HighwayHash, HighwayHasher};
 use k256::elliptic_curve::group::GroupEncoding;
-use k256::Secp256k1;
+// Secp256k1 is not used here; referenced in inner code if necessary from k256 directly.
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
@@ -35,8 +36,8 @@ pub type TripleId = u64;
 /// A completed triple.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Triple {
-    pub share: TripleShare<Secp256k1>,
-    pub public: TriplePub<Secp256k1>,
+    pub share: TripleShare,
+    pub public: TriplePub,
 }
 
 struct TripleGenerator {
@@ -71,7 +72,12 @@ impl TripleGenerator {
         participants.sort();
 
         let protocol =
-            threshold_signatures::triples::generate_triple_many::<Secp256k1, 2>(&participants, me, threshold)?;
+            threshold_signatures::ecdsa::ot_based_ecdsa::triples::generate_triple_many::<2>(
+                &participants,
+                me,
+                threshold,
+                OsRng,
+            )?;
 
         let inbox = msg.subscribe_triple(id).await;
         Ok(Self {

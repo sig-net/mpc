@@ -2456,6 +2456,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cait-sith"
+version = "0.1.0"
+dependencies = [
+ "k256",
+ "rand 0.8.5",
+ "serde",
+ "threshold-signatures",
+]
+
+[[package]]
 name = "camino"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6250,6 +6260,7 @@ dependencies = [
  "bollard",
  "borsh 1.5.7",
  "bs58 0.5.1",
+ "cait-sith",
  "ciborium",
  "clap",
  "criterion",

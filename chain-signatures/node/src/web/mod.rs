@@ -22,7 +22,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use axum_extra::extract::WithRejection;
-use threshold_signatures::protocol::Participant;
+use threshold_signatures::participants::Participant;
 use mpc_keys::hpke::Ciphered;
 use near_account_id::AccountId;
 use near_primitives::types::BlockHeight;

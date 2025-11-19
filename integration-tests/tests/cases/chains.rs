@@ -1,7 +1,7 @@
 use alloy::primitives::{keccak256, Address as AlloyAddress, U256};
 use anyhow::Context as _;
 use anyhow::Result;
-use threshold_signatures::ecdsa::ot_based_ecdsa::FullSignature;
+use cait_sith::FullSignature;
 use integration_tests::{actions, cluster};
 use k256::ecdsa::SigningKey;
 use k256::elliptic_curve::ops::Reduce;
@@ -247,7 +247,7 @@ fn append_u256(stream: &mut RlpStream, value: &U256) {
     }
 }
 
-fn signature_components(signature: &FullSignature<Secp256k1>) -> (U256, U256) {
+fn signature_components(signature: &FullSignature) -> (U256, U256) {
     let r_scalar = actions::x_coordinate::<Secp256k1>(&signature.big_r);
     let r_bytes = r_scalar.to_bytes();
     let r = U256::from_be_slice(r_bytes.as_slice());

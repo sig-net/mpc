@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use crate::protocol::triple::{Triple, TripleId};
 
-use threshold_signatures::protocol::Participant;
+use threshold_signatures::participants::Participant;
 use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};

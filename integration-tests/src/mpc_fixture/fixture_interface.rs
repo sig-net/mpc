@@ -2,7 +2,7 @@
 //! it with controlled inputs, and assert on outputs.
 
 use crate::containers::Redis;
-use threshold_signatures::protocol::Participant;
+use threshold_signatures::participants::Participant;
 use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;

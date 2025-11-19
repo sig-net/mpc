@@ -4,8 +4,8 @@ use std::time::Duration;
 use anyhow::Context;
 use backon::ConstantBuilder;
 use backon::Retryable;
-use threshold_signatures::ecdsa::ot_based_ecdsa::FullSignature;
-use k256::Secp256k1;
+use cait_sith::FullSignature;
+// No need for `Secp256k1` here; used in other modules for generic parameters.
 use mpc_primitives::Signature;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_primitives::errors::ActionErrorKind;
@@ -36,14 +36,14 @@ pub enum WaitForError {
 /// Used locally for testing to circumvent retrying on all errors. This will avoid retrying
 /// on failed signatures as we should abort early on those when in the retrying loop.
 enum Outcome {
-    Signature(FullSignature<Secp256k1>),
+    Signature(FullSignature),
     Failed(String),
-    Signatures(Vec<FullSignature<Secp256k1>>),
+    Signatures(Vec<FullSignature>),
 }
 
 pub async fn signature_responded(
     status: AsyncTransactionStatus,
-) -> Result<FullSignature<Secp256k1>, WaitForError> {
+) -> Result<FullSignature, WaitForError> {
     let is_tx_ready = || async {
         let Poll::Ready(outcome) = status
             .status()
@@ -60,10 +60,10 @@ pub async fn signature_responded(
         let result: Signature = outcome
             .json()
             .map_err(|err| WaitForError::SerdeJson(format!("{err:?}")))?;
-            Ok(Outcome::Signature(threshold_signatures::FullSignature::<Secp256k1> {
+            Ok(Outcome::Signature(FullSignature {
             big_r: result.big_r,
             s: result.s,
-        }))
+            }))
     };
 
     let strategy = ConstantBuilder::default()
@@ -136,7 +136,7 @@ pub async fn rogue_message_responded(status: AsyncTransactionStatus) -> anyhow::
 
 pub async fn batch_signature_responded(
     status: AsyncTransactionStatus,
-) -> Result<Vec<FullSignature<Secp256k1>>, WaitForError> {
+) -> Result<Vec<FullSignature>, WaitForError> {
     let is_tx_ready = || async {
         let Poll::Ready(outcome) = status
             .status()
@@ -170,7 +170,7 @@ pub async fn batch_signature_responded(
 
         let starting_receipts = &receipt_outcomes.first().unwrap().outcome.receipt_ids;
 
-        let mut signatures: Vec<FullSignature<Secp256k1>> = vec![];
+    let mut signatures: Vec<FullSignature> = vec![];
         for receipt_id in starting_receipts {
             if !result_receipts.contains_key(receipt_id) {
                 break;
@@ -190,7 +190,7 @@ pub async fn batch_signature_responded(
                         ExecutionStatusView::SuccessValue(value) => {
                             let result: Signature = serde_json::from_slice(&value)
                                 .map_err(|err| WaitForError::SerdeJson(format!("{err:?}")))?;
-                            let signature = threshold_signatures::FullSignature::<Secp256k1> {
+                            let signature = FullSignature {
                                 big_r: result.big_r,
                                 s: result.s,
                             };

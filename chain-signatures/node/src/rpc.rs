@@ -15,9 +15,9 @@ use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
 use alloy::providers::{Provider, RootProvider, WalletProvider};
 use alloy::rpc::types::{Transaction, TransactionReceipt};
-use threshold_signatures::protocol::Participant;
-use threshold_signatures::ecdsa::ot_based_ecdsa::FullSignature;
-use k256::{AffinePoint, Secp256k1};
+use threshold_signatures::participants::Participant;
+use threshold_signatures::ecdsa::Signature as ThresholdSignature;
+use k256::AffinePoint;
 use mpc_keys::hpke;
 use mpc_primitives::SignId;
 use mpc_primitives::Signature;
@@ -80,7 +80,7 @@ type EthContractInstance = ContractInstance<EthContractFillProvider>;
 pub struct PublishAction {
     pub public_key: mpc_crypto::PublicKey,
     pub indexed: IndexedSignRequest,
-    output: FullSignature<Secp256k1>,
+    output: ThresholdSignature,
     pub participants: Vec<Participant>,
     timestamp: Instant,
     retry_count: usize,
@@ -100,7 +100,7 @@ impl RpcChannel {
         &self,
         public_key: mpc_crypto::PublicKey,
         indexed: IndexedSignRequest,
-        output: FullSignature<Secp256k1>,
+        output: ThresholdSignature,
         participants: Vec<Participant>,
     ) {
         let rpc = self.clone();

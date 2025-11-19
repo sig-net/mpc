@@ -23,7 +23,7 @@ use crate::node_client::NodeClient;
 use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::Config;
 
-use threshold_signatures::protocol::Participant;
+use threshold_signatures::participants::Participant;
 use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke::{self, Ciphered};
 use mpc_primitives::SignId;
@@ -1032,7 +1032,7 @@ const fn cbor_name(value: &ciborium::Value) -> &'static str {
 mod tests {
     use std::time::Duration;
 
-    use threshold_signatures::protocol::Participant;
+    use threshold_signatures::participants::Participant;
     use mpc_keys::hpke::{self, Ciphered};
     use mpc_primitives::SignId;
     use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -1055,7 +1055,7 @@ mod tests {
         let associated_data = b"";
         let (cipher_sk, cipher_pk) = mpc_keys::hpke::generate();
         let starting_message = Message::Generating(GeneratingMessage {
-            from: threshold_signatures::protocol::Participant::from(0),
+            from: Participant::from(0),
             data: vec![],
         });
 

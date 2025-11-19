@@ -12,11 +12,11 @@ use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
 use crate::types::{ReshareProtocol, SecretKeyShare};
-
-use threshold_signatures::protocol::{Action, MessageData};
+use threshold_signatures::protocol::Action;
 use threshold_signatures::errors::{InitializationError, ProtocolError};
 use threshold_signatures::participants::Participant;
-use k256::elliptic_curve::group::GroupEncoding;
+// GroupEncoding not used here; keep other secp usage through to_encoded_point via ToEncodedPoint.
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::sha2::{Digest, Sha256};
 use mpc_crypto::PublicKey;
 use tokio::sync::mpsc;
@@ -126,10 +126,13 @@ impl CryptographicProtocol for GeneratingState {
                 }
                 Action::Return(r) => {
                     tracing::info!(
-                        public_key = hex::encode(r.public_key.to_bytes()),
+                        public_key = hex::encode(r.public_key.to_element().to_affine().to_encoded_point(true).as_bytes()),
                         "generating: successfully completed key generation"
                     );
-                    return self.finalize(r.public_key, r.private_share, ctx).await;
+                    // Convert frost_core::VerifyingKey -> AffinePoint for storage
+                    return self
+                        .finalize(r.public_key.to_element().to_affine(), r.private_share, ctx)
+                        .await;
                 }
             }
         }
@@ -346,10 +349,10 @@ impl CryptographicProtocol for ResharingState {
                             .await;
                     }
                 }
-                Action::Return(private_share) => {
+                Action::Return(keygen_output) => {
                     tracing::info!("resharing: successfully completed key reshare");
                     resharing.last_activity = Instant::now();
-                    match Self::try_finalize(ctx, &mut resharing, private_share, &self.contract)
+                    match Self::try_finalize(ctx, &mut resharing, keygen_output.private_share, &self.contract)
                         .await
                     {
                         Ok(next_state) => return next_state,

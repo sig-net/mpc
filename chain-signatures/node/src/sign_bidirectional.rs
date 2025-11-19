@@ -354,8 +354,10 @@ pub fn sign_and_hash_legacy_from_unsigned(
 }
 
 /// Get the x coordinate of a point, as a scalar
-fn x_coordinate<C: threshold_signatures::CSCurve>(point: &C::AffinePoint) -> C::Scalar {
-    <C::Scalar as k256::elliptic_curve::ops::Reduce<<C as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(&point.x())
+fn x_coordinate(point: &k256::AffinePoint) -> k256::Scalar {
+    use k256::elliptic_curve::ops::Reduce;
+    use k256::elliptic_curve::bigint::U256;
+    <k256::Scalar as Reduce<U256>>::reduce_bytes(&point.x())
 }
 
 fn public_key_to_address(public_key: &secp256k1::PublicKey) -> Address {
@@ -375,7 +377,7 @@ pub fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Sc
         _ => unreachable!(),
     };
 
-    let x_coord = x_coordinate::<k256::Secp256k1>(&user_pk);
+    let x_coord = x_coordinate(&user_pk);
     let x_only = secp256k1::XOnlyPublicKey::from_slice(&x_coord.to_bytes()).unwrap();
     let secp_pk = secp256k1::PublicKey::from_x_only_public_key(x_only, parity);
 

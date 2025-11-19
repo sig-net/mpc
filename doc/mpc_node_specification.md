@@ -109,7 +109,7 @@ participant set, yet, thus we should not send messages unless we are okay with
 wasting Ps and Ts.
 
 Even without the black box assumption, we know that threshold-signatures requires strict
-non-reuse of Ps and Ts. 
+non-reuse of Ps and Ts.
 
 *Why should we still care about incoming messages?*
 

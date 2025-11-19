@@ -1,7 +1,6 @@
 use super::MpcSignProtocol;
 use crate::backlog::Backlog;
 use crate::config::Config;
-use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
 use crate::protocol::message::{
     MessageChannel, PositMessage, PositProtocolId, SignatureMessage, Subscriber,
@@ -16,12 +15,15 @@ use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap};
 
 use crate::protocol::SignRequestType;
-use threshold_signatures::protocol::{Action, MessageData};
+use threshold_signatures::protocol::Action;
 use threshold_signatures::errors::InitializationError;
 use threshold_signatures::participants::Participant;
-use threshold_signatures::ecdsa::ot_based_ecdsa::PresignOutput;
+use threshold_signatures::ecdsa::ot_based_ecdsa::RerandomizedPresignOutput;
+use threshold_signatures::ecdsa::RerandomizationArguments;
+use threshold_signatures::ecdsa::Tweak;
+use threshold_signatures::participants::ParticipantList;
 use chrono::Utc;
-use k256::Secp256k1;
+// derive_delta and Secp256k1 were unused after migration; remove these imports.
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::{derive_key, PublicKey};
 use mpc_primitives::{SignArgs, SignId};
@@ -696,22 +698,33 @@ impl SignGenerator {
         );
 
         let (presignature, dropper) = taken.take();
-        let PresignOutput { big_r, k, sigma } = presignature.output;
-        let delta = derive_delta(indexed.id.request_id, indexed.args.entropy, big_r);
-        // TODO: Check whether it is okay to use invert_vartime instead
-        let output: PresignOutput<Secp256k1> = PresignOutput {
-            big_r: (big_r * delta).to_affine(),
-            k: k * delta.invert().unwrap(),
-            sigma: (sigma + indexed.args.epsilon * k) * delta.invert().unwrap(),
-        };
-    use threshold_signatures::ecdsa::ot_based_ecdsa::sign::sign as ts_sign;
-    let protocol = Box::new(ts_sign(
-            &participants,
-            ctx.me,
-            derive_key(ctx.public_key, indexed.args.epsilon),
-            output,
-            indexed.args.payload,
-        )?);
+        // Rerandomize the presignature using the same public entropy used by
+        // derive_delta. `threshold-signatures` exposes a helper for this.
+        let msg_hash_bytes: [u8; 32] = indexed.args.payload.to_bytes().into();
+        let tweak = Tweak::new(indexed.args.epsilon);
+        let participants_list = ParticipantList::new(&participants).unwrap();
+        let rerand_args = RerandomizationArguments::new(
+            ctx.public_key,
+            tweak,
+            msg_hash_bytes,
+            presignature.output.big_r,
+            participants_list,
+            indexed.args.entropy,
+        );
+        let rerandomized: RerandomizedPresignOutput =
+            RerandomizedPresignOutput::rerandomize_presign(&presignature.output, &rerand_args)
+                .map_err(|e| InitializationError::BadParameters(format!("rerandomization failed: {e:?}")))?;
+
+        let protocol = Box::new(
+            threshold_signatures::ecdsa::ot_based_ecdsa::sign::sign(
+                &participants,
+                proposer,
+                ctx.me,
+                derive_key(ctx.public_key, indexed.args.epsilon),
+                rerandomized,
+                indexed.args.payload,
+            )?,
+        );
         let inbox = ctx.msg.subscribe_signature(sign_id, presignature_id).await;
         Ok(Self {
             protocol,
@@ -848,8 +861,10 @@ impl SignGenerator {
                         .await;
                 }
                 Action::Return(output) => {
-                    let big_r = output.big_r;
-                    let s = output.s;
+                    match output {
+                        Some(sig) => {
+                            let big_r = sig.big_r;
+                            let s = sig.s;
                     tracing::info!(
                         ?sign_id,
                         ?me,
@@ -866,13 +881,18 @@ impl SignGenerator {
                         .with_label_values(&[my_account_id.as_str()])
                         .observe(self.created.elapsed().as_secs_f64());
 
-                    if self.proposer == me {
-                        ctx.rpc.publish(
-                            ctx.public_key,
-                            self.indexed.clone(),
-                            output,
-                            self.participants.clone(),
-                        );
+                            if self.proposer == me {
+                                ctx.rpc.publish(
+                                    ctx.public_key,
+                                    self.indexed.clone(),
+                                    sig,
+                                    self.participants.clone(),
+                                );
+                            }
+                        }
+                        None => {
+                            tracing::warn!(?sign_id, "signature protocol returned no signature");
+                        }
                     }
 
                     if let SignRequestType::SignBidirectional(event) =

@@ -3,7 +3,7 @@ pub mod presignature_storage;
 pub mod secret_storage;
 pub mod triple_storage;
 
-use threshold_signatures::protocol::Participant;
+use threshold_signatures::participants::Participant;
 pub use presignature_storage::PresignatureStorage;
 pub use triple_storage::TripleStorage;
 

@@ -12,12 +12,13 @@ use crate::storage::TripleStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
 use crate::util::{AffinePointExt, JoinMap};
 
-use threshold_signatures::protocol::{Action, MessageData};
+use threshold_signatures::protocol::Action;
 use threshold_signatures::errors::InitializationError;
 use threshold_signatures::participants::Participant;
-use threshold_signatures::ecdsa::ot_based_ecdsa::{KeygenOutput, PresignArguments, PresignOutput};
+use threshold_signatures::ecdsa::KeygenOutput;
+use threshold_signatures::ecdsa::ot_based_ecdsa::{PresignArguments, PresignOutput};
 use chrono::Utc;
-use k256::{AffinePoint, Scalar, Secp256k1};
+use k256::{AffinePoint, Scalar};
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::PublicKey;
 use serde::ser::SerializeStruct;
@@ -59,7 +60,7 @@ impl FullPresignatureId {
 /// A completed presignature.
 pub struct Presignature {
     pub id: PresignatureId,
-    pub output: PresignOutput<Secp256k1>,
+    pub output: PresignOutput,
     pub participants: Vec<Participant>,
 }
 
@@ -570,9 +571,36 @@ impl PresignatureSpawner {
         let epoch = self.epoch;
         let msg = self.msg.clone();
         let my_account_id = self.my_account_id.clone();
+    use threshold_signatures::frost_core::{Group, VerifyingKey};
+    use threshold_signatures::ecdsa::Secp256K1Sha256;
+        use k256::ProjectivePoint;
+
+        // Convert the project AffinePoint public key into the ciphersuite
+        // verifying key expected by threshold-signatures.
+        let public_key_element: threshold_signatures::frost_core::Element<Secp256K1Sha256> =
+            ProjectivePoint::from(self.public_key);
+
+    // Serialize the group element using the ciphersuite's Group::serialize and
+    // then deserialize into a frost-core VerifyingKey. We avoid calling
+    // `VerifyingKey::new` because it is not public; instead use the public
+    // deserialize API.
+    let pk_ser =
+        <Secp256K1Sha256 as threshold_signatures::frost_core::Ciphersuite>::Group::serialize(
+            &public_key_element,
+        )
+        .map_err(|e| InitializationError::BadParameters(format!(
+            "Failed to serialize public key element: {:?}",
+            e
+        )))?;
+    let verifying_key = VerifyingKey::<Secp256K1Sha256>::deserialize(pk_ser.as_ref())
+        .map_err(|e| InitializationError::BadParameters(format!(
+            "Failed to deserialize verifying key: {:?}",
+            e
+        )))?;
+
         let keygen_out = KeygenOutput {
             private_share: self.private_share,
-            public_key: self.public_key,
+            public_key: verifying_key,
         };
 
         let task = async move {
@@ -583,10 +611,6 @@ impl PresignatureSpawner {
             let (pair, dropper) = triples.take();
             use threshold_signatures::ecdsa::ot_based_ecdsa::presign::presign as ts_presign;
             let protocol = match ts_presign(
-                &participants,
-                me,
-                // These paramaters appear to be to make it easier to use different indexing schemes for triples
-                // Introduced in this PR https://github.com/LIT-Protocol/cait-sith/pull/7
                 &participants,
                 me,
                 PresignArguments {

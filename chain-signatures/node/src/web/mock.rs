@@ -1,4 +1,4 @@
-use threshold_signatures::protocol::Participant;
+use threshold_signatures::participants::Participant;
 use mockito::ServerGuard;
 use near_sdk::AccountId;
 

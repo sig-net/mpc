@@ -4,7 +4,7 @@ use crate::protocol::presignature::PresignatureSpawnerTask;
 use crate::protocol::signature::SignatureSpawnerTask;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 
-use threshold_signatures::protocol::Participant;
+use threshold_signatures::participants::Participant;
 use mpc_crypto::PublicKey;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;

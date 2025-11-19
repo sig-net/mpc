@@ -7,7 +7,7 @@ use crate::mpc_fixture::fixture_tasks::MessageFilter;
 use crate::mpc_fixture::input::FixtureInput;
 use crate::mpc_fixture::mock_governance::MockGovernance;
 use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
-use threshold_signatures::protocol::Participant;
+use threshold_signatures::participants::Participant;
 use mpc_contract::config::{min_to_ms, ProtocolConfig};
 use mpc_contract::primitives::{
     CandidateInfo, Candidates as CandidatesById, ParticipantInfo, Participants as ParticipantsById,

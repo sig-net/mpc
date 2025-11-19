@@ -1,4 +1,4 @@
-use threshold_signatures::protocol::Participant;
+use threshold_signatures::participants::Participant;
 use serde::{Deserialize, Serialize};
 
 use std::collections::hash_map::Entry;
@@ -405,7 +405,7 @@ impl SinglePositCounter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use threshold_signatures::protocol::Participant;
+    use threshold_signatures::participants::Participant;
 
     type Id = u64;
 
