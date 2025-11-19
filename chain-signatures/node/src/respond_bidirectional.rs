@@ -1,24 +1,19 @@
+use crate::indexer_eth::EthereumClientTrait;
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::BidirectionalTx;
 use crate::sign_bidirectional::BidirectionalTxId;
-
-use crate::sign_bidirectional::BidirectionalTxStatus;
-
+use crate::sign_bidirectional::PendingRequestStatus;
 use crate::sign_bidirectional::TransactionOutput;
-
 use alloy::consensus::Transaction;
-
 use alloy::eips::{BlockId, BlockNumberOrTag};
-
 use alloy::primitives::Address;
 use alloy::primitives::Bytes;
-
 use alloy::rpc::types::TransactionRequest;
-
 use helios::ethereum::EthereumClient;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::{SignArgs, SignId};
+use std::sync::Arc;
 use tokio::time::Duration;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
@@ -78,14 +73,14 @@ impl CompletedTx {
 
     pub async fn create_sign_request_from_completed_tx(
         &self,
-        helios_client: &Arc<EthereumClient>,
+        ethereum_client: &impl EthereumClientTrait,
         chain: Chain,
         max_attempts: u8,
         signature_generation_total_timeout: Duration,
     ) -> Option<IndexedSignRequest> {
         match self
             .process_completed_tx(
-                helios_client,
+                ethereum_client,
                 chain,
                 max_attempts,
                 signature_generation_total_timeout,
@@ -111,14 +106,14 @@ impl CompletedTx {
 
     async fn process_completed_tx(
         &self,
-        helios_client: &Arc<EthereumClient>,
+        ethereum_client: &impl EthereumClientTrait,
         chain: Chain,
         max_attempts: u8,
         signature_generation_total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
         if self.tx.status == PendingRequestStatus::Success {
             self.process_success_tx(
-                helios_client,
+                ethereum_client,
                 chain,
                 max_attempts,
                 signature_generation_total_timeout,
@@ -165,13 +160,13 @@ impl CompletedTx {
 
     async fn process_success_tx(
         &self,
-        helios_client: &Arc<EthereumClient>,
+        ethereum_client: &impl EthereumClientTrait,
         chain: Chain,
         max_attempts: u8,
         signature_generation_total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
         let tx_output = self
-            .extract_success_tx_output(helios_client, max_attempts)
+            .extract_success_tx_output(ethereum_client, max_attempts)
             .await?;
         tracing::info!("Tx succeeded: {tx_output:?}");
         let respond_serialization_format = RESPOND_SERIALIZATION_FORMAT;
@@ -241,10 +236,10 @@ impl CompletedTx {
 
     async fn extract_success_tx_output(
         &self,
-        helios_client: &Arc<EthereumClient>,
+        ethereum_client: &impl EthereumClientTrait,
         max_attempts: u8,
     ) -> anyhow::Result<TransactionOutput> {
-        let tx = fetch_tx_from_helios(helios_client, self.tx.id, max_attempts).await;
+        let tx = fetch_tx(ethereum_client, self.tx.id, max_attempts).await;
         let Some(tx) = tx else {
             anyhow::bail!("Failed to fetch tx from helios, tx id: {:?}", self.tx.id);
         };
@@ -258,7 +253,7 @@ impl CompletedTx {
             SerDeserFormat::Abi if is_contract_call => {
                 let to_address = tx.inner.to().unwrap();
                 let call_result = fetch_call_result(
-                    helios_client,
+                    ethereum_client,
                     from_address,
                     to_address,
                     data.clone(),
@@ -286,7 +281,7 @@ fn calculate_respond_bidirectional_hash_message(
 }
 
 async fn fetch_call_result(
-    helios_client: &Arc<EthereumClient>,
+    ethereum_client: &impl EthereumClientTrait,
     from_address: Address,
     to_address: Address,
     data: Bytes,
@@ -295,7 +290,7 @@ async fn fetch_call_result(
 ) -> anyhow::Result<Bytes> {
     let mut attempts = 0;
     loop {
-        match helios_client
+        match ethereum_client
             .call(
                 &TransactionRequest::default()
                     .from(from_address)
@@ -320,14 +315,14 @@ async fn fetch_call_result(
     }
 }
 
-async fn fetch_tx_from_helios(
-    helios_client: &Arc<EthereumClient>,
+async fn fetch_tx(
+    ethereum_client: &impl EthereumClientTrait,
     tx_id: BidirectionalTxId,
     max_attempts: u8,
 ) -> Option<alloy::rpc::types::Transaction> {
     let mut attempts = 0;
     loop {
-        match helios_client.get_transaction(tx_id.0).await {
+        match ethereum_client.transaction_by_hash(tx_id.0).await {
             Ok(Some(tx)) => return Some(tx),
             Ok(None) => {
                 tracing::error!("Failed to fecth tx from helios: result is None");

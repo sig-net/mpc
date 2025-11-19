@@ -1,25 +1,32 @@
 pub mod indexer_eth_direct_rpc;
 pub mod indexer_eth_helios;
 
+use crate::backlog::Backlog;
+use crate::mesh::wait_threshold_active;
+use crate::mesh::MeshState;
+use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+use crate::rpc::ContractStateWatcher;
+use crate::sign_bidirectional::BidirectionalTxId;
+use crate::storage::app_data_storage::AppDataStorage;
+use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::rpc::types::Log;
-
-use crate::sign_bidirectional::BidirectionalTx;
-use crate::sign_bidirectional::BidirectionalTxId;
-use crate::storage::app_data_storage::AppDataStorage;
 use alloy::sol_types::{sol, SolEvent};
+use async_trait::async_trait;
 use k256::Scalar;
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
 use std::sync::Arc;
-use std::{fmt, sync::LazyLock, time::Instant};
+use std::sync::LazyLock;
+use std::time::Instant;
 use tokio::sync::mpsc;
-use tokio::sync::RwLock;
+use tokio::sync::watch;
 use tokio::time::Duration;
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
@@ -32,8 +39,40 @@ pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     .unwrap()
 });
 
-type BlockNumber = u64;
+// This is the maximum number of blocks that Helios can look back to
+const MAX_CATCHUP_BLOCKS: u64 = 8191;
 
+const MAX_BLOCKS_TO_PROCESS: usize = 10000;
+
+fn blocks_to_process_channel() -> (mpsc::Sender<BlockToProcess>, mpsc::Receiver<BlockToProcess>) {
+    mpsc::channel(MAX_BLOCKS_TO_PROCESS)
+}
+
+const MAX_INDEXED_REQUESTS: usize = 1024;
+
+fn indexed_channel() -> (
+    mpsc::Sender<BlockAndRequests>,
+    mpsc::Receiver<BlockAndRequests>,
+) {
+    mpsc::channel(MAX_INDEXED_REQUESTS)
+}
+
+const MAX_FAILED_BLOCKS: usize = 1024;
+
+fn failed_blocks_channel() -> (
+    mpsc::Sender<BlockNumberAndHash>,
+    mpsc::Receiver<BlockNumberAndHash>,
+) {
+    mpsc::channel(MAX_FAILED_BLOCKS)
+}
+
+const MAX_FINALIZED_BLOCKS: usize = 1024;
+
+fn finalized_block_channel() -> (mpsc::Sender<BlockNumber>, mpsc::Receiver<BlockNumber>) {
+    mpsc::channel(MAX_FINALIZED_BLOCKS)
+}
+
+type BlockNumber = u64;
 type BlockNumberAndHash = (u64, alloy::primitives::B256);
 
 pub enum BlockToProcess {
@@ -62,6 +101,27 @@ impl BlockAndRequests {
     }
 }
 
+#[async_trait]
+pub trait EthereumClientTrait {
+    async fn get_block(
+        &self,
+        block_id: alloy::rpc::types::BlockId,
+    ) -> Option<alloy::rpc::types::Block>;
+    async fn get_block_receipts(
+        &self,
+        block_number_or_tag: BlockNumberOrTag,
+    ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>>;
+    async fn get_nonce(
+        &self,
+        address: Address,
+        block_id: alloy::rpc::types::BlockId,
+    ) -> anyhow::Result<u64>;
+    async fn get_transaction_by_hash(
+        &self,
+        tx_hash: alloy::primitives::B256,
+    ) -> anyhow::Result<Option<alloy::rpc::types::Transaction>>;
+}
+
 #[derive(Clone)]
 pub struct EthConfig {
     /// The ethereum account secret key used to sign eth respond txn.
@@ -80,6 +140,8 @@ pub struct EthConfig {
     pub refresh_finalized_interval: u64,
     /// total timeout for a sign request starting from indexed time in seconds
     pub total_timeout: u64,
+    /// Enable the indexer to just send requests optimistically instead waiting for final.
+    pub optimistic_requests: bool,
 }
 
 impl fmt::Debug for EthConfig {
@@ -96,11 +158,12 @@ impl fmt::Debug for EthConfig {
                 &self.refresh_finalized_interval,
             )
             .field("total_timeout", &self.total_timeout)
+            .field("optimistic_requests", &self.optimistic_requests)
             .finish()
     }
 }
 
-/// Configures Ethereum indexer.
+// Configures Ethereum indexer.
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "indexer_eth_options")]
 pub struct EthArgs {
@@ -151,6 +214,10 @@ pub struct EthArgs {
     /// total timeout for a sign request starting from indexed time in seconds
     #[clap(long, env("MPC_ETH_TOTAL_TIMEOUT"), default_value = "1500")]
     pub eth_total_timeout: Option<u64>,
+    /// Enable the indexer to just send requests optimistically instead waiting for final.
+    /// Useful for testing where we do not want to reach finality due to how long it takes.
+    #[clap(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "false")]
+    pub eth_optimistic_requests: bool,
 }
 
 impl EthArgs {
@@ -192,6 +259,9 @@ impl EthArgs {
                 eth_total_timeout.to_string(),
             ]);
         }
+        if self.eth_optimistic_requests {
+            args.push("--eth-optimistic-requests".to_string());
+        }
         args
     }
 
@@ -205,6 +275,7 @@ impl EthArgs {
             helios_data_path: self.eth_helios_data_path?,
             refresh_finalized_interval: self.eth_refresh_finalized_interval?,
             total_timeout: self.eth_total_timeout?,
+            optimistic_requests: self.eth_optimistic_requests,
         })
     }
 
@@ -219,6 +290,7 @@ impl EthArgs {
                 eth_helios_data_path: Some(config.helios_data_path),
                 eth_refresh_finalized_interval: Some(config.refresh_finalized_interval),
                 eth_total_timeout: Some(config.total_timeout),
+                eth_optimistic_requests: config.optimistic_requests,
             },
             _ => Self {
                 eth_account_sk: None,
@@ -229,6 +301,7 @@ impl EthArgs {
                 eth_helios_data_path: None,
                 eth_refresh_finalized_interval: None,
                 eth_total_timeout: None,
+                eth_optimistic_requests: false,
             },
         }
     }
@@ -263,6 +336,18 @@ sol! {
         string algo,
         string dest,
         string params
+    );
+
+    struct Signature {
+        uint8 v;
+        bytes32 r;
+        bytes32 s;
+    }
+
+    event SignatureResponded(
+        bytes32 indexed requestId,
+        address responder,
+        Signature signature
     );
 }
 
@@ -319,10 +404,9 @@ fn sign_request_from_filtered_log(
         },
         chain: Chain::Ethereum,
         unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-        timestamp_sign_queue: None,
+        timestamp_sign_queue: Instant::now(),
         total_timeout,
         sign_request_type: SignRequestType::Sign,
-        participants: None,
     })
 }
 // Helper function to parse event logs
@@ -403,6 +487,59 @@ fn parse_filtered_logs(logs: Vec<Log>, total_timeout: Duration) -> Vec<IndexedSi
     indexed_requests
 }
 
+async fn process_respond_events(logs: &[Log], backlog: &Backlog) {
+    for log in logs {
+        if let Some(sign_id) = sign_id_from_signature_responded_log(log) {
+            // Check the sign request type to determine if it's a bidirectional request
+            if let Some(sign_type) = backlog.sign_type(Chain::Ethereum, &sign_id).await {
+                match sign_type {
+                    SignRequestType::SignBidirectional(_) => {
+                        // This is a bidirectional request, keep it in the backlog.
+                        // It will be removed when we receive the respond_bidirectional event.
+                        tracing::info!(
+                            ?sign_id,
+                            "observed SignatureResponded event for bidirectional request, keeping in backlog"
+                        );
+                    }
+                    SignRequestType::Sign => {
+                        tracing::info!(
+                            ?sign_id,
+                            "observed SignatureResponded event for regular sign request, removing from backlog"
+                        );
+                        backlog.remove(Chain::Ethereum, &sign_id).await;
+                    }
+                    SignRequestType::RespondBidirectional(_) => {
+                        tracing::warn!(
+                            ?sign_id,
+                            "observed SignatureResponded event for respond_bidirectional request, which should not happen"
+                        );
+                    }
+                }
+            } else {
+                // If we don't have the type tracked, just remove it (fallback behavior for backward compatibility)
+                tracing::debug!(
+                    ?sign_id,
+                    "sign request type not found, removing from backlog"
+                );
+                backlog.remove(Chain::Ethereum, &sign_id).await;
+            }
+        }
+    }
+}
+
+fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
+    if log
+        .topic0()
+        .is_none_or(|topic| *topic != SignatureResponded::SIGNATURE_HASH)
+    {
+        return None;
+    }
+
+    let request_topic = log.topics().get(1)?;
+    let request_id: [u8; 32] = (*request_topic).into();
+    Some(SignId { request_id })
+}
+
 fn send_indexed_requests(
     requests: Vec<IndexedSignRequest>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
@@ -412,16 +549,6 @@ fn send_indexed_requests(
         let sign_tx = sign_tx.clone();
         let node_near_account_id = node_near_account_id.clone();
         tokio::spawn(async move {
-            let request = IndexedSignRequest {
-                id: request.id,
-                chain: request.chain,
-                args: request.args,
-                unix_timestamp_indexed: request.unix_timestamp_indexed,
-                timestamp_sign_queue: Some(Instant::now()),
-                total_timeout: request.total_timeout,
-                sign_request_type: request.sign_request_type,
-                participants: request.participants,
-            };
             match sign_tx.send(request).await {
                 Ok(_) => {
                     crate::metrics::NUM_SIGN_REQUESTS
@@ -456,7 +583,7 @@ impl SignatureRequestedEvent {
     fn encode_abi(&self) -> Vec<u8> {
         let signature_requested_event_encoding = SignatureRequestedEncoding {
             sender: self.requester,
-            payload: self.payload_hash.to_vec().into(),
+            payload: self.payload_hash.into(),
             path: self.path.clone(),
             keyVersion: self.key_version,
             chainId: self.chain_id,
@@ -473,31 +600,553 @@ impl SignatureRequestedEvent {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     eth: Option<EthConfig>,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     app_data_storage: AppDataStorage,
     node_near_account_id: AccountId,
-    bidirectional_tx_map: Arc<RwLock<HashMap<BidirectionalTxId, BidirectionalTx>>>,
-    helios: bool,
+    backlog: Backlog,
+    contract_watcher: ContractStateWatcher,
+    mesh_state: watch::Receiver<MeshState>,
+    node_client: NodeClient,
+    light_client: bool,
 ) {
-    if helios {
+    let Some(eth) = eth else {
+        tracing::warn!("ethereum indexer is disabled");
+        return;
+    };
+
+    if light_client {
         indexer_eth_helios::run(
             eth,
             sign_tx,
             app_data_storage,
             node_near_account_id,
-            bidirectional_tx_map,
+            backlog,
+            contract_watcher,
+            mesh_state,
+            node_client,
         )
-        .await;
+        .await
     } else {
         indexer_eth_direct_rpc::run(
             eth,
             sign_tx,
             app_data_storage,
             node_near_account_id,
-            bidirectional_tx_map,
+            backlog,
+            contract_watcher,
+            mesh_state,
+            node_client,
         )
-        .await;
+        .await
+    }
+}
+
+pub enum EthereumClient {
+    Helios(indexer_eth_helios::HeliosEthereumClient),
+    DirectRpc(indexer_eth_direct_rpc::RpcEthereumClient),
+}
+
+#[async_trait]
+impl EthereumClientTrait for EthereumClient {
+    async fn get_block(
+        &self,
+        block_id: alloy::rpc::types::BlockId,
+    ) -> Option<alloy::rpc::types::Block> {
+        match self {
+            EthereumClient::Helios(client) => client.get_block(block_id).await,
+            EthereumClient::DirectRpc(client) => client.get_block(block_id).await,
+        }
+    }
+
+    async fn get_block_receipts(
+        &self,
+        block_number_or_tag: BlockNumberOrTag,
+    ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>> {
+        match self {
+            EthereumClient::Helios(client) => client.get_block_receipts(block_number_or_tag).await,
+            EthereumClient::DirectRpc(client) => {
+                client.get_block_receipts(block_number_or_tag).await
+            }
+        }
+    }
+
+    async fn get_nonce(
+        &self,
+        address: Address,
+        block_id: alloy::rpc::types::BlockId,
+    ) -> anyhow::Result<u64> {
+        match self {
+            EthereumClient::Helios(client) => client.get_nonce(address, block_id).await,
+            EthereumClient::DirectRpc(client) => client.get_nonce(address, block_id).await,
+        }
+    }
+
+    async fn get_transaction_by_hash(
+        &self,
+        tx_hash: alloy::primitives::B256,
+    ) -> anyhow::Result<Option<alloy::rpc::types::Transaction>> {
+        match self {
+            EthereumClient::Helios(client) => client.get_transaction_by_hash(tx_hash).await,
+            EthereumClient::DirectRpc(client) => client.get_transaction_by_hash(tx_hash).await,
+        }
+    }
+}
+pub struct EthereumIndexer {
+    eth: Option<EthConfig>,
+    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    app_data_storage: AppDataStorage,
+    node_near_account_id: AccountId,
+    backlog: Backlog,
+    contract_watcher: ContractStateWatcher,
+    mesh_state: watch::Receiver<MeshState>,
+    node_client: NodeClient,
+    client: EthereumClient,
+}
+
+pub trait EthereumIndexerTrait {
+    #[allow(clippy::too_many_arguments)]
+    async fn process_block(
+        client: Arc<EthereumClient>,
+        block_number: u64,
+        block_hash: alloy::primitives::B256,
+        contract_address: Address,
+        node_near_account_id: AccountId,
+        requests_indexed: mpsc::Sender<BlockAndRequests>,
+        total_timeout: Duration,
+        backlog: Backlog,
+    ) -> anyhow::Result<()>;
+    async fn add_new_block_to_process(
+        client: Arc<EthereumClient>,
+        blocks_to_process: mpsc::Sender<BlockToProcess>,
+    );
+    async fn catchup_end_block_number(client: Arc<EthereumClient>) -> anyhow::Result<BlockNumber>;
+    async fn build_client(eth: EthConfig) -> anyhow::Result<EthereumClient>;
+
+    /// Sends a request to the sign queue when the block where the request is in is finalized.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_requests_when_final(
+        client: Arc<EthereumClient>,
+        mut requests_indexed: mpsc::Receiver<BlockAndRequests>,
+        mut finalized_block_rx: mpsc::Receiver<BlockNumber>,
+        sign_tx: mpsc::Sender<IndexedSignRequest>,
+        app_data_storage: AppDataStorage,
+        node_near_account_id: AccountId,
+        optimistic_requests: bool,
+        backlog: Backlog,
+    ) {
+        let mut finalized_block_number: Option<BlockNumber> = None;
+        let mut last_processed_block: Option<BlockNumber> = app_data_storage
+            .last_processed_block_eth()
+            .await
+            .unwrap_or_else(|err| {
+                tracing::warn!("Failed to fetch last processed block: {err:?}, setting to None");
+                None
+            });
+
+        loop {
+            let Some(BlockAndRequests {
+                block_number,
+                block_hash,
+                indexed_requests,
+            }) = requests_indexed.recv().await
+            else {
+                tracing::error!("Failed to receive indexed requests");
+                return;
+            };
+
+            if !optimistic_requests {
+                // Wait for finalized block if needed
+                while finalized_block_number.is_none_or(|n| block_number > n) {
+                    let Some(new_finalized_block) = finalized_block_rx.recv().await else {
+                        tracing::error!("Failed to receive finalized blocks");
+                        return;
+                    };
+                    finalized_block_number.replace(new_finalized_block);
+                }
+            }
+
+            // Verify block hash and send requests
+            let block = client
+                .as_ref()
+                .get_block(alloy::rpc::types::BlockId::Number(
+                    BlockNumberOrTag::Number(block_number),
+                ))
+                .await;
+
+            let Some(block) = block else {
+                tracing::warn!("Block {block_number} not found from Helios client, skipping this block and its requests");
+                continue;
+            };
+
+            if block.header.hash == block_hash {
+                tracing::info!("Block {block_number} is finalized!");
+                send_indexed_requests(
+                    indexed_requests,
+                    sign_tx.clone(),
+                    node_near_account_id.clone(),
+                );
+                if last_processed_block.is_none_or(|n| n < block_number) {
+                    if let Err(err) = app_data_storage
+                        .set_last_processed_block_eth(block_number)
+                        .await
+                    {
+                        tracing::warn!("Failed to set last processed block: {err:?}");
+                    }
+                    last_processed_block.replace(block_number);
+                }
+                backlog
+                    .set_processed_block(Chain::Ethereum, block_number)
+                    .await;
+            } else {
+                // no special handling for chain reorg, just log the error
+                // This is because when such chain reorg happens, the new canonical chain will have already been emitted by helios's block header stream, and we can safely skip this block here.
+                tracing::error!(
+                "Block {block_number} hash mismatch: expected {block_hash:?}, got {:?}. Chain re-orged.",
+                block.header.hash
+            );
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn retry_failed_blocks(
+        client: Arc<EthereumClient>,
+        mut blocks_failed_rx: mpsc::Receiver<BlockNumberAndHash>,
+        blocks_failed_tx: mpsc::Sender<BlockNumberAndHash>,
+        contract_address: Address,
+        node_near_account_id: AccountId,
+        requests_indexed: mpsc::Sender<BlockAndRequests>,
+        total_timeout: Duration,
+        backlog: Backlog,
+    ) {
+        loop {
+            let Some((block_number, block_hash)) = blocks_failed_rx.recv().await else {
+                tracing::warn!("Failed to receive block and requests from requests_indexed");
+                break;
+            };
+            if let Err(err) = Self::process_block(
+                client.clone(),
+                block_number,
+                block_hash,
+                contract_address,
+                node_near_account_id.clone(),
+                requests_indexed.clone(),
+                total_timeout,
+                backlog.clone(),
+            )
+            .await
+            {
+                tracing::warn!("Retry failed for block {block_number}: {err:?}");
+                Self::add_failed_block(blocks_failed_tx.clone(), block_number, block_hash).await;
+            } else {
+                tracing::info!("Successfully retried block: {block_number}");
+            }
+        }
+    }
+
+    async fn add_failed_block(
+        blocks_failed: mpsc::Sender<BlockNumberAndHash>,
+        block_number: u64,
+        block_hash: alloy::primitives::B256,
+    ) {
+        blocks_failed
+            .send((block_number, block_hash))
+            .await
+            .unwrap_or_else(|err| {
+                tracing::warn!("Failed to send failed block: {:?}", err);
+            });
+    }
+
+    /// Polls for the latest finalized block and update finalized block channel.
+    async fn refresh_finalized_block(
+        client: Arc<EthereumClient>,
+        finalized_block_send: mpsc::Sender<BlockNumber>,
+        refresh_finalized_interval: u64,
+    ) {
+        let mut interval = tokio::time::interval(Duration::from_millis(refresh_finalized_interval));
+        let mut final_block_number: Option<BlockNumber> = None;
+
+        loop {
+            interval.tick().await;
+            tracing::info!("Refreshing finalized epoch");
+
+            let new_finalized_block = match client
+                .as_ref()
+                .get_block(alloy::rpc::types::BlockId::Number(
+                    BlockNumberOrTag::Finalized,
+                ))
+                .await
+            {
+                Some(block) => block,
+                None => {
+                    tracing::warn!("Finalized block not found from Helios client");
+                    continue;
+                }
+            };
+
+            let new_final_block_number = new_finalized_block.header.number;
+            tracing::info!(
+            "New finalized block number: {new_final_block_number}, last finalized block number: {final_block_number:?}"
+        );
+
+            if final_block_number.is_none_or(|n| new_final_block_number > n) {
+                tracing::info!("Found new finalized block!");
+                if let Err(err) = finalized_block_send.send(new_final_block_number).await {
+                    tracing::warn!("Failed to send finalized block: {err:?}");
+                    continue;
+                }
+                final_block_number.replace(new_final_block_number);
+                continue;
+            }
+
+            let Some(last_final_block_number) = final_block_number else {
+                continue;
+            };
+
+            if new_final_block_number < last_final_block_number {
+                tracing::warn!(
+                    "New finalized block number overflowed range of u64 and has wrapped around!"
+                );
+            }
+
+            if last_final_block_number == new_final_block_number {
+                tracing::info!("No new finalized block");
+            }
+        }
+    }
+
+    async fn add_catchup_blocks_to_process(
+        blocks_to_process: mpsc::Sender<BlockToProcess>,
+        start_block_number: u64,
+        end_block_number: u64,
+    ) {
+        // helios can only go back maximum MAX_CATCHUP_BLOCKS blocks, so we need to adjust the start block number if it's too far behind
+        let helios_oldest_block_number = end_block_number.saturating_sub(MAX_CATCHUP_BLOCKS);
+        let start_block_number = if start_block_number < helios_oldest_block_number {
+            tracing::warn!(
+                "Start block number {start_block_number} is too far behind the latest block {end_block_number}, adjusting to {helios_oldest_block_number}"
+            );
+            helios_oldest_block_number
+        } else {
+            start_block_number
+        };
+
+        for block_number in start_block_number..=end_block_number {
+            if let Err(err) = blocks_to_process
+                .send(BlockToProcess::Catchup(block_number))
+                .await
+            {
+                tracing::warn!("Failed to send block to process: {err:?}");
+            }
+        }
+    }
+
+    async fn recover_backlog(
+        backlog: &Backlog,
+        mut contract_watcher: ContractStateWatcher,
+        mut mesh_state: watch::Receiver<MeshState>,
+        node_client: NodeClient,
+    ) {
+        // Recover backlog before doing anything.
+        // Wait for threshold to be available
+        let threshold = contract_watcher.wait_threshold().await;
+        if threshold > 0 {
+            wait_threshold_active(&mut mesh_state, threshold).await;
+
+            let mesh_state = mesh_state.borrow().clone();
+            backlog
+                .recover(&mesh_state, &node_client, threshold, &[Chain::Ethereum])
+                .await;
+        }
+    }
+
+    async fn get_last_processed_block(app_data_storage: AppDataStorage) -> Option<BlockNumber> {
+        app_data_storage
+            .last_processed_block_eth()
+            .await
+            .unwrap_or_else(|err| {
+                tracing::warn!("Failed to get last processed block: {err:?}");
+                None
+            })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run(
+        eth: EthConfig,
+        sign_tx: mpsc::Sender<IndexedSignRequest>,
+        app_data_storage: AppDataStorage,
+        node_near_account_id: AccountId,
+        backlog: Backlog,
+        contract_watcher: ContractStateWatcher,
+        mesh_state: watch::Receiver<MeshState>,
+        node_client: NodeClient,
+    ) {
+        Self::recover_backlog(&backlog, contract_watcher, mesh_state, node_client).await;
+
+        let last_processed_block = Self::get_last_processed_block(app_data_storage).await;
+
+        let client: Arc<EthereumClient> = match Self::build_client(eth).await {
+            Ok(client) => Arc::new(client),
+            Err(err) => {
+                tracing::error!("Failed to build client: {err:?}");
+                return;
+            }
+        };
+
+        tracing::info!("running ethereum indexer");
+
+        let eth_config_clone = eth.clone();
+
+        let Ok(contract_address) =
+            Address::from_str(&format!("0x{}", eth_config_clone.contract_address))
+        else {
+            tracing::error!(
+                "Failed to parse contract address: {}",
+                eth_config_clone.contract_address
+            );
+            return;
+        };
+        let total_timeout = Duration::from_secs(eth.total_timeout);
+
+        let (blocks_failed_send, blocks_failed_recv) = failed_blocks_channel();
+
+        let (requests_indexed_send, requests_indexed_recv) = indexed_channel();
+
+        let (finalized_block_send, finalized_block_recv) = finalized_block_channel();
+
+        let (blocks_to_process_send, mut blocks_to_process_recv) = blocks_to_process_channel();
+
+        let client_clone = Arc::clone(&client);
+        let finalized_block_send_clone = finalized_block_send.clone();
+        let refresh_interval = eth.refresh_finalized_interval;
+        let future = async move {
+            tracing::info!("Spawned task to refresh the latest finalized block");
+            Self::refresh_finalized_block(
+                client_clone,
+                finalized_block_send_clone,
+                refresh_interval,
+            )
+            .await;
+        };
+        tokio::spawn(future);
+
+        let node_near_account_id_clone = node_near_account_id.clone();
+        let backlog_clone = backlog.clone();
+        let client_clone = Arc::clone(&client);
+        tokio::spawn(async move {
+            Self::send_requests_when_final(
+                client_clone,
+                requests_indexed_recv,
+                finalized_block_recv,
+                sign_tx,
+                app_data_storage,
+                node_near_account_id_clone,
+                eth.optimistic_requests,
+                backlog_clone,
+            )
+            .await;
+        });
+
+        let blocks_failed_send_clone = blocks_failed_send.clone();
+        let node_near_account_id_clone2 = node_near_account_id.clone();
+        let requests_indexed_send_clone = requests_indexed_send.clone();
+        let backlog_clone2 = backlog.clone();
+        let client_clone = Arc::clone(&client);
+        tokio::spawn(async move {
+            Self::retry_failed_blocks(
+                client_clone,
+                blocks_failed_recv,
+                blocks_failed_send_clone,
+                contract_address,
+                node_near_account_id_clone2,
+                requests_indexed_send_clone,
+                total_timeout,
+                backlog_clone2,
+            )
+            .await;
+        });
+
+        let blocks_to_process_send_clone = blocks_to_process_send.clone();
+        let client_clone = Arc::clone(&client);
+        if let Some(last_processed_block) = last_processed_block {
+            match Self::catchup_end_block_number(client_clone).await {
+                Ok(end_block_number) => {
+                    Self::add_catchup_blocks_to_process(
+                        blocks_to_process_send_clone,
+                        last_processed_block,
+                        end_block_number,
+                    )
+                    .await
+                }
+                Err(err) => {
+                    tracing::error!("Failed to get catchup end block number: {err:?}");
+                }
+            }
+        }
+
+        let blocks_to_process_send_clone = blocks_to_process_send.clone();
+        let client_clone = Arc::clone(&client);
+        tokio::spawn(async move {
+            tracing::info!("Spawned task to add new blocks to process");
+            Self::add_new_block_to_process(client_clone, blocks_to_process_send_clone).await
+        });
+
+        let mut interval = tokio::time::interval(Duration::from_millis(200));
+        let requests_indexed_send_clone = requests_indexed_send.clone();
+        loop {
+            let Some(block_to_process) = blocks_to_process_recv.recv().await else {
+                interval.tick().await;
+                continue;
+            };
+            let (block_number, block_hash, is_catchup) = match block_to_process {
+                BlockToProcess::Catchup(block_number) => {
+                    let block = client
+                        .get_block(alloy::rpc::types::BlockId::Number(
+                            BlockNumberOrTag::Number(block_number),
+                        ))
+                        .await;
+                    if let Some(block) = block {
+                        (block.header.number, block.header.hash, true)
+                    } else {
+                        tracing::warn!("Block {block_number} not found from Helios client");
+                        continue;
+                    }
+                }
+                BlockToProcess::NewBlock((block_number, block_hash)) => {
+                    (block_number, block_hash, false)
+                }
+            };
+            if let Err(err) = Self::process_block(
+                client.clone(),
+                block_number,
+                block_hash,
+                contract_address,
+                node_near_account_id.clone(),
+                requests_indexed_send_clone.clone(),
+                total_timeout,
+                backlog.clone(),
+            )
+            .await
+            {
+                tracing::warn!(
+                    "Eth indexer failed to process block number {block_number}: {err:?}"
+                );
+                Self::add_failed_block(blocks_failed_send.clone(), block_number, block_hash).await;
+                continue;
+            }
+            if block_number % 10 == 0 {
+                if is_catchup {
+                    tracing::info!("Processed catchup block number {block_number}");
+                } else {
+                    tracing::info!("Processed new block number {block_number}");
+                }
+            }
+            crate::metrics::LATEST_BLOCK_NUMBER
+                .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
+                .set(block_number as i64);
+        }
     }
 }
