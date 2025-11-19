@@ -3,7 +3,8 @@ use mpc_primitives::SignId;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::protocol::message::{
-    GeneratingMessage, PresignatureMessage, ResharingMessage, SignatureMessage, TripleMessage,
+    GeneratingMessage, PresignatureMessage, ReadyMessage, ResharingMessage, SignatureMessage,
+    TripleMessage,
 };
 use crate::protocol::posit::PositAction;
 use crate::protocol::presignature::{FullPresignatureId, PresignatureId};
@@ -15,6 +16,7 @@ pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
 pub enum SubscribeId {
     Generating,
     Resharing,
+    Ready,
     Triples,
     Presignatures,
     Signatures,
@@ -26,6 +28,7 @@ pub enum SubscribeId {
 pub enum SubscribeResponse {
     Generating(mpsc::Receiver<GeneratingMessage>),
     Resharing(mpsc::Receiver<ResharingMessage>),
+    Ready(mpsc::Receiver<ReadyMessage>),
     Triple(mpsc::Receiver<TripleMessage>),
     TriplePosit(mpsc::Receiver<(TripleId, Participant, PositAction)>),
     Presignature(mpsc::Receiver<PresignatureMessage>),

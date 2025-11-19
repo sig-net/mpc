@@ -1,15 +1,20 @@
+use crate::backlog::Checkpoint;
 use crate::protocol::message::cbor_to_bytes;
 use crate::protocol::state::NodeStatus;
 use crate::protocol::sync::SyncUpdate;
+use crate::protocol::Chain;
 use crate::web::StateView;
+
 use hyper::StatusCode;
 use mpc_keys::hpke::Ciphered;
 use reqwest::IntoUrl;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use url::Url;
+
+use std::collections::HashMap;
 use std::str::Utf8Error;
 use std::time::Duration;
-use url::Url;
 
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "message_options")]
@@ -133,10 +138,6 @@ impl NodeClient {
         self.post_msg(&url, msg).await
     }
 
-    pub async fn msg_empty(&self, base: impl IntoUrl) -> Result<(), RequestError> {
-        self.msg(base, &[]).await
-    }
-
     pub async fn state(&self, base: impl IntoUrl) -> Result<StateView, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("state");
@@ -170,5 +171,31 @@ impl NodeClient {
         url.set_path("sync");
 
         self.post_cbor(&url, update).await
+    }
+
+    pub async fn checkpoint(
+        &self,
+        base: impl IntoUrl,
+    ) -> Result<HashMap<Chain, Checkpoint>, RequestError> {
+        let mut url = base.into_url()?;
+        url.set_path("checkpoint");
+
+        let resp = self
+            .http
+            .get(url)
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let body = resp.bytes().await.map_err(RequestError::MalformedBody)?;
+
+        if status.is_success() {
+            ciborium::from_reader(body.as_ref())
+                .map_err(|err| RequestError::Conversion(err.to_string()))
+        } else {
+            let resp = std::str::from_utf8(&body).map_err(RequestError::MalformedResponse)?;
+            Err(RequestError::Unsuccessful(status, resp.into()))
+        }
     }
 }

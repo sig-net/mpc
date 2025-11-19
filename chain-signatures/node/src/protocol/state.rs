@@ -1,4 +1,4 @@
-use super::contract::primitives::Participants;
+use super::contract::{primitives::Participants, ResharingContractState};
 use super::triple::TripleSpawnerTask;
 use crate::protocol::presignature::PresignatureSpawnerTask;
 use crate::protocol::signature::SignatureSpawnerTask;
@@ -7,10 +7,15 @@ use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 use cait_sith::protocol::Participant;
 use mpc_crypto::PublicKey;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
+
+use rand::random;
+use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Display, Formatter};
+use std::time::{Duration, Instant};
 
-use tokio::sync::watch;
+pub const RESHARING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PersistentNodeData {
@@ -77,16 +82,64 @@ pub struct RunningState {
 
 pub struct ResharingState {
     pub me: Participant,
-    pub old_epoch: u64,
-    pub old_participants: Participants,
-    pub new_participants: Participants,
-    pub threshold: usize,
-    pub public_key: PublicKey,
+    pub contract: ResharingContractState,
+    pub local_private_share: Option<SecretKeyShare>,
+    pub phase: ResharingPhase,
+    pub ready_nonce: u64,
+}
+
+pub struct ReshareAwaiting {
+    pub ready_tokens: HashMap<Participant, u64>,
+    pub my_token: u64,
+    /// Interval to control broadcasting readiness messages.
+    // NOTE: this is an Instant for now since generating/resharing tasks are not async
+    // and happen in main protocol loop. once it becomes async we can make this an interval.
+    pub broadcast_interval: Instant,
+}
+
+pub struct ReshareRunning {
     pub protocol: ReshareProtocol,
+
+    /// Participants that have sent readiness messages along with their tokens. These
+    /// are retained for the duration of the resharing protocol until either completion
+    /// or restart. They will be combined to form the singular token for all resharing
+    /// messages.
+    pub ready_tokens: HashMap<Participant, u64>,
+
+    /// Unique identifier for the current resharing attempt. Messages that do not match
+    /// this token are discarded and ignored from processing.
+    pub token: u64,
 
     /// If the resharing state fails to store data after generating, it gets temporarily
     /// stored here and retried later.
     pub failed_store: Option<SecretKeyShare>,
+    pub started_at: Instant,
+    pub last_activity: Instant,
+}
+
+#[allow(clippy::large_enum_variant)]
+pub enum ResharingPhase {
+    Awaiting(ReshareAwaiting),
+    Resharing(ReshareRunning),
+}
+
+impl ResharingPhase {
+    pub fn awaiting(me: Participant) -> Self {
+        let my_token = random::<u64>();
+        Self::Awaiting(ReshareAwaiting {
+            ready_tokens: std::iter::once((me, my_token)).collect(),
+            my_token,
+            // ready to broadcast immediately
+            broadcast_interval: Instant::now() - RESHARING_READY_BROADCAST_INTERVAL,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResharingStatus {
+    Awaiting,
+    Running,
 }
 
 pub struct JoiningState {
@@ -116,6 +169,7 @@ pub enum NodeStatus {
     Resharing {
         old_participants: Vec<Participant>,
         new_participants: Vec<Participant>,
+        phase: ResharingStatus,
     },
     Joining {
         participants: Vec<Participant>,
@@ -213,9 +267,14 @@ impl Node {
                 });
             }
             NodeState::Resharing(state) => {
+                let phase = match &state.phase {
+                    ResharingPhase::Awaiting(_) => ResharingStatus::Awaiting,
+                    ResharingPhase::Resharing(_) => ResharingStatus::Running,
+                };
                 let _ = self.watcher_tx.send(NodeStatus::Resharing {
-                    old_participants: state.old_participants.keys_vec(),
-                    new_participants: state.new_participants.keys_vec(),
+                    old_participants: state.contract.old_participants.keys_vec(),
+                    new_participants: state.contract.new_participants.keys_vec(),
+                    phase,
                 });
             }
             NodeState::Joining(state) => {

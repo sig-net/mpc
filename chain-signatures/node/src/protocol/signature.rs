@@ -1,5 +1,6 @@
 use super::contract::primitives::intersect_vec;
 use super::MpcSignProtocol;
+use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
@@ -9,7 +10,6 @@ use crate::protocol::posit::{PositAction, PositInternalAction, Positor, Posits};
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
-use crate::sign_respond_tx::SignRespondSignatureChannel;
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
@@ -45,10 +45,9 @@ pub struct IndexedSignRequest {
     pub args: SignArgs,
     pub chain: Chain,
     pub unix_timestamp_indexed: u64,
-    pub timestamp_sign_queue: Option<Instant>,
+    pub timestamp_sign_queue: Instant,
     pub total_timeout: Duration,
     pub sign_request_type: SignRequestType,
-    pub participants: Option<Vec<Participant>>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -170,11 +169,7 @@ impl SignQueue {
     ) -> SignRequest {
         let sign_id = indexed.id;
         let reorganize = initial_round > 0;
-        let mut participants = if indexed.participants.is_some() {
-            indexed.participants.clone().unwrap()
-        } else {
-            participants.keys().cloned().collect()
-        };
+        let mut participants = participants.keys().copied().collect::<Vec<_>>();
         participants.sort();
 
         // Simple round-robin selection of the proposer, using only inputs that
@@ -267,6 +262,7 @@ impl SignQueue {
                     .inc();
             }
             if let Some(pending) = self.pending.remove(&sign_id) {
+                tracing::info!(?sign_id, proposer = ?request.proposer, "sign queue received pending request");
                 if pending.send(request.clone()).is_err() {
                     tracing::warn!(
                         ?sign_id,
@@ -337,9 +333,8 @@ impl SignQueue {
 
     pub fn expire(&mut self, cfg: &ProtocolConfig) {
         self.requests.retain(|_, request| {
-            request.indexed.timestamp_sign_queue.is_none_or(|t| {
-                t.elapsed() < Duration::from_millis(cfg.signature.generation_timeout_total)
-            })
+            request.indexed.timestamp_sign_queue.elapsed()
+                < Duration::from_millis(cfg.signature.generation_timeout_total)
         });
         self.my_requests.retain(|id| {
             let Some(request) = self.requests.get(id) else {
@@ -387,7 +382,14 @@ struct SignatureGenerator {
     inbox: mpsc::Receiver<SignatureMessage>,
     msg: MessageChannel,
     rpc: RpcChannel,
-    sign_respond_signature_channel: SignRespondSignatureChannel,
+
+    // TODO: will be used in the future when we move requests channels
+    // into the backlog.
+    #[allow(dead_code)]
+    backlog: Backlog,
+
+    #[cfg(feature = "debug-page")]
+    debug_view: crate::web::debug::DebugPageTaskHandle,
 }
 
 impl SignatureGenerator {
@@ -401,7 +403,8 @@ impl SignatureGenerator {
         cfg: ProtocolConfig,
         msg: MessageChannel,
         rpc: RpcChannel,
-        sign_respond_signature_channel: SignRespondSignatureChannel,
+        backlog: Backlog,
+        _my_account_id: &AccountId,
     ) -> Result<Self, InitializationError> {
         let sign_id = request.id();
         let request = request
@@ -460,18 +463,17 @@ impl SignatureGenerator {
             inbox,
             msg,
             rpc,
-            sign_respond_signature_channel,
+            backlog,
+            #[cfg(feature = "debug-page")]
+            debug_view: crate::web::debug::register_task(
+                _my_account_id.to_string(),
+                format!("SignatureGenerator {sign_id:#?}"),
+            ),
         })
     }
 
     fn timeout_total(&self) -> bool {
-        let timestamp = self
-            .request
-            .indexed
-            .timestamp_sign_queue
-            .as_ref()
-            .unwrap_or(&self.created);
-        timestamp.elapsed() >= self.timeout_total
+        self.request.indexed.timestamp_sign_queue.elapsed() >= self.timeout_total
     }
 
     /// Receive the next message for the signature protocol; error out on the timeout being reached
@@ -559,6 +561,8 @@ impl SignatureGenerator {
             total_pokes += 1;
             poke_last_time = Instant::now();
             poke_latency.observe(poke_start_time.elapsed().as_millis() as f64);
+            #[cfg(feature = "debug-page")]
+            self.render_debug(total_pokes);
 
             match action {
                 Action::Wait => {
@@ -610,12 +614,14 @@ impl SignatureGenerator {
                         .await;
                 }
                 Action::Return(output) => {
+                    let big_r = output.big_r;
+                    let s = output.s;
                     tracing::info!(
                         ?sign_id,
                         ?me,
                         presignature_id,
-                        big_r = ?output.big_r.to_base58(),
-                        s = ?output.s,
+                        big_r = ?big_r.to_base58(),
+                        ?s,
                         elapsed = ?self.created.elapsed(),
                         "completed signature generation"
                     );
@@ -633,14 +639,21 @@ impl SignatureGenerator {
                             output,
                             self.participants.clone(),
                         );
-                    } else if let SignRequestType::SignRespond(_) =
-                        self.request.indexed.sign_request_type
+                    }
+
+                    if let SignRequestType::SignBidirectional(event) =
+                        &self.request.indexed.sign_request_type
                     {
-                        self.sign_respond_signature_channel.send(
-                            self.public_key,
-                            self.request.clone(),
-                            output,
-                            self.participants.clone(),
+                        let source_chain = self.request.indexed.chain;
+
+                        // Note: The promotion to Bidirectional will happen when we receive the
+                        // SignatureRespondedEvent in the Solana indexer, which has the signature data.
+                        // For now, we just complete the signature generation. The indexer will handle the promotion.
+                        tracing::debug!(
+                            ?sign_id,
+                            ?source_chain,
+                            ?event.dest,
+                            "generated signature for bidirectional request, awaiting indexer to process"
                         );
                     }
 
@@ -648,6 +661,14 @@ impl SignatureGenerator {
                 }
             }
         }
+    }
+
+    #[cfg(feature = "debug-page")]
+    fn render_debug(&self, total_pokes: i32) {
+        let markup = maud::html! {
+            p { (format!("{total_pokes} pokes")) }
+        };
+        self.debug_view.send(markup);
     }
 }
 
@@ -680,7 +701,7 @@ pub struct SignatureSpawner {
     epoch: u64,
     msg: MessageChannel,
     rpc: RpcChannel,
-    sign_respond_signature_channel: SignRespondSignatureChannel,
+    backlog: Backlog,
 }
 
 impl SignatureSpawner {
@@ -695,7 +716,7 @@ impl SignatureSpawner {
         presignatures: &PresignatureStorage,
         msg: MessageChannel,
         rpc: RpcChannel,
-        sign_respond_signature_channel: SignRespondSignatureChannel,
+        backlog: Backlog,
     ) -> Self {
         Self {
             presignatures: presignatures.clone(),
@@ -709,7 +730,7 @@ impl SignatureSpawner {
             epoch,
             msg,
             rpc,
-            sign_respond_signature_channel,
+            backlog,
         }
     }
 
@@ -756,7 +777,7 @@ impl SignatureSpawner {
         &mut self,
         sign_id: SignId,
         presignature_id: PresignatureId,
-        request: Option<SignRequest>,
+        mut request: Option<SignRequest>,
         from: Participant,
         action: PositAction,
         cfg: ProtocolConfig,
@@ -769,15 +790,31 @@ impl SignatureSpawner {
             );
             PositInternalAction::Reply(PositAction::Reject)
         } else if matches!(action, PositAction::Propose) {
-            if let Some(request) = request {
-                if request.proposer == from {
-                    self.posits
-                        .act((sign_id, presignature_id), from, self.threshold, &action)
-                } else {
+            match request.take() {
+                Some(req) => {
+                    if req.proposer == from {
+                        self.posits
+                            .act((sign_id, presignature_id), from, self.threshold, &action)
+                    } else {
+                        tracing::warn!(
+                            ?sign_id,
+                            presignature_id,
+                            expected_proposer = ?req.proposer,
+                            actual_proposer = ?from,
+                            "rejecting signature posit: proposer mismatch",
+                        );
+                        PositInternalAction::Reply(PositAction::Reject)
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        ?sign_id,
+                        presignature_id,
+                        ?from,
+                        "rejecting signature posit: sign request not yet available locally",
+                    );
                     PositInternalAction::Reply(PositAction::Reject)
                 }
-            } else {
-                PositInternalAction::Reply(PositAction::Reject)
             }
         } else {
             self.posits
@@ -827,7 +864,6 @@ impl SignatureSpawner {
         presignature: PendingPresignature,
         participants: Vec<Participant>,
         cfg: ProtocolConfig,
-        sign_respond_signature_channel: SignRespondSignatureChannel,
     ) {
         let me = self.me;
         let epoch = self.epoch;
@@ -837,6 +873,7 @@ impl SignatureSpawner {
         let my_account_id = self.my_account_id.clone();
         let msg = self.msg.clone();
         let rpc = self.rpc.clone();
+        let backlog = self.backlog.clone();
         let task = async move {
             let generator = match SignatureGenerator::new(
                 me,
@@ -847,7 +884,8 @@ impl SignatureSpawner {
                 cfg,
                 msg,
                 rpc,
-                sign_respond_signature_channel,
+                backlog,
+                &my_account_id,
             )
             .await
             {
@@ -909,14 +947,8 @@ impl SignatureSpawner {
                 self.presignatures.clone(),
             ),
         };
-        self.generate(
-            request,
-            presignature,
-            participants,
-            cfg,
-            self.sign_respond_signature_channel.clone(),
-        )
-        .await;
+        self.generate(request, presignature, participants, cfg)
+            .await;
     }
 
     async fn handle_requests(
@@ -1100,7 +1132,7 @@ impl SignatureSpawnerTask {
             &ctx.presignature_storage,
             ctx.msg_channel.clone(),
             ctx.rpc_channel.clone(),
-            ctx.sign_respond_signature_channel.clone(),
+            ctx.backlog.clone(),
         );
 
         Self {

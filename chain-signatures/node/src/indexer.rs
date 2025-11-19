@@ -1,3 +1,4 @@
+use crate::backlog::Backlog;
 use crate::protocol::Chain;
 use crate::protocol::IndexedSignRequest;
 use mpc_contract::primitives::PendingRequest;
@@ -111,10 +112,9 @@ impl NearIndexer {
             },
             chain: Chain::NEAR,
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            timestamp_sign_queue: Some(Instant::now()),
+            timestamp_sign_queue: Instant::now(),
             total_timeout: Duration::from_secs(200),
             sign_request_type: crate::protocol::SignRequestType::Sign,
-            participants: None,
         }
     }
 
@@ -141,9 +141,13 @@ struct Context {
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     indexer: NearIndexer,
     rpc_client: near_fetch::Client,
+    backlog: Backlog,
 }
 
 async fn poll_pending_requests(ctx: &Context) -> anyhow::Result<()> {
+    let latest_block = ctx.rpc_client.view_block().await?;
+    let latest_height = latest_block.header.height;
+
     // Fetch pending requests from the contract
     let pending_requests = ctx
         .indexer
@@ -179,7 +183,7 @@ async fn poll_pending_requests(ctx: &Context) -> anyhow::Result<()> {
     // Update metrics
     crate::metrics::LATEST_BLOCK_NUMBER
         .with_label_values(&[Chain::NEAR.as_str(), ctx.node_account_id.as_str()])
-        .set(crate::util::current_unix_timestamp() as i64);
+        .set(latest_height as i64);
 
     // Send all new requests
     for request in new_requests {
@@ -196,6 +200,10 @@ async fn poll_pending_requests(ctx: &Context) -> anyhow::Result<()> {
         }
     }
 
+    ctx.backlog
+        .set_processed_block(Chain::NEAR, latest_height)
+        .await;
+
     // Cleanup old processed requests periodically
     ctx.indexer.cleanup_old_requests().await;
 
@@ -208,6 +216,7 @@ pub fn run(
     node_account_id: &AccountId,
     sign_tx: mpsc::Sender<IndexedSignRequest>,
     rpc_client: near_fetch::Client,
+    backlog: Backlog,
 ) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, NearIndexer)> {
     tracing::info!(
         %mpc_contract_id,
@@ -222,6 +231,7 @@ pub fn run(
         sign_tx,
         indexer: indexer.clone(),
         rpc_client,
+        backlog,
     };
 
     let join_handle = tokio::spawn(run_polling_loop(context));

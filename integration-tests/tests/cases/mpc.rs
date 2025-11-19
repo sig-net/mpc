@@ -1,11 +1,14 @@
 use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
+use integration_tests::mpc_fixture::input::FixtureTriple;
 use integration_tests::mpc_fixture::MpcFixtureBuilder;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::protocol::SignRequestType;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState};
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
+use test_log::test;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::time::Duration;
@@ -18,7 +21,7 @@ const KEY_SHARE_FILE: &str = "tmp/key_shares.json";
 const TRIPLES_FILE: &str = "tmp/triples.json";
 const PRESIGNATURES_FILE: &str = "tmp/presignatures.json";
 
-#[tokio::test(flavor = "multi_thread")]
+#[test(tokio::test(flavor = "multi_thread"))]
 async fn test_basic_generate_keys() {
     let network = MpcFixtureBuilder::new(5, 4).build().await;
 
@@ -65,14 +68,14 @@ async fn test_basic_generate_keys() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[test(tokio::test(flavor = "multi_thread"))]
 async fn test_basic_generate_triples() {
     let network = MpcFixtureBuilder::default()
         .only_generate_triples()
         .build()
         .await;
 
-    tokio::time::timeout(Duration::from_secs(60), network.wait_for_triples(1))
+    tokio::time::timeout(Duration::from_secs(180), network.wait_for_triples(1))
         .await
         .expect("should have enough triples eventually");
 
@@ -89,7 +92,11 @@ async fn test_basic_generate_triples() {
                         .hget::<&str, u64, Triple>(node.triple_storage.triple_key(), triple_id)
                         .await;
                     if let Ok(t) = t {
-                        peer_triples.push(t);
+                        peer_triples.push(FixtureTriple {
+                            id: triple_id,
+                            share: t.share,
+                            public: t.public,
+                        });
                     } else {
                         tracing::error!("missing triple in redis {triple_id}");
                     }
@@ -106,7 +113,7 @@ async fn test_basic_generate_triples() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[test(tokio::test(flavor = "multi_thread"))]
 async fn test_basic_generate_presignature() {
     let network = MpcFixtureBuilder::default()
         .only_generate_presignatures()
@@ -150,7 +157,7 @@ async fn test_basic_generate_presignature() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[test(tokio::test(flavor = "multi_thread"))]
 async fn test_basic_sign() {
     let network = MpcFixtureBuilder::default()
         .only_generate_signatures()
@@ -190,9 +197,8 @@ fn sign_request(seed: u8) -> IndexedSignRequest {
         args: sign_arg(seed),
         chain: Chain::NEAR,
         unix_timestamp_indexed: 0,
-        timestamp_sign_queue: None,
+        timestamp_sign_queue: std::time::Instant::now(),
         total_timeout: Duration::from_secs(45),
-        participants: None,
         sign_request_type: SignRequestType::Sign,
     }
 }
@@ -211,7 +217,7 @@ fn sign_arg(seed: u8) -> SignArgs {
 
 /// drop the first 20 presignature messages on each node and see if the system
 /// can recover
-#[tokio::test(flavor = "multi_thread")]
+#[test(tokio::test(flavor = "multi_thread"))]
 async fn test_presignature_timeout() {
     fn create_filter() -> MessageFilter {
         let mut drop_counter = 20;

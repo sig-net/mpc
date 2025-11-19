@@ -8,6 +8,20 @@ declare_id!("CMGYAEsqXw5z52R8fmMZwPYQARHPEkGbefJA2FmeHLMh");
 pub mod signet_program {
     use super::*;
 
+    /// Initialize the program state
+    pub fn initialize(
+        ctx: Context<Initialize>,
+        signature_deposit: u64,
+        chain_id: String,
+    ) -> Result<()> {
+        let program_state = &mut ctx.accounts.program_state;
+        program_state.admin = ctx.accounts.admin.key();
+        program_state.signature_deposit = signature_deposit;
+        program_state.chain_id = chain_id;
+
+        Ok(())
+    }
+
     // we need minimal implementation of the contract in order to import all the primitives
     pub fn respond(
         ctx: Context<Respond>,
@@ -16,7 +30,7 @@ pub mod signet_program {
     ) -> Result<()> {
         // Minimal implementation - just emit the event
         for i in 0..request_ids.len() {
-            emit!(SignatureRespondedEvent {
+            emit_cpi!(SignatureRespondedEvent {
                 request_id: request_ids[i],
                 responder: *ctx.accounts.responder.key,
                 signature: signatures[i].clone(),
@@ -26,20 +40,17 @@ pub mod signet_program {
         Ok(())
     }
 
-    pub fn read_respond(
-        ctx: Context<ReadRespond>,
+    pub fn respond_bidirectional(
+        ctx: Context<RespondBidirectional>,
         request_id: [u8; 32],
         serialized_output: Vec<u8>,
         signature: Signature,
     ) -> Result<()> {
-        // The signature should be an ECDSA signature over keccak256(request_id || serialized_output)
-
         // only possible error responses // (this tx could never happen):
         // - nonce too low
         // - balance too low
         // - literal on chain error
-
-        emit!(ReadRespondedEvent {
+        emit!(RespondBidirectionalEvent {
             request_id,
             responder: *ctx.accounts.responder.key,
             serialized_output,
@@ -48,32 +59,136 @@ pub mod signet_program {
 
         Ok(())
     }
+
+    pub fn sign(
+        ctx: Context<Sign>,
+        payload: [u8; 32],
+        key_version: u32,
+        path: String,
+        algo: String,
+        dest: String,
+        params: String,
+    ) -> Result<()> {
+        // Emit a sign request event that matches the MPC node's expected structure
+        emit!(SignatureRequestedEvent {
+            sender: *ctx.accounts.requester.key,
+            payload,
+            key_version,
+            deposit: ctx.accounts.program_state.signature_deposit,
+            chain_id: "solana".to_string(),
+            path,
+            algo,
+            dest,
+            params,
+            fee_payer: Some(*ctx.accounts.requester.key),
+        });
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn sign_bidirectional(
+        ctx: Context<SignBidirectional>,
+        serialized_transaction: Vec<u8>,
+        caip2_id: String,
+        key_version: u32,
+        path: String,
+        algo: String,
+        dest: String,
+        params: String,
+        program_id: Pubkey,
+        output_deserialization_schema: Vec<u8>,
+        respond_serialization_schema: Vec<u8>,
+    ) -> Result<()> {
+        emit!(SignBidirectionalEvent {
+            sender: *ctx.accounts.requester.key,
+            serialized_transaction,
+            caip2_id,
+            key_version,
+            deposit: ctx.accounts.program_state.signature_deposit,
+            path,
+            algo,
+            dest,
+            params,
+            program_id,
+            output_deserialization_schema,
+            respond_serialization_schema,
+        });
+
+        Ok(())
+    }
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct AffinePoint {
     pub x: [u8; 32],
     pub y: [u8; 32],
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Signature {
     pub big_r: AffinePoint,
     pub s: [u8; 32],
     pub recovery_id: u8,
 }
 
+#[account]
+pub struct ProgramState {
+    pub admin: Pubkey,
+    pub signature_deposit: u64,
+    pub chain_id: String,
+}
+
+#[derive(Accounts)]
+pub struct Initialize<'info> {
+    #[account(
+        init,
+        payer = admin,
+        space = 8 + 32 + 8 + 4 + 128, // discriminator + admin + deposit + string length + max chain_id length
+        seeds = [b"program-state"],
+        bump
+    )]
+    pub program_state: Account<'info, ProgramState>,
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[event_cpi]
 #[derive(Accounts)]
 pub struct Respond<'info> {
     pub responder: Signer<'info>,
 }
 
 #[derive(Accounts)]
-pub struct ReadRespond<'info> {
+pub struct RespondBidirectional<'info> {
     pub responder: Signer<'info>,
 }
 
+#[event_cpi]
+#[derive(Accounts)]
+pub struct Sign<'info> {
+    #[account(mut, seeds = [b"program-state"], bump)]
+    pub program_state: Account<'info, ProgramState>,
+    #[account(mut)]
+    pub requester: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct SignBidirectional<'info> {
+    #[account(mut, seeds = [b"program-state"], bump)]
+    pub program_state: Account<'info, ProgramState>,
+    #[account(mut)]
+    pub requester: Signer<'info>,
+    #[account(mut)]
+    pub fee_payer: Option<Signer<'info>>,
+    pub system_program: Program<'info, System>,
+    pub instructions: Option<AccountInfo<'info>>,
+}
+
 #[event]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SignatureRespondedEvent {
     pub request_id: [u8; 32],
     pub responder: Pubkey,
@@ -81,9 +196,41 @@ pub struct SignatureRespondedEvent {
 }
 
 #[event]
-pub struct ReadRespondedEvent {
+pub struct RespondBidirectionalEvent {
     pub request_id: [u8; 32],
     pub responder: Pubkey,
     pub serialized_output: Vec<u8>,
     pub signature: Signature,
+}
+
+#[event]
+#[derive(Clone, Debug)]
+pub struct SignatureRequestedEvent {
+    pub sender: Pubkey,
+    pub payload: [u8; 32],
+    pub key_version: u32,
+    pub deposit: u64,
+    pub chain_id: String,
+    pub path: String,
+    pub algo: String,
+    pub dest: String,
+    pub params: String,
+    pub fee_payer: Option<Pubkey>,
+}
+
+#[event]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SignBidirectionalEvent {
+    pub sender: Pubkey,
+    pub serialized_transaction: Vec<u8>,
+    pub caip2_id: String,
+    pub key_version: u32,
+    pub deposit: u64,
+    pub path: String,
+    pub algo: String,
+    pub dest: String,
+    pub params: String,
+    pub program_id: Pubkey,
+    pub output_deserialization_schema: Vec<u8>,
+    pub respond_serialization_schema: Vec<u8>,
 }

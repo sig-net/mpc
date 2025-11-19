@@ -332,6 +332,34 @@ impl VersionedMpcContract {
     }
 
     #[handle_result]
+    pub fn remove_candidacy(&mut self) -> Result<(), Error> {
+        log!("remove_candidacy: signer={}", env::signer_account_id());
+        let protocol_state = self.mutable_state();
+
+        match protocol_state {
+            ProtocolContractState::Running(RunningContractState {
+                candidates,
+                join_votes,
+                ..
+            }) => {
+                let signer_account_id = env::signer_account_id();
+                if candidates.get(&signer_account_id).is_none() {
+                    return Err(JoinError::RevokeNotCandidate.into());
+                }
+
+                // cleanup the existing votes
+                join_votes.remove(&signer_account_id);
+
+                // remove from candidates
+                candidates.remove(&signer_account_id);
+
+                Ok(())
+            }
+            _ => Err(InvalidState::ProtocolStateNotRunning.into()),
+        }
+    }
+
+    #[handle_result]
     pub fn vote_join(&mut self, candidate: AccountId) -> Result<bool, Error> {
         log!(
             "vote_join: signer={}, candidate={}",
@@ -365,6 +393,7 @@ impl VersionedMpcContract {
                         threshold: *threshold,
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
+                        cancel_votes: HashSet::new(),
                     });
                     Ok(true)
                 } else {
@@ -411,6 +440,7 @@ impl VersionedMpcContract {
                         threshold: *threshold,
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
+                        cancel_votes: HashSet::new(),
                     });
                     Ok(true)
                 } else {
@@ -471,11 +501,11 @@ impl VersionedMpcContract {
         match protocol_state {
             ProtocolContractState::Resharing(ResharingContractState {
                 old_epoch,
-                old_participants: _,
                 new_participants,
                 threshold,
                 public_key,
                 finished_votes,
+                ..
             }) => {
                 if *old_epoch + 1 != epoch {
                     return Err(InvalidState::EpochMismatch.into());
@@ -501,6 +531,40 @@ impl VersionedMpcContract {
                     Ok(true)
                 } else {
                     Err(InvalidState::UnexpectedProtocolState.message("Running: invalid epoch"))
+                }
+            }
+            _ => Err(InvalidState::UnexpectedProtocolState.message(protocol_state.name())),
+        }
+    }
+
+    #[handle_result]
+    pub fn vote_cancel_resharing(&mut self) -> Result<bool, Error> {
+        let voter = self.voter()?;
+        log!("vote_cancel_resharing: signer={voter:?}");
+        let protocol_state = self.mutable_state();
+        match protocol_state {
+            ProtocolContractState::Resharing(ResharingContractState {
+                old_epoch,
+                old_participants,
+                threshold,
+                public_key,
+                cancel_votes,
+                ..
+            }) => {
+                cancel_votes.insert(voter);
+                if cancel_votes.len() >= *threshold {
+                    *protocol_state = ProtocolContractState::Running(RunningContractState {
+                        epoch: *old_epoch,
+                        participants: old_participants.clone(),
+                        threshold: *threshold,
+                        public_key: public_key.clone(),
+                        candidates: Candidates::new(),
+                        join_votes: Votes::new(),
+                        leave_votes: Votes::new(),
+                    });
+                    Ok(true)
+                } else {
+                    Ok(false)
                 }
             }
             _ => Err(InvalidState::UnexpectedProtocolState.message(protocol_state.name())),
@@ -651,8 +715,10 @@ impl VersionedMpcContract {
     #[init(ignore_state)]
     #[handle_result]
     pub fn migrate() -> Result<Self, Error> {
-        let old: MpcContract = env::state_read().ok_or(InvalidState::ContractStateIsMissing)?;
-        Ok(VersionedMpcContract::V0(old))
+        // If old state read failed, try reading as new state (no migration needed)
+        let new_contract: MpcContract =
+            env::state_read().ok_or(InvalidState::ContractStateIsMissing)?;
+        Ok(VersionedMpcContract::V0(new_contract))
     }
 
     pub fn state(&self) -> &ProtocolContractState {

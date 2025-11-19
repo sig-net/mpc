@@ -61,6 +61,12 @@ jobs:
         with:
           node-version: '18'
 
+      - name: Setup Solana and Anchor
+        uses: metadaoproject/setup-anchor@v3.1
+        with:
+          solana-cli-version: '2.3.9'
+          anchor-version: '0.30.1'
+
       - uses: WarpBuilds/cache@v1
         with:
           path: |
@@ -92,3 +98,7 @@ jobs:
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
+          IT_ETH_ACCOUNT_SK: ${{ secrets.IT_ETH_ACCOUNT_SK }}
+          IT_ETH_CONTRACT_ADDR: ${{ secrets.IT_ETH_CONTRACT_ADDR }}
+          IT_ETH_CONSENSUS_RPC_URL: ${{ secrets.IT_ETH_CONSENSUS_RPC_URL }}
+          IT_ETH_EXECUTION_RPC_URL: ${{ secrets.IT_ETH_EXECUTION_RPC_URL }}

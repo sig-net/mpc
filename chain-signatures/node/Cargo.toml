@@ -9,7 +9,6 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait = "0.1"
-atty = "0.2"
 axum = "0.7.9"
 axum-extra = "0.9.6"
 chrono = "0.4.24"
@@ -26,9 +25,7 @@ prometheus = "0.14.0"
 redis = "0.27.2"
 semver = "1.0.23"
 sysinfo = "0.32.0"
-tokio-retry = "0.3"
 tokio-stream = { version = "0.1.17", features = ["sync"] }
-tracing-appender = "0.2.2"
 tracing-stackdriver = "0.10.0"
 tracing-opentelemetry = "0.30.0"
 opentelemetry = { version = "0.29.0", default-features = false, features = [
@@ -40,9 +37,9 @@ opentelemetry_sdk = { version = "0.29.0", default-features = false, features = [
     "rt-tokio",
 ] }
 opentelemetry-appender-tracing = "0.29.1"
-alloy-signer-local = "1.0.9"
-alloy-sol-types = "1.2.0"
-helios = { git = "https://github.com/a16z/helios", rev = "0a96f31125b7948bbe5c7ab73aa5699efae24902"} 
+alloy-signer-local = "1.0.38"
+alloy-sol-types = "1.4.1"
+helios = { git = "https://github.com/a16z/helios", rev = "0a96f31125b7948bbe5c7ab73aa5699efae24902", optional = true }
 
 
 # workspace dependencies
@@ -88,14 +85,12 @@ mpc-keys.workspace = true
 mpc-primitives.workspace = true
 signet-program.workspace = true
 
-alloy-rlp.workspace = true
+alloy-primitives.workspace = true
 alloy-dyn-abi.workspace = true
-ethers-core.workspace = true
 secp256k1.workspace = true
 rlp.workspace = true
-alloy-consensus.workspace = true
-alloy-primitives.workspace = true
-alloy-json-abi.workspace = true
+
+maud = { version = "0.27.0", optional = true }
 
 [dev-dependencies]
 mockito = "1.7.0"
@@ -103,7 +98,11 @@ test-log = { version = "0.2.12", features = ["log", "trace"] }
 
 [features]
 default = []
+# utilize ethereum light client via helios
+light_client = ["helios"]
 # utilized for benchmarking the node:
 bench = []
 # utilized by "integration-tests" package:
 test-feature = []
+# Show a debug page
+debug-page = ["maud"]

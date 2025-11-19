@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use cait_sith::protocol::Participant;
+use near_account_id::AccountId;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::WatchStream;
@@ -105,50 +106,44 @@ impl NodeConnection {
                     });
                 }
                 _ = interval.tick() => {
-                    if let Err(err) = client.msg_empty(&url).await {
-                        tracing::warn!(?node, ?err, "checking /msg (empty) failed");
-                        status_tx.send_if_modified(|(status, _)| {
-                            std::mem::replace(status, NodeStatus::Offline) != NodeStatus::Offline
-                        });
-                        continue;
-                    }
-
-                    match client.status(&url).await {
-                        Ok(state) => {
-                            // note: borrowing and sending later on `status_tx` can potentially deadlock,
-                            // but since we are copying the status, this is not the case. Change this carefully.
-                            let old_status = status_tx.borrow().0;
-                            let mut new_status = match state {
-                                OtherNodeStatus::Running { .. } => NodeStatus::Active,
-                                OtherNodeStatus::Resharing { .. }
-                                | OtherNodeStatus::Generating { .. }
-                                | OtherNodeStatus::Joining { .. }
-                                | OtherNodeStatus::Starting
-                                | OtherNodeStatus::Started
-                                | OtherNodeStatus::WaitingForConsensus { .. } => NodeStatus::Inactive,
-                            };
-                            if old_status == NodeStatus::Inactive && new_status == NodeStatus::Active {
-                                // Sync when we want to enter an active state
-                                //
-                                // The peer is running. But before we can reliably
-                                // use the connected node in protocols we initiate,
-                                // we need to ensure the peer has the up-to-date
-                                // data about out owned IDs.
-                                new_status = NodeStatus::Syncing;
-                            }
-                            if old_status != new_status {
-                                tracing::info!(?node, ?new_status, "updated with new status");
-                                status_tx.send_modify(|(status, _)| {
-                                    *status = new_status;
-                                });
-                            }
-                        }
+                    let status = match client.status(&url).await {
+                        Ok(status) => status,
                         Err(err) => {
                             tracing::warn!(?node, ?err, "checking /status failed");
                             status_tx.send_if_modified(|(status, _)| {
                                 std::mem::replace(status, NodeStatus::Offline) != NodeStatus::Offline
                             });
+                            continue;
                         }
+                    };
+
+                    // note: borrowing and sending later on `status_tx` can potentially deadlock,
+                    // but since we are copying the status, this is not the case. Change this carefully.
+                    let old_status = status_tx.borrow().0;
+                    let mut new_status = match status {
+                        OtherNodeStatus::Running { .. } => NodeStatus::Active,
+                        OtherNodeStatus::Resharing { .. }
+                        | OtherNodeStatus::Generating { .. }
+                        | OtherNodeStatus::Joining { .. }
+                        | OtherNodeStatus::Starting
+                        | OtherNodeStatus::Started
+                        | OtherNodeStatus::WaitingForConsensus { .. } => NodeStatus::Inactive,
+                    };
+                    if matches!(old_status, NodeStatus::Inactive | NodeStatus::Offline | NodeStatus::Syncing)
+                        && new_status == NodeStatus::Active {
+                        // Sync when we want to enter an active state
+                        //
+                        // The peer is running. But before we can reliably
+                        // use the connected node in protocols we initiate,
+                        // we need to ensure the peer has the up-to-date
+                        // data about out owned IDs.
+                        new_status = NodeStatus::Syncing;
+                    }
+                    if old_status != new_status {
+                        tracing::info!(?node, ?old_status, ?new_status, "updated with new status");
+                        status_tx.send_modify(|(status, _)| {
+                            *status = new_status;
+                        });
                     }
                 }
             }
@@ -180,18 +175,22 @@ pub struct Pool {
     /// to join the network within the next epoch.
     connections: HashMap<Participant, NodeConnection>,
 
+    /// Account id of this node. Used to avoid creating self connections.
+    node_account_id: AccountId,
+
     conn_update_tx: broadcast::Sender<ConnectionUpdate>,
     conn_update_rx: broadcast::Receiver<ConnectionUpdate>,
 }
 
 impl Pool {
-    pub fn new(client: &NodeClient, ping_interval: Duration) -> Self {
+    pub fn new(client: &NodeClient, node_account_id: &AccountId, ping_interval: Duration) -> Self {
         tracing::info!("creating new connection pool");
         let (conn_update_tx, conn_update_rx) = broadcast::channel(256);
         Self {
             client: client.clone(),
             ping_interval,
             connections: HashMap::new(),
+            node_account_id: node_account_id.clone(),
 
             conn_update_tx,
             conn_update_rx,
@@ -228,6 +227,19 @@ impl Pool {
         seen: &mut HashSet<Participant>,
     ) {
         for (&participant, info) in participants.iter() {
+            if info.account_id == self.node_account_id {
+                tracing::debug!(?participant, "skipping self connection");
+                if self.connections.remove(&participant).is_some()
+                    && self
+                        .conn_update_tx
+                        .send(ConnectionUpdate::Drop(participant))
+                        .is_err()
+                {
+                    tracing::warn!(?participant, "unable to send drop for self connection");
+                }
+                continue;
+            }
+
             seen.insert(participant);
 
             let node = (participant, &info.url);
@@ -286,6 +298,7 @@ impl Pool {
     /// Update the node state after synchronization was successful.
     pub async fn report_node_synced(&self, participant: Participant) {
         if let Some(conn) = self.connections.get(&participant) {
+            tracing::info!(?participant, "reporting node synced");
             conn.status_tx.send_if_modified(|(status, _)| {
                 if *status == NodeStatus::Syncing {
                     *status = NodeStatus::Active;

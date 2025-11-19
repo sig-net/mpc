@@ -1,7 +1,6 @@
-mod cryptography;
-
 pub mod consensus;
 pub mod contract;
+pub mod cryptography;
 pub mod error;
 pub mod message;
 pub mod posit;
@@ -18,25 +17,25 @@ pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
+pub use mpc_primitives::Chain;
 pub use signature::{IndexedSignRequest, SignQueue};
+use signet_program::SignBidirectionalEvent;
 pub use state::{Node, NodeState};
 
+use crate::backlog::Backlog;
 use crate::config::Config;
-use crate::indexer_sol::SignRespondRequestedEvent;
 use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
-use crate::protocol::message::{GeneratingMessage, ResharingMessage};
-use crate::read_respond::ReadRespondedTx;
+use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
+use crate::respond_bidirectional::RespondBidirectionalTx;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
-use crate::sign_respond_tx::SignRespondSignatureChannel;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
 
 use near_account_id::AccountId;
 use semver::Version;
-use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -52,12 +51,13 @@ pub struct MpcSignProtocol {
     pub(crate) sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
     pub(crate) generating: mpsc::Receiver<GeneratingMessage>,
     pub(crate) resharing: mpsc::Receiver<ResharingMessage>,
+    pub(crate) ready: mpsc::Receiver<ReadyMessage>,
     pub(crate) msg_channel: MessageChannel,
     pub(crate) rpc_channel: RpcChannel,
     pub(crate) contract: ContractStateWatcher,
     pub(crate) config: watch::Receiver<Config>,
     pub(crate) mesh_state: watch::Receiver<MeshState>,
-    pub(crate) sign_respond_signature_channel: SignRespondSignatureChannel,
+    pub(crate) backlog: Backlog,
 }
 
 /// Interface required by the [`MpcSignProtocol`] to participate in the
@@ -82,7 +82,6 @@ impl MpcSignProtocol {
         mut node: Node,
         mut gov_client: G,
         contract_state: ContractStateWatcher,
-        config: watch::Receiver<Config>,
         mesh_state: watch::Receiver<MeshState>,
     ) {
         let my_account_id = self.my_account_id.as_str();
@@ -102,14 +101,9 @@ impl MpcSignProtocol {
                 .with_label_values(&[my_account_id.as_str()])
                 .inc();
 
-            let cfg = config.borrow().clone();
             let mesh_state = mesh_state.borrow().clone();
-
             let crypto_time = Instant::now();
-            node.state = node
-                .state
-                .progress(&mut self, cfg.clone(), mesh_state.clone())
-                .await;
+            node.state = node.state.progress(&mut self, mesh_state).await;
             node.update_watchers().await;
             crate::metrics::PROTOCOL_LATENCY_ITER_CRYPTO
                 .with_label_values(&[my_account_id.as_str()])
@@ -232,34 +226,12 @@ pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHan
     })
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq, Copy, Hash)]
-pub enum Chain {
-    NEAR,
-    Ethereum,
-    Solana,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[allow(clippy::large_enum_variant)]
 pub enum SignRequestType {
     Sign,
-    SignRespond(SignRespondRequestedEvent),
-    ReadRespond(ReadRespondedTx),
-}
-
-impl Chain {
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Chain::NEAR => "NEAR",
-            Chain::Ethereum => "Ethereum",
-            Chain::Solana => "Solana",
-        }
-    }
-}
-
-impl fmt::Display for Chain {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
+    SignBidirectional(SignBidirectionalEvent),
+    RespondBidirectional(RespondBidirectionalTx),
 }
 
 #[cfg(test)]

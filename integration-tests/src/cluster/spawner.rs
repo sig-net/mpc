@@ -1,9 +1,11 @@
 use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
+use mpc_node::protocol::state::NodeKeyInfo;
 use near_account_id::AccountId;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, Worker};
 
+use std::collections::BTreeMap;
 use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
 
@@ -16,6 +18,89 @@ use crate::cluster::Cluster;
 const DOCKER_NETWORK: &str = "mpc_it_network";
 const GCP_PROJECT_ID: &str = "multichain-integration";
 const ENV: &str = "integration-tests";
+
+/// Configuration for pregenerated keys to skip the 20+ second key generation phase.
+///
+/// When enabled, uses hardcoded key shares from fixture data to start nodes in
+/// Running state immediately, avoiding the expensive MPC key generation protocol.
+#[derive(Clone)]
+pub enum PregeneratedKeys {
+    /// Generate keys fresh during cluster setup (slow but tests full protocol)
+    Disabled,
+    /// Use pregenerated keys from fixture data (fast, skips keygen)
+    Enabled {
+        /// Key shares for each participant, indexed by participant ID
+        keys: BTreeMap<Participant, NodeKeyInfo>,
+        /// The shared public key for all participants
+        public_key: mpc_crypto::PublicKey,
+    },
+}
+
+impl PregeneratedKeys {
+    /// Load pregenerated keys for the given number of nodes from fixture data
+    pub fn load(num_nodes: usize) -> Option<Self> {
+        let data = match num_nodes {
+            3 => include_str!("../mpc_fixture/3_nodes.json"),
+            5 => include_str!("../mpc_fixture/5_nodes.json"),
+            other => {
+                tracing::warn!("No pregenerated keys for {other} nodes available");
+                return None;
+            }
+        };
+
+        #[derive(serde::Deserialize)]
+        struct FixtureData {
+            keys: BTreeMap<Participant, NodeKeyInfo>,
+        }
+
+        let fixture: FixtureData = serde_json::from_str(data)
+            .expect("Failed to parse pregenerated keys from fixture data");
+
+        let public_key = fixture
+            .keys
+            .values()
+            .next()
+            .expect("No keys in fixture data")
+            .public_key;
+
+        Some(Self::Enabled {
+            keys: fixture.keys,
+            public_key,
+        })
+    }
+
+    /// Check if keys are enabled
+    pub fn is_enabled(&self) -> bool {
+        matches!(self, Self::Enabled { .. })
+    }
+
+    /// Get the key info for a specific participant
+    pub fn get(&self, participant: &Participant) -> Option<&NodeKeyInfo> {
+        match self {
+            Self::Disabled => None,
+            Self::Enabled { keys, .. } => keys.get(participant),
+        }
+    }
+
+    /// Get the public key
+    pub fn public_key(&self) -> Option<mpc_crypto::PublicKey> {
+        match self {
+            Self::Disabled => None,
+            Self::Enabled { public_key, .. } => Some(*public_key),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Disabled => 0,
+            Self::Enabled { keys, .. } => keys.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
 
 pub struct Prestockpile {
     /// Multiplier to increase the stockpile such that stockpiling presignatures does not trigger
@@ -37,7 +122,11 @@ pub struct ClusterSpawner {
     pub wait_for_running: bool,
     pub redis: Option<containers::Redis>,
     pub worker: Option<Worker<Sandbox>>,
+    pub solana: Option<containers::Solana>,
+    pub program_address: Option<String>,
     prestockpile: Option<Prestockpile>,
+    pub pregenerated_keys: PregeneratedKeys,
+    pub use_ethereum: bool,
 }
 
 impl Default for ClusterSpawner {
@@ -45,8 +134,9 @@ impl Default for ClusterSpawner {
         let mut tmp_dir = execute::target_dir().expect("unable to locate target dir");
         tmp_dir.push("tmp");
 
+        let nodes = 3;
         let cfg = NodeConfig {
-            nodes: 3,
+            nodes,
             threshold: 2,
             ..Default::default()
         };
@@ -64,7 +154,11 @@ impl Default for ClusterSpawner {
             wait_for_running: true,
             redis: None,
             worker: None,
+            solana: None,
+            program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
+            pregenerated_keys: PregeneratedKeys::load(nodes).unwrap(),
+            use_ethereum: false,
         }
     }
 }
@@ -116,6 +210,43 @@ impl ClusterSpawner {
         self
     }
 
+    /// Disable pregenerated keys and generate keys fresh.
+    /// This is slower but tests the full key generation protocol.
+    pub fn without_pregenerated_keys(mut self) -> Self {
+        self.pregenerated_keys = PregeneratedKeys::Disabled;
+        self
+    }
+
+    fn load_pregenerated_keys(mut self) -> Self {
+        if self.pregenerated_keys.is_enabled() && self.pregenerated_keys.len() != self.cfg.nodes {
+            self.pregenerated_keys =
+                PregeneratedKeys::load(self.cfg.nodes).unwrap_or(PregeneratedKeys::Disabled);
+        }
+        self
+    }
+
+    /// Configures the cluster to spawn with Solana sandbox.
+    /// This method sets up a Solana test validator and configures the SolConfig.
+    pub fn solana(mut self) -> Self {
+        // Enable Solana by setting a placeholder if not already configured
+        if self.cfg.sol.is_none() {
+            self.cfg.sol = Some(mpc_node::indexer_sol::SolConfig {
+                account_sk: String::new(),      // Will be filled in later
+                rpc_http_url: String::new(),    // Will be filled in later
+                rpc_ws_url: String::new(),      // Will be filled in later
+                program_address: String::new(), // Will be filled in later
+                total_timeout: 60,
+            });
+        }
+        self
+    }
+
+    /// Set the Solana program address to watch for events.
+    pub fn program_address(mut self, address: String) -> Self {
+        self.program_address = Some(address);
+        self
+    }
+
     pub fn env(mut self, env: &str) -> Self {
         self.env = env.to_string();
         self
@@ -128,6 +259,11 @@ impl ClusterSpawner {
 
     pub fn network(mut self, network: &str) -> Self {
         self.network = network.to_string();
+        self
+    }
+
+    pub fn ethereum(mut self) -> Self {
+        self.use_ethereum = true;
         self
     }
 
@@ -162,12 +298,22 @@ impl ClusterSpawner {
         containers::Redis::run(self).await
     }
 
+    pub async fn spawn_solana(&self) -> containers::Solana {
+        containers::Solana::run().await
+    }
+
     /// Prespawns a redis instance where we're able to make use of it before the nodes are spun
     /// up and are in running phase. This redis instance will be reused when the whole environment
     /// is setup.
     pub async fn prespawn_redis(&mut self) -> &containers::Redis {
         self.redis = Some(self.spawn_redis().await);
         self.redis.as_ref().unwrap()
+    }
+
+    /// Prespawns a Solana test validator instance for integration testing.
+    pub async fn prespawn_solana(&mut self) -> &containers::Solana {
+        self.solana = Some(self.spawn_solana().await);
+        self.solana.as_ref().unwrap()
     }
 
     /// Grabs the underlying redis instance that was prespawned, or if not prespawned, create a
@@ -177,6 +323,12 @@ impl ClusterSpawner {
             Some(redis) => redis,
             None => self.spawn_redis().await,
         }
+    }
+
+    /// Grabs the underlying Solana instance that was prespawned, or if not prespawned, create a
+    /// new one from start up.
+    pub async fn take_solana(&mut self) -> Option<containers::Solana> {
+        self.solana.take()
     }
 
     pub async fn prespawn_sandbox(&mut self) -> anyhow::Result<&Worker<Sandbox>> {
@@ -214,7 +366,28 @@ impl IntoFuture for ClusterSpawner {
 
     fn into_future(mut self) -> Self::IntoFuture {
         Box::pin(async move {
-            self = self.init_network().await?;
+            self = self.load_pregenerated_keys().init_network().await?;
+
+            // Check if Solana is enabled and spawn if needed
+            if self.cfg.sol.is_some() {
+                // Start Solana test validator
+                let solana = self.spawn_solana().await;
+
+                // Deploy the core contracts and get the program address
+                let program_address = if let Some(addr) = self.program_address.clone() {
+                    // Use provided program address
+                    addr
+                } else {
+                    // Deploy the contract and use the deployed program address
+                    solana.deploy_contract().await?
+                };
+
+                let sol_config = solana.get_config(program_address);
+                self.cfg.sol = Some(sol_config);
+
+                // Store the Solana container for potential later use
+                self.solana = Some(solana);
+            }
 
             let nodes = self.run().await?;
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
@@ -227,6 +400,7 @@ impl IntoFuture for ClusterSpawner {
                 http_client: reqwest::Client::default(),
                 docker_client: self.docker,
                 account_idx: nodes.len(),
+                solana: self.solana.take(),
                 nodes,
             };
 

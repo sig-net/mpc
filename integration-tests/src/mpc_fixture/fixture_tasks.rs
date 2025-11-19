@@ -41,6 +41,7 @@ pub(super) fn test_mock_network(
                     let log_msg = match msg {
                         protocol::Message::Posit(_) => "Posit",
                         protocol::Message::Generating(_) => "Generating",
+                        protocol::Message::Ready(_) => "Ready",
                         protocol::Message::Resharing(_) => "Resharing",
                         protocol::Message::Triple(_) => "Triple",
                         protocol::Message::Presignature(_) => "Presignature",

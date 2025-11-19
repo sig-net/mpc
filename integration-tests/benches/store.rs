@@ -20,7 +20,7 @@ use mpc_node::{
         ParticipantInfo, ProtocolState,
     },
     rpc::ContractStateWatcher,
-    storage::{PresignatureStorage, TripleStorage},
+    storage::{triple_storage::TriplePair, PresignatureStorage, TripleStorage},
 };
 use near_account_id::AccountId;
 use tokio::{
@@ -102,6 +102,7 @@ fn env() -> (Runtime, SyncEnv) {
             mpc_node::mesh::Options {
                 ping_interval: 1000,
             },
+            &node_id,
             synced_peer_rx,
         );
 
@@ -155,7 +156,7 @@ fn bench_load_keys(c: &mut Criterion) {
         b.iter(|| {
             rt.block_on(async {
                 for i in 0..1000 {
-                    let t = dummy_triple(i);
+                    let t = dummy_pair(i);
                     env.triples
                         .reserve(t.id)
                         .await
@@ -225,10 +226,17 @@ fn dummy_presignature(id: u64) -> Presignature {
     }
 }
 
-// TODO: cleanup and move this to a common test utils module
-fn dummy_triple(id: u64) -> Triple {
-    Triple {
+fn dummy_pair(id: u64) -> TriplePair {
+    TriplePair {
         id,
+        triple0: dummy_triple(),
+        triple1: dummy_triple(),
+    }
+}
+
+// TODO: cleanup and move this to a common test utils module
+fn dummy_triple() -> Triple {
+    Triple {
         share: TripleShare {
             a: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
             b: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,

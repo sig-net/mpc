@@ -3,18 +3,22 @@ mod error;
 #[cfg(test)]
 pub mod mock;
 
+#[cfg(feature = "debug-page")]
+pub mod debug;
+
 use self::error::Error;
+use crate::backlog::{Backlog, Checkpoint};
 use crate::indexer::NearIndexer;
 use crate::metrics::WEB_ENDPOINT_LATENCY;
-use crate::protocol::state::{NodeStateWatcher, NodeStatus};
+use crate::protocol::state::{NodeStateWatcher, NodeStatus, ResharingStatus};
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
-use crate::protocol::MessageChannel;
+use crate::protocol::{Chain, MessageChannel};
 use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::web::cbor::Cbor;
 use crate::web::error::Result;
 
 use anyhow::Context;
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{DefaultBodyLimit, Query};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -25,6 +29,7 @@ use near_account_id::AccountId;
 use near_primitives::types::BlockHeight;
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -36,6 +41,7 @@ struct AxumState {
     sync_channel: SyncChannel,
     msg_channel: MessageChannel,
     my_account_id: AccountId,
+    backlog: Backlog,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -48,6 +54,7 @@ pub async fn run(
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
     my_account_id: AccountId,
+    backlog: Backlog,
 ) {
     tracing::info!("starting web server");
     let axum_state = AxumState {
@@ -58,6 +65,7 @@ pub async fn run(
         presignature_storage,
         sync_channel,
         my_account_id,
+        backlog,
     };
 
     // Sync can be a large payload, so we set a higher limit for payload.
@@ -78,6 +86,8 @@ pub async fn run(
         .route("/state", get(state))
         .route("/status", get(status))
         .route("/metrics", get(metrics))
+        .route("/checkpoint", get(checkpoint))
+        .route("/debug", get(debug::page))
         .merge(sync);
 
     if cfg!(feature = "bench") {
@@ -130,6 +140,7 @@ pub enum StateView {
         old_participants: Vec<Participant>,
         new_participants: Vec<Participant>,
         latest_block_height: BlockHeight,
+        phase: ResharingStatus,
     },
     Joining {
         participants: Vec<Participant>,
@@ -178,10 +189,12 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
         NodeStatus::Resharing {
             old_participants,
             new_participants,
+            phase,
         } => Ok(Json(StateView::Resharing {
             old_participants: old_participants.clone(),
             new_participants: new_participants.clone(),
             latest_block_height,
+            phase,
         })),
         NodeStatus::Joining { participants } => Ok(Json(StateView::Joining {
             participants: participants.clone(),
@@ -260,4 +273,104 @@ async fn sync(
         .with_label_values(&["sync", state.my_account_id.as_str()])
         .observe(start.elapsed().as_millis() as f64);
     Ok(Json(()))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CheckpointQuery {
+    /// Combined chain selection and hash filter. Entries are separated by commas.
+    /// Examples:
+    /// - "Ethereum" -> latest Ethereum checkpoint
+    /// - "Solana:1234" -> specific Solana checkpoint by hash
+    /// - "Solana:1234,Ethereum" -> mix of filters
+    #[serde(default)]
+    query: Option<String>,
+}
+
+impl CheckpointQuery {
+    #[allow(clippy::result_large_err)]
+    fn parse(self) -> Result<Vec<(Chain, Option<u64>)>, Error> {
+        let Some(query) = self.query else {
+            return Ok(Chain::iter()
+                .into_iter()
+                .map(|chain| (chain, None))
+                .collect());
+        };
+
+        let mut selections = Vec::new();
+        for entry in query.split(',') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                return Err(Error::InvalidParameters(
+                    "query parameter contains an empty segment".to_string(),
+                ));
+            }
+
+            let mut parts = entry.splitn(2, ':');
+            let chain_part = parts
+                .next()
+                .expect("splitn(2) always returns at least one part")
+                .trim();
+            let chain = chain_part.parse::<Chain>().map_err(|e| {
+                Error::InvalidParameters(format!("Invalid chain '{}': {}", chain_part, e))
+            })?;
+
+            let hash = match parts.next() {
+                Some(hash_part) => {
+                    let hash_part = hash_part.trim();
+                    if hash_part.is_empty() {
+                        return Err(Error::InvalidParameters(format!(
+                            "Invalid hash format for '{}'. Expected 'chain:hash'",
+                            chain_part
+                        )));
+                    }
+
+                    Some(hash_part.parse::<u64>().map_err(|e| {
+                        Error::InvalidParameters(format!("Invalid hash '{}': {}", hash_part, e))
+                    })?)
+                }
+                None => None,
+            };
+
+            selections.push((chain, hash));
+        }
+
+        Ok(selections)
+    }
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn checkpoint(
+    Extension(state): Extension<Arc<AxumState>>,
+    Query(query): Query<CheckpointQuery>,
+) -> Result<Cbor<HashMap<Chain, Checkpoint>>> {
+    let start = Instant::now();
+    let selections = query.parse()?;
+    let mut resp = HashMap::new();
+    for (chain, hash) in selections {
+        let checkpoint = if let Some(hash) = hash {
+            state.backlog.find_checkpoint_by_hash(chain, hash).await
+        } else {
+            state.backlog.latest_checkpoint(chain).await
+        };
+
+        let Some(checkpoint) = checkpoint else {
+            tracing::warn!(?chain, ?hash, "unable to find checkpoint");
+            continue;
+        };
+
+        resp.insert(chain, checkpoint);
+    }
+
+    WEB_ENDPOINT_LATENCY
+        .with_label_values(&["checkpoint", state.my_account_id.as_str()])
+        .observe(start.elapsed().as_millis() as f64);
+
+    Ok(Cbor(resp))
+}
+
+#[cfg(not(feature = "debug-page"))]
+mod debug {
+    pub async fn page() -> axum::response::Html<String> {
+        format!("<html><body>Debug page disabled. Compile the node with --features=debug-page to show useful information here.</bod></html>").into()
+    }
 }

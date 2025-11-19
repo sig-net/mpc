@@ -1,3 +1,4 @@
+use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
 use crate::mesh::Mesh;
@@ -6,9 +7,7 @@ use crate::protocol::message::MessageChannel;
 use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
-use crate::read_respond::ReadRespondedTxProcessor;
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
-use crate::sign_respond_tx::SignRespondSignatureProcessor;
 use crate::storage::app_data_storage;
 use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
 use clap::Parser;
@@ -18,7 +17,6 @@ use local_ip_address::local_ip;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 use url::Url;
@@ -225,6 +223,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             }
             tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
 
+            let backlog = Backlog::new();
+
             // NEAR Indexer is only used for integration tests
             // TODO: Remove this once we have integration tests built on other chains
             let indexer = if storage_options.env == "integration-tests" {
@@ -234,6 +234,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     &account_id,
                     sign_tx.clone(),
                     rpc_client.clone(),
+                    backlog.clone(),
                 )?;
                 Some(indexer)
             } else {
@@ -255,7 +256,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let client = NodeClient::new(&message_options);
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
             let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
-            let mesh = Mesh::new(&client, mesh_options, synced_peer_rx);
+            let mesh = Mesh::new(&client, mesh_options, &account_id, synced_peer_rx);
             let mesh_state = mesh.watch();
             let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(&account_id);
 
@@ -264,11 +265,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let network = NetworkConfig { cipher_sk, sign_sk };
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
-            let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth, &sol);
-            let (sign_respond_signature_channel, sign_respond_signature_processor) =
-                SignRespondSignatureProcessor::new();
-            let (read_responded_tx_channel, read_responded_tx_processor) =
-                ReadRespondedTxProcessor::new();
+
+            let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth, &sol, backlog.clone());
+
             let (sync_channel, sync) = SyncTask::new(
                 &client,
                 triple_storage.clone(),
@@ -277,11 +276,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher.clone(),
                 synced_peer_tx,
             );
-
-            let sign_respond_tx_map = Arc::new(RwLock::new(HashMap::<
-                crate::sign_respond_tx::SignRespondTxId,
-                crate::sign_respond_tx::SignRespondTx,
-            >::new()));
 
             tracing::info!(
                 %digest,
@@ -305,7 +299,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let node_watcher = node.watch();
 
             let msg_channel = MessageChannel::spawn(
-                client,
+                client.clone(),
                 &account_id,
                 config_rx.clone(),
                 contract_watcher.clone(),
@@ -317,37 +311,28 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 msg_channel: msg_channel.clone(),
                 generating: msg_channel.subscribe_generation().await,
                 resharing: msg_channel.subscribe_resharing().await,
+                ready: msg_channel.subscribe_ready().await,
                 sign_rx: Arc::new(RwLock::new(sign_rx)),
                 secret_storage: key_storage,
                 triple_storage: triple_storage.clone(),
                 presignature_storage: presignature_storage.clone(),
                 contract: contract_watcher.clone(),
-                config: config_rx.clone(),
+                config: config_rx,
                 mesh_state: mesh_state.clone(),
-                sign_respond_signature_channel: sign_respond_signature_channel.clone(),
+                backlog: backlog.clone(),
             };
 
             tracing::info!("protocol initialized");
             tokio::spawn(sync.run());
-            tokio::spawn(rpc.run(
-                contract_state_tx,
-                config_tx.clone(),
-                sign_respond_signature_channel.clone(),
-                read_responded_tx_channel.clone(),
-            ));
+            tokio::spawn(rpc.run(contract_state_tx, config_tx.clone()));
 
-            let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
-            tokio::spawn(sign_respond_signature_processor.run(sign_respond_tx_map_clone, 5));
-            let sign_respond_tx_map_clone = sign_respond_tx_map.clone();
-            tokio::spawn(read_responded_tx_processor.run(sign_respond_tx_map_clone, 5));
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
             let protocol_handle = tokio::spawn(protocol.run(
                 node,
                 near_client,
-                contract_watcher,
-                config_rx,
-                mesh_state,
+                contract_watcher.clone(),
+                mesh_state.clone(),
             ));
             tracing::info!("protocol thread spawned");
             let web_handle = tokio::spawn(web::run(
@@ -359,15 +344,27 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 presignature_storage,
                 sync_channel,
                 account_id.clone(),
+                backlog.clone(),
             ));
             tokio::spawn(indexer_eth::run(
                 eth,
                 sign_tx.clone(),
                 app_data_storage.clone(),
                 account_id.clone(),
-                sign_respond_tx_map,
+                backlog.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                client.clone(),
             ));
-            tokio::spawn(indexer_sol::run(sol, sign_tx, account_id));
+            tokio::spawn(indexer_sol::run(
+                sol,
+                sign_tx,
+                account_id,
+                backlog,
+                contract_watcher,
+                mesh_state,
+                client,
+            ));
             tracing::info!("protocol http server spawned");
             protocol_handle.await?;
             web_handle.await?;

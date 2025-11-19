@@ -7,6 +7,7 @@ use cait_sith::protocol::Participant;
 use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
+use serde::{Deserialize, Serialize};
 
 use near_account_id::AccountId;
 
@@ -14,102 +15,123 @@ use super::{owner_key, STORAGE_VERSION};
 
 const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
-/// A pre-reserved slot for a triple that will eventually be inserted.
-pub struct TripleSlot {
+/// A pair of completed triples.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TriplePair {
+    pub id: TripleId,
+    pub triple0: Triple,
+    pub triple1: Triple,
+}
+
+impl ToRedisArgs for TriplePair {
+    fn write_redis_args<W>(&self, out: &mut W)
+    where
+        W: ?Sized + RedisWrite,
+    {
+        match serde_json::to_string(self) {
+            Ok(json) => out.write_arg(json.as_bytes()),
+            Err(e) => {
+                tracing::error!("Failed to serialize TriplePair: {}", e);
+                out.write_arg("failed_to_serialize".as_bytes())
+            }
+        }
+    }
+}
+
+impl FromRedisValue for TriplePair {
+    fn from_redis_value(v: &redis::Value) -> redis::RedisResult<Self> {
+        let json = String::from_redis_value(v)?;
+
+        serde_json::from_str(&json).map_err(|e| {
+            RedisError::from((
+                redis::ErrorKind::TypeError,
+                "Failed to deserialize TriplePair",
+                e.to_string(),
+            ))
+        })
+    }
+}
+
+/// A pre-reserved slot for a triple pair that will eventually be inserted.
+pub struct TriplePairSlot {
     id: TripleId,
     storage: TripleStorage,
     stored: bool,
 }
 
-impl TripleSlot {
-    /// Inserts the triple into the storage, associating it with the given owner.
+impl TriplePairSlot {
+    /// Inserts the triple pair into the storage, associating it with the given owner.
     /// Returns true if the insertion was successful, false otherwise.
     // TODO: put inside a tokio task:
-    pub async fn insert(&mut self, triple: Triple, owner: Participant) -> bool {
-        self.stored = self.storage.insert(triple, owner).await;
+    pub async fn insert(&mut self, pair: TriplePair, owner: Participant) -> bool {
+        self.stored = self.storage.insert_pair(pair, owner).await;
         self.stored
     }
 
     pub async fn unreserve(&self) {
         if !self.stored {
-            self.storage.unreserve([self.id]).await;
+            self.storage.unreserve_pair([self.id]).await;
         }
     }
 }
 
-impl Drop for TripleSlot {
+impl Drop for TriplePairSlot {
     fn drop(&mut self) {
         if !self.stored {
             let storage = self.storage.clone();
             let id = self.id;
             // If the slot was not stored, we need to unreserve it.
             tokio::spawn(async move {
-                storage.unreserve([id]).await;
+                storage.unreserve_pair([id]).await;
             });
         }
     }
 }
 
 pub struct TriplesTaken {
-    pub triple0: Triple,
-    pub triple1: Triple,
+    pub pair: TriplePair,
     pub dropper: TriplesTakenDropper,
 }
 
 impl TriplesTaken {
-    pub fn owner(triple0: Triple, triple1: Triple, storage: TripleStorage) -> Self {
+    pub fn owner(pair: TriplePair, storage: TripleStorage) -> Self {
         let dropper = TriplesTakenDropper {
-            id0: triple0.id,
-            id1: triple1.id,
+            pair_id: pair.id,
             storage: Some(storage),
         };
-        Self {
-            triple0,
-            triple1,
-            dropper,
-        }
+        Self { pair, dropper }
     }
 
-    pub fn foreigner(triple0: Triple, triple1: Triple) -> Self {
+    pub fn foreigner(pair: TriplePair) -> Self {
         let dropper = TriplesTakenDropper {
-            id0: triple0.id,
-            id1: triple1.id,
+            pair_id: pair.id,
             storage: None,
         };
-        Self {
-            triple0,
-            triple1,
-            dropper,
-        }
+        Self { pair, dropper }
     }
 
-    pub fn take(self) -> (Triple, Triple, TriplesTakenDropper) {
-        (self.triple0, self.triple1, self.dropper)
+    pub fn take(self) -> (TriplePair, TriplesTakenDropper) {
+        (self.pair, self.dropper)
     }
 }
 
 impl fmt::Debug for TriplesTaken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("TriplesTaken")
-            .field(&self.triple0.id)
-            .field(&self.triple1.id)
-            .finish()
+        f.debug_tuple("TriplesTaken").field(&self.pair.id).finish()
     }
 }
 
 pub struct TriplesTakenDropper {
-    pub id0: TripleId,
-    pub id1: TripleId,
+    pub pair_id: TripleId,
     storage: Option<TripleStorage>,
 }
 
 impl Drop for TriplesTakenDropper {
     fn drop(&mut self) {
         if let Some(storage) = self.storage.take() {
-            let id0 = self.id0;
-            let id1 = self.id1;
+            let pair_id = self.pair_id;
             tokio::spawn(async move {
-                storage.unreserve([id0, id1]).await;
+                storage.unreserve_pair([pair_id]).await;
             });
         }
     }
@@ -118,8 +140,7 @@ impl Drop for TriplesTakenDropper {
 impl fmt::Debug for TriplesTakenDropper {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("TriplesTakenDropper")
-            .field(&self.id0)
-            .field(&self.id1)
+            .field(&self.pair_id)
             .finish()
     }
 }
@@ -161,28 +182,28 @@ impl TripleStorage {
             .ok()
     }
 
-    pub async fn reserve(&self, id: TripleId) -> Option<TripleSlot> {
+    pub async fn reserve(&self, id: TripleId) -> Option<TriplePairSlot> {
         let start = Instant::now();
 
         const SCRIPT: &str = r#"
             local triple_key = KEYS[1]
             local used_key = KEYS[2]
             local reserved_key = KEYS[3]
-            local triple_id = ARGV[1]
+            local pair_id = ARGV[1]
 
-            -- cannot reserve this triple if it already exists.
-            if redis.call("SADD", reserved_key, triple_id) == 0 then
-                return {err = "WARN triple " .. triple_id .. " has already been reserved"}
+            -- cannot reserve this pair if it already exists.
+            if redis.call("SADD", reserved_key, pair_id) == 0 then
+                return {err = "WARN pair " .. pair_id .. " has already been reserved"}
             end
 
-            -- cannot reserve this triple if its already in storage.
-            if redis.call("HEXISTS", triple_key, triple_id) == 1 then
-                return {err = "WARN triple " .. triple_id .. " has already been stored"}
+            -- cannot reserve this pair if its already in storage.
+            if redis.call("HEXISTS", triple_key, pair_id) == 1 then
+                return {err = "WARN pair " .. pair_id .. " has already been stored"}
             end
 
-            -- cannot reserve this triple if it has already been used.
-            if redis.call("HEXISTS", used_key, triple_id) == 1 then
-                return {err = "WARN triple " .. triple_id .. " has already been used"}
+            -- cannot reserve this pair if it has already been used.
+            if redis.call("HEXISTS", used_key, pair_id) == 1 then
+                return {err = "WARN pair " .. pair_id .. " has already been used"}
             end
         "#;
 
@@ -197,11 +218,11 @@ impl TripleStorage {
 
         let elapsed = start.elapsed();
         crate::metrics::REDIS_LATENCY
-            .with_label_values(&["triple", "reserve", self.account_id.as_str()])
+            .with_label_values(&["triple", "reserve_pair", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
 
         match result {
-            Ok(_) => Some(TripleSlot {
+            Ok(_) => Some(TriplePairSlot {
                 id,
                 storage: self.clone(),
                 stored: false,
@@ -210,7 +231,7 @@ impl TripleStorage {
                 tracing::warn!(
                     ?err,
                     elapsed_ms = elapsed.as_millis(),
-                    "failed to reserve triple"
+                    "failed to reserve pair"
                 );
                 None
             }
@@ -225,6 +246,10 @@ impl TripleStorage {
         if let Err(err) = outcome {
             tracing::warn!(?triples, ?err, "failed to unreserve triples");
         }
+    }
+
+    async fn unreserve_pair(&self, pairs: [TripleId; 1]) {
+        self.unreserve(pairs).await;
     }
 
     pub async fn remove_outdated(
@@ -327,7 +352,7 @@ impl TripleStorage {
             .unwrap_or_default()
     }
 
-    async fn insert(&self, triple: Triple, owner: Participant) -> bool {
+    async fn insert_pair(&self, pair: TriplePair, owner: Participant) -> bool {
         let start = Instant::now();
 
         const SCRIPT: &str = r#"
@@ -336,27 +361,27 @@ impl TripleStorage {
             local reserved_key = KEYS[3]
             local owner_keys = KEYS[4]
             local owner_key = KEYS[5]
-            local triple_id = ARGV[1]
-            local triple = ARGV[2]
+            local pair_id = ARGV[1]
+            local pair = ARGV[2]
 
-            -- if the triple has not been reserved, then something went wrong when acquiring the
-            -- reservation for it via triple slot.
-            if redis.call("SREM", reserved_key, triple_id) == 0 then
-                return {err = "WARN triple " .. triple_id .. " has NOT been reserved"}
+            -- if the pair has not been reserved, then something went wrong when acquiring the
+            -- reservation for it via triple pair slot.
+            if redis.call("SREM", reserved_key, pair_id) == 0 then
+                return {err = "WARN pair " .. pair_id .. " has NOT been reserved"}
             end
 
-            if redis.call("HEXISTS", used_key, triple_id) == 1 then
-                return {err = "WARN triple " .. triple_id .. " has already been used"}
+            if redis.call("HEXISTS", used_key, pair_id) == 1 then
+                return {err = "WARN pair " .. pair_id .. " has already been used"}
             end
 
-            redis.call("SADD", owner_key, triple_id)
+            redis.call("SADD", owner_key, pair_id)
             redis.call("SADD", owner_keys, owner_key)
-            redis.call("HSET", triple_key, triple_id, triple)
+            redis.call("HSET", triple_key, pair_id, pair)
         "#;
 
-        let id = triple.id;
+        let id = pair.id;
         let Some(mut conn) = self.connect().await else {
-            tracing::warn!(id, "failed to insert triple: connection failed");
+            tracing::warn!(id, "failed to insert pair: connection failed");
             return false;
         };
         let result: Result<(), _> = redis::Script::new(SCRIPT)
@@ -366,13 +391,13 @@ impl TripleStorage {
             .key(&self.owner_keys)
             .key(owner_key(&self.owner_keys, owner))
             .arg(id)
-            .arg(triple)
+            .arg(pair)
             .invoke_async(&mut conn)
             .await;
 
         let elapsed = start.elapsed();
         crate::metrics::REDIS_LATENCY
-            .with_label_values(&["triple", "insert", self.account_id.as_str()])
+            .with_label_values(&["triple", "insert_pair", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
 
         if let Err(err) = result {
@@ -380,7 +405,7 @@ impl TripleStorage {
                 id,
                 ?err,
                 elapsed_ms = elapsed.as_millis(),
-                "failed to insert triple into storage"
+                "failed to insert pair into storage"
             );
             false
         } else {
@@ -441,14 +466,12 @@ impl TripleStorage {
         }
     }
 
-    /// Take two unspent triple by theirs id with no way to return it. Only takes
-    /// if both of them are present.
-    /// It is very important to NOT reuse the same triple twice for two different
+    /// Take a triple pair by its id. Only takes if it is present.
+    /// It is very important to NOT reuse the same pair twice for two different
     /// protocols.
-    pub async fn take_two(
+    pub async fn take(
         &self,
-        id1: TripleId,
-        id2: TripleId,
+        id: TripleId,
         owner: Participant,
         me: Participant,
     ) -> Option<TriplesTaken> {
@@ -458,43 +481,38 @@ impl TripleStorage {
             local owner_key = KEYS[3]
             local mine_key = KEYS[4]
             local reserved_key = KEYS[5]
-            local id1 = ARGV[1]
-            local id2 = ARGV[2]
+            local pair_id = ARGV[1]
 
-            local reserved = redis.call("SMISMEMBER", reserved_key, id1, id2)
-            if reserved[1] == 1 or reserved[2] == 1 then
-                return {err = "WARN triple " .. id1 .. " or " .. id2 .. " is generating or taken"}
+            local reserved = redis.call("SMISMEMBER", reserved_key, pair_id)
+            if reserved[1] == 1 then
+                return {err = "WARN pair " .. pair_id .. " is generating or taken"}
             end
 
-            -- check if the given triple id belong to us, if so then we cannot take it as foreign
-            local check = redis.call("SMISMEMBER", mine_key, id1, id2)
-            if check[1] == 1 or check[2] == 1 then
-                return {err = "WARN triple " .. id1 .. " or " .. id2 .. " cannot be taken as foreign owned"}
+            -- check if the given pair id belong to us, if so then we cannot take it as foreign
+            local check = redis.call("SMISMEMBER", mine_key, pair_id)
+            if check[1] == 1 then
+                return {err = "WARN pair " .. pair_id .. " cannot be taken as foreign owned"}
             end
 
-            -- check if the given triple id belong to the owner, if not then error out
-            local check = redis.call("SMISMEMBER", owner_key, id1, id2)
-            if check[1] == 0 or check[2] == 0 then
-                return {err = "WARN triple " .. id1 .. " or " .. id2 .. " cannot be taken by incorrect owner " .. owner_key}
+            -- check if the given pair id belong to the owner, if not then error out
+            local check = redis.call("SMISMEMBER", owner_key, pair_id)
+            if check[1] == 0 then
+                return {err = "WARN pair " .. pair_id .. " cannot be taken by incorrect owner " .. owner_key}
             end
 
-            -- fetch the triples and delete them once successfully fetched
-            local triples = redis.call("HMGET", triple_key, id1, id2)
-            if not triples[1] then
-                return {err = "WARN unexpected, triple " .. id1 .. " is missing"}
+            -- fetch the pair and delete it once successfully fetched
+            local pair = redis.call("HGET", triple_key, pair_id)
+            if not pair then
+                return {err = "WARN unexpected, pair " .. pair_id .. " is missing"}
             end
-            if not triples[2] then
-                return {err = "WARN unexpected, triple " .. id2 .. " is missing"}
-            end
-            redis.call("HDEL", triple_key, id1, id2)
-            redis.call("SREM", owner_key, id1, id2)
+            redis.call("HDEL", triple_key, pair_id)
+            redis.call("SREM", owner_key, pair_id)
 
-            -- Add the triples to the used set and set expiration time. Note, HSET is used so
-            -- we can expire on each field instead of the whole hash set.
-            redis.call("HSET", used_key, id1, "1", id2, "1")
-            redis.call("HEXPIRE", used_key, ARGV[3], "FIELDS", 2, id1, id2)
+            -- Add the pair to the used set and set expiration time.
+            redis.call("HSET", used_key, pair_id, "1")
+            redis.call("HEXPIRE", used_key, ARGV[2], "FIELDS", 1, pair_id)
 
-            return triples
+            return pair
         "#;
 
         let start = Instant::now();
@@ -505,44 +523,37 @@ impl TripleStorage {
             .key(owner_key(&self.owner_keys, owner))
             .key(owner_key(&self.owner_keys, me))
             .key(&self.reserved_key)
-            .arg(id1)
-            .arg(id2)
+            .arg(id)
             .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await;
 
         let elapsed = start.elapsed();
         crate::metrics::REDIS_LATENCY
-            .with_label_values(&["triple", "take_two", self.account_id.as_str()])
+            .with_label_values(&["triple", "take", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
 
         match result {
-            Ok((triple0, triple1)) => {
-                tracing::debug!(
-                    id1,
-                    id2,
-                    elapsed_ms = elapsed.as_millis(),
-                    "took two triples"
-                );
-                Some(TriplesTaken::foreigner(triple0, triple1))
+            Ok(pair) => {
+                tracing::debug!(id, elapsed_ms = elapsed.as_millis(), "took pair");
+                Some(TriplesTaken::foreigner(pair))
             }
             Err(err) => {
                 tracing::warn!(
-                    id1,
-                    id2,
+                    id,
                     ?err,
                     elapsed_ms = elapsed.as_millis(),
-                    "failed to take two triples from storage"
+                    "failed to take pair from storage"
                 );
                 None
             }
         }
     }
 
-    /// Take two random unspent triple generated by this node. Either takes both or none.
-    /// It is very important to NOT reuse the same triple twice for two different
+    /// Take a random unspent triple pair generated by this node.
+    /// It is very important to NOT reuse the same pair twice for two different
     /// protocols.
-    pub async fn take_two_mine(&self, me: Participant) -> Option<TriplesTaken> {
+    pub async fn take_mine(&self, me: Participant) -> Option<TriplesTaken> {
         const SCRIPT: &str = r#"
             local triple_key = KEYS[1]
             local used_key = KEYS[2]
@@ -550,36 +561,32 @@ impl TripleStorage {
             local reserved_key = KEYS[4]
             local expire_time = ARGV[1]
 
-            if redis.call("SCARD", mine_key) < 2 then
+            if redis.call("SCARD", mine_key) < 1 then
                 return nil
             end
 
-            -- pop two triples from the self owner set and delete them once successfully fetched
-            local triple_ids = redis.call("SPOP", mine_key, 2)
-            local triples = redis.call("HMGET", triple_key, unpack(triple_ids))
-            if not triples[1] then
-                return {err = "WARN unexpected, triple " .. triple_ids[1] .. " is missing"}
-            end
-            if not triples[2] then
-                return {err = "WARN unexpected, triple " .. triple_ids[2] .. " is missing"}
+            -- pop one pair from the self owner set and delete it once successfully fetched
+            local pair_ids = redis.call("SPOP", mine_key, 1)
+            local pair = redis.call("HGET", triple_key, pair_ids[1])
+            if not pair then
+                return {err = "WARN unexpected, pair " .. pair_ids[1] .. " is missing"}
             end
 
-            -- reserve the triples again, since the owner is taking them here, and should
+            -- reserve the pair again, since the owner is taking it here, and should
             -- not invalidate the other nodes when syncing.
-            redis.call("SADD", reserved_key, unpack(triple_ids))
+            redis.call("SADD", reserved_key, pair_ids[1])
 
-            -- Delete the triples from the hash map
-            redis.call("HDEL", triple_key, unpack(triple_ids))
-            -- delete the triples from our self owner set
-            redis.call("SREM", mine_key, unpack(triple_ids))
+            -- Delete the pair from the hash map
+            redis.call("HDEL", triple_key, pair_ids[1])
+            -- delete the pair from our self owner set
+            redis.call("SREM", mine_key, pair_ids[1])
 
-            -- Add the triples to the used set and set expiration time. Note, HSET is used so
-            -- we can expire on each field instead of the whole hash set.
-            redis.call("HSET", used_key, triple_ids[1], "1", triple_ids[2], "1")
-            redis.call("HEXPIRE", used_key, expire_time, "FIELDS", 2, unpack(triple_ids))
+            -- Add the pair to the used set and set expiration time.
+            redis.call("HSET", used_key, pair_ids[1], "1")
+            redis.call("HEXPIRE", used_key, expire_time, "FIELDS", 1, pair_ids[1])
 
-            -- Return the triples as a response
-            return triples
+            -- Return the pair as a response
+            return pair
         "#;
 
         let start = Instant::now();
@@ -595,17 +602,16 @@ impl TripleStorage {
 
         let elapsed = start.elapsed();
         crate::metrics::REDIS_LATENCY
-            .with_label_values(&["triple", "take_two_mine", self.account_id.as_str()])
+            .with_label_values(&["triple", "take_mine", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
 
         match result {
-            Ok(Some((triple0, triple1))) => {
-                let taken = TriplesTaken::owner(triple0, triple1, self.clone());
+            Ok(Some(pair)) => {
+                let taken = TriplesTaken::owner(pair, self.clone());
                 tracing::debug!(
-                    id0 = taken.triple0.id,
-                    id1 = taken.triple1.id,
+                    id = taken.pair.id,
                     elapsed_ms = elapsed.as_millis(),
-                    "took two mine triples"
+                    "took mine pair"
                 );
                 Some(taken)
             }
@@ -614,7 +620,7 @@ impl TripleStorage {
                 tracing::warn!(
                     ?err,
                     elapsed_ms = elapsed.as_millis(),
-                    "failed to take two mine triples from storage"
+                    "failed to take mine pair from storage"
                 );
                 None
             }

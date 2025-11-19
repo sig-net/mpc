@@ -59,6 +59,7 @@ pub struct ResharingContractState {
     pub threshold: usize,
     pub public_key: PublicKey,
     pub finished_votes: HashSet<AccountId>,
+    pub cancel_votes: HashSet<AccountId>,
 }
 
 impl From<mpc_contract::ResharingContractState> for ResharingContractState {
@@ -71,6 +72,11 @@ impl From<mpc_contract::ResharingContractState> for ResharingContractState {
             public_key: contract_state.public_key.into_affine_point(),
             finished_votes: contract_state
                 .finished_votes
+                .into_iter()
+                .map(|acc_id| AccountId::from_str(acc_id.as_ref()).unwrap())
+                .collect(),
+            cancel_votes: contract_state
+                .cancel_votes
                 .into_iter()
                 .map(|acc_id| AccountId::from_str(acc_id.as_ref()).unwrap())
                 .collect(),

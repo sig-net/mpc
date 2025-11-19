@@ -243,14 +243,25 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                 }
 
                 if action.is_accept() {
-                    counter.accepts.insert(from);
+                    if counter.accepts.insert(from) {
+                        tracing::info!(?id, ?from, "posit ACCEPT processed");
+                    } else {
+                        tracing::warn!(?id, ?from, "posit ACCEPT duplicate ignored");
+                    }
+                } else if counter.rejects.insert(from) {
+                    tracing::info!(?id, ?from, "posit REJECT processed");
                 } else {
-                    counter.rejects.insert(from);
+                    tracing::warn!(?id, ?from, "posit REJECT duplicate ignored");
                 }
 
                 // TODO: broadcast aborting the protocol if we have enough rejections
                 if counter.enough_rejects(threshold) {
-                    tracing::info!(?id, rejects = ?counter.rejects, "received enough REJECTs, aborting protocol");
+                    tracing::info!(
+                        ?id,
+                        ?counter.accepts,
+                        ?counter.rejects,
+                        "received enough REJECTs, aborting protocol",
+                    );
                     entry.remove();
                     return PositInternalAction::Abort;
                 }

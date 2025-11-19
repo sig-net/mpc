@@ -13,17 +13,20 @@ use mpc_contract::primitives::{
     CandidateInfo, Candidates as CandidatesById, ParticipantInfo, Participants as ParticipantsById,
 };
 use mpc_keys::hpke::{self, Ciphered};
+use mpc_node::backlog::Backlog;
 use mpc_node::config::{Config, LocalConfig, NetworkConfig};
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes, Votes};
 use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
 use mpc_node::protocol::message::{MessageInbox, MessageOutbox};
 use mpc_node::protocol::state::NodeKeyInfo;
+use mpc_node::protocol::triple::Triple;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState, SignQueue};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
-use mpc_node::sign_respond_tx::SignRespondSignatureProcessor;
-use mpc_node::storage::{presignature_storage, secret_storage, triple_storage, Options};
+use mpc_node::storage::{
+    presignature_storage, secret_storage, triple_storage, triple_storage::TriplePair, Options,
+};
 use near_sdk::AccountId;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -117,11 +120,6 @@ impl FixtureConfig {
 
 impl MpcFixtureBuilder {
     pub fn new(num_nodes: u32, threshold: usize) -> Self {
-        // This is a bit of a weird place to install the subscriber but every
-        // test needs to call it somewhere. Since tests will usually call this
-        // before doing anything interesting, might as well do it here.
-        crate::utils::init_tracing_log();
-
         let prepared_nodes: Vec<_> = (0..num_nodes).map(MpcFixtureNodeBuilder::new).collect();
 
         // construct full list of participants and candidates (same set)
@@ -425,8 +423,6 @@ impl MpcFixtureNodeBuilder {
         let rpc_channel = RpcChannel { tx: rpc_tx };
         let (mesh_tx, mesh_rx) = watch::channel(context.init_mesh.clone());
         let (config_tx, config_rx) = watch::channel(self.config);
-        let (sign_respond_signature_channel, _sign_respond_signature_processor) =
-            SignRespondSignatureProcessor::new();
 
         let channels = protocol::test_setup::TestProtocolChannels {
             sign_rx: Arc::new(RwLock::new(sign_rx)),
@@ -434,7 +430,6 @@ impl MpcFixtureNodeBuilder {
             rpc_channel,
             config: config_rx.clone(),
             mesh_state: mesh_rx.clone(),
-            sign_respond_signature_channel: sign_respond_signature_channel.clone(),
         };
 
         // We have to start the inbox job before calling
@@ -465,7 +460,6 @@ impl MpcFixtureNodeBuilder {
                 protocol_state_tx,
             },
             context.contract_state,
-            config_rx.clone(),
             mesh_rx.clone(),
         ));
 
@@ -481,16 +475,22 @@ impl MpcFixtureNodeBuilder {
             self.messaging.filter,
         );
 
-        MpcFixtureNode {
+        let mut node = MpcFixtureNode {
             me: self.me,
             state: node_state,
             mesh: mesh_tx,
             config: config_tx,
             sign_tx,
-            msg_tx: self.messaging.channel.inbox,
+            msg_channel: self.messaging.channel,
             triple_storage,
             presignature_storage,
-        }
+            backlog: Backlog::new(),
+            web_handle: None,
+        };
+
+        node.start_web_interface(self.participant_info.account_id);
+
+        node
     }
 
     /// Build a node's triple, presignature, and secret storage.
@@ -522,9 +522,23 @@ impl MpcFixtureNodeBuilder {
             // removing here because we can't clone a triple
             let my_shares = fixture_config.input.triples.remove(&self.me).unwrap();
             for (owner, triple_shares) in my_shares {
-                for triple_share in triple_shares {
-                    let mut slot = triple_storage.reserve(triple_share.id).await.unwrap();
-                    slot.insert(triple_share, owner).await;
+                // Group triples into pairs
+                for pair in triple_shares.chunks_exact(2) {
+                    // Use the id from the fixture data as the pair ID
+                    let pair_id = pair[0].id;
+                    let pair = TriplePair {
+                        id: pair_id,
+                        triple0: Triple {
+                            share: pair[0].share.clone(),
+                            public: pair[0].public.clone(),
+                        },
+                        triple1: Triple {
+                            share: pair[1].share.clone(),
+                            public: pair[1].public.clone(),
+                        },
+                    };
+                    let mut slot = triple_storage.reserve(pair_id).await.unwrap();
+                    slot.insert(pair, owner).await;
                 }
             }
         }

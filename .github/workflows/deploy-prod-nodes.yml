@@ -1,5 +1,6 @@
 name: Deploy Multichain Prod.
 on:
+  workflow_call:
   workflow_dispatch:
     inputs:
       network:
@@ -10,6 +11,9 @@ on:
         description: mainnet or testnet network
         default: testnet
         required: true
+
+env:
+  TAG: ${{ github.sha }}
 
 
 jobs:
@@ -39,4 +43,4 @@ jobs:
         with:
           push: true
           file: ./Dockerfile
-          tags: "europe-west1-docker.pkg.dev/near-cs-${{ github.event.inputs.network }}/multichain-public/multichain-${{ github.event.inputs.network }}:latest"
+          tags: "europe-west1-docker.pkg.dev/near-cs-${{ github.event.inputs.network }}/multichain-public/multichain-${{ github.event.inputs.network }}:latest,europe-west1-docker.pkg.dev/near-cs-${{ github.event.inputs.network }}/multichain-public/multichain-${{ github.event.inputs.network }}:${{ env.TAG }}"

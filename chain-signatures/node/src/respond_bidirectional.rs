@@ -1,53 +1,99 @@
 use crate::protocol::{Chain, IndexedSignRequest};
-use crate::sign_respond_tx::SignRespondTx;
-use crate::sign_respond_tx::SignRespondTxId;
-use crate::sign_respond_tx::SignRespondTxStatus;
-use crate::sign_respond_tx::TransactionOutput;
+use crate::sign_bidirectional::BidirectionalTx;
+use crate::sign_bidirectional::BidirectionalTxId;
+#[cfg(feature = "light_client")]
+use crate::sign_bidirectional::BidirectionalTxStatus;
+#[cfg(feature = "light_client")]
+use crate::sign_bidirectional::TransactionOutput;
+#[cfg(feature = "light_client")]
 use alloy::consensus::Transaction;
+#[cfg(feature = "light_client")]
 use alloy::eips::{BlockId, BlockNumberOrTag};
-use alloy::primitives::{Address, Bytes};
+#[cfg(feature = "light_client")]
+use alloy::primitives::Address;
+use alloy::primitives::Bytes;
+#[cfg(feature = "light_client")]
 use alloy::rpc::types::TransactionRequest;
+#[cfg(feature = "light_client")]
 use helios::ethereum::EthereumClient;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
-use mpc_primitives::SignArgs;
-use mpc_primitives::SignId;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio::sync::RwLock;
+use mpc_primitives::{SignArgs, SignId};
 use tokio::time::Duration;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
-const SOLANA_READ_RESPOND_PATH: &str = "solana response key";
+const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
+// Use Borsh as this is what we are using for solana
+pub(crate) const RESPOND_SERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Borsh;
+// Use Abi as this is what we are using for ethereum
+pub(crate) const OUTPUT_DESERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Abi;
+
+#[derive(PartialEq)]
+pub enum SerDeserFormat {
+    Borsh,
+    Abi,
+}
 
 pub struct CompletedTx {
-    tx: SignRespondTx,
+    tx: BidirectionalTx,
+    #[cfg(feature = "light_client")]
     block_number: u64,
 }
 
 #[derive(Hash, PartialEq, Eq, Clone, Debug)]
-pub struct ReadRespondedTx {
-    pub tx_id: SignRespondTxId,
-    pub output: ReadRespondSerializedOutput,
+pub struct RespondBidirectionalTx {
+    pub tx_id: BidirectionalTxId,
+    pub output: RespondBidirectionalSerializedOutput,
 }
 
-pub type ReadRespondSerializedOutput = Vec<u8>;
+pub type RespondBidirectionalSerializedOutput = Vec<u8>;
 
 impl CompletedTx {
-    pub fn new(tx: SignRespondTx, block_number: u64) -> Self {
-        Self { tx, block_number }
+    #[cfg_attr(not(feature = "light_client"), allow(unused_variables))]
+    pub fn new(tx: BidirectionalTx, block_number: u64) -> Self {
+        Self {
+            tx,
+            #[cfg(feature = "light_client")]
+            block_number,
+        }
     }
 
+    #[cfg(not(feature = "light_client"))]
+    pub(crate) async fn create_failed_sign_request_without_light_client(
+        &self,
+        chain: Chain,
+        signature_generation_total_timeout: Duration,
+    ) -> anyhow::Result<IndexedSignRequest> {
+        self.process_failed_tx(chain, signature_generation_total_timeout)
+            .await
+    }
+
+    #[cfg(not(feature = "light_client"))]
+    pub(crate) fn create_sign_request_from_serialized_output(
+        &self,
+        chain: Chain,
+        serialized_output: RespondBidirectionalSerializedOutput,
+        signature_generation_total_timeout: Duration,
+    ) -> anyhow::Result<IndexedSignRequest> {
+        self.create_respond_bidirectional_sign_request(
+            chain,
+            serialized_output,
+            signature_generation_total_timeout,
+        )
+    }
+
+    #[cfg(feature = "light_client")]
     pub async fn create_sign_request_from_completed_tx(
         &self,
         helios_client: &Arc<EthereumClient>,
+        chain: Chain,
         max_attempts: u8,
         signature_generation_total_timeout: Duration,
     ) -> Option<IndexedSignRequest> {
         match self
             .process_completed_tx(
                 helios_client,
+                chain,
                 max_attempts,
                 signature_generation_total_timeout,
             )
@@ -70,54 +116,66 @@ impl CompletedTx {
         }
     }
 
+    #[cfg(feature = "light_client")]
     async fn process_completed_tx(
         &self,
         helios_client: &Arc<EthereumClient>,
+        chain: Chain,
         max_attempts: u8,
         signature_generation_total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
-        if self.tx.status == SignRespondTxStatus::Success {
+        if self.tx.status == PendingRequestStatus::Success {
             self.process_success_tx(
                 helios_client,
+                chain,
                 max_attempts,
                 signature_generation_total_timeout,
             )
             .await
         } else {
-            self.process_failed_tx(signature_generation_total_timeout)
+            self.process_failed_tx(chain, signature_generation_total_timeout)
                 .await
         }
     }
 
     async fn process_failed_tx(
         &self,
+        chain: Chain,
         total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("Tx failed: {:?}", self.tx.id);
-        let callback_serialization_format = self.tx.callback_serialization_format;
 
+        let respond_serialization_format = RESPOND_SERIALIZATION_FORMAT;
         let mut output = Vec::new();
         output.extend_from_slice(&MAGIC_ERROR_PREFIX);
-        let serialized_output: Vec<u8> = if callback_serialization_format == 0 {
-            let borsh_data = [1u8]; // Simple serialization: 1 = true
-            output.extend_from_slice(&borsh_data);
-            Bytes::from(output).into()
-        } else {
-            // Encode boolean as ABI: true = 0x0000000000000000000000000000000000000000000000000000000000000001
-            let abi_encoded = [0u8; 32];
-            let mut encoded = abi_encoded;
-            encoded[31] = 1; // Set last byte to 1 for true
-            output.extend_from_slice(&encoded);
-            Bytes::from(output).into()
+        let serialized_output: Vec<u8> = match respond_serialization_format {
+            SerDeserFormat::Borsh => {
+                let borsh_data = [1u8]; // Simple serialization: 1 = true
+                output.extend_from_slice(&borsh_data);
+                Bytes::from(output).into()
+            }
+            SerDeserFormat::Abi => {
+                // Encode boolean as ABI: true = 0x0000000000000000000000000000000000000000000000000000000000000001
+                let abi_encoded = [0u8; 32];
+                let mut encoded = abi_encoded;
+                encoded[31] = 1; // Set last byte to 1 for true
+                output.extend_from_slice(&encoded);
+                Bytes::from(output).into()
+            }
         };
-        let sign_request =
-            self.create_read_respond_sign_request(serialized_output, total_timeout)?;
+        let sign_request = self.create_respond_bidirectional_sign_request(
+            chain,
+            serialized_output,
+            total_timeout,
+        )?;
         Ok(sign_request)
     }
 
+    #[cfg(feature = "light_client")]
     async fn process_success_tx(
         &self,
         helios_client: &Arc<EthereumClient>,
+        chain: Chain,
         max_attempts: u8,
         signature_generation_total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
@@ -125,27 +183,39 @@ impl CompletedTx {
             .extract_success_tx_output(helios_client, max_attempts)
             .await?;
         tracing::info!("Tx succeeded: {tx_output:?}");
-        let callback_serialization_format = self.tx.callback_serialization_format;
-        let callback_serialization_schema = &self.tx.callback_serialization_schema;
+        let respond_serialization_format = RESPOND_SERIALIZATION_FORMAT;
+        let respond_serialization_schema = &self.tx.respond_serialization_schema;
         let serialized_output = tx_output
             .output
-            .serialize(callback_serialization_format, callback_serialization_schema)?;
-        self.create_read_respond_sign_request(serialized_output, signature_generation_total_timeout)
+            .serialize(respond_serialization_format, respond_serialization_schema)?;
+        self.create_respond_bidirectional_sign_request(
+            chain,
+            serialized_output,
+            signature_generation_total_timeout,
+        )
     }
 
-    fn create_read_respond_sign_request(
+    fn create_respond_bidirectional_sign_request(
         &self,
-        serialized_output: ReadRespondSerializedOutput,
+        chain: Chain,
+        serialized_output: RespondBidirectionalSerializedOutput,
         signature_generation_total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
         let request_id_bytes = self.tx.request_id;
-        tracing::info!("Read respond serialized output: {:?}", serialized_output);
-        let message = calculate_read_respond_hash_message(&request_id_bytes, &serialized_output);
-        tracing::info!("Read respond message hash: {:?}", hex::encode(message));
+        tracing::info!(
+            "Respond bidirectional serialized output: {:?}",
+            serialized_output
+        );
+        let message =
+            calculate_respond_bidirectional_hash_message(&request_id_bytes, &serialized_output);
+        tracing::info!(
+            "Respond bidirectional message hash: {:?}",
+            hex::encode(message)
+        );
         let Some(payload) = Scalar::from_bytes(message) else {
-            anyhow::bail!("Failed to convert read respond message to scalar: {message:?}");
+            anyhow::bail!("Failed to convert respond bidirectional message to scalar: {message:?}");
         };
-        let path = SOLANA_READ_RESPOND_PATH.to_string();
+        let path = SOLANA_RESPOND_BIDIRECTIONAL_PATH.to_string();
         tracing::info!(
             "requester to derive epsilon: {:?}",
             self.tx.sender.to_string()
@@ -158,7 +228,7 @@ impl CompletedTx {
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest {
             id: SignId::new(request_id_bytes),
-            chain: Chain::Solana,
+            chain,
             args: SignArgs {
                 entropy: entropy.into(),
                 epsilon,
@@ -167,16 +237,18 @@ impl CompletedTx {
                 key_version: self.tx.key_version,
             },
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            timestamp_sign_queue: None,
+            timestamp_sign_queue: std::time::Instant::now(),
             total_timeout: signature_generation_total_timeout,
-            sign_request_type: crate::protocol::SignRequestType::ReadRespond(ReadRespondedTx {
-                tx_id: self.tx.id,
-                output: serialized_output,
-            }),
-            participants: Some(self.tx.participants.clone()),
+            sign_request_type: crate::protocol::SignRequestType::RespondBidirectional(
+                RespondBidirectionalTx {
+                    tx_id: self.tx.id,
+                    output: serialized_output,
+                },
+            ),
         })
     }
 
+    #[cfg(feature = "light_client")]
     async fn extract_success_tx_output(
         &self,
         helios_client: &Arc<EthereumClient>,
@@ -186,31 +258,35 @@ impl CompletedTx {
         let Some(tx) = tx else {
             anyhow::bail!("Failed to fetch tx from helios, tx id: {:?}", self.tx.id);
         };
-        let explorer_deserialization_format = self.tx.explorer_deserialization_format;
-        let explorer_deserialization_schema = &self.tx.explorer_deserialization_schema;
+        let output_deserialization_format = OUTPUT_DESERIALIZATION_FORMAT;
+        let output_deserialization_schema = &self.tx.output_deserialization_schema;
         let from_address = self.tx.from_address;
 
         let data = tx.inner.input();
         let is_contract_call = data.len() > 2 && *data != Bytes::from("0x");
-        if is_contract_call && explorer_deserialization_format == 1 {
-            let to_address = tx.inner.to().unwrap();
-            let call_result = fetch_call_result(
-                helios_client,
-                from_address,
-                to_address,
-                data.clone(),
-                self.block_number - 1,
-                5,
-            )
-            .await?;
-            TransactionOutput::from_call_result(explorer_deserialization_schema, &call_result)
-        } else {
-            Ok(TransactionOutput::non_function_call_output())
+        match output_deserialization_format {
+            SerDeserFormat::Abi if is_contract_call => {
+                let to_address = tx.inner.to().unwrap();
+                let call_result = fetch_call_result(
+                    helios_client,
+                    from_address,
+                    to_address,
+                    data.clone(),
+                    self.block_number - 1,
+                    5,
+                )
+                .await?;
+                TransactionOutput::from_call_result(output_deserialization_schema, &call_result)
+            }
+            _ => Ok(TransactionOutput::non_function_call_output()),
         }
     }
 }
 
-fn calculate_read_respond_hash_message(request_id: &[u8], serialized_output: &[u8]) -> [u8; 32] {
+fn calculate_respond_bidirectional_hash_message(
+    request_id: &[u8],
+    serialized_output: &[u8],
+) -> [u8; 32] {
     let mut combined = Vec::with_capacity(request_id.len() + serialized_output.len());
     combined.extend_from_slice(request_id);
     combined.extend_from_slice(serialized_output);
@@ -219,6 +295,7 @@ fn calculate_read_respond_hash_message(request_id: &[u8], serialized_output: &[u
     alloy::primitives::keccak256(&combined).into()
 }
 
+#[cfg(feature = "light_client")]
 async fn fetch_call_result(
     helios_client: &Arc<EthereumClient>,
     from_address: Address,
@@ -254,9 +331,10 @@ async fn fetch_call_result(
     }
 }
 
+#[cfg(feature = "light_client")]
 async fn fetch_tx_from_helios(
     helios_client: &Arc<EthereumClient>,
-    tx_id: SignRespondTxId,
+    tx_id: BidirectionalTxId,
     max_attempts: u8,
 ) -> Option<alloy::rpc::types::Transaction> {
     let mut attempts = 0;
@@ -277,62 +355,6 @@ async fn fetch_tx_from_helios(
                 tracing::warn!("Failed to fecth tx from helios: {err:?}, retrying...");
                 attempts += 1;
                 tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct ReadRespondedTxChannel {
-    tx: mpsc::Sender<SignRespondTxId>,
-}
-
-impl ReadRespondedTxChannel {
-    pub fn send(&self, tx_id: SignRespondTxId) {
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            if let Err(err) = tx.send(tx_id).await {
-                tracing::error!(%err, "failed to send read responded tx id");
-            }
-        });
-    }
-}
-
-pub struct ReadRespondedTxProcessor {
-    read_responded_tx_rx: mpsc::Receiver<SignRespondTxId>,
-}
-
-const MAX_CONCURRENT_READ_RESPONDED_TX_REQUESTS: usize = 1024;
-
-impl ReadRespondedTxProcessor {
-    pub fn new() -> (ReadRespondedTxChannel, Self) {
-        let (tx, rx) = mpsc::channel(MAX_CONCURRENT_READ_RESPONDED_TX_REQUESTS);
-        (
-            ReadRespondedTxChannel { tx },
-            Self {
-                read_responded_tx_rx: rx,
-            },
-        )
-    }
-
-    pub async fn run(
-        mut self,
-        sign_respond_tx_map: Arc<RwLock<HashMap<SignRespondTxId, SignRespondTx>>>,
-        max_attempts: u8,
-    ) {
-        while let Some(sign_respond_tx_id) = self.read_responded_tx_rx.recv().await {
-            for attempt in 1..=max_attempts {
-                if sign_respond_tx_map
-                    .write()
-                    .await
-                    .remove(&sign_respond_tx_id)
-                    .is_some()
-                {
-                    tracing::info!(sign_id = ?sign_respond_tx_id, "removed sign respond tx from map");
-                    break;
-                } else if attempt == max_attempts {
-                    tracing::error!(sign_id = ?sign_respond_tx_id, "failed to remove sign respond tx from map after {max_attempts} attempts");
-                }
             }
         }
     }
