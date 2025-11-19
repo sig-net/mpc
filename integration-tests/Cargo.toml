@@ -48,7 +48,6 @@ ecdsa = "0.16.9"
 ethers-core.workspace = true
 ethers = { version = "2.0.13", features = ["abigen"] }
 threshold-signatures = { git = "https://github.com/near/threshold-signatures" }
-cait-sith = { path = "../cait-sith" }
 elliptic-curve = { version = "0.13.5", default-features = false }
 k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
 secp256k1.workspace = true

@@ -13,13 +13,9 @@ use bollard::network::CreateNetworkOptions;
 use bollard::secret::Ipam;
 use bollard::Docker;
 use borsh::{BorshDeserialize, BorshSerialize};
-use threshold_signatures::participants::Participant;
-use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
-use cait_sith::FullSignature;
 use elliptic_curve::rand_core::OsRng;
 use futures::StreamExt as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-// Secp256k1 import not required in this file; tests may import it where needed.
 use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
@@ -44,6 +40,9 @@ use testcontainers::{
     runners::AsyncRunner,
     GenericImage, ImageExt,
 };
+use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
+use threshold_signatures::ecdsa::Signature as FullSignature;
+use threshold_signatures::participants::Participant;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{sleep, Duration};
 use tracing;
@@ -402,17 +401,17 @@ impl Redis {
         // Create triples by sampling values and distributing shares (similar to
         // `threshold-signatures` test helper `deal`). We keep the code local so that
         // tests don't depend on internal test helpers inside the dependency.
-    use threshold_signatures::ecdsa::{Polynomial};
-    use k256::ProjectivePoint;
+        use k256::ProjectivePoint;
         use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
+        use threshold_signatures::ecdsa::Polynomial;
 
-    let mut rng = OsRng;
-    let f_a = Polynomial::generate_polynomial(None, cfg.threshold - 1, &mut rng).unwrap();
-    let a = f_a.eval_at_zero().unwrap().0;
+        let mut rng = OsRng;
+        let f_a = Polynomial::generate_polynomial(None, cfg.threshold - 1, &mut rng).unwrap();
+        let a = f_a.eval_at_zero().unwrap().0;
 
-    let f_b = Polynomial::generate_polynomial(None, cfg.threshold - 1, &mut rng).unwrap();
-    let b = f_b.eval_at_zero().unwrap().0;
-    let c = a * b;
+        let f_b = Polynomial::generate_polynomial(None, cfg.threshold - 1, &mut rng).unwrap();
+        let b = f_b.eval_at_zero().unwrap().0;
+        let c = a * b;
         let f_c = Polynomial::generate_polynomial(Some(c), cfg.threshold - 1, &mut rng).unwrap();
 
         let mut shares = Vec::with_capacity(participant_ids.len());
@@ -1095,7 +1094,7 @@ impl Solana {
         &self,
         request_id: [u8; 32],
         serialized_output: Vec<u8>,
-    signature: &FullSignature,
+        signature: &FullSignature,
         recovery_id: u8,
     ) -> anyhow::Result<SolanaSignature> {
         if self.rpc_client.get_version().await.is_err() {

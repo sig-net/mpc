@@ -2,7 +2,6 @@
 //! passing between nodes and updates to the governance smart contract.
 
 use crate::mpc_fixture::fixture_interface::SharedOutput;
-use threshold_signatures::participants::Participant;
 use mpc_keys::hpke::Ciphered;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
@@ -11,6 +10,7 @@ use mpc_node::protocol::message::{MessageOutbox, SendMessage, SignedMessage};
 use mpc_node::rpc::RpcAction;
 use std::collections::HashMap;
 use std::sync::Arc;
+use threshold_signatures::participants::Participant;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;

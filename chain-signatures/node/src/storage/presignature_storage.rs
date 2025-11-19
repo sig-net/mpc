@@ -1,9 +1,9 @@
-use threshold_signatures::participants::Participant;
 use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 use std::time::Instant;
+use threshold_signatures::participants::Participant;
 use tokio::task::JoinHandle;
 
 use crate::protocol::presignature::{Presignature, PresignatureId};

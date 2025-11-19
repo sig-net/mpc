@@ -1,10 +1,5 @@
 use std::time::Instant;
 
-use threshold_signatures::{
-    protocol::Participant,
-    triples::{TriplePub, TripleShare},
-    PresignOutput,
-};
 use criterion::{criterion_group, criterion_main, Criterion};
 use elliptic_curve::CurveArithmetic;
 use integration_tests::{cluster::spawner::ClusterSpawner, containers::Redis};
@@ -23,6 +18,9 @@ use mpc_node::{
     storage::{triple_storage::TriplePair, PresignatureStorage, TripleStorage},
 };
 use near_account_id::AccountId;
+use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
+use threshold_signatures::ecdsa::ot_based_ecdsa::PresignOutput;
+use threshold_signatures::participants::Participant;
 use tokio::{
     runtime::Runtime,
     sync::{mpsc, watch},

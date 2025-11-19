@@ -1,6 +1,3 @@
-use threshold_signatures::participants::Participant;
-use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
-use cait_sith::PresignOutput;
 use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
@@ -12,6 +9,9 @@ use mpc_node::protocol::MessageChannel;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::types::SecretKeyShare;
 use test_log::test;
+use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
+use threshold_signatures::ecdsa::ot_based_ecdsa::PresignOutput;
+use threshold_signatures::participants::Participant;
 
 #[test(tokio::test)]
 async fn test_triple_persistence() -> anyhow::Result<()> {

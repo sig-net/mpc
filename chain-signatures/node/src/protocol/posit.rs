@@ -1,5 +1,5 @@
-use threshold_signatures::participants::Participant;
 use serde::{Deserialize, Serialize};
+use threshold_signatures::participants::Participant;
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};

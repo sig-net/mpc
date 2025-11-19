@@ -9,8 +9,8 @@ use crate::backlog::Checkpoint;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::Chain;
-use threshold_signatures::participants::Participant;
 use std::collections::HashMap;
+use threshold_signatures::participants::Participant;
 
 /// Queries all participants for their checkpoints and returns a consensus checkpoint
 /// for each chain based on the threshold-lowest block height: select the checkpoint

@@ -1,6 +1,6 @@
-use threshold_signatures::participants::Participant;
 use mockito::ServerGuard;
 use near_sdk::AccountId;
+use threshold_signatures::participants::Participant;
 
 use crate::{
     node_client::NodeClient,

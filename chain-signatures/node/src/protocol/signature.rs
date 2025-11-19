@@ -15,14 +15,14 @@ use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap};
 
 use crate::protocol::SignRequestType;
-use threshold_signatures::protocol::Action;
-use threshold_signatures::errors::InitializationError;
-use threshold_signatures::participants::Participant;
+use chrono::Utc;
 use threshold_signatures::ecdsa::ot_based_ecdsa::RerandomizedPresignOutput;
 use threshold_signatures::ecdsa::RerandomizationArguments;
 use threshold_signatures::ecdsa::Tweak;
+use threshold_signatures::errors::InitializationError;
+use threshold_signatures::participants::Participant;
 use threshold_signatures::participants::ParticipantList;
-use chrono::Utc;
+use threshold_signatures::protocol::Action;
 // derive_delta and Secp256k1 were unused after migration; remove these imports.
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::{derive_key, PublicKey};
@@ -713,18 +713,18 @@ impl SignGenerator {
         );
         let rerandomized: RerandomizedPresignOutput =
             RerandomizedPresignOutput::rerandomize_presign(&presignature.output, &rerand_args)
-                .map_err(|e| InitializationError::BadParameters(format!("rerandomization failed: {e:?}")))?;
+                .map_err(|e| {
+                    InitializationError::BadParameters(format!("rerandomization failed: {e:?}"))
+                })?;
 
-        let protocol = Box::new(
-            threshold_signatures::ecdsa::ot_based_ecdsa::sign::sign(
-                &participants,
-                proposer,
-                ctx.me,
-                derive_key(ctx.public_key, indexed.args.epsilon),
-                rerandomized,
-                indexed.args.payload,
-            )?,
-        );
+        let protocol = Box::new(threshold_signatures::ecdsa::ot_based_ecdsa::sign::sign(
+            &participants,
+            proposer,
+            ctx.me,
+            derive_key(ctx.public_key, indexed.args.epsilon),
+            rerandomized,
+            indexed.args.payload,
+        )?);
         let inbox = ctx.msg.subscribe_signature(sign_id, presignature_id).await;
         Ok(Self {
             protocol,
@@ -865,21 +865,21 @@ impl SignGenerator {
                         Some(sig) => {
                             let big_r = sig.big_r;
                             let s = sig.s;
-                    tracing::info!(
-                        ?sign_id,
-                        ?me,
-                        presignature_id,
-                        big_r = ?big_r.to_base58(),
-                        ?s,
-                        elapsed = ?self.created.elapsed(),
-                        "completed signature generation"
-                    );
+                            tracing::info!(
+                                ?sign_id,
+                                ?me,
+                                presignature_id,
+                                big_r = ?big_r.to_base58(),
+                                ?s,
+                                elapsed = ?self.created.elapsed(),
+                                "completed signature generation"
+                            );
 
-                    accrued_wait_delay.observe(total_wait.as_millis() as f64);
-                    poke_counts.observe(total_pokes as f64);
-                    crate::metrics::SIGN_GENERATION_LATENCY
-                        .with_label_values(&[my_account_id.as_str()])
-                        .observe(self.created.elapsed().as_secs_f64());
+                            accrued_wait_delay.observe(total_wait.as_millis() as f64);
+                            poke_counts.observe(total_pokes as f64);
+                            crate::metrics::SIGN_GENERATION_LATENCY
+                                .with_label_values(&[my_account_id.as_str()])
+                                .observe(self.created.elapsed().as_secs_f64());
 
                             if self.proposer == me {
                                 ctx.rpc.publish(

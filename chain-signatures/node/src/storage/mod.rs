@@ -3,8 +3,8 @@ pub mod presignature_storage;
 pub mod secret_storage;
 pub mod triple_storage;
 
-use threshold_signatures::participants::Participant;
 pub use presignature_storage::PresignatureStorage;
+use threshold_signatures::participants::Participant;
 pub use triple_storage::TripleStorage;
 
 // Can be used to "clear" redis storage in case of a breaking change

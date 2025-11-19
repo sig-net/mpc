@@ -13,11 +13,9 @@ use alloy::sol_types::SolEvent;
 use anchor_client::anchor_lang::{AnchorDeserialize, Discriminator};
 use anchor_client::{Client, Cluster as AnchorCluster};
 use anyhow::Context as _;
-use cait_sith::FullSignature;
 use elliptic_curve::sec1::FromEncodedPoint;
 use futures::StreamExt;
 use generic_array::GenericArray;
-// Secp256k1 is not used directly in this module after FullSignature refactor; keep generics elsewhere.
 use mpc_contract::errors;
 use mpc_contract::primitives::SignRequest;
 use mpc_crypto::ScalarExt as _;
@@ -35,6 +33,7 @@ use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature as SolSignature;
 use solana_sdk::signer::Signer as _;
+use threshold_signatures::ecdsa::Signature as FullSignature;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
 
@@ -1002,7 +1001,7 @@ fn parse_sol_signature(
         Scalar::from_bytes(solana_sig.s).ok_or_else(|| anyhow::anyhow!("Invalid scalar bytes"))?;
 
     // Create the FullSignature (note: FullSignature doesn't store recovery_id)
-    Ok((cait_sith::FullSignature { big_r, s }, solana_sig.recovery_id))
+    Ok((FullSignature { big_r, s }, solana_sig.recovery_id))
 }
 
 /// Ethereum contract signature request outcome
@@ -1310,7 +1309,7 @@ impl EthSignAction<'_> {
                 let s = k256::Scalar::from_bytes(s_bytes.into())
                     .ok_or_else(|| anyhow::anyhow!("invalid scalar value in event {s_bytes:?}"))?;
 
-                let signature = cait_sith::FullSignature { big_r, s };
+                let signature = FullSignature { big_r, s };
 
                 tracing::info!("successfully parsed signature from SignatureResponded event");
                 return Ok(EthSignOutcome {

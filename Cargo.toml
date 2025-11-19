@@ -19,7 +19,6 @@ alloy = { version = "=1.0.38", features = ["contract", "json"] }
 anyhow = { version = "1.0.95", features = ["backtrace"] }
 borsh = "1.5.3"
 threshold-signatures = { git = "https://github.com/near/threshold-signatures" }
-cait-sith = { path = "./cait-sith" }
 ciborium = "0.2.2"
 clap = { version = "4.5.4", features = ["derive", "env"] }
 deadpool-redis = "0.18.0"

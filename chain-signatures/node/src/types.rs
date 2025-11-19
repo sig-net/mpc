@@ -1,12 +1,12 @@
-use threshold_signatures::protocol::{Action, MessageData};
+use threshold_signatures::ecdsa::ot_based_ecdsa::PresignOutput;
+use threshold_signatures::ecdsa::KeygenOutput;
+use threshold_signatures::ecdsa::Secp256K1Sha256;
+use threshold_signatures::ecdsa::Signature as EcdsaSignature;
 use threshold_signatures::errors::{InitializationError, ProtocolError};
+use threshold_signatures::frost_core::keys::SigningShare;
 use threshold_signatures::participants::Participant;
 use threshold_signatures::protocol::Protocol;
-use threshold_signatures::frost_core::keys::SigningShare;
-use threshold_signatures::ecdsa::KeygenOutput;
-use threshold_signatures::ecdsa::ot_based_ecdsa::PresignOutput;
-use threshold_signatures::ecdsa::Signature as EcdsaSignature;
-use threshold_signatures::ecdsa::Secp256K1Sha256;
+use threshold_signatures::protocol::{Action, MessageData};
 
 use crate::protocol::contract::ResharingContractState;
 
@@ -14,9 +14,9 @@ pub type SecretKeyShare = SigningShare<Secp256K1Sha256>;
 pub type TripleProtocol = Box<
     dyn Protocol<
             Output = Vec<(
-                        threshold_signatures::ecdsa::ot_based_ecdsa::triples::TripleShare,
-                        threshold_signatures::ecdsa::ot_based_ecdsa::triples::TriplePub,
-                    )>,
+                threshold_signatures::ecdsa::ot_based_ecdsa::triples::TripleShare,
+                threshold_signatures::ecdsa::ot_based_ecdsa::triples::TriplePub,
+            )>,
         > + Send,
 >;
 // Presignature protocol implementations from `threshold-signatures` are not
@@ -41,9 +41,9 @@ impl KeygenProtocol {
         me: Participant,
         threshold: usize,
     ) -> Result<Self, InitializationError> {
-    use rand::rngs::OsRng;
+        use rand::rngs::OsRng;
 
-    Ok(Self {
+        Ok(Self {
             threshold,
             me,
             participants: participants.into(),
@@ -95,38 +95,43 @@ impl ReshareProtocol {
             new_participants,
             me
         );
-    use threshold_signatures::frost_core::{Group, VerifyingKey};
-    use k256::ProjectivePoint;
-    use rand::rngs::OsRng;
+        use k256::ProjectivePoint;
+        use rand::rngs::OsRng;
+        use threshold_signatures::frost_core::{Group, VerifyingKey};
 
-    // Convert the AffinePoint public key into the ciphersuite verifying key
-    // `AffinePoint` -> `ProjectivePoint` conversion uses `ProjectivePoint::from`
-    let public_key_element: threshold_signatures::frost_core::Element<Secp256K1Sha256> =
-        ProjectivePoint::from(contract_state.public_key);
+        // Convert the AffinePoint public key into the ciphersuite verifying key
+        // `AffinePoint` -> `ProjectivePoint` conversion uses `ProjectivePoint::from`
+        let public_key_element: threshold_signatures::frost_core::Element<Secp256K1Sha256> =
+            ProjectivePoint::from(contract_state.public_key);
 
-    let pk_ser = <Secp256K1Sha256 as threshold_signatures::frost_core::Ciphersuite>::Group::serialize(
-        &public_key_element,
-    )
-    .map_err(|e| InitializationError::BadParameters(format!(
-        "Failed to serialize public key element: {:?}",
-        e
-    )))?;
-    let verifying_key = VerifyingKey::<Secp256K1Sha256>::deserialize(pk_ser.as_ref())
-        .map_err(|e| InitializationError::BadParameters(format!(
-            "Failed to deserialize verifying key: {:?}",
-            e
-        )))?;
+        let pk_ser =
+            <Secp256K1Sha256 as threshold_signatures::frost_core::Ciphersuite>::Group::serialize(
+                &public_key_element,
+            )
+            .map_err(|e| {
+                InitializationError::BadParameters(format!(
+                    "Failed to serialize public key element: {:?}",
+                    e
+                ))
+            })?;
+        let verifying_key =
+            VerifyingKey::<Secp256K1Sha256>::deserialize(pk_ser.as_ref()).map_err(|e| {
+                InitializationError::BadParameters(format!(
+                    "Failed to deserialize verifying key: {:?}",
+                    e
+                ))
+            })?;
 
-    let protocol = Box::new(threshold_signatures::reshare::<Secp256K1Sha256>(
-        &old_participants,
-        contract_state.threshold,
-        private_share,
-        verifying_key,
-        &new_participants,
-        contract_state.threshold,
-        me,
-        OsRng,
-    )?);
+        let protocol = Box::new(threshold_signatures::reshare::<Secp256K1Sha256>(
+            &old_participants,
+            contract_state.threshold,
+            private_share,
+            verifying_key,
+            &new_participants,
+            contract_state.threshold,
+            me,
+            OsRng,
+        )?);
         Ok(Self { protocol })
     }
 

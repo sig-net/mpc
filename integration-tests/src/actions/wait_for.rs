@@ -4,8 +4,6 @@ use std::time::Duration;
 use anyhow::Context;
 use backon::ConstantBuilder;
 use backon::Retryable;
-use cait_sith::FullSignature;
-// No need for `Secp256k1` here; used in other modules for generic parameters.
 use mpc_primitives::Signature;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_primitives::errors::ActionErrorKind;
@@ -14,6 +12,7 @@ use near_primitives::views::ExecutionOutcomeWithIdView;
 use near_primitives::views::ExecutionStatusView;
 use near_primitives::views::FinalExecutionStatus;
 use std::collections::HashMap;
+use threshold_signatures::ecdsa::Signature as FullSignature;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SignatureError {
@@ -60,10 +59,10 @@ pub async fn signature_responded(
         let result: Signature = outcome
             .json()
             .map_err(|err| WaitForError::SerdeJson(format!("{err:?}")))?;
-            Ok(Outcome::Signature(FullSignature {
+        Ok(Outcome::Signature(FullSignature {
             big_r: result.big_r,
             s: result.s,
-            }))
+        }))
     };
 
     let strategy = ConstantBuilder::default()
@@ -170,7 +169,7 @@ pub async fn batch_signature_responded(
 
         let starting_receipts = &receipt_outcomes.first().unwrap().outcome.receipt_ids;
 
-    let mut signatures: Vec<FullSignature> = vec![];
+        let mut signatures: Vec<FullSignature> = vec![];
         for receipt_id in starting_receipts {
             if !result_receipts.contains_key(receipt_id) {
                 break;

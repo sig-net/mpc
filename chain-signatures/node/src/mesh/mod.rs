@@ -7,8 +7,8 @@ use crate::protocol::contract::primitives::Participants;
 use crate::protocol::ParticipantInfo;
 use crate::protocol::ProtocolState;
 use crate::rpc::ContractStateWatcher;
-use threshold_signatures::participants::Participant;
 use near_account_id::AccountId;
+use threshold_signatures::participants::Participant;
 use tokio::sync::{mpsc, watch};
 
 pub mod connection;

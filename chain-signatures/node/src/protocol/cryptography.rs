@@ -12,9 +12,9 @@ use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage
 use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
 use crate::types::{ReshareProtocol, SecretKeyShare};
-use threshold_signatures::protocol::Action;
 use threshold_signatures::errors::{InitializationError, ProtocolError};
 use threshold_signatures::participants::Participant;
+use threshold_signatures::protocol::Action;
 // GroupEncoding not used here; keep other secp usage through to_encoded_point via ToEncodedPoint.
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::sha2::{Digest, Sha256};
@@ -126,7 +126,13 @@ impl CryptographicProtocol for GeneratingState {
                 }
                 Action::Return(r) => {
                     tracing::info!(
-                        public_key = hex::encode(r.public_key.to_element().to_affine().to_encoded_point(true).as_bytes()),
+                        public_key = hex::encode(
+                            r.public_key
+                                .to_element()
+                                .to_affine()
+                                .to_encoded_point(true)
+                                .as_bytes()
+                        ),
                         "generating: successfully completed key generation"
                     );
                     // Convert frost_core::VerifyingKey -> AffinePoint for storage
@@ -352,8 +358,13 @@ impl CryptographicProtocol for ResharingState {
                 Action::Return(keygen_output) => {
                     tracing::info!("resharing: successfully completed key reshare");
                     resharing.last_activity = Instant::now();
-                    match Self::try_finalize(ctx, &mut resharing, keygen_output.private_share, &self.contract)
-                        .await
+                    match Self::try_finalize(
+                        ctx,
+                        &mut resharing,
+                        keygen_output.private_share,
+                        &self.contract,
+                    )
+                    .await
                     {
                         Ok(next_state) => return next_state,
                         Err(()) => {

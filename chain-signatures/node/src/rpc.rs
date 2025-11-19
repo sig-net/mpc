@@ -15,12 +15,12 @@ use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
 use alloy::providers::{Provider, RootProvider, WalletProvider};
 use alloy::rpc::types::{Transaction, TransactionReceipt};
-use threshold_signatures::participants::Participant;
-use threshold_signatures::ecdsa::Signature as ThresholdSignature;
 use k256::AffinePoint;
 use mpc_keys::hpke;
 use mpc_primitives::SignId;
 use mpc_primitives::Signature;
+use threshold_signatures::ecdsa::Signature as ThresholdSignature;
+use threshold_signatures::participants::Participant;
 
 use alloy::contract::{ContractInstance, Interface};
 use alloy::dyn_abi::DynSolValue;

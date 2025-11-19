@@ -1,6 +1,6 @@
+use mpc_primitives::SignId;
 use threshold_signatures::errors::InitializationError;
 use threshold_signatures::participants::Participant;
-use mpc_primitives::SignId;
 
 use super::{presignature::PresignatureId, triple::TripleId};
 

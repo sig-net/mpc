@@ -1,11 +1,11 @@
 use std::time::Duration;
 
-use threshold_signatures::participants::Participant;
-use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
-use cait_sith::PresignOutput;
 use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster;
 use k256::Secp256k1;
+use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
+use threshold_signatures::ecdsa::ot_based_ecdsa::PresignOutput;
+use threshold_signatures::participants::Participant;
 
 use integration_tests::cluster::spawner::ClusterSpawner;
 use mpc_node::mesh::Mesh;

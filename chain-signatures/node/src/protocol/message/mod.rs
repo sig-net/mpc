@@ -23,7 +23,6 @@ use crate::node_client::NodeClient;
 use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::Config;
 
-use threshold_signatures::participants::Participant;
 use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke::{self, Ciphered};
 use mpc_primitives::SignId;
@@ -31,6 +30,7 @@ use near_account_id::AccountId;
 use near_crypto::Signature;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use threshold_signatures::participants::Participant;
 use tokio::sync::{mpsc, watch};
 
 use std::collections::{HashMap, VecDeque};
@@ -1032,10 +1032,10 @@ const fn cbor_name(value: &ciborium::Value) -> &'static str {
 mod tests {
     use std::time::Duration;
 
-    use threshold_signatures::participants::Participant;
     use mpc_keys::hpke::{self, Ciphered};
     use mpc_primitives::SignId;
     use serde::{de::DeserializeOwned, Deserialize, Serialize};
+    use threshold_signatures::participants::Participant;
 
     use crate::{
         config::{Config, LocalConfig, NetworkConfig, OverrideConfig},

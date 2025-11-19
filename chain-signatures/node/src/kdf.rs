@@ -39,7 +39,7 @@ pub fn into_eth_sig(
 ) -> anyhow::Result<Signature> {
     let public_key = public_key.to_encoded_point(false);
     let signature = k256::ecdsa::Signature::from_scalars(x_coordinate(big_r), s)
-    .context("cannot create signature from threshold-signatures signature")?;
+        .context("cannot create signature from threshold-signatures signature")?;
     let pk0 = recover(
         &msg_hash.to_bytes()[..],
         &signature,

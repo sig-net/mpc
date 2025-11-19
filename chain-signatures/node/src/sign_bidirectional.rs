@@ -355,8 +355,8 @@ pub fn sign_and_hash_legacy_from_unsigned(
 
 /// Get the x coordinate of a point, as a scalar
 fn x_coordinate(point: &k256::AffinePoint) -> k256::Scalar {
-    use k256::elliptic_curve::ops::Reduce;
     use k256::elliptic_curve::bigint::U256;
+    use k256::elliptic_curve::ops::Reduce;
     <k256::Scalar as Reduce<U256>>::reduce_bytes(&point.x())
 }
 

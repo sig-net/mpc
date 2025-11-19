@@ -1,9 +1,9 @@
-use threshold_signatures::participants::Participant;
 use mpc_contract::config::ProtocolConfig;
 use mpc_node::protocol::state::NodeKeyInfo;
 use near_account_id::AccountId;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, Worker};
+use threshold_signatures::participants::Participant;
 
 use std::collections::BTreeMap;
 use std::future::{Future, IntoFuture};
