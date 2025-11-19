@@ -180,7 +180,7 @@ impl ClusterSpawner {
         self
     }
 
-    /// Add mainnet nodes to the cluster. Uses the highest semver binary from artifacts/mainnet.
+    /// Add mainnet nodes to the cluster using the tagged binary under target/compat/mainnet.
     pub fn mainnet_nodes(mut self, count: usize) -> Self {
         let current_len = self.node_binary_sources.len();
         self.node_binary_sources
@@ -189,7 +189,7 @@ impl ClusterSpawner {
         self
     }
 
-    /// Add testnet nodes to the cluster. Uses the highest semver binary from artifacts/testnet.
+    /// Add testnet nodes to the cluster using the tagged binary under target/compat/testnet.
     pub fn testnet_nodes(mut self, count: usize) -> Self {
         let current_len = self.node_binary_sources.len();
         self.node_binary_sources

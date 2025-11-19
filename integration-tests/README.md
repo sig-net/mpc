@@ -56,6 +56,26 @@ To run benchmarks, simply run the `bench.sh` script in the root:
 ./bench.sh
 ```
 
+## Production compatibility tests
+
+Historical compatibility tests boot one node from the latest code and one node
+from the production tags (`testnet` = 1.10.0, `mainnet` = 1.1.2). To run them
+locally:
+
+1. Build the tagged binaries (only needed once per version):
+    ```bash
+    ./scripts/build-compat-binaries.sh
+    ```
+    Set `FORCE_REBUILD=1` if you need to rebuild an existing binary.
+2. Execute the tests:
+    ```bash
+    ./scripts/test-prod-compat.sh
+    ```
+
+The build script generates binaries under `target/compat/<channel>/<version>` so
+the integration test cluster can spawn historical nodes without checking
+artifacts into git.
+
 ## FAQ
 
 ### I want to run a test, but keep the docker containers from being destroyed

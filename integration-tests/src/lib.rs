@@ -36,9 +36,9 @@ use serde_json::json;
 pub enum NodeBinarySource {
     /// Use the current compiled code from target/release
     CurrentCode,
-    /// Use the highest semver binary from artifacts/mainnet
+    /// Use the tagged mainnet binary compiled under target/compat/mainnet/<version>
     Mainnet,
-    /// Use the highest semver binary from artifacts/testnet
+    /// Use the tagged testnet binary compiled under target/compat/testnet/<version>
     Testnet,
 }
 
@@ -48,8 +48,8 @@ impl NodeBinarySource {
         match self {
             // Will use default executable lookup
             NodeBinarySource::CurrentCode => Ok(None),
-            NodeBinarySource::Mainnet => Ok(Some(execute::find_highest_semver_binary("mainnet")?)),
-            NodeBinarySource::Testnet => Ok(Some(execute::find_highest_semver_binary("testnet")?)),
+            NodeBinarySource::Mainnet => Ok(Some(execute::compatibility_binary("mainnet")?)),
+            NodeBinarySource::Testnet => Ok(Some(execute::compatibility_binary("testnet")?)),
         }
     }
 }

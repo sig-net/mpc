@@ -1,59 +1,53 @@
 use anyhow::Context;
 use async_process::Child;
 use mpc_primitives::Chain;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 pub(crate) const PACKAGE_MULTICHAIN: &str = "mpc-node";
-const ARTIFACTS_DIR: &str = "artifacts";
-const ARTIFACT_PREFIX: &str = "mpc-node.";
+const COMPAT_SUBDIR: &str = "compat";
+const COMPAT_VERSIONS_JSON: &str = include_str!("../../scripts/prod-compat-versions.json");
 
-/// Finds the binary with the highest semantic version in the given directory.
-/// Expects binaries to be named like "mpc-node.1.10.1"
-pub fn find_highest_semver_binary(dir: &str) -> anyhow::Result<PathBuf> {
-    let artifacts_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("could not find parent dir"))?
-        .join(ARTIFACTS_DIR)
-        .join(dir);
+static COMPAT_VERSIONS: OnceLock<HashMap<String, String>> = OnceLock::new();
 
-    if !artifacts_dir.exists() {
+fn compatibility_versions() -> &'static HashMap<String, String> {
+    COMPAT_VERSIONS.get_or_init(|| {
+        serde_json::from_str(COMPAT_VERSIONS_JSON)
+            .expect("invalid prod-compat-versions.json format")
+    })
+}
+
+fn compatibility_version(channel: &str) -> anyhow::Result<String> {
+    compatibility_versions()
+        .get(channel)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("unknown compatibility channel '{channel}'"))
+}
+
+/// Returns the compiled binary for the requested production channel (mainnet/testnet).
+/// Binaries are expected under target/compat/<channel>/<version>/release/mpc-node.
+pub fn compatibility_binary(channel: &str) -> anyhow::Result<PathBuf> {
+    let version = compatibility_version(channel)?;
+    let target_dir = target_dir().ok_or_else(|| {
+        anyhow::anyhow!("could not locate target directory for compatibility binary")
+    })?;
+
+    let binary_path = target_dir
+        .join(COMPAT_SUBDIR)
+        .join(channel)
+        .join(&version)
+        .join("release")
+        .join(PACKAGE_MULTICHAIN);
+
+    if !binary_path.exists() {
         anyhow::bail!(
-            "artifacts directory does not exist: {}",
-            artifacts_dir.display()
+            "compatibility binary for {channel} ({version}) not found at {}. Run scripts/build-compat-binaries.sh to build it.",
+            binary_path.display()
         );
     }
 
-    let mut highest_version: Option<(semver::Version, PathBuf)> = None;
-
-    for entry in std::fs::read_dir(&artifacts_dir)
-        .with_context(|| format!("failed to read directory: {}", artifacts_dir.display()))?
-    {
-        let entry = entry?;
-        let file_name = entry.file_name();
-        let file_name_str = file_name.to_string_lossy();
-
-        // Check if it starts with ARTIFACT_PREFIX and extract version
-        if let Some(version_str) = file_name_str.strip_prefix(ARTIFACT_PREFIX) {
-            if let Ok(version) = semver::Version::parse(version_str) {
-                let path = entry.path();
-                match &highest_version {
-                    None => highest_version = Some((version, path)),
-                    Some((current_highest, _)) => {
-                        if version > *current_highest {
-                            highest_version = Some((version, path));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    highest_version.map(|(_, path)| path).ok_or_else(|| {
-        anyhow::anyhow!(
-            "no valid mpc-node binary found in {}",
-            artifacts_dir.display()
-        )
-    })
+    Ok(binary_path)
 }
 
 pub fn target_dir() -> Option<std::path::PathBuf> {
