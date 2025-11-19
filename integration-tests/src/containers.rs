@@ -8,9 +8,7 @@ use crate::NodeConfig;
 
 use anyhow::{anyhow, Context};
 use async_process::{Child, Command};
-use bollard::container::LogsOptions;
-use bollard::network::CreateNetworkOptions;
-use bollard::secret::Ipam;
+use bollard::models::{Ipam, NetworkCreateRequest};
 use bollard::Docker;
 use borsh::{BorshDeserialize, BorshSerialize};
 use cait_sith::protocol::Participant;
@@ -193,7 +191,7 @@ impl DockerClient {
     ) -> anyhow::Result<String> {
         let network_settings = self
             .docker
-            .inspect_container(container.id(), None)
+            .inspect_container(container.id(), None::<bollard::query_parameters::InspectContainerOptions>)
             .await?
             .network_settings
             .ok_or_else(|| anyhow!("missing NetworkSettings on container '{}'", container.id()))?;
@@ -227,23 +225,25 @@ impl DockerClient {
     }
 
     pub async fn create_network(&self, network: &str) -> anyhow::Result<()> {
-        let list = self.docker.list_networks::<&str>(None).await?;
+        let list = self
+            .docker
+            .list_networks(None::<bollard::query_parameters::ListNetworksOptions>)
+            .await?;
         if list.iter().any(|n| n.name == Some(network.to_string())) {
             return Ok(());
         }
 
-        let create_network_options = CreateNetworkOptions {
-            name: network,
-            check_duplicate: true,
-            driver: if cfg!(windows) {
-                "transparent"
+        let create_network_options = NetworkCreateRequest {
+            name: network.to_string(),
+            driver: Some(if cfg!(windows) {
+                "transparent".to_string()
             } else {
-                "bridge"
-            },
-            ipam: Ipam {
+                "bridge".to_string()
+            }),
+            ipam: Some(Ipam {
                 config: None,
                 ..Default::default()
-            },
+            }),
             ..Default::default()
         };
         let _response = &self.docker.create_network(create_network_options).await?;
@@ -252,14 +252,13 @@ impl DockerClient {
     }
 
     pub async fn continuously_print_logs(&self, id: &str) -> anyhow::Result<()> {
-        let mut output = self.docker.logs::<String>(
+        let mut output = self.docker.logs(
             id,
-            Some(LogsOptions {
-                follow: true,
-                stdout: true,
-                stderr: true,
-                ..Default::default()
-            }),
+            Some(bollard::query_parameters::LogsOptionsBuilder::default()
+                .follow(true)
+                .stdout(true)
+                .stderr(true)
+                .build()),
         );
 
         // Asynchronous process that pipes docker attach output into stdout.
@@ -280,14 +279,13 @@ impl DockerClient {
     }
 
     pub async fn output_logs(&self, id: &str, path: impl AsRef<Path>) -> anyhow::Result<()> {
-        let mut output = self.docker.logs::<String>(
+        let mut output = self.docker.logs(
             id,
-            Some(LogsOptions {
-                follow: true,
-                stdout: true,
-                stderr: true,
-                ..Default::default()
-            }),
+            Some(bollard::query_parameters::LogsOptionsBuilder::default()
+                .follow(true)
+                .stdout(true)
+                .stderr(true)
+                .build()),
         );
 
         let mut out = std::fs::File::create(path)?;
