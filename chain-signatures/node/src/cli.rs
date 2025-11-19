@@ -15,14 +15,13 @@ use clap::Parser;
 use deadpool_redis::Runtime;
 use k256::sha2::Sha256;
 use local_ip_address::local_ip;
+use mpc_keys::hpke;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch, RwLock};
 use url::Url;
-
-use mpc_keys::hpke;
 
 const DEFAULT_WEB_PORT: u16 = 3000;
 
@@ -343,7 +342,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 account_id.clone(),
                 backlog.clone(),
             ));
-            tokio::spawn(indexer_eth::run(
+
+            match indexer_eth::EthereumIndexer::new(
                 eth,
                 sign_tx.clone(),
                 app_data_storage.clone(),
@@ -352,8 +352,19 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher.clone(),
                 mesh_state.clone(),
                 client.clone(),
-                true,
-            ));
+            )
+            .await
+            {
+                Ok(eth_indexer) => {
+                    tokio::spawn(async move {
+                        eth_indexer.run().await;
+                    });
+                }
+                Err(err) => {
+                    tracing::error!(?err, "failed to create ethereum indexer");
+                }
+            };
+
             tokio::spawn(indexer_sol::run(
                 sol,
                 sign_tx,

@@ -353,6 +353,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             refresh_finalized_interval: 1_000,
             total_timeout: 600,
             optimistic_requests: false,
+            light_client: false,
         });
 
         ethereum = Some(EthereumContext {
