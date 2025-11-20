@@ -262,10 +262,18 @@ impl SyncUpdate {
     async fn process(self, triples: TripleStorage, presignatures: PresignatureStorage) {
         let start = Instant::now();
 
-        let outdated_triples = triples.remove_outdated(self.from, &self.triples).await;
-        let outdated_presignatures = presignatures
-            .remove_outdated(self.from, &self.presignatures)
-            .await;
+        let outdated_triples = if !self.triples.is_empty() {
+            triples.remove_outdated(self.from, &self.triples).await
+        } else {
+            Vec::new()
+        };
+        let outdated_presignatures = if !self.presignatures.is_empty() {
+            presignatures
+                .remove_outdated(self.from, &self.presignatures)
+                .await
+        } else {
+            Vec::new()
+        };
 
         if !outdated_triples.is_empty() || !outdated_presignatures.is_empty() {
             tracing::info!(
