@@ -285,7 +285,7 @@ impl Drop for Nodes {
 }
 
 pub struct EthereumContext {
-    pub sandbox: containers::EthereumSandbox,
+    pub sandbox: std::sync::Arc<containers::EthereumSandbox>,
     pub contract_address: Address,
     pub deployer_address: Address,
 }
@@ -326,7 +326,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
 
     let mut ethereum = None;
     if spawner.use_ethereum {
-        let sandbox = containers::EthereumSandbox::run(spawner).await?;
+        let sandbox = spawner.take_ethereum().await?;
 
         let (client, deployer_address) = eth::client(
             &sandbox.external_http_endpoint,
@@ -356,7 +356,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         });
 
         ethereum = Some(EthereumContext {
-            sandbox,
+            sandbox: std::sync::Arc::clone(&sandbox),
             contract_address,
             deployer_address,
         });

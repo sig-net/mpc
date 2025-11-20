@@ -39,7 +39,8 @@ pub struct Cluster {
     http_client: reqwest::Client,
     pub nodes: Nodes,
     pub account_idx: usize,
-    pub solana: Option<containers::Solana>,
+    pub solana: Option<Arc<containers::Solana>>,
+    pub ethereum: Option<Arc<containers::EthereumSandbox>>,
 }
 
 impl Cluster {

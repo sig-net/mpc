@@ -20,5 +20,15 @@ async fn test_shared_redis_and_worker() -> anyhow::Result<()> {
     assert_eq!(redis1.internal_address, redis2.internal_address);
     assert_eq!(worker1.rpc_addr(), worker2.rpc_addr());
 
+    // Test solana singleton
+    let solana1 = spawner1.prespawn_solana().await.clone();
+    let solana2 = spawner2.spawn_solana().await;
+    assert_eq!(solana1.rpc_address, solana2.rpc_address);
+
+    // Test ethereum singleton (requires spawner to create or use ethereum runtime)
+    let eth1 = spawner1.prespawn_ethereum().await?.clone();
+    let eth2 = spawner2.spawn_ethereum().await?;
+    assert_eq!(eth1.external_http_endpoint, eth2.external_http_endpoint);
+
     Ok(())
 }

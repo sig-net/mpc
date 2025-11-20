@@ -124,7 +124,8 @@ pub struct ClusterSpawner {
     pub wait_for_running: bool,
     pub redis: Option<Arc<containers::Redis>>,
     pub worker: Option<Arc<Worker<Sandbox>>>,
-    pub solana: Option<containers::Solana>,
+    pub solana: Option<Arc<containers::Solana>>,
+    pub ethereum: Option<Arc<containers::EthereumSandbox>>,
     pub program_address: Option<String>,
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
@@ -157,6 +158,7 @@ impl Default for ClusterSpawner {
             redis: None,
             worker: None,
             solana: None,
+            ethereum: None,
             program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
             pregenerated_keys: PregeneratedKeys::load(nodes).unwrap(),
@@ -320,8 +322,26 @@ impl ClusterSpawner {
         }
     }
 
-    pub async fn spawn_solana(&self) -> containers::Solana {
-        containers::Solana::run().await
+    pub async fn spawn_solana(&self) -> Arc<containers::Solana> {
+        #[cfg(feature = "parallel")]
+        {
+            static GLOBAL_SOLANA: OnceCell<Arc<containers::Solana>> = OnceCell::const_new();
+            if let Some(existing) = GLOBAL_SOLANA.get() {
+                tracing::info!("reusing global solana instance: {}", existing.rpc_address);
+                return Arc::clone(existing);
+            }
+            let solana = Arc::new(containers::Solana::run().await);
+            if GLOBAL_SOLANA.set(Arc::clone(&solana)).is_err() {
+                return Arc::clone(GLOBAL_SOLANA.get().unwrap());
+            }
+            tracing::info!("initialized global solana instance: {}", solana.rpc_address);
+            solana
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            Arc::new(containers::Solana::run().await)
+        }
     }
 
     /// Prespawns a redis instance where we're able to make use of it before the nodes are spun
@@ -333,7 +353,7 @@ impl ClusterSpawner {
     }
 
     /// Prespawns a Solana test validator instance for integration testing.
-    pub async fn prespawn_solana(&mut self) -> &containers::Solana {
+    pub async fn prespawn_solana(&mut self) -> &Arc<containers::Solana> {
         self.solana = Some(self.spawn_solana().await);
         self.solana.as_ref().unwrap()
     }
@@ -349,8 +369,42 @@ impl ClusterSpawner {
 
     /// Grabs the underlying Solana instance that was prespawned, or if not prespawned, create a
     /// new one from start up.
-    pub async fn take_solana(&mut self) -> Option<containers::Solana> {
+    pub async fn take_solana(&mut self) -> Option<Arc<containers::Solana>> {
         self.solana.take()
+    }
+
+    pub async fn spawn_ethereum(&self) -> anyhow::Result<Arc<containers::EthereumSandbox>> {
+        #[cfg(feature = "parallel")]
+        {
+            static GLOBAL_ETH: OnceCell<Arc<containers::EthereumSandbox>> = OnceCell::const_new();
+            if let Some(existing) = GLOBAL_ETH.get() {
+                tracing::info!("reusing global ethereum instance: {}", existing.external_http_endpoint);
+                return Ok(Arc::clone(existing));
+            }
+            let sandbox = Arc::new(containers::EthereumSandbox::run(self).await?);
+            if GLOBAL_ETH.set(Arc::clone(&sandbox)).is_err() {
+                return Ok(Arc::clone(GLOBAL_ETH.get().unwrap()));
+            }
+            tracing::info!("initialized global ethereum instance: {}", sandbox.external_http_endpoint);
+            Ok(sandbox)
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            Ok(Arc::new(containers::EthereumSandbox::run(self).await?))
+        }
+    }
+
+    pub async fn prespawn_ethereum(&mut self) -> anyhow::Result<&Arc<containers::EthereumSandbox>> {
+        self.ethereum = Some(self.spawn_ethereum().await?);
+        Ok(self.ethereum.as_ref().unwrap())
+    }
+
+    pub async fn take_ethereum(&mut self) -> anyhow::Result<Arc<containers::EthereumSandbox>> {
+        match self.ethereum.take() {
+            Some(s) => Ok(s),
+            None => self.spawn_ethereum().await,
+        }
     }
 
     pub async fn prespawn_sandbox(&mut self) -> anyhow::Result<&Arc<Worker<Sandbox>>> {
@@ -466,6 +520,7 @@ impl IntoFuture for ClusterSpawner {
                 docker_client: self.docker,
                 account_idx: nodes.len(),
                 solana: self.solana.take(),
+                ethereum: self.ethereum.take(),
                 nodes,
             };
 
