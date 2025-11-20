@@ -1,7 +1,6 @@
 use alloy::primitives::{keccak256, Address as AlloyAddress, U256};
 use anyhow::Context as _;
 use anyhow::Result;
-use cait_sith::FullSignature;
 use integration_tests::{actions, cluster};
 use k256::ecdsa::SigningKey;
 use k256::elliptic_curve::ops::Reduce;
@@ -20,6 +19,7 @@ use sha3::{Digest, Keccak256};
 use solana_sdk::signer::Signer as _;
 use std::time::Duration;
 use test_log::test;
+use threshold_signatures::ecdsa::Signature as FullSignature;
 use tokio::time::sleep;
 
 const FUNDING_TOP_UP_WEI: u128 = 200_000_000_000_000; // 0.0002 ETH
@@ -252,7 +252,7 @@ fn append_u256(stream: &mut RlpStream, value: &U256) {
     }
 }
 
-fn signature_components(signature: &FullSignature<Secp256k1>) -> (U256, U256) {
+fn signature_components(signature: &FullSignature) -> (U256, U256) {
     let r_scalar = actions::x_coordinate::<Secp256k1>(&signature.big_r);
     let r_bytes = r_scalar.to_bytes();
     let r = U256::from_be_slice(r_bytes.as_slice());

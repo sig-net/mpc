@@ -1,10 +1,10 @@
-use cait_sith::protocol::Participant;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, ToRedisArgs};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use std::{fmt, time::Instant};
+use threshold_signatures::participants::Participant;
 use tokio::sync::RwLock;
 use tracing;
 

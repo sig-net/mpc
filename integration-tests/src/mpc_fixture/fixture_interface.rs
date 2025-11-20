@@ -3,7 +3,6 @@
 
 use crate::containers::Redis;
 use crate::mpc_fixture::message_collector::{CollectMessages, MessagePrinter};
-use cait_sith::protocol::Participant;
 use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
@@ -16,6 +15,7 @@ use near_sdk::AccountId;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
+use threshold_signatures::participants::Participant;
 use tokio::sync::mpsc;
 use tokio::sync::{watch, Mutex};
 

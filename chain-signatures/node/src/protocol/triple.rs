@@ -11,10 +11,16 @@ use crate::util::{AffinePointExt, JoinMap};
 
 use mpc_contract::config::ProtocolConfig;
 
-use cait_sith::protocol::{Action, InitializationError, Participant};
-use cait_sith::triples::{TriplePub, TripleShare};
 use chrono::Utc;
-use k256::Secp256k1;
+use highway::{HighwayHash, HighwayHasher};
+use k256::elliptic_curve::group::GroupEncoding;
+use rand::rngs::OsRng;
+use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
+use threshold_signatures::errors::InitializationError;
+use threshold_signatures::participants::Participant;
+use threshold_signatures::protocol::Action;
+// Secp256k1 is not used here; referenced in inner code if necessary from k256 directly.
+use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -24,15 +30,15 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 /// Unique number used to identify a specific ongoing triple generation protocol.
-/// Without `TripleId` it would be unclear where to route incoming cait-sith triple generation
+/// Without `TripleId` it would be unclear where to route incoming triple generation
 /// messages.
 pub type TripleId = u64;
 
 /// A completed triple.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Triple {
-    pub share: TripleShare<Secp256k1>,
-    pub public: TriplePub<Secp256k1>,
+    pub share: TripleShare,
+    pub public: TriplePub,
 }
 
 struct TripleGenerator {
@@ -74,8 +80,9 @@ impl TripleGenerator {
         // Participants can be out of order, so let's sort them before doing anything.
         participants.sort();
 
-        let protocol =
-            cait_sith::triples::generate_triple_many::<Secp256k1, 2>(&participants, me, threshold)?;
+        let protocol = threshold_signatures::ecdsa::ot_based_ecdsa::triples::generate_triple_many::<
+            2,
+        >(&participants, me, threshold, OsRng)?;
 
         let inbox = msg.subscribe_triple(id).await;
         Ok(Self {

@@ -99,7 +99,7 @@ pub fn check_ec_signature(
 ) -> anyhow::Result<()> {
     let public_key = expected_pk.to_encoded_point(false);
     let signature = k256::ecdsa::Signature::from_scalars(x_coordinate(big_r), s)
-        .context("cannot create signature from cait_sith signature")?;
+        .context("cannot create signature from threshold-signatures signature")?;
     let found_pk = recover(
         &msg_hash.to_bytes(),
         &signature,

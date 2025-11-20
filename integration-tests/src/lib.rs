@@ -410,7 +410,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     if spawner.pregenerated_keys.is_enabled() {
         tracing::info!("injecting pregenerated keyshares into storage...");
         for (i, account) in spawner.accounts.iter().enumerate() {
-            let participant = cait_sith::protocol::Participant::from(i as u32);
+            let participant = threshold_signatures::participants::Participant::from(i as u32);
             if let Some(key_info) = spawner.pregenerated_keys.get(&participant) {
                 let mut secret_storage = storage::secret_storage::init(
                     None, // No GCP service for tests

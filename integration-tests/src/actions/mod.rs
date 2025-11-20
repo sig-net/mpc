@@ -5,12 +5,11 @@ pub mod wait_for;
 use crate::cluster::Cluster;
 
 use anyhow::Context as _;
-use cait_sith::FullSignature;
 use elliptic_curve::sec1::ToEncodedPoint;
 use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
-use k256::{AffinePoint, EncodedPoint, Scalar, Secp256k1};
+use k256::{AffinePoint, EncodedPoint, Scalar};
 use mpc_contract::errors::SignError;
 use mpc_contract::primitives::SignRequest;
 use mpc_crypto::ScalarExt;
@@ -23,6 +22,7 @@ use near_workspaces::types::Gas;
 use near_workspaces::types::NearToken;
 use near_workspaces::Account;
 use rand::Rng;
+use threshold_signatures::ecdsa::Signature as FullSignature;
 use wait_for::{SignatureError, WaitForError};
 
 use std::time::Duration;
@@ -105,7 +105,7 @@ pub async fn validate_signature(
     account_id: &near_workspaces::AccountId,
     mpc_pk_bytes: &[u8],
     payload: [u8; 32],
-    signature: &FullSignature<Secp256k1>,
+    signature: &FullSignature,
 ) -> anyhow::Result<()> {
     let mpc_point = EncodedPoint::from_bytes(mpc_pk_bytes).unwrap();
     let mpc_pk = AffinePoint::from_encoded_point(&mpc_point).unwrap();
@@ -152,7 +152,7 @@ pub async fn batch_duplicate_signature_production(nodes: &Cluster) -> anyhow::Re
 }
 
 /// Get the x coordinate of a point, as a scalar
-pub fn x_coordinate<C: cait_sith::CSCurve>(point: &C::AffinePoint) -> C::Scalar {
+pub fn x_coordinate<C: k256::elliptic_curve::CurveArithmetic>(point: &C::AffinePoint) -> C::Scalar {
     <C::Scalar as k256::elliptic_curve::ops::Reduce<<C as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(&point.x())
 }
 
@@ -257,6 +257,7 @@ mod tests {
     use k256::{AffinePoint, EncodedPoint, Scalar};
     use mpc_crypto::{derive_epsilon_near, derive_key, ScalarExt as _};
     use mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
+    use threshold_signatures::ecdsa::Signature as FullSignature;
 
     use super::{public_key_to_address, recover, recover_eth_address, x_coordinate};
 
@@ -309,9 +310,8 @@ mod tests {
         let s = k256::Scalar::from_bytes(s).unwrap();
         let r = x_coordinate::<k256::Secp256k1>(&big_r);
 
-        let signature = cait_sith::FullSignature::<k256::Secp256k1> { big_r, s };
-
-        let multichain_sig = mpc_node::kdf::into_signature(
+        let signature = FullSignature { big_r, s };
+    let multichain_sig = mpc_node::kdf::into_signature(
             &user_pk,
             &signature.big_r,
             &signature.s,
@@ -319,7 +319,6 @@ mod tests {
         )
         .unwrap();
 
-        // Check signature using cait-sith tooling
         let is_signature_valid_for_user_pk = signature.verify(&user_pk, &payload_hash_scalar);
         let is_signature_valid_for_mpc_pk = signature.verify(&mpc_pk, &payload_hash_scalar);
         let another_user_pk = derive_key(mpc_pk, derivation_epsilon + k256::Scalar::ONE);

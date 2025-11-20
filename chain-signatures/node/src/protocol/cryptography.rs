@@ -13,10 +13,12 @@ use crate::protocol::state::{PersistentNodeData, WaitingForConsensusState};
 use crate::protocol::MeshState;
 use crate::types::{ReshareProtocol, SecretKeyShare};
 
-use cait_sith::protocol::{Action, InitializationError, Participant, ProtocolError};
-use k256::elliptic_curve::group::GroupEncoding;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::sha2::{Digest, Sha256};
 use mpc_crypto::PublicKey;
+use threshold_signatures::errors::{InitializationError, ProtocolError};
+use threshold_signatures::participants::Participant;
+use threshold_signatures::protocol::Action;
 use tokio::sync::mpsc;
 
 pub static RESHARING_RUNNING_TIMEOUT_SECS: AtomicU64 = AtomicU64::new(300);
@@ -31,10 +33,10 @@ pub fn set_resharing_running_timeout(duration: Duration) {
 
 #[derive(thiserror::Error, Debug)]
 pub enum CryptographicError {
-    #[error("cait-sith initialization error: {0}")]
-    CaitSithInitializationError(#[from] InitializationError),
-    #[error("cait-sith protocol error: {0}")]
-    CaitSithProtocolError(#[from] ProtocolError),
+    #[error("initialization error: {0}")]
+    Init(#[from] InitializationError),
+    #[error("protocol error: {0}")]
+    Protocol(#[from] ProtocolError),
 }
 
 pub(crate) trait CryptographicProtocol {
@@ -93,7 +95,7 @@ impl CryptographicProtocol for GeneratingState {
                     tracing::debug!("generating: sending a message to many participants");
                     for p in &participants {
                         if p == &self.me {
-                            // Skip yourself, cait-sith never sends messages to oneself
+                            // Skip yourself, threshold-signatures never sends messages to oneself
                             continue;
                         }
 
@@ -124,10 +126,19 @@ impl CryptographicProtocol for GeneratingState {
                 }
                 Action::Return(r) => {
                     tracing::info!(
-                        public_key = hex::encode(r.public_key.to_bytes()),
+                        public_key = hex::encode(
+                            r.public_key
+                                .to_element()
+                                .to_affine()
+                                .to_encoded_point(true)
+                                .as_bytes()
+                        ),
                         "generating: successfully completed key generation"
                     );
-                    return self.finalize(r.public_key, r.private_share, ctx).await;
+                    // Convert frost_core::VerifyingKey -> AffinePoint for storage
+                    return self
+                        .finalize(r.public_key.to_element().to_affine(), r.private_share, ctx)
+                        .await;
                 }
             }
         }
@@ -344,11 +355,16 @@ impl CryptographicProtocol for ResharingState {
                             .await;
                     }
                 }
-                Action::Return(private_share) => {
+                Action::Return(keygen_output) => {
                     tracing::info!("resharing: successfully completed key reshare");
                     resharing.last_activity = Instant::now();
-                    match Self::try_finalize(ctx, &mut resharing, private_share, &self.contract)
-                        .await
+                    match Self::try_finalize(
+                        ctx,
+                        &mut resharing,
+                        keygen_output.private_share,
+                        &self.contract,
+                    )
+                    .await
                     {
                         Ok(next_state) => return next_state,
                         Err(()) => {

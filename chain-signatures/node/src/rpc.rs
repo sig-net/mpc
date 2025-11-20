@@ -17,12 +17,12 @@ use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
 use alloy::providers::{Provider, RootProvider, WalletProvider};
 use alloy::rpc::types::{Transaction, TransactionReceipt};
-use cait_sith::protocol::Participant;
-use cait_sith::FullSignature;
-use k256::{AffinePoint, Secp256k1};
+use k256::AffinePoint;
 use mpc_keys::hpke;
 use mpc_primitives::SignId;
 use mpc_primitives::Signature;
+use threshold_signatures::ecdsa::Signature as ThresholdSignature;
+use threshold_signatures::participants::Participant;
 
 use crate::util::retry::{retry_async, Backoff, RetryConfig, RetryError, RetryReason};
 use alloy::contract::{ContractInstance, Interface};
@@ -107,7 +107,7 @@ impl PublishAction {
     pub fn new(
         public_key: mpc_crypto::PublicKey,
         indexed: IndexedSignRequest,
-        output: FullSignature<Secp256k1>,
+        output: ThresholdSignature,
         participants: Vec<Participant>,
     ) -> Option<Self> {
         let expected_public_key = mpc_crypto::derive_key(public_key, indexed.args.epsilon);
@@ -152,7 +152,7 @@ impl RpcChannel {
         &self,
         public_key: mpc_crypto::PublicKey,
         indexed: IndexedSignRequest,
-        output: FullSignature<Secp256k1>,
+        output: ThresholdSignature,
         participants: Vec<Participant>,
     ) {
         let sign_id = indexed.id;

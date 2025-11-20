@@ -1,6 +1,5 @@
 use crate::backlog::Backlog;
 use crate::config::Config;
-use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::contract::primitives::intersect_vec;
@@ -16,13 +15,10 @@ use crate::storage::protocol_storage::ProtocolArtifact;
 use crate::storage::PresignatureStorage;
 use crate::stream::ops::SignBidirectionalEvent;
 use crate::types::SignatureProtocol;
-use crate::util::{AffinePointExt, JoinMap, TimeoutBudget};
+use crate::util::{JoinMap, TimeoutBudget};
 
 use crate::protocol::SignKind;
-use cait_sith::protocol::{Action, InitializationError, Participant};
-use cait_sith::PresignOutput;
 use chrono::Utc;
-use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::derive_key;
 use mpc_primitives::{SignArgs, SignId};
@@ -33,6 +29,13 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use threshold_signatures::ecdsa::ot_based_ecdsa::RerandomizedPresignOutput;
+use threshold_signatures::ecdsa::RerandomizationArguments;
+use threshold_signatures::ecdsa::Tweak;
+use threshold_signatures::errors::InitializationError;
+use threshold_signatures::participants::Participant;
+use threshold_signatures::participants::ParticipantList;
+use threshold_signatures::protocol::Action;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -924,19 +927,31 @@ impl SignGenerator {
         );
 
         let (presignature, dropper) = taken.take();
-        let PresignOutput { big_r, k, sigma } = presignature.output;
-        let delta = derive_delta(indexed.id.request_id, indexed.args.entropy, big_r);
-        // TODO: Check whether it is okay to use invert_vartime instead
-        let output: PresignOutput<Secp256k1> = PresignOutput {
-            big_r: (big_r * delta).to_affine(),
-            k: k * delta.invert().unwrap(),
-            sigma: (sigma + indexed.args.epsilon * k) * delta.invert().unwrap(),
-        };
-        let protocol = Box::new(cait_sith::sign(
+        // Rerandomize the presignature using the same public entropy used by
+        // derive_delta. `threshold-signatures` exposes a helper for this.
+        let msg_hash_bytes: [u8; 32] = indexed.args.payload.to_bytes().into();
+        let tweak = Tweak::new(indexed.args.epsilon);
+        let participants_list = ParticipantList::new(&participants).unwrap();
+        let rerand_args = RerandomizationArguments::new(
+            ctx.public_key,
+            tweak,
+            msg_hash_bytes,
+            presignature.output.big_r,
+            participants_list,
+            indexed.args.entropy,
+        );
+        let rerandomized: RerandomizedPresignOutput =
+            RerandomizedPresignOutput::rerandomize_presign(&presignature.output, &rerand_args)
+                .map_err(|e| {
+                    InitializationError::BadParameters(format!("rerandomization failed: {e:?}"))
+                })?;
+
+        let protocol = Box::new(threshold_signatures::ecdsa::ot_based_ecdsa::sign::sign(
             &participants,
+            proposer,
             ctx.governance.me,
             derive_key(ctx.governance.public_key, indexed.args.epsilon),
-            output,
+            rerandomized,
             indexed.args.payload,
         )?);
         let inbox = ctx.msg.subscribe_signature(sign_id, presignature_id).await;
@@ -1070,14 +1085,14 @@ impl SignGenerator {
                         .await;
                 }
                 Action::Return(output) => {
-                    let big_r = output.big_r;
-                    let s = output.s;
                     tracing::info!(
                         ?sign_id,
                         ?me,
-                        ?presignature_id,
-                        big_r = ?big_r.to_base58(),
-                        ?s,
+                        presignature_id,
+                        proposer = ?self.proposer,
+                        publisher = output.is_some(),
+                        big_r = ?output.as_ref().map(|sig| sig.big_r),
+                        s = ?output.as_ref().map(|sig| sig.s),
                         elapsed = ?self.created.elapsed(),
                         "completed signature generation"
                     );
@@ -1088,6 +1103,11 @@ impl SignGenerator {
                         "ok",
                         self.created,
                     );
+
+                    let Some(output) = output else {
+                        tracing::info!(?sign_id, "signature completed => we aren't the proposer");
+                        break Ok(());
+                    };
 
                     crate::metrics::protocols::SIGNATURE_ACCRUED_WAIT_DELAY
                         .observe(total_wait.as_millis() as f64);

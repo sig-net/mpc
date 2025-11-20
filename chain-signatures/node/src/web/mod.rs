@@ -25,7 +25,6 @@ use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use axum_extra::extract::WithRejection;
-use cait_sith::protocol::Participant;
 use mpc_keys::hpke::Ciphered;
 use near_account_id::AccountId;
 use near_primitives::types::BlockHeight;
@@ -35,6 +34,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::Instrument;
+use threshold_signatures::participants::Participant;
 
 struct AxumState {
     node: NodeStateWatcher,

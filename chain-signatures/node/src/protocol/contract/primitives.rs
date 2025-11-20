@@ -1,4 +1,3 @@
-use cait_sith::protocol::Participant;
 use mpc_keys::hpke;
 use near_primitives::{borsh::BorshDeserialize, types::AccountId};
 use serde::{Deserialize, Serialize};
@@ -7,6 +6,7 @@ use std::{
     hash::Hash,
     str::FromStr,
 };
+use threshold_signatures::participants::Participant;
 
 type ParticipantId = u32;
 

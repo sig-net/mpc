@@ -14,13 +14,10 @@ use bollard::network::CreateNetworkOptions;
 use bollard::secret::Ipam;
 use bollard::Docker;
 use borsh::{BorshDeserialize, BorshSerialize};
-use cait_sith::protocol::Participant;
-use cait_sith::triples::{TriplePub, TripleShare};
-use cait_sith::FullSignature;
 use elliptic_curve::rand_core::OsRng;
 use futures::StreamExt as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-use k256::Secp256k1;
+use k256::ProjectivePoint;
 use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
@@ -48,6 +45,10 @@ use testcontainers::{
     runners::AsyncRunner,
     GenericImage, ImageExt,
 };
+use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
+use threshold_signatures::ecdsa::Polynomial;
+use threshold_signatures::ecdsa::Signature as FullSignature;
+use threshold_signatures::participants::Participant;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{sleep, Duration};
 use tracing;
@@ -438,8 +439,37 @@ impl Redis {
             .values()
             .map(|id| Participant::from(*id))
             .collect::<Vec<_>>();
-        let (public, shares): (TriplePub<Secp256k1>, Vec<TripleShare<Secp256k1>>) =
-            cait_sith::triples::deal(&mut OsRng, &participant_ids, cfg.threshold);
+
+        // Create triples by sampling values and distributing shares (similar to
+        // `threshold-signatures` test helper `deal`).
+        let mut rng = OsRng;
+        let f_a = Polynomial::generate_polynomial(None, cfg.threshold - 1, &mut rng).unwrap();
+        let a = f_a.eval_at_zero().unwrap().0;
+
+        let f_b = Polynomial::generate_polynomial(None, cfg.threshold - 1, &mut rng).unwrap();
+        let b = f_b.eval_at_zero().unwrap().0;
+        let c = a * b;
+        let f_c = Polynomial::generate_polynomial(Some(c), cfg.threshold - 1, &mut rng).unwrap();
+
+        let mut shares = Vec::with_capacity(participant_ids.len());
+        let mut participants_owned = Vec::with_capacity(participant_ids.len());
+
+        for p in &participant_ids {
+            participants_owned.push(*p);
+            shares.push(TripleShare {
+                a: f_a.eval_at_participant(*p).unwrap().0,
+                b: f_b.eval_at_participant(*p).unwrap().0,
+                c: f_c.eval_at_participant(*p).unwrap().0,
+            });
+        }
+
+        let public = TriplePub {
+            big_a: (ProjectivePoint::GENERATOR * a).to_affine(),
+            big_b: (ProjectivePoint::GENERATOR * b).to_affine(),
+            big_c: (ProjectivePoint::GENERATOR * c).to_affine(),
+            participants: participants_owned,
+            threshold: cfg.threshold,
+        };
 
         // - first/second loop add at least min_triples per node
         // - third loop: for each pair, store the shares as pairs per node
@@ -585,10 +615,7 @@ fn derive_secret_key(mnemonic: &str) -> anyhow::Result<String> {
     Ok(format!("0x{}", hex::encode(bytes)))
 }
 
-fn shares_to_triples(
-    public: &TriplePub<Secp256k1>,
-    shares: &[TripleShare<Secp256k1>],
-) -> Vec<Triple> {
+fn shares_to_triples(public: &TriplePub, shares: &[TripleShare]) -> Vec<Triple> {
     shares
         .iter()
         .map(|share| Triple {
@@ -1120,7 +1147,7 @@ impl Solana {
         &self,
         request_id: [u8; 32],
         serialized_output: Vec<u8>,
-        signature: &FullSignature<Secp256k1>,
+        signature: &FullSignature,
         recovery_id: u8,
     ) -> anyhow::Result<SolanaSignature> {
         if self.rpc_client.get_version().await.is_err() {

@@ -6,8 +6,8 @@ use crate::protocol::contract::primitives::Participants;
 use crate::protocol::ParticipantInfo;
 use crate::protocol::ProtocolState;
 use crate::rpc::ContractStateWatcher;
-use cait_sith::protocol::Participant;
 use near_account_id::AccountId;
+use threshold_signatures::participants::Participant;
 use tokio::sync::{mpsc, watch};
 
 pub mod connection;
@@ -138,6 +138,7 @@ impl Mesh {
             ProtocolState::Resharing(resharing) => resharing
                 .new_participants
                 .find(&self.my_id)
+                .or_else(|| resharing.old_participants.find(&self.my_id))
                 .map(|(p, info)| (*p, info.clone())),
         }
     }

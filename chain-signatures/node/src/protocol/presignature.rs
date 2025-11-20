@@ -13,10 +13,9 @@ use crate::storage::TripleStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
 use crate::util::{AffinePointExt, JoinMap};
 
-use cait_sith::protocol::{Action, InitializationError, Participant};
-use cait_sith::{KeygenOutput, PresignArguments, PresignOutput};
 use chrono::Utc;
-use k256::{AffinePoint, Scalar, Secp256k1};
+use k256::ProjectivePoint;
+use k256::{AffinePoint, Scalar};
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::PublicKey;
 use serde::ser::SerializeStruct;
@@ -25,12 +24,18 @@ use sha3::{Digest, Sha3_256};
 use std::collections::HashSet;
 use std::fmt;
 use std::time::{Duration, Instant};
+use threshold_signatures::ecdsa::ot_based_ecdsa::{self, PresignArguments, PresignOutput};
+use threshold_signatures::ecdsa::{KeygenOutput, Secp256K1Sha256};
+use threshold_signatures::errors::InitializationError;
+use threshold_signatures::frost_core::{Element, VerifyingKey};
+use threshold_signatures::participants::Participant;
+use threshold_signatures::protocol::Action;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time;
 
 /// Unique number used to identify a specific ongoing presignature generation protocol.
-/// Without `PresignatureId` it would be unclear where to route incoming cait-sith presignature
+/// Without `PresignatureId` it would be unclear where to route incoming threshold-signatures presignature
 /// generation messages.
 pub type PresignatureId = u64;
 
@@ -56,7 +61,7 @@ impl FullPresignatureId {
 /// A completed presignature.
 pub struct Presignature {
     pub id: PresignatureId,
-    pub output: PresignOutput<Secp256k1>,
+    pub output: PresignOutput,
     /// Original protocol participants
     pub participants: Vec<Participant>,
     /// Nodes still holding their share of the artifact
@@ -580,9 +585,14 @@ impl PresignatureSpawner {
         let node_account_id = self.node_account_id.clone();
         #[cfg(not(feature = "debug-page"))]
         let _ = self.node_account_id.clone();
+
+        // Convert the project AffinePoint public key into the ciphersuite
+        // verifying key expected by threshold-signatures.
+        let pk_element: Element<Secp256K1Sha256> = ProjectivePoint::from(self.public_key);
+        let verifying_key = VerifyingKey::<Secp256K1Sha256>::new(pk_element);
         let keygen_out = KeygenOutput {
             private_share: self.private_share,
-            public_key: self.public_key,
+            public_key: verifying_key,
         };
 
         let task = async move {
@@ -591,11 +601,7 @@ impl PresignatureSpawner {
             };
 
             let (pair, dropper) = triples.take();
-            let protocol = match cait_sith::presign(
-                &participants,
-                me,
-                // These paramaters appear to be to make it easier to use different indexing schemes for triples
-                // Introduced in this PR https://github.com/LIT-Protocol/cait-sith/pull/7
+            let protocol = match ot_based_ecdsa::presign::presign(
                 &participants,
                 me,
                 PresignArguments {
@@ -876,8 +882,8 @@ impl PendingTriples {
 
 #[cfg(test)]
 mod tests {
-    use cait_sith::{protocol::Participant, PresignOutput};
     use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
+    use threshold_signatures::{ecdsa::ot_based_ecdsa::PresignOutput, participants::Participant};
 
     use crate::protocol::presignature::Presignature;
 

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cait_sith::protocol::Participant;
 use serde::{Deserialize, Serialize};
+use threshold_signatures::participants::Participant;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 

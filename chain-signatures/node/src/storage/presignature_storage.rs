@@ -1,5 +1,5 @@
 use deadpool_redis::Pool;
-use near_sdk::AccountId;
+use near_account_id::AccountId;
 use redis::{FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 
 use cait_sith::protocol::Participant;
