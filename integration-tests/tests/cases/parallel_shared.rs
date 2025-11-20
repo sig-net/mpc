@@ -4,7 +4,7 @@ use test_log::test;
 // Ensure that when `parallel` feature is enabled, multiple spawners return the same
 // redis instance (global) and worker (sandbox) references.
 #[test(tokio::test)]
-async fn test_shared_redis_and_worker() -> anyhow::Result<()> {
+async fn test_shared_resources() -> anyhow::Result<()> {
     // Two separate spawners in same process
     let mut spawner1 = ClusterSpawner::default().init_network().await?;
     let mut spawner2 = ClusterSpawner::default().init_network().await?;

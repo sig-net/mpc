@@ -5,7 +5,8 @@ use near_account_id::AccountId;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, Worker};
 use std::sync::Arc;
-use tokio::sync::OnceCell;
+use once_cell::sync::Lazy;
+use tokio::sync::Mutex as AsyncMutex;
 
 use std::collections::BTreeMap;
 use std::future::{Future, IntoFuture};
@@ -16,6 +17,13 @@ use crate::utils::dev_gen_indexed;
 use crate::{execute, NodeConfig, Nodes};
 
 use crate::cluster::Cluster;
+use libc;
+
+// Global singletons used by the `parallel` feature to share test infrastructure.
+static GLOBAL_REDIS: Lazy<AsyncMutex<Option<Arc<containers::Redis>>>> = Lazy::new(|| AsyncMutex::new(None));
+static GLOBAL_WORKER: Lazy<AsyncMutex<Option<Arc<Worker<Sandbox>>>>> = Lazy::new(|| AsyncMutex::new(None));
+static GLOBAL_SOLANA: Lazy<AsyncMutex<Option<Arc<containers::Solana>>>> = Lazy::new(|| AsyncMutex::new(None));
+static GLOBAL_ETH: Lazy<AsyncMutex<Option<Arc<containers::EthereumSandbox>>>> = Lazy::new(|| AsyncMutex::new(None));
 
 const DOCKER_NETWORK: &str = "mpc_it_network";
 const GCP_PROJECT_ID: &str = "multichain-integration";
@@ -130,6 +138,58 @@ pub struct ClusterSpawner {
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
+}
+
+/// Shutdown and clear any global instances created for the `parallel` feature.
+///
+/// This attempts a graceful shutdown of containers and processes and then clears
+/// the module-level references so new instances can be created by later tests.
+pub async fn shutdown_global_instances() {
+    // Stop Ethereum sandbox if present
+    {
+        let mut guard = GLOBAL_ETH.lock().await;
+        if let Some(sandbox) = guard.take() {
+            tracing::info!("stopping global ethereum sandbox: {}", sandbox.external_http_endpoint);
+            if let Err(e) = sandbox.container.stop().await {
+                tracing::warn!("failed to stop ethereum sandbox container: {:?}", e);
+            }
+        }
+    }
+
+    // Stop Solana process if present
+    {
+        let mut guard = GLOBAL_SOLANA.lock().await;
+        if let Some(solana) = guard.take() {
+            tracing::info!("stopping global solana test-validator: {}", solana.rpc_address);
+            // best-effort: if we can get an OS pid, send SIGTERM
+            let pid = solana.process.id();
+            if pid != 0 {
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
+            }
+        }
+    }
+
+    // Stop Redis container if present
+    {
+        let mut guard = GLOBAL_REDIS.lock().await;
+        if let Some(redis) = guard.take() {
+            tracing::info!("stopping global redis instance: {}", redis.internal_address);
+            if let Err(e) = redis.container.stop().await {
+                tracing::warn!("failed to stop redis container: {:?}", e);
+            }
+        }
+    }
+
+    // Clear worker (sandbox) reference; there's no explicit stop for near-workspaces
+    {
+        let mut guard = GLOBAL_WORKER.lock().await;
+        if let Some(worker) = guard.take() {
+            tracing::info!("cleared global near sandbox: {}", worker.rpc_addr());
+            // Drop worker by taking it out of global state
+        }
+    }
 }
 
 impl Default for ClusterSpawner {
@@ -298,21 +358,20 @@ impl ClusterSpawner {
             .extend((0..self.accounts.len() as u32).map(Participant::from));
     }
 
+    // module-level global guards for parallel mode
+
     pub async fn spawn_redis(&self) -> Arc<containers::Redis> {
         // When parallel feature is enabled, we attempt to reuse a global redis instance
         #[cfg(feature = "parallel")]
         {
-            static GLOBAL_REDIS: OnceCell<Arc<containers::Redis>> = OnceCell::const_new();
-            if let Some(existing) = GLOBAL_REDIS.get() {
+            let mut guard = crate::cluster::spawner::GLOBAL_REDIS.lock().await;
+            if let Some(existing) = &*guard {
                 tracing::info!("reusing global redis instance: {}", existing.internal_address);
                 return Arc::clone(existing);
             }
             let redis = Arc::new(containers::Redis::run(self).await);
             tracing::info!("initialized global redis instance: {}", redis.internal_address);
-            // Try to set global; if this fails (concurrent set), just clone the existing
-            if GLOBAL_REDIS.set(Arc::clone(&redis)).is_err() {
-                return Arc::clone(GLOBAL_REDIS.get().unwrap());
-            }
+            *guard = Some(Arc::clone(&redis));
             return redis;
         }
 
@@ -325,16 +384,14 @@ impl ClusterSpawner {
     pub async fn spawn_solana(&self) -> Arc<containers::Solana> {
         #[cfg(feature = "parallel")]
         {
-            static GLOBAL_SOLANA: OnceCell<Arc<containers::Solana>> = OnceCell::const_new();
-            if let Some(existing) = GLOBAL_SOLANA.get() {
+            let mut guard = crate::cluster::spawner::GLOBAL_SOLANA.lock().await;
+            if let Some(existing) = &*guard {
                 tracing::info!("reusing global solana instance: {}", existing.rpc_address);
                 return Arc::clone(existing);
             }
             let solana = Arc::new(containers::Solana::run().await);
-            if GLOBAL_SOLANA.set(Arc::clone(&solana)).is_err() {
-                return Arc::clone(GLOBAL_SOLANA.get().unwrap());
-            }
             tracing::info!("initialized global solana instance: {}", solana.rpc_address);
+            *guard = Some(Arc::clone(&solana));
             solana
         }
 
@@ -376,16 +433,14 @@ impl ClusterSpawner {
     pub async fn spawn_ethereum(&self) -> anyhow::Result<Arc<containers::EthereumSandbox>> {
         #[cfg(feature = "parallel")]
         {
-            static GLOBAL_ETH: OnceCell<Arc<containers::EthereumSandbox>> = OnceCell::const_new();
-            if let Some(existing) = GLOBAL_ETH.get() {
+            let mut guard = crate::cluster::spawner::GLOBAL_ETH.lock().await;
+            if let Some(existing) = &*guard {
                 tracing::info!("reusing global ethereum instance: {}", existing.external_http_endpoint);
                 return Ok(Arc::clone(existing));
             }
             let sandbox = Arc::new(containers::EthereumSandbox::run(self).await?);
-            if GLOBAL_ETH.set(Arc::clone(&sandbox)).is_err() {
-                return Ok(Arc::clone(GLOBAL_ETH.get().unwrap()));
-            }
             tracing::info!("initialized global ethereum instance: {}", sandbox.external_http_endpoint);
+            *guard = Some(Arc::clone(&sandbox));
             Ok(sandbox)
         }
 
@@ -411,19 +466,15 @@ impl ClusterSpawner {
         if self.worker.is_none() {
             #[cfg(feature = "parallel")]
             {
-                static GLOBAL_WORKER: OnceCell<Arc<Worker<Sandbox>>> = OnceCell::const_new();
-                    if let Some(w) = GLOBAL_WORKER.get() {
+                let mut guard = crate::cluster::spawner::GLOBAL_WORKER.lock().await;
+                if let Some(w) = &*guard {
                     tracing::info!("reusing global near sandbox instance: {}", w.rpc_addr());
                     self.worker = Some(Arc::clone(w));
                 } else {
                     let worker = Arc::new(near_workspaces::sandbox().await?);
-                    // if another thread tries to set at the same time, prefer existing one
-                    if GLOBAL_WORKER.set(Arc::clone(&worker)).is_err() {
-                        self.worker = Some(Arc::clone(GLOBAL_WORKER.get().unwrap()));
-                    } else {
-                        tracing::info!("initialized global near sandbox instance: {}", worker.rpc_addr());
-                        self.worker = Some(worker);
-                    }
+                    tracing::info!("initialized global near sandbox instance: {}", worker.rpc_addr());
+                    *guard = Some(Arc::clone(&worker));
+                    self.worker = Some(worker);
                 }
             }
 
@@ -441,18 +492,15 @@ impl ClusterSpawner {
             None => {
                 #[cfg(feature = "parallel")]
                 {
-                    static GLOBAL_WORKER: OnceCell<Arc<Worker<Sandbox>>> = OnceCell::const_new();
-                    if let Some(w) = GLOBAL_WORKER.get() {
+                    let mut guard = crate::cluster::spawner::GLOBAL_WORKER.lock().await;
+                    if let Some(w) = &*guard {
                         tracing::info!("reusing global near sandbox instance: {}", w.rpc_addr());
                         Arc::clone(w)
                     } else {
                         let worker = Arc::new(near_workspaces::sandbox().await.unwrap());
-                        if GLOBAL_WORKER.set(Arc::clone(&worker)).is_err() {
-                            Arc::clone(GLOBAL_WORKER.get().unwrap())
-                        } else {
-                            tracing::info!("initialized global near sandbox instance: {}", worker.rpc_addr());
-                            worker
-                        }
+                        tracing::info!("initialized global near sandbox instance: {}", worker.rpc_addr());
+                        *guard = Some(Arc::clone(&worker));
+                        worker
                     }
                 }
 
