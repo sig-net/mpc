@@ -1,4 +1,6 @@
-use crate::checkpoint_consensus::fetch_consensus_checkpoints;
+pub mod selection;
+
+use self::selection::select_checkpoints;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, SignRequestType};
@@ -558,16 +560,15 @@ impl Backlog {
         threshold: usize,
         chains: &[Chain],
     ) {
-        tracing::info!("attempting to recover from latest checkpoints via node consensus");
+        tracing::info!("attempting to recover from latest checkpoints via node selection");
 
-        // p2p node consensus to find checkpoints.
-        // Fetches all checkpoints from active participants and creates a consensus checkpoint:
+        // p2p node selection to find checkpoints.
+        // Fetches all checkpoints from active participants and creates a selected checkpoint:
         // - sorts all checkpoints by block height
         // - selects threshold lowest block height checkpoint
-        let checkpoints =
-            fetch_consensus_checkpoints(mesh_state, node_client, threshold, chains).await;
+        let checkpoints = select_checkpoints(mesh_state, node_client, threshold, chains).await;
         if checkpoints.is_empty() {
-            tracing::info!("no consensus checkpoints found, starting with empty state");
+            tracing::info!("no selected checkpoints found, starting with empty state");
             return;
         }
 
@@ -575,13 +576,13 @@ impl Backlog {
             tracing::info!(
                 ?chain,
                 block_height = checkpoint.block_height,
-                "found consensus checkpoint, attempting recovery"
+                "found selected checkpoint, attempting recovery"
             );
             if let Err(err) = self.recover_by_checkpoint(checkpoint).await {
                 tracing::warn!(
                     ?chain,
                     %err,
-                    "failed to recover from consensus checkpoint, continuing with empty state"
+                    "failed to recover from selected checkpoint, continuing with empty state"
                 );
             }
         }
