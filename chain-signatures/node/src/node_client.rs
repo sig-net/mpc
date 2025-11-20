@@ -182,7 +182,7 @@ impl NodeClient {
         url.set_path("checkpoint");
         if !chains.is_empty() {
             url.set_query(Some(&format!(
-                "?query={}",
+                "query={}",
                 chains
                     .iter()
                     .map(|c| c.as_str())
