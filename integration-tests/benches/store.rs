@@ -8,6 +8,7 @@ use cait_sith::{
 use criterion::{criterion_group, criterion_main, Criterion};
 use elliptic_curve::CurveArithmetic;
 use integration_tests::{cluster::spawner::ClusterSpawner, containers::Redis};
+use std::sync::Arc;
 use k256::Secp256k1;
 use mpc_node::{
     mesh::{Mesh, MeshState},
@@ -62,7 +63,7 @@ struct SyncEnv {
     participants: Participants,
     mesh_state: watch::Receiver<MeshState>,
     client: NodeClient,
-    redis: Redis,
+    redis: Arc<Redis>,
     triples: TripleStorage,
     presignatures: PresignatureStorage,
     sync_channel: SyncChannel,

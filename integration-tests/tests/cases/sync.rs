@@ -103,7 +103,7 @@ async fn test_state_sync_e2e_large_outdated_stockpile() {
     let mut spawner = cluster::spawn();
     {
         let worker = spawner.prespawn_sandbox().await.unwrap().clone();
-        spawner.create_accounts(&worker).await;
+        spawner.create_accounts(&*worker).await;
     }
     // NOTE: cannot reliably get the first participant until running state is reached, so
     // this assumes that 0 and 1 is the first and second participants.
@@ -111,7 +111,7 @@ async fn test_state_sync_e2e_large_outdated_stockpile() {
     let node0_account_id = spawner.account_id(Into::<u32>::into(node0) as usize);
     let node1 = Participant::from(1);
     let node1_account_id = spawner.account_id(Into::<u32>::into(node1) as usize);
-    let redis = spawner.prespawn_redis().await;
+    let redis = spawner.prespawn_redis().await.clone();
 
     // immediately add to triples/presignatures storage the triples/presignatures we want to invalidate.
     let node0_triples = redis.triple_storage(&node0_account_id);

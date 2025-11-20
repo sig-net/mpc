@@ -295,9 +295,9 @@ pub struct Context {
     pub docker_network: String,
     pub release: bool,
 
-    pub worker: Worker<Sandbox>,
+    pub worker: std::sync::Arc<Worker<Sandbox>>,
     pub mpc_contract: Contract,
-    pub redis: containers::Redis,
+    pub redis: std::sync::Arc<containers::Redis>,
     pub storage_options: storage::Options,
     pub log_options: logs::Options,
     pub mesh_options: mesh::Options,
@@ -307,7 +307,7 @@ pub struct Context {
 
 pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     let worker = spawner.take_worker().await;
-    spawner.create_accounts(&worker).await;
+    spawner.create_accounts(&*worker).await;
 
     let mpc_contract = worker
         .dev_deploy(&std::fs::read(

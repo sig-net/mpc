@@ -4,6 +4,8 @@ use mpc_node::protocol::state::NodeKeyInfo;
 use near_account_id::AccountId;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, Worker};
+use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 use std::collections::BTreeMap;
 use std::future::{Future, IntoFuture};
@@ -120,8 +122,8 @@ pub struct ClusterSpawner {
 
     pub cfg: NodeConfig,
     pub wait_for_running: bool,
-    pub redis: Option<containers::Redis>,
-    pub worker: Option<Worker<Sandbox>>,
+    pub redis: Option<Arc<containers::Redis>>,
+    pub worker: Option<Arc<Worker<Sandbox>>>,
     pub solana: Option<containers::Solana>,
     pub program_address: Option<String>,
     prestockpile: Option<Prestockpile>,
@@ -294,8 +296,28 @@ impl ClusterSpawner {
             .extend((0..self.accounts.len() as u32).map(Participant::from));
     }
 
-    pub async fn spawn_redis(&self) -> containers::Redis {
-        containers::Redis::run(self).await
+    pub async fn spawn_redis(&self) -> Arc<containers::Redis> {
+        // When parallel feature is enabled, we attempt to reuse a global redis instance
+        #[cfg(feature = "parallel")]
+        {
+            static GLOBAL_REDIS: OnceCell<Arc<containers::Redis>> = OnceCell::const_new();
+            if let Some(existing) = GLOBAL_REDIS.get() {
+                tracing::info!("reusing global redis instance: {}", existing.internal_address);
+                return Arc::clone(existing);
+            }
+            let redis = Arc::new(containers::Redis::run(self).await);
+            tracing::info!("initialized global redis instance: {}", redis.internal_address);
+            // Try to set global; if this fails (concurrent set), just clone the existing
+            if GLOBAL_REDIS.set(Arc::clone(&redis)).is_err() {
+                return Arc::clone(GLOBAL_REDIS.get().unwrap());
+            }
+            return redis;
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            Arc::new(containers::Redis::run(self).await)
+        }
     }
 
     pub async fn spawn_solana(&self) -> containers::Solana {
@@ -305,7 +327,7 @@ impl ClusterSpawner {
     /// Prespawns a redis instance where we're able to make use of it before the nodes are spun
     /// up and are in running phase. This redis instance will be reused when the whole environment
     /// is setup.
-    pub async fn prespawn_redis(&mut self) -> &containers::Redis {
+    pub async fn prespawn_redis(&mut self) -> &Arc<containers::Redis> {
         self.redis = Some(self.spawn_redis().await);
         self.redis.as_ref().unwrap()
     }
@@ -318,7 +340,7 @@ impl ClusterSpawner {
 
     /// Grabs the underlying redis instance that was prespawned, or if not prespawned, create a
     /// new one from start up.
-    pub async fn take_redis(&mut self) -> containers::Redis {
+    pub async fn take_redis(&mut self) -> Arc<containers::Redis> {
         match self.redis.take() {
             Some(redis) => redis,
             None => self.spawn_redis().await,
@@ -331,23 +353,66 @@ impl ClusterSpawner {
         self.solana.take()
     }
 
-    pub async fn prespawn_sandbox(&mut self) -> anyhow::Result<&Worker<Sandbox>> {
+    pub async fn prespawn_sandbox(&mut self) -> anyhow::Result<&Arc<Worker<Sandbox>>> {
         if self.worker.is_none() {
-            self.worker = Some(near_workspaces::sandbox().await?);
+            #[cfg(feature = "parallel")]
+            {
+                static GLOBAL_WORKER: OnceCell<Arc<Worker<Sandbox>>> = OnceCell::const_new();
+                    if let Some(w) = GLOBAL_WORKER.get() {
+                    tracing::info!("reusing global near sandbox instance: {}", w.rpc_addr());
+                    self.worker = Some(Arc::clone(w));
+                } else {
+                    let worker = Arc::new(near_workspaces::sandbox().await?);
+                    // if another thread tries to set at the same time, prefer existing one
+                    if GLOBAL_WORKER.set(Arc::clone(&worker)).is_err() {
+                        self.worker = Some(Arc::clone(GLOBAL_WORKER.get().unwrap()));
+                    } else {
+                        tracing::info!("initialized global near sandbox instance: {}", worker.rpc_addr());
+                        self.worker = Some(worker);
+                    }
+                }
+            }
+
+            #[cfg(not(feature = "parallel"))]
+            {
+                self.worker = Some(Arc::new(near_workspaces::sandbox().await?));
+            }
         }
         Ok(self.worker.as_ref().unwrap())
     }
 
-    pub async fn take_worker(&mut self) -> Worker<Sandbox> {
+    pub async fn take_worker(&mut self) -> Arc<Worker<Sandbox>> {
         match self.worker.take() {
             Some(worker) => worker,
-            None => near_workspaces::sandbox().await.unwrap(),
+            None => {
+                #[cfg(feature = "parallel")]
+                {
+                    static GLOBAL_WORKER: OnceCell<Arc<Worker<Sandbox>>> = OnceCell::const_new();
+                    if let Some(w) = GLOBAL_WORKER.get() {
+                        tracing::info!("reusing global near sandbox instance: {}", w.rpc_addr());
+                        Arc::clone(w)
+                    } else {
+                        let worker = Arc::new(near_workspaces::sandbox().await.unwrap());
+                        if GLOBAL_WORKER.set(Arc::clone(&worker)).is_err() {
+                            Arc::clone(GLOBAL_WORKER.get().unwrap())
+                        } else {
+                            tracing::info!("initialized global near sandbox instance: {}", worker.rpc_addr());
+                            worker
+                        }
+                    }
+                }
+
+                #[cfg(not(feature = "parallel"))]
+                {
+                    Arc::new(near_workspaces::sandbox().await.unwrap())
+                }
+            }
         }
     }
 
-    pub async fn presetup(&mut self) -> anyhow::Result<&containers::Redis> {
+    pub async fn presetup(&mut self) -> anyhow::Result<&Arc<containers::Redis>> {
         let worker = self.prespawn_sandbox().await?.clone();
-        self.create_accounts(&worker).await;
+        self.create_accounts(&*worker).await;
         Ok(self.prespawn_redis().await)
     }
 

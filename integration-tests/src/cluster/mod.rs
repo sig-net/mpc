@@ -8,6 +8,7 @@ use mpc_primitives::{Chain, Checkpoint};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{Finality, NearToken};
 use near_workspaces::{Account, AccountId, Contract, Worker};
+use std::sync::Arc;
 use spawner::{ClusterSpawner, Prestockpile};
 
 use crate::actions::sign::SignAction;
@@ -87,8 +88,8 @@ impl Cluster {
         SignAction::new(self)
     }
 
-    pub fn worker(&self) -> &Worker<Sandbox> {
-        &self.nodes.ctx().worker
+    pub fn worker(&self) -> Arc<Worker<Sandbox>> {
+        Arc::clone(&self.nodes.ctx().worker)
     }
 
     pub fn contract(&self) -> &Contract {
@@ -168,7 +169,8 @@ impl Cluster {
                 node.account
             }
             None => {
-                let account = utils::dev_gen_indexed(self.worker(), self.account_idx).await?;
+                let worker = self.worker();
+                let account = utils::dev_gen_indexed(&*worker, self.account_idx).await?;
                 self.account_idx += 1;
                 tracing::info!(node_account_id = %account.id(), "adding new participant");
                 account

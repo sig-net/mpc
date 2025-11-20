@@ -22,6 +22,7 @@ pub mod nightly;
 pub mod solana;
 pub mod store;
 pub mod sync;
+pub mod parallel_shared;
 
 #[test(tokio::test)]
 async fn test_multichain_reshare() -> anyhow::Result<()> {

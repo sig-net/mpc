@@ -92,5 +92,7 @@ path = "benches/store.rs"
 harness = false
 
 [features]
-default = []
+# Enable by default to share global near sandbox and redis instances across tests.
+default = ["parallel"]
+parallel = []
 docker-test = []
