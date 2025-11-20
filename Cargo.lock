@@ -14988,7 +14988,7 @@ dependencies = [
 [[package]]
 name = "threshold-signatures"
 version = "0.1.0"
-source = "git+https://github.com/near/threshold-signatures#1e03b9cd4bfecb1ecadb4556eacb403e8280dd2f"
+source = "git+https://github.com/near/threshold-signatures?rev=315a9749072fde57cdfc7496000878a3bb97400a#315a9749072fde57cdfc7496000878a3bb97400a"
 dependencies = [
  "auto_ops",
  "blstrs",
