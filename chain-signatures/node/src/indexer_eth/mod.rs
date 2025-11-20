@@ -109,7 +109,7 @@ pub trait EthereumClientTrait {
     ) -> Option<alloy::rpc::types::Block>;
     async fn get_block_receipts(
         &self,
-        block_number_or_tag: BlockNumberOrTag,
+        block_id: alloy::rpc::types::BlockId,
     ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>>;
     async fn get_nonce(
         &self,
@@ -140,7 +140,7 @@ pub struct EthConfig {
     pub account_sk: String,
     /// Ethereum consensus HTTP RPC URL
     pub consensus_rpc_http_url: String,
-    /// Ethereum excution HTTP RPC URL
+    /// Ethereum execution HTTP RPC URL
     pub execution_rpc_http_url: String,
     /// The contract address to watch without the `0x` prefix
     pub contract_address: String,
@@ -644,13 +644,11 @@ impl EthereumClientTrait for EthereumClient {
 
     async fn get_block_receipts(
         &self,
-        block_number_or_tag: BlockNumberOrTag,
+        block_id: alloy::rpc::types::BlockId,
     ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>> {
         match self {
-            EthereumClient::Helios(client) => client.get_block_receipts(block_number_or_tag).await,
-            EthereumClient::DirectRpc(client) => {
-                client.get_block_receipts(block_number_or_tag).await
-            }
+            EthereumClient::Helios(client) => client.get_block_receipts(block_id).await,
+            EthereumClient::DirectRpc(client) => client.get_block_receipts(block_id).await,
         }
     }
 
@@ -994,9 +992,7 @@ pub trait EthereumIndexerTrait: Send + Sync + 'static {
             block_hash
         );
         let start = Instant::now();
-        let block_receipts_result = client
-            .get_block_receipts(BlockNumberOrTag::Number(block_number))
-            .await;
+        let block_receipts_result = client.get_block_receipts(block_number.into()).await;
         crate::metrics::ETH_BLOCK_RECEIPT_LATENCY
             .with_label_values(&[node_near_account_id.as_str()])
             .observe(start.elapsed().as_millis() as f64);

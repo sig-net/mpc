@@ -27,72 +27,14 @@ impl EthereumClientTrait for RpcEthereumClient {
         &self,
         block_id: alloy::rpc::types::BlockId,
     ) -> Option<alloy::rpc::types::Block> {
-        match block_id {
-            alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Number(number)) => {
-                self.block_by_number(number).await.unwrap_or_else(|err| {
-                    tracing::warn!("Failed to get block by number {number}: {err:?}");
-                    None
-                })
-            }
-            alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Latest) => self
-                .block_by_tag("latest".to_string())
-                .await
-                .unwrap_or_else(|err| {
-                    tracing::warn!("Failed to get block by tag latest: {err:?}");
-                    None
-                }),
-            alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Finalized) => self
-                .block_by_tag("finalized".to_string())
-                .await
-                .unwrap_or_else(|err| {
-                    tracing::warn!("Failed to get block by tag finalized: {err:?}");
-                    None
-                }),
-            alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Safe) => self
-                .block_by_tag("safe".to_string())
-                .await
-                .unwrap_or_else(|err| {
-                    tracing::warn!("Failed to get block by tag safe: {err:?}");
-                    None
-                }),
-            alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Earliest) => self
-                .block_by_tag("earliest".to_string())
-                .await
-                .unwrap_or_else(|err| {
-                    tracing::warn!("Failed to get block by tag earliest: {err:?}");
-                    None
-                }),
-            alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Pending) => self
-                .block_by_tag("pending".to_string())
-                .await
-                .unwrap_or_else(|err| {
-                    tracing::warn!("Failed to get block by tag pending: {err:?}");
-                    None
-                }),
-            alloy::rpc::types::BlockId::Hash(hash) => self
-                .block_by_hash(hash.block_hash)
-                .await
-                .unwrap_or_else(|err| {
-                    tracing::warn!("Failed to get block by hash {hash:?}: {err:?}");
-                    None
-                }),
-        }
+        self.block(block_id).await.unwrap_or(None)
     }
 
     async fn get_block_receipts(
         &self,
-        block_number_or_tag: BlockNumberOrTag,
+        block_id: alloy::rpc::types::BlockId,
     ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>> {
-        match block_number_or_tag {
-            BlockNumberOrTag::Number(number) => self.block_receipts_by_number(number).await,
-            BlockNumberOrTag::Latest => self.block_receipts_by_tag("latest".to_string()).await,
-            BlockNumberOrTag::Finalized => {
-                self.block_receipts_by_tag("finalized".to_string()).await
-            }
-            BlockNumberOrTag::Safe => self.block_receipts_by_tag("safe".to_string()).await,
-            BlockNumberOrTag::Earliest => self.block_receipts_by_tag("earliest".to_string()).await,
-            BlockNumberOrTag::Pending => self.block_receipts_by_tag("pending".to_string()).await,
-        }
+        self.block_receipts(block_id).await
     }
 
     async fn get_nonce(
@@ -176,46 +118,37 @@ impl RpcEthereumClient {
         hex_to_u64(&hex)
     }
 
-    async fn block_by_number(
+    async fn block(
         &self,
-        number: u64,
+        block_id: alloy::rpc::types::BlockId,
     ) -> anyhow::Result<Option<alloy::rpc::types::Block>> {
-        self.rpc_call(
-            "eth_getBlockByNumber",
-            vec![json!(to_hex_u64(number)), json!(false)],
-        )
-        .await
+        match block_id {
+            alloy::rpc::types::BlockId::Number(_) => {
+                self.rpc_call(
+                    "eth_getBlockByNumber",
+                    vec![json!(to_hex_block_id(block_id)), json!(false)],
+                )
+                .await
+            }
+            alloy::rpc::types::BlockId::Hash(hash) => {
+                self.rpc_call(
+                    "eth_getBlockByHash",
+                    vec![json!(format!("{:#x}", hash.block_hash))],
+                )
+                .await
+            }
+        }
     }
 
-    async fn block_by_tag(&self, tag: String) -> anyhow::Result<Option<alloy::rpc::types::Block>> {
-        self.rpc_call("eth_getBlockByTag", vec![json!(tag)]).await
-    }
-
-    async fn block_by_hash(
+    async fn block_receipts(
         &self,
-        hash: alloy::primitives::B256,
-    ) -> anyhow::Result<Option<alloy::rpc::types::Block>> {
-        self.rpc_call("eth_getBlockByHash", vec![json!(format!("{:#x}", hash))])
-            .await
-    }
-
-    async fn block_receipts_by_number(
-        &self,
-        number: u64,
+        block_id: alloy::rpc::types::BlockId,
     ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>> {
         self.rpc_call(
-            "eth_getBlockReceiptsByNumber",
-            vec![json!(to_hex_u64(number))],
+            "eth_getBlockReceipts",
+            vec![json!(to_hex_block_id(block_id))],
         )
         .await
-    }
-
-    async fn block_receipts_by_tag(
-        &self,
-        tag: String,
-    ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>> {
-        self.rpc_call("eth_getBlockReceiptsByTag", vec![json!(tag)])
-            .await
     }
 
     #[allow(unused)]
@@ -261,29 +194,17 @@ impl RpcEthereumClient {
         address: Address,
         block_id: alloy::rpc::types::BlockId,
     ) -> anyhow::Result<u64> {
-        let block_id_hex = match block_id {
-            alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Number(number)) => {
-                json!(to_hex_u64(number))
-            }
-            alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Latest) => json!("latest"),
-            alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Finalized) => json!("finalized"),
-            alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Safe) => json!("safe"),
-            alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Earliest) => json!("earliest"),
-            alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Pending) => json!("pending"),
-            alloy::rpc::types::BlockId::Hash(hash) => {
-                json!(format!("{:#x}", hash.block_hash))
-            }
-        };
-        self.rpc_call::<serde_json::Value>(
-            "eth_getAccount",
-            vec![json!(format_address(address)), block_id_hex],
+        self.rpc_call::<String>(
+            "eth_getTransactionCount",
+            vec![
+                json!(format_address(address)),
+                json!(to_hex_block_id(block_id)),
+            ],
         )
         .await
-        .map_err(|err| anyhow::anyhow!("Failed to get nonce: {err}"))?
-        .get("nonce")
-        .and_then(|nonce| nonce.as_str())
-        .and_then(|nonce_str| hex_to_u64(nonce_str).ok())
-        .ok_or_else(|| anyhow::anyhow!("Failed to parse nonce"))
+        .and_then(|nonce| {
+            hex_to_u64(&nonce).map_err(|err| anyhow::anyhow!("Failed to parse nonce: {err}"))
+        })
     }
 
     async fn call(
@@ -332,4 +253,16 @@ fn hex_to_u64(value: &str) -> anyhow::Result<u64> {
     }
     u64::from_str_radix(trimmed, 16)
         .map_err(|err| anyhow::anyhow!("failed to parse hex value '{value}': {err}"))
+}
+
+fn to_hex_block_id(block_id: alloy::rpc::types::BlockId) -> String {
+    match block_id {
+        alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Number(number)) => to_hex_u64(number),
+        alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Latest) => "latest".to_string(),
+        alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Finalized) => "finalized".to_string(),
+        alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Safe) => "safe".to_string(),
+        alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Earliest) => "earliest".to_string(),
+        alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Pending) => "pending".to_string(),
+        alloy::rpc::types::BlockId::Hash(hash) => format!("{:#x}", hash.block_hash),
+    }
 }

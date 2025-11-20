@@ -29,17 +29,12 @@ impl EthereumClientTrait for HeliosEthereumClient {
 
     async fn get_block_receipts(
         &self,
-        block_number_or_tag: BlockNumberOrTag,
+        block_id: alloy::rpc::types::BlockId,
     ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>> {
         self.client
-            .get_block_receipts(BlockId::Number(block_number_or_tag))
+            .get_block_receipts(block_id)
             .await
-            .map_err(|err| {
-                anyhow::anyhow!(
-                    "Failed to get block receipts for block number {block_number_or_tag:?}: {:?}",
-                    err
-                )
-            })
+            .map_err(|err| anyhow::anyhow!("Failed to get block receipts for block: {:?}", err))
     }
 
     async fn get_nonce(
@@ -205,7 +200,10 @@ pub async fn build_client(eth: EthConfig) -> anyhow::Result<HeliosEthereumClient
         }
     };
     tracing::info!("Built Helios client on network {}", network);
-    client.wait_synced().await;
+    client
+        .wait_synced()
+        .await
+        .map_err(|err| anyhow::anyhow!("Failed to wait for synced: {err:?}"))?;
 
     Ok(HeliosEthereumClient::new(
         client,

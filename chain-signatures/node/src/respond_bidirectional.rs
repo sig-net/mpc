@@ -39,7 +39,6 @@ pub struct RespondBidirectionalTx {
 pub type RespondBidirectionalSerializedOutput = Vec<u8>;
 
 impl CompletedTx {
-    #[allow(unused_variables)]
     pub fn new(tx: BidirectionalTx, block_number: u64) -> Self {
         Self { tx, block_number }
     }
