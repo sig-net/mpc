@@ -371,6 +371,6 @@ async fn checkpoint(
 #[cfg(not(feature = "debug-page"))]
 mod debug {
     pub async fn page() -> axum::response::Html<String> {
-        format!("<html><body>Debug page disabled. Compile the node with --features=debug-page to show useful information here.</bod></html>").into()
+        "<html><body>Debug page disabled. Compile the node with --features=debug-page to show useful information here.</bod></html>".to_string().into()
     }
 }

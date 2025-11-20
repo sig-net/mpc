@@ -10,8 +10,8 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::Chain;
 use cait_sith::protocol::Participant;
-use futures_util::{stream::FuturesUnordered, StreamExt};
 use std::collections::HashMap;
+use tokio::task::JoinSet;
 
 /// Queries all participants for their checkpoints and returns a selected checkpoint
 /// for each chain based on the threshold-lowest block height: select the checkpoint
@@ -83,59 +83,41 @@ async fn fetch_latest(
 ) -> HashMap<Participant, HashMap<Chain, Checkpoint>> {
     let mut all_checkpoints = HashMap::new();
 
-    // Build query string for chains
-    let chains_query = if chains.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "?query={}",
-            chains
-                .iter()
-                .map(|c| c.as_str())
-                .collect::<Vec<_>>()
-                .join(",")
-        )
-    };
+    let mut tasks = JoinSet::new();
+    for (participant_id, info) in &mesh_state.active.participants {
+        let client = node_client.clone();
+        let participant = *participant_id;
+        let node_url = info.url.clone();
+        let chains = chains.to_vec();
+        tasks.spawn(async move {
+            let result = client.checkpoint(&node_url, &chains).await;
+            (participant, node_url, result)
+        });
+    }
 
-    let mut requests = mesh_state
-        .active
-        .participants
-        .iter()
-        .map(|(participant_id, info)| {
-            let client = node_client.clone();
-            let participant = *participant_id;
-            let base_url = info.url.clone();
-            let query_suffix = chains_query.clone();
-            async move {
-                let base_for_request = base_url.clone();
-                let request_url = if query_suffix.is_empty() {
-                    base_for_request
-                } else {
-                    format!("{base_for_request}{query_suffix}")
-                };
-                let result = client.checkpoint(&request_url).await;
-                (participant, base_url, request_url, result)
-            }
-        })
-        .collect::<FuturesUnordered<_>>();
+    while let Some(join_result) = tasks.join_next().await {
+        let Ok((participant, node_url, result)) = join_result.inspect_err(|err| {
+            tracing::warn!(%err, "checkpoint query interrupted");
+        }) else {
+            continue;
+        };
 
-    while let Some((participant_id, base_url, request_url, result)) = requests.next().await {
         match result {
             Ok(checkpoints) => {
                 tracing::debug!(
-                    participant = ?participant_id,
+                    ?participant,
+                    %node_url,
                     checkpoint_count = checkpoints.len(),
-                    "received checkpoints from participant"
+                    "checkpoint query received"
                 );
-                all_checkpoints.insert(participant_id, checkpoints);
+                all_checkpoints.insert(participant, checkpoints);
             }
             Err(err) => {
                 tracing::warn!(
-                    participant = ?participant_id,
-                    base_url = %base_url,
-                    request_url = %request_url,
+                    ?participant,
+                    %node_url,
                     %err,
-                    "failed to query participant for checkpoints"
+                    "checkpoint query failed"
                 );
             }
         }
