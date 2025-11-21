@@ -11,21 +11,14 @@ VERSIONS_FILE="$REPO_ROOT/scripts/prod-compat-versions.json"
 COMPAT_ROOT="$REPO_ROOT/target/compat"
 
 get_version() {
-    python3 - "$VERSIONS_FILE" "$1" <<'PY'
-import json, pathlib, sys
-versions_path = pathlib.Path(sys.argv[1])
-channel = sys.argv[2]
-data = json.loads(versions_path.read_text())
-if channel not in data:
-    raise SystemExit(f"Unknown compatibility channel '{channel}'.")
-print(data[channel])
-PY
+  local channel="$1"
+  jq -r --arg channel "$channel" \
+    'if has($channel) then .[$channel] else error("Unknown compatibility channel \($channel).") end' "$VERSIONS_FILE"
 }
 
 binary_path_for() {
     local channel="$1"
-    local version
-    version="$(get_version "$channel")"
+    local version="$(get_version "$channel")"
     echo "$COMPAT_ROOT/$channel/$version/release/mpc-node"
 }
 

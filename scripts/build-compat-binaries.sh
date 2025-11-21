@@ -7,7 +7,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSIONS_FILE="$REPO_ROOT/integration-tests/prod-compat-versions.json"
+VERSIONS_FILE="$REPO_ROOT/scripts/prod-compat-versions.json"
 TARGET_ROOT="$REPO_ROOT/target/compat"
 WORKTREES_ROOT="$TARGET_ROOT/worktrees"
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
@@ -33,19 +33,8 @@ trap cleanup EXIT
 
 get_version() {
   local channel="$1"
-  python3 - "$VERSIONS_FILE" "$channel" <<'PY'
-import json
-import pathlib
-import sys
-
-versions_path = pathlib.Path(sys.argv[1])
-channel = sys.argv[2]
-
-data = json.loads(versions_path.read_text())
-if channel not in data:
-    raise SystemExit(f"Unknown compatibility channel '{channel}'.")
-print(data[channel])
-PY
+  jq -r --arg channel "$channel" \
+    'if has($channel) then .[$channel] else error("Unknown compatibility channel \($channel).") end' "$VERSIONS_FILE"
 }
 
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
