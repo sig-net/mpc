@@ -117,20 +117,20 @@ impl NodeConnection {
                         }
                     };
 
-                    let old_status = status_tx.borrow().0;
-                    if old_status != NodeStatus::Offline && resp.protocol_version != crate::PROTOCOL_VERSION {
+                    if resp.protocol_version != crate::PROTOCOL_VERSION {
                         tracing::warn!(
                             ?node,
                             our_version = crate::PROTOCOL_VERSION,
                             peer_version = resp.protocol_version,
                             "protocol version mismatch"
                         );
-                        status_tx.send_modify(|(status, _)| {
-                            *status = NodeStatus::Offline;
+                        status_tx.send_if_modified(|(status, _)| {
+                            std::mem::replace(status, NodeStatus::Offline) != NodeStatus::Offline
                         });
                         continue;
                     }
 
+                    let old_status = status_tx.borrow().0;
                     let mut new_status = match resp.status {
                         OtherNodeStatus::Running { .. } => NodeStatus::Active,
                         OtherNodeStatus::Resharing { .. }
