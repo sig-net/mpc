@@ -368,8 +368,8 @@ impl PresignatureSpawner {
         self.ongoing.contains_key(&id)
     }
 
-    pub async fn contains_used(&self, id: PresignatureId) -> bool {
-        self.presignatures.contains_used(id).await
+    pub async fn contains_reserved(&self, id: PresignatureId) -> bool {
+        self.presignatures.contains_reserved(id).await
     }
 
     /// Returns the number of unspent presignatures available in the manager.

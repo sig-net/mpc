@@ -71,8 +71,6 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_storage.len_generated().await, 0);
     assert_eq!(triple_spawner.len_mine().await, 0);
     assert_eq!(triple_spawner.len_potential().await, 0);
-    assert!(triple_storage.contains_used(triple_id1).await);
-    assert!(triple_storage.contains_used(triple_id2).await);
 
     // Attempt to re-reserve used triples and check that it cannot be reserved since it is used.
     assert!(triple_storage.reserve(triple_id1).await.is_none());
@@ -121,8 +119,6 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_spawner.len_mine().await, 0);
     assert!(triple_storage.is_empty().await);
     assert_eq!(triple_spawner.len_potential().await, 0);
-    assert!(triple_storage.contains_used(id3).await);
-    assert!(triple_storage.contains_used(id4).await);
 
     // Attempt to re-insert used mine triples and check that it fails
     assert!(triple_storage.reserve(id3).await.is_none());
@@ -230,7 +226,6 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_storage.len_generated().await, 0);
     assert_eq!(presignature_spawner.len_mine().await, 0);
     assert_eq!(presignature_spawner.len_potential().await, 0);
-    assert!(presignature_storage.contains_used(id).await);
 
     // Attempt to re-insert used presignature and check that it fails
     assert!(presignature_storage.reserve(id).await.is_none());
@@ -263,7 +258,6 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_spawner.len_mine().await, 0);
     assert!(presignature_storage.is_empty().await);
     assert_eq!(presignature_spawner.len_potential().await, 0);
-    assert!(presignature_storage.contains_used(id2).await);
 
     // Attempt to re-insert used mine presignature and check that it fails
     assert!(presignature_storage.reserve(id2).await.is_none());
