@@ -156,14 +156,21 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
         .context("eth_sendRawTransaction missing result")?
         .to_string();
 
-    let receipt = wait_for_transaction_receipt(
+    let respond_future = actions::sign::wait_for_respond_bidirectional(
+        solana,
+        sol_outcome.request_id,
+        Duration::from_secs(120),
+    );
+
+    let receipt_future = wait_for_transaction_receipt(
         &client,
         &execution_rpc_http_url,
         &tx_hash,
         TX_RECEIPT_MAX_ATTEMPTS,
         Duration::from_secs(TX_RECEIPT_POLL_INTERVAL_SECS),
-    )
-    .await?;
+    );
+
+    let (read_outcome, receipt) = tokio::try_join!(respond_future, receipt_future)?;
 
     let status = receipt
         .get("status")
@@ -177,13 +184,6 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
             status
         );
     }
-
-    let read_outcome = actions::sign::wait_for_respond_bidirectional(
-        solana,
-        sol_outcome.request_id,
-        Duration::from_secs(120),
-    )
-    .await?;
 
     assert_eq!(
         read_outcome.request_id, sol_outcome.request_id,
