@@ -133,14 +133,31 @@ impl HeliosEthereumClient {
         block_number: u64,
     ) -> anyhow::Result<Bytes> {
         let helios_client = self.client.clone();
+
+        // Build a base tx *without* the sentinel max gas
+        let mut tx = TransactionRequest::default()
+            .from(from)
+            .to(to)
+            .input(alloy::rpc::types::TransactionInput::both(data.clone()));
+
+        // 1) Estimate
+        let est = helios_client
+            .estimate_gas(&tx, BlockId::Number(BlockNumberOrTag::Number(block_number)))
+            .await
+            .unwrap_or(3_000_000u64); // fallback
+
+        // 2) Add 20% buffer, but keep < 16,777,216
+        let mut gas = (est as f64 * 1.2) as u64;
+        if gas > 16_777_216 {
+            gas = 16_777_216;
+        }
+
+        // 3) Apply gas limit
+        tx = tx.gas_limit(gas);
+
+        // 4) Execute the call
         helios_client
-            .call(
-                &TransactionRequest::default()
-                    .from(from)
-                    .to(to)
-                    .input(alloy::rpc::types::TransactionInput::both(data.clone())),
-                BlockId::Number(BlockNumberOrTag::Number(block_number)),
-            )
+            .call(&tx, BlockId::Number(BlockNumberOrTag::Number(block_number)))
             .await
             .map_err(|err| anyhow::anyhow!("Failed to call: {err:?}"))
     }
