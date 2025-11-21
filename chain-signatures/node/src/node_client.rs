@@ -175,9 +175,20 @@ impl NodeClient {
     pub async fn checkpoint(
         &self,
         base: impl IntoUrl,
+        chains: &[Chain],
     ) -> Result<HashMap<Chain, Checkpoint>, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("checkpoint");
+        if !chains.is_empty() {
+            url.set_query(Some(&format!(
+                "query={}",
+                chains
+                    .iter()
+                    .map(|c| c.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )));
+        };
 
         let resp = self
             .http
