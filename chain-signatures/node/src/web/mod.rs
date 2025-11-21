@@ -208,9 +208,19 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
     result
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusResponse {
+    pub status: NodeStatus,
+    #[serde(default)]
+    pub protocol_version: u64,
+}
+
 #[tracing::instrument(level = "debug", skip_all)]
-async fn status(Extension(web): Extension<Arc<AxumState>>) -> Json<NodeStatus> {
-    Json(web.node.status())
+async fn status(Extension(web): Extension<Arc<AxumState>>) -> Json<StatusResponse> {
+    Json(StatusResponse {
+        status: web.node.status(),
+        protocol_version: crate::PROTOCOL_VERSION,
+    })
 }
 
 #[tracing::instrument(level = "debug", skip_all)]

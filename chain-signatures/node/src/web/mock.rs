@@ -5,6 +5,8 @@ use near_sdk::AccountId;
 use crate::{
     node_client::NodeClient,
     protocol::{contract::primitives::Participants, state::NodeStatus, ParticipantInfo},
+    web::StatusResponse,
+    PROTOCOL_VERSION,
 };
 
 use super::StateView;
@@ -77,11 +79,15 @@ impl MockServer {
     }
 
     pub async fn make_online(&mut self) {
+        self.set_protocol_version(Some(PROTOCOL_VERSION)).await;
+    }
+
+    pub async fn set_protocol_version(&mut self, protocol_version: Option<u64>) {
         self.server
             .mock("GET", "/status")
             .with_status(201)
             .with_header("content-type", "application/json")
-            .with_body(default_status_body(self.id))
+            .with_body(status_body(self.id, protocol_version))
             .create_async()
             .await;
     }
@@ -166,11 +172,23 @@ fn default_state_body() -> Vec<u8> {
 }
 
 fn default_status_body(id: u32) -> Vec<u8> {
-    serde_json::to_vec(&NodeStatus::Running {
+    status_body(id, Some(PROTOCOL_VERSION))
+}
+
+fn status_body(id: u32, version: Option<u64>) -> Vec<u8> {
+    let status = NodeStatus::Running {
         me: Participant::from(id),
         participants: vec![Participant::from(0)],
         ongoing_triple_gen: 0,
         ongoing_presignature_gen: 0,
-    })
-    .unwrap()
+    };
+
+    match version {
+        Some(protocol_version) => serde_json::to_vec(&StatusResponse {
+            protocol_version,
+            status: status.clone(),
+        })
+        .unwrap(),
+        None => serde_json::to_vec(&status).unwrap(),
+    }
 }

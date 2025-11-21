@@ -202,6 +202,23 @@ mod tests {
 
     const PING_INTERVAL: Duration = Duration::from_millis(10);
 
+    async fn expect_status(
+        watcher: &mut connection::ConnectionWatcher,
+        participant: Participant,
+        expected: NodeStatus,
+    ) {
+        for _ in 0..20 {
+            if let Ok((p, status, _info)) =
+                tokio::time::timeout(Duration::from_millis(500), watcher.next()).await
+            {
+                if p == participant && status == expected {
+                    return;
+                }
+            }
+        }
+        panic!("timed out waiting for {participant:?} to become {expected:?}");
+    }
+
     #[test(tokio::test)]
     async fn test_pool_update() {
         let num_nodes = 3;
@@ -439,5 +456,33 @@ mod tests {
         }
 
         mesh_task.abort();
+    }
+
+    #[test(tokio::test)]
+    async fn test_protocol_version_mismatch_marks_offline() {
+        let mut servers = MockServers::run(2).await;
+        let participants = servers.participants();
+        let my_id = servers[0].account_id().clone();
+
+        let mut pool = Pool::new(&servers.client(), &my_id, PING_INTERVAL);
+        let mut watcher = pool.watch();
+        pool.connect_nodes(&participants, &mut HashSet::new()).await;
+
+        let remote_id = servers[1].id();
+
+        expect_status(&mut watcher, remote_id, NodeStatus::Syncing).await;
+        pool.report_node_synced(remote_id).await;
+        expect_status(&mut watcher, remote_id, NodeStatus::Active).await;
+
+        servers[1].set_protocol_version(None).await;
+        expect_status(&mut watcher, remote_id, NodeStatus::Offline).await;
+
+        servers[1].make_online().await;
+        expect_status(&mut watcher, remote_id, NodeStatus::Syncing).await;
+        pool.report_node_synced(remote_id).await;
+        expect_status(&mut watcher, remote_id, NodeStatus::Active).await;
+
+        servers[1].set_protocol_version(Some(0)).await;
+        expect_status(&mut watcher, remote_id, NodeStatus::Offline).await;
     }
 }
