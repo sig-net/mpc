@@ -168,13 +168,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         self.reserved.write().await.remove(&id).is_some()
     }
 
-    async fn unreserve_many<I>(&self, ids: I)
-    where
-        I: IntoIterator<Item = A::Id>,
-    {
+    async fn unreserve_many(&self, ids: impl Iterator<Item = &A::Id>) {
         let mut reservations = self.reserved.write().await;
         for id in ids {
-            reservations.remove(&id);
+            reservations.remove(id);
         }
     }
 
@@ -211,50 +208,33 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     pub async fn reserve(&self, id: A::Id) -> Option<ArtifactSlot<A>> {
         let start = Instant::now();
         if !self.try_reserve(id).await {
-            tracing::warn!(id, "failed to reserve artifact: already reserved");
+            tracing::warn!(id, "already reserved");
             return None;
         }
-
         let Some(mut conn) = self.connect().await else {
             self.unreserve(id).await;
             return None;
         };
 
-        match conn.hexists(&self.artifact_key, id).await {
-            Ok(true) => {
-                let elapsed = start.elapsed();
-                crate::metrics::REDIS_LATENCY
-                    .with_label_values(&[A::METRIC_LABEL, "reserve", self.account_id.as_str()])
-                    .observe(elapsed.as_millis() as f64);
-                tracing::warn!(
-                    id,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to reserve artifact: already stored"
-                );
-                self.unreserve(id).await;
-                return None;
-            }
-            Ok(false) => {}
-            Err(err) => {
-                let elapsed = start.elapsed();
-                crate::metrics::REDIS_LATENCY
-                    .with_label_values(&[A::METRIC_LABEL, "reserve", self.account_id.as_str()])
-                    .observe(elapsed.as_millis() as f64);
-                tracing::warn!(
-                    id,
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to reserve artifact: existence check failed"
-                );
-                self.unreserve(id).await;
-                return None;
-            }
-        }
-
+        let outcome = conn.hexists(&self.artifact_key, id).await;
         let elapsed = start.elapsed();
         crate::metrics::REDIS_LATENCY
             .with_label_values(&[A::METRIC_LABEL, "reserve", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
+
+        let exists = match outcome {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                tracing::warn!(id, ?err, ?elapsed, "reserve failed due to redis");
+                self.unreserve(id).await;
+                return None;
+            }
+        };
+        if exists {
+            tracing::warn!(id, ?elapsed, "reserve failed, already stored");
+            self.unreserve(id).await;
+            return None;
+        }
 
         Some(ArtifactSlot {
             id,
@@ -321,21 +301,13 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         match result {
             Ok(outdated) => {
                 if !outdated.is_empty() {
-                    self.unreserve_many(outdated.iter().copied()).await;
-                    tracing::info!(
-                        ?outdated,
-                        elapsed_ms = elapsed.as_millis(),
-                        "removed outdated artifacts"
-                    );
+                    self.unreserve_many(outdated.iter()).await;
+                    tracing::info!(?outdated, ?elapsed, "removed outdated artifacts");
                 }
                 outdated
             }
             Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to remove outdated artifacts"
-                );
+                tracing::warn!(?err, ?elapsed, "failed to remove outdated artifacts");
                 Vec::new()
             }
         }
@@ -385,12 +357,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         match outcome {
             Ok(()) => true,
             Err(err) => {
-                tracing::warn!(
-                    id,
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to insert artifact"
-                );
+                tracing::warn!(id, ?err, ?elapsed, "failed to insert artifact");
                 false
             }
         }
@@ -469,16 +436,11 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 if !self.try_reserve(id).await {
                     tracing::warn!(id, "artifact already reserved while taking");
                 }
-                tracing::debug!(id, elapsed_ms = elapsed.as_millis(), "took artifact");
+                tracing::debug!(id, ?elapsed, "took artifact");
                 Some(ArtifactTaken::new(artifact, self.clone()))
             }
             Err(err) => {
-                tracing::warn!(
-                    id,
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to take artifact"
-                );
+                tracing::warn!(id, ?err, ?elapsed, "failed to take artifact");
                 None
             }
         }
@@ -598,11 +560,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let artifact = result
             .inspect_err(|err| {
-                tracing::warn!(
-                    ?err,
-                    elapsed = elapsed.as_millis(),
-                    "failed to take mine artifact from storage"
-                );
+                tracing::warn!(?err, ?elapsed, "failed to take mine artifact from storage");
             })
             .ok()??;
 
@@ -611,11 +569,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             tracing::warn!(id, "artifact already reserved while taking mine");
         }
         let taken = ArtifactTaken::new(artifact, self.clone());
-        tracing::debug!(
-            id = taken.artifact.id(),
-            elapsed_ms = elapsed.as_millis(),
-            "took mine artifact"
-        );
+        tracing::debug!(id, ?elapsed, "took mine artifact");
         Some(taken)
     }
 
