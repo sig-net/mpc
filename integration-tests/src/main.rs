@@ -54,7 +54,7 @@ enum Cli {
         #[arg(long, default_value = "wss://api.devnet.solana.com")]
         sol_rpc_ws_url: String,
         /// The program address to watch
-        #[arg(long, default_value = "85hZuPHErQ6y1o59oMGjVCjHz4xgzKzjVCpgPm6kdBTV")]
+        #[arg(long, default_value = "H5tHfpYoEnarrrzcV7sWBcZhiKMvL2aRpUYvb1ydWkwS")]
         sol_program_address: String,
         /// total timeout for a sign request starting from indexed time in seconds
         #[arg(long, default_value = "200")]
@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
                     refresh_finalized_interval: eth_refresh_finalized_interval,
                     total_timeout: eth_total_timeout,
                     optimistic_requests: false,
-                    light_client: false,
+                    light_client: true,
                 }),
                 sol: Some(SolConfig {
                     account_sk: sol_account_sk,
