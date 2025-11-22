@@ -685,7 +685,9 @@ fn check_metric_multichain_prefix(name: &str) -> Result<()> {
 
 pub struct Histogram {
     pub histogram: HistogramVec,
+    #[cfg(feature = "bench")]
     pub label_values: Mutex<Vec<String>>,
+    #[cfg(feature = "bench")]
     pub exact: Mutex<Vec<f64>>,
 }
 
@@ -694,7 +696,9 @@ impl Histogram {
         let histogram = try_create_histogram_vec(name, help, labels, buckets).unwrap();
         Self {
             histogram,
+            #[cfg(feature = "bench")]
             label_values: Mutex::new(Vec::new()),
+            #[cfg(feature = "bench")]
             exact: Mutex::new(Vec::new()),
         }
     }
@@ -712,17 +716,166 @@ impl Histogram {
     }
 
     pub fn observe(&self, value: f64) {
-        let mut exact = self.exact.lock().unwrap();
-        exact.push(value);
+        // Only keep exact samples / label_value bookkeeping when bench feature is enabled.
+        #[cfg(feature = "bench")]
+        {
+            let mut exact = self.exact.lock().unwrap();
+            exact.push(value);
 
-        let label_values = self.label_values.lock().unwrap();
-        let label_values = label_values.iter().map(String::as_str).collect::<Vec<_>>();
-        self.histogram
-            .with_label_values(&label_values)
-            .observe(value);
+            let label_values = self.label_values.lock().unwrap();
+            let label_values = label_values.iter().map(String::as_str).collect::<Vec<_>>();
+            self.histogram
+                .with_label_values(&label_values)
+                .observe(value);
+        }
+
+        #[cfg(not(feature = "bench"))]
+        {
+            // In production builds avoid additional locking and write straight to the histogram.
+            // Use default/empty label set when bench-time label bookkeeping is not active.
+            // (metric label handling is handled externally via the HistogramVec usage in the codebase)
+            let empty: &[&str] = &[];
+            self.histogram.with_label_values(empty).observe(value);
+        }
     }
 
     pub fn exact(&self) -> Vec<f64> {
-        self.exact.lock().unwrap().clone()
+        #[cfg(feature = "bench")]
+        {
+            self.exact.lock().unwrap().clone()
+        }
+
+        #[cfg(not(feature = "bench"))]
+        {
+            Vec::new()
+        }
+    }
+}
+
+// SLO violation counters: incremented when certain metric thresholds are breached.
+pub(crate) static REDIS_SLO_VIOLATIONS: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_redis_slo_violations",
+        "Count of Redis operation latencies exceeding configured SLO thresholds",
+        &["protocol", "operation", "node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static PROTOCOL_SLO_VIOLATIONS: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_protocol_slo_violations",
+        "Count of multichain protocol loop latencies exceeding configured SLO thresholds",
+        &["node_account_id", "protocol"],
+    )
+    .unwrap()
+});
+
+pub(crate) static QUEUE_SLO_VIOLATIONS: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_queue_slo_violations",
+        "Count of queue/backlog sizes exceeding configured SLO thresholds",
+        &["queue", "node_account_id"],
+    )
+    .unwrap()
+});
+
+/// Check a Redis latency against SLO and increment violation counter when above threshold.
+pub fn check_redis_slo(protocol: &str, operation: &str, node: &str, latency_ms: f64) {
+    // default threshold (ms) overridden by MPC_REDIS_SLO_MS env var
+    let threshold = std::env::var("MPC_REDIS_SLO_MS")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(200.0);
+
+    if latency_ms > threshold {
+        REDIS_SLO_VIOLATIONS
+            .with_label_values(&[protocol, operation, node])
+            .inc();
+        tracing::warn!(
+            latency_ms,
+            threshold,
+            protocol,
+            operation,
+            node,
+            "redis slo violated"
+        );
+    }
+}
+
+/// Check a protocol iteration latency (seconds) against SLO and increment violation counter.
+pub fn check_protocol_slo(node: &str, protocol: &str, latency_s: f64) {
+    // default threshold (sec) overridden by MPC_PROTOCOL_SLO_SEC env var
+    let threshold = std::env::var("MPC_PROTOCOL_SLO_SEC")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(1.0);
+
+    if latency_s > threshold {
+        PROTOCOL_SLO_VIOLATIONS
+            .with_label_values(&[node, protocol])
+            .inc();
+        tracing::warn!(
+            latency_s,
+            threshold,
+            node,
+            protocol,
+            "protocol slo violated"
+        );
+    }
+}
+
+/// Check a queue/backlog size against SLO and increment violation counter when above threshold.
+pub fn check_queue_slo(queue: &str, node: &str, size: i64) {
+    // default threshold overridden by MPC_QUEUE_SLO_SIZE env var
+    let threshold = std::env::var("MPC_QUEUE_SLO_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(100);
+
+    if size > threshold {
+        QUEUE_SLO_VIOLATIONS.with_label_values(&[queue, node]).inc();
+        tracing::warn!(size, threshold, queue, node, "queue slo violated");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_check_redis_slo_increments() {
+        std::env::set_var("MPC_REDIS_SLO_MS", "10");
+        let labels = ["proto", "op", "node_test"];
+        let before = REDIS_SLO_VIOLATIONS.with_label_values(&labels).get();
+        check_redis_slo(labels[0], labels[1], labels[2], 50.0);
+        let after = REDIS_SLO_VIOLATIONS.with_label_values(&labels).get();
+        assert!(after > before, "redis slo counter should increase");
+    }
+
+    #[test]
+    fn test_check_protocol_and_queue_slo_increments() {
+        std::env::set_var("MPC_PROTOCOL_SLO_SEC", "0");
+        std::env::set_var("MPC_QUEUE_SLO_SIZE", "0");
+
+        let proto_labels = ["node_test", "crypto"];
+        let q_labels = ["sign_queue", "node_test"];
+
+        let before_proto = PROTOCOL_SLO_VIOLATIONS
+            .with_label_values(&proto_labels)
+            .get();
+        check_protocol_slo(proto_labels[0], proto_labels[1], 1.0);
+        let after_proto = PROTOCOL_SLO_VIOLATIONS
+            .with_label_values(&proto_labels)
+            .get();
+        assert!(
+            after_proto > before_proto,
+            "protocol slo counter should increase"
+        );
+
+        let before_q = QUEUE_SLO_VIOLATIONS.with_label_values(&q_labels).get();
+        check_queue_slo(q_labels[0], q_labels[1], 10);
+        let after_q = QUEUE_SLO_VIOLATIONS.with_label_values(&q_labels).get();
+        assert!(after_q > before_q, "queue slo counter should increase");
     }
 }

@@ -261,6 +261,7 @@ impl SignOrganizer {
                             id: PositProtocolId::Signature(sign_id, presignature_id),
                             from: ctx.me,
                             action: PositAction::Propose,
+                            trace_id: None,
                         },
                     )
                     .await;
@@ -328,6 +329,7 @@ impl SignPositor {
                                     id: PositProtocolId::Signature(sign_id, *presignature_id),
                                     from: ctx.me,
                                     action: PositAction::Reject,
+                                    trace_id: None,
                                 },
                             )
                             .await;
@@ -351,6 +353,7 @@ impl SignPositor {
                                 id: PositProtocolId::Signature(sign_id, *presignature_id),
                                 from: ctx.me,
                                 action: PositAction::Reject,
+                                trace_id: None,
                             },
                         )
                         .await;
@@ -382,6 +385,7 @@ impl SignPositor {
                     id: PositProtocolId::Signature(sign_id, presignature_id),
                     from: ctx.me,
                     action: PositAction::Accept,
+                    trace_id: None,
                 },
             )
             .await;
@@ -502,6 +506,7 @@ impl SignPositor {
                                             id: PositProtocolId::Signature(sign_id, presignature_id),
                                             from: ctx.me,
                                             action: PositAction::Start(participants.clone()),
+                                            trace_id: None,
                                         },
                                     )
                                     .await;
@@ -545,6 +550,7 @@ impl SignPositor {
                                             id: PositProtocolId::Signature(sign_id, presignature_id),
                                             from: ctx.me,
                                             action: PositAction::Start(participants.clone()),
+                                            trace_id: None,
                                         },
                                     )
                                     .await;
@@ -822,6 +828,7 @@ impl SignGenerator {
                                     from: me,
                                     data: data.clone(),
                                     timestamp: Utc::now().timestamp() as u64,
+                                    trace_id: None,
                                 },
                             )
                             .await;
@@ -840,6 +847,7 @@ impl SignGenerator {
                                 from: me,
                                 data,
                                 timestamp: Utc::now().timestamp() as u64,
+                                trace_id: None,
                             },
                         )
                         .await;
@@ -1122,6 +1130,11 @@ impl SignatureSpawner {
         crate::metrics::SIGN_QUEUE_SIZE
             .with_label_values(&[self.my_account_id.as_str()])
             .set(self.tasks.len() as i64);
+        crate::metrics::check_queue_slo(
+            "sign_queue",
+            self.my_account_id.as_str(),
+            self.tasks.len() as i64,
+        );
     }
 
     async fn run(

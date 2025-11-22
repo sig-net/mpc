@@ -233,6 +233,7 @@ impl PresignatureGenerator {
                                     from: me,
                                     data: data.clone(),
                                     timestamp: Utc::now().timestamp() as u64,
+                                    trace_id: None,
                                 },
                             )
                             .await;
@@ -250,6 +251,7 @@ impl PresignatureGenerator {
                                 from: me,
                                 data,
                                 timestamp: Utc::now().timestamp() as u64,
+                                trace_id: None,
                             },
                         )
                         .await;
@@ -451,6 +453,7 @@ impl PresignatureSpawner {
                             id: PositProtocolId::Presignature(id),
                             from: self.me,
                             action,
+                            trace_id: None,
                         },
                     )
                     .await;
@@ -507,6 +510,7 @@ impl PresignatureSpawner {
                         id: PositProtocolId::Presignature(id),
                         from: self.me,
                         action: PositAction::Propose,
+                        trace_id: None,
                     },
                 )
                 .await;
@@ -658,6 +662,7 @@ impl PresignatureSpawner {
                             id: PositProtocolId::Presignature(id),
                             from: self.me,
                             action: PositAction::Start(participants.clone()),
+                            trace_id: None,
                         },
                     )
                     .await;

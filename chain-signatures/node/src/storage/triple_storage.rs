@@ -220,6 +220,12 @@ impl TripleStorage {
         crate::metrics::REDIS_LATENCY
             .with_label_values(&["triple", "reserve_pair", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
+        crate::metrics::check_redis_slo(
+            "triple",
+            "reserve_pair",
+            self.account_id.as_str(),
+            elapsed.as_millis() as f64,
+        );
 
         match result {
             Ok(_) => Some(TriplePairSlot {
@@ -315,6 +321,12 @@ impl TripleStorage {
         crate::metrics::REDIS_LATENCY
             .with_label_values(&["triple", "remove_outdated", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
+        crate::metrics::check_redis_slo(
+            "triple",
+            "remove_outdated",
+            self.account_id.as_str(),
+            elapsed.as_millis() as f64,
+        );
 
         match result {
             Ok(outdated) => {
@@ -399,6 +411,12 @@ impl TripleStorage {
         crate::metrics::REDIS_LATENCY
             .with_label_values(&["triple", "insert_pair", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
+        crate::metrics::check_redis_slo(
+            "triple",
+            "insert_pair",
+            self.account_id.as_str(),
+            elapsed.as_millis() as f64,
+        );
 
         if let Err(err) = result {
             tracing::warn!(
@@ -532,6 +550,12 @@ impl TripleStorage {
         crate::metrics::REDIS_LATENCY
             .with_label_values(&["triple", "take", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
+        crate::metrics::check_redis_slo(
+            "triple",
+            "take",
+            self.account_id.as_str(),
+            elapsed.as_millis() as f64,
+        );
 
         match result {
             Ok(pair) => {
@@ -604,6 +628,12 @@ impl TripleStorage {
         crate::metrics::REDIS_LATENCY
             .with_label_values(&["triple", "take_mine", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
+        crate::metrics::check_redis_slo(
+            "triple",
+            "take_mine",
+            self.account_id.as_str(),
+            elapsed.as_millis() as f64,
+        );
 
         match result {
             Ok(Some(pair)) => {
@@ -699,6 +729,12 @@ impl TripleStorage {
         crate::metrics::REDIS_LATENCY
             .with_label_values(&["triple", "clear", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
+        crate::metrics::check_redis_slo(
+            "triple",
+            "clear",
+            self.account_id.as_str(),
+            elapsed.as_millis() as f64,
+        );
 
         // if the outcome is None, it means the script failed or there was an error.
         outcome.is_some()

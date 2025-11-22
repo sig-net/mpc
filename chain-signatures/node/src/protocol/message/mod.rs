@@ -2,8 +2,6 @@ mod filter;
 mod sub;
 mod types;
 
-pub use sub::Subscriber;
-
 use crate::protocol::message::sub::{
     SubscribeId, SubscribeRequest, SubscribeRequestAction, SubscribeResponse,
 };
@@ -14,14 +12,17 @@ pub use crate::protocol::message::types::{
 };
 use crate::protocol::posit::PositAction;
 use crate::protocol::presignature::FullPresignatureId;
+use crate::protocol::Config;
 use crate::rpc::ContractStateWatcher;
+pub use sub::Subscriber;
 
 use super::contract::primitives::{ParticipantMap, Participants};
 use super::presignature::PresignatureId;
 use super::triple::TripleId;
 use crate::node_client::NodeClient;
 use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
-use crate::protocol::Config;
+use opentelemetry::trace::TraceContextExt;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
@@ -175,17 +176,42 @@ impl MessageInbox {
 
         let mut messages = Vec::new();
         while let Some((encrypted, timestamp)) = self.try_decrypt.pop_front() {
-            let decrypted: Result<Vec<Message>, _> =
-                SignedMessage::decrypt_with(&encrypted, cipher_sk, participants, |sig| {
-                    if self.idempotent.put(sig.clone(), ()).is_some() {
-                        Err(MessageError::Idempotent)
-                    } else {
-                        Ok(())
-                    }
-                });
+            let decrypted: Result<
+                (
+                    Vec<Message>,
+                    Option<std::collections::HashMap<String, String>>,
+                ),
+                _,
+            > = SignedMessage::decrypt_with_carrier(&encrypted, cipher_sk, participants, |sig| {
+                if self.idempotent.put(sig.clone(), ()).is_some() {
+                    Err(MessageError::Idempotent)
+                } else {
+                    Ok(())
+                }
+            });
 
             match decrypted {
-                Ok(decrypted) => messages.extend(decrypted),
+                Ok((mut decrypted, carrier)) => {
+                    // If the decrypted batch included an injected OTLP text-map carrier,
+                    // extract the W3C `traceparent` header and set message.trace_id for
+                    // easier correlation inside the node processing spans.
+                    if let Some(map) = carrier {
+                        if let Some(tp) = map.get("traceparent") {
+                            // Store the full W3C `traceparent` string on messages that
+                            // don't already carry a trace id. The traceparent header is
+                            // sufficient to extract the full OpenTelemetry context later
+                            // at processing time.
+                            let traceparent = tp.to_string();
+                            for msg in &mut decrypted {
+                                if msg.trace_id().is_none() {
+                                    msg.set_trace_id(Some(traceparent.clone()));
+                                }
+                            }
+                        }
+                    }
+
+                    messages.extend(decrypted);
+                }
                 Err(err) => {
                     if matches!(err, MessageError::UnknownParticipant(_)) {
                         retry.push((encrypted, timestamp));
@@ -214,7 +240,41 @@ impl MessageInbox {
 
     /// Publish messages to subscribers
     async fn publish(&mut self, messages: Vec<Message>) {
-        for message in messages {
+        for mut message in messages {
+            // create a processing span for each message. If a W3C `traceparent` header was
+            // propagated through the encrypted payload, extract the OpenTelemetry context and
+            // set it as the parent for the processing span so traces correlate end-to-end.
+            let span = if let Some(tp) = message.trace_id().map(|s| s.to_string()) {
+                // Build a one-entry extractor with just the `traceparent` header so the
+                // global propagator can recreate the remote context.
+                struct MapExtractor<'a>(&'a std::collections::HashMap<String, String>);
+                impl<'a> opentelemetry::propagation::Extractor for MapExtractor<'a> {
+                    fn get(&self, key: &str) -> Option<&str> {
+                        self.0.get(key).map(String::as_str)
+                    }
+
+                    fn keys(&self) -> Vec<&str> {
+                        self.0.keys().map(String::as_str).collect()
+                    }
+                }
+
+                // Prepare the text map containing the traceparent header only.
+                let mut map = std::collections::HashMap::new();
+                map.insert("traceparent".to_string(), tp.clone());
+
+                // Extract the remote context and create a span associated with it.
+                let cx = opentelemetry::global::get_text_map_propagator(|prop| {
+                    prop.extract(&MapExtractor(&map))
+                });
+
+                let span = tracing::info_span!("inbox.process", message = message.typename(), trace_id = %tp);
+                // best-effort attach the extracted context as the parent; ignore errors if any
+                let _ = span.set_parent(cx);
+                span
+            } else {
+                tracing::info_span!("inbox.process", message = message.typename())
+            };
+            let _enter = span.enter();
             self.send(message).await;
         }
     }
@@ -400,9 +460,18 @@ impl MessageChannel {
 
     /// Send a message to the participants in the network.
     pub async fn send(&self, from: Participant, to: Participant, message: impl Into<Message>) {
+        // Attach current tracing span trace id for cross-node correlation when available.
+        let mut message = message.into();
+        let cx = tracing::Span::current().context();
+        let trace_id = cx.span().span_context().trace_id();
+        // only set trace id if it's valid
+        if trace_id != opentelemetry::trace::TraceId::INVALID {
+            message.set_trace_id(Some(trace_id.to_string()));
+        }
+
         if let Err(err) = self
             .outgoing
-            .send((message.into(), (from, to, Instant::now())))
+            .send((message, (from, to, Instant::now())))
             .await
         {
             tracing::error!(?err, "outbox: failed to send message to participants");
@@ -680,6 +749,9 @@ pub struct SignedMessage {
     pub sig: Signature,
     /// From which particpant the message was sent.
     pub from: Participant,
+    /// Optional injected text-map carrier (OTLP/W3C headers) for trace context propagation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carrier: Option<std::collections::HashMap<String, String>>,
 }
 
 impl SignedMessage {
@@ -695,7 +767,37 @@ impl SignedMessage {
     ) -> Result<Ciphered, MessageError> {
         let msg = cbor_to_bytes(msg)?;
         let sig = sign_sk.sign(&msg);
-        let msg = Self { msg, sig, from };
+        // Try to inject the current OpenTelemetry text-map propagation context if available.
+        let mut carrier: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        // Attempt to capture the current tracing span's OpenTelemetry context and inject it.
+        let cx = tracing::Span::current().context();
+        // Create a simple injector wrapper for our hashmap
+        struct Injector<'a>(&'a mut std::collections::HashMap<String, String>);
+        impl<'a> opentelemetry::propagation::Injector for Injector<'a> {
+            fn set(&mut self, key: &str, value: String) {
+                self.0.insert(key.to_string(), value);
+            }
+        }
+
+        // Use the global propagator to inject context into our hashmap carrier.
+        opentelemetry::global::get_text_map_propagator(|prop| {
+            let mut injector = Injector(&mut carrier);
+            prop.inject_context(&cx, &mut injector);
+        });
+
+        let carrier = if carrier.is_empty() {
+            None
+        } else {
+            Some(carrier)
+        };
+
+        let msg = Self {
+            msg,
+            sig,
+            from,
+            carrier,
+        };
         let msg = cbor_to_bytes(&msg)?;
         let ciphered = cipher_pk
             .encrypt(&msg, Self::ASSOCIATED_DATA)
@@ -726,7 +828,12 @@ impl SignedMessage {
             .inspect_err(|err| {
                 tracing::error!(?err, "failed to decrypt message");
             })?;
-        let Self { msg, sig, from } = cbor_from_bytes(&msg)?;
+        let Self {
+            msg,
+            sig,
+            from,
+            carrier,
+        } = cbor_from_bytes(&msg)?;
         let info = participants
             .get(&from)
             .ok_or(MessageError::UnknownParticipant(from))?;
@@ -743,6 +850,48 @@ impl SignedMessage {
 
         cbor_from_bytes(&msg)
     }
+
+    /// Like `decrypt_with` but returns the text-map carrier that was injected by the sender
+    /// (if any) alongside the deserialized payload. This is used by inbox codepaths to
+    /// re-hydrate trace information and attach it to messages.
+    pub fn decrypt_with_carrier<
+        T: DeserializeOwned,
+        F: FnMut(&Signature) -> Result<(), MessageError>,
+    >(
+        encrypted: &Ciphered,
+        cipher_sk: &hpke::SecretKey,
+        participants: &ParticipantMap,
+        mut check: F,
+    ) -> Result<(T, Option<std::collections::HashMap<String, String>>), MessageError> {
+        let msg = cipher_sk
+            .decrypt(encrypted, Self::ASSOCIATED_DATA)
+            .inspect_err(|err| {
+                tracing::error!(?err, "failed to decrypt message");
+            })?;
+        let Self {
+            msg,
+            sig,
+            from,
+            carrier,
+        } = cbor_from_bytes(&msg)?;
+        let info = participants
+            .get(&from)
+            .ok_or(MessageError::UnknownParticipant(from))?;
+
+        // Do external check before verifying the signature.
+        check(&sig)?;
+
+        if !sig.verify(&msg, &info.sign_pk) {
+            tracing::error!(?from, "signed message erred out with invalid signature");
+            return Err(MessageError::Verification(
+                "invalid signature while verifying authenticity of encrypted protocol message",
+            ));
+        }
+
+        // Return the deserialized message along with the optional carrier map.
+        let payload = cbor_from_bytes(&msg)?;
+        Ok((payload, carrier))
+    }
 }
 
 type FromParticipant = Participant;
@@ -754,6 +903,8 @@ pub struct Partition {
     messages: Vec<Message>,
     /// The earliest timestamp from all the messages.
     timestamp: Instant,
+    /// Optional trace id for the partition (taken from the first message that has one)
+    trace_id: Option<String>,
 }
 
 /// Message outbox is the set of messages that are pending to be sent to other nodes.
@@ -794,7 +945,7 @@ impl MessageOutbox {
         sign_sk: &near_crypto::SecretKey,
         participants: &Participants,
         compacted: HashMap<MessageRoute, Vec<Partition>>,
-    ) -> HashMap<MessageRoute, Vec<(Ciphered, Instant, usize)>> {
+    ) -> HashMap<MessageRoute, Vec<(Ciphered, Instant, usize, Option<String>)>> {
         // failed for when a participant is not active, so keep this message for next round.
         let mut errors = Vec::new();
 
@@ -823,6 +974,7 @@ impl MessageOutbox {
                     message,
                     partition.timestamp,
                     partition.messages.len(),
+                    partition.trace_id.clone(),
                 ));
             }
         }
@@ -841,7 +993,7 @@ impl MessageOutbox {
         client: &NodeClient,
         participants: &Participants,
         cfg: &ProtocolConfig,
-        encrypted: HashMap<MessageRoute, Vec<(Ciphered, Instant, usize)>>,
+        encrypted: HashMap<MessageRoute, Vec<(Ciphered, Instant, usize, Option<String>)>>,
     ) {
         let start = Instant::now();
         let timeout = Duration::from_millis(cfg.message_timeout);
@@ -856,7 +1008,7 @@ impl MessageOutbox {
             crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY.with_label_values(&[account_id.as_str()]);
 
         for ((_from, to), encrypted) in encrypted {
-            for (encrypted_partition, timestamp, message_len) in encrypted {
+            for (encrypted_partition, timestamp, message_len, trace_id) in encrypted {
                 // guaranteed to unwrap due to our previous loop check:
                 let info = participants.get(&to).unwrap();
                 let url = info.url.clone();
@@ -872,7 +1024,15 @@ impl MessageOutbox {
                     failed_send_encrypted_latency_metric.clone();
 
                 let client = client.clone();
+                // Create a child span for this network send so it correlates with the
+                // originating trace id when present.
                 tokio::spawn(async move {
+                    let span = if let Some(tid) = trace_id.clone() {
+                        tracing::info_span!("outbox.send", to = ?to, trace_id = %tid)
+                    } else {
+                        tracing::info_span!("outbox.send", to = ?to)
+                    };
+                    let _enter = span.enter();
                     let instant = Instant::now();
                     msg_send_delay_metric.observe((instant - timestamp).as_millis() as f64);
                     let payload = &[&encrypted_partition];
@@ -981,9 +1141,16 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
         let bytesize = msg.size();
         if current_size + bytesize > 256 * 1024 {
             // If adding this byte vector exceeds 256kb, start a new partition
+            // pick the first trace id present in current_messages (if any) and carry it in the
+            // partition so that encrypted partitions can be correlated to tracing spans later.
+            let trace_id = current_messages
+                .iter()
+                .filter_map(|m: &Message| m.trace_id().map(|s| s.to_string()))
+                .next();
             partitions.push(Partition {
                 messages: std::mem::take(&mut current_messages),
                 timestamp: earliest,
+                trace_id,
             });
             current_size = 0;
         }
@@ -993,9 +1160,14 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
 
     if !current_messages.is_empty() {
         // Add the last partition
+        let trace_id = current_messages
+            .iter()
+            .filter_map(|m: &Message| m.trace_id().map(|s| s.to_string()))
+            .next();
         partitions.push(Partition {
             messages: current_messages,
             timestamp: earliest,
+            trace_id,
         });
     }
 
@@ -1057,6 +1229,7 @@ mod tests {
         let starting_message = Message::Generating(GeneratingMessage {
             from: cait_sith::protocol::Participant::from(0),
             data: vec![],
+            trace_id: None,
         });
 
         let message = serde_json::to_vec(&starting_message).unwrap();
@@ -1095,6 +1268,7 @@ mod tests {
             from,
             data: vec![128u8; 1024],
             timestamp: 1234567,
+            trace_id: None,
         })];
         let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
         let decrypted_batch: Vec<Message> =
@@ -1104,6 +1278,89 @@ mod tests {
             batch, decrypted_batch,
             "batch messages did not get encrypted and decrypted correctly"
         );
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_with_carrier() {
+        use std::collections::HashMap;
+        let (cipher_sk, cipher_pk) = mpc_keys::hpke::generate();
+        let sign_sk = near_crypto::SecretKey::from_seed(
+            near_crypto::KeyType::ED25519,
+            "sign-encrypt-carrier",
+        );
+        let from = Participant::from(7);
+
+        // prepare a batch payload
+        let batch = vec![Message::Triple(TripleMessage {
+            id: 42,
+            epoch: 0,
+            from,
+            data: vec![1u8, 2, 3],
+            timestamp: 42,
+            trace_id: None,
+        })];
+
+        // Serialize payload
+        let msg = super::cbor_to_bytes(&batch).unwrap();
+        let sig = sign_sk.sign(&msg);
+
+        // create a carrier map that mimics propagated W3C headers
+        let mut carrier = HashMap::new();
+        carrier.insert(
+            "traceparent".to_string(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+        );
+
+        // Build a signed message with the carrier explicitly set and encrypt it
+        #[derive(Serialize, Deserialize)]
+        struct WithCarrier {
+            #[serde(with = "serde_bytes")]
+            msg: Vec<u8>,
+            sig: near_crypto::Signature,
+            from: Participant,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            carrier: Option<HashMap<String, String>>,
+        }
+
+        let sm = WithCarrier {
+            msg,
+            sig,
+            from,
+            carrier: Some(carrier.clone()),
+        };
+        let bytes = super::cbor_to_bytes(&sm).unwrap();
+        let ciphered = cipher_pk
+            .encrypt(&bytes, SignedMessage::ASSOCIATED_DATA)
+            .unwrap();
+
+        // Decrypt using the decrypt_with_carrier code path and verify we get carrier back
+        let participants = {
+            let mut parts = Participants::default();
+            parts.insert(
+                &from,
+                ParticipantInfo {
+                    sign_pk: sign_sk.public_key(),
+                    cipher_pk: cipher_pk.clone(),
+                    id: from.into(),
+                    url: "http://x".to_string(),
+                    account_id: "n.near".parse().unwrap(),
+                },
+            );
+            ParticipantMap::One(parts)
+        };
+
+        let (payload, returned) =
+            SignedMessage::decrypt_with_carrier(&ciphered, &cipher_sk, &participants, |_| Ok(()))
+                .unwrap();
+        let returned_map = returned.expect("carrier expected");
+        assert_eq!(
+            returned_map.get("traceparent").unwrap(),
+            carrier.get("traceparent").unwrap()
+        );
+
+        // ensure the decrypted payload matches the original batch
+        let batch_dec: Vec<Message> = payload;
+        assert_eq!(batch_dec, batch);
     }
 
     #[test]
@@ -1217,10 +1474,12 @@ mod tests {
                 from,
                 data: vec![128; 1024],
                 timestamp: 1234567,
+                trace_id: None,
             }),
             Message::Generating(GeneratingMessage {
                 from,
                 data: vec![8; 512],
+                trace_id: None,
             }),
             Message::Signature(SignatureMessage {
                 id: SignId::new([7; 32]),
@@ -1230,6 +1489,7 @@ mod tests {
                 from,
                 data: vec![78; 1222],
                 timestamp: 1234567,
+                trace_id: None,
             }),
         ];
         let encrypted = SignedMessage::encrypt(&old_batch, from, &sign_sk, &cipher_pk).unwrap();
@@ -1271,6 +1531,7 @@ mod tests {
                 from,
                 data: vec![128u8; 1024],
                 timestamp: 1,
+                trace_id: None,
             }),
             Message::Triple(crate::protocol::message::TripleMessage {
                 id: 2,
@@ -1278,6 +1539,7 @@ mod tests {
                 from,
                 data: vec![255u8; 2048],
                 timestamp: 2,
+                trace_id: None,
             }),
             Message::Triple(TripleMessage {
                 id: 3,
@@ -1285,6 +1547,7 @@ mod tests {
                 from,
                 data: vec![101u8; 1337],
                 timestamp: 3,
+                trace_id: None,
             }),
         ];
 
@@ -1359,6 +1622,7 @@ mod tests {
                     from,
                     data: vec![128u8; 1024],
                     timestamp: 1,
+                    trace_id: None,
                 }),
                 Message::Triple(crate::protocol::message::TripleMessage {
                     id: 2,
@@ -1366,6 +1630,7 @@ mod tests {
                     from,
                     data: vec![255u8; 2048],
                     timestamp: 2,
+                    trace_id: None,
                 }),
                 Message::Triple(TripleMessage {
                     id: 3,
@@ -1373,6 +1638,7 @@ mod tests {
                     from,
                     data: vec![101u8; 1337],
                     timestamp: 3,
+                    trace_id: None,
                 }),
             ];
             let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
@@ -1406,6 +1672,7 @@ mod tests {
                 from,
                 data: vec![129u8; 1024],
                 timestamp: 1,
+                trace_id: None,
             }),
             Message::Triple(TripleMessage {
                 id: filter_id,
@@ -1413,6 +1680,7 @@ mod tests {
                 from,
                 data: vec![229u8; 2048],
                 timestamp: 2,
+                trace_id: None,
             }),
             Message::Triple(TripleMessage {
                 id: 3,
@@ -1420,6 +1688,7 @@ mod tests {
                 from,
                 data: vec![121u8; 1337],
                 timestamp: 3,
+                trace_id: None,
             }),
         ];
         {

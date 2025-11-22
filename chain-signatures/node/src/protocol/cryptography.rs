@@ -104,6 +104,7 @@ impl CryptographicProtocol for GeneratingState {
                                 GeneratingMessage {
                                     from: self.me,
                                     data: data.clone(),
+                                    trace_id: None,
                                 },
                             )
                             .await;
@@ -118,6 +119,7 @@ impl CryptographicProtocol for GeneratingState {
                             GeneratingMessage {
                                 from: self.me,
                                 data,
+                                trace_id: None,
                             },
                         )
                         .await;
@@ -319,6 +321,7 @@ impl CryptographicProtocol for ResharingState {
                                     from: self.me,
                                     token: resharing.token,
                                     data: data.clone(),
+                                    trace_id: None,
                                 },
                             )
                             .await;
@@ -339,6 +342,7 @@ impl CryptographicProtocol for ResharingState {
                                     from: self.me,
                                     token: resharing.token,
                                     data,
+                                    trace_id: None,
                                 },
                             )
                             .await;
@@ -469,6 +473,7 @@ impl ReshareAwaiting {
                         from: me,
                         nonce,
                         token: self.my_token,
+                        trace_id: None,
                     },
                 )
                 .await;

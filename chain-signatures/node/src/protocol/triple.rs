@@ -182,6 +182,7 @@ impl TripleGenerator {
                             from: self.me,
                             data: data.clone(),
                             timestamp: Utc::now().timestamp() as u64,
+                            trace_id: None,
                         };
                         self.msg.send(self.me, *to, message).await;
                     }
@@ -193,6 +194,7 @@ impl TripleGenerator {
                         from: self.me,
                         data: data.clone(),
                         timestamp: Utc::now().timestamp() as u64,
+                        trace_id: None,
                     };
                     self.msg.send(self.me, to, message).await;
                 }
@@ -402,6 +404,7 @@ impl TripleSpawner {
                             id: PositProtocolId::Triple(id),
                             from: self.me,
                             action,
+                            trace_id: None,
                         },
                     )
                     .await;
@@ -430,6 +433,7 @@ impl TripleSpawner {
                         id: PositProtocolId::Triple(pair_id),
                         from: self.me,
                         action: PositAction::Propose,
+                        trace_id: None,
                     },
                 )
                 .await;
@@ -456,6 +460,7 @@ impl TripleSpawner {
                             id: PositProtocolId::Triple(id),
                             from: self.me,
                             action: PositAction::Start(participants.clone()),
+                            trace_id: None,
                         },
                     )
                     .await;

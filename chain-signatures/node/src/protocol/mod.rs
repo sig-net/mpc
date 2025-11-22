@@ -108,6 +108,11 @@ impl MpcSignProtocol {
             crate::metrics::PROTOCOL_LATENCY_ITER_CRYPTO
                 .with_label_values(&[my_account_id.as_str()])
                 .observe(crypto_time.elapsed().as_secs_f64());
+            crate::metrics::check_protocol_slo(
+                my_account_id.as_str(),
+                "crypto",
+                crypto_time.elapsed().as_secs_f64(),
+            );
 
             if let Some(contract_state) = contract_state.state() {
                 let consensus_time = Instant::now();
@@ -118,6 +123,11 @@ impl MpcSignProtocol {
                 crate::metrics::PROTOCOL_LATENCY_ITER_CONSENSUS
                     .with_label_values(&[my_account_id.as_str()])
                     .observe(consensus_time.elapsed().as_secs_f64());
+                crate::metrics::check_protocol_slo(
+                    my_account_id.as_str(),
+                    "consensus",
+                    consensus_time.elapsed().as_secs_f64(),
+                );
                 node.update_watchers().await;
             }
 
@@ -135,6 +145,11 @@ impl MpcSignProtocol {
             crate::metrics::PROTOCOL_LATENCY_ITER_TOTAL
                 .with_label_values(&[my_account_id.as_str()])
                 .observe(protocol_time.elapsed().as_secs_f64());
+            crate::metrics::check_protocol_slo(
+                my_account_id.as_str(),
+                "total",
+                protocol_time.elapsed().as_secs_f64(),
+            );
             tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
         }
     }

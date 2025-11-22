@@ -177,9 +177,16 @@ impl PresignatureStorage {
             .await;
 
         let elapsed = start.elapsed();
+        let elapsed_ms = elapsed.as_millis() as f64;
         crate::metrics::REDIS_LATENCY
             .with_label_values(&["presignature", "reserve", self.account_id.as_str()])
-            .observe(elapsed.as_millis() as f64);
+            .observe(elapsed_ms);
+        crate::metrics::check_redis_slo(
+            "presignature",
+            "reserve",
+            self.account_id.as_str(),
+            elapsed_ms,
+        );
 
         match result {
             Ok(_) => Some(PresignatureSlot {
@@ -270,6 +277,12 @@ impl PresignatureStorage {
         crate::metrics::REDIS_LATENCY
             .with_label_values(&["presignature", "remove_outdated", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
+        crate::metrics::check_redis_slo(
+            "presignature",
+            "remove_outdated",
+            self.account_id.as_str(),
+            elapsed.as_millis() as f64,
+        );
 
         match result {
             Ok(outdated) => {
@@ -341,6 +354,12 @@ impl PresignatureStorage {
         crate::metrics::REDIS_LATENCY
             .with_label_values(&["presignature", "insert", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
+        crate::metrics::check_redis_slo(
+            "presignature",
+            "insert",
+            self.account_id.as_str(),
+            elapsed.as_millis() as f64,
+        );
 
         match outcome {
             Ok(()) => true,
@@ -455,6 +474,12 @@ impl PresignatureStorage {
         crate::metrics::REDIS_LATENCY
             .with_label_values(&["presignature", "take", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
+        crate::metrics::check_redis_slo(
+            "presignature",
+            "take",
+            self.account_id.as_str(),
+            elapsed.as_millis() as f64,
+        );
 
         match result {
             Ok(presignature) => Some(PresignatureTaken::foreigner(presignature)),
@@ -512,6 +537,12 @@ impl PresignatureStorage {
         crate::metrics::REDIS_LATENCY
             .with_label_values(&["presignature", "take_mine", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
+        crate::metrics::check_redis_slo(
+            "presignature",
+            "take_mine",
+            self.account_id.as_str(),
+            elapsed.as_millis() as f64,
+        );
 
         match result {
             Ok(Some(presignature)) => Some(PresignatureTaken::owner(presignature, self.clone())),
@@ -598,6 +629,12 @@ impl PresignatureStorage {
         crate::metrics::REDIS_LATENCY
             .with_label_values(&["presignature", "clear", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
+        crate::metrics::check_redis_slo(
+            "presignature",
+            "clear",
+            self.account_id.as_str(),
+            elapsed.as_millis() as f64,
+        );
 
         outcome.is_some()
     }

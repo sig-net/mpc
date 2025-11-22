@@ -34,6 +34,9 @@ pub struct PositMessage {
     pub id: PositProtocolId,
     pub from: Participant,
     pub action: PositAction,
+    /// Optional trace id propagated along the protocol message for correlating traces/logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 impl PositMessage {
@@ -60,6 +63,9 @@ pub struct GeneratingMessage {
     pub from: Participant,
     #[serde(with = "serde_bytes")]
     pub data: MessageData,
+    /// Optional trace id propagated along the protocol message for correlating traces/logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 impl From<GeneratingMessage> for Message {
@@ -78,6 +84,9 @@ pub struct ResharingMessage {
     pub token: u64,
     #[serde(with = "serde_bytes")]
     pub data: MessageData,
+    /// Optional trace id propagated along the protocol message for correlating traces/logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 impl From<ResharingMessage> for Message {
@@ -97,6 +106,9 @@ pub struct ReadyMessage {
     /// Participant-scoped random identifier combined into a cluster-wide attempt identifier.
     #[serde(default)]
     pub token: u64,
+    /// Optional trace id propagated along the protocol message for correlating traces/logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 impl From<ReadyMessage> for Message {
@@ -114,6 +126,9 @@ pub struct TripleMessage {
     pub data: MessageData,
     // UNIX timestamp as seconds since the epoch
     pub timestamp: u64,
+    /// Optional trace id propagated along the protocol message for correlating traces/logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 impl From<TripleMessage> for Message {
@@ -132,6 +147,9 @@ pub struct PresignatureMessage {
     pub data: MessageData,
     // UNIX timestamp as seconds since the epoch
     pub timestamp: u64,
+    /// Optional trace id propagated along the protocol message for correlating traces/logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 impl From<PresignatureMessage> for Message {
@@ -151,6 +169,9 @@ pub struct SignatureMessage {
     pub data: MessageData,
     // UNIX timestamp as seconds since the epoch
     pub timestamp: u64,
+    /// Optional trace id propagated along the protocol message for correlating traces/logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 impl From<SignatureMessage> for Message {
@@ -202,6 +223,34 @@ impl Message {
             }
             Message::Signature(msg) => std::mem::size_of::<SignatureMessage>() + msg.data.len(),
             Message::Unknown(_msg) => usize::MAX,
+        }
+    }
+
+    /// Attach an optional trace id to the message (for propagation across nodes).
+    pub fn set_trace_id(&mut self, trace_id: Option<String>) {
+        match self {
+            Message::Posit(m) => m.trace_id = trace_id,
+            Message::Generating(m) => m.trace_id = trace_id,
+            Message::Resharing(m) => m.trace_id = trace_id,
+            Message::Ready(m) => m.trace_id = trace_id,
+            Message::Triple(m) => m.trace_id = trace_id,
+            Message::Presignature(m) => m.trace_id = trace_id,
+            Message::Signature(m) => m.trace_id = trace_id,
+            Message::Unknown(_) => (),
+        }
+    }
+
+    /// Get the message trace id, if present.
+    pub fn trace_id(&self) -> Option<&str> {
+        match self {
+            Message::Posit(m) => m.trace_id.as_deref(),
+            Message::Generating(m) => m.trace_id.as_deref(),
+            Message::Resharing(m) => m.trace_id.as_deref(),
+            Message::Ready(m) => m.trace_id.as_deref(),
+            Message::Triple(m) => m.trace_id.as_deref(),
+            Message::Presignature(m) => m.trace_id.as_deref(),
+            Message::Signature(m) => m.trace_id.as_deref(),
+            Message::Unknown(_) => None,
         }
     }
 }
