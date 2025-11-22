@@ -1,5 +1,5 @@
 use super::message::{MessageChannel, PositMessage, PositProtocolId, PresignatureMessage};
-use super::posit::{PositAction, Positor, SinglePositCounter};
+use super::posit::{PositAction, PositCounter, Positor};
 use super::triple::TripleId;
 use crate::config::Config;
 use crate::mesh::MeshState;
@@ -314,7 +314,6 @@ enum PresignTaskMessage {
 struct PresignTask {
     id: FullPresignatureId,
     me: Participant,
-    participants: Vec<Participant>,
     threshold: usize,
     positor: Positor<TriplesTaken>,
     timeout: Duration,
@@ -328,102 +327,22 @@ struct PresignTask {
 }
 
 impl PresignTask {
-    async fn run(self, mut task_rx: mpsc::Receiver<PresignTaskMessage>) {
-        let id = self.id;
-
+    async fn run(mut self, mut task_rx: mpsc::Receiver<PresignTaskMessage>) {
         // Handle the posit phase internally. Proposer will collect Accept/Reject votes
         // using a SinglePositCounter. Deliberators will wait for a Start message from
         // the proposer which will contain the final participant list.
 
-        let participants = if self.positor.is_proposer() {
-            let mut counter = SinglePositCounter::new(self.me, &self.participants);
-            let posit_deadline = tokio::time::sleep(Duration::from_secs(60));
-            tokio::pin!(posit_deadline);
-
-            loop {
-                tokio::select! {
-                    Some(task_msg) = task_rx.recv() => {
-                        let PresignTaskMessage::PositMessage { from, action } = task_msg;
-                        if !counter.process_action(from, &action) {
-                            continue;
-                        }
-
-                        if counter.enough_rejects(self.threshold) {
-                            tracing::warn!(?id, ?from, "received enough REJECTs, aborting presignature generation");
-                            return;
-                        }
-
-                        if counter.meets_totality() {
-                            let participants = counter.accepts.iter().copied().collect::<Vec<_>>();
-                            if participants.len() < self.threshold {
-                                tracing::warn!(?id, threshold = self.threshold, accepted = ?participants.len(), "not enough accepts to reach threshold, aborting");
-                                return;
-                            }
-
-                            tracing::info!(?id, ?participants, "proposer broadcasting Start");
-                            for &p in &participants {
-                                if p == self.me { continue; }
-                                self.msg.send(
-                                    self.me,
-                                    p,
-                                    PositMessage { id: PositProtocolId::Presignature(id), from: self.me, action: PositAction::Start(participants.clone()) }
-                                ).await;
-                            }
-
-                            break participants;
-                        }
-                    }
-                    _ = &mut posit_deadline => {
-                        if counter.enough_accepts(self.threshold) {
-                            let participants = counter.accepts.iter().copied().collect::<Vec<_>>();
-                            if participants.len() < self.threshold {
-                                tracing::warn!(?id, threshold = self.threshold, accepted = ?participants.len(), "posit timeout: not enough accepts, aborting");
-                                return;
-                            }
-
-                            tracing::info!(?id, "posit timeout with enough accepts, broadcasting Start");
-                            for &p in &participants {
-                                if p == self.me { continue; }
-                                self.msg.send(
-                                    self.me,
-                                    p,
-                                    PositMessage { id: PositProtocolId::Presignature(id), from: self.me, action: PositAction::Start(participants.clone()) }
-                                ).await;
-                            }
-
-                            break participants;
-                        } else {
-                            tracing::warn!(?id, "posit timeout without enough accepts, aborting");
-                            return;
-                        }
-                    }
-                }
-            }
-        } else {
-            // Deliberator: wait for Start from the proposer
-            let start_deadline = tokio::time::sleep(Duration::from_secs(60));
-            tokio::pin!(start_deadline);
-
-            loop {
-                tokio::select! {
-                    Some(task_msg) = task_rx.recv() => {
-                        let PresignTaskMessage::PositMessage { from, action } = task_msg;
-                        if let PositAction::Start(participants) = action {
-                            if from != self.positor.id() {
-                                tracing::warn!(?id, ?from, expected = ?self.positor.id(), "received Start from non-proposer, ignoring");
-                                continue;
-                            }
-                            tracing::info!(?id, participants = ?participants, "deliberator received Start");
-                            break participants;
-                        }
-                    }
-                    _ = &mut start_deadline => {
-                        tracing::warn!(?id, "deliberator timed out waiting for Start, aborting");
-                        return;
-                    }
-                }
-            }
+        let Some(participants) = self.run_posit(&mut task_rx).await else {
+            return;
         };
+
+        // proceed to generation phase
+        self.run_generation(participants).await;
+    }
+
+    /// Generation phase: reserve slot, prepare triples and start presignature generator.
+    async fn run_generation(self, participants: Vec<Participant>) {
+        let id = self.id;
 
         // Reserve presignature slot
         let Some(slot) = self.presignatures.reserve(id.id).await else {
@@ -436,7 +355,9 @@ impl PresignTask {
 
         // Prepare owner and pending triples
         let (owner, triples) = match self.positor {
-            Positor::Proposer(proposer, triples) => (proposer, PendingTriples::Available(triples)),
+            Positor::Proposer(proposer, counter) => {
+                (proposer, PendingTriples::Available(counter.into_store()))
+            }
             Positor::Deliberator(proposer) => (
                 proposer,
                 PendingTriples::InStorage(id.pair_id, self.triples.clone()),
@@ -502,7 +423,93 @@ impl PresignTask {
             ),
         };
 
+        // record that we've started a historical presignature generator
+        crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS
+            .with_label_values(&[my_account_id.as_str()])
+            .inc();
+        if owner == me {
+            crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE
+                .with_label_values(&[my_account_id.as_str()])
+                .inc();
+        }
+
         generator.run(&my_account_id, me, epoch).await;
+    }
+
+    /// Run the posit phase for a presignature id and return participants if successful.
+    async fn run_posit(
+        &mut self,
+        task_rx: &mut mpsc::Receiver<PresignTaskMessage>,
+    ) -> Option<Vec<Participant>> {
+        if self.positor.is_proposer() {
+            let counter = match &mut self.positor {
+                Positor::Proposer(_, counter) => counter,
+                _ => unreachable!(),
+            };
+            let id = self.id;
+
+            let extract = |msg: &PresignTaskMessage| match msg {
+                PresignTaskMessage::PositMessage { from, action } => Some((*from, action.clone())),
+            };
+
+            let send_start = |participants: &Vec<Participant>| {
+                let msg = self.msg.clone();
+                let me = self.me;
+                let participants = participants.clone();
+                async move {
+                    tracing::info!(?id, ?participants, "proposer broadcasting Start");
+                    for &p in &participants {
+                        if p == me {
+                            continue;
+                        }
+                        msg.send(
+                            me,
+                            p,
+                            PositMessage {
+                                id: PositProtocolId::Presignature(id),
+                                from: me,
+                                action: PositAction::Start(participants.clone()),
+                            },
+                        )
+                        .await;
+                    }
+                }
+            };
+
+            let participants = crate::protocol::posit::proposer_collect(
+                counter,
+                self.threshold,
+                Duration::from_secs(60),
+                task_rx,
+                extract,
+                send_start,
+            )
+            .await;
+
+            if let Some(participants) = participants {
+                if participants.len() < self.threshold {
+                    tracing::warn!(?id, threshold = self.threshold, accepted = ?participants.len(), "not enough accepts to reach threshold, aborting");
+                    return None;
+                }
+                return Some(participants);
+            }
+            None
+        } else {
+            let expected = self.positor.id();
+            let extract = |msg: &PresignTaskMessage| match msg {
+                PresignTaskMessage::PositMessage { from, action } => Some((*from, action.clone())),
+            };
+
+            let participants = crate::protocol::posit::deliberator_wait_for_start(
+                task_rx,
+                expected,
+                Duration::from_secs(60),
+                extract,
+            )
+            .await;
+
+            participants
+        }
     }
 }
 
@@ -696,7 +703,7 @@ impl PresignatureSpawner {
 
         // No existing per-id task: only PROPOSE should create a deliberator task
         if matches!(action, PositAction::Propose) {
-            self.spawn_task(id, Positor::Deliberator(from), Vec::new(), timeout)
+            self.spawn_task(id, Positor::Deliberator(from), timeout)
                 .await;
             // reply Accept to proposer
             self.msg
@@ -718,14 +725,13 @@ impl PresignatureSpawner {
         // To ensure there is no contention between different nodes we are only using triples
         // that we proposed. This way in a non-BFT environment we are guaranteed to never try
         // to use the same triple as any other node.
-        // TODO: have all this part be a separate task such that finding a pair of triples is done in parallel instead
-        // of waiting for storage to respond here.
         let Some(triples) = self.triples.take_mine(self.me).await else {
             return;
         };
 
         let pair_id = triples.pair.id;
         // note: only one of the pair's participants is needed since they are the same.
+        // TODO: can use posit purely for participants, so we can just grab the triple pair participants instead of intersection.
         let participants = intersect_vec(&[active, &triples.pair.triple0.public.participants]);
         if participants.len() < self.threshold {
             tracing::warn!(
@@ -747,8 +753,7 @@ impl PresignatureSpawner {
         // Create a per-id task as proposer which will manage posits internally.
         self.spawn_task(
             id,
-            Positor::Proposer(self.me, triples),
-            participants.clone(),
+            Positor::Proposer(self.me, PositCounter::new(self.me, &participants, triples)),
             Duration::from_secs(60),
         )
         .await;
@@ -775,7 +780,6 @@ impl PresignatureSpawner {
         &mut self,
         id: FullPresignatureId,
         positor: Positor<TriplesTaken>,
-        participants: Vec<Participant>,
         timeout: Duration,
     ) {
         tracing::info!(?id, "spawning presignature task");
@@ -788,7 +792,6 @@ impl PresignatureSpawner {
         let task = PresignTask {
             id,
             me: self.me,
-            participants: participants.clone(),
             threshold: self.threshold,
             positor,
             timeout,

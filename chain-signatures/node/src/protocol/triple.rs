@@ -1,5 +1,5 @@
 use super::message::{MessageChannel, PositMessage, PositProtocolId, TripleMessage};
-use super::posit::{PositAction, SinglePositCounter};
+use super::posit::{PositAction, PositCounter};
 use super::MpcSignProtocol;
 use crate::config::Config;
 use crate::mesh::MeshState;
@@ -291,7 +291,6 @@ enum TripleTaskMessage {
 struct TripleTask {
     id: TripleId,
     me: Participant,
-    participants: Vec<Participant>,
     threshold: usize,
     positor: Positor<()>,
     timeout: Duration,
@@ -303,108 +302,107 @@ struct TripleTask {
 }
 
 impl TripleTask {
-    async fn run(self, mut task_rx: mpsc::Receiver<TripleTaskMessage>) {
-        let id = self.id;
-
+    async fn run(mut self, mut task_rx: mpsc::Receiver<TripleTaskMessage>) {
         // Handle the posit phase internally. Proposer will collect Accept/Reject votes
         // using a SinglePositCounter. Deliberators will wait for a Start message from
         // the proposer which will contain the final participant list.
 
-        let participants = if self.positor.is_proposer() {
-            // As proposer we already know the candidate participants.
-            let mut counter = SinglePositCounter::new(self.me, &self.participants);
-
-            let posit_deadline = tokio::time::sleep(Duration::from_secs(60));
-            tokio::pin!(posit_deadline);
-
-            loop {
-                tokio::select! {
-                    Some(task_msg) = task_rx.recv() => {
-                        let TripleTaskMessage::PositMessage { from, action } = task_msg;
-                        // Only process Accept/Reject here
-                        if !counter.process_action(from, &action) {
-                            continue;
-                        }
-
-                        if counter.enough_rejects(self.threshold) {
-                            tracing::warn!(id, ?from, "received enough REJECTs, aborting triple generation");
-                            return;
-                        }
-
-                        if counter.meets_totality() {
-                            let participants = counter.accepts.iter().copied().collect::<Vec<_>>();
-                            if participants.len() < self.threshold {
-                                tracing::warn!(id, threshold = self.threshold, accepted = ?participants.len(), "not enough accepts to reach threshold, aborting");
-                                return;
-                            }
-
-                            // broadcast Start to the selected participants
-                            tracing::info!(id, ?participants, "proposer broadcasting Start");
-                            for &p in &participants {
-                                if p == self.me { continue; }
-                                self.msg.send(
-                                    self.me,
-                                    p,
-                                    PositMessage { id: PositProtocolId::Triple(id), from: self.me, action: PositAction::Start(participants.clone()) }
-                                ).await;
-                            }
-
-                            break participants;
-                        }
-                    }
-                    _ = &mut posit_deadline => {
-                        if counter.enough_accepts(self.threshold) {
-                            let participants = counter.accepts.iter().copied().collect::<Vec<_>>();
-                            if participants.len() < self.threshold {
-                                tracing::warn!(id, threshold = self.threshold, accepted = ?participants.len(), "posit timeout: not enough accepts, aborting");
-                                return;
-                            }
-
-                            tracing::info!(id, "posit timeout with enough accepts, broadcasting Start");
-                            for &p in &participants {
-                                if p == self.me { continue; }
-                                self.msg.send(
-                                    self.me,
-                                    p,
-                                    PositMessage { id: PositProtocolId::Triple(id), from: self.me, action: PositAction::Start(participants.clone()) }
-                                ).await;
-                            }
-
-                            break participants;
-                        } else {
-                            tracing::warn!(id, "posit timeout without enough accepts, aborting");
-                            return;
-                        }
-                    }
-                }
-            }
-        } else {
-            // Deliberator: wait for Start from the proposer
-            let start_deadline = tokio::time::sleep(Duration::from_secs(60));
-            tokio::pin!(start_deadline);
-
-            loop {
-                tokio::select! {
-                    Some(task_msg) = task_rx.recv() => {
-                        let TripleTaskMessage::PositMessage { from, action } = task_msg;
-                        if let PositAction::Start(participants) = action {
-                            if from != self.positor.id() {
-                                tracing::warn!(id, ?from, expected = ?self.positor.id(), "received Start from non-proposer, ignoring");
-                                continue;
-                            }
-                            tracing::info!(id, participants = ?participants, "deliberator received Start");
-                            break participants;
-                        }
-                    }
-                    _ = &mut start_deadline => {
-                        tracing::warn!(id, "deliberator timed out waiting for Start, aborting");
-                        return;
-                    }
-                }
-            }
+        let Some(participants) = self.run_posit(&mut task_rx).await else {
+            return;
         };
 
-        // Reserve a slot for this triple id and run the generator
+        // proceed to the generation phase (reserve slot, create generator and run it)
+        self.run_generation(participants).await;
+    }
+
+    /// Handles the posit phase (proposer/deliberator) and returns the selected participants
+    /// if the task should proceed, or None if aborted.
+    async fn run_posit(
+        &mut self,
+        task_rx: &mut mpsc::Receiver<TripleTaskMessage>,
+    ) -> Option<Vec<Participant>> {
+        if self.positor.is_proposer() {
+            // As proposer we already know the candidate participants. Use the counter
+            // carried inside `self.positor`.
+            let counter = match &mut self.positor {
+                Positor::Proposer(_, counter) => counter,
+                _ => unreachable!(),
+            };
+            let id = self.id;
+
+            let extract = |msg: &TripleTaskMessage| match msg {
+                TripleTaskMessage::PositMessage { from, action } => Some((*from, action.clone())),
+            };
+
+            let send_start = |participants: &Vec<Participant>| {
+                let msg = self.msg.clone();
+                let me = self.me;
+                let participants = participants.clone();
+                async move {
+                    tracing::info!(id, ?participants, "proposer broadcasting Start");
+                    for &p in &participants {
+                        if p == me {
+                            continue;
+                        }
+                        msg.send(
+                            me,
+                            p,
+                            PositMessage {
+                                id: PositProtocolId::Triple(id),
+                                from: me,
+                                action: PositAction::Start(participants.clone()),
+                            },
+                        )
+                        .await;
+                    }
+                }
+            };
+
+            let participants = crate::protocol::posit::proposer_collect(
+                counter,
+                self.threshold,
+                Duration::from_secs(60),
+                task_rx,
+                extract,
+                send_start,
+            )
+            .await;
+
+            if let Some(participants) = participants {
+                if participants.len() < self.threshold {
+                    tracing::warn!(id, threshold = self.threshold, accepted = ?participants.len(), "not enough accepts to reach threshold, aborting");
+                    return None;
+                }
+
+                return Some(participants);
+            }
+            return None;
+        } else {
+            // Deliberator: wait for Start from the proposer
+            // Deliberator: wait for Start from the proposer
+            let expected = self.positor.id();
+            let extract = |msg: &TripleTaskMessage| match msg {
+                TripleTaskMessage::PositMessage { from, action } => Some((*from, action.clone())),
+            };
+
+            let participants = crate::protocol::posit::deliberator_wait_for_start(
+                task_rx,
+                expected,
+                Duration::from_secs(60),
+                extract,
+            )
+            .await;
+
+            return participants;
+        }
+    }
+
+    /// Perform the generation phase: reserve slot, create generator, increment historical
+    /// metrics and run the generator.
+    async fn run_generation(self, participants: Vec<Participant>) {
+        let id = self.id;
+
+        // Reserve a slot for this triple id
         let Some(slot) = self.triple_storage.reserve(id).await else {
             tracing::warn!(id, "id collision reserving triple slot, aborting task");
             return;
@@ -588,7 +586,7 @@ impl TripleSpawner {
         // No task yet: when someone proposes, create a per-id task as a deliberator and reply Accept.
         if matches!(action, PositAction::Propose) {
             // spawn task as a deliberator; participants will be discovered on START
-            self.spawn_task(id, Vec::new(), Positor::Deliberator(from), timeout)
+            self.spawn_task(id, Positor::Deliberator(from), timeout)
                 .await;
 
             // reply Accept to the proposer
@@ -613,8 +611,7 @@ impl TripleSpawner {
         let participants = active.to_vec();
         self.spawn_task(
             pair_id,
-            participants.clone(),
-            Positor::Proposer(self.me, ()),
+            Positor::Proposer(self.me, PositCounter::new(self.me, &participants, ())),
             Duration::from_secs(60),
         )
         .await;
@@ -637,13 +634,7 @@ impl TripleSpawner {
         }
     }
 
-    async fn spawn_task(
-        &mut self,
-        id: TripleId,
-        participants: Vec<Participant>,
-        positor: Positor<()>,
-        timeout: Duration,
-    ) {
+    async fn spawn_task(&mut self, id: TripleId, positor: Positor<()>, timeout: Duration) {
         tracing::info!(id, "spawning triple task");
 
         // Subscribe to (or create) the posit inbox for this triple id
@@ -652,7 +643,6 @@ impl TripleSpawner {
         let task = TripleTask {
             id,
             me: self.me,
-            participants: participants.clone(),
             threshold: self.threshold,
             positor,
             timeout,

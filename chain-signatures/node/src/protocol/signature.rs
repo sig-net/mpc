@@ -6,7 +6,7 @@ use crate::mesh::MeshState;
 use crate::protocol::message::{
     MessageChannel, PositMessage, PositProtocolId, SignatureMessage, Subscriber,
 };
-use crate::protocol::posit::{PositAction, SinglePositCounter};
+use crate::protocol::posit::{PositAction, PositCounter};
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
@@ -435,131 +435,106 @@ impl SignPositor {
                 Ok(id) => id,
                 Err(phase) => return phase,
             }
-        }
+        };
 
         // GUARANTEE: at least threshold participants from organizing phase.
         let posit_participants = stable.iter().copied().collect::<Vec<_>>();
-        let mut counter = SinglePositCounter::new(ctx.me, &posit_participants);
+        let mut counter = PositCounter::new(ctx.me, &posit_participants, ());
 
-        let posit_timeout = Duration::from_secs(60);
-        let posit_deadline = tokio::time::sleep(posit_timeout);
-        tokio::pin!(posit_deadline);
+        let extract = |msg: &SignTaskMessage| match msg {
+            SignTaskMessage::PositMessage {
+                presignature_id: _,
+                from,
+                action,
+            } => Some((*from, action.clone())),
+        };
 
-        let accepted_participants = loop {
-            tokio::select! {
-                Some(task_msg) = task_rx.recv() => {
-                    let SignTaskMessage::PositMessage { presignature_id: _, from, action } = task_msg;
-                    if is_deliberator {
-                        if let PositAction::Start(participants) = action {
-                            if from != proposer {
-                                tracing::warn!(?sign_id, ?from, ?proposer, "received Start from non-proposer, ignoring");
-                                continue;
-                            }
-                            tracing::info!(?sign_id, participant = ?ctx.me, ?participants, "deliberator received Start");
-                            break participants;
-                        }
-                    } else {
-                        if !counter.process_action(from, &action) {
+        let accepted_participants = if is_deliberator {
+            // For a deliberator simply wait for Start from the proposer
+            let accepted_participants = crate::protocol::posit::deliberator_wait_for_start(
+                task_rx,
+                proposer,
+                Duration::from_secs(60),
+                extract,
+            )
+            .await;
+
+            match accepted_participants {
+                Some(p) => p,
+                None => {
+                    tracing::warn!(
+                        ?sign_id,
+                        "deliberator timed out waiting for Start, reorganizing"
+                    );
+                    state.bump_round();
+                    return SignPhase::Organizing(SignOrganizer);
+                }
+            }
+        } else {
+            let send_start = |participants: &Vec<Participant>| {
+                let msg = ctx.msg.clone();
+                let me = ctx.me;
+                let sign_id = sign_id;
+                let presignature_id = presignature_id;
+                let participants = participants.clone();
+                async move {
+                    tracing::info!(?sign_id, me = ?me, ?participants, "proposer broadcasting Start");
+                    for &p in &participants {
+                        if p == me {
                             continue;
                         }
-
-                        if counter.enough_rejects(ctx.threshold) {
-                            tracing::warn!(?sign_id, ?from, "received enough REJECTs, reorganizing");
-                            state.bump_round();
-                            return SignPhase::Organizing(SignOrganizer);
-                        }
-
-                        if counter.meets_totality() {
-                            // Only include participants who both accepted AND were part of the presignature generation
-                            let mut participants = counter.accepts.iter().copied().collect::<Vec<_>>();
-                            if !presignature_participants.is_empty() {
-                                participants.retain(|p| presignature_participants.contains(p));
-                            }
-
-                            if participants.len() < ctx.threshold {
-                                tracing::warn!(
-                                    ?sign_id,
-                                    presig_participants = ?presignature_participants,
-                                    accepts = ?counter.accepts,
-                                    filtered_participants = ?participants,
-                                    threshold = ctx.threshold,
-                                    "not enough presignature participants accepted, reorganizing"
-                                );
-                                state.bump_round();
-                                return SignPhase::Organizing(SignOrganizer);
-                            }
-
-                            tracing::info!(?sign_id, me = ?ctx.me, ?participants, "proposer broadcasting Start");
-                            for &p in &participants {
-                                if p == ctx.me {
-                                    continue;
-                                }
-                                ctx.msg
-                                    .send(
-                                        ctx.me,
-                                        p,
-                                        PositMessage {
-                                            id: PositProtocolId::Signature(sign_id, presignature_id),
-                                            from: ctx.me,
-                                            action: PositAction::Start(participants.clone()),
-                                        },
-                                    )
-                                    .await;
-                            }
-                            break participants;
-                        }
+                        msg.send(
+                            me,
+                            p,
+                            PositMessage {
+                                id: PositProtocolId::Signature(sign_id, presignature_id),
+                                from: me,
+                                action: PositAction::Start(participants.clone()),
+                            },
+                        )
+                        .await;
                     }
                 }
-                _ = &mut posit_deadline => {
-                    if is_proposer {
-                        if counter.enough_accepts(ctx.threshold) {
-                            // Only include participants who both accepted AND were part of the presignature generation
-                            let mut participants = counter.accepts.iter().copied().collect::<Vec<_>>();
-                            if !presignature_participants.is_empty() {
-                                participants.retain(|p| presignature_participants.contains(p));
-                            }
+            };
 
-                            if participants.len() < ctx.threshold {
-                                tracing::warn!(
-                                    ?sign_id,
-                                    presig_participants = ?presignature_participants,
-                                    accepts = ?counter.accepts,
-                                    filtered_participants = ?participants,
-                                    threshold = ctx.threshold,
-                                    "posit timeout: not enough presignature participants accepted, reorganizing"
-                                );
-                                state.bump_round();
-                                return SignPhase::Organizing(SignOrganizer);
-                            }
+            // run proposer loop
+            let participants_opt = crate::protocol::posit::proposer_collect(
+                &mut counter,
+                ctx.threshold,
+                Duration::from_secs(60),
+                task_rx,
+                extract,
+                send_start,
+            )
+            .await;
+            match participants_opt {
+                Some(mut participants) => {
+                    // Only include participants who both accepted AND were part of the presignature generation
+                    if !presignature_participants.is_empty() {
+                        participants.retain(|p| presignature_participants.contains(p));
+                    }
 
-                            tracing::info!(?sign_id, "posit timeout with enough accepts, broadcasting Start");
-                            for &p in &participants {
-                                if p == ctx.me {
-                                    continue;
-                                }
-                                ctx.msg
-                                    .send(
-                                        ctx.me,
-                                        p,
-                                        PositMessage {
-                                            id: PositProtocolId::Signature(sign_id, presignature_id),
-                                            from: ctx.me,
-                                            action: PositAction::Start(participants.clone()),
-                                        },
-                                    )
-                                    .await;
-                            }
-                            break participants;
-                        } else {
-                            tracing::warn!(?sign_id, "posit timeout without enough accepts, reorganizing");
-                            state.bump_round();
-                            return SignPhase::Organizing(SignOrganizer);
-                        }
-                    } else {
-                        tracing::warn!(?sign_id, "deliberator posit timeout waiting for Start, reorganizing");
+                    if participants.len() < ctx.threshold {
+                        tracing::warn!(
+                            ?sign_id,
+                            presig_participants = ?presignature_participants,
+                            accepts = ?counter.accepts_set(),
+                            filtered_participants = ?participants,
+                            threshold = ctx.threshold,
+                            "not enough presignature participants accepted, reorganizing"
+                        );
                         state.bump_round();
                         return SignPhase::Organizing(SignOrganizer);
                     }
+                    participants
+                }
+                None => {
+                    tracing::warn!(
+                        ?sign_id,
+                        "proposer timed out or got enough rejects, reorganizing"
+                    );
+                    state.bump_round();
+                    return SignPhase::Organizing(SignOrganizer);
                 }
             }
         };

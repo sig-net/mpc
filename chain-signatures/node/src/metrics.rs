@@ -270,6 +270,20 @@ pub(crate) static PROTOCOL_LATENCY_ITER_TOTAL: LazyLock<HistogramVec> = LazyLock
     .unwrap()
 });
 
+/// Public helper to read historical triple generator counters for tests and telemetry
+pub fn get_total_historical_triple_generators(label: &str) -> f64 {
+    NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
+        .with_label_values(&[label])
+        .get()
+}
+
+/// Public helper to read historical presignature generator counters for tests and telemetry
+pub fn get_total_historical_presignature_generators(label: &str) -> f64 {
+    NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS
+        .with_label_values(&[label])
+        .get()
+}
+
 pub(crate) static PROTOCOL_LATENCY_ITER_CRYPTO: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_protocol_iter_crypto",
