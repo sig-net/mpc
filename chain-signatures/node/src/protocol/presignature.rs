@@ -233,7 +233,7 @@ impl PresignatureGenerator {
                                     from: me,
                                     data: data.clone(),
                                     timestamp: Utc::now().timestamp() as u64,
-                                    trace_id: None,
+                                    trace_id: Some(self.id.to_string()),
                                 },
                             )
                             .await;
@@ -251,7 +251,7 @@ impl PresignatureGenerator {
                                 from: me,
                                 data,
                                 timestamp: Utc::now().timestamp() as u64,
-                                trace_id: None,
+                                trace_id: Some(self.id.to_string()),
                             },
                         )
                         .await;
@@ -733,12 +733,15 @@ impl PresignatureSpawner {
                     crate::metrics::NUM_PRESIGNATURES_MINE
                         .with_label_values(&[self.my_account_id.as_str()])
                         .set(self.len_mine().await as i64);
+                    crate::metrics::check_queue_slo("presignatures_mine", self.my_account_id.as_str(), self.len_mine().await as i64);
                     crate::metrics::NUM_PRESIGNATURES_TOTAL
                         .with_label_values(&[self.my_account_id.as_str()])
                         .set(self.len_generated().await as i64);
+                    crate::metrics::check_queue_slo("presignatures_total", self.my_account_id.as_str(), self.len_generated().await as i64);
                     crate::metrics::NUM_PRESIGNATURE_GENERATORS_TOTAL
                         .with_label_values(&[self.my_account_id.as_str()])
                         .set(self.len_potential().await as i64 - self.len_generated().await as i64);
+                    crate::metrics::check_queue_slo("presignature_generators_total", self.my_account_id.as_str(), self.len_potential().await as i64 - self.len_generated().await as i64);
                 }
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();

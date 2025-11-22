@@ -182,7 +182,7 @@ impl TripleGenerator {
                             from: self.me,
                             data: data.clone(),
                             timestamp: Utc::now().timestamp() as u64,
-                            trace_id: None,
+                            trace_id: Some(self.id.to_string()),
                         };
                         self.msg.send(self.me, *to, message).await;
                     }
@@ -194,7 +194,7 @@ impl TripleGenerator {
                         from: self.me,
                         data: data.clone(),
                         timestamp: Utc::now().timestamp() as u64,
-                        trace_id: None,
+                        trace_id: Some(self.id.to_string()),
                     };
                     self.msg.send(self.me, to, message).await;
                 }
@@ -588,15 +588,19 @@ impl TripleSpawner {
                     crate::metrics::NUM_TRIPLES_MINE
                         .with_label_values(&[self.my_account_id.as_str()])
                         .set(self.len_mine().await as i64);
+                    crate::metrics::check_queue_slo("triples_mine", self.my_account_id.as_str(), self.len_mine().await as i64);
                     crate::metrics::NUM_TRIPLES_TOTAL
                         .with_label_values(&[self.my_account_id.as_str()])
                         .set(self.triple_storage.len_generated().await as i64);
+                    crate::metrics::check_queue_slo("triples_total", self.my_account_id.as_str(), self.triple_storage.len_generated().await as i64);
                     crate::metrics::NUM_TRIPLE_GENERATORS_INTRODUCED
                         .with_label_values(&[self.my_account_id.as_str()])
                         .set(self.len_introduced() as i64);
+                    crate::metrics::check_queue_slo("triple_generators_introduced", self.my_account_id.as_str(), self.len_introduced() as i64);
                     crate::metrics::NUM_TRIPLE_GENERATORS_TOTAL
                         .with_label_values(&[self.my_account_id.as_str()])
                         .set(self.len_ongoing() as i64);
+                    crate::metrics::check_queue_slo("triple_generators_total", self.my_account_id.as_str(), self.len_ongoing() as i64);
                 }
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();

@@ -828,7 +828,7 @@ impl SignGenerator {
                                     from: me,
                                     data: data.clone(),
                                     timestamp: Utc::now().timestamp() as u64,
-                                    trace_id: None,
+                                    trace_id: Some(sign_id.request_id.iter().map(|b| format!("{:02x}", b)).collect::<String>()),
                                 },
                             )
                             .await;
@@ -847,7 +847,7 @@ impl SignGenerator {
                                 from: me,
                                 data,
                                 timestamp: Utc::now().timestamp() as u64,
-                                trace_id: None,
+                                trace_id: Some(sign_id.request_id.iter().map(|b| format!("{:02x}", b)).collect::<String>()),
                             },
                         )
                         .await;
