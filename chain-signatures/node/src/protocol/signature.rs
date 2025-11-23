@@ -6,7 +6,7 @@ use crate::mesh::MeshState;
 use crate::protocol::message::{
     MessageChannel, PositMessage, PositProtocolId, SignatureMessage, Subscriber,
 };
-use crate::protocol::posit::{PositAction, PositCounter};
+use crate::protocol::posit::{PositAction, PositCounter, Positor};
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
@@ -439,7 +439,12 @@ impl SignPositor {
 
         // GUARANTEE: at least threshold participants from organizing phase.
         let posit_participants = stable.iter().copied().collect::<Vec<_>>();
-        let mut counter = PositCounter::new(ctx.me, &posit_participants, ());
+
+        let mut positor = if is_deliberator {
+            Positor::Deliberator(proposer)
+        } else {
+            Positor::Proposer(ctx.me, PositCounter::new(ctx.me, &posit_participants, ()))
+        };
 
         let extract = |msg: &SignTaskMessage| match msg {
             SignTaskMessage::PositMessage {
@@ -449,97 +454,74 @@ impl SignPositor {
             } => Some((*from, action.clone())),
         };
 
-        let accepted_participants = if is_deliberator {
-            // For a deliberator simply wait for Start from the proposer
-            let accepted_participants = crate::protocol::posit::deliberator_wait_for_start(
-                task_rx,
-                proposer,
-                Duration::from_secs(60),
-                extract,
-            )
-            .await;
-
-            match accepted_participants {
-                Some(p) => p,
-                None => {
-                    tracing::warn!(
-                        ?sign_id,
-                        "deliberator timed out waiting for Start, reorganizing"
-                    );
-                    state.bump_round();
-                    return SignPhase::Organizing(SignOrganizer);
+        let send_start = |participants: &Vec<Participant>| {
+            let msg = ctx.msg.clone();
+            let me = ctx.me;
+            let sign_id = sign_id;
+            let presignature_id = presignature_id;
+            let participants = participants.clone();
+            async move {
+                tracing::info!(?sign_id, me = ?me, ?participants, "proposer broadcasting Start");
+                for &p in &participants {
+                    if p == me {
+                        continue;
+                    }
+                    msg.send(
+                        me,
+                        p,
+                        PositMessage {
+                            id: PositProtocolId::Signature(sign_id, presignature_id),
+                            from: me,
+                            action: PositAction::Start(participants.clone()),
+                        },
+                    )
+                    .await;
                 }
             }
-        } else {
-            let send_start = |participants: &Vec<Participant>| {
-                let msg = ctx.msg.clone();
-                let me = ctx.me;
-                let sign_id = sign_id;
-                let presignature_id = presignature_id;
-                let participants = participants.clone();
-                async move {
-                    tracing::info!(?sign_id, me = ?me, ?participants, "proposer broadcasting Start");
-                    for &p in &participants {
-                        if p == me {
-                            continue;
-                        }
-                        msg.send(
-                            me,
-                            p,
-                            PositMessage {
-                                id: PositProtocolId::Signature(sign_id, presignature_id),
-                                from: me,
-                                action: PositAction::Start(participants.clone()),
-                            },
-                        )
-                        .await;
-                    }
-                }
-            };
+        };
 
-            // run proposer loop
-            let participants_opt = crate::protocol::posit::proposer_collect(
-                &mut counter,
+        let Some(mut accepted) = positor
+            .process(
                 ctx.threshold,
                 Duration::from_secs(60),
                 task_rx,
                 extract,
                 send_start,
             )
-            .await;
-            match participants_opt {
-                Some(mut participants) => {
-                    // Only include participants who both accepted AND were part of the presignature generation
-                    if !presignature_participants.is_empty() {
-                        participants.retain(|p| presignature_participants.contains(p));
-                    }
+            .await
+        else {
+            tracing::warn!(
+                ?sign_id,
+                "proposer timed out or got enough rejects, reorganizing"
+            );
+            state.bump_round();
+            return SignPhase::Organizing(SignOrganizer);
+        };
 
-                    if participants.len() < ctx.threshold {
-                        tracing::warn!(
-                            ?sign_id,
-                            presig_participants = ?presignature_participants,
-                            accepts = ?counter.accepts_set(),
-                            filtered_participants = ?participants,
-                            threshold = ctx.threshold,
-                            "not enough presignature participants accepted, reorganizing"
-                        );
-                        state.bump_round();
-                        return SignPhase::Organizing(SignOrganizer);
-                    }
-                    participants
-                }
-                None => {
+        // Only include participants who both accepted AND were part of the presignature generation
+        if !presignature_participants.is_empty() {
+            accepted.retain(|p| presignature_participants.contains(p));
+        }
+
+        // If we were the proposer we can log accepted set via the embedded counter
+        if is_proposer {
+            if let Positor::Proposer(_, counter) = &positor {
+                if accepted.len() < ctx.threshold {
                     tracing::warn!(
                         ?sign_id,
-                        "proposer timed out or got enough rejects, reorganizing"
+                        presig_participants = ?presignature_participants,
+                        accepts = ?counter.accepts_set(),
+                        filtered_participants = ?accepted,
+                        threshold = ctx.threshold,
+                        "not enough presignature participants accepted, reorganizing"
                     );
                     state.bump_round();
                     return SignPhase::Organizing(SignOrganizer);
                 }
             }
-        };
+        }
 
-        if accepted_participants.is_empty() {
+        if accepted.is_empty() {
             tracing::warn!(
                 ?sign_id,
                 ?round,
@@ -553,7 +535,7 @@ impl SignPositor {
             proposer,
             presignature_id,
             presignature,
-            accepted_participants,
+            accepted_participants: accepted,
         })
     }
 }

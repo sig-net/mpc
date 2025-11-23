@@ -25,6 +25,51 @@ impl<T> Positor<T> {
             Positor::Deliberator(id) => *id,
         }
     }
+
+    /// Process incoming posit messages for this Positor instance.
+    ///
+    /// - For `Proposer(_, counter)` this behaves like `proposer_collect`: it will
+    ///   process Accept/Reject actions, and when enough accepts are present (or on
+    ///   timeout with enough accepts), it will call `send_start` with the selected participant
+    ///   list and return it. Returns `None` on abort or insufficient accepts.
+    /// - For `Deliberator(proposer)` this behaves like `deliberator_wait_for_start`: it waits
+    ///   for a `Start` action from the expected proposer and returns its participant list.
+    pub async fn process<TMsg, ExtractFn, SendFn, SendFut>(
+        &mut self,
+        threshold: usize,
+        timeout: Duration,
+        task_rx: &mut mpsc::Receiver<TMsg>,
+        extract_msg: ExtractFn,
+        send_start: SendFn,
+    ) -> Option<Vec<Participant>>
+    where
+        ExtractFn: FnMut(&TMsg) -> Option<(Participant, PositAction)>,
+        SendFn: FnMut(&Vec<Participant>) -> SendFut,
+        SendFut: Future<Output = ()>,
+    {
+        match self {
+            Positor::Proposer(_, counter) => {
+                // Reuse proposer_collect logic
+                // When proposer_collect obtains participants, it's responsible for
+                // broadcasting `Start` via send_start closure, which caller can
+                // implement to also send PositMessage Start to peers.
+                proposer_collect(
+                    counter,
+                    threshold,
+                    timeout,
+                    task_rx,
+                    extract_msg,
+                    send_start,
+                )
+                .await
+            }
+            Positor::Deliberator(expected_proposer) => {
+                // Deliberator ignores any action except Start from expected proposer
+                // Reuse deliberator_wait_for_start helper with an extractor
+                deliberator_wait_for_start(task_rx, *expected_proposer, timeout, extract_msg).await
+            }
+        }
+    }
 }
 
 /// All actions that can be taken when a new posit is introduced for a protocol.

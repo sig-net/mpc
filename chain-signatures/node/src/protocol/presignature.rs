@@ -441,43 +441,39 @@ impl PresignTask {
         &mut self,
         task_rx: &mut mpsc::Receiver<PresignTaskMessage>,
     ) -> Option<Vec<Participant>> {
-        if self.positor.is_proposer() {
-            let counter = match &mut self.positor {
-                Positor::Proposer(_, counter) => counter,
-                _ => unreachable!(),
-            };
-            let id = self.id;
+        let id = self.id;
 
-            let extract = |msg: &PresignTaskMessage| match msg {
-                PresignTaskMessage::PositMessage { from, action } => Some((*from, action.clone())),
-            };
+        let extract = |msg: &PresignTaskMessage| match msg {
+            PresignTaskMessage::PositMessage { from, action } => Some((*from, action.clone())),
+        };
 
-            let send_start = |participants: &Vec<Participant>| {
-                let msg = self.msg.clone();
-                let me = self.me;
-                let participants = participants.clone();
-                async move {
-                    tracing::info!(?id, ?participants, "proposer broadcasting Start");
-                    for &p in &participants {
-                        if p == me {
-                            continue;
-                        }
-                        msg.send(
-                            me,
-                            p,
-                            PositMessage {
-                                id: PositProtocolId::Presignature(id),
-                                from: me,
-                                action: PositAction::Start(participants.clone()),
-                            },
-                        )
-                        .await;
+        let send_start = |participants: &Vec<Participant>| {
+            let msg = self.msg.clone();
+            let me = self.me;
+            let participants = participants.clone();
+            async move {
+                tracing::info!(?id, ?participants, "proposer broadcasting Start");
+                for &p in &participants {
+                    if p == me {
+                        continue;
                     }
+                    msg.send(
+                        me,
+                        p,
+                        PositMessage {
+                            id: PositProtocolId::Presignature(id),
+                            from: me,
+                            action: PositAction::Start(participants.clone()),
+                        },
+                    )
+                    .await;
                 }
-            };
+            }
+        };
 
-            let participants = crate::protocol::posit::proposer_collect(
-                counter,
+        let participants = self
+            .positor
+            .process(
                 self.threshold,
                 Duration::from_secs(60),
                 task_rx,
@@ -486,30 +482,14 @@ impl PresignTask {
             )
             .await;
 
-            if let Some(participants) = participants {
-                if participants.len() < self.threshold {
-                    tracing::warn!(?id, threshold = self.threshold, accepted = ?participants.len(), "not enough accepts to reach threshold, aborting");
-                    return None;
-                }
-                return Some(participants);
+        if let Some(participants) = participants {
+            if participants.len() < self.threshold {
+                tracing::warn!(?id, threshold = self.threshold, accepted = ?participants.len(), "not enough accepts to reach threshold, aborting");
+                return None;
             }
-            None
-        } else {
-            let expected = self.positor.id();
-            let extract = |msg: &PresignTaskMessage| match msg {
-                PresignTaskMessage::PositMessage { from, action } => Some((*from, action.clone())),
-            };
-
-            let participants = crate::protocol::posit::deliberator_wait_for_start(
-                task_rx,
-                expected,
-                Duration::from_secs(60),
-                extract,
-            )
-            .await;
-
-            participants
+            return Some(participants);
         }
+        None
     }
 }
 

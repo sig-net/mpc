@@ -321,45 +321,39 @@ impl TripleTask {
         &mut self,
         task_rx: &mut mpsc::Receiver<TripleTaskMessage>,
     ) -> Option<Vec<Participant>> {
-        if self.positor.is_proposer() {
-            // As proposer we already know the candidate participants. Use the counter
-            // carried inside `self.positor`.
-            let counter = match &mut self.positor {
-                Positor::Proposer(_, counter) => counter,
-                _ => unreachable!(),
-            };
-            let id = self.id;
+        let id = self.id;
 
-            let extract = |msg: &TripleTaskMessage| match msg {
-                TripleTaskMessage::PositMessage { from, action } => Some((*from, action.clone())),
-            };
+        let extract = |msg: &TripleTaskMessage| match msg {
+            TripleTaskMessage::PositMessage { from, action } => Some((*from, action.clone())),
+        };
 
-            let send_start = |participants: &Vec<Participant>| {
-                let msg = self.msg.clone();
-                let me = self.me;
-                let participants = participants.clone();
-                async move {
-                    tracing::info!(id, ?participants, "proposer broadcasting Start");
-                    for &p in &participants {
-                        if p == me {
-                            continue;
-                        }
-                        msg.send(
-                            me,
-                            p,
-                            PositMessage {
-                                id: PositProtocolId::Triple(id),
-                                from: me,
-                                action: PositAction::Start(participants.clone()),
-                            },
-                        )
-                        .await;
+        let send_start = |participants: &Vec<Participant>| {
+            let msg = self.msg.clone();
+            let me = self.me;
+            let participants = participants.clone();
+            async move {
+                tracing::info!(id, ?participants, "proposer broadcasting Start");
+                for &p in &participants {
+                    if p == me {
+                        continue;
                     }
+                    msg.send(
+                        me,
+                        p,
+                        PositMessage {
+                            id: PositProtocolId::Triple(id),
+                            from: me,
+                            action: PositAction::Start(participants.clone()),
+                        },
+                    )
+                    .await;
                 }
-            };
+            }
+        };
 
-            let participants = crate::protocol::posit::proposer_collect(
-                counter,
+        let participants = self
+            .positor
+            .process(
                 self.threshold,
                 Duration::from_secs(60),
                 task_rx,
@@ -368,33 +362,15 @@ impl TripleTask {
             )
             .await;
 
-            if let Some(participants) = participants {
-                if participants.len() < self.threshold {
-                    tracing::warn!(id, threshold = self.threshold, accepted = ?participants.len(), "not enough accepts to reach threshold, aborting");
-                    return None;
-                }
-
-                return Some(participants);
+        if let Some(participants) = participants {
+            if participants.len() < self.threshold {
+                tracing::warn!(id, threshold = self.threshold, accepted = ?participants.len(), "not enough accepts to reach threshold, aborting");
+                return None;
             }
-            return None;
-        } else {
-            // Deliberator: wait for Start from the proposer
-            // Deliberator: wait for Start from the proposer
-            let expected = self.positor.id();
-            let extract = |msg: &TripleTaskMessage| match msg {
-                TripleTaskMessage::PositMessage { from, action } => Some((*from, action.clone())),
-            };
 
-            let participants = crate::protocol::posit::deliberator_wait_for_start(
-                task_rx,
-                expected,
-                Duration::from_secs(60),
-                extract,
-            )
-            .await;
-
-            return participants;
+            return Some(participants);
         }
+        return None;
     }
 
     /// Perform the generation phase: reserve slot, create generator, increment historical
