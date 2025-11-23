@@ -3,6 +3,7 @@ use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
+use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{
     MessageChannel, PositMessage, PositProtocolId, SignatureMessage, Subscriber,
 };
@@ -395,20 +396,14 @@ impl SignPositor {
         state: &mut SignState,
         task_rx: &mut mpsc::Receiver<SignTaskMessage>,
     ) -> SignPhase {
-        let SignPositor {
-            proposer,
-            stable,
-            mut presignature_id,
-            presignature,
-        } = self;
-
         let sign_id = ctx.sign_id;
         let round = state.round;
-        let is_proposer = proposer == ctx.me;
+        let is_proposer = self.proposer == ctx.me;
         let is_deliberator = !is_proposer;
+        let mut presignature_id = self.presignature_id;
 
         // Get the presignature participants - only these nodes participated in generating it
-        let presignature_participants = if let Some(ref taken) = presignature {
+        let presignature_participants = if let Some(ref taken) = self.presignature {
             taken.presignature.participants.clone()
         } else {
             // Deliberators don't have the presignature yet, will verify when they receive Propose
@@ -417,33 +412,41 @@ impl SignPositor {
 
         tracing::info!(
             ?sign_id,
-            ?presignature_id,
+            presignature_id,
             ?round,
             is_proposer,
             "entering posit phase"
         );
 
-        if is_deliberator {
+        let mut positor = if is_deliberator {
             tracing::info!(
                 ?sign_id,
                 ?round,
-                ?proposer,
+                proposer = ?self.proposer,
                 "deliberator waiting for Propose"
             );
 
-            presignature_id = match Self::wait_propose(ctx, state, task_rx, proposer).await {
+            presignature_id = match Self::wait_propose(ctx, state, task_rx, self.proposer).await {
                 Ok(id) => id,
                 Err(phase) => return phase,
-            }
-        };
-
-        // GUARANTEE: at least threshold participants from organizing phase.
-        let posit_participants = stable.iter().copied().collect::<Vec<_>>();
-
-        let mut positor = if is_deliberator {
-            Positor::Deliberator(proposer)
+            };
+            Positor::Deliberator(self.proposer)
         } else {
-            Positor::Proposer(ctx.me, PositCounter::new(ctx.me, &posit_participants, ()))
+            // GUARANTEE: at least threshold participants from organizing phase.
+            let participants = self.stable.iter().copied().collect::<Vec<_>>();
+            let participants = intersect_vec(&[&participants, &presignature_participants]);
+            if participants.len() < ctx.threshold {
+                tracing::warn!(
+                    ?sign_id,
+                    presig_participants = ?presignature_participants,
+                    participants_len = participants.len(),
+                    threshold = ctx.threshold,
+                    "not enough presignature participants to proceed, re-positing"
+                );
+                return SignPhase::Posit(self);
+            }
+
+            Positor::Proposer(ctx.me, PositCounter::new(ctx.me, &participants, ()))
         };
 
         let extract = |msg: &SignTaskMessage| match msg {
@@ -457,11 +460,9 @@ impl SignPositor {
         let send_start = |participants: &Vec<Participant>| {
             let msg = ctx.msg.clone();
             let me = ctx.me;
-            let sign_id = sign_id;
-            let presignature_id = presignature_id;
             let participants = participants.clone();
             async move {
-                tracing::info!(?sign_id, me = ?me, ?participants, "proposer broadcasting Start");
+                tracing::info!(?sign_id, ?me, ?participants, "proposer broadcasting Start");
                 for &p in &participants {
                     if p == me {
                         continue;
@@ -480,7 +481,7 @@ impl SignPositor {
             }
         };
 
-        let Some(mut accepted) = positor
+        let Some(accepted) = positor
             .process(
                 ctx.threshold,
                 Duration::from_secs(60),
@@ -498,43 +499,23 @@ impl SignPositor {
             return SignPhase::Organizing(SignOrganizer);
         };
 
-        // Only include participants who both accepted AND were part of the presignature generation
-        if !presignature_participants.is_empty() {
-            accepted.retain(|p| presignature_participants.contains(p));
-        }
-
-        // If we were the proposer we can log accepted set via the embedded counter
-        if is_proposer {
-            if let Positor::Proposer(_, counter) = &positor {
-                if accepted.len() < ctx.threshold {
-                    tracing::warn!(
-                        ?sign_id,
-                        presig_participants = ?presignature_participants,
-                        accepts = ?counter.accepts_set(),
-                        filtered_participants = ?accepted,
-                        threshold = ctx.threshold,
-                        "not enough presignature participants accepted, reorganizing"
-                    );
-                    state.bump_round();
-                    return SignPhase::Organizing(SignOrganizer);
-                }
-            }
-        }
-
-        if accepted.is_empty() {
+        if accepted.len() < ctx.threshold {
             tracing::warn!(
                 ?sign_id,
                 ?round,
-                "no accepted participants after posit, reorganizing"
+                me = ?ctx.me,
+                proposer = ?self.proposer,
+                "not enough accepted participants after posit, reorganizing"
             );
             state.bump_round();
             return SignPhase::Organizing(SignOrganizer);
         }
 
         SignPhase::Generating(SignGenerating {
-            proposer,
+            proposer: self.proposer,
+            // TODO: multiple presignature id and presignature should not be Optional here.
             presignature_id,
-            presignature,
+            presignature: self.presignature,
             accepted_participants: accepted,
         })
     }
