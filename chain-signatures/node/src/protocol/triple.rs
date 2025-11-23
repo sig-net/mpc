@@ -292,7 +292,6 @@ struct TripleTask {
     id: TripleId,
     me: Participant,
     threshold: usize,
-    positor: Positor<()>,
     timeout: Duration,
     // slot_owner was never read — removed
     triple_storage: TripleStorage,
@@ -302,12 +301,12 @@ struct TripleTask {
 }
 
 impl TripleTask {
-    async fn run(mut self, mut task_rx: mpsc::Receiver<TripleTaskMessage>) {
+    async fn run(mut self, positor: Positor<()>, mut task_rx: mpsc::Receiver<TripleTaskMessage>) {
         // Handle the posit phase internally. Proposer will collect Accept/Reject votes
         // using a SinglePositCounter. Deliberators will wait for a Start message from
         // the proposer which will contain the final participant list.
 
-        let Some(participants) = self.run_posit(&mut task_rx).await else {
+        let Some(participants) = self.run_posit(positor, &mut task_rx).await else {
             return;
         };
 
@@ -319,6 +318,7 @@ impl TripleTask {
     /// if the task should proceed, or None if aborted.
     async fn run_posit(
         &mut self,
+        positor: Positor<()>,
         task_rx: &mut mpsc::Receiver<TripleTaskMessage>,
     ) -> Option<Vec<Participant>> {
         let id = self.id;
@@ -351,27 +351,28 @@ impl TripleTask {
             }
         };
 
-        let result = self
-            .positor
+        let (accepted, ()) = positor
             .process(
                 self.threshold,
                 Duration::from_secs(60),
                 task_rx,
                 extract,
                 send_start,
-                || async move { Some(()) },
+                || async { Some(()) },
             )
-            .await;
+            .await?;
 
-        if let Some((participants, _maybe_store)) = result {
-            if participants.len() < self.threshold {
-                tracing::warn!(id, threshold = self.threshold, accepted = ?participants.len(), "not enough accepts to reach threshold, aborting");
-                return None;
-            }
-
-            return Some(participants);
+        if accepted.len() < self.threshold {
+            tracing::warn!(
+                id,
+                threshold = self.threshold,
+                ?accepted,
+                "not enough accepts to reach threshold, aborting"
+            );
+            return None;
         }
-        return None;
+
+        Some(accepted)
     }
 
     /// Perform the generation phase: reserve slot, create generator, increment historical
@@ -423,7 +424,7 @@ pub struct TripleSpawner {
     /// The set of all ongoing triple generation protocols. This is a map of `TripleId` to
     /// the `JoinHandle` of the triple generation task. The tasks return Result to allow
     /// capturing initialization errors.
-    ongoing: JoinMap<TripleId, Result<(), InitializationError>>,
+    ongoing: JoinMap<TripleId, ()>,
 
     /// The set of ongoing triples that were introduced to the system by the current node.
     ongoing_introduced: HashSet<TripleId>,
@@ -617,26 +618,19 @@ impl TripleSpawner {
         // Subscribe to (or create) the posit inbox for this triple id
         let rx = self.inboxes.entry(id).or_default().subscribe();
 
+        let is_proposer = matches!(positor, Positor::Proposer(p, _) if p == self.me);
+
         let task = TripleTask {
             id,
             me: self.me,
             threshold: self.threshold,
-            positor,
             timeout,
             triple_storage: self.triple_storage.clone(),
             msg: self.msg.clone(),
             my_account_id: self.my_account_id.clone(),
             epoch: self.epoch,
         };
-
-        // Determine proposer state before moving `task` into the spawned future
-        let is_proposer = task.positor.is_proposer();
-
-        // Spawn the consolidated task
-        self.ongoing.spawn(id, async move {
-            task.run(rx).await;
-            Ok(())
-        });
+        self.ongoing.spawn(id, task.run(positor, rx));
 
         if is_proposer {
             self.ongoing_introduced.insert(id);
@@ -690,11 +684,7 @@ impl TripleSpawner {
                 // `join_next` returns None on the set being empty, so don't handle that case
                 Some(result) = self.ongoing.join_next(), if !self.ongoing.is_empty() => {
                     let id = match result {
-                        Ok((id, Ok(()))) => id,
-                        Ok((id, Err(err))) => {
-                            tracing::warn!(id, ?err, "triple generation task failed");
-                            id
-                        }
+                        Ok((id, ())) => id,
                         Err(id) => {
                             tracing::warn!(id, "triple generation task interrupted");
                             id

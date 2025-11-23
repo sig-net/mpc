@@ -315,7 +315,6 @@ struct PresignTask {
     id: FullPresignatureId,
     me: Participant,
     threshold: usize,
-    positor: Positor<TriplesTaken>,
     timeout: Duration,
     presignatures: PresignatureStorage,
     triples: TripleStorage,
@@ -327,21 +326,31 @@ struct PresignTask {
 }
 
 impl PresignTask {
-    async fn run(mut self, mut task_rx: mpsc::Receiver<PresignTaskMessage>) {
+    async fn run(
+        mut self,
+        positor: Positor<TriplesTaken>,
+        mut task_rx: mpsc::Receiver<PresignTaskMessage>,
+    ) {
         // Handle the posit phase internally. Proposer will collect Accept/Reject votes
         // using a SinglePositCounter. Deliberators will wait for a Start message from
         // the proposer which will contain the final participant list.
 
-        let Some((participants, triples)) = self.run_posit(&mut task_rx).await else {
+        let Some((participants, triples, owner)) = self.run_posit(positor, &mut task_rx).await
+        else {
             return;
         };
 
         // proceed to generation phase
-        self.run_generation(participants, triples).await;
+        self.run_generation(participants, triples, owner).await;
     }
 
     /// Generation phase: reserve slot, prepare triples and start presignature generator.
-    async fn run_generation(self, participants: Vec<Participant>, triples: TriplesTaken) {
+    async fn run_generation(
+        self,
+        participants: Vec<Participant>,
+        triples: TriplesTaken,
+        owner: Participant,
+    ) {
         let id = self.id;
 
         // Reserve presignature slot
@@ -351,11 +360,6 @@ impl PresignTask {
                 "id collision reserving presignature slot, aborting task"
             );
             return;
-        };
-
-        // Determine owner for the generation protocol
-        let owner = match self.positor {
-            Positor::Proposer(proposer, _) | Positor::Deliberator(proposer) => proposer,
         };
 
         // fetch the triples and run the generator
@@ -432,8 +436,9 @@ impl PresignTask {
     /// aborts the protocol.
     async fn run_posit(
         &mut self,
+        positor: Positor<TriplesTaken>,
         task_rx: &mut mpsc::Receiver<PresignTaskMessage>,
-    ) -> Option<(Vec<Participant>, TriplesTaken)> {
+    ) -> Option<(Vec<Participant>, TriplesTaken, Participant)> {
         let id = self.id;
 
         let extract = |msg: &PresignTaskMessage| match msg {
@@ -465,9 +470,7 @@ impl PresignTask {
         };
 
         // Pre-compute owner for the fetch closure (copy out of positor)
-        let owner = match &self.positor {
-            Positor::Proposer(o, _) | Positor::Deliberator(o) => *o,
-        };
+        let owner = positor.id();
 
         let me = self.me;
         let timeout = self.timeout;
@@ -480,8 +483,7 @@ impl PresignTask {
                 .await
         };
 
-        let (accepted, triples) = self
-            .positor
+        let (accepted, triples) = positor
             .process(
                 self.threshold,
                 Duration::from_secs(60),
@@ -501,7 +503,7 @@ impl PresignTask {
             );
             return None;
         }
-        Some((accepted, triples))
+        Some((accepted, triples, owner))
     }
 }
 
@@ -762,7 +764,6 @@ impl PresignatureSpawner {
             id,
             me: self.me,
             threshold: self.threshold,
-            positor,
             timeout,
             presignatures: self.presignatures.clone(),
             triples: self.triples.clone(),
@@ -774,7 +775,7 @@ impl PresignatureSpawner {
         };
 
         self.ongoing.spawn(id.id, async move {
-            task.run(rx).await;
+            task.run(positor, rx).await;
             Ok(())
         });
 

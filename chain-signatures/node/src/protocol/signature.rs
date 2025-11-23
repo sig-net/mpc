@@ -436,7 +436,7 @@ impl SignPositor {
         // storage for any presignature we may have fetched during the propose wait
         let mut fetched_presignature: Option<PresignatureTaken> = None;
 
-        let mut positor = if is_deliberator {
+        let positor = if is_deliberator {
             tracing::info!(
                 ?sign_id,
                 ?round,
