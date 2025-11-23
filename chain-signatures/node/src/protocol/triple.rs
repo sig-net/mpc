@@ -1,4 +1,4 @@
-use super::message::{MessageChannel, PositMessage, PositProtocolId, TripleMessage};
+use super::message::{MessageChannel, PositMessage, PositProtocolId, Subscriber, TripleMessage};
 use super::posit::{PositAction, PositCounter};
 use super::MpcSignProtocol;
 use crate::config::Config;
@@ -293,7 +293,6 @@ struct TripleTask {
     me: Participant,
     threshold: usize,
     timeout: Duration,
-    // slot_owner was never read — removed
     triple_storage: TripleStorage,
     msg: MessageChannel,
     my_account_id: AccountId,
@@ -429,12 +428,10 @@ pub struct TripleSpawner {
     /// The set of ongoing triples that were introduced to the system by the current node.
     ongoing_introduced: HashSet<TripleId>,
 
-    /// (Previously held global posits) We now handle posits inside per-id tasks.
-
     /// Buffered inboxes for posit messages, allowing us to queue messages for a specific
     /// triple id before a task is spawned. Messages for an id will be routed to the
     /// corresponding subscriber when a task is active.
-    inboxes: HashMap<TripleId, super::message::Subscriber<TripleTaskMessage>>,
+    inboxes: HashMap<TripleId, Subscriber<TripleTaskMessage>>,
 
     me: Participant,
     threshold: usize,
@@ -586,14 +583,13 @@ impl TripleSpawner {
     async fn propose_posit(&mut self, active: &[Participant]) {
         let pair_id = rand::random();
         // Spawn our per-id task as proposer for this id so it can manage posits internally.
-        let participants = active.to_vec();
         self.spawn_task(
             pair_id,
-            Positor::Proposer(self.me, PositCounter::new(self.me, &participants, ())),
+            Positor::Proposer(self.me, PositCounter::new(self.me, active, ())),
             Duration::from_secs(60),
         )
         .await;
-        for &p in active.iter() {
+        for &p in active {
             if p == self.me {
                 continue;
             }
@@ -615,11 +611,8 @@ impl TripleSpawner {
     async fn spawn_task(&mut self, id: TripleId, positor: Positor<()>, timeout: Duration) {
         tracing::info!(id, "spawning triple task");
 
-        // Subscribe to (or create) the posit inbox for this triple id
         let rx = self.inboxes.entry(id).or_default().subscribe();
-
-        let is_proposer = matches!(positor, Positor::Proposer(p, _) if p == self.me);
-
+        let is_proposer = positor.is_proposer();
         let task = TripleTask {
             id,
             me: self.me,
@@ -630,8 +623,8 @@ impl TripleSpawner {
             my_account_id: self.my_account_id.clone(),
             epoch: self.epoch,
         };
-        self.ongoing.spawn(id, task.run(positor, rx));
 
+        self.ongoing.spawn(id, task.run(positor, rx));
         if is_proposer {
             self.ongoing_introduced.insert(id);
         }

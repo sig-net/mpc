@@ -540,7 +540,7 @@ impl SignPositor {
         // presignature earlier store it; otherwise fall back to the task's
         // existing `self.presignature`.
         let proposer = self.proposer;
-        let mut presignature = fetched_presignature.or(self.presignature);
+        let presignature = fetched_presignature.or(self.presignature);
 
         // If wait_propose returned a taken presignature we stored it already in `presignature`.
         SignPhase::Generating(SignGenerating {

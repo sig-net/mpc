@@ -1,4 +1,6 @@
-use super::message::{MessageChannel, PositMessage, PositProtocolId, PresignatureMessage};
+use super::message::{
+    MessageChannel, PositMessage, PositProtocolId, PresignatureMessage, Subscriber,
+};
 use super::posit::{PositAction, PositCounter, Positor};
 use super::triple::TripleId;
 use crate::config::Config;
@@ -11,7 +13,7 @@ use crate::storage::TripleStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
 use crate::util::{AffinePointExt, JoinMap};
 
-use cait_sith::protocol::{Action, InitializationError, Participant};
+use cait_sith::protocol::{Action, Participant};
 use cait_sith::{KeygenOutput, PresignArguments, PresignOutput};
 use chrono::Utc;
 use k256::{AffinePoint, Scalar, Secp256k1};
@@ -513,12 +515,10 @@ pub struct PresignatureSpawner {
     triples: TripleStorage,
     presignatures: PresignatureStorage,
     /// Ongoing presignature generation protocols.
-    ongoing: JoinMap<PresignatureId, Result<(), InitializationError>>,
+    ongoing: JoinMap<PresignatureId, ()>,
     ongoing_owned: HashSet<PresignatureId>,
-    /// (Previously held global posits) per-id tasks now manage posits.
-
     /// Buffered inboxes for posit messages per-presignature id.
-    inboxes: HashMap<PresignatureId, super::message::Subscriber<PresignTaskMessage>>,
+    inboxes: HashMap<PresignatureId, Subscriber<PresignTaskMessage>>,
 
     me: Participant,
     threshold: usize,
@@ -547,7 +547,6 @@ impl PresignatureSpawner {
             presignatures: presignatures.clone(),
             ongoing: JoinMap::new(),
             ongoing_owned: HashSet::new(),
-            // posits handled inside per-id tasks
             inboxes: HashMap::new(),
             me,
             threshold,
@@ -728,7 +727,7 @@ impl PresignatureSpawner {
             Duration::from_secs(60),
         )
         .await;
-        for &p in participants.iter() {
+        for p in participants {
             if p == self.me {
                 continue;
             }
@@ -757,9 +756,7 @@ impl PresignatureSpawner {
 
         // Subscribe to (or create) the posit inbox for this presignature id
         let rx = self.inboxes.entry(id.id).or_default().subscribe();
-
-        let is_owned = matches!(positor, Positor::Proposer(p, _) if p == self.me);
-
+        let is_proposer = positor.is_proposer();
         let task = PresignTask {
             id,
             me: self.me,
@@ -774,12 +771,8 @@ impl PresignatureSpawner {
             epoch: self.epoch,
         };
 
-        self.ongoing.spawn(id.id, async move {
-            task.run(positor, rx).await;
-            Ok(())
-        });
-
-        if is_owned {
+        self.ongoing.spawn(id.id, task.run(positor, rx));
+        if is_proposer {
             self.ongoing_owned.insert(id.id);
         }
     }
@@ -826,11 +819,7 @@ impl PresignatureSpawner {
                 // `join_next` returns None on the set being empty, so don't handle that case
                 Some(result) = self.ongoing.join_next(), if !self.ongoing.is_empty() => {
                     let id = match result {
-                        Ok((id, Ok(()))) => id,
-                        Ok((id, Err(err))) => {
-                            tracing::warn!(id, ?err, "presignature generation task failed");
-                            id
-                        }
+                        Ok((id, ())) => id,
                         Err(id) => {
                             tracing::warn!(id, "presignature generation task interrupted");
                             id
