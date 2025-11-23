@@ -288,7 +288,7 @@ impl SignPositor {
         state: &mut SignState,
         task_rx: &mut mpsc::Receiver<SignTaskMessage>,
         proposer: Participant,
-    ) -> Result<PresignatureId, SignPhase> {
+    ) -> Result<(PresignatureId, Option<PresignatureTaken>), SignPhase> {
         let sign_id = ctx.sign_id;
         let round = state.round;
         let outcome = tokio::time::timeout(Duration::from_secs(30), async {
@@ -314,13 +314,22 @@ impl SignPositor {
                         "deliberator received Propose"
                     );
 
-                    // Check if we have access to this presignature (in storage or generating)
-                    if !ctx.presignatures.contains(*presignature_id).await {
-                        tracing::warn!(
-                            ?sign_id,
-                            presignature_id,
-                            "deliberator does not have access to proposed presignature, rejecting"
-                        );
+                    // When a deliberator receives a Propose we should verify we can
+                    // obtain the presignature before accepting it. Construct a
+                    // `PendingPresignature::InStorage` pointing to the storage and
+                    // attempt to `fetch` it with a timeout. If we can fetch (take)
+                    // it, return it so the later phases can use the taken presignature.
+                    let pending = PendingPresignature::InStorage(
+                        *presignature_id,
+                        proposer,
+                        ctx.presignatures.clone(),
+                    );
+
+                    let take_timeout = Duration::from_millis(ctx.cfg.signature.generation_timeout);
+                    let taken = pending.fetch(ctx.me, take_timeout).await;
+                    if taken.is_none() {
+                        tracing::warn!(?sign_id, presignature_id = ?presignature_id, "deliberator unable to fetch presignature, rejecting");
+                        // Reply reject and continue waiting for another propose
                         ctx.msg
                             .send(
                                 ctx.me,
@@ -335,7 +344,9 @@ impl SignPositor {
                         continue;
                     }
 
-                    break *presignature_id;
+                    // We successfully fetched (took) the presignature; we'll accept and
+                    // return the taken value so the caller can thread it through.
+                    break (*presignature_id, taken);
                 } else {
                     tracing::warn!(
                         ?sign_id,
@@ -360,8 +371,8 @@ impl SignPositor {
         })
         .await;
 
-        let presignature_id = match outcome {
-            Ok(id) => id,
+        let (presignature_id, maybe_taken) = match outcome {
+            Ok(pair) => pair,
             Err(_) => {
                 tracing::warn!(
                     ?sign_id,
@@ -374,7 +385,7 @@ impl SignPositor {
             }
         };
 
-        // received propose, send Accept
+        // received propose and (maybe) fetched the presignature, send Accept
         ctx.msg
             .send(
                 ctx.me,
@@ -387,7 +398,7 @@ impl SignPositor {
             )
             .await;
 
-        Ok(presignature_id)
+        Ok((presignature_id, maybe_taken))
     }
 
     async fn advance(
@@ -418,6 +429,9 @@ impl SignPositor {
             "entering posit phase"
         );
 
+        // storage for any presignature we may have fetched during the propose wait
+        let mut fetched_presignature: Option<PresignatureTaken> = None;
+
         let mut positor = if is_deliberator {
             tracing::info!(
                 ?sign_id,
@@ -426,10 +440,16 @@ impl SignPositor {
                 "deliberator waiting for Propose"
             );
 
-            presignature_id = match Self::wait_propose(ctx, state, task_rx, self.proposer).await {
-                Ok(id) => id,
+            // A deliberator may be able to fetch (take) the presignature at the time
+            // it receives the Propose. Record it here and use it later after the
+            // posit phase finishes.
+
+            let (id, taken) = match Self::wait_propose(ctx, state, task_rx, self.proposer).await {
+                Ok((id, taken)) => (id, taken),
                 Err(phase) => return phase,
             };
+            presignature_id = id;
+            fetched_presignature = taken;
             Positor::Deliberator(self.proposer)
         } else {
             // GUARANTEE: at least threshold participants from organizing phase.
@@ -511,11 +531,18 @@ impl SignPositor {
             return SignPhase::Organizing(SignOrganizer);
         }
 
+        // take ownership of fields we will mutate/use below. If we fetched a
+        // presignature earlier store it; otherwise fall back to the task's
+        // existing `self.presignature`.
+        let proposer = self.proposer;
+        let mut presignature = fetched_presignature.or(self.presignature);
+
+        // If wait_propose returned a taken presignature we stored it already in `presignature`.
         SignPhase::Generating(SignGenerating {
-            proposer: self.proposer,
+            proposer,
             // TODO: multiple presignature id and presignature should not be Optional here.
             presignature_id,
-            presignature: self.presignature,
+            presignature,
             accepted_participants: accepted,
         })
     }
@@ -801,14 +828,14 @@ impl SignGenerator {
                         .with_label_values(&[my_account_id.as_str()])
                         .observe(self.created.elapsed().as_secs_f64());
 
-                    if self.proposer == me {
-                        ctx.rpc.publish(
-                            ctx.public_key,
-                            self.indexed.clone(),
-                            output,
-                            self.participants.clone(),
-                        );
-                    }
+                    // Publish the completed signature to the RPC layer so the indexer can handle it.
+                    let signature = cait_sith::FullSignature::<Secp256k1> { big_r, s };
+                    ctx.rpc.publish(
+                        ctx.public_key,
+                        self.indexed.clone(),
+                        signature,
+                        self.participants.clone(),
+                    );
 
                     if let SignRequestType::SignBidirectional(event) =
                         &self.indexed.sign_request_type
