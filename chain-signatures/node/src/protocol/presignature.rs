@@ -332,16 +332,16 @@ impl PresignTask {
         // using a SinglePositCounter. Deliberators will wait for a Start message from
         // the proposer which will contain the final participant list.
 
-        let Some(participants) = self.run_posit(&mut task_rx).await else {
+        let Some((participants, triples)) = self.run_posit(&mut task_rx).await else {
             return;
         };
 
         // proceed to generation phase
-        self.run_generation(participants).await;
+        self.run_generation(participants, triples).await;
     }
 
     /// Generation phase: reserve slot, prepare triples and start presignature generator.
-    async fn run_generation(self, participants: Vec<Participant>) {
+    async fn run_generation(self, participants: Vec<Participant>, triples: TriplesTaken) {
         let id = self.id;
 
         // Reserve presignature slot
@@ -353,15 +353,9 @@ impl PresignTask {
             return;
         };
 
-        // Prepare owner and pending triples
-        let (owner, triples) = match self.positor {
-            Positor::Proposer(proposer, counter) => {
-                (proposer, PendingTriples::Available(counter.into_store()))
-            }
-            Positor::Deliberator(proposer) => (
-                proposer,
-                PendingTriples::InStorage(id.pair_id, self.triples.clone()),
-            ),
+        // Determine owner for the generation protocol
+        let owner = match self.positor {
+            Positor::Proposer(proposer, _) | Positor::Deliberator(proposer) => proposer,
         };
 
         // fetch the triples and run the generator
@@ -372,11 +366,6 @@ impl PresignTask {
         let msg = self.msg.clone();
         let my_account_id = self.my_account_id.clone();
         let epoch = self.epoch;
-
-        let Some(triples) = triples.fetch(me, owner, timeout).await else {
-            tracing::warn!(?id, "missing triples when starting presignature generation");
-            return;
-        };
 
         let (pair, dropper) = triples.take();
         let mut participants = participants.clone();
@@ -436,11 +425,15 @@ impl PresignTask {
         generator.run(&my_account_id, me, epoch).await;
     }
 
-    /// Run the posit phase for a presignature id and return participants if successful.
+    /// Run the posit phase for a presignature id and return participants and
+    /// the Triple pair (TriplesTaken) required for generation if successful.
+    /// Proposers will return their store from the posit; deliberators will
+    /// have to fetch the TriplesTaken from storage — failing to obtain it
+    /// aborts the protocol.
     async fn run_posit(
         &mut self,
         task_rx: &mut mpsc::Receiver<PresignTaskMessage>,
-    ) -> Option<Vec<Participant>> {
+    ) -> Option<(Vec<Participant>, TriplesTaken)> {
         let id = self.id;
 
         let extract = |msg: &PresignTaskMessage| match msg {
@@ -471,7 +464,23 @@ impl PresignTask {
             }
         };
 
-        let participants = self
+        // Pre-compute owner for the fetch closure (copy out of positor)
+        let owner = match &self.positor {
+            Positor::Proposer(o, _) | Positor::Deliberator(o) => *o,
+        };
+
+        let me = self.me;
+        let timeout = self.timeout;
+        let storage = self.triples.clone();
+        let pair_id = id.pair_id;
+
+        let fetch_store = || async move {
+            PendingTriples::InStorage(pair_id, storage)
+                .fetch(me, owner, timeout)
+                .await
+        };
+
+        let (accepted, triples) = self
             .positor
             .process(
                 self.threshold,
@@ -479,17 +488,20 @@ impl PresignTask {
                 task_rx,
                 extract,
                 send_start,
+                fetch_store,
             )
-            .await;
+            .await?;
 
-        if let Some(participants) = participants {
-            if participants.len() < self.threshold {
-                tracing::warn!(?id, threshold = self.threshold, accepted = ?participants.len(), "not enough accepts to reach threshold, aborting");
-                return None;
-            }
-            return Some(participants);
+        if accepted.len() < self.threshold {
+            tracing::warn!(
+                ?id,
+                threshold = self.threshold,
+                ?accepted,
+                "not enough accepts to reach threshold, aborting"
+            );
+            return None;
         }
-        None
+        Some((accepted, triples))
     }
 }
 
@@ -644,29 +656,6 @@ impl PresignatureSpawner {
 
         if self.contains(id.id).await {
             tracing::warn!(?id, ?from, ?action, "presignature already generated");
-            self.msg
-                .send(
-                    self.me,
-                    from,
-                    PositMessage {
-                        id: PositProtocolId::Presignature(id),
-                        from: self.me,
-                        action: PositAction::Reject,
-                    },
-                )
-                .await;
-            return;
-        }
-
-        if !(self.triples.contains_reserved(id.pair_id).await
-            || self.triples.contains(id.pair_id).await)
-        {
-            tracing::warn!(
-                ?id,
-                ?from,
-                ?action,
-                "presignature required triples are not known"
-            );
             self.msg
                 .send(
                     self.me,

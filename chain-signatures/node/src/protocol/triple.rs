@@ -351,7 +351,7 @@ impl TripleTask {
             }
         };
 
-        let participants = self
+        let result = self
             .positor
             .process(
                 self.threshold,
@@ -359,10 +359,11 @@ impl TripleTask {
                 task_rx,
                 extract,
                 send_start,
+                || async move { Some(()) },
             )
             .await;
 
-        if let Some(participants) = participants {
+        if let Some((participants, _maybe_store)) = result {
             if participants.len() < self.threshold {
                 tracing::warn!(id, threshold = self.threshold, accepted = ?participants.len(), "not enough accepts to reach threshold, aborting");
                 return None;

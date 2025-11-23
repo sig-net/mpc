@@ -34,18 +34,21 @@ impl<T> Positor<T> {
     ///   list and return it. Returns `None` on abort or insufficient accepts.
     /// - For `Deliberator(proposer)` this behaves like `deliberator_wait_for_start`: it waits
     ///   for a `Start` action from the expected proposer and returns its participant list.
-    pub async fn process<TMsg, ExtractFn, SendFn, SendFut>(
+    pub async fn process<TMsg, ExtractFn, SendFn, SendFut, FetchFn, FetchFut>(
         &mut self,
         threshold: usize,
         timeout: Duration,
         task_rx: &mut mpsc::Receiver<TMsg>,
         extract_msg: ExtractFn,
         send_start: SendFn,
-    ) -> Option<Vec<Participant>>
+        fetch_store: FetchFn,
+    ) -> Option<(Vec<Participant>, T)>
     where
         ExtractFn: FnMut(&TMsg) -> Option<(Participant, PositAction)>,
         SendFn: FnMut(&Vec<Participant>) -> SendFut,
         SendFut: Future<Output = ()>,
+        FetchFn: FnOnce() -> FetchFut,
+        FetchFut: Future<Output = Option<T>>,
     {
         match self {
             Positor::Proposer(_, counter) => {
@@ -53,7 +56,12 @@ impl<T> Positor<T> {
                 // When proposer_collect obtains participants, it's responsible for
                 // broadcasting `Start` via send_start closure, which caller can
                 // implement to also send PositMessage Start to peers.
-                proposer_collect(
+                // run the proposer collect using a mutable reference to the
+                // PositCounter. If the proposer_collect returns a participant
+                // list (Some), attempt to take the stored value out of the
+                // counter and return it as part of the result. For deliberator
+                // path, the store will be None.
+                let participants = proposer_collect(
                     counter,
                     threshold,
                     timeout,
@@ -61,12 +69,24 @@ impl<T> Positor<T> {
                     extract_msg,
                     send_start,
                 )
-                .await
+                .await?;
+                // Extract the store out of the counter; if it's missing then
+                // return None to indicate an abort.
+                let store = counter.take_store()?;
+                Some((participants, store))
             }
             Positor::Deliberator(expected_proposer) => {
                 // Deliberator ignores any action except Start from expected proposer
                 // Reuse deliberator_wait_for_start helper with an extractor
-                deliberator_wait_for_start(task_rx, *expected_proposer, timeout, extract_msg).await
+                // For deliberator we wait for Start and then try to fetch the
+                // store via the provided async fetch_store closure. If the
+                // fetch returns None, we abort and return None.
+                let participants =
+                    deliberator_wait_for_start(task_rx, *expected_proposer, timeout, extract_msg)
+                        .await?;
+
+                let store = fetch_store().await?;
+                Some((participants, store))
             }
         }
     }
@@ -96,7 +116,7 @@ pub struct PositCounter<S> {
     pub participants: HashSet<Participant>,
     accepts: HashSet<Participant>,
     rejects: HashSet<Participant>,
-    store: S,
+    store: Option<S>,
 }
 
 impl<T> PositCounter<T> {
@@ -120,7 +140,7 @@ impl<T> PositCounter<T> {
             participants: participants.iter().copied().collect(),
             accepts,
             rejects: HashSet::new(),
-            store,
+            store: Some(store),
         }
     }
 
@@ -150,6 +170,12 @@ impl<T> PositCounter<T> {
     /// Consume the counter and return the stored payload S.
     pub fn into_store(self) -> T {
         self.store
+            .expect("store missing in PositCounter::into_store")
+    }
+
+    /// Take the stored payload out of the counter leaving None behind.
+    pub fn take_store(&mut self) -> Option<T> {
+        self.store.take()
     }
 }
 

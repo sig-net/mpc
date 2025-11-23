@@ -328,7 +328,11 @@ impl SignPositor {
                     let take_timeout = Duration::from_millis(ctx.cfg.signature.generation_timeout);
                     let taken = pending.fetch(ctx.me, take_timeout).await;
                     if taken.is_none() {
-                        tracing::warn!(?sign_id, presignature_id = ?presignature_id, "deliberator unable to fetch presignature, rejecting");
+                        tracing::warn!(
+                            ?sign_id,
+                            ?presignature_id,
+                            "deliberator unable to fetch presignature, rejecting"
+                        );
                         // Reply reject and continue waiting for another propose
                         ctx.msg
                             .send(
@@ -501,13 +505,14 @@ impl SignPositor {
             }
         };
 
-        let Some(accepted) = positor
+        let Some((accepted, _maybe_store)) = positor
             .process(
                 ctx.threshold,
                 Duration::from_secs(60),
                 task_rx,
                 extract,
                 send_start,
+                || async move { Some(()) },
             )
             .await
         else {
