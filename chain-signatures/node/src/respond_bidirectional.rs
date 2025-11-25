@@ -1,5 +1,4 @@
 use crate::indexer_eth::EthereumClient;
-use crate::indexer_eth::EthereumClientTrait;
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::BidirectionalTx;
 use crate::sign_bidirectional::BidirectionalTxId;

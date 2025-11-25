@@ -356,9 +356,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             .await
             {
                 Ok(eth_indexer) => {
-                    tokio::spawn(async move {
-                        eth_indexer.run().await;
-                    });
+                    tokio::spawn(eth_indexer.run());
                 }
                 Err(err) => {
                     tracing::error!(?err, "failed to create ethereum indexer");
