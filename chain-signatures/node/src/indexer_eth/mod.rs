@@ -835,11 +835,10 @@ impl EthereumIndexer {
             }
         }
 
-        let blocks_to_process_send_clone = blocks_to_process_send.clone();
-        let client_clone = Arc::clone(&client);
-        tokio::spawn(async move {
-            Self::add_new_block_to_process(client_clone, blocks_to_process_send_clone).await
-        });
+        tokio::spawn(Self::add_new_block_to_process(
+            Arc::clone(&client),
+            blocks_to_process_send.clone(),
+        ));
 
         let mut interval = tokio::time::interval(Duration::from_millis(200));
         let requests_indexed_send_clone = requests_indexed_send.clone();
