@@ -73,9 +73,9 @@ solana-transaction-status.workspace = true
 solana-client.workspace = true
 futures-util.workspace = true
 
-near-account-id.workspace = true
-near-crypto = "0.26.0"
-near-fetch = "0.6.0"
+near-account-id = "1.1.4"
+near-crypto = "0.34.0-rc.3"
+near-fetch = "0.9.0"
 near-primitives.workspace = true
 near-sdk.workspace = true
 

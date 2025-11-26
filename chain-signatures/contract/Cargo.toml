@@ -2,6 +2,7 @@
 name = "mpc-contract"
 version.workspace = true
 edition = "2021"
+rust-version = "1.86"
 
 [lib]
 crate-type = ["cdylib", "lib"]
@@ -27,8 +28,8 @@ signature = "2.2.0"
 digest = "0.10.7"
 
 # near dependencies
-near-crypto = "0.27.0"
-near-workspaces = "0.15.0"
+near-crypto = "0.34.0-rc.3"
+near-workspaces = "0.21.0"
 
 [features]
 default = []

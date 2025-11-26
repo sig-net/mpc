@@ -1,7 +1,6 @@
 pub mod bytes;
 
 use k256::{AffinePoint, Scalar};
-use near_account_id::AccountId;
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use sha3::Digest;
@@ -44,7 +43,7 @@ impl SignId {
         Self { request_id }
     }
 
-    pub fn from_parts(id: &AccountId, payload: &[u8; 32], path: &str, key_version: u32) -> Self {
+    pub fn from_parts(id: &str, payload: &[u8; 32], path: &str, key_version: u32) -> Self {
         let mut hasher = sha3::Sha3_256::new();
         hasher.update(id.as_bytes());
         hasher.update(payload);

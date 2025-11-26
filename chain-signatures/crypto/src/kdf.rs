@@ -5,7 +5,6 @@ use k256::{
     elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint, CurveArithmetic},
     Scalar, Secp256k1, SecretKey,
 };
-use near_account_id::AccountId;
 use sha3::{Digest, Keccak256, Sha3_256};
 
 // Constant prefix that ensures epsilon derivation values are used specifically for
@@ -75,8 +74,8 @@ fn keccak(derivation_path: impl AsRef<[u8]>) -> Scalar {
     Scalar::from_non_biased(hash)
 }
 
-pub fn derive_epsilon_near(key_version: u32, predecessor_id: &AccountId, path: &str) -> Scalar {
-    let derivation_path = derivation_path(key_version, Chain::Near, predecessor_id.as_str(), path);
+pub fn derive_epsilon_near(key_version: u32, predecessor_id: &str, path: &str) -> Scalar {
+    let derivation_path = derivation_path(key_version, Chain::Near, predecessor_id, path);
     sha3(derivation_path)
 }
 
@@ -262,11 +261,11 @@ mod tests {
 
         // Test NEAR epsilon derivation
         assert_eq!(
-            derive_epsilon_near(0, &AccountId::from_str("sender.near").unwrap(), "path"),
+            derive_epsilon_near(0, "sender.near", "path"),
             expected_near_v0
         );
         assert_eq!(
-            derive_epsilon_near(1, &AccountId::from_str("sender.near").unwrap(), "path"),
+            derive_epsilon_near(1, "sender.near", "path"),
             expected_near_v1
         );
     }
