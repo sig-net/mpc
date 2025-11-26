@@ -40,3 +40,14 @@ async fn test_solana_signature_basic() -> anyhow::Result<()> {
         anyhow::bail!("signature verification failed");
     }
 }
+
+#[test(tokio::test)]
+async fn test_solana_stockpile_depletion() -> anyhow::Result<()> {
+    let cluster = cluster::spawn().solana().await?;
+
+    for i in 0..20 {
+        tracing::info!("producing signature {i}");
+        cluster.sign().solana().await.unwrap();
+    }
+    Ok(())
+}
