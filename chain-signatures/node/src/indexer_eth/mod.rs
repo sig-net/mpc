@@ -101,39 +101,6 @@ impl BlockAndRequests {
     }
 }
 
-#[async_trait]
-pub trait EthereumClientTrait {
-    async fn get_block(
-        &self,
-        block_id: alloy::rpc::types::BlockId,
-    ) -> Option<alloy::rpc::types::Block>;
-    async fn get_block_receipts(
-        &self,
-        block_id: alloy::rpc::types::BlockId,
-    ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>>;
-    async fn get_nonce(
-        &self,
-        address: Address,
-        block_id: alloy::rpc::types::BlockId,
-    ) -> anyhow::Result<u64>;
-    async fn get_transaction_by_hash(
-        &self,
-        tx_hash: alloy::primitives::B256,
-    ) -> anyhow::Result<Option<alloy::rpc::types::Transaction>>;
-    async fn call(
-        &self,
-        from: Address,
-        to: Address,
-        data: Bytes,
-        block_number: u64,
-    ) -> anyhow::Result<Bytes>;
-    async fn get_latest_block_number(&self) -> anyhow::Result<u64>;
-    async fn get_transaction_receipt(
-        &self,
-        tx_hash: alloy::primitives::B256,
-    ) -> anyhow::Result<Option<alloy::rpc::types::TransactionReceipt>>;
-}
-
 #[derive(Clone)]
 pub struct EthConfig {
     /// The ethereum account secret key used to sign eth respond txn.
@@ -638,8 +605,19 @@ pub enum EthereumClient {
     DirectRpc(indexer_eth_direct_rpc::RpcEthereumClient),
 }
 
-#[async_trait]
-impl EthereumClientTrait for EthereumClient {
+impl EthereumClient {
+    pub async fn new(eth: EthConfig) -> anyhow::Result<EthereumClient> {
+        if eth.light_client {
+            Ok(EthereumClient::Helios(
+                indexer_eth_helios::build_client(eth.clone()).await?,
+            ))
+        } else {
+            Ok(EthereumClient::DirectRpc(
+                indexer_eth_direct_rpc::RpcEthereumClient::new(&eth.execution_rpc_http_url),
+            ))
+        }
+    }
+
     async fn get_block(
         &self,
         block_id: alloy::rpc::types::BlockId,
@@ -671,7 +649,7 @@ impl EthereumClientTrait for EthereumClient {
         }
     }
 
-    async fn get_transaction_by_hash(
+    pub async fn get_transaction_by_hash(
         &self,
         tx_hash: alloy::primitives::B256,
     ) -> anyhow::Result<Option<alloy::rpc::types::Transaction>> {
@@ -681,7 +659,7 @@ impl EthereumClientTrait for EthereumClient {
         }
     }
 
-    async fn call(
+    pub async fn call(
         &self,
         from: Address,
         to: Address,
@@ -698,30 +676,6 @@ impl EthereumClientTrait for EthereumClient {
         match self {
             EthereumClient::Helios(client) => client.get_latest_block_number().await,
             EthereumClient::DirectRpc(client) => client.get_latest_block_number().await,
-        }
-    }
-
-    async fn get_transaction_receipt(
-        &self,
-        tx_hash: alloy::primitives::B256,
-    ) -> anyhow::Result<Option<alloy::rpc::types::TransactionReceipt>> {
-        match self {
-            EthereumClient::Helios(client) => client.get_transaction_receipt(tx_hash).await,
-            EthereumClient::DirectRpc(client) => client.get_transaction_receipt(tx_hash).await,
-        }
-    }
-}
-
-impl EthereumClient {
-    pub async fn new(eth: EthConfig) -> anyhow::Result<EthereumClient> {
-        if eth.light_client {
-            Ok(EthereumClient::Helios(
-                indexer_eth_helios::build_client(eth.clone()).await?,
-            ))
-        } else {
-            Ok(EthereumClient::DirectRpc(
-                indexer_eth_direct_rpc::RpcEthereumClient::new(&eth.execution_rpc_http_url),
-            ))
         }
     }
 }
@@ -771,25 +725,26 @@ impl EthereumIndexer {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn run(&self) {
-        let backlog = self.backlog.clone();
-        let contract_watcher = self.contract_watcher.clone();
-        let mesh_state = self.mesh_state.clone();
-        let node_client = self.node_client.clone();
-        let sign_tx = self.sign_tx.clone();
-        let app_data_storage = self.app_data_storage.clone();
-        let client = self.client.clone();
+    pub async fn run(self) {
+        let backlog = self.backlog;
+        let contract_watcher = self.contract_watcher;
+        let mesh_state = self.mesh_state;
+        let node_client = self.node_client;
+        let app_data_storage = self.app_data_storage;
+        let client = self.client;
+        let eth = self.eth;
+        let sign_tx = self.sign_tx;
+        let node_near_account_id = self.node_near_account_id;
 
         Self::recover_backlog(&backlog, contract_watcher, mesh_state, node_client).await;
 
-        let last_processed_block = Self::get_last_processed_block(&self.app_data_storage).await;
+        let last_processed_block = Self::get_last_processed_block(&app_data_storage).await;
 
         let client = Arc::new(client);
 
         tracing::info!("running ethereum indexer");
 
-        let eth_config_clone = self.eth.clone();
+        let eth_config_clone = eth.clone();
 
         let Ok(contract_address) =
             Address::from_str(&format!("0x{}", eth_config_clone.contract_address))
@@ -800,7 +755,7 @@ impl EthereumIndexer {
             );
             return;
         };
-        let total_timeout = Duration::from_secs(self.eth.total_timeout);
+        let total_timeout = Duration::from_secs(eth.total_timeout);
 
         let (blocks_failed_send, blocks_failed_recv) = failed_blocks_channel();
 
@@ -812,7 +767,7 @@ impl EthereumIndexer {
 
         let client_clone = Arc::clone(&client);
         let finalized_block_send_clone = finalized_block_send.clone();
-        let refresh_interval = self.eth.refresh_finalized_interval;
+        let refresh_interval = eth.refresh_finalized_interval;
         tokio::spawn(async move {
             tracing::info!("Spawned task to refresh the latest finalized block");
             Self::refresh_finalized_block(
@@ -823,10 +778,10 @@ impl EthereumIndexer {
             .await;
         });
 
-        let node_near_account_id_clone = self.node_near_account_id.clone();
-        let backlog_clone = self.backlog.clone();
+        let node_near_account_id_clone = node_near_account_id.clone();
+        let backlog_clone = backlog.clone();
         let client_clone = Arc::clone(&client);
-        let optimistic_requests = self.eth.optimistic_requests;
+        let optimistic_requests = eth.optimistic_requests;
         let sign_tx_clone = sign_tx.clone();
         tokio::spawn(async move {
             Self::send_requests_when_final(
@@ -843,9 +798,9 @@ impl EthereumIndexer {
         });
 
         let blocks_failed_send_clone = blocks_failed_send.clone();
-        let node_near_account_id_clone2 = self.node_near_account_id.clone();
+        let node_near_account_id_clone2 = node_near_account_id.clone();
         let requests_indexed_send_clone = requests_indexed_send.clone();
-        let backlog_clone2 = self.backlog.clone();
+        let backlog_clone2 = backlog.clone();
         let sign_tx_clone = sign_tx.clone();
         let client_clone = Arc::clone(&client);
         tokio::spawn(async move {
@@ -864,9 +819,8 @@ impl EthereumIndexer {
         });
 
         let blocks_to_process_send_clone = blocks_to_process_send.clone();
-        let client_clone = Arc::clone(&client);
         if let Some(last_processed_block) = last_processed_block {
-            match Self::catchup_end_block_number(client_clone).await {
+            match Self::catchup_end_block_number(Arc::clone(&client)).await {
                 Ok(end_block_number) => {
                     Self::add_catchup_blocks_to_process(
                         blocks_to_process_send_clone,
@@ -881,12 +835,10 @@ impl EthereumIndexer {
             }
         }
 
-        let blocks_to_process_send_clone = blocks_to_process_send.clone();
-        let client_clone = Arc::clone(&client);
-        tokio::spawn(async move {
-            tracing::info!("Spawned task to add new blocks to process");
-            Self::add_new_block_to_process(client_clone, blocks_to_process_send_clone).await
-        });
+        tokio::spawn(Self::add_new_block_to_process(
+            Arc::clone(&client),
+            blocks_to_process_send.clone(),
+        ));
 
         let mut interval = tokio::time::interval(Duration::from_millis(200));
         let requests_indexed_send_clone = requests_indexed_send.clone();
@@ -905,7 +857,7 @@ impl EthereumIndexer {
                     if let Some(block) = block {
                         (block, true)
                     } else {
-                        tracing::warn!("Block {block_number} not found from Helios client");
+                        tracing::warn!("Block {block_number} not found from Ethereum client");
                         continue;
                     }
                 }
@@ -916,10 +868,10 @@ impl EthereumIndexer {
                 client.clone(),
                 block.clone(),
                 contract_address,
-                self.node_near_account_id.clone(),
+                node_near_account_id.clone(),
                 requests_indexed_send_clone.clone(),
                 total_timeout,
-                self.backlog.clone(),
+                backlog.clone(),
                 sign_tx.clone(),
             )
             .await
@@ -938,7 +890,7 @@ impl EthereumIndexer {
                 }
             }
             crate::metrics::LATEST_BLOCK_NUMBER
-                .with_label_values(&[Chain::Ethereum.as_str(), self.node_near_account_id.as_str()])
+                .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
                 .set(block_number as i64);
         }
     }
@@ -950,6 +902,7 @@ impl EthereumIndexerTrait for EthereumIndexer {
         client: Arc<EthereumClient>,
         blocks_to_process: mpsc::Sender<BlockToProcess>,
     ) {
+        tracing::info!("Adding new blocks to process...");
         let mut current_block = 0;
         loop {
             let Some(latest_block) = client
@@ -1318,7 +1271,7 @@ pub trait EthereumIndexerTrait: Send + Sync + 'static {
                 .await;
 
             let Some(block) = block else {
-                tracing::warn!("Block {block_number} not found from Helios client, skipping this block and its requests");
+                tracing::warn!("Block {block_number} not found from Ethereum client, skipping this block and its requests");
                 continue;
             };
 
@@ -1421,7 +1374,7 @@ pub trait EthereumIndexerTrait: Send + Sync + 'static {
             {
                 Some(block) => block,
                 None => {
-                    tracing::warn!("Finalized block not found from Helios client");
+                    tracing::warn!("Finalized block not found from Ethereum client");
                     continue;
                 }
             };

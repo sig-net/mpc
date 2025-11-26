@@ -1,4 +1,3 @@
-use crate::indexer_eth::EthereumClientTrait;
 use crate::indexer_eth::SignatureRequested;
 use crate::indexer_eth::SignatureResponded;
 use alloy::eips::BlockNumberOrTag;
@@ -6,9 +5,7 @@ use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes};
 use alloy::rpc::types::Log;
 use alloy::rpc::types::Transaction;
-use alloy::rpc::types::TransactionReceipt;
 use alloy::sol_types::SolEvent;
-use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,59 +18,6 @@ pub struct RpcEthereumClient {
     id: Arc<AtomicU64>,
 }
 
-#[async_trait]
-impl EthereumClientTrait for RpcEthereumClient {
-    async fn get_block(
-        &self,
-        block_id: alloy::rpc::types::BlockId,
-    ) -> Option<alloy::rpc::types::Block> {
-        self.block(block_id).await.unwrap_or(None)
-    }
-
-    async fn get_block_receipts(
-        &self,
-        block_id: alloy::rpc::types::BlockId,
-    ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>> {
-        self.block_receipts(block_id).await
-    }
-
-    async fn get_nonce(
-        &self,
-        address: Address,
-        block_id: alloy::rpc::types::BlockId,
-    ) -> anyhow::Result<u64> {
-        self.nonce(address, block_id).await
-    }
-
-    async fn get_transaction_by_hash(
-        &self,
-        tx_hash: alloy::primitives::B256,
-    ) -> anyhow::Result<Option<alloy::rpc::types::Transaction>> {
-        self.transaction_by_hash(tx_hash).await
-    }
-
-    async fn call(
-        &self,
-        from: Address,
-        to: Address,
-        data: Bytes,
-        block_number: u64,
-    ) -> anyhow::Result<Bytes> {
-        self.call(from, to, data, block_number).await
-    }
-
-    async fn get_latest_block_number(&self) -> anyhow::Result<u64> {
-        self.block_number().await
-    }
-
-    async fn get_transaction_receipt(
-        &self,
-        tx_hash: alloy::primitives::B256,
-    ) -> anyhow::Result<Option<TransactionReceipt>> {
-        self.transaction_receipt(tx_hash).await
-    }
-}
-
 impl RpcEthereumClient {
     pub fn new(endpoint: &str) -> Self {
         Self {
@@ -81,6 +25,71 @@ impl RpcEthereumClient {
             url: endpoint.to_owned(),
             id: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    pub async fn get_block(
+        &self,
+        block_id: alloy::rpc::types::BlockId,
+    ) -> Option<alloy::rpc::types::Block> {
+        self.block(block_id).await.unwrap_or(None)
+    }
+
+    pub async fn get_block_receipts(
+        &self,
+        block_id: alloy::rpc::types::BlockId,
+    ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>> {
+        self.block_receipts(block_id).await
+    }
+
+    pub async fn get_nonce(
+        &self,
+        address: Address,
+        block_id: alloy::rpc::types::BlockId,
+    ) -> anyhow::Result<u64> {
+        self.rpc_call::<String>(
+            "eth_getTransactionCount",
+            vec![
+                json!(format_address(address)),
+                json!(to_hex_block_id(block_id)),
+            ],
+        )
+        .await
+        .and_then(|nonce| {
+            hex_to_u64(&nonce).map_err(|err| anyhow::anyhow!("Failed to parse nonce: {err}"))
+        })
+    }
+
+    pub async fn get_transaction_by_hash(
+        &self,
+        tx_hash: alloy::primitives::B256,
+    ) -> anyhow::Result<Option<alloy::rpc::types::Transaction>> {
+        self.transaction_by_hash(tx_hash).await
+    }
+
+    pub async fn get_latest_block_number(&self) -> anyhow::Result<u64> {
+        self.block_number().await
+    }
+
+    pub async fn call(
+        &self,
+        from: Address,
+        to: Address,
+        data: Bytes,
+        block_number: u64,
+    ) -> anyhow::Result<Bytes> {
+        let params = json!({
+            "from": format_address(from),
+            "to": format_address(to),
+            "data": format_bytes(&data),
+        });
+        let block = json!(to_hex_u64(block_number));
+        let result: String = self.rpc_call("eth_call", vec![params, block]).await?;
+        let stripped = result.trim_start_matches("0x");
+        if stripped.is_empty() {
+            return Ok(Bytes::default());
+        }
+        let decoded = hex::decode(stripped)?;
+        Ok(Bytes::from(decoded))
     }
 
     fn next_id(&self) -> u64 {
@@ -167,17 +176,6 @@ impl RpcEthereumClient {
         self.rpc_call("eth_getLogs", vec![filter]).await
     }
 
-    async fn transaction_receipt(
-        &self,
-        tx_hash: alloy::primitives::B256,
-    ) -> anyhow::Result<Option<TransactionReceipt>> {
-        self.rpc_call(
-            "eth_getTransactionReceipt",
-            vec![json!(format!("{:#x}", tx_hash))],
-        )
-        .await
-    }
-
     async fn transaction_by_hash(
         &self,
         tx_hash: alloy::primitives::B256,
@@ -187,46 +185,6 @@ impl RpcEthereumClient {
             vec![json!(format!("{:#x}", tx_hash))],
         )
         .await
-    }
-
-    async fn nonce(
-        &self,
-        address: Address,
-        block_id: alloy::rpc::types::BlockId,
-    ) -> anyhow::Result<u64> {
-        self.rpc_call::<String>(
-            "eth_getTransactionCount",
-            vec![
-                json!(format_address(address)),
-                json!(to_hex_block_id(block_id)),
-            ],
-        )
-        .await
-        .and_then(|nonce| {
-            hex_to_u64(&nonce).map_err(|err| anyhow::anyhow!("Failed to parse nonce: {err}"))
-        })
-    }
-
-    async fn call(
-        &self,
-        from: Address,
-        to: Address,
-        data: Bytes,
-        block_number: u64,
-    ) -> anyhow::Result<Bytes> {
-        let params = json!({
-            "from": format_address(from),
-            "to": format_address(to),
-            "data": format_bytes(&data),
-        });
-        let block = json!(to_hex_u64(block_number));
-        let result: String = self.rpc_call("eth_call", vec![params, block]).await?;
-        let stripped = result.trim_start_matches("0x");
-        if stripped.is_empty() {
-            return Ok(Bytes::default());
-        }
-        let decoded = hex::decode(stripped)?;
-        Ok(Bytes::from(decoded))
     }
 }
 
