@@ -8,11 +8,10 @@ use crate::protocol::message::{
     MessageChannel, PositMessage, PositProtocolId, SignatureMessage, Subscriber,
 };
 use crate::protocol::posit::{PositAction, SinglePositCounter};
-use crate::protocol::presignature::{Presignature, PresignatureId};
+use crate::protocol::presignature::PresignatureId;
 use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
-use crate::storage::protocol_storage::ArtifactTaken;
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap};
@@ -201,6 +200,7 @@ impl SignOrganizer {
                 });
 
             let is_mine = proposer == me;
+            state.round = selected_round;
 
             tracing::info!(
                 ?sign_id,

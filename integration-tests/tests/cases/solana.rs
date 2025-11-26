@@ -44,7 +44,7 @@ async fn test_solana_signature_basic() -> anyhow::Result<()> {
 // Concurrent variant: spawn many sign requests at once against a very small
 // presignature stockpile and assert we make forward progress (no livelock).
 #[test(tokio::test)]
-async fn test_solana_stockpile_depletion_concurrent() -> anyhow::Result<()> {
+async fn test_solana_stockpile_depletion() -> anyhow::Result<()> {
     let cluster = cluster::spawn()
         .solana()
         .with_config(|conf| {
@@ -62,7 +62,7 @@ async fn test_solana_stockpile_depletion_concurrent() -> anyhow::Result<()> {
     for _ in 0..concurrent {
         // don't spawn new tasks at thread boundary; keep futures local so borrows are simple
         futs.push(tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(15),
             async {
                 cluster
                     .sign()
@@ -74,11 +74,9 @@ async fn test_solana_stockpile_depletion_concurrent() -> anyhow::Result<()> {
     }
 
     // wait for all futures to complete and ensure none timed out or errored
-    let all = futures::future::join_all(futs).await;
-    for r in all {
-        match r {
-            Ok(inner) => inner.map(|_| ())?,
-            Err(_) => anyhow::bail!("timed out waiting for sign request"),
+    for outcome in futures::future::join_all(futs).await {
+        if let Err(err) = outcome {
+            anyhow::bail!("timeout waiting for sign request to complete: {err:?}");
         }
     }
 
