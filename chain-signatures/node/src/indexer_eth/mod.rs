@@ -15,7 +15,6 @@ use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::rpc::types::Log;
 use alloy::sol_types::{sol, SolEvent};
-use async_trait::async_trait;
 use k256::Scalar;
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
@@ -342,20 +341,17 @@ sol! {
     );
 }
 
-fn sign_request_from_filtered_log(
-    log: Log,
-    total_timeout: Duration,
-) -> anyhow::Result<IndexedSignRequest> {
-    let event = parse_event(&log)?;
+fn sign_request_from_filtered_log(log: Log, total_timeout: Duration) -> Option<IndexedSignRequest> {
+    let event = parse_event(&log);
     tracing::debug!("found eth event: {:?}", event);
     if event.deposit == U256::ZERO {
         tracing::warn!("deposit is 0, skipping sign request");
-        anyhow::bail!("deposit is 0");
+        return None;
     }
 
     if event.key_version > LATEST_MPC_KEY_VERSION {
         tracing::warn!("unsupported key version: {}", event.key_version);
-        anyhow::bail!("unsupported key version");
+        return None;
     }
 
     // Create sign request from event
@@ -364,12 +360,12 @@ fn sign_request_from_filtered_log(
             "eth `sign` did not produce payload hash correctly: {:?}",
             event.payload_hash,
         );
-        anyhow::bail!("failed to convert event payload hash to scalar");
+        return None;
     };
 
     if payload > *MAX_SECP256K1_SCALAR {
         tracing::warn!("payload exceeds secp256k1 curve order: {payload:?}");
-        anyhow::bail!("payload exceeds secp256k1 curve order");
+        return None;
     }
 
     let epsilon = derive_epsilon_eth(
@@ -384,7 +380,7 @@ fn sign_request_from_filtered_log(
     let sign_id = SignId::new(event.generate_request_id());
     tracing::info!(?sign_id, "eth signature requested");
 
-    Ok(IndexedSignRequest {
+    Some(IndexedSignRequest {
         id: sign_id,
         args: SignArgs {
             entropy: entropy.into(),
@@ -401,7 +397,7 @@ fn sign_request_from_filtered_log(
     })
 }
 // Helper function to parse event logs
-fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
+fn parse_event(log: &Log) -> SignatureRequestedEvent {
     // Parse data fields
     let data = log.data().data.clone();
 
@@ -438,7 +434,7 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
         params
     );
 
-    Ok(SignatureRequestedEvent {
+    SignatureRequestedEvent {
         requester,
         payload_hash,
         path,
@@ -448,7 +444,7 @@ fn parse_event(log: &Log) -> anyhow::Result<SignatureRequestedEvent> {
         algo,
         dest,
         params,
-    })
+    }
 }
 
 fn parse_string_args(data: &Bytes, offset_start: usize) -> String {
@@ -466,10 +462,8 @@ fn parse_filtered_logs(logs: Vec<Log>, total_timeout: Duration) -> Vec<IndexedSi
     for log in logs {
         tracing::debug!("Parsing Ethereum log: {:?}", log);
         match sign_request_from_filtered_log(log.clone(), total_timeout) {
-            Ok(request) => indexed_requests.push(request),
-            Err(err) => {
-                tracing::warn!(?log, ?err, "Failed to parse Ethereum log");
-            }
+            Some(request) => indexed_requests.push(request),
+            None => tracing::warn!("Failed to parse Ethereum log: {:?}", log),
         }
     }
     if indexed_requests.is_empty() {
@@ -894,10 +888,7 @@ impl EthereumIndexer {
                 .set(block_number as i64);
         }
     }
-}
 
-#[async_trait]
-impl EthereumIndexerTrait for EthereumIndexer {
     async fn add_new_block_to_process(
         client: Arc<EthereumClient>,
         blocks_to_process: mpsc::Sender<BlockToProcess>,
@@ -928,15 +919,6 @@ impl EthereumIndexerTrait for EthereumIndexer {
     async fn catchup_end_block_number(client: Arc<EthereumClient>) -> anyhow::Result<BlockNumber> {
         client.get_latest_block_number().await
     }
-}
-
-#[async_trait]
-pub trait EthereumIndexerTrait: Send + Sync + 'static {
-    async fn add_new_block_to_process(
-        client: Arc<EthereumClient>,
-        blocks_to_process: mpsc::Sender<BlockToProcess>,
-    );
-    async fn catchup_end_block_number(client: Arc<EthereumClient>) -> anyhow::Result<BlockNumber>;
 
     #[allow(clippy::too_many_arguments)]
     async fn process_block(
