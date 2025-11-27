@@ -3,6 +3,7 @@ use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
+use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{
     MessageChannel, PositMessage, PositProtocolId, SignatureMessage, Subscriber,
 };
@@ -221,19 +222,34 @@ impl SignOrganizer {
         };
 
         let is_proposer = proposer == ctx.me;
-        let (presignature_id, presignature) = if is_proposer {
+        let (presignature_id, presignature, stable) = if is_proposer {
             tracing::info!(?sign_id, round = ?state.round, "proposer waiting for presignature");
+            let stable = stable.iter().copied().collect::<Vec<_>>();
+            let mut recycle = Vec::new();
             let fetch = tokio::time::timeout(Duration::from_secs(30), async {
                 loop {
                     if let Some(taken) = ctx.presignatures.take_mine(ctx.me).await {
-                        break taken;
+                        let participants = intersect_vec(&[&taken.artifact.participants, &stable]);
+                        if participants.len() < ctx.threshold {
+                            recycle.push(taken);
+                            continue;
+                        }
+
+                        break (taken, participants);
                     }
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
             })
             .await;
 
-            let taken = match fetch {
+            let presignatures = ctx.presignatures.clone();
+            tokio::spawn(async move {
+                for taken in recycle {
+                    presignatures.recycle_mine(me, taken).await;
+                }
+            });
+
+            let (taken, participants) = match fetch {
                 Ok(value) => value,
                 Err(_) => {
                     tracing::warn!(
@@ -251,7 +267,7 @@ impl SignOrganizer {
             tracing::info!(?sign_id, presignature_id, "proposer got presignature");
 
             // broadcast to participants and let them reject if they don't have the presignature.
-            for &p in &stable {
+            for &p in &participants {
                 if p == ctx.me {
                     continue;
                 }
@@ -268,9 +284,11 @@ impl SignOrganizer {
                     .await;
             }
 
-            (presignature_id, Some(taken))
+            // Update stable to only include participants that are in both the presignature and stable set
+            let stable = participants.into_iter().collect::<BTreeSet<_>>();
+            (presignature_id, Some(taken), stable)
         } else {
-            (PresignatureId::default(), None)
+            (PresignatureId::default(), None, stable)
         };
 
         SignPhase::Posit(SignPositor {
