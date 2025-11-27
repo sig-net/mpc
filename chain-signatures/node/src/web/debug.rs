@@ -4,6 +4,7 @@ use alloy_primitives::map::HashMap;
 use axum::response::Html;
 use axum::Extension;
 use maud::{html, Markup, Render};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::{sync::LazyLock, time::Instant};
 use tokio::sync::{watch, Mutex, RwLock};
@@ -85,24 +86,45 @@ pub(super) async fn page(Extension(web): Extension<Arc<AxumState>>) -> Html<Stri
     let registry = read_registry(web.my_account_id.as_str()).await;
     let tasks = registry.lock().await;
 
+    // Render all registered tasks and group them
+    let mut rendered_tasks: BTreeMap<&str, Vec<_>> = BTreeMap::new();
+
+    for t in tasks.iter() {
+        // Take first word as key for grouping tasks (e.g. "TripleGenerator")
+        let key = t.name.split_whitespace().next().unwrap_or_default();
+        let data = (
+            t.name.clone(),
+            format!("{:#.2?}", t.registered.elapsed()),
+            t.state.borrow().render(),
+        );
+        rendered_tasks.entry(key).or_default().push(data);
+    }
+
     let markup = html! {
         h1 { "Registered Tasks (" (tasks.len())  ")"}
         style {
             ".tasks { display: flex; flex-wrap: wrap; }"
-            ".task { margin: 1rem; padding: 1rem; border: solid 1px; }"
+            ".task { margin: 1rem; padding: 1rem; border: solid 1px; width: 15rem; }"
             ".task-title { font-weight: bold; }"
         }
 
-        .tasks {
-            @for task in tasks.iter() {
-                @let age = format!("{:#.2?}", task.registered.elapsed());
-                .task {
-                    .task-title {
-                        (task.name)
-                    }
-                    .task-state {
-                        "age: " (age)
-                        (task.state.borrow().render())
+        @for (task_group_name, task_group) in rendered_tasks.iter() {
+            details {
+                summary {
+                    (task_group_name) "(" (task_group.len()) " running tasks)"
+                }
+                .tasks {
+                    @for task in task_group.iter() {
+                        @let (name, age, markup) = task;
+                        .task {
+                            .task-title {
+                                (name)
+                            }
+                            .task-state {
+                                "age: " (age)
+                                (markup)
+                            }
+                        }
                     }
                 }
             }
