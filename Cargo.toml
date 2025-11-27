@@ -83,7 +83,7 @@ x25519-dalek = { git = "https://github.com/dalek-cryptography/curve25519-dalek",
 # Attempt to mitigate ed25519 advisories by patching to the upstream repository.
 # NOTE: Solana pins ed25519/curve25519 carefully; this override may break Solana-related
 # paths — run unit and integration tests and revert if it causes regressions.
-ed25519-dalek = { git = "https://github.com/dalek-cryptography/ed25519-dalek", rev = "02001d8c" }
+ed25519-dalek = { git = "https://github.com/dalek-cryptography/ed25519-dalek", rev = "1042cb60a07cdaacb59ca209716b69f444460f8f" }
 
 # big optimization even in test builds for math heavy crates
 [profile.dev.package.curve25519-dalek]
