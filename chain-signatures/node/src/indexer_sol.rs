@@ -1008,7 +1008,7 @@ async fn subscribe_to_program_respond_events(
             let root_public_key = contract_watcher.wait_public_key().await;
             let epsilon = mpc_crypto::kdf::derive_epsilon_sol(
                 event.key_version,
-                &ev.responder.to_string(),
+                &event.sender.to_string(),
                 &event.path,
             );
             let from_address =
@@ -1016,7 +1016,7 @@ async fn subscribe_to_program_respond_events(
 
             let bidirectional_tx = BidirectionalTx {
                 id: tx_id,
-                sender: ev.responder,
+                sender: event.sender,
                 serialized_transaction: event.serialized_transaction,
                 source_chain: Chain::Solana,
                 target_chain,

@@ -79,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
                     refresh_finalized_interval: eth_refresh_finalized_interval,
                     total_timeout: eth_total_timeout,
                     optimistic_requests: false,
+                    light_client: false,
                 }),
                 ..Default::default()
             };
