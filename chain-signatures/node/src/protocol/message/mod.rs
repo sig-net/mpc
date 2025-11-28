@@ -219,6 +219,45 @@ impl MessageInbox {
         }
     }
 
+    /// Process an incoming encrypted message through the full pipeline:
+    /// expire old messages → enqueue → decrypt → filter → publish
+    pub async fn process_incoming(
+        &mut self,
+        encrypted: Ciphered,
+        message_timeout: Duration,
+        cipher_sk: &hpke::SecretKey,
+        participants: &ParticipantMap,
+    ) {
+        self.expire(message_timeout);
+        self.try_decrypt.push_back((encrypted, Instant::now()));
+        let messages = self.decrypt(cipher_sk, participants);
+
+        // update filter before fanning out messages.
+        self.filter.try_update();
+
+        let messages = self.filter(messages);
+        self.publish(messages).await;
+    }
+
+    /// Process incoming without publish - for benchmarking the decrypt + filter pipeline only.
+    /// Returns the filtered messages that would be published.
+    pub fn process_incoming_sync(
+        &mut self,
+        encrypted: Ciphered,
+        message_timeout: Duration,
+        cipher_sk: &hpke::SecretKey,
+        participants: &ParticipantMap,
+    ) -> Vec<Message> {
+        self.expire(message_timeout);
+        self.try_decrypt.push_back((encrypted, Instant::now()));
+        let messages = self.decrypt(cipher_sk, participants);
+
+        // update filter before fanning out messages.
+        self.filter.try_update();
+
+        self.filter(messages)
+    }
+
     pub fn clear_filters(&mut self) {
         self.filter.clear();
     }
@@ -330,28 +369,32 @@ impl MessageInbox {
         }
     }
 
-    pub async fn run(mut self, config: watch::Receiver<Config>, contract: ContractStateWatcher) {
+    pub async fn run(
+        mut self,
+        mut config: watch::Receiver<Config>,
+        contract: ContractStateWatcher,
+    ) {
+        let (mut cipher_sk, mut message_timeout) = {
+            let config = config.borrow();
+            let cipher_sk = config.local.network.cipher_sk.clone();
+            let message_timeout = config.protocol.message_timeout;
+            (cipher_sk, Duration::from_millis(message_timeout))
+        };
+
         loop {
             tokio::select! {
                 _ = self.filter.update() => {}
+                _ = config.changed() => {
+                    let config = config.borrow();
+                    cipher_sk = config.local.network.cipher_sk.clone();
+                    message_timeout = Duration::from_millis(config.protocol.message_timeout);
+                }
                 Some(sub) = self.subscribe_rx.recv() => {
                     self.process_subscribe(sub);
                 }
                 Some(encrypted) = self.inbox_rx.recv() => {
-                    let config = config.borrow().clone();
-                    let expiration = Duration::from_millis(config.protocol.message_timeout);
                     let participants = contract.participant_map().await;
-                    let cipher_sk = config.local.network.cipher_sk;
-
-                    self.expire(expiration);
-                    self.try_decrypt.push_back((encrypted, Instant::now()));
-                    let messages = self.decrypt(&cipher_sk, &participants);
-
-                    // update filter before fanning out messages.
-                    self.filter.try_update();
-
-                    let messages = self.filter(messages);
-                    self.publish(messages).await;
+                    self.process_incoming(encrypted, message_timeout, &cipher_sk, &participants).await;
                 }
             }
         }
@@ -927,6 +970,28 @@ impl MessageOutbox {
         let encrypted = self.encrypt(&config.local.network.sign_sk, &participants, compacted);
         self.send(id, client, &participants, &config.protocol, encrypted)
             .await;
+    }
+
+    /// Process outgoing messages through the full pipeline (without network send):
+    /// compact → encrypt. Returns the encrypted partitions ready to be sent.
+    /// This is useful for benchmarking the outbox processing without network I/O.
+    pub fn process_outgoing(
+        &mut self,
+        sign_sk: &near_crypto::SecretKey,
+        participants: &Participants,
+    ) -> HashMap<MessageRoute, Vec<(Ciphered, Instant, usize)>> {
+        let compacted = self.compact();
+        self.encrypt(sign_sk, participants, compacted)
+    }
+
+    /// Queue a message for outgoing processing. This is useful for benchmarking
+    /// to populate the outbox before calling process_outgoing.
+    #[cfg(any(test, feature = "test-feature"))]
+    pub fn queue_message(&mut self, from: Participant, to: Participant, msg: Message) {
+        self.messages
+            .entry((from, to))
+            .or_default()
+            .push((msg, Instant::now()));
     }
 
     pub async fn run(

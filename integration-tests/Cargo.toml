@@ -91,6 +91,11 @@ name = "store"
 path = "benches/store.rs"
 harness = false
 
+[[bench]]
+name = "message"
+path = "benches/message.rs"
+harness = false
+
 [features]
 default = []
 docker-test = []
