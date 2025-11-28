@@ -4,6 +4,7 @@ use crate::protocol::state::NodeStatus;
 use crate::protocol::sync::SyncUpdate;
 use crate::protocol::Chain;
 use crate::web::StateView;
+use crate::ws_client::WsPool;
 
 use hyper::StatusCode;
 use mpc_keys::hpke::Ciphered;
@@ -14,6 +15,7 @@ use url::Url;
 
 use std::collections::HashMap;
 use std::str::Utf8Error;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, clap::Parser)]
@@ -66,6 +68,8 @@ pub enum RequestError {
 pub struct NodeClient {
     http: reqwest::Client,
     options: Options,
+    /// WebSocket connection pool for persistent connections
+    ws_pool: Arc<WsPool>,
 }
 
 impl NodeClient {
@@ -76,6 +80,7 @@ impl NodeClient {
                 .build()
                 .unwrap(),
             options: options.clone(),
+            ws_pool: Arc::new(WsPool::new()),
         }
     }
 
@@ -132,8 +137,31 @@ impl NodeClient {
         self.post_cbor(url, msg).await
     }
 
+    /// Send messages to a node, preferring WebSocket if available.
+    ///
+    /// This method will:
+    /// 1. Try to send via WebSocket if connection is available
+    /// 2. Fall back to HTTP POST if WebSocket fails
     pub async fn msg(&self, base: impl IntoUrl, msg: &[&Ciphered]) -> Result<(), RequestError> {
-        let mut url = base.into_url()?;
+        let base_url = base.into_url()?;
+
+        // Try WebSocket first
+        match self.ws_pool.send_to_url(&base_url, msg).await {
+            Ok(true) => {
+                tracing::trace!(?base_url, "message sent via websocket");
+                return Ok(());
+            }
+            Ok(false) => {
+                // WebSocket not available, fall through to HTTP
+                tracing::trace!(?base_url, "websocket unavailable, using HTTP");
+            }
+            Err(err) => {
+                tracing::debug!(?base_url, ?err, "websocket send failed, falling back to HTTP");
+            }
+        }
+
+        // Fall back to HTTP
+        let mut url = base_url;
         url.set_path("msg");
         self.post_msg(&url, msg).await
     }

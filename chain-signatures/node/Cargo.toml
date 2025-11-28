@@ -9,8 +9,9 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait = "0.1"
-axum = "0.7.9"
+axum = { version = "0.7.9", features = ["ws"] }
 axum-extra = "0.9.6"
+tokio-tungstenite = "0.24"
 chrono = "0.4.24"
 google-datastore1 = "=5.0.4"
 google-secretmanager1 = "5"

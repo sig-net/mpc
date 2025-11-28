@@ -2,11 +2,13 @@ mod cbor;
 mod error;
 #[cfg(test)]
 pub mod mock;
+pub mod ws;
 
 #[cfg(feature = "debug-page")]
 pub mod debug;
 
 use self::error::Error;
+use self::ws::WsState;
 use crate::backlog::{Backlog, Checkpoint};
 use crate::metrics::WEB_ENDPOINT_LATENCY;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus, ResharingStatus};
@@ -54,6 +56,12 @@ pub async fn run(
     backlog: Backlog,
 ) {
     tracing::info!("starting web server");
+    // WebSocket state for persistent connections (create before AxumState to avoid move issues)
+    let ws_state = Arc::new(WsState {
+        msg_channel: msg_channel.clone(),
+        my_account_id: my_account_id.clone(),
+    });
+
     let axum_state = AxumState {
         msg_channel,
         node,
@@ -79,12 +87,14 @@ pub async fn run(
             }),
         )
         .route("/msg", post(msg))
+        .route("/ws", get(ws::ws_handler))
         .route("/state", get(state))
         .route("/status", get(status))
         .route("/metrics", get(metrics))
         .route("/checkpoint", get(checkpoint))
         .route("/debug", get(debug::page))
-        .merge(sync);
+        .merge(sync)
+        .layer(Extension(ws_state));
 
     if cfg!(feature = "bench") {
         router = router.route("/bench/metrics", get(bench_metrics));

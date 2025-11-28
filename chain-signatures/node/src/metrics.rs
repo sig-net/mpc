@@ -639,6 +639,70 @@ pub(crate) static ETH_BLOCK_RECEIPT_LATENCY: LazyLock<HistogramVec> = LazyLock::
     .unwrap()
 });
 
+// WebSocket metrics
+pub(crate) static WS_CONNECTIONS_ACTIVE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    try_create_int_gauge_vec(
+        "multichain_ws_connections_active",
+        "Number of active WebSocket connections",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static WS_MESSAGES_SENT: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_ws_messages_sent",
+        "Number of messages sent via WebSocket",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static WS_MESSAGES_RECEIVED: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_ws_messages_received",
+        "Number of messages received via WebSocket",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static WS_BYTES_SENT: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_ws_bytes_sent",
+        "Number of bytes sent via WebSocket",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static WS_BYTES_RECEIVED: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_ws_bytes_received",
+        "Number of bytes received via WebSocket",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static WS_CONNECTION_ERRORS: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_ws_connection_errors",
+        "Number of WebSocket connection errors",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static WS_FALLBACK_TO_HTTP: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_ws_fallback_to_http",
+        "Number of times WebSocket fell back to HTTP",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
 pub fn try_create_int_gauge_vec(name: &str, help: &str, labels: &[&str]) -> Result<IntGaugeVec> {
     check_metric_multichain_prefix(name)?;
     let opts = Opts::new(name, help);
