@@ -1,11 +1,7 @@
-use crate::indexer_eth::SignatureRequested;
-use crate::indexer_eth::SignatureResponded;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes};
-use alloy::rpc::types::Log;
 use alloy::rpc::types::Transaction;
-use alloy::sol_types::SolEvent;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -158,22 +154,6 @@ impl RpcEthereumClient {
             vec![json!(to_hex_block_id(block_id))],
         )
         .await
-    }
-
-    #[allow(unused)]
-    async fn get_logs(
-        &self,
-        block_hash: alloy::primitives::B256,
-        contract_address: Address,
-    ) -> anyhow::Result<Vec<Log>> {
-        let topic_requested = format!("0x{}", SignatureRequested::SIGNATURE_HASH.encode_hex());
-        let topic_responded = format!("0x{}", SignatureResponded::SIGNATURE_HASH.encode_hex());
-        let filter = json!({
-            "address": format_address(contract_address),
-            "blockHash": format!("{:#x}", block_hash),
-            "topics": [[topic_requested, topic_responded]],
-        });
-        self.rpc_call("eth_getLogs", vec![filter]).await
     }
 
     async fn transaction_by_hash(
