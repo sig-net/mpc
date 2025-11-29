@@ -66,8 +66,9 @@ pub(super) fn test_mock_network(
                         *from,
                         &config.local.network.sign_sk,
                         &receiver_info.cipher_pk,
+                        None,
                     ) {
-                        Ok(ciphered) => {
+                        Ok((ciphered, _session_key)) => {
                             if let Some(tx) = routing_table.get(to) {
                                 if let Err(e) = tx.send(ciphered).await {
                                     tracing::warn!(target: "mock_network", ?e, "Failed to forward encrypted message to {to:?}");

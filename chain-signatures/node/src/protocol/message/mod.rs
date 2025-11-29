@@ -25,7 +25,7 @@ use crate::protocol::Config;
 
 use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
-use mpc_keys::hpke::{self, Ciphered};
+use mpc_keys::hpke::{self, Ciphered, SessionKey};
 use mpc_primitives::SignId;
 use near_account_id::AccountId;
 use near_crypto::Signature;
@@ -69,6 +69,8 @@ pub struct MessageInbox {
     presignature_init: Subscriber<(FullPresignatureId, Participant, PositAction)>,
     signature: HashMap<(SignId, PresignatureId), Subscriber<SignatureMessage>>,
     signature_init: Subscriber<(SignId, PresignatureId, Participant, PositAction)>,
+
+    sessions: HashMap<u64, SessionKey>,
 }
 
 impl MessageInbox {
@@ -92,6 +94,7 @@ impl MessageInbox {
             presignature_init: Subscriber::unsubscribed(),
             signature: HashMap::new(),
             signature_init: Subscriber::unsubscribed(),
+            sessions: HashMap::new(),
         }
     }
 
@@ -175,8 +178,27 @@ impl MessageInbox {
 
         let mut messages = Vec::new();
         while let Some((encrypted, timestamp)) = self.try_decrypt.pop_front() {
-            let decrypted: Result<Vec<Message>, _> =
-                SignedMessage::decrypt_with(&encrypted, cipher_sk, participants, |sig| {
+            let session_id = match &encrypted {
+                Ciphered::Cached(c) => Some(c.session_id),
+                _ => None,
+            };
+
+            let session = if let Some(id) = session_id {
+                self.sessions.get_mut(&id)
+            } else {
+                None
+            };
+
+            if let Ciphered::Cached(_) = &encrypted {
+                if session.is_none() {
+                    // Session missing or expired.
+                    tracing::warn!("inbox: received cached message with unknown session id");
+                    continue;
+                }
+            }
+
+            let decrypted: Result<(Vec<Message>, Option<SessionKey>), _> =
+                SignedMessage::decrypt_with(&encrypted, cipher_sk, participants, session, |sig| {
                     if self.idempotent.put(sig.clone(), ()).is_some() {
                         Err(MessageError::Idempotent)
                     } else {
@@ -185,7 +207,15 @@ impl MessageInbox {
                 });
 
             match decrypted {
-                Ok(decrypted) => messages.extend(decrypted),
+                Ok((decrypted, new_session)) => {
+                    if let Some(key) = new_session {
+                        if let Ciphered::Standard(c) = &encrypted {
+                            let id = c.encapped_key.session_id();
+                            self.sessions.insert(id, key);
+                        }
+                    }
+                    messages.extend(decrypted)
+                }
                 Err(err) => {
                     if matches!(err, MessageError::UnknownParticipant(_)) {
                         retry.push((encrypted, timestamp));
@@ -692,17 +722,20 @@ impl SignedMessage {
         from: Participant,
         sign_sk: &near_crypto::SecretKey,
         cipher_pk: &hpke::PublicKey,
-    ) -> Result<Ciphered, MessageError> {
+        session: Option<&mut SessionKey>,
+    ) -> Result<(Ciphered, Option<SessionKey>), MessageError> {
         let msg = cbor_to_bytes(msg)?;
         let sig = sign_sk.sign(&msg);
         let msg = Self { msg, sig, from };
         let msg = cbor_to_bytes(&msg)?;
-        let ciphered = cipher_pk
-            .encrypt(&msg, Self::ASSOCIATED_DATA)
-            .inspect_err(|err| {
-                tracing::error!(?err, "failed to encrypt message");
-            })?;
-        Ok(ciphered)
+
+        if let Some(session) = session {
+            let ciphered = session.encrypt(&msg)?;
+            Ok((Ciphered::Cached(ciphered), None))
+        } else {
+            let (ciphered, key) = cipher_pk.start_session(&msg, Self::ASSOCIATED_DATA)?;
+            Ok((Ciphered::Standard(ciphered), Some(key)))
+        }
     }
 }
 
@@ -711,21 +744,29 @@ impl SignedMessage {
         encrypted: &Ciphered,
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
-    ) -> Result<T, MessageError> {
-        Self::decrypt_with(encrypted, cipher_sk, participants, |_| Ok(()))
+        session: Option<&mut SessionKey>,
+    ) -> Result<(T, Option<SessionKey>), MessageError> {
+        Self::decrypt_with(encrypted, cipher_sk, participants, session, |_| Ok(()))
     }
 
     pub fn decrypt_with<T: DeserializeOwned, F: FnMut(&Signature) -> Result<(), MessageError>>(
         encrypted: &Ciphered,
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
+        session: Option<&mut SessionKey>,
         mut check: F,
-    ) -> Result<T, MessageError> {
-        let msg = cipher_sk
-            .decrypt(encrypted, Self::ASSOCIATED_DATA)
-            .inspect_err(|err| {
-                tracing::error!(?err, "failed to decrypt message");
-            })?;
+    ) -> Result<(T, Option<SessionKey>), MessageError> {
+        let (msg, new_session) = match encrypted {
+            Ciphered::Standard(c) => {
+                let (msg, key) = cipher_sk.accept_session(c, Self::ASSOCIATED_DATA)?;
+                (msg, Some(key))
+            }
+            Ciphered::Cached(c) => {
+                let session = session.ok_or(hpke::Error::OpenError)?;
+                let msg = session.decrypt(c)?;
+                (msg, None)
+            }
+        };
         let Self { msg, sig, from } = cbor_from_bytes(&msg)?;
         let info = participants
             .get(&from)
@@ -741,7 +782,8 @@ impl SignedMessage {
             ));
         }
 
-        cbor_from_bytes(&msg)
+        let decoded: T = cbor_from_bytes(&msg)?;
+        Ok((decoded, new_session))
     }
 }
 
@@ -768,6 +810,7 @@ pub struct MessageOutbox {
     /// Messsages sorted by participant map to a list of partitioned messages to be sent as
     /// a single request to other participants.
     messages: HashMap<MessageRoute, Vec<(Message, Instant)>>,
+    sessions: HashMap<MessageRoute, (u64, SessionKey)>,
 }
 
 impl MessageOutbox {
@@ -775,6 +818,7 @@ impl MessageOutbox {
         Self {
             outbox_rx,
             messages: HashMap::new(),
+            sessions: HashMap::new(),
         }
     }
 
@@ -806,13 +850,31 @@ impl MessageOutbox {
             };
 
             for partition in compacted {
+                let session_entry = self.sessions.get_mut(&(from, to));
+                let mut session = session_entry.map(|(_, key)| key);
+
                 let message = match SignedMessage::encrypt(
                     &partition.messages,
                     from,
                     sign_sk,
                     &info.cipher_pk,
+                    session.as_deref_mut(),
                 ) {
-                    Ok(encrypted) => encrypted,
+                    Ok((mut ciphered, new_session)) => {
+                        if let Some(key) = new_session {
+                            if let Ciphered::Standard(c) = &ciphered {
+                                let id = c.encapped_key.session_id();
+                                self.sessions.insert((from, to), (id, key));
+                            }
+                        }
+
+                        if let Ciphered::Cached(c) = &mut ciphered {
+                            if let Some((id, _)) = self.sessions.get(&(from, to)) {
+                                c.session_id = *id;
+                            }
+                        }
+                        ciphered
+                    }
                     Err(err) => {
                         errors.push(err);
                         continue;
@@ -1041,7 +1103,10 @@ mod tests {
         config::{Config, LocalConfig, NetworkConfig, OverrideConfig},
         protocol::{
             contract::primitives::{ParticipantMap, Participants},
-            message::{GeneratingMessage, Message, SignatureMessage, SignedMessage, TripleMessage},
+            message::{
+                cbor_from_bytes, cbor_to_bytes, GeneratingMessage, Message, SignatureMessage,
+                SignedMessage, TripleMessage,
+            },
             ParticipantInfo,
         },
         rpc::ContractStateWatcher,
@@ -1059,13 +1124,22 @@ mod tests {
             data: vec![],
         });
 
-        let message = serde_json::to_vec(&starting_message).unwrap();
-        let message = cipher_pk.encrypt(&message, associated_data).unwrap();
+        let message = cbor_to_bytes(&starting_message).unwrap();
+        let (encrypted, _) = cipher_pk.start_session(&message, associated_data).unwrap();
+        let ciphered = Ciphered::Standard(encrypted);
 
-        let message = serde_json::to_vec(&message).unwrap();
-        let cipher = serde_json::from_slice(&message).unwrap();
-        let message = cipher_sk.decrypt(&cipher, associated_data).unwrap();
-        let message: Message = serde_json::from_slice(&message).unwrap();
+        let serialized = cbor_to_bytes(&ciphered).unwrap();
+        let deserialized: Ciphered = cbor_from_bytes(&serialized).unwrap();
+        let (decrypted, _) = cipher_sk
+            .accept_session(
+                match &deserialized {
+                    Ciphered::Standard(c) => c,
+                    _ => panic!(),
+                },
+                associated_data,
+            )
+            .unwrap();
+        let message: Message = cbor_from_bytes(&decrypted).unwrap();
 
         assert_eq!(starting_message, message);
     }
@@ -1096,9 +1170,10 @@ mod tests {
             data: vec![128u8; 1024],
             timestamp: 1234567,
         })];
-        let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
-        let decrypted_batch: Vec<Message> =
-            SignedMessage::decrypt(&encrypted, &cipher_sk, &participants).unwrap();
+        let (encrypted, _) =
+            SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk, None).unwrap();
+        let (decrypted_batch, _): (Vec<Message>, _) =
+            SignedMessage::decrypt(&encrypted, &cipher_sk, &participants, None).unwrap();
 
         assert_eq!(
             batch, decrypted_batch,
@@ -1138,14 +1213,22 @@ mod tests {
                     added_field: vec![127; 1024],
                 };
                 let msg = super::cbor_to_bytes(&msg).unwrap();
-                cipher_pk.encrypt(&msg, Self::ASSOCIATED_DATA).unwrap()
+                let (ciphered, _) = cipher_pk
+                    .start_session(&msg, Self::ASSOCIATED_DATA)
+                    .unwrap();
+                Ciphered::Standard(ciphered)
             }
 
             fn decrypt<T: DeserializeOwned>(
                 encrypted: &Ciphered,
                 cipher_sk: &hpke::SecretKey,
             ) -> T {
-                let msg = cipher_sk.decrypt(encrypted, Self::ASSOCIATED_DATA).unwrap();
+                let (msg, _) = match encrypted {
+                    Ciphered::Standard(c) => {
+                        cipher_sk.accept_session(c, Self::ASSOCIATED_DATA).unwrap()
+                    }
+                    _ => panic!(),
+                };
                 let Self { msg, .. } = super::cbor_from_bytes(&msg).unwrap();
                 super::cbor_from_bytes(&msg).unwrap()
             }
@@ -1232,7 +1315,8 @@ mod tests {
                 timestamp: 1234567,
             }),
         ];
-        let encrypted = SignedMessage::encrypt(&old_batch, from, &sign_sk, &cipher_pk).unwrap();
+        let (encrypted, _) =
+            SignedMessage::encrypt(&old_batch, from, &sign_sk, &cipher_pk, None).unwrap();
         let new_batch: Vec<NewMessage> = NewSignedMessage::decrypt(&encrypted, &cipher_sk);
         assert_eq!(
             new_batch, old_batch,
@@ -1252,8 +1336,8 @@ mod tests {
             NewMessage::NewVariant("hello".to_string()),
         ];
         let new_ciphered = NewSignedMessage::encrypt(&new_batch, from, &sign_sk, &cipher_pk);
-        let old_batch: Vec<Message> =
-            SignedMessage::decrypt(&new_ciphered, &cipher_sk, &participants).unwrap();
+        let (old_batch, _): (Vec<Message>, _) =
+            SignedMessage::decrypt(&new_ciphered, &cipher_sk, &participants, None).unwrap();
         assert_eq!(
             new_batch, old_batch,
             "encrypt/decrypt failed backward compatibility"
@@ -1294,8 +1378,12 @@ mod tests {
         let (_cipher_sk, cipher_pk) = hpke::generate();
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt0");
-        let ciphered = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
-        let ciphered_bytesize = ciphered.text.len();
+        let (ciphered, _) =
+            SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk, None).unwrap();
+        let ciphered_bytesize = match &ciphered {
+            Ciphered::Standard(c) => c.text.len(),
+            _ => panic!(),
+        };
         dbg!(ciphered_bytesize);
 
         let margin_percent = 0.05;
@@ -1375,7 +1463,8 @@ mod tests {
                     timestamp: 3,
                 }),
             ];
-            let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
+            let (encrypted, _) =
+                SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk, None).unwrap();
             channel.inbox.send(encrypted).await.unwrap();
 
             let mut recv1 = channel.subscribe_triple(1).await;
@@ -1423,7 +1512,8 @@ mod tests {
             }),
         ];
         {
-            let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
+            let (encrypted, _) =
+                SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk, None).unwrap();
 
             let mut recv1 = channel.subscribe_triple(1).await;
             let mut recv2 = channel.subscribe_triple(filter_id).await;
@@ -1454,7 +1544,8 @@ mod tests {
         // the same signature. Thus sending the same encrypted message should be idempotent and no new messages
         // should be received by the subscribers.
         {
-            let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
+            let (encrypted, _) =
+                SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk, None).unwrap();
             channel.inbox.send(encrypted).await.unwrap();
             let mut recv1 =
                 tokio::time::timeout(Duration::from_millis(300), channel.subscribe_triple(1))
@@ -1479,5 +1570,207 @@ mod tests {
         }
 
         inbox.abort();
+    }
+
+    #[tokio::test]
+    async fn test_session_key_caching() {
+        // This test verifies that session keys are properly cached and reused
+        // across multiple message exchanges between nodes.
+
+        let epoch = 100;
+        let node0 = Participant::from(0);
+        let node1 = Participant::from(1);
+
+        // Generate keys for both nodes
+        let (cipher_sk0, cipher_pk0) = hpke::generate();
+        let (cipher_sk1, cipher_pk1) = hpke::generate();
+        let sign_sk0 =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "node0-sign");
+        let sign_sk1 =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "node1-sign");
+
+        // Set up participants map
+        let mut participants = Participants::default();
+        participants.insert(
+            &node0,
+            ParticipantInfo {
+                sign_pk: sign_sk0.public_key(),
+                cipher_pk: cipher_pk0.clone(),
+                id: node0.into(),
+                url: "http://localhost:3030".to_string(),
+                account_id: "node0.test.near".parse().unwrap(),
+            },
+        );
+        participants.insert(
+            &node1,
+            ParticipantInfo {
+                sign_pk: sign_sk1.public_key(),
+                cipher_pk: cipher_pk1.clone(),
+                id: node1.into(),
+                url: "http://localhost:3031".to_string(),
+                account_id: "node1.test.near".parse().unwrap(),
+            },
+        );
+        let participants = ParticipantMap::One(participants);
+
+        // Simulate message exchange from node0 to node1
+
+        // Message 1: First message should use Standard (HPKE) encryption
+        let msg1 = vec![Message::Triple(TripleMessage {
+            id: 1,
+            epoch,
+            from: node0,
+            data: vec![1u8; 512],
+            timestamp: 1000,
+        })];
+
+        let (encrypted1, session_key1) =
+            SignedMessage::encrypt(&msg1, node0, &sign_sk0, &cipher_pk1, None).unwrap();
+
+        // Verify first message uses Standard encryption
+        assert!(
+            matches!(encrypted1, Ciphered::Standard(_)),
+            "First message should use Standard HPKE encryption"
+        );
+        assert!(
+            session_key1.is_some(),
+            "First message should return a session key"
+        );
+
+        // Decrypt on node1 side
+        let (decrypted1, received_session1): (Vec<Message>, _) =
+            SignedMessage::decrypt(&encrypted1, &cipher_sk1, &participants, None).unwrap();
+        assert_eq!(decrypted1, msg1, "Decrypted message should match original");
+        assert!(
+            received_session1.is_some(),
+            "Receiver should get session key from first message"
+        );
+
+        // Message 2: Second message should use Cached (session key) encryption
+        let msg2 = vec![Message::Triple(TripleMessage {
+            id: 2,
+            epoch,
+            from: node0,
+            data: vec![2u8; 1024],
+            timestamp: 2000,
+        })];
+
+        let mut sender_session = session_key1.unwrap();
+        let (encrypted2, session_key2) = SignedMessage::encrypt(
+            &msg2,
+            node0,
+            &sign_sk0,
+            &cipher_pk1,
+            Some(&mut sender_session),
+        )
+        .unwrap();
+
+        // Verify second message uses Cached encryption
+        assert!(
+            matches!(encrypted2, Ciphered::Cached(_)),
+            "Second message should use Cached session key encryption"
+        );
+        assert!(
+            session_key2.is_none(),
+            "Second message should not return a new session key"
+        );
+
+        // Decrypt on node1 side using the session key
+        let mut receiver_session = received_session1.unwrap();
+        let (decrypted2, received_session2): (Vec<Message>, _) = SignedMessage::decrypt(
+            &encrypted2,
+            &cipher_sk1,
+            &participants,
+            Some(&mut receiver_session),
+        )
+        .unwrap();
+        assert_eq!(decrypted2, msg2, "Decrypted message should match original");
+        assert!(
+            received_session2.is_none(),
+            "Cached message should not return a new session key"
+        );
+
+        // Message 3: Third message to verify session continues to work
+        let msg3 = vec![
+            Message::Triple(TripleMessage {
+                id: 3,
+                epoch,
+                from: node0,
+                data: vec![3u8; 2048],
+                timestamp: 3000,
+            }),
+            Message::Triple(TripleMessage {
+                id: 4,
+                epoch,
+                from: node0,
+                data: vec![4u8; 512],
+                timestamp: 3001,
+            }),
+        ];
+
+        let (encrypted3, session_key3) = SignedMessage::encrypt(
+            &msg3,
+            node0,
+            &sign_sk0,
+            &cipher_pk1,
+            Some(&mut sender_session),
+        )
+        .unwrap();
+
+        assert!(
+            matches!(encrypted3, Ciphered::Cached(_)),
+            "Third message should use Cached session key encryption"
+        );
+        assert!(
+            session_key3.is_none(),
+            "Third message should not return a new session key"
+        );
+
+        let (decrypted3, _): (Vec<Message>, _) = SignedMessage::decrypt(
+            &encrypted3,
+            &cipher_sk1,
+            &participants,
+            Some(&mut receiver_session),
+        )
+        .unwrap();
+        assert_eq!(decrypted3, msg3, "Decrypted message should match original");
+
+        // Verify nonce progression (each message should increment the nonce)
+        if let Ciphered::Cached(ref cached2) = encrypted2 {
+            if let Ciphered::Cached(ref cached3) = encrypted3 {
+                assert!(
+                    cached3.nonce > cached2.nonce,
+                    "Nonces should increment with each message"
+                );
+            }
+        }
+
+        // Test reverse direction: node1 to node0
+        let msg_reverse = vec![Message::Triple(TripleMessage {
+            id: 5,
+            epoch,
+            from: node1,
+            data: vec![5u8; 1024],
+            timestamp: 4000,
+        })];
+
+        // First message in reverse direction should also use Standard encryption
+        let (encrypted_reverse, session_reverse) =
+            SignedMessage::encrypt(&msg_reverse, node1, &sign_sk1, &cipher_pk0, None).unwrap();
+        assert!(
+            matches!(encrypted_reverse, Ciphered::Standard(_)),
+            "First message in reverse should use Standard encryption"
+        );
+        assert!(
+            session_reverse.is_some(),
+            "First reverse message should return a session key"
+        );
+
+        let (decrypted_reverse, _): (Vec<Message>, _) =
+            SignedMessage::decrypt(&encrypted_reverse, &cipher_sk0, &participants, None).unwrap();
+        assert_eq!(
+            decrypted_reverse, msg_reverse,
+            "Reverse message should decrypt correctly"
+        );
     }
 }
