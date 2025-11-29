@@ -15,7 +15,7 @@ use std::time::Duration;
 /// Use this toggle locally to regenerate hard-coded inputs such as key shares,
 /// triples, and presignatures.
 /// You might have to create the directory `integrations-tests/tmp` first.
-const WRITE_OUTPUT_TO_FILES: bool = false;
+const WRITE_OUTPUT_TO_FILES: bool = true;
 const KEY_SHARE_FILE: &str = "tmp/key_shares.json";
 const TRIPLES_FILE: &str = "tmp/triples.json";
 const PRESIGNATURES_FILE: &str = "tmp/presignatures.json";
@@ -552,4 +552,114 @@ async fn test_sign_requests_wait_for_presignatures() {
             "unexpected rpc action {action_str}"
         );
     }
+}
+
+/// Test sign request contention with 5 nodes.
+/// This test generates triples and presignatures on-the-fly (slower but more realistic).
+/// Uses 5_nodes.json fixture for pre-shared keys only.
+///
+/// Note: 5-node triple generation takes ~3-4 minutes, so this test has a longer timeout.
+/// We only wait for 3 presignatures per owner since presignature distribution is not uniform.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sign_contention_5_nodes() {
+    const NUM_NODES: u32 = 5;
+    const THRESHOLD: usize = 4;
+    const NUM_SIGN_REQUESTS: u8 = 5; // Reduced from 10 to match presignature availability
+                                     // Wait for at least 3 presignatures per owner - presignature distribution is not uniform
+                                     // and we don't want to wait forever for even distribution
+    const MIN_PRESIGNATURES_PER_OWNER: usize = 3;
+    // Configure stockpile targets higher than what we wait for
+    const STOCKPILE_MIN: u32 = 8;
+    const STOCKPILE_MAX: u32 = 12;
+
+    tracing::info!(
+        num_nodes = NUM_NODES,
+        threshold = THRESHOLD,
+        num_requests = NUM_SIGN_REQUESTS,
+        "starting 5-node contention test with on-the-fly generation"
+    );
+
+    // Build network with pre-shared keys, generate triples/presignatures on the fly
+    let network = MpcFixtureBuilder::new(NUM_NODES, THRESHOLD)
+        .with_preshared_key()
+        .with_min_triples_stockpile(STOCKPILE_MIN)
+        .with_max_triples_stockpile(STOCKPILE_MAX)
+        .with_min_presignatures_stockpile(STOCKPILE_MIN)
+        .with_max_presignatures_stockpile(STOCKPILE_MAX)
+        .build()
+        .await;
+
+    // Wait for presignatures to be generated - 5-node triple generation takes ~3-4 minutes
+    // We wait for a modest per-owner count since distribution is not uniform
+    tracing::info!("waiting for presignatures to be generated (triple gen takes ~3-4 min)...");
+    tokio::time::timeout(
+        Duration::from_secs(480), // 8 minutes for triple + presignature generation
+        network.wait_for_presignatures(MIN_PRESIGNATURES_PER_OWNER),
+    )
+    .await
+    .expect("should generate presignatures within 8 minutes");
+
+    let initial_presignatures = network[0].presignature_storage.len_generated().await;
+    tracing::info!(
+        initial_presignatures,
+        "presignatures ready, sending sign requests"
+    );
+
+    // Send sign requests to all nodes concurrently (simulates real network conditions)
+    for seed in 0..NUM_SIGN_REQUESTS {
+        let request = sign_request(seed);
+        for node in &network.nodes {
+            node.sign_tx
+                .send(Sign::Request(request.clone()))
+                .await
+                .unwrap();
+        }
+    }
+
+    // Wait for all signatures - allow more time for 5-node consensus
+    let timeout = Duration::from_secs(120);
+    let actions = tokio::time::timeout(
+        timeout,
+        network.wait_for_actions(NUM_SIGN_REQUESTS as usize),
+    )
+    .await
+    .expect("should produce all signatures");
+
+    let final_presignatures = network[0].presignature_storage.len_generated().await;
+    let presignatures_consumed = initial_presignatures.saturating_sub(final_presignatures);
+
+    tracing::info!(
+        signatures_produced = actions.len(),
+        initial_presignatures,
+        final_presignatures,
+        presignatures_consumed,
+        "5-node contention test completed"
+    );
+
+    assert_eq!(
+        actions.len(),
+        NUM_SIGN_REQUESTS as usize,
+        "should have exactly {} signatures",
+        NUM_SIGN_REQUESTS
+    );
+
+    for action_str in &actions {
+        assert!(
+            action_str.contains("RpcAction::Publish"),
+            "unexpected rpc action {action_str}"
+        );
+    }
+
+    // Verify 1:1 presignature consumption (with small tolerance for timing)
+    assert!(
+        presignatures_consumed <= actions.len() + 2,
+        "too many presignatures consumed ({presignatures_consumed}) for {} signatures - potential burning issue",
+        actions.len()
+    );
+
+    tracing::info!(
+        "5-node test passed: {} signatures with {} presignatures consumed",
+        actions.len(),
+        presignatures_consumed
+    );
 }
