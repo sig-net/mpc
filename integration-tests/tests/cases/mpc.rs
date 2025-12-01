@@ -15,7 +15,7 @@ use std::time::Duration;
 /// Use this toggle locally to regenerate hard-coded inputs such as key shares,
 /// triples, and presignatures.
 /// You might have to create the directory `integrations-tests/tmp` first.
-const WRITE_OUTPUT_TO_FILES: bool = true;
+const WRITE_OUTPUT_TO_FILES: bool = false;
 const KEY_SHARE_FILE: &str = "tmp/key_shares.json";
 const TRIPLES_FILE: &str = "tmp/triples.json";
 const PRESIGNATURES_FILE: &str = "tmp/presignatures.json";
