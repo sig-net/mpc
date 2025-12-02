@@ -1,3 +1,5 @@
+pub const PROTOCOL_VERSION: u64 = 1;
+
 pub mod backlog;
 pub mod checkpoint_consensus;
 pub mod cli;

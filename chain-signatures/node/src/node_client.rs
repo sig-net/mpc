@@ -1,9 +1,8 @@
 use crate::backlog::Checkpoint;
 use crate::protocol::message::cbor_to_bytes;
-use crate::protocol::state::NodeStatus;
 use crate::protocol::sync::SyncUpdate;
 use crate::protocol::Chain;
-use crate::web::StateView;
+use crate::web::{StateView, StatusResponse};
 
 use hyper::StatusCode;
 use mpc_keys::hpke::Ciphered;
@@ -152,7 +151,7 @@ impl NodeClient {
         Ok(resp.json::<StateView>().await?)
     }
 
-    pub async fn status(&self, base: impl IntoUrl) -> Result<NodeStatus, RequestError> {
+    pub async fn status(&self, base: impl IntoUrl) -> Result<StatusResponse, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("status");
 
