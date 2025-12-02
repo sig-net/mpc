@@ -2,7 +2,7 @@
 //! it before it starts running.
 
 use crate::containers::Redis;
-use crate::mpc_fixture::fixture_interface::SharedOutput;
+use crate::mpc_fixture::fixture_interface::{CompletionBroadcast, SharedOutput};
 use crate::mpc_fixture::fixture_tasks::MessageFilter;
 use crate::mpc_fixture::input::FixtureInput;
 use crate::mpc_fixture::mock_governance::MockGovernance;
@@ -159,6 +159,7 @@ impl MpcFixtureBuilder {
         let initial_mesh_state = self.build_mesh_state();
 
         let output = SharedOutput::default();
+        let completion_broadcast = CompletionBroadcast::new();
         let mut nodes = vec![];
 
         let account_ids: Vec<_> = self
@@ -185,6 +186,7 @@ impl MpcFixtureBuilder {
                     shared_contract_state_tx.clone(),
                     &mut self.fixture_config,
                     &output,
+                    &completion_broadcast,
                 )
                 .await;
 
@@ -405,6 +407,7 @@ impl MpcFixtureNodeBuilder {
         protocol_state_tx: watch::Sender<Option<ProtocolState>>,
         fixture_config: &mut FixtureConfig,
         shared_output: &SharedOutput,
+        completion_broadcast: &CompletionBroadcast,
     ) -> MpcFixtureNode {
         // overwrite the default protocol config with the built config
         self.config.protocol = context.protocol_config.clone();
@@ -471,6 +474,9 @@ impl MpcFixtureNodeBuilder {
             mesh_tx.clone(),
             config_tx.clone(),
             self.messaging.filter,
+            sign_tx.clone(),
+            completion_broadcast.tx.clone(),
+            completion_broadcast.subscribe(),
         );
 
         let mut node = MpcFixtureNode {

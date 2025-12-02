@@ -8,9 +8,12 @@ use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol;
 use mpc_node::protocol::message::{MessageOutbox, SendMessage, SignedMessage};
+use mpc_node::protocol::Sign;
 use mpc_node::rpc::RpcAction;
+use mpc_primitives::SignId;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -25,6 +28,9 @@ pub(super) fn test_mock_network(
     mesh: watch::Sender<MeshState>,
     config: watch::Sender<Config>,
     mut filter: MessageFilter,
+    sign_tx: Sender<Sign>,
+    completion_tx: broadcast::Sender<SignId>,
+    mut completion_rx: broadcast::Receiver<SignId>,
 ) -> JoinHandle<()> {
     let msg_log = Arc::clone(&shared_output.msg_log);
     let rpc_actions = Arc::clone(&shared_output.rpc_actions);
@@ -83,17 +89,30 @@ pub(super) fn test_mock_network(
                 }
 
                 Some(rpc) = rpc_rx.recv() => {
-                    let action_str = match rpc {
-                        RpcAction::Publish(publish_action) => {
-                            format!(
+                    let (action_str, sign_id) = match rpc {
+                        RpcAction::Publish(ref publish_action) => {
+                            (format!(
                                 "RpcAction::Publish({:?})",
                                 publish_action.indexed,
-                            )
+                            ), publish_action.indexed.id.clone())
                         },
                     };
-                    tracing::error!(target: "mock_network", ?action_str, "Received RPC action");
+                    tracing::info!(target: "mock_network", ?action_str, "Received RPC action, broadcasting completion");
                     let mut actions_log = rpc_actions.lock().await;
                     actions_log.insert(action_str);
+
+                    // Broadcast completion to all nodes
+                    if let Err(e) = completion_tx.send(sign_id) {
+                        tracing::warn!(target: "mock_network", ?e, "Failed to broadcast completion");
+                    }
+                }
+
+                Ok(sign_id) = completion_rx.recv() => {
+                    // Received a completion from another node, forward to our sign_tx
+                    tracing::info!(target: "mock_network", ?sign_id, "Received completion broadcast, forwarding to sign channel");
+                    if let Err(e) = sign_tx.send(Sign::Completion(sign_id)).await {
+                        tracing::warn!(target: "mock_network", ?e, "Failed to send completion to sign channel");
+                    }
                 }
 
                 else => {

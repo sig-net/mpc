@@ -10,11 +10,12 @@ use mpc_node::protocol::state::NodeStateWatcher;
 use mpc_node::protocol::sync::SyncChannel;
 use mpc_node::protocol::{MessageChannel, ProtocolState, Sign};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
+use mpc_primitives::SignId;
 use near_sdk::AccountId;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::sync::{watch, Mutex};
 
 pub struct MpcFixture {
@@ -45,6 +46,24 @@ pub struct MpcFixtureNode {
 pub struct SharedOutput {
     pub msg_log: Arc<Mutex<Vec<String>>>,
     pub rpc_actions: Arc<Mutex<HashSet<String>>>,
+}
+
+/// Broadcast channel for sign completions across all nodes.
+/// When any node publishes a signature, this channel is used to notify
+/// all other nodes so they can abort their tasks for the same SignId.
+pub struct CompletionBroadcast {
+    pub tx: broadcast::Sender<SignId>,
+}
+
+impl CompletionBroadcast {
+    pub fn new() -> Self {
+        let (tx, _) = broadcast::channel(1024);
+        Self { tx }
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<SignId> {
+        self.tx.subscribe()
+    }
 }
 
 impl MpcFixture {
