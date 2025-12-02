@@ -438,6 +438,10 @@ impl Redis {
 
 pub struct EthereumSandbox {
     pub container: Container,
+    /// Optional local anvil process spawned as a fallback when the container's RPC
+    /// endpoint isn't reachable (useful on macOS where Docker "host" networking
+    /// doesn't work reliably).
+    pub process: Option<Child>,
     pub internal_http_endpoint: String,
     pub external_http_endpoint: String,
     pub secret_key: String,
@@ -498,15 +502,88 @@ impl EthereumSandbox {
             (endpoint.clone(), endpoint)
         };
 
-        wait_for_rpc(&external_http_endpoint).await?;
+        // Try to wait for the RPC to become available on the mapped/exposed
+        // endpoint. If that fails, we attempt a local-anvil fallback (this
+        // improves dev experience on macOS where Docker host networking is
+        // problematic).
+        let mut process: Option<Child> = None;
+
+        match wait_for_rpc(&external_http_endpoint).await {
+            Ok(()) => {
+                // OK, container's RPC is reachable
+            }
+            Err(e) => {
+                tracing::warn!(?e, endpoint=%external_http_endpoint, "container ethereum RPC didn't become ready — trying local anvil fallback if available");
+
+                // Try to detect if we have a local `anvil` binary available
+                match Command::new("anvil").arg("--version").output().await {
+                    Ok(out) if out.status.success() => {
+                        tracing::info!("local anvil found in PATH — spawning fallback anvil process on 127.0.0.1:8545");
+
+                        // Spawn a local anvil (non-blocking) bound to 127.0.0.1:8545
+                        let child = Command::new("anvil")
+                            .arg("--host")
+                            .arg("127.0.0.1")
+                            .arg("--chain-id")
+                            .arg(Self::DEFAULT_CHAIN_ID.to_string())
+                            .arg("--mnemonic")
+                            .arg(Self::DEFAULT_MNEMONIC.to_string())
+                            .spawn()
+                            .context("failed to spawn local anvil fallback")?;
+
+                        // Update endpoints to use local anvil port
+                        let local_endpoint = "http://127.0.0.1:8545".to_string();
+                        // give a bit of time and wait for RPC to be ready
+                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                        wait_for_rpc(&local_endpoint).await.context("local anvil fallback did not become ready")?;
+
+                        process = Some(child);
+
+                        // Replace external/internal endpoints with the local one
+                        let internal_http_endpoint = local_endpoint.clone();
+                        let external_http_endpoint = local_endpoint;
+
+                        return Ok(Self {
+                            container,
+                            process,
+                            internal_http_endpoint,
+                            external_http_endpoint,
+                            secret_key,
+                            chain_id: Self::DEFAULT_CHAIN_ID,
+                        });
+                    }
+                    _ => {
+                        // No local anvil or cannot spawn — return original error
+                        anyhow::bail!(e);
+                    }
+                }
+            }
+        }
 
         Ok(Self {
+            container,
+            process,
             internal_http_endpoint,
             external_http_endpoint,
             secret_key,
             chain_id: Self::DEFAULT_CHAIN_ID,
-            container,
         })
+    }
+}
+
+impl Drop for EthereumSandbox {
+    fn drop(&mut self) {
+        // If we spawned a local anvil process, try to kill it so tests don't
+        // leave stray processes running.
+        if let Some(child) = self.process.as_mut() {
+            // We're in a synchronous Drop; child.kill() is async for async_process::Child.
+            // Try best-effort: attempt to kill via std::process::Command if possible,
+            // otherwise attempt to use the async child API in a blocking manner.
+            match child.kill() {
+                Ok(_) => tracing::info!("killed local anvil fallback process"),
+                Err(err) => tracing::warn!(?err, "failed to kill local anvil process in Drop; it may already be terminated"),
+            }
+        }
     }
 }
 

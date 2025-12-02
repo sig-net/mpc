@@ -5,6 +5,7 @@ pub mod eth;
 pub mod execute;
 pub mod local;
 pub mod mpc_fixture;
+pub mod mpc_env;
 pub mod utils;
 
 use std::collections::HashMap;

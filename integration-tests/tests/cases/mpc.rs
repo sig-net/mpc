@@ -1,6 +1,6 @@
 use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
-use integration_tests::mpc_fixture::MpcFixtureBuilder;
+use integration_tests::mpc_env::MpcEnvBuilder;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::SignRequestType;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState, Sign};
@@ -22,7 +22,8 @@ const PRESIGNATURES_FILE: &str = "tmp/presignatures.json";
 
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_basic_generate_keys() {
-    let network = MpcFixtureBuilder::new(5, 4).build().await;
+    let env = MpcEnvBuilder::new(5, 4).build().await.unwrap();
+    let network = env.into_fixture();
 
     let result = tokio::time::timeout(Duration::from_secs(10), async {
         let mut contract_state_watcher = network.shared_contract_state.subscribe();
@@ -69,10 +70,12 @@ async fn test_basic_generate_keys() {
 
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_basic_generate_triples() {
-    let network = MpcFixtureBuilder::default()
+    let env = MpcEnvBuilder::default()
         .only_generate_triples()
         .build()
-        .await;
+        .await
+        .unwrap();
+    let network = env.into_fixture();
 
     tokio::time::timeout(Duration::from_secs(180), network.wait_for_triples(1))
         .await
@@ -110,10 +113,12 @@ async fn test_basic_generate_triples() {
 
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_basic_generate_presignature() {
-    let network = MpcFixtureBuilder::default()
+    let env = MpcEnvBuilder::default()
         .only_generate_presignatures()
         .build()
-        .await;
+        .await
+        .unwrap();
+    let network = env.into_fixture();
 
     tokio::time::timeout(Duration::from_secs(10), network.wait_for_presignatures(1))
         .await
@@ -154,10 +159,12 @@ async fn test_basic_generate_presignature() {
 
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_basic_sign() {
-    let network = MpcFixtureBuilder::default()
+    let env = MpcEnvBuilder::default()
         .only_generate_signatures()
         .build()
-        .await;
+        .await
+        .unwrap();
+    let network = env.into_fixture();
 
     tokio::time::timeout(
         Duration::from_millis(300),
@@ -241,7 +248,7 @@ async fn test_presignature_timeout() {
         })
     }
 
-    let network = MpcFixtureBuilder::default()
+    let env = MpcEnvBuilder::default()
         // configure network ready to generate presignatures immediately
         .only_generate_presignatures()
         // set exact presignature count target
@@ -254,7 +261,10 @@ async fn test_presignature_timeout() {
         // speed up timeout
         .with_presignature_timeout_ms(2000)
         .build()
-        .await;
+        .await
+        .unwrap();
+
+    let network = env.into_fixture();
 
     tokio::time::timeout(Duration::from_secs(300), network.wait_for_presignatures(1))
         .await
