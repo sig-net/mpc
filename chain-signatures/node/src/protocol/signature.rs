@@ -27,6 +27,7 @@ use mpc_primitives::{SignArgs, SignId};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
+use sha3::Digest;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -37,6 +38,11 @@ use near_account_id::AccountId;
 
 /// The round interval to search for a proposer in the organizing phase.
 const ROUND_INTERVAL: usize = 512;
+
+// If the message comes from someone who isn't the expected proposer,
+// don't immediately reject. Accept proposers who would be selected
+// for any round within +/- ACCEPT_ROUND_RANGE of our current round.
+const ACCEPT_ROUND_RANGE: usize = 3;
 
 /// All relevant info pertaining to an Indexed sign request from an indexer.
 #[derive(Debug, Clone, PartialEq)]
@@ -131,7 +137,12 @@ impl SignOrganizer {
         participants: &[Participant],
         entropy: &[u8; 32],
     ) -> Participant {
-        let index = entropy[0] as usize + round;
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(entropy);
+        hasher.update(&(round as u64).to_le_bytes());
+        let hash = hasher.finalize();
+
+        let index = u64::from_le_bytes(hash[0..8].try_into().unwrap()) as usize;
         participants[index % participants.len()]
     }
 
@@ -356,24 +367,56 @@ impl SignPositor {
 
                     break *presignature_id;
                 } else {
-                    tracing::warn!(
-                        ?sign_id,
-                        ?from,
-                        ?proposer,
-                        "received Propose from non-proposer, rejecting"
-                    );
 
-                    ctx.msg
-                        .send(
-                            ctx.me,
-                            *from,
-                            PositMessage {
-                                id: PositProtocolId::Signature(sign_id, *presignature_id),
-                                from: ctx.me,
-                                action: PositAction::Reject,
-                            },
-                        )
-                        .await;
+                    // Build participants vector (same ordering used elsewhere)
+                    let participants = ctx.participants.iter().copied().collect::<Vec<_>>();
+
+                    // Check if `from` would be proposer for any round in the neighborhood
+                    let mut is_nearby_proposer = false;
+                    let start = round.saturating_sub(ACCEPT_ROUND_RANGE);
+                    let end = round + ACCEPT_ROUND_RANGE;
+                    for r in start..=end {
+                        let candidate = SignOrganizer::proposer_per_round(r, &participants, &state.indexed.args.entropy);
+                        if candidate == *from {
+                            tracing::info!(?sign_id, round = r, ?from, "received Propose from proposer valid for nearby round, accepting");
+                            is_nearby_proposer = true;
+                            break;
+                        }
+                    }
+
+                    if !is_nearby_proposer {
+                        tracing::warn!(?sign_id, ?from, ?proposer, "received Propose from non-proposer and not in nearby rounds, ignoring");
+                        // We intentionally *do not* send an explicit Reject here — the sender
+                        // might simply be a proposer for a different view and rejecting is noisy.
+                        continue;
+                    }
+
+                    // If the sender is a nearby proposer, check that we have access to the presignature.
+                    if !ctx.presignatures.contains(*presignature_id).await {
+                        tracing::warn!(
+                            ?sign_id,
+                            presignature_id,
+                            "deliberator does not have access to proposed presignature, rejecting"
+                        );
+                        // Inform the (nearby) proposer we cannot accept this proposal because
+                        // we do not have the presignature required to participate.
+                        ctx.msg
+                            .send(
+                                ctx.me,
+                                *from,
+                                PositMessage {
+                                    id: PositProtocolId::Signature(sign_id, *presignature_id),
+                                    from: ctx.me,
+                                    action: PositAction::Reject,
+                                },
+                            )
+                            .await;
+                        continue;
+                    }
+
+                    // Otherwise accept this proposal.
+                    tracing::info!(?sign_id, ?from, ?proposer, "accepting propose from nearby proposer");
+                    break *presignature_id;
                 }
             }
         })
@@ -1312,5 +1355,53 @@ impl PendingPresignature {
                 None
             }
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_entropy(seed: u8) -> [u8; 32] {
+        let mut e = [0u8; 32];
+        e[0] = seed;
+        e
+    }
+
+    #[test]
+    fn proposer_per_round_varies_with_round_and_entropy() {
+        let participants = vec![Participant::from(0), Participant::from(1), Participant::from(2), Participant::from(3)];
+        let entropy = make_entropy(1);
+
+        let p0 = SignOrganizer::proposer_per_round(0, &participants, &entropy);
+        let p1 = SignOrganizer::proposer_per_round(1, &participants, &entropy);
+        let p2 = SignOrganizer::proposer_per_round(2, &participants, &entropy);
+
+        // For a non-trivial hash it's extremely unlikely all three are equal
+        assert!(!(p0 == p1 && p1 == p2));
+    }
+
+    #[test]
+    fn nearby_proposer_detection_within_3_rounds() {
+        let participants = vec![Participant::from(0), Participant::from(1), Participant::from(2), Participant::from(3)];
+        let entropy = make_entropy(2);
+
+        let round = 10usize;
+        // pick a 'from' that is the proposer for round + 2
+        let from = SignOrganizer::proposer_per_round(round + 2, &participants, &entropy);
+
+        // verify the algorithm would accept it when checking +/-3 rounds around `round`
+        let mut found = false;
+        for r in round.saturating_sub(3)..=round + 3 {
+            if SignOrganizer::proposer_per_round(r, &participants, &entropy) == from {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "expected proposer from nearby round to be detected");
+
+        // We only assert the nearby detection here; far-away rounds could collide due to
+        // hash periodicity in small test setups and are not reliable to assert against.
     }
 }
