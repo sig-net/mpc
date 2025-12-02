@@ -44,6 +44,13 @@ const ROUND_INTERVAL: usize = 512;
 // for any round within +/- ACCEPT_ROUND_RANGE of our current round.
 const ACCEPT_ROUND_RANGE: usize = 3;
 
+/// Timeout durations for the posit phase. Propose is should be faster than deliberator
+/// for the purpose of starting sooner if we have enough participants.
+const PROPOSER_TIMEOUT: Duration = Duration::from_secs(5);
+/// Deliberator timeout should be slightly longer to account for proposer expiring their
+/// posit and then issuing a start message.
+const DELIBERATOR_TIMEOUT: Duration = Duration::from_secs(7);
+
 /// All relevant info pertaining to an Indexed sign request from an indexer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexedSignRequest {
@@ -237,7 +244,7 @@ impl SignOrganizer {
             tracing::info!(?sign_id, round = ?state.round, "proposer waiting for presignature");
             let stable = stable.iter().copied().collect::<Vec<_>>();
             let mut recycle = Vec::new();
-            let fetch = tokio::time::timeout(Duration::from_secs(30), async {
+            let fetch = tokio::time::timeout(PROPOSER_TIMEOUT, async {
                 loop {
                     if let Some(taken) = ctx.presignatures.take_mine(ctx.me).await {
                         let participants = intersect_vec(&[&taken.artifact.participants, &stable]);
@@ -248,7 +255,7 @@ impl SignOrganizer {
 
                         break (taken, participants);
                     }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
                 }
             })
             .await;
@@ -321,7 +328,7 @@ impl SignPositor {
     ) -> Result<PresignatureId, SignPhase> {
         let sign_id = ctx.sign_id;
         let round = state.round;
-        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+        let outcome = tokio::time::timeout(DELIBERATOR_TIMEOUT, async {
             loop {
                 let Some(task_msg) = task_rx.recv().await else {
                     continue;
@@ -504,7 +511,7 @@ impl SignPositor {
         let posit_participants = stable.iter().copied().collect::<Vec<_>>();
         let mut counter = SinglePositCounter::new(ctx.me, &posit_participants);
 
-        let posit_timeout = Duration::from_secs(60);
+        let posit_timeout = if is_proposer { PROPOSER_TIMEOUT } else { DELIBERATOR_TIMEOUT };
         let posit_deadline = tokio::time::sleep(posit_timeout);
         tokio::pin!(posit_deadline);
 
