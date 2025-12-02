@@ -452,6 +452,9 @@ async fn test_sign_requests_wait_for_presignatures() {
         .with_preshared_key()
         .with_preshared_triples()
         .with_presignature_stockpile()
+        // Disable triple generation since we're using preshared triples
+        .with_min_triples_stockpile(0)
+        .with_max_triples_stockpile(0)
         // Enable presignature generation for second batch
         .with_min_presignatures_stockpile(5)
         .with_max_presignatures_stockpile(20)
@@ -557,18 +560,12 @@ async fn test_sign_requests_wait_for_presignatures() {
 /// Test sign request contention with 5 nodes.
 /// This test generates triples and presignatures on-the-fly (slower but more realistic).
 /// Uses 5_nodes.json fixture for pre-shared keys only.
-///
-/// Note: 5-node triple generation takes ~3-4 minutes, so this test has a longer timeout.
-/// We only wait for 3 presignatures per owner since presignature distribution is not uniform.
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_sign_contention_5_nodes() {
     const NUM_NODES: u32 = 5;
     const THRESHOLD: usize = 4;
     const NUM_SIGN_REQUESTS: u8 = 5; // Reduced from 10 to match presignature availability
-                                     // Wait for at least 3 presignatures per owner - presignature distribution is not uniform
-                                     // and we don't want to wait forever for even distribution
     const MIN_PRESIGNATURES_PER_OWNER: usize = 3;
-    // Configure stockpile targets higher than what we wait for
     const STOCKPILE_MIN: u32 = 8;
     const STOCKPILE_MAX: u32 = 12;
 
