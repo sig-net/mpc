@@ -1,3 +1,4 @@
+use crate::deadman_switch::DeadmanSwitch;
 use crate::mpc_env::config::MpcEnvConfig;
 
 /// Fluent builder for MpcEnv. For Phase 1 it's intentionally minimal — it
@@ -119,6 +120,15 @@ impl MpcEnvBuilder {
     /// Build the environment. In phase 1 this is a placeholder which will be
     /// expanded in later phases.
     pub async fn build(self) -> anyhow::Result<crate::mpc_env::MpcEnv> {
+        // Spawn the deadman switch first (will be disabled if MPC_KEEP_ENV=1)
+        let deadman_switch = match DeadmanSwitch::spawn().await {
+            Ok(switch) => Some(switch),
+            Err(e) => {
+                tracing::warn!("failed to spawn deadman switch: {}", e);
+                None
+            }
+        };
+
         // If disable_real_nodes, construct an in-process MpcFixture and attach
         // it to the environment. This delegates to the existing fixture
         // implementation.
@@ -161,6 +171,7 @@ impl MpcEnvBuilder {
                 config: self.config,
                 fixture: Some(fixture),
                 cluster: None,
+                deadman_switch,
             });
         }
 
@@ -183,6 +194,7 @@ impl MpcEnvBuilder {
                 config: self.config,
                 fixture: None,
                 cluster: Some(cluster),
+                deadman_switch,
             });
         }
 
@@ -190,6 +202,7 @@ impl MpcEnvBuilder {
             config: self.config,
             fixture: None,
             cluster: None,
+            deadman_switch,
         })
     }
 }

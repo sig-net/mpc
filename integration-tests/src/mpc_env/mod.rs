@@ -6,6 +6,8 @@ pub use builder::MpcEnvBuilder;
 pub use config::MpcEnvConfig;
 pub use node::{MpcEnvNode, InProcessNode, ExternalNode};
 
+use crate::deadman_switch::DeadmanSwitch;
+
 /// Runtime environment for tests. This is a small, forward-compatible
 /// abstraction that will be expanded in later phases. For now this is a
 /// placeholder container that will be populated by the builder.
@@ -18,6 +20,10 @@ pub struct MpcEnv {
     /// If the environment was built as a full cluster using real nodes, the
     /// cluster will be stored here and can be converted with `into_cluster`.
     pub cluster: Option<crate::cluster::Cluster>,
+
+    /// Deadman switch for automatic cleanup of orphaned processes.
+    /// Active unless `MPC_KEEP_ENV=1` is set.
+    deadman_switch: Option<DeadmanSwitch>,
 }
 
 impl MpcEnv {
@@ -62,5 +68,26 @@ impl MpcEnv {
         } else {
             panic!("wait_for_actions only available for in-process fixtures");
         }
+    }
+
+    /// Register process IDs with the deadman switch for monitoring.
+    pub async fn watch_pids(&self, pids: &[u32]) -> anyhow::Result<()> {
+        if let Some(ref switch) = self.deadman_switch {
+            switch.watch_pids(pids).await?;
+        }
+        Ok(())
+    }
+
+    /// Register container IDs with the deadman switch for monitoring.
+    pub async fn watch_containers(&self, containers: &[String]) -> anyhow::Result<()> {
+        if let Some(ref switch) = self.deadman_switch {
+            switch.watch_containers(containers).await?;
+        }
+        Ok(())
+    }
+
+    /// Check if the deadman switch is active.
+    pub fn has_deadman_switch(&self) -> bool {
+        self.deadman_switch.as_ref().map(|s| s.is_active()).unwrap_or(false)
     }
 }

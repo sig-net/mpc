@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod cluster;
 pub mod containers;
+pub mod deadman_switch;
 pub mod eth;
 pub mod execute;
 pub mod local;
