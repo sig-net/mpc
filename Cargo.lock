@@ -7987,6 +7987,7 @@ dependencies = [
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "parity-scale-codec",
  "prometheus 0.14.0",
  "rand 0.8.5",
  "redis",
@@ -7998,6 +7999,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha3",
+ "signet-pallet",
  "signet-program",
  "solana-client",
  "solana-sdk",
@@ -12555,6 +12557,14 @@ checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
  "digest 0.10.7",
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "signet-pallet"
+version = "0.1.0"
+dependencies = [
+ "parity-scale-codec",
+ "subxt",
 ]
 
 [[package]]

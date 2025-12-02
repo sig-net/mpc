@@ -1,0 +1,13 @@
+[package]
+name = "signet-pallet"
+version = "0.1.0"
+description = "Minimal types for Hydration indexer integration"
+edition = "2021"
+
+[lib]
+crate-type = ["lib"]
+name = "signet_pallet"
+
+[dependencies]
+parity-scale-codec = { version = "3", features = ["derive"] }
+subxt = "0.44"
