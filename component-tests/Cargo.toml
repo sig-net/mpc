@@ -1,0 +1,21 @@
+[package]
+name = "component-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# We intentionally reuse the integration-tests crate for its test harness
+# components (MpcEnv/MpcFixture). This keeps migration small — component-tests
+# is a thin wrapper that can hold standalone component-style tests and
+# convenience helpers.
+integration-tests = { path = "../integration-tests" }
+
+[features]
+# allow the crate to be used with docker-test when needed
+default = []
+
+docker-test = []
+
+[dev-dependencies]
+tokio = { version = "1.45.1", features = ["full", "test-util"] }

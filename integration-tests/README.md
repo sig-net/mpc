@@ -14,6 +14,17 @@ Then run the integration tests:
 
 ```BASH
 cargo test -p integration-tests --jobs 1 -- --test-threads 1
+
+Note: By default the repository is configured to run `./setup.sh` (via
+`.cargo/config.toml`) before tests to build contracts and the `mpc-node`. If you
+are running lightweight in-process tests (for example the MpcFixture / MpcEnv
+tests that don't require rebuilding the contract or node) you can skip that
+prebuild step to save time by setting the `SKIP_SETUP=1` or `SKIP_PREBUILD=1`
+environment variables. For example:
+
+```bash
+SKIP_SETUP=1 cargo test -p integration-tests --jobs 1 -- --test-threads 1
+```
 # or if you want to run tests in docker
 cargo test -p integration-tests --features docker-test
 ```
