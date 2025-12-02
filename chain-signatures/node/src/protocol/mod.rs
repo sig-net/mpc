@@ -19,7 +19,6 @@ pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
 pub use mpc_primitives::Chain;
 pub use signature::{IndexedSignRequest, Sign};
-use signet_program::SignBidirectionalEvent;
 pub use state::{Node, NodeState};
 
 use crate::backlog::Backlog;
@@ -238,7 +237,7 @@ pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHan
 #[allow(clippy::large_enum_variant)]
 pub enum SignRequestType {
     Sign,
-    SignBidirectional(SignBidirectionalEvent),
+    SignBidirectional(crate::indexer_common::SignBidirectionalEvent),
     RespondBidirectional(RespondBidirectionalTx),
 }
 

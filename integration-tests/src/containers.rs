@@ -114,6 +114,8 @@ impl Node {
         };
         let eth_args = EthArgs::from_config(config.cfg.eth.clone());
         let sol_args = mpc_node::indexer_sol::SolArgs::from_config(config.cfg.sol.clone());
+        let hydration_args =
+            mpc_node::indexer_hydration::HydrationArgs::from_config(config.cfg.hydration.clone());
         let args = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
@@ -124,6 +126,7 @@ impl Node {
             indexer_options: indexer_options.clone(),
             eth: eth_args,
             sol: sol_args,
+            hydration: hydration_args,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),

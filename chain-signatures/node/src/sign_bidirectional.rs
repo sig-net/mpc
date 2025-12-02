@@ -74,11 +74,11 @@ impl BidirectionalTx {
             anyhow::bail!("sign request is not a sign bidirectional");
         };
 
-        let unsigned_rlp_data = &event.serialized_transaction;
-        let target_chain = Chain::from_str(&event.dest).map_err(|err| {
+        let unsigned_rlp_data = &event.serialized_transaction();
+        let target_chain = Chain::from_str(&event.dest()).map_err(|err| {
             anyhow::anyhow!(
                 "invalid target chain '{}' for bidirectional transaction: {err}",
-                event.dest
+                event.dest()
             )
         })?;
         let source_chain = signature.indexed.chain;
@@ -95,19 +95,19 @@ impl BidirectionalTx {
 
         Ok(Self {
             id: BidirectionalTxId(signed_transaction_hash.into()),
-            sender: event.sender,
-            serialized_transaction: event.serialized_transaction,
+            sender: event.sender(),
+            serialized_transaction: event.serialized_transaction(),
             source_chain,
             target_chain,
-            caip2_id: event.caip2_id,
-            key_version: event.key_version,
-            deposit: event.deposit,
-            path: event.path,
-            algo: event.algo,
-            dest: event.dest,
-            params: event.params,
-            output_deserialization_schema: event.output_deserialization_schema,
-            respond_serialization_schema: event.respond_serialization_schema,
+            caip2_id: event.caip2_id(),
+            key_version: event.key_version(),
+            deposit: event.deposit(),
+            path: event.path(),
+            algo: event.algo(),
+            dest: event.dest(),
+            params: event.params(),
+            output_deserialization_schema: event.output_deserialization_schema(),
+            respond_serialization_schema: event.respond_serialization_schema(),
             request_id: signature.indexed.id.request_id,
             from_address,
             nonce,
