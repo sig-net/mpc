@@ -92,15 +92,10 @@ impl MpcFixture {
 
     pub async fn add_presignatures(&mut self) -> usize {
         let mut total_added = 0;
-
         let mut id_mapping = HashMap::new();
-        // let mut shares = HashMap::new();
-
         for node in &self.nodes {
             if let Some(my_shares) = self.pregenerated_presignatures.get(&node.me) {
                 for (owner, presignature_shares) in my_shares {
-                    // let id: PresignatureId = random();
-
                     for presignature_share in presignature_shares {
                         let id = id_mapping
                             .entry(presignature_share.id)

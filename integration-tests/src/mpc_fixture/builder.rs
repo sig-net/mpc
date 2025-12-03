@@ -60,10 +60,6 @@ struct FixtureConfig {
 
     use_preshared_triples: bool,
     presignature_stockpile: bool,
-    /// If set, only load this many presignatures initially (total, across owners) for
-    /// each participant. The rest are stored for later addition via
-    /// `MpcFixture::add_presignatures()`.
-    initial_presignature_count: Option<usize>,
 
     min_triples: u32,
     max_triples: u32,
@@ -109,7 +105,6 @@ impl FixtureConfig {
             input: FixtureInput::load(num_nodes),
             use_preshared_triples: false,
             presignature_stockpile: false,
-            initial_presignature_count: None,
             min_triples: 10,
             max_triples: 30,
             min_presignatures: 10,
@@ -303,14 +298,6 @@ impl MpcFixtureBuilder {
     /// Set protocol config
     pub fn with_max_presignatures_stockpile(mut self, value: u32) -> Self {
         self.fixture_config.max_presignatures = value;
-        self
-    }
-
-    /// Only load this many presignatures initially (total, across owners) per participant.
-    /// The remaining presignatures can be added later via `MpcFixture::add_presignatures()`.
-    /// This is useful for testing scenarios where presignatures run out and more need to be added.
-    pub fn with_initial_presignature_count(mut self, count: usize) -> Self {
-        self.fixture_config.initial_presignature_count = Some(count);
         self
     }
 

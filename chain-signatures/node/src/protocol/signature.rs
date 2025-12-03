@@ -36,7 +36,7 @@ use tokio::task::JoinHandle;
 
 use near_account_id::AccountId;
 
-/// Timeout durations for the posit phase. Propose is should be faster than deliberator
+/// Timeout durations for the posit phase. Proposer should be faster than deliberator
 /// for the purpose of starting sooner if we have enough participants.
 const PROPOSER_TIMEOUT: Duration = Duration::from_secs(5);
 /// Deliberator timeout should be slightly longer to account for proposer expiring their

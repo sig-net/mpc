@@ -440,7 +440,7 @@ async fn test_sign_limited_stockpile_contention() {
 /// 3. No presignature burning during the waiting period
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_sign_requests_wait_for_presignatures() {
-    // We'll send 10 sign requests but start with only 5 presignatures.
+    // We'll send 20 sign requests but start with only 15 presignatures.
     // The first batch should complete, then we add more presignatures to
     // complete the remaining requests.
     const TOTAL_SIGN_REQUESTS: u8 = 20;
@@ -470,7 +470,7 @@ async fn test_sign_requests_wait_for_presignatures() {
     );
     assert_eq!(
         initial_presignatures, INITIAL_STOCKPILE,
-        "should start with at least 1 presignature"
+        "should start with exactly {INITIAL_STOCKPILE} presignatures"
     );
 
     // Send ALL sign requests at once - more than we have presignatures for
@@ -510,16 +510,22 @@ async fn test_sign_requests_wait_for_presignatures() {
     let current_actions = network.output.rpc_actions.lock().await.len();
     tracing::info!(current_actions, "actions before adding more presignatures");
 
-    let final_actions = tokio::time::timeout(
+    let initial_actions = tokio::time::timeout(
         Duration::from_secs(10),
         network.wait_for_actions(INITIAL_STOCKPILE),
     )
     .await
     .expect("initial stockpile signatures should complete");
     tracing::info!(
-        ?final_actions,
+        ?initial_actions,
         "finished waiting for initial stockpile signatures"
     );
+    for action_str in &initial_actions {
+        assert!(
+            action_str.contains("RpcAction::Publish"),
+            "unexpected rpc action {action_str}"
+        );
+    }
 
     // Now add the remaining presignatures
     tracing::info!("adding more presignatures");
