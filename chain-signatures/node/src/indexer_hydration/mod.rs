@@ -40,12 +40,16 @@ use tokio::sync::watch;
 #[group(id = "indexer_hydration_options")]
 pub struct HydrationArgs {
     /// Hydration RPC ws URL
-    #[clap(long, env("MPC_HYDRATION_RPC_WS_URL"))]
+    #[clap(long = "hydration-rpc-ws-url", env("MPC_HYDRATION_RPC_WS_URL"))]
     pub rpc_ws_url: Option<String>,
     /// Hydration signer URI
-    #[clap(long, env("MPC_HYDRATION_SIGNER_URI"))]
+    #[clap(long = "hydration-signer-uri", env("MPC_HYDRATION_SIGNER_URI"))]
     pub signer_uri: Option<String>,
-    #[clap(long, env("MPC_HYDRATION_TOTAL_TIMEOUT"), default_value = "200")]
+    #[clap(
+        long = "hydration-total-timeout",
+        env("MPC_HYDRATION_TOTAL_TIMEOUT"),
+        default_value = "200"
+    )]
     pub total_timeout: Option<u64>,
 }
 
@@ -472,10 +476,10 @@ pub async fn run(
     mut contract_watcher: ContractStateWatcher,
     mut mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
-) -> Result<()> {
+) {
     let Some(hydration) = hydration else {
         tracing::warn!("hydration indexer is disabled");
-        return Ok(());
+        return;
     };
     let total_timeout = Duration::from_secs(hydration.total_timeout);
 
@@ -484,10 +488,23 @@ pub async fn run(
     tracing::info!("connecting to hydration rpc at {}", ws_url);
 
     // High‑level Subxt client for blocks + events.
-    let hydration_api = OnlineClient::<SubstrateConfig>::from_url(ws_url).await?;
-
+    let hydration_api = OnlineClient::<SubstrateConfig>::from_url(ws_url).await;
+    let hydration_api = match hydration_api {
+        Ok(api) => api,
+        Err(e) => {
+            tracing::error!("failed to connect to hydration rpc: {e}");
+            return;
+        }
+    };
     // Low‑level RPC client for legacy methods like state_get_read_proof.
-    let rpc_client = RpcClient::from_url(ws_url).await?;
+    let rpc_client = RpcClient::from_url(ws_url).await;
+    let rpc_client = match rpc_client {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::error!("failed to connect to hydration rpc: {e}");
+            return;
+        }
+    };
     let legacy_rpc = LegacyRpcMethods::<SubstrateConfig>::new(rpc_client);
 
     // Wait for threshold to be available
@@ -501,11 +518,23 @@ pub async fn run(
     .await;
 
     // Subscribe to finalized Hydration blocks.
-    let mut blocks = hydration_api.blocks().subscribe_finalized().await?;
+    let mut blocks = match hydration_api.blocks().subscribe_finalized().await {
+        Ok(blocks) => blocks,
+        Err(e) => {
+            tracing::error!("failed to subscribe to finalized blocks: {e}");
+            return;
+        }
+    };
 
     while let Some(block_res) = blocks.next().await {
         tracing::info!("received block from hydration rpc");
-        let block = block_res?;
+        let block = match block_res {
+            Ok(block) => block,
+            Err(e) => {
+                tracing::error!("failed to get block: {e}");
+                continue;
+            }
+        };
         let number = block.number();
         let hash = block.hash();
         let header = block.header().clone();
@@ -514,20 +543,33 @@ pub async fn run(
         let state_root: H256 = header.state_root;
 
         // Events as decoded by Subxt (unproven bytes).
-        let events = block.events().await?;
+        let events = match block.events().await {
+            Ok(events) => events,
+            Err(e) => {
+                tracing::error!("failed to get events: {e}");
+                continue;
+            }
+        };
         // Raw SCALE bytes for `System::Events` that Subxt decoded.
         let events_bytes_unproven = events.bytes().to_vec();
 
         // Events bytes proven via storage proof under state_root.
         let events_bytes_proven =
-            fetch_proven_system_events_bytes(&legacy_rpc, state_root, hash).await?;
+            match fetch_proven_system_events_bytes(&legacy_rpc, state_root, hash).await {
+                Ok(events_bytes_proven) => events_bytes_proven,
+                Err(e) => {
+                    tracing::error!("failed to fetch proven system events bytes: {e}");
+                    continue;
+                }
+            };
 
         // Sanity check: bytes that Subxt decoded must match the Merkle‑proven bytes.
         if events_bytes_unproven != events_bytes_proven {
-            return Err(anyhow!(
+            tracing::error!(
                 "Mismatch between RPC events and Merkle‑proven System::Events \
                  in block #{number} ({hash:?})"
-            ));
+            );
+            continue;
         }
 
         // At this point:
@@ -542,10 +584,16 @@ pub async fn run(
         let backlog = backlog.clone();
 
         for ev in events.iter() {
-            let ev = ev?;
+            let ev = match ev {
+                Ok(ev) => ev,
+                Err(e) => {
+                    tracing::error!("failed to get event: {e}");
+                    continue;
+                }
+            };
 
             // SignatureRequested
-            if let Some(req) = ev.as_event::<hydration::signet::events::SignatureRequested>()? {
+            if let Ok(Some(req)) = ev.as_event::<hydration::signet::events::SignatureRequested>() {
                 let event = HydrationSignatureRequestedEvent::from(req);
                 tracing::info!(
                     "Hydration::Signet::SignatureRequested in block #{number} ({hash:?}): {:?}",
@@ -554,7 +602,7 @@ pub async fn run(
 
                 let entropy: [u8; 32] = rand::random();
 
-                crate::indexer_common::process_sign_event(
+                if let Err(e) = crate::indexer_common::process_sign_event(
                     Box::new(event),
                     entropy,
                     sign_tx.clone(),
@@ -562,28 +610,34 @@ pub async fn run(
                     total_timeout,
                     backlog.clone(),
                 )
-                .await?;
+                .await
+                {
+                    tracing::error!("failed to process sign event: {e}");
+                }
             }
 
             // SignatureResponded
-            if let Some(resp) = ev.as_event::<hydration::signet::events::SignatureResponded>()? {
+            if let Ok(Some(resp)) = ev.as_event::<hydration::signet::events::SignatureResponded>() {
                 let event = HydrationSignatureRespondedEvent::from(resp);
                 tracing::info!(
                     "Hydration::Signet::SignatureResponded in block #{number} ({hash:?}): {:?}",
                     event
                 );
-                crate::indexer_common::process_respond_event(
+                if let Err(e) = crate::indexer_common::process_respond_event(
                     crate::indexer_common::SignatureRespondedEvent::Hydration(event),
                     sign_tx.clone(),
                     &mut contract_watcher,
                     &backlog,
                 )
-                .await?;
+                .await
+                {
+                    tracing::error!("failed to process respond event: {e}");
+                }
             }
 
             // Bidirectional request
-            if let Some(req_bi) =
-                ev.as_event::<hydration::signet::events::SignBidirectionalRequested>()?
+            if let Ok(Some(req_bi)) =
+                ev.as_event::<hydration::signet::events::SignBidirectionalRequested>()
             {
                 let event = HydrationSignBidirectionalRequestedEvent::from(req_bi);
                 tracing::info!(
@@ -593,7 +647,7 @@ pub async fn run(
 
                 let entropy: [u8; 32] = rand::random();
 
-                crate::indexer_common::process_sign_event(
+                if let Err(e) = crate::indexer_common::process_sign_event(
                     Box::new(event),
                     entropy,
                     sign_tx.clone(),
@@ -601,27 +655,31 @@ pub async fn run(
                     total_timeout,
                     backlog.clone(),
                 )
-                .await?;
+                .await
+                {
+                    tracing::error!("failed to process sign event: {e}");
+                }
             }
 
             // Bidirectional response
-            if let Some(resp_bi) =
-                ev.as_event::<hydration::signet::events::RespondBidirectionalEvent>()?
+            if let Ok(Some(resp_bi)) =
+                ev.as_event::<hydration::signet::events::RespondBidirectionalEvent>()
             {
                 let event = HydrationRespondBidirectionalEvent::from(resp_bi);
                 tracing::info!(
                     "Hydration::Signet::RespondBidirectionalEvent in block #{number} ({hash:?}): {:?}",
                     event
                 );
-                crate::indexer_common::process_respond_bidirectional_event(
+                if let Err(e) = crate::indexer_common::process_respond_bidirectional_event(
                     crate::indexer_common::RespondBidirectionalEvent::Hydration(event),
                     sign_tx.clone(),
                     &backlog,
                 )
-                .await?;
+                .await
+                {
+                    tracing::error!("failed to process respond bidirectional event: {e}");
+                }
             }
         }
     }
-
-    Ok(())
 }
