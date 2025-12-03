@@ -56,11 +56,11 @@ pub struct SharedOutput {
 /// Broadcast channel for sign completions across all nodes.
 /// When any node publishes a signature, this channel is used to notify
 /// all other nodes so they can abort their tasks for the same SignId.
-pub struct CompletionBroadcast {
+pub struct CompletionBroadcaster {
     pub tx: broadcast::Sender<SignId>,
 }
 
-impl CompletionBroadcast {
+impl CompletionBroadcaster {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(1024);
         Self { tx }
@@ -68,6 +68,12 @@ impl CompletionBroadcast {
 
     pub fn subscribe(&self) -> broadcast::Receiver<SignId> {
         self.tx.subscribe()
+    }
+}
+
+impl Default for CompletionBroadcaster {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -105,11 +111,6 @@ impl MpcFixture {
                             output: presignature_share.output.clone(),
                             participants: presignature_share.participants.clone(),
                         };
-
-                        // shares
-                        //     .entry(*id)
-                        //     .or_insert_with(Vec::new)
-                        //     .push((node.me, *owner, share));
 
                         if let Some(mut slot) = node.presignature_storage.reserve(share.id).await {
                             slot.insert(share, *owner).await;

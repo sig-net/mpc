@@ -20,6 +20,7 @@ use tokio::task::JoinHandle;
 
 pub type MessageFilter = Box<dyn FnMut(&SendMessage) -> bool + Send>;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn test_mock_network(
     routing_table: HashMap<Participant, Sender<Ciphered>>,
     shared_output: &SharedOutput,
@@ -94,7 +95,7 @@ pub(super) fn test_mock_network(
                             (format!(
                                 "RpcAction::Publish({:?})",
                                 publish_action.indexed,
-                            ), publish_action.indexed.id.clone())
+                            ), publish_action.indexed.id)
                         },
                     };
                     tracing::info!(target: "mock_network", ?action_str, "Received RPC action, broadcasting completion");
