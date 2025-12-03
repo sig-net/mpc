@@ -13,7 +13,8 @@ use mpc_node::protocol::{MessageChannel, ProtocolState, Sign};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use mpc_primitives::SignId;
 use near_sdk::AccountId;
-use std::collections::{BTreeMap, HashSet};
+use rand::random;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
@@ -26,8 +27,7 @@ pub struct MpcFixture {
     pub output: SharedOutput,
     /// Presignatures that were held back during fixture creation.
     /// Can be added later via `add_presignatures()`.
-    pub remaining_presignatures:
-        Mutex<BTreeMap<Participant, BTreeMap<Participant, Vec<Presignature>>>>,
+    pub pregenerated_presignatures: BTreeMap<Participant, BTreeMap<Participant, Vec<Presignature>>>,
 }
 
 pub struct MpcFixtureNode {
@@ -84,20 +84,35 @@ impl MpcFixture {
         }
     }
 
-    pub async fn add_presignatures(&self) -> usize {
-        let mut remaining = self.remaining_presignatures.lock().await;
+    pub async fn add_presignatures(&mut self) -> usize {
         let mut total_added = 0;
 
+        let mut id_mapping = HashMap::new();
+        // let mut shares = HashMap::new();
+
         for node in &self.nodes {
-            if let Some(my_shares) = remaining.remove(&node.me) {
+            if let Some(my_shares) = self.pregenerated_presignatures.get(&node.me) {
                 for (owner, presignature_shares) in my_shares {
+                    // let id: PresignatureId = random();
+
                     for presignature_share in presignature_shares {
-                        if let Some(mut slot) = node
-                            .presignature_storage
-                            .reserve(presignature_share.id)
-                            .await
-                        {
-                            slot.insert(presignature_share, owner).await;
+                        let id = id_mapping
+                            .entry(presignature_share.id)
+                            .or_insert_with(random);
+
+                        let share = Presignature {
+                            id: *id,
+                            output: presignature_share.output.clone(),
+                            participants: presignature_share.participants.clone(),
+                        };
+
+                        // shares
+                        //     .entry(*id)
+                        //     .or_insert_with(Vec::new)
+                        //     .push((node.me, *owner, share));
+
+                        if let Some(mut slot) = node.presignature_storage.reserve(share.id).await {
+                            slot.insert(share, *owner).await;
                             total_added += 1;
                         }
                     }

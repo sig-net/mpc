@@ -36,10 +36,6 @@ use tokio::task::JoinHandle;
 
 use near_account_id::AccountId;
 
-/// No multi-round proposer selection anymore.
-/// We select a deterministic leader per-request using a hash-score
-/// computed from the request id and participant id.
-
 /// Timeout durations for the posit phase. Propose is should be faster than deliberator
 /// for the purpose of starting sooner if we have enough participants.
 const PROPOSER_TIMEOUT: Duration = Duration::from_secs(5);
@@ -146,9 +142,9 @@ impl SignOrganizer {
             .map(|p| {
                 let mut hasher = sha3::Sha3_256::new();
                 // request id gives uniqueness per-request
-                hasher.update(&sign_id.request_id);
+                hasher.update(sign_id.request_id);
                 // participant id deterministic bytes
-                hasher.update(&Into::<u32>::into(p).to_le_bytes());
+                hasher.update(Into::<u32>::into(p).to_le_bytes());
                 let hash = hasher.finalize();
                 let score = u64::from_le_bytes(hash[0..8].try_into().unwrap());
                 (score, p)

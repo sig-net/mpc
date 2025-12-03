@@ -443,17 +443,16 @@ async fn test_sign_requests_wait_for_presignatures() {
     // We'll send 10 sign requests but start with only 5 presignatures.
     // The first batch should complete, then we add more presignatures to
     // complete the remaining requests.
-    // Note: The fixture has ~15 presignatures total per participant.
-    const TOTAL_SIGN_REQUESTS: u8 = 10;
-    const INITIAL_PRESIGNATURES: usize = 5;
+    const TOTAL_SIGN_REQUESTS: u8 = 20;
+    // Note: The fixture has 15 presignatures in the node setup.
+    const INITIAL_STOCKPILE: usize = 15;
 
     // Use a network with preshared presignatures, but only load some initially
     // Disable presignature generation so we control exactly when more are available
-    let network = MpcFixtureBuilder::default()
+    let mut network = MpcFixtureBuilder::default()
         .with_preshared_key()
         .with_preshared_triples()
         .with_presignature_stockpile()
-        .with_initial_presignature_count(INITIAL_PRESIGNATURES)
         // Disable triple and presignature generation
         .with_min_triples_stockpile(0)
         .with_max_triples_stockpile(0)
@@ -469,8 +468,8 @@ async fn test_sign_requests_wait_for_presignatures() {
         total_requests = TOTAL_SIGN_REQUESTS,
         "starting presignature wait test"
     );
-    assert!(
-        initial_presignatures >= 1,
+    assert_eq!(
+        initial_presignatures, INITIAL_STOCKPILE,
         "should start with at least 1 presignature"
     );
 
@@ -486,14 +485,10 @@ async fn test_sign_requests_wait_for_presignatures() {
         }
     }
 
-    // First batch: wait for signatures to complete using available presignatures
-    // We expect roughly INITIAL_PRESIGNATURES to complete (some variance due to ownership)
-    let first_batch_expected = INITIAL_PRESIGNATURES.min(15); // at most what we started with
-    tracing::info!(first_batch_expected, "waiting for first batch");
-
+    tracing::info!("waiting for first batch of sign requests to complete");
     let first_actions = tokio::time::timeout(
         Duration::from_secs(30),
-        network.wait_for_actions(first_batch_expected),
+        network.wait_for_actions(INITIAL_STOCKPILE),
     )
     .await
     .expect("first batch should complete with available presignatures");
@@ -515,8 +510,19 @@ async fn test_sign_requests_wait_for_presignatures() {
     let current_actions = network.output.rpc_actions.lock().await.len();
     tracing::info!(current_actions, "actions before adding more presignatures");
 
+    let final_actions = tokio::time::timeout(
+        Duration::from_secs(10),
+        network.wait_for_actions(INITIAL_STOCKPILE),
+    )
+    .await
+    .expect("initial stockpile signatures should complete");
+    tracing::info!(
+        ?final_actions,
+        "finished waiting for initial stockpile signatures"
+    );
+
     // Now add the remaining presignatures
-    tracing::info!("adding remaining presignatures");
+    tracing::info!("adding more presignatures");
     let added = network.add_presignatures().await;
     tracing::info!(added, "presignatures added");
 
