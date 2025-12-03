@@ -602,7 +602,6 @@ impl Backlog {
             select_checkpoints(mesh_state, node_client, threshold, chains).await;
 
         // Merge local and remote checkpoints, preferring the one with higher block height
-
         let checkpoints = merge_checkpoints(local_checkpoints, remote_checkpoints);
 
         if checkpoints.is_empty() {
@@ -702,6 +701,29 @@ impl BacklogTransaction {
     pub fn is_bidirectional(&self) -> bool {
         matches!(self, Self::Bidirectional(_))
     }
+}
+
+fn merge_checkpoints(
+    local: HashMap<Chain, Checkpoint>,
+    mut remote: HashMap<Chain, Checkpoint>,
+) -> HashMap<Chain, Checkpoint> {
+    for (chain, local_cp) in local {
+        remote
+            .entry(chain)
+            .and_modify(|remote_cp| {
+                if local_cp.block_height > remote_cp.block_height {
+                    tracing::info!(
+                        ?chain,
+                        local_height = local_cp.block_height,
+                        remote_height = remote_cp.block_height,
+                        "local checkpoint is newer than remote selection"
+                    );
+                    *remote_cp = local_cp.clone();
+                }
+            })
+            .or_insert(local_cp);
+    }
+    remote
 }
 
 #[cfg(test)]
@@ -1231,28 +1253,4 @@ mod tests {
         let merged = merge_checkpoints(local.clone(), remote.clone());
         assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 400);
     }
-}
-
-fn merge_checkpoints(
-    local: HashMap<Chain, Checkpoint>,
-    remote: HashMap<Chain, Checkpoint>,
-) -> HashMap<Chain, Checkpoint> {
-    let mut checkpoints = remote;
-    for (chain, local_cp) in local {
-        checkpoints
-            .entry(chain)
-            .and_modify(|remote_cp| {
-                if local_cp.block_height > remote_cp.block_height {
-                    tracing::info!(
-                        ?chain,
-                        local_height = local_cp.block_height,
-                        remote_height = remote_cp.block_height,
-                        "local checkpoint is newer than remote selection"
-                    );
-                    *remote_cp = local_cp.clone();
-                }
-            })
-            .or_insert(local_cp);
-    }
-    checkpoints
 }

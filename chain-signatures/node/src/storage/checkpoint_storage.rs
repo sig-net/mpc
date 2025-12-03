@@ -3,6 +3,7 @@ use crate::protocol::Chain;
 use anyhow::Context;
 use deadpool_redis::Pool;
 use mpc_primitives::Checkpoint;
+use near_account_id::AccountId;
 use redis::AsyncCommands;
 use tokio::sync::RwLock;
 
@@ -11,7 +12,7 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub enum CheckpointStorage {
-    Redis(Pool),
+    Redis(Pool, AccountId),
     InMemory(Arc<RwLock<HashMap<Chain, Checkpoint>>>),
 }
 
@@ -26,14 +27,22 @@ impl CheckpointStorage {
         Self::InMemory(Arc::new(RwLock::new(HashMap::new())))
     }
 
+    fn checkpoint_key(&self, chain: Chain) -> String {
+        match self {
+            CheckpointStorage::Redis(_, account_id) => {
+                format!("{account_id}:checkpoint:latest:{chain}")
+            }
+            CheckpointStorage::InMemory(_) => format!("checkpoint:latest:{chain}"),
+        }
+    }
+
     pub async fn persist(&self, checkpoint: &Checkpoint) -> anyhow::Result<()> {
         match self {
-            CheckpointStorage::Redis(pool) => {
+            CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
-                let key = format!("checkpoint:{}", checkpoint.chain);
-                let value =
-                    serde_json::to_string(checkpoint).context("failed to serialize checkpoint")?;
-                conn.set::<_, _, ()>(key, value)
+                let value = serde_json::to_string(checkpoint)
+                    .context("failed to serialize checkpoint persistence")?;
+                conn.set::<_, _, ()>(self.checkpoint_key(checkpoint.chain), value)
                     .await
                     .context("failed to set checkpoint in redis")?;
             }
@@ -49,11 +58,10 @@ impl CheckpointStorage {
 
     pub async fn load_latest(&self, chain: Chain) -> anyhow::Result<Option<Checkpoint>> {
         match self {
-            CheckpointStorage::Redis(pool) => {
+            CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
-                let key = format!("checkpoint:{}", chain);
                 let value: Option<String> = conn
-                    .get(key)
+                    .get(self.checkpoint_key(chain))
                     .await
                     .context("failed to get checkpoint from redis")?;
                 match value {
