@@ -476,7 +476,9 @@ pub async fn run(
     };
     let total_timeout = Duration::from_secs(hydration.total_timeout);
 
-    let ws_url = "ws://127.0.0.1:9944";
+    let ws_url = "ws://127.0.0.1:8000";
+
+    tracing::info!("connecting to hydration rpc at {}", ws_url);
 
     // High‑level Subxt client for blocks + events.
     let hydration_api = OnlineClient::<SubstrateConfig>::from_url(ws_url).await?;
@@ -499,6 +501,7 @@ pub async fn run(
     let mut blocks = hydration_api.blocks().subscribe_finalized().await?;
 
     while let Some(block_res) = blocks.next().await {
+        tracing::info!("received block from hydration rpc");
         let block = block_res?;
         let number = block.number();
         let hash = block.hash();

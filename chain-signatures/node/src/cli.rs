@@ -378,6 +378,15 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tokio::spawn(indexer_sol::run(
                 sol,
+                sign_tx.clone(),
+                account_id.clone(),
+                backlog.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                client.clone(),
+            ));
+            tokio::spawn(indexer_hydration::run(
+                hydration,
                 sign_tx,
                 account_id,
                 backlog,
