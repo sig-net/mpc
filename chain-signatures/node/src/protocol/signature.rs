@@ -36,13 +36,9 @@ use tokio::task::JoinHandle;
 
 use near_account_id::AccountId;
 
-/// The round interval to search for a proposer in the organizing phase.
-const ROUND_INTERVAL: usize = 512;
-
-// If the message comes from someone who isn't the expected proposer,
-// don't immediately reject. Accept proposers who would be selected
-// for any round within +/- ACCEPT_ROUND_RANGE of our current round.
-const ACCEPT_ROUND_RANGE: usize = 3;
+/// No multi-round proposer selection anymore.
+/// We select a deterministic leader per-request using a hash-score
+/// computed from the request id and participant id.
 
 /// Timeout durations for the posit phase. Propose is should be faster than deliberator
 /// for the purpose of starting sooner if we have enough participants.
@@ -76,7 +72,7 @@ enum SignError {
 }
 
 struct SignState {
-    round: usize,
+    attempt: usize,
     indexed: IndexedSignRequest,
     mesh_state: watch::Receiver<MeshState>,
 }
@@ -84,7 +80,7 @@ struct SignState {
 impl SignState {
     fn new(indexed: IndexedSignRequest, mesh_state: watch::Receiver<MeshState>) -> Self {
         Self {
-            round: 0,
+            attempt: 0,
             indexed,
             mesh_state,
         }
@@ -94,8 +90,8 @@ impl SignState {
         &self.indexed
     }
 
-    fn bump_round(&mut self) {
-        self.round += 1;
+    fn bump_attempt(&mut self) {
+        self.attempt += 1;
     }
 }
 
@@ -139,18 +135,29 @@ impl SignPhase {
 struct SignOrganizer;
 
 impl SignOrganizer {
-    fn proposer_per_round(
-        round: usize,
-        participants: &[Participant],
-        entropy: &[u8; 32],
-    ) -> Participant {
-        let mut hasher = sha3::Sha3_256::new();
-        hasher.update(entropy);
-        hasher.update(&(round as u64).to_le_bytes());
-        let hash = hasher.finalize();
+    /// Deterministically score participants for a sign request and return a ranking.
+    /// Uses the SignId.request_id as the per-request seed so every participant
+    /// can independently compute the same ordering.
+    fn proposer_ordering(sign_id: &SignId, participants: &[Participant]) -> Vec<Participant> {
+        // Build a vector of (score, participant)
+        let mut scored: Vec<(u64, Participant)> = participants
+            .iter()
+            .copied()
+            .map(|p| {
+                let mut hasher = sha3::Sha3_256::new();
+                // request id gives uniqueness per-request
+                hasher.update(&sign_id.request_id);
+                // participant id deterministic bytes
+                hasher.update(&Into::<u32>::into(p).to_le_bytes());
+                let hash = hasher.finalize();
+                let score = u64::from_le_bytes(hash[0..8].try_into().unwrap());
+                (score, p)
+            })
+            .collect();
 
-        let index = u64::from_le_bytes(hash[0..8].try_into().unwrap()) as usize;
-        participants[index % participants.len()]
+        // sort by score ascending (lower scores have priority)
+        scored.sort_by_key(|(score, _)| *score);
+        scored.into_iter().map(|(_, p)| p).collect()
     }
 
     /// Waits for threshold stable participants to be present.
@@ -193,36 +200,33 @@ impl SignOrganizer {
         let threshold = ctx.threshold;
         let me = ctx.me;
         let entropy = state.indexed.args.entropy;
+        let attempt = state.attempt;
         let participants = ctx.participants.iter().copied().collect::<Vec<_>>();
 
-        tracing::info!(?sign_id, round = ?state.round, "entering organizing phase");
+        tracing::info!(?sign_id, attempt, "entering organizing phase");
         let (stable, proposer) = {
             let Some(stable) = self.wait_stable(ctx, state, threshold).await else {
-                tracing::warn!(?sign_id, round = ?state.round, "no stable participants, reorganizing");
-                state.bump_round();
+                tracing::warn!(?sign_id, attempt, "no stable participants, reorganizing");
+                state.bump_attempt();
                 return SignPhase::Organizing(self);
             };
 
-            let max_rounds = state.round + ROUND_INTERVAL;
-            let (selected_round, proposer) = (state.round..max_rounds)
-                .map(|r| (r, Self::proposer_per_round(r, &participants, &entropy)))
-                .find(|(_, potential_proposer)| stable.contains(potential_proposer))
+            // Select proposer based on deterministic proposer ordering based on the first that is stable.
+            let proposer = Self::proposer_ordering(&ctx.sign_id, &participants)
+                .into_iter()
+                .find(|p| stable.contains(p))
                 .unwrap_or_else(|| {
-                    (
-                        max_rounds,
-                        *stable
-                            .iter()
-                            .choose(&mut StdRng::from_seed(entropy))
-                            .unwrap(),
-                    )
+                    *stable
+                        .iter()
+                        .choose(&mut StdRng::from_seed(entropy))
+                        .unwrap()
                 });
 
             let is_mine = proposer == me;
-            state.round = selected_round;
 
             tracing::info!(
                 ?sign_id,
-                round = selected_round,
+                attempt,
                 ?proposer,
                 ?me,
                 is_mine,
@@ -230,7 +234,7 @@ impl SignOrganizer {
                 "organized: selected proposer"
             );
 
-            if is_mine && state.round == 0 {
+            if is_mine && state.attempt == 0 {
                 crate::metrics::NUM_SIGN_REQUESTS_MINE
                     .with_label_values(&[ctx.my_account_id.as_str()])
                     .inc();
@@ -241,7 +245,7 @@ impl SignOrganizer {
 
         let is_proposer = proposer == ctx.me;
         let (presignature_id, presignature, stable) = if is_proposer {
-            tracing::info!(?sign_id, round = ?state.round, "proposer waiting for presignature");
+            tracing::info!(?sign_id, attempt, "proposer waiting for presignature");
             let stable = stable.iter().copied().collect::<Vec<_>>();
             let mut recycle = Vec::new();
             let fetch = tokio::time::timeout(PROPOSER_TIMEOUT, async {
@@ -272,10 +276,10 @@ impl SignOrganizer {
                 Err(_) => {
                     tracing::warn!(
                         ?sign_id,
-                        round = ?state.round,
+                        attempt,
                         "proposer timeout waiting for presignature, reorganizing"
                     );
-                    state.bump_round();
+                    state.bump_attempt();
                     return SignPhase::Organizing(self);
                 }
             };
@@ -327,7 +331,7 @@ impl SignPositor {
         proposer: Participant,
     ) -> Result<PresignatureId, SignPhase> {
         let sign_id = ctx.sign_id;
-        let round = state.round;
+        let attempt = state.attempt;
         let outcome = tokio::time::timeout(DELIBERATOR_TIMEOUT, async {
             loop {
                 let Some(task_msg) = task_rx.recv().await else {
@@ -343,88 +347,50 @@ impl SignPositor {
                     continue;
                 }
 
-                if from == &proposer {
-                    tracing::info!(
+                if from != &proposer {
+                    ctx.msg
+                        .send(
+                            ctx.me,
+                            *from,
+                            PositMessage {
+                                id: PositProtocolId::Signature(sign_id, *presignature_id),
+                                from: ctx.me,
+                                action: PositAction::Reject,
+                            },
+                        )
+                        .await;
+                    continue;
+                }
+
+                tracing::info!(
+                    ?sign_id,
+                    presignature_id,
+                    ?from,
+                    "deliberator received Propose"
+                );
+
+                // Check if we have access to this presignature (in storage or generating)
+                if !ctx.presignatures.contains(*presignature_id).await {
+                    tracing::warn!(
                         ?sign_id,
                         presignature_id,
-                        ?from,
-                        "deliberator received Propose"
+                        "deliberator does not have access to proposed presignature, rejecting"
                     );
-
-                    // Check if we have access to this presignature (in storage or generating)
-                    if !ctx.presignatures.contains(*presignature_id).await {
-                        tracing::warn!(
-                            ?sign_id,
-                            presignature_id,
-                            "deliberator does not have access to proposed presignature, rejecting"
-                        );
-                        ctx.msg
-                            .send(
-                                ctx.me,
-                                proposer,
-                                PositMessage {
-                                    id: PositProtocolId::Signature(sign_id, *presignature_id),
-                                    from: ctx.me,
-                                    action: PositAction::Reject,
-                                },
-                            )
-                            .await;
-                        continue;
-                    }
-
-                    break *presignature_id;
-                } else {
-
-                    // Build participants vector (same ordering used elsewhere)
-                    let participants = ctx.participants.iter().copied().collect::<Vec<_>>();
-
-                    // Check if `from` would be proposer for any round in the neighborhood
-                    let mut is_nearby_proposer = false;
-                    let start = round.saturating_sub(ACCEPT_ROUND_RANGE);
-                    let end = round + ACCEPT_ROUND_RANGE;
-                    for r in start..=end {
-                        let candidate = SignOrganizer::proposer_per_round(r, &participants, &state.indexed.args.entropy);
-                        if candidate == *from {
-                            tracing::info!(?sign_id, round = r, ?from, "received Propose from proposer valid for nearby round, accepting");
-                            is_nearby_proposer = true;
-                            break;
-                        }
-                    }
-
-                    if !is_nearby_proposer {
-                        tracing::warn!(?sign_id, ?from, ?proposer, "received Propose from non-proposer and not in nearby rounds, ignoring");
-                        // We intentionally *do not* send an explicit Reject here — the sender
-                        // might simply be a proposer for a different view and rejecting is noisy.
-                        continue;
-                    }
-
-                    // If the sender is a nearby proposer, check that we have access to the presignature.
-                    if !ctx.presignatures.contains(*presignature_id).await {
-                        tracing::warn!(
-                            ?sign_id,
-                            presignature_id,
-                            "deliberator does not have access to proposed presignature, rejecting"
-                        );
-                        // Inform the (nearby) proposer we cannot accept this proposal because
-                        // we do not have the presignature required to participate.
-                        ctx.msg
-                            .send(
-                                ctx.me,
-                                *from,
-                                PositMessage {
-                                    id: PositProtocolId::Signature(sign_id, *presignature_id),
-                                    from: ctx.me,
-                                    action: PositAction::Reject,
-                                },
-                            )
-                            .await;
-                        continue;
-                    }
-
-                    // Otherwise accept this proposal.
-                    tracing::info!(?sign_id, ?from, ?proposer, "accepting propose from nearby proposer");
-                    break *presignature_id;
+                    ctx.msg
+                        .send(
+                            ctx.me,
+                            proposer,
+                            PositMessage {
+                                id: PositProtocolId::Signature(sign_id, *presignature_id),
+                                from: ctx.me,
+                                action: PositAction::Reject,
+                            },
+                        )
+                        .await;
+                    continue;
                 }
+
+                break *presignature_id;
             }
         })
         .await;
@@ -434,11 +400,11 @@ impl SignPositor {
             Err(_) => {
                 tracing::warn!(
                     ?sign_id,
-                    ?round,
+                    attempt,
                     ?proposer,
                     "deliberator timeout waiting for Propose, reorganizing"
                 );
-                state.bump_round();
+                state.bump_attempt();
                 return Err(SignPhase::Organizing(SignOrganizer));
             }
         };
@@ -473,7 +439,7 @@ impl SignPositor {
         } = self;
 
         let sign_id = ctx.sign_id;
-        let round = state.round;
+        let attempt = state.attempt;
         let is_proposer = proposer == ctx.me;
         let is_deliberator = !is_proposer;
 
@@ -488,7 +454,7 @@ impl SignPositor {
         tracing::info!(
             ?sign_id,
             ?presignature_id,
-            ?round,
+            attempt,
             is_proposer,
             "entering posit phase"
         );
@@ -496,7 +462,7 @@ impl SignPositor {
         if is_deliberator {
             tracing::info!(
                 ?sign_id,
-                ?round,
+                attempt,
                 ?proposer,
                 "deliberator waiting for Propose"
             );
@@ -511,7 +477,11 @@ impl SignPositor {
         let posit_participants = stable.iter().copied().collect::<Vec<_>>();
         let mut counter = SinglePositCounter::new(ctx.me, &posit_participants);
 
-        let posit_timeout = if is_proposer { PROPOSER_TIMEOUT } else { DELIBERATOR_TIMEOUT };
+        let posit_timeout = if is_proposer {
+            PROPOSER_TIMEOUT
+        } else {
+            DELIBERATOR_TIMEOUT
+        };
         let posit_deadline = tokio::time::sleep(posit_timeout);
         tokio::pin!(posit_deadline);
 
@@ -529,10 +499,10 @@ impl SignPositor {
                             if participants.len() < ctx.threshold {
                                 tracing::warn!(
                                     ?sign_id,
-                                    ?round,
+                                    attempt,
                                     "not enough start participants"
                                 );
-                                state.bump_round();
+                                state.bump_attempt();
                                 return SignPhase::Organizing(SignOrganizer);
                             }
 
@@ -550,7 +520,7 @@ impl SignPositor {
                                 tracing::warn!(?sign_id, "recycling presignature due to REJECTs");
                                 ctx.presignatures.recycle_mine(ctx.me, taken).await;
                             }
-                            state.bump_round();
+                            state.bump_attempt();
                             return SignPhase::Organizing(SignOrganizer);
                         }
 
@@ -574,7 +544,7 @@ impl SignPositor {
                                     tracing::warn!(?sign_id, "recycling presignature due to insufficient participants");
                                     ctx.presignatures.recycle_mine(ctx.me, taken).await;
                                 }
-                                state.bump_round();
+                                state.bump_attempt();
                                 return SignPhase::Organizing(SignOrganizer);
                             }
 
@@ -621,7 +591,7 @@ impl SignPositor {
                                     tracing::warn!(?sign_id, "recycling presignature due to posit timeout");
                                     ctx.presignatures.recycle_mine(ctx.me, taken).await;
                                 }
-                                state.bump_round();
+                                state.bump_attempt();
                                 return SignPhase::Organizing(SignOrganizer);
                             }
 
@@ -649,12 +619,12 @@ impl SignPositor {
                                 tracing::warn!(?sign_id, "recycling presignature due to posit timeout (no accepts)");
                                 ctx.presignatures.recycle_mine(ctx.me, taken).await;
                             }
-                            state.bump_round();
+                            state.bump_attempt();
                             return SignPhase::Organizing(SignOrganizer);
                         }
                     } else {
                         tracing::warn!(?sign_id, "deliberator posit timeout waiting for Start, reorganizing");
-                        state.bump_round();
+                        state.bump_attempt();
                         return SignPhase::Organizing(SignOrganizer);
                     }
                 }
@@ -673,10 +643,11 @@ impl SignPositor {
 impl SignGenerating {
     async fn advance(mut self, ctx: &SignTask, state: &mut SignState) -> SignPhase {
         let sign_id = ctx.sign_id;
-        let round = state.round;
+        let attempt = state.attempt;
 
         tracing::info!(
             ?sign_id,
+            attempt,
             presignature_id = ?self.presignature_id,
             participants = ?self.accepted_participants,
             "posit complete, starting generation"
@@ -705,11 +676,11 @@ impl SignGenerating {
             Err(err) => {
                 tracing::warn!(
                     ?sign_id,
-                    ?round,
+                    attempt,
                     ?err,
                     "failed to create generator, reorganizing"
                 );
-                state.bump_round();
+                state.bump_attempt();
                 return SignPhase::Organizing(SignOrganizer);
             }
         };
@@ -724,11 +695,11 @@ impl SignGenerating {
             Err(err) => {
                 tracing::warn!(
                     ?sign_id,
-                    ?round,
+                    attempt,
                     ?err,
                     "signature generation failed, reorganizing"
                 );
-                state.bump_round();
+                state.bump_attempt();
                 SignPhase::Organizing(SignOrganizer)
             }
         }
@@ -1031,6 +1002,7 @@ impl SignTask {
             ?sign_id,
             me = ?self.me,
             epoch = task_epoch,
+            attempt = 0,
             "signature task starting with organizing loop"
         );
 
@@ -1365,50 +1337,53 @@ impl PendingPresignature {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn make_entropy(seed: u8) -> [u8; 32] {
-        let mut e = [0u8; 32];
-        e[0] = seed;
-        e
+    #[test]
+    fn proposer_order_varies_with_request_id() {
+        let participants = vec![
+            Participant::from(0),
+            Participant::from(1),
+            Participant::from(2),
+            Participant::from(3),
+        ];
+
+        let mut id0 = [0u8; 32];
+        id0[0] = 1;
+        let sign0 = SignId::new(id0);
+
+        let mut id1 = [0u8; 32];
+        id1[0] = 2;
+        let sign1 = SignId::new(id1);
+
+        let o0 = SignOrganizer::proposer_ordering(&sign0, &participants);
+        let o1 = SignOrganizer::proposer_ordering(&sign1, &participants);
+
+        // It's extremely unlikely the ordering is identical for two different request ids
+        assert_ne!(o0, o1);
     }
 
     #[test]
-    fn proposer_per_round_varies_with_round_and_entropy() {
-        let participants = vec![Participant::from(0), Participant::from(1), Participant::from(2), Participant::from(3)];
-        let entropy = make_entropy(1);
+    fn proposer_selection_determinism() {
+        let participants = vec![
+            Participant::from(0),
+            Participant::from(1),
+            Participant::from(2),
+            Participant::from(3),
+        ];
 
-        let p0 = SignOrganizer::proposer_per_round(0, &participants, &entropy);
-        let p1 = SignOrganizer::proposer_per_round(1, &participants, &entropy);
-        let p2 = SignOrganizer::proposer_per_round(2, &participants, &entropy);
+        let mut id0 = [0u8; 32];
+        id0[0] = 17;
+        let sign0 = SignId::new(id0);
 
-        // For a non-trivial hash it's extremely unlikely all three are equal
-        assert!(!(p0 == p1 && p1 == p2));
-    }
+        let order = SignOrganizer::proposer_ordering(&sign0, &participants);
+        // first leader must be one of participants
+        assert!(participants.contains(&order[0]));
 
-    #[test]
-    fn nearby_proposer_detection_within_3_rounds() {
-        let participants = vec![Participant::from(0), Participant::from(1), Participant::from(2), Participant::from(3)];
-        let entropy = make_entropy(2);
-
-        let round = 10usize;
-        // pick a 'from' that is the proposer for round + 2
-        let from = SignOrganizer::proposer_per_round(round + 2, &participants, &entropy);
-
-        // verify the algorithm would accept it when checking +/-3 rounds around `round`
-        let mut found = false;
-        for r in round.saturating_sub(3)..=round + 3 {
-            if SignOrganizer::proposer_per_round(r, &participants, &entropy) == from {
-                found = true;
-                break;
-            }
-        }
-        assert!(found, "expected proposer from nearby round to be detected");
-
-        // We only assert the nearby detection here; far-away rounds could collide due to
-        // hash periodicity in small test setups and are not reliable to assert against.
+        // calling again with same id gives same ordering
+        let order2 = SignOrganizer::proposer_ordering(&sign0, &participants);
+        assert_eq!(order, order2);
     }
 }
