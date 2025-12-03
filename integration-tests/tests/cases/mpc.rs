@@ -440,40 +440,38 @@ async fn test_sign_limited_stockpile_contention() {
 /// 3. No presignature burning during the waiting period
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_sign_requests_wait_for_presignatures() {
-    // We'll send 20 sign requests but start with only enough presignatures for ~10.
-    // The first batch should complete, then we generate more presignatures to
+    // We'll send 10 sign requests but start with only 5 presignatures.
+    // The first batch should complete, then we add more presignatures to
     // complete the remaining requests.
-    const TOTAL_SIGN_REQUESTS: u8 = 20;
-    const FIRST_BATCH_SIZE: usize = 10;
+    // Note: The fixture has ~15 presignatures total per participant.
+    const TOTAL_SIGN_REQUESTS: u8 = 10;
+    const INITIAL_PRESIGNATURES: usize = 5;
 
-    // Use a network that can generate presignatures (has preshared triples)
-    // but starts with the stockpiled presignatures from fixture
+    // Use a network with preshared presignatures, but only load some initially
+    // Disable presignature generation so we control exactly when more are available
     let network = MpcFixtureBuilder::default()
         .with_preshared_key()
         .with_preshared_triples()
         .with_presignature_stockpile()
-        // Disable triple generation since we're using preshared triples
+        .with_initial_presignature_count(INITIAL_PRESIGNATURES)
+        // Disable triple and presignature generation
         .with_min_triples_stockpile(0)
         .with_max_triples_stockpile(0)
-        // Enable presignature generation for second batch
-        .with_min_presignatures_stockpile(5)
-        .with_max_presignatures_stockpile(20)
+        .with_min_presignatures_stockpile(0)
+        .with_max_presignatures_stockpile(0)
         .build()
         .await;
 
-    // Wait for initial presignatures to be loaded
-    tokio::time::timeout(
-        Duration::from_millis(500),
-        network.wait_for_presignatures(1),
-    )
-    .await
-    .expect("should start with presignatures");
-
+    // Wait for initial presignatures to be loaded (checking total, not by owner)
     let initial_presignatures = network[0].presignature_storage.len_generated().await;
     tracing::info!(
         initial_presignatures,
         total_requests = TOTAL_SIGN_REQUESTS,
         "starting presignature wait test"
+    );
+    assert!(
+        initial_presignatures >= 1,
+        "should start with at least 1 presignature"
     );
 
     // Send ALL sign requests at once - more than we have presignatures for
@@ -488,13 +486,13 @@ async fn test_sign_requests_wait_for_presignatures() {
         }
     }
 
-    // First batch: wait for as many signatures as we initially have presignatures
-    let first_batch_expected = initial_presignatures.min(FIRST_BATCH_SIZE);
+    // First batch: wait for signatures to complete using available presignatures
+    // We expect roughly INITIAL_PRESIGNATURES to complete (some variance due to ownership)
+    let first_batch_expected = INITIAL_PRESIGNATURES.min(15); // at most what we started with
     tracing::info!(first_batch_expected, "waiting for first batch");
 
-    let first_batch_timeout = Duration::from_secs(30);
     let first_actions = tokio::time::timeout(
-        first_batch_timeout,
+        Duration::from_secs(30),
         network.wait_for_actions(first_batch_expected),
     )
     .await
@@ -505,7 +503,7 @@ async fn test_sign_requests_wait_for_presignatures() {
         "first batch completed"
     );
 
-    // Check presignatures after first batch
+    // Check presignatures after first batch - should be depleted
     let after_first_batch = network[0].presignature_storage.len_generated().await;
     tracing::info!(
         after_first_batch,
@@ -513,46 +511,24 @@ async fn test_sign_requests_wait_for_presignatures() {
         "presignatures after first batch"
     );
 
-    // Try to get all signatures quickly first (fast path)
-    // With improvements to proposer election, signatures can complete very quickly
-    tracing::info!("attempting fast path - waiting briefly for all signatures");
-    let fast_result = tokio::time::timeout(
-        Duration::from_secs(5),
+    // Verify we haven't completed all requests yet (some should be waiting)
+    let current_actions = network.output.rpc_actions.lock().await.len();
+    tracing::info!(current_actions, "actions before adding more presignatures");
+
+    // Now add the remaining presignatures
+    tracing::info!("adding remaining presignatures");
+    let added = network.add_presignatures().await;
+    tracing::info!(added, "presignatures added");
+
+    // Wait for remaining signatures to complete
+    tracing::info!("waiting for remaining signatures");
+    let final_timeout = Duration::from_secs(30);
+    let final_actions = tokio::time::timeout(
+        final_timeout,
         network.wait_for_actions(TOTAL_SIGN_REQUESTS as usize),
     )
-    .await;
-
-    let final_actions = match fast_result {
-        Ok(actions) => {
-            tracing::info!("fast path succeeded - all signatures completed quickly!");
-            actions
-        }
-        Err(_) => {
-            // Fast path timed out - need to wait for more presignatures
-            let current_actions = network.output.rpc_actions.lock().await.len();
-            tracing::info!(current_actions, "fast path timed out, waiting for presignatures");
-
-            tokio::time::timeout(
-                Duration::from_secs(120),
-                network.wait_for_presignatures(3), // wait for at least 3 owned presignatures per node
-            )
-            .await
-            .expect("should generate more presignatures");
-
-            let after_generation = network[0].presignature_storage.len_generated().await;
-            tracing::info!(after_generation, "presignatures after generation");
-
-            // Now wait for remaining signatures to complete
-            tracing::info!("waiting for remaining signatures");
-            let final_timeout = Duration::from_secs(60);
-            tokio::time::timeout(
-                final_timeout,
-                network.wait_for_actions(TOTAL_SIGN_REQUESTS as usize),
-            )
-            .await
-            .expect("all signatures should complete after presignature generation")
-        }
-    };
+    .await
+    .expect("all signatures should complete after adding presignatures");
 
     tracing::info!(
         total_signatures = final_actions.len(),

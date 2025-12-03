@@ -26,7 +26,7 @@ use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
 use mpc_node::storage::{secret_storage, triple_storage::TriplePair, Options};
 use near_sdk::AccountId;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::watch;
@@ -60,6 +60,10 @@ struct FixtureConfig {
 
     use_preshared_triples: bool,
     presignature_stockpile: bool,
+    /// If set, only load this many presignatures initially (total, across owners) for
+    /// each participant. The rest are stored for later addition via
+    /// `MpcFixture::add_presignatures()`.
+    initial_presignature_count: Option<usize>,
 
     min_triples: u32,
     max_triples: u32,
@@ -105,6 +109,7 @@ impl FixtureConfig {
             input: FixtureInput::load(num_nodes),
             use_preshared_triples: false,
             presignature_stockpile: false,
+            initial_presignature_count: None,
             min_triples: 10,
             max_triples: 30,
             min_presignatures: 10,
@@ -162,6 +167,15 @@ impl MpcFixtureBuilder {
         let completion_broadcast = CompletionBroadcast::new();
         let mut nodes = vec![];
 
+        let remaining_presignatures = if self.fixture_config.initial_presignature_count.is_some() {
+            // Build a fresh copy of the fixture presignatures which will be owned by the
+            // running `MpcFixture` and later consumed by `add_presignatures()`.
+            let num_nodes = self.prepared_nodes.len() as u32;
+            FixtureInput::load(num_nodes).presignatures
+        } else {
+            BTreeMap::new()
+        };
+
         let account_ids: Vec<_> = self
             .prepared_nodes
             .iter()
@@ -198,6 +212,7 @@ impl MpcFixtureBuilder {
             nodes,
             output,
             shared_contract_state: shared_contract_state_tx,
+            remaining_presignatures: tokio::sync::Mutex::new(remaining_presignatures),
         }
     }
 
@@ -294,6 +309,14 @@ impl MpcFixtureBuilder {
     /// Set protocol config
     pub fn with_max_presignatures_stockpile(mut self, value: u32) -> Self {
         self.fixture_config.max_presignatures = value;
+        self
+    }
+
+    /// Only load this many presignatures initially (total, across owners) per participant.
+    /// The remaining presignatures can be added later via `MpcFixture::add_presignatures()`.
+    /// This is useful for testing scenarios where presignatures run out and more need to be added.
+    pub fn with_initial_presignature_count(mut self, count: usize) -> Self {
+        self.fixture_config.initial_presignature_count = Some(count);
         self
     }
 
@@ -538,15 +561,86 @@ impl MpcFixtureNodeBuilder {
             Presignature::storage(&context.redis_pool, &self.participant_info.account_id);
 
         if fixture_config.presignature_stockpile {
-            // removing here because we can't clone a presignature
-            let my_shares = fixture_config.input.presignatures.remove(&self.me).unwrap();
-            for (owner, presignature_shares) in my_shares {
-                for presignature_share in presignature_shares {
-                    let mut slot = presignature_storage
-                        .reserve(presignature_share.id)
-                        .await
-                        .unwrap();
-                    slot.insert(presignature_share, owner).await;
+            // If an initial_presignature_count is configured, we intentionally keep
+            // all fixture presignatures in the builder's `remaining_presignatures` and
+            // only load *that many* shares into the node right now. To keep things
+            // simple and allow duplication when the initial count exceeds the
+            // available items in the fixture file, we repeatedly reload the static
+            // fixture (via FixtureInput::load) and consume entries until we've
+            // inserted the requested `initial_presignature_count` shares.
+            if let Some(initial_count) = fixture_config.initial_presignature_count {
+                tracing::info!(me = ?self.me, initial_count, "loading limited set of presignatures for test (may duplicate)");
+
+                // Number of nodes in fixtures (3 or 5 currently)
+                let num_nodes = fixture_config.input.presignatures.len() as u32;
+                let mut inserted = 0usize;
+
+                // Keep loading the fixture until we've inserted `initial_count` shares.
+                while inserted < initial_count {
+                    let fresh = FixtureInput::load(num_nodes);
+
+                    if let Some((_participant, owner_map)) =
+                        fresh.presignatures.into_iter().find(|(p, _)| *p == self.me)
+                    {
+                        // Build owner -> VecDeque so we can select presignatures in a
+                        // round-robin fashion across owners for this participant. This
+                        // helps make initial selection balanced and increases the
+                        // likelihood that proposers will find usable presignatures.
+                        let mut owner_deques: Vec<(Participant, VecDeque<Presignature>)> =
+                            owner_map
+                                .into_iter()
+                                .map(|(owner, v)| (owner, VecDeque::from(v)))
+                                .collect();
+
+                        let mut made_progress = true;
+                        while inserted < initial_count && made_progress {
+                            made_progress = false;
+                            for (owner, dq) in owner_deques.iter_mut() {
+                                if inserted >= initial_count {
+                                    break;
+                                }
+                                if let Some(presignature_share) = dq.pop_front() {
+                                    let mut slot = presignature_storage
+                                        .reserve(presignature_share.id)
+                                        .await
+                                        .unwrap();
+                                    slot.insert(presignature_share, *owner).await;
+                                    inserted += 1;
+                                    made_progress = true;
+                                }
+                            }
+                        }
+                    } else {
+                        // Fixture didn't contain any entries for this participant — nothing to do
+                        break;
+                    }
+                }
+
+                tracing::info!(me = ?self.me, inserted, "loaded initial presignatures for node");
+            } else {
+                // Original behaviour: move all presignatures for this node into storage
+                // (no remaining split logic here).
+                let my_shares = fixture_config.input.presignatures.remove(&self.me).unwrap();
+                tracing::info!(
+                    me = ?self.me,
+                    owners = my_shares.len(),
+                    total_presigs = my_shares.values().map(|v| v.len()).sum::<usize>(),
+                    "loading presignatures from fixture"
+                );
+                for (owner, presignature_shares) in my_shares {
+                    tracing::info!(
+                        me = ?self.me,
+                        ?owner,
+                        count = presignature_shares.len(),
+                        "loading presignatures for owner"
+                    );
+                    for presignature_share in presignature_shares {
+                        let mut slot = presignature_storage
+                            .reserve(presignature_share.id)
+                            .await
+                            .unwrap();
+                        slot.insert(presignature_share, owner).await;
+                    }
                 }
             }
         }
