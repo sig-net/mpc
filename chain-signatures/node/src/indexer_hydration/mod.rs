@@ -59,7 +59,10 @@ impl HydrationArgs {
             args.extend(["--hydration-signer-uri".to_string(), signer_uri]);
         }
         if let Some(total_timeout) = self.total_timeout {
-            args.extend(["--total-timeout".to_string(), total_timeout.to_string()]);
+            args.extend([
+                "--hydration-total-timeout".to_string(),
+                total_timeout.to_string(),
+            ]);
         }
         args
     }
@@ -180,7 +183,7 @@ impl SignatureEventTrait for HydrationSignatureRequestedEvent {
 
         let Some(payload) = Scalar::from_bytes(self.payload) else {
             tracing::warn!(
-                "solana `sign` did not produce payload hash correctly: {:?}",
+                "hydration `sign` did not produce payload hash correctly: {:?}",
                 self.payload,
             );
             anyhow::bail!("failed to convert event payload hash to scalar");
@@ -198,7 +201,7 @@ impl SignatureEventTrait for HydrationSignatureRequestedEvent {
         );
 
         let sign_id = SignId::new(self.generate_request_id());
-        tracing::info!(?sign_id, "solana signature requested");
+        tracing::info!(?sign_id, "hydration signature requested");
 
         Ok(IndexedSignRequest {
             id: sign_id,
@@ -292,7 +295,7 @@ impl SignatureEventTrait for HydrationSignBidirectionalRequestedEvent {
         entropy: [u8; 32],
         total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
-        tracing::info!("found solana event: {:?}", self);
+        tracing::info!("found hydration event: {:?}", self);
         if self.deposit == 0 {
             tracing::warn!("deposit is 0, skipping sign request");
             anyhow::bail!("deposit is 0");
@@ -335,7 +338,7 @@ impl SignatureEventTrait for HydrationSignBidirectionalRequestedEvent {
                 path: self.path.clone(),
                 key_version: self.key_version,
             },
-            chain: Chain::Solana,
+            chain: Chain::Hydration,
             timestamp_sign_queue: Instant::now(),
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             total_timeout,
