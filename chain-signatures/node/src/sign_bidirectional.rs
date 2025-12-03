@@ -1,12 +1,9 @@
-use crate::protocol::signature::SignRequest;
-use crate::protocol::Chain;
-use crate::protocol::SignRequestType;
+use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
 use crate::respond_bidirectional::SerDeserFormat;
 use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
 use anchor_lang::prelude::Pubkey;
 use borsh::BorshSerialize;
-use cait_sith::protocol::Participant;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
@@ -36,10 +33,14 @@ struct AbiField {
     typ: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PendingRequestStatus {
+    /// Request has been received on the source chain and is waiting for a `respond`
+    /// transaction to be observed.
+    AwaitingResponse,
+    /// Request has been responded to and the derived transaction is now waiting to
+    /// execute on the destination chain.
     PendingExecution,
-    PendingPublish,
     Failed,
     Success,
 }
@@ -63,14 +64,12 @@ pub struct BidirectionalTx {
     pub request_id: [u8; 32],
     pub from_address: Address,
     pub nonce: u64,
-    pub participants: Vec<Participant>,
     pub status: PendingRequestStatus,
 }
 
 impl BidirectionalTx {
     pub fn new(signature: SignBidirectionalSignature) -> anyhow::Result<Self> {
-        let SignRequestType::SignBidirectional(event) =
-            signature.request.indexed.sign_request_type.clone()
+        let SignRequestType::SignBidirectional(event) = signature.indexed.sign_request_type.clone()
         else {
             anyhow::bail!("sign request is not a sign bidirectional");
         };
@@ -82,7 +81,7 @@ impl BidirectionalTx {
                 event.dest
             )
         })?;
-        let source_chain = signature.request.indexed.chain;
+        let source_chain = signature.indexed.chain;
 
         let (signed_transaction_hash, nonce) =
             sign_and_hash_transaction(unsigned_rlp_data, signature.signature)?;
@@ -90,7 +89,7 @@ impl BidirectionalTx {
         tracing::info!(signed_transaction_hash = ?signed_transaction_hash, "signed_transaction_hash");
 
         let from_address =
-            derive_user_address(signature.public_key, signature.request.indexed.args.epsilon);
+            derive_user_address(signature.public_key, signature.indexed.args.epsilon);
 
         tracing::info!(from_address = ?from_address, "from_address");
 
@@ -109,11 +108,10 @@ impl BidirectionalTx {
             params: event.params,
             output_deserialization_schema: event.output_deserialization_schema,
             respond_serialization_schema: event.respond_serialization_schema,
-            request_id: signature.request.indexed.id.request_id,
+            request_id: signature.indexed.id.request_id,
             from_address,
             nonce,
-            participants: signature.participants,
-            status: PendingRequestStatus::PendingExecution,
+            status: PendingRequestStatus::AwaitingResponse,
         })
     }
 }
@@ -266,7 +264,18 @@ pub fn sign_and_hash_transaction(
     if is_eip1559(unsigned_rlp) {
         sign_and_hash_eip1559_from_unsigned(unsigned_rlp, &r, &s, y_parity)
     } else {
-        sign_and_hash_legacy_from_unsigned(unsigned_rlp, Some(60), &r, &s, y_parity)
+        // Extract chain_id from the unsigned RLP (it's the 7th field in legacy transactions)
+        // In legacy Ethereum transactions with EIP-155, there are 9 fields:
+        // [nonce, gasPrice, gasLimit, to, value, data, chain_id, 0, 0]
+        // The chain_id is the 7th field (index 6, 0-based).
+        // We check for at least 9 fields to ensure chain_id is present.
+        let rlp = Rlp::new(unsigned_rlp);
+        let chain_id = if rlp.item_count().unwrap_or(0) >= 9 {
+            rlp.val_at::<u64>(6).ok()
+        } else {
+            None
+        };
+        sign_and_hash_legacy_from_unsigned(unsigned_rlp, chain_id, &r, &s, y_parity)
     }
 }
 
@@ -512,7 +521,6 @@ fn parse_borsh_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<Abi
 #[derive(Clone)]
 pub struct SignBidirectionalSignature {
     pub public_key: mpc_crypto::PublicKey,
-    pub request: SignRequest,
+    pub indexed: IndexedSignRequest,
     pub signature: Signature,
-    pub participants: Vec<Participant>,
 }

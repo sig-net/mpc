@@ -1,5 +1,6 @@
 pub mod app_data_storage;
 pub mod presignature_storage;
+pub mod protocol_storage;
 pub mod secret_storage;
 pub mod triple_storage;
 
@@ -8,7 +9,7 @@ pub use presignature_storage::PresignatureStorage;
 pub use triple_storage::TripleStorage;
 
 // Can be used to "clear" redis storage in case of a breaking change
-pub const STORAGE_VERSION: &str = "v8";
+pub const STORAGE_VERSION: &str = "v9";
 
 /// Configures storage.
 #[derive(Debug, Clone, clap::Parser)]

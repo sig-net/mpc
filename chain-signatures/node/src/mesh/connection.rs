@@ -106,7 +106,7 @@ impl NodeConnection {
                     });
                 }
                 _ = interval.tick() => {
-                    let status = match client.status(&url).await {
+                    let resp = match client.status(&url).await {
                         Ok(status) => status,
                         Err(err) => {
                             tracing::warn!(?node, ?err, "checking /status failed");
@@ -117,10 +117,21 @@ impl NodeConnection {
                         }
                     };
 
-                    // note: borrowing and sending later on `status_tx` can potentially deadlock,
-                    // but since we are copying the status, this is not the case. Change this carefully.
+                    if resp.protocol_version != crate::PROTOCOL_VERSION {
+                        tracing::warn!(
+                            ?node,
+                            our_version = crate::PROTOCOL_VERSION,
+                            peer_version = resp.protocol_version,
+                            "protocol version mismatch"
+                        );
+                        status_tx.send_if_modified(|(status, _)| {
+                            std::mem::replace(status, NodeStatus::Offline) != NodeStatus::Offline
+                        });
+                        continue;
+                    }
+
                     let old_status = status_tx.borrow().0;
-                    let mut new_status = match status {
+                    let mut new_status = match resp.status {
                         OtherNodeStatus::Running { .. } => NodeStatus::Active,
                         OtherNodeStatus::Resharing { .. }
                         | OtherNodeStatus::Generating { .. }

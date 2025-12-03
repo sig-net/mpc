@@ -24,7 +24,9 @@ use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
 use mpc_node::indexer_eth::EthArgs;
+use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
+use mpc_node::storage::triple_storage::TriplePair;
 use near_account_id::AccountId;
 use near_workspaces::Account;
 use reqwest::Client;
@@ -91,6 +93,8 @@ impl Node {
     }
 
     pub async fn kill(self) -> NodeEnvConfig {
+        // Give the container a brief moment to clean up connections gracefully
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         self.container.stop().await.unwrap();
         NodeEnvConfig {
             web_port: Self::CONTAINER_PORT,
@@ -366,11 +370,11 @@ impl Redis {
     }
 
     pub fn triple_storage(&self, id: &AccountId) -> mpc_node::storage::TripleStorage {
-        mpc_node::storage::triple_storage::init(&self.pool(), id)
+        TriplePair::storage(&self.pool(), id)
     }
 
     pub fn presignature_storage(&self, id: &AccountId) -> mpc_node::storage::PresignatureStorage {
-        mpc_node::storage::presignature_storage::init(&self.pool(), id)
+        Presignature::storage(&self.pool(), id)
     }
 
     pub async fn stockpile_triples(&self, cfg: &NodeConfig, participants: &Participants, mul: u32) {
@@ -386,7 +390,7 @@ impl Redis {
                             .get(account_id)
                             .unwrap(),
                     ),
-                    mpc_node::storage::triple_storage::init(&pool, account_id),
+                    TriplePair::storage(&pool, account_id),
                 )
             })
             .collect::<HashMap<_, _>>();
@@ -396,33 +400,39 @@ impl Redis {
             .values()
             .map(|id| Participant::from(*id))
             .collect::<Vec<_>>();
-        let (public, shares) =
+        let (public, shares): (TriplePub<Secp256k1>, Vec<TripleShare<Secp256k1>>) =
             cait_sith::triples::deal(&mut OsRng, &participant_ids, cfg.threshold);
 
         // - first/second loop add at least min_triples per node
-        // - third loop: for each triple, store the shares individually per node
-        let mut num_triples = 0;
+        // - third loop: for each pair, store the shares as pairs per node
+        let mut num_pairs = 0;
         for owner in &participant_ids {
-            for _ in 0..(cfg.protocol.triple.min_triples * mul) {
-                num_triples += 1;
-                let triple_id = rand::random();
-                for (me, triple) in participant_ids
+            for _ in 0..(cfg.protocol.triple.min_triples * mul / 2) {
+                num_pairs += 1;
+                let pair_id = rand::random();
+                for ((me, triple0), triple1) in participant_ids
                     .iter()
-                    .zip(shares_to_triples(triple_id, &public, &shares))
+                    .zip(shares_to_triples(&public, &shares))
+                    .zip(shares_to_triples(&public, &shares))
                 {
+                    let pair = TriplePair {
+                        id: pair_id,
+                        triple0,
+                        triple1,
+                    };
                     storage
                         .get(me)
                         .unwrap()
-                        .reserve(triple.id)
+                        .reserve(pair_id)
                         .await
                         .unwrap()
-                        .insert(triple, *owner)
+                        .insert(pair, *owner)
                         .await;
                 }
             }
         }
 
-        tracing::info!("stockpiled {num_triples} triples");
+        tracing::info!("stockpiled {num_pairs} triple pairs");
     }
 }
 
@@ -556,14 +566,12 @@ fn derive_secret_key(mnemonic: &str) -> anyhow::Result<String> {
 }
 
 fn shares_to_triples(
-    id: u64,
     public: &TriplePub<Secp256k1>,
     shares: &[TripleShare<Secp256k1>],
 ) -> Vec<Triple> {
     shares
         .iter()
         .map(|share| Triple {
-            id,
             public: public.clone(),
             share: share.clone(),
         })

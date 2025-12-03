@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::mesh::MeshState;
-use crate::protocol::{IndexedSignRequest, MessageChannel, MpcSignProtocol};
+use crate::protocol::{MessageChannel, MpcSignProtocol, Sign};
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::{PresignatureStorage, TripleStorage};
@@ -17,7 +17,7 @@ pub struct TestProtocolStorage {
 }
 
 pub struct TestProtocolChannels {
-    pub sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
+    pub sign_rx: Arc<RwLock<mpsc::Receiver<Sign>>>,
     pub msg_channel: MessageChannel,
     pub rpc_channel: RpcChannel,
     pub config: watch::Receiver<Config>,

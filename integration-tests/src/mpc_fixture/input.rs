@@ -1,7 +1,7 @@
 use cait_sith::protocol::Participant;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::state::NodeKeyInfo;
-use mpc_node::protocol::triple::Triple;
+use mpc_node::storage::triple_storage::TriplePair;
 use std::collections::BTreeMap;
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -9,7 +9,7 @@ pub struct FixtureInput {
     /// Output of test_basic_generate_keys
     pub keys: BTreeMap<Participant, NodeKeyInfo>,
     /// Output of test_basic_generate_triples
-    pub triples: BTreeMap<Participant, BTreeMap<Participant, Vec<Triple>>>,
+    pub triples: BTreeMap<Participant, BTreeMap<Participant, Vec<TriplePair>>>,
     /// Output of test_basic_generate_presignature
     pub presignatures: BTreeMap<Participant, BTreeMap<Participant, Vec<Presignature>>>,
 }

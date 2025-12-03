@@ -4,25 +4,26 @@ use crate::gcp::GcpService;
 use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
+use crate::protocol::presignature::Presignature;
 use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
-use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
-use crate::respond_bidirectional::RespondBidirectionalTxProcessor;
+use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
+use crate::storage::triple_storage::TriplePair;
 use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
+
 use clap::Parser;
 use deadpool_redis::Runtime;
 use k256::sha2::Sha256;
 use local_ip_address::local_ip;
+use mpc_keys::hpke;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
 use std::sync::Arc;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{mpsc, watch, RwLock};
 use url::Url;
-
-use mpc_keys::hpke;
 
 const DEFAULT_WEB_PORT: u16 = 3000;
 
@@ -201,7 +202,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 .with_label_values(&[account_id.as_str()])
                 .set(digest);
 
-            let (sign_tx, sign_rx) = SignQueue::channel();
+            let (sign_tx, sign_rx) = mpsc::channel(1024);
 
             let gcp_service = GcpService::init(&account_id, &storage_options).await?;
 
@@ -212,9 +213,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let redis_cfg = deadpool_redis::Config::from_url(redis_url);
             let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-            let triple_storage = storage::triple_storage::init(&redis_pool, &account_id);
-            let presignature_storage =
-                storage::presignature_storage::init(&redis_pool, &account_id);
+            let triple_storage = TriplePair::storage(&redis_pool, &account_id);
+            let presignature_storage = Presignature::storage(&redis_pool, &account_id);
             let app_data_storage = app_data_storage::init(&redis_pool, &account_id);
 
             let mut rpc_client = near_fetch::Client::new(&near_rpc);
@@ -228,8 +228,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             // NEAR Indexer is only used for integration tests
             // TODO: Remove this once we have integration tests built on other chains
-            let indexer = if storage_options.env == "integration-tests" {
-                let (_handle, indexer) = indexer::run(
+            if storage_options.env == "integration-tests" {
+                indexer::run(
                     &indexer_options,
                     &mpc_contract_id,
                     &account_id,
@@ -237,10 +237,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     rpc_client.clone(),
                     backlog.clone(),
                 )?;
-                Some(indexer)
-            } else {
-                None
-            };
+            }
 
             let web_port = web_port.unwrap_or(DEFAULT_WEB_PORT);
 
@@ -268,8 +265,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
 
             let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth, &sol, backlog.clone());
-            let (respond_bidirectional_tx_channel, respond_bidirectional_tx_processor) =
-                RespondBidirectionalTxProcessor::new();
+
             let (sync_channel, sync) = SyncTask::new(
                 &client,
                 triple_storage.clone(),
@@ -301,7 +297,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let node_watcher = node.watch();
 
             let msg_channel = MessageChannel::spawn(
-                client,
+                client.clone(),
                 &account_id,
                 config_rx.clone(),
                 contract_watcher.clone(),
@@ -326,36 +322,57 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tracing::info!("protocol initialized");
             tokio::spawn(sync.run());
-            tokio::spawn(rpc.run(
-                contract_state_tx,
-                config_tx.clone(),
-                respond_bidirectional_tx_channel.clone(),
-            ));
+            tokio::spawn(rpc.run(contract_state_tx, config_tx.clone()));
 
-            tokio::spawn(respond_bidirectional_tx_processor.run(backlog.clone(), 5));
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;
-            let protocol_handle =
-                tokio::spawn(protocol.run(node, near_client, contract_watcher, mesh_state));
+            let protocol_handle = tokio::spawn(protocol.run(
+                node,
+                near_client,
+                contract_watcher.clone(),
+                mesh_state.clone(),
+            ));
             tracing::info!("protocol thread spawned");
             let web_handle = tokio::spawn(web::run(
                 web_port,
                 msg_channel,
                 node_watcher,
-                indexer,
                 triple_storage,
                 presignature_storage,
                 sync_channel,
                 account_id.clone(),
+                backlog.clone(),
             ));
-            tokio::spawn(indexer_eth::run(
+
+            match indexer_eth::EthereumIndexer::new(
                 eth,
                 sign_tx.clone(),
                 app_data_storage.clone(),
                 account_id.clone(),
                 backlog.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                client.clone(),
+            )
+            .await
+            {
+                Ok(eth_indexer) => {
+                    tokio::spawn(eth_indexer.run());
+                }
+                Err(err) => {
+                    tracing::error!(?err, "failed to create ethereum indexer");
+                }
+            };
+
+            tokio::spawn(indexer_sol::run(
+                sol,
+                sign_tx,
+                account_id,
+                backlog,
+                contract_watcher,
+                mesh_state,
+                client,
             ));
-            tokio::spawn(indexer_sol::run(sol, sign_tx, account_id, backlog));
             tracing::info!("protocol http server spawned");
             protocol_handle.await?;
             web_handle.await?;

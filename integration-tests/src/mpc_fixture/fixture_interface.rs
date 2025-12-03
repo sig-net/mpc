@@ -3,17 +3,18 @@
 
 use crate::containers::Redis;
 use cait_sith::protocol::Participant;
+use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol::state::NodeStateWatcher;
 use mpc_node::protocol::sync::SyncChannel;
-use mpc_node::protocol::{IndexedSignRequest, MessageChannel, ProtocolState};
+use mpc_node::protocol::{MessageChannel, ProtocolState, Sign};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use near_sdk::AccountId;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc;
 use tokio::sync::{watch, Mutex};
 
 pub struct MpcFixture {
@@ -29,11 +30,12 @@ pub struct MpcFixtureNode {
     pub mesh: watch::Sender<MeshState>,
     pub config: watch::Sender<Config>,
 
-    pub sign_tx: Sender<IndexedSignRequest>,
+    pub sign_tx: mpsc::Sender<Sign>,
     pub msg_channel: MessageChannel,
 
     pub triple_storage: TripleStorage,
     pub presignature_storage: PresignatureStorage,
+    pub backlog: Backlog,
 
     pub web_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -100,12 +102,12 @@ impl MpcFixtureNode {
             8200 + u32::from(self.me) as u16,
             self.msg_channel.clone(),
             self.state.clone(),
-            None,
             self.triple_storage.clone(),
             self.presignature_storage.clone(),
             // unused but needed to call the web interface
             SyncChannel::new().1,
             account_id,
+            self.backlog.clone(),
         );
         self.web_handle = Some(tokio::spawn(task));
     }

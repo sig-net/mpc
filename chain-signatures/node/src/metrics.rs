@@ -109,15 +109,6 @@ pub(crate) static REDIS_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
     .unwrap()
 });
 
-pub(crate) static SIGN_QUEUE_MINE_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
-    try_create_int_gauge_vec(
-        "multichain_sign_queue_mine_size",
-        "number of my requests in sign queue",
-        &["node_account_id"],
-    )
-    .unwrap()
-});
-
 pub(crate) static NUM_TRIPLE_GENERATORS_INTRODUCED: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     try_create_int_gauge_vec(
         "multichain_num_triple_generators_introduced",
@@ -379,15 +370,6 @@ pub(crate) static PRESIGNATURE_GENERATOR_FAILURES: LazyLock<CounterVec> = LazyLo
     try_create_counter_vec(
         "multichain_presignature_generator_failures",
         "total presignature generator failures",
-        &["node_account_id"],
-    )
-    .unwrap()
-});
-
-pub(crate) static SIGNATURE_FAILURES: LazyLock<CounterVec> = LazyLock::new(|| {
-    try_create_counter_vec(
-        "multichain_signature_failures",
-        "total signature failures",
         &["node_account_id"],
     )
     .unwrap()

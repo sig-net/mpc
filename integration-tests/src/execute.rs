@@ -1,5 +1,6 @@
 use anyhow::Context;
 use async_process::Child;
+use mpc_primitives::Chain;
 
 pub(crate) const PACKAGE_MULTICHAIN: &str = "mpc-node";
 
@@ -43,6 +44,7 @@ pub fn spawn_multichain(
     async_process::Command::new(&executable)
         .args(cli.into_str_args())
         .env("RUST_LOG", "info,workspaces=warn")
+        .envs(Chain::checkpoint_env_vars())
         .envs(std::env::vars())
         .stdout(async_process::Stdio::inherit())
         .stderr(async_process::Stdio::inherit())

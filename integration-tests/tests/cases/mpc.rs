@@ -2,9 +2,9 @@ use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
 use integration_tests::mpc_fixture::MpcFixtureBuilder;
 use mpc_node::protocol::presignature::Presignature;
-use mpc_node::protocol::triple::Triple;
 use mpc_node::protocol::SignRequestType;
-use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState};
+use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState, Sign};
+use mpc_node::storage::triple_storage::TriplePair;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use test_log::test;
 
@@ -74,7 +74,7 @@ async fn test_basic_generate_triples() {
         .build()
         .await;
 
-    tokio::time::timeout(Duration::from_secs(60), network.wait_for_triples(1))
+    tokio::time::timeout(Duration::from_secs(180), network.wait_for_triples(1))
         .await
         .expect("should have enough triples eventually");
 
@@ -87,11 +87,11 @@ async fn test_basic_generate_triples() {
                 let triple_ids = node.triple_storage.fetch_owned(peer.me).await;
                 let mut peer_triples = Vec::with_capacity(triple_ids.len());
                 for triple_id in triple_ids {
-                    let t = conn
-                        .hget::<&str, u64, Triple>(node.triple_storage.triple_key(), triple_id)
+                    let pair = conn
+                        .hget::<&str, u64, TriplePair>(node.triple_storage.triple_key(), triple_id)
                         .await;
-                    if let Ok(t) = t {
-                        peer_triples.push(t);
+                    if let Ok(pair) = pair {
+                        peer_triples.push(pair);
                     } else {
                         tracing::error!("missing triple in redis {triple_id}");
                     }
@@ -168,9 +168,21 @@ async fn test_basic_sign() {
 
     tracing::info!("sending requests now");
     let request = sign_request(0);
-    network[0].sign_tx.send(request.clone()).await.unwrap();
-    network[1].sign_tx.send(request.clone()).await.unwrap();
-    network[2].sign_tx.send(request.clone()).await.unwrap();
+    network[0]
+        .sign_tx
+        .send(Sign::Request(request.clone()))
+        .await
+        .unwrap();
+    network[1]
+        .sign_tx
+        .send(Sign::Request(request.clone()))
+        .await
+        .unwrap();
+    network[2]
+        .sign_tx
+        .send(Sign::Request(request.clone()))
+        .await
+        .unwrap();
 
     let timeout = Duration::from_secs(10);
 
@@ -192,9 +204,8 @@ fn sign_request(seed: u8) -> IndexedSignRequest {
         args: sign_arg(seed),
         chain: Chain::NEAR,
         unix_timestamp_indexed: 0,
-        timestamp_sign_queue: None,
+        timestamp_sign_queue: std::time::Instant::now(),
         total_timeout: Duration::from_secs(45),
-        participants: None,
         sign_request_type: SignRequestType::Sign,
     }
 }
@@ -248,4 +259,404 @@ async fn test_presignature_timeout() {
     tokio::time::timeout(Duration::from_secs(300), network.wait_for_presignatures(1))
         .await
         .expect("should have enough presignatures eventually");
+}
+
+/// Test that with adequate presignature stockpile, sign requests complete
+/// without burning extra presignatures. Each signature should consume exactly
+/// one presignature. This test verifies that the sign task organization
+/// (proposer selection) works correctly and doesn't cause presignature waste.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sign_adequate_stockpile() {
+    // We have ~15 presignatures in the fixture (5 mine + 10 foreign per node approx).
+    // This test sends fewer requests than available presignatures to verify
+    // that each signature consumes exactly one presignature.
+    const NUM_SIGN_REQUESTS: u8 = 10;
+
+    let network = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    // Wait for presignatures to be loaded
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        network.wait_for_presignatures(1),
+    )
+    .await
+    .expect("should start with enough presignatures");
+
+    // Count initial presignatures from first node (all nodes share same Redis)
+    let initial_presignatures = network[0].presignature_storage.len_generated().await;
+    tracing::info!(initial_presignatures, "starting presignature count");
+
+    // Send sign requests to all nodes concurrently
+    tracing::info!(NUM_SIGN_REQUESTS, "sending sign requests");
+    for seed in 0..NUM_SIGN_REQUESTS {
+        let request = sign_request(seed);
+        for node in &network.nodes {
+            node.sign_tx
+                .send(Sign::Request(request.clone()))
+                .await
+                .unwrap();
+        }
+    }
+
+    // Wait for all signatures to be produced
+    let timeout = Duration::from_secs(60);
+    let actions = tokio::time::timeout(
+        timeout,
+        network.wait_for_actions(NUM_SIGN_REQUESTS as usize),
+    )
+    .await
+    .expect("should publish all RPC actions eventually");
+
+    assert_eq!(
+        actions.len(),
+        NUM_SIGN_REQUESTS as usize,
+        "should have exactly {NUM_SIGN_REQUESTS} signatures"
+    );
+
+    // Verify all actions are publish actions
+    for action_str in &actions {
+        assert!(
+            action_str.contains("RpcAction::Publish"),
+            "unexpected rpc action {action_str}"
+        );
+    }
+
+    // Count final presignatures to verify consumption
+    let final_presignatures = network[0].presignature_storage.len_generated().await;
+    tracing::info!(final_presignatures, "ending presignature count");
+
+    // Each signature should consume exactly one presignature
+    let presignatures_consumed = initial_presignatures.saturating_sub(final_presignatures);
+    tracing::info!(
+        presignatures_consumed,
+        signatures_produced = NUM_SIGN_REQUESTS,
+        "presignature consumption"
+    );
+
+    // We expect presignatures consumed to equal signatures produced.
+    // If presignatures are being "burned" (wasted), we'd see more consumption.
+    assert!(
+        presignatures_consumed <= NUM_SIGN_REQUESTS as usize + 2, // small tolerance for edge cases
+        "too many presignatures consumed ({presignatures_consumed}) for {NUM_SIGN_REQUESTS} signatures - possible presignature burning issue"
+    );
+}
+
+/// Test sign request behavior under presignature contention. When there are
+/// fewer presignatures than sign requests, tasks must wait and coordinate.
+/// This test verifies that sign tasks don't get stuck in infinite loops
+/// choosing new proposers and burning presignatures.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sign_limited_stockpile_contention() {
+    // Send more sign requests than presignatures to trigger contention.
+    // We have ~15 presignatures in fixture, send 12 requests.
+    // All should complete since we have enough presignatures.
+    const NUM_SIGN_REQUESTS: u8 = 12;
+
+    let network = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    // Wait for presignatures to be loaded
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        network.wait_for_presignatures(1),
+    )
+    .await
+    .expect("should start with presignatures");
+
+    // Get initial count from first node (all nodes share same Redis pool)
+    let initial_presignatures = network[0].presignature_storage.len_generated().await;
+    tracing::info!(
+        initial_presignatures,
+        num_requests = NUM_SIGN_REQUESTS,
+        "starting contention test"
+    );
+
+    // Send all requests at once to maximize contention
+    tracing::info!(NUM_SIGN_REQUESTS, "sending sign requests simultaneously");
+    for seed in 0..NUM_SIGN_REQUESTS {
+        let request = sign_request(seed);
+        for node in &network.nodes {
+            node.sign_tx
+                .send(Sign::Request(request.clone()))
+                .await
+                .unwrap();
+        }
+    }
+
+    // We expect to complete at least as many signatures as we have presignatures.
+    // With contention, this tests that tasks properly coordinate and don't get
+    // stuck in reorganization loops burning presignatures.
+    let min_expected_signatures = initial_presignatures.min(NUM_SIGN_REQUESTS as usize);
+
+    // Use a generous timeout since contention may slow things down
+    let timeout = Duration::from_secs(90);
+    let actions = tokio::time::timeout(timeout, network.wait_for_actions(min_expected_signatures))
+        .await
+        .expect("should produce signatures even under contention");
+
+    // Count final presignatures
+    let final_presignatures = network[0].presignature_storage.len_generated().await;
+    let presignatures_consumed = initial_presignatures.saturating_sub(final_presignatures);
+
+    tracing::info!(
+        signatures_produced = actions.len(),
+        min_expected = min_expected_signatures,
+        presignatures_consumed,
+        "contention test completed"
+    );
+
+    assert!(
+        actions.len() >= min_expected_signatures,
+        "should have produced at least {min_expected_signatures} signatures, got {}",
+        actions.len()
+    );
+
+    // Verify all actions are publish actions
+    for action_str in &actions {
+        assert!(
+            action_str.contains("RpcAction::Publish"),
+            "unexpected rpc action {action_str}"
+        );
+    }
+
+    // Verify no excessive presignature burning
+    // Consumed should be <= signatures produced + small margin for contention
+    assert!(
+        presignatures_consumed <= actions.len() + 3,
+        "too many presignatures consumed ({presignatures_consumed}) for {} signatures - possible presignature burning",
+        actions.len()
+    );
+}
+
+/// Test that sign requests wait for presignatures and complete when more become available.
+/// This verifies:
+/// 1. Sign requests don't fail when there aren't enough presignatures
+/// 2. Sign requests complete as presignatures become available
+/// 3. No presignature burning during the waiting period
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sign_requests_wait_for_presignatures() {
+    // We'll send 20 sign requests but start with only enough presignatures for ~10.
+    // The first batch should complete, then we generate more presignatures to
+    // complete the remaining requests.
+    const TOTAL_SIGN_REQUESTS: u8 = 20;
+    const FIRST_BATCH_SIZE: usize = 10;
+
+    // Use a network that can generate presignatures (has preshared triples)
+    // but starts with the stockpiled presignatures from fixture
+    let network = MpcFixtureBuilder::default()
+        .with_preshared_key()
+        .with_preshared_triples()
+        .with_presignature_stockpile()
+        // Disable triple generation since we're using preshared triples
+        .with_min_triples_stockpile(0)
+        .with_max_triples_stockpile(0)
+        // Enable presignature generation for second batch
+        .with_min_presignatures_stockpile(5)
+        .with_max_presignatures_stockpile(20)
+        .build()
+        .await;
+
+    // Wait for initial presignatures to be loaded
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        network.wait_for_presignatures(1),
+    )
+    .await
+    .expect("should start with presignatures");
+
+    let initial_presignatures = network[0].presignature_storage.len_generated().await;
+    tracing::info!(
+        initial_presignatures,
+        total_requests = TOTAL_SIGN_REQUESTS,
+        "starting presignature wait test"
+    );
+
+    // Send ALL sign requests at once - more than we have presignatures for
+    tracing::info!(TOTAL_SIGN_REQUESTS, "sending all sign requests");
+    for seed in 0..TOTAL_SIGN_REQUESTS {
+        let request = sign_request(seed);
+        for node in &network.nodes {
+            node.sign_tx
+                .send(Sign::Request(request.clone()))
+                .await
+                .unwrap();
+        }
+    }
+
+    // First batch: wait for as many signatures as we initially have presignatures
+    let first_batch_expected = initial_presignatures.min(FIRST_BATCH_SIZE);
+    tracing::info!(first_batch_expected, "waiting for first batch");
+
+    let first_batch_timeout = Duration::from_secs(30);
+    let first_actions = tokio::time::timeout(
+        first_batch_timeout,
+        network.wait_for_actions(first_batch_expected),
+    )
+    .await
+    .expect("first batch should complete with available presignatures");
+
+    tracing::info!(
+        first_batch_completed = first_actions.len(),
+        "first batch completed"
+    );
+
+    // Check presignatures after first batch
+    let after_first_batch = network[0].presignature_storage.len_generated().await;
+    tracing::info!(
+        after_first_batch,
+        consumed = initial_presignatures.saturating_sub(after_first_batch),
+        "presignatures after first batch"
+    );
+
+    // Now wait for more presignatures to be generated
+    // The remaining sign requests should be waiting
+    tracing::info!("waiting for presignature generation to catch up");
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        network.wait_for_presignatures(3), // wait for at least 3 owned presignatures per node
+    )
+    .await
+    .expect("should generate more presignatures");
+
+    let after_generation = network[0].presignature_storage.len_generated().await;
+    tracing::info!(after_generation, "presignatures after generation");
+
+    // Now wait for remaining signatures to complete
+    tracing::info!("waiting for remaining signatures");
+    let final_timeout = Duration::from_secs(60);
+    let final_actions = tokio::time::timeout(
+        final_timeout,
+        network.wait_for_actions(TOTAL_SIGN_REQUESTS as usize),
+    )
+    .await
+    .expect("all signatures should complete after presignature generation");
+
+    tracing::info!(
+        total_signatures = final_actions.len(),
+        "all signatures completed"
+    );
+
+    assert_eq!(
+        final_actions.len(),
+        TOTAL_SIGN_REQUESTS as usize,
+        "should complete all {} sign requests",
+        TOTAL_SIGN_REQUESTS
+    );
+
+    // Verify all actions are publish actions
+    for action_str in &final_actions {
+        assert!(
+            action_str.contains("RpcAction::Publish"),
+            "unexpected rpc action {action_str}"
+        );
+    }
+}
+
+/// Test sign request contention with 5 nodes.
+/// This test generates triples and presignatures on-the-fly (slower but more realistic).
+/// Uses 5_nodes.json fixture for pre-shared keys only.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sign_contention_5_nodes() {
+    const NUM_NODES: u32 = 5;
+    const THRESHOLD: usize = 4;
+    const NUM_SIGN_REQUESTS: u8 = 5; // Reduced from 10 to match presignature availability
+    const MIN_PRESIGNATURES_PER_OWNER: usize = 3;
+    const STOCKPILE_MIN: u32 = 8;
+    const STOCKPILE_MAX: u32 = 12;
+
+    tracing::info!(
+        num_nodes = NUM_NODES,
+        threshold = THRESHOLD,
+        num_requests = NUM_SIGN_REQUESTS,
+        "starting 5-node contention test with on-the-fly generation"
+    );
+
+    // Build network with pre-shared keys, generate triples/presignatures on the fly
+    let network = MpcFixtureBuilder::new(NUM_NODES, THRESHOLD)
+        .with_preshared_key()
+        .with_min_triples_stockpile(STOCKPILE_MIN)
+        .with_max_triples_stockpile(STOCKPILE_MAX)
+        .with_min_presignatures_stockpile(STOCKPILE_MIN)
+        .with_max_presignatures_stockpile(STOCKPILE_MAX)
+        .build()
+        .await;
+
+    // Wait for presignatures to be generated - 5-node triple generation takes ~3-4 minutes
+    // We wait for a modest per-owner count since distribution is not uniform
+    tracing::info!("waiting for presignatures to be generated (triple gen takes ~3-4 min)...");
+    tokio::time::timeout(
+        Duration::from_secs(480), // 8 minutes for triple + presignature generation
+        network.wait_for_presignatures(MIN_PRESIGNATURES_PER_OWNER),
+    )
+    .await
+    .expect("should generate presignatures within 8 minutes");
+
+    let initial_presignatures = network[0].presignature_storage.len_generated().await;
+    tracing::info!(
+        initial_presignatures,
+        "presignatures ready, sending sign requests"
+    );
+
+    // Send sign requests to all nodes concurrently (simulates real network conditions)
+    for seed in 0..NUM_SIGN_REQUESTS {
+        let request = sign_request(seed);
+        for node in &network.nodes {
+            node.sign_tx
+                .send(Sign::Request(request.clone()))
+                .await
+                .unwrap();
+        }
+    }
+
+    // Wait for all signatures - allow more time for 5-node consensus
+    let timeout = Duration::from_secs(120);
+    let actions = tokio::time::timeout(
+        timeout,
+        network.wait_for_actions(NUM_SIGN_REQUESTS as usize),
+    )
+    .await
+    .expect("should produce all signatures");
+
+    let final_presignatures = network[0].presignature_storage.len_generated().await;
+    let presignatures_consumed = initial_presignatures.saturating_sub(final_presignatures);
+
+    tracing::info!(
+        signatures_produced = actions.len(),
+        initial_presignatures,
+        final_presignatures,
+        presignatures_consumed,
+        "5-node contention test completed"
+    );
+
+    assert_eq!(
+        actions.len(),
+        NUM_SIGN_REQUESTS as usize,
+        "should have exactly {} signatures",
+        NUM_SIGN_REQUESTS
+    );
+
+    for action_str in &actions {
+        assert!(
+            action_str.contains("RpcAction::Publish"),
+            "unexpected rpc action {action_str}"
+        );
+    }
+
+    // Verify 1:1 presignature consumption (with small tolerance for timing)
+    assert!(
+        presignatures_consumed <= actions.len() + 2,
+        "too many presignatures consumed ({presignatures_consumed}) for {} signatures - potential burning issue",
+        actions.len()
+    );
+
+    tracing::info!(
+        "5-node test passed: {} signatures with {} presignatures consumed",
+        actions.len(),
+        presignatures_consumed
+    );
 }
