@@ -10,6 +10,7 @@ use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
+use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::triple_storage::TriplePair;
 use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
 
@@ -224,7 +225,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             }
             tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
 
-            let backlog = Backlog::new();
+            let backlog = Backlog::persisted(CheckpointStorage::Redis(redis_pool.clone()));
 
             // NEAR Indexer is only used for integration tests
             // TODO: Remove this once we have integration tests built on other chains
