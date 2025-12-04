@@ -5,6 +5,7 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, SignRequestType};
 use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PendingRequestStatus};
+use crate::storage::checkpoint_storage::CheckpointStorage;
 use anyhow::Context;
 use mpc_primitives::{PendingTx, SignId};
 use std::collections::{hash_map, HashMap};
@@ -185,6 +186,7 @@ struct HistoricalCheckpoint {
 /// publish queues.
 #[derive(Debug, Clone)]
 pub struct Backlog {
+    storage: CheckpointStorage,
     requests: Arc<RwLock<HashMap<Chain, PendingRequests>>>,
     execution_watchers: Arc<RwLock<HashMap<Chain, ExecutionWatchers>>>,
     sign_request_types: Arc<RwLock<HashMap<(Chain, SignId), SignRequestType>>>,
@@ -200,7 +202,12 @@ impl Default for Backlog {
 
 impl Backlog {
     pub fn new() -> Self {
+        Self::persisted(CheckpointStorage::in_memory())
+    }
+
+    pub fn persisted(storage: CheckpointStorage) -> Self {
         Self {
+            storage,
             requests: Arc::new(RwLock::new(HashMap::new())),
             execution_watchers: Arc::new(RwLock::new(HashMap::new())),
             sign_request_types: Arc::new(RwLock::new(HashMap::new())),
@@ -463,6 +470,10 @@ impl Backlog {
         });
         historical.retain(|hcp| hcp.created_at.elapsed() < RETENTION_DURATION);
 
+        if let Err(err) = self.storage.persist(&checkpoint).await {
+            tracing::warn!(?chain, %err, "failed to persist checkpoint");
+        }
+
         checkpoint
     }
 
@@ -562,11 +573,37 @@ impl Backlog {
     ) {
         tracing::info!("attempting to recover from latest checkpoints via node selection");
 
+        // Load local checkpoints first
+        let mut local_checkpoints = HashMap::new();
+        for &chain in chains {
+            match self.storage.load_latest(chain).await {
+                Ok(Some(checkpoint)) => {
+                    tracing::info!(
+                        ?chain,
+                        block_height = checkpoint.block_height,
+                        "loaded local checkpoint"
+                    );
+                    local_checkpoints.insert(chain, checkpoint);
+                }
+                Ok(None) => {
+                    tracing::info!(?chain, "no local checkpoint found");
+                }
+                Err(err) => {
+                    tracing::warn!(?chain, %err, "failed to load local checkpoint");
+                }
+            }
+        }
+
         // p2p node selection to find checkpoints.
         // Fetches all checkpoints from active participants and creates a selected checkpoint:
         // - sorts all checkpoints by block height
         // - selects threshold lowest block height checkpoint
-        let checkpoints = select_checkpoints(mesh_state, node_client, threshold, chains).await;
+        let remote_checkpoints =
+            select_checkpoints(mesh_state, node_client, threshold, chains).await;
+
+        // Merge local and remote checkpoints, preferring the one with higher block height
+        let checkpoints = merge_checkpoints(local_checkpoints, remote_checkpoints);
+
         if checkpoints.is_empty() {
             tracing::info!("no selected checkpoints found, starting with empty state");
             return;
@@ -664,6 +701,29 @@ impl BacklogTransaction {
     pub fn is_bidirectional(&self) -> bool {
         matches!(self, Self::Bidirectional(_))
     }
+}
+
+fn merge_checkpoints(
+    local: HashMap<Chain, Checkpoint>,
+    mut remote: HashMap<Chain, Checkpoint>,
+) -> HashMap<Chain, Checkpoint> {
+    for (chain, local_cp) in local {
+        remote
+            .entry(chain)
+            .and_modify(|remote_cp| {
+                if local_cp.block_height > remote_cp.block_height {
+                    tracing::info!(
+                        ?chain,
+                        local_height = local_cp.block_height,
+                        remote_height = remote_cp.block_height,
+                        "local checkpoint is newer than remote selection"
+                    );
+                    *remote_cp = local_cp.clone();
+                }
+            })
+            .or_insert(local_cp);
+    }
+    remote
 }
 
 #[cfg(test)]
@@ -1138,5 +1198,59 @@ mod tests {
         let checkpoint = checkpoint.unwrap();
         assert_eq!(checkpoint.block_height, interval);
         assert_eq!(checkpoint.chain, Chain::Solana);
+    }
+    #[test]
+    fn test_merge_checkpoints() {
+        let mut local = HashMap::new();
+        let mut remote = HashMap::new();
+
+        // Case 1: Only local
+        local.insert(
+            Chain::Ethereum,
+            Checkpoint {
+                chain: Chain::Ethereum,
+                block_height: 100,
+                pending_requests: vec![],
+            },
+        );
+        let merged = merge_checkpoints(local.clone(), remote.clone());
+        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 100);
+
+        // Case 2: Only remote
+        local.clear();
+        remote.insert(
+            Chain::Ethereum,
+            Checkpoint {
+                chain: Chain::Ethereum,
+                block_height: 200,
+                pending_requests: vec![],
+            },
+        );
+        let merged = merge_checkpoints(local.clone(), remote.clone());
+        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 200);
+
+        // Case 3: Local higher
+        local.insert(
+            Chain::Ethereum,
+            Checkpoint {
+                chain: Chain::Ethereum,
+                block_height: 300,
+                pending_requests: vec![],
+            },
+        );
+        let merged = merge_checkpoints(local.clone(), remote.clone());
+        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 300);
+
+        // Case 4: Remote higher
+        remote.insert(
+            Chain::Ethereum,
+            Checkpoint {
+                chain: Chain::Ethereum,
+                block_height: 400,
+                pending_requests: vec![],
+            },
+        );
+        let merged = merge_checkpoints(local.clone(), remote.clone());
+        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 400);
     }
 }

@@ -50,6 +50,13 @@ pub struct IndexedSignRequest {
     pub sign_request_type: SignRequestType,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub enum Sign {
+    Request(IndexedSignRequest),
+    Completion(SignId),
+}
+
 #[allow(clippy::large_enum_variant)]
 pub enum PendingRequest {
     Available(SignRequest),
