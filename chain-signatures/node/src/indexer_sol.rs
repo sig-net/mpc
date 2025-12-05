@@ -571,6 +571,7 @@ async fn subscribe_and_process_sign_events(
                     }
                 });
             },
+            node_near_account_id.clone(),
         )
         .await;
 
@@ -686,6 +687,7 @@ async fn subscribe_to_program_cpi_events<F>(
     ws_url: &str,
     backlog: Backlog,
     mut event_handler: F,
+    node_near_account_id: AccountId,
 ) -> Result<()>
 where
     F: FnMut(SignatureEventBox, Signature, u64) + Send,
@@ -745,6 +747,11 @@ where
                 "created Solana checkpoint"
             );
         }
+
+        // Update block height metric
+        crate::metrics::LATEST_BLOCK_NUMBER
+            .with_label_values(&[Chain::Solana.as_str(), node_near_account_id.as_str()])
+            .set(response.context.slot as i64);
     }
 
     Ok(())
