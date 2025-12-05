@@ -42,6 +42,7 @@ pub enum TestError {
 }
 
 /// Handle to a running SignTask for testing
+#[allow(dead_code)]
 struct SignTaskHandle {
     participant: Participant,
     handle: JoinHandle<()>,
@@ -54,7 +55,7 @@ pub struct SignTaskTestHarness {
     tasks: Vec<SignTaskHandle>,
     message_bus: Arc<InMemoryMessageBus>,
     presignature_storage: PresignatureStorage,
-    convergence_monitor: Arc<ConvergenceMonitor>,
+    pub convergence_monitor: Arc<ConvergenceMonitor>,
     participants: Vec<Participant>,
     threshold: usize,
     mesh_state_tx: watch::Sender<MeshState>,

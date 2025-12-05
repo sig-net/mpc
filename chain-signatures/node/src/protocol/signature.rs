@@ -4,6 +4,12 @@ pub mod test_harness;
 #[cfg(test)]
 pub mod convergence_monitor;
 
+#[cfg(test)]
+mod convergence_tests;
+
+#[cfg(test)]
+mod stall_reproduction_tests;
+
 use super::MpcSignProtocol;
 use crate::backlog::Backlog;
 use crate::config::Config;
