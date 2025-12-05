@@ -1,3 +1,6 @@
+#[cfg(test)]
+pub mod test_harness;
+
 use super::MpcSignProtocol;
 use crate::backlog::Backlog;
 use crate::config::Config;
