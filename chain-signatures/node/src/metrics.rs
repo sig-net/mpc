@@ -308,6 +308,15 @@ pub(crate) static NUM_SEND_ENCRYPTED_TOTAL: LazyLock<CounterVec> = LazyLock::new
     .unwrap()
 });
 
+pub(crate) static NUM_RECEIVED_ENCRYPTED_TOTAL: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_received_encrypted_total",
+        "number total received encrypted",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
 pub(crate) static SEND_ENCRYPTED_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_send_encrypted_ms",

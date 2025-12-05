@@ -330,7 +330,12 @@ impl MessageInbox {
         }
     }
 
-    pub async fn run(mut self, config: watch::Receiver<Config>, contract: ContractStateWatcher) {
+    pub async fn run(
+        mut self,
+        my_account_id: AccountId,
+        config: watch::Receiver<Config>,
+        contract: ContractStateWatcher,
+    ) {
         loop {
             tokio::select! {
                 _ = self.filter.update() => {}
@@ -351,7 +356,12 @@ impl MessageInbox {
                     self.filter.try_update();
 
                     let messages = self.filter(messages);
+                    let messages_len = messages.len();
                     self.publish(messages).await;
+
+                    crate::metrics::NUM_RECEIVED_ENCRYPTED_TOTAL
+                        .with_label_values(&[my_account_id.as_str()])
+                        .inc_by(messages_len as f64);
                 }
             }
         }
@@ -392,7 +402,7 @@ impl MessageChannel {
         contract: ContractStateWatcher,
     ) -> Self {
         let (inbox, outbox, channel) = Self::new();
-        tokio::spawn(inbox.run(config.clone(), contract.clone()));
+        tokio::spawn(inbox.run(id.clone(), config.clone(), contract.clone()));
         tokio::spawn(outbox.run(id.clone(), client, config, contract));
 
         channel
@@ -1347,7 +1357,7 @@ mod tests {
             participants,
         );
         let (inbox, _outbox, channel) = MessageChannel::new();
-        let inbox = tokio::spawn(inbox.run(config_rx, contract_watcher));
+        let inbox = tokio::spawn(inbox.run(node_id.clone(), config_rx, contract_watcher));
 
         // Case 1:
         // Check that the inbox received our messages correctly:

@@ -81,6 +81,7 @@ struct MockedNodeContext {
     redis_pool: deadpool_redis::Pool,
     init_mesh: MeshState,
     contract_state: ContractStateWatcher,
+    node_account_id: AccountId,
 }
 
 /// Has the interface for a message channel but nothing is running, yet.
@@ -177,6 +178,7 @@ impl MpcFixtureBuilder {
                 redis_pool: redis_container.pool(),
                 init_mesh: initial_mesh_state.clone(),
                 contract_state,
+                node_account_id: node.participant_info.account_id.clone(),
             };
 
             let started = node
@@ -433,11 +435,11 @@ impl MpcFixtureNodeBuilder {
         // We have to start the inbox job before calling
         // `MpcSignProtocol::new_test` or else subscribing to messages will
         // await the subscription response forever.
-        let _inbox_handle = tokio::spawn(
-            self.messaging
-                .inbox
-                .run(config_rx.clone(), context.contract_state.clone()),
-        );
+        let _inbox_handle = tokio::spawn(self.messaging.inbox.run(
+            context.node_account_id,
+            config_rx.clone(),
+            context.contract_state.clone(),
+        ));
 
         let protocol = MpcSignProtocol::new_test(
             self.participant_info.account_id.clone(),
