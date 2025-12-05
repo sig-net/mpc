@@ -1,6 +1,9 @@
 #[cfg(test)]
 pub mod test_harness;
 
+#[cfg(test)]
+pub mod convergence_monitor;
+
 use super::MpcSignProtocol;
 use crate::backlog::Backlog;
 use crate::config::Config;
