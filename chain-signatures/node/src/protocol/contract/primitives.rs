@@ -115,8 +115,8 @@ impl Participants {
         self.participants.is_empty()
     }
 
-    pub fn insert(&mut self, id: &Participant, info: ParticipantInfo) {
-        self.participants.insert(*id, info);
+    pub fn insert(&mut self, id: &Participant, info: ParticipantInfo) -> Option<ParticipantInfo> {
+        self.participants.insert(*id, info)
     }
 
     pub fn remove(&mut self, id: &Participant) -> Option<ParticipantInfo> {

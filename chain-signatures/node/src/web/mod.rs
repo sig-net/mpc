@@ -23,6 +23,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use axum_extra::extract::WithRejection;
 use cait_sith::protocol::Participant;
+use chrono::{DateTime, Utc};
 use mpc_keys::hpke::Ciphered;
 use near_account_id::AccountId;
 use near_primitives::types::BlockHeight;
@@ -213,6 +214,7 @@ pub struct StatusResponse {
     pub status: NodeStatus,
     #[serde(default)]
     pub protocol_version: u64,
+    pub time: DateTime<Utc>,
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
@@ -220,6 +222,7 @@ async fn status(Extension(web): Extension<Arc<AxumState>>) -> Json<StatusRespons
     Json(StatusResponse {
         status: web.node.status(),
         protocol_version: crate::PROTOCOL_VERSION,
+        time: Utc::now(),
     })
 }
 

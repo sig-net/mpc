@@ -1,4 +1,5 @@
 use cait_sith::protocol::Participant;
+use chrono::Utc;
 use mockito::ServerGuard;
 use near_sdk::AccountId;
 
@@ -187,6 +188,7 @@ fn status_body(id: u32, version: Option<u64>) -> Vec<u8> {
         Some(protocol_version) => serde_json::to_vec(&StatusResponse {
             protocol_version,
             status: status.clone(),
+            time: Utc::now(),
         })
         .unwrap(),
         None => serde_json::to_vec(&status).unwrap(),

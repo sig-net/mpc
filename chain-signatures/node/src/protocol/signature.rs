@@ -37,6 +37,7 @@ use near_account_id::AccountId;
 
 /// The round interval to search for a proposer in the organizing phase.
 const ROUND_INTERVAL: usize = 512;
+const DRIFT_INTERVAL: u64 = 3000;
 
 /// All relevant info pertaining to an Indexed sign request from an indexer.
 #[derive(Debug, Clone, PartialEq)]
@@ -177,34 +178,33 @@ impl SignOrganizer {
         let entropy = state.indexed.args.entropy;
         let participants = ctx.participants.iter().copied().collect::<Vec<_>>();
 
+        // Deterministic round based on time
+        let now = Utc::now().timestamp_millis() as u64;
+        let drift_interval = DRIFT_INTERVAL as u64;
+        state.round = ((now + drift_interval) / (4 * drift_interval)) as usize;
+
         tracing::info!(?sign_id, round = ?state.round, "entering organizing phase");
         let (stable, proposer) = {
             let Some(stable) = self.wait_stable(ctx, state, threshold).await else {
                 tracing::warn!(?sign_id, round = ?state.round, "no stable participants, reorganizing");
-                state.bump_round();
                 return SignPhase::Organizing(self);
             };
 
-            let max_rounds = state.round + ROUND_INTERVAL;
-            let (selected_round, proposer) = (state.round..max_rounds)
-                .map(|r| (r, Self::proposer_per_round(r, &participants, &entropy)))
-                .find(|(_, potential_proposer)| stable.contains(potential_proposer))
+            let proposer = (state.round..state.round + ROUND_INTERVAL)
+                .map(|r| Self::proposer_per_round(r, &participants, &entropy))
+                .find(|potential_proposer| stable.contains(potential_proposer))
                 .unwrap_or_else(|| {
-                    (
-                        max_rounds,
-                        *stable
-                            .iter()
-                            .choose(&mut StdRng::from_seed(entropy))
-                            .unwrap(),
-                    )
+                    *stable
+                        .iter()
+                        .choose(&mut StdRng::from_seed(entropy))
+                        .unwrap()
                 });
 
             let is_mine = proposer == me;
-            state.round = selected_round;
 
             tracing::info!(
                 ?sign_id,
-                round = selected_round,
+                round = state.round,
                 ?proposer,
                 ?me,
                 is_mine,

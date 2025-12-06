@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
 use crate::mesh::connection::NodeStatus;
@@ -8,6 +8,7 @@ use crate::protocol::ParticipantInfo;
 use crate::protocol::ProtocolState;
 use crate::rpc::ContractStateWatcher;
 use cait_sith::protocol::Participant;
+use chrono::Utc;
 use near_account_id::AccountId;
 use tokio::sync::{mpsc, watch};
 
@@ -31,6 +32,9 @@ impl Options {
     }
 }
 
+/// The +/- drift range in milliseconds.
+pub const DRIFT_INTERVAL: i64 = 3000;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MeshState {
     /// Participants that are active in the network; as in they respond when pinged.
@@ -45,12 +49,24 @@ pub struct MeshState {
 }
 
 impl MeshState {
-    pub fn update(&mut self, participant: Participant, status: NodeStatus, info: ParticipantInfo) {
+    pub fn update(
+        &mut self,
+        participant: Participant,
+        status: NodeStatus,
+        info: ParticipantInfo,
+    ) -> bool {
         match status {
-            NodeStatus::Active => {
+            NodeStatus::Active(time) => {
                 self.active.insert(&participant, info);
                 self.need_sync.remove(&participant);
-                self.stable.insert(participant);
+
+                // Check drift is within the expected DRIFT_INTERVAL range.
+                let drift = (time - Utc::now()).num_milliseconds().abs();
+                if drift <= DRIFT_INTERVAL {
+                    self.stable.insert(participant);
+                } else {
+                    self.stable.remove(&participant);
+                }
             }
             NodeStatus::Syncing => {
                 self.need_sync.insert(&participant, info);
@@ -61,6 +77,7 @@ impl MeshState {
                 self.stable.remove(&participant);
             }
         }
+        true
     }
 }
 
@@ -125,7 +142,7 @@ impl Mesh {
                     if let Some((participant, info)) = my_info {
                         let new_status = match &contract {
                             ProtocolState::Initializing(_) | ProtocolState::Resharing(_) => NodeStatus::Inactive,
-                            ProtocolState::Running(_) => NodeStatus::Active,
+                            ProtocolState::Running(_) => NodeStatus::Active(Utc::now()),
                         };
                         self.connections.connect(contract).await;
                         self.state_tx.send_modify(|state| {
@@ -211,8 +228,12 @@ mod tests {
             if let Ok((p, status, _info)) =
                 tokio::time::timeout(Duration::from_millis(500), watcher.next()).await
             {
-                if p == participant && status == expected {
-                    return;
+                if p == participant {
+                    match (&status, &expected) {
+                        (NodeStatus::Active(_), NodeStatus::Active(_)) => return,
+                        (s1, s2) if s1 == s2 => return,
+                        _ => {}
+                    }
                 }
             }
         }
@@ -256,7 +277,7 @@ mod tests {
             match tokio::time::timeout(Duration::from_millis(100), watcher.next()).await {
                 Ok((participant, status, _info)) => {
                     tracing::info!(?participant, ?status, "got connection update for active");
-                    if matches!(status, NodeStatus::Active) {
+                    if matches!(status, NodeStatus::Active(_)) {
                         syncing.insert(participant);
                     }
                 }
@@ -472,7 +493,7 @@ mod tests {
 
         expect_status(&mut watcher, remote_id, NodeStatus::Syncing).await;
         pool.report_node_synced(remote_id).await;
-        expect_status(&mut watcher, remote_id, NodeStatus::Active).await;
+        expect_status(&mut watcher, remote_id, NodeStatus::Active(Utc::now())).await;
 
         servers[1].set_protocol_version(None).await;
         expect_status(&mut watcher, remote_id, NodeStatus::Offline).await;
@@ -480,7 +501,7 @@ mod tests {
         servers[1].make_online().await;
         expect_status(&mut watcher, remote_id, NodeStatus::Syncing).await;
         pool.report_node_synced(remote_id).await;
-        expect_status(&mut watcher, remote_id, NodeStatus::Active).await;
+        expect_status(&mut watcher, remote_id, NodeStatus::Active(Utc::now())).await;
 
         servers[1].set_protocol_version(Some(0)).await;
         expect_status(&mut watcher, remote_id, NodeStatus::Offline).await;

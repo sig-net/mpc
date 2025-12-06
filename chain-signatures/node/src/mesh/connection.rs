@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use cait_sith::protocol::Participant;
+use chrono::{DateTime, Utc};
 use near_account_id::AccountId;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
@@ -18,7 +19,7 @@ use crate::protocol::{ParticipantInfo, ProtocolState};
 pub enum NodeStatus {
     /// The connected node responds and is actively participating in the MPC
     /// network.
-    Active,
+    Active(DateTime<Utc>),
     /// State sync is running for node in this state.
     ///
     /// State sync needs to run once for every connection when a node starts.
@@ -60,7 +61,8 @@ impl NodeConnection {
         info: &ParticipantInfo,
         ping_interval: Duration,
     ) -> Self {
-        let (status_tx, status_rx) = watch::channel((NodeStatus::Offline, info.clone()));
+        let (status_tx, status_rx) =
+            watch::channel((NodeStatus::Offline, info.clone()));
         let (info_tx, info_rx) = watch::channel(info.clone());
         let task = tokio::spawn(Self::run(
             client.clone(),
@@ -132,7 +134,7 @@ impl NodeConnection {
 
                     let old_status = status_tx.borrow().0;
                     let mut new_status = match resp.status {
-                        OtherNodeStatus::Running { .. } => NodeStatus::Active,
+                        OtherNodeStatus::Running { .. } => NodeStatus::Active(resp.time),
                         OtherNodeStatus::Resharing { .. }
                         | OtherNodeStatus::Generating { .. }
                         | OtherNodeStatus::Joining { .. }
@@ -141,7 +143,7 @@ impl NodeConnection {
                         | OtherNodeStatus::WaitingForConsensus { .. } => NodeStatus::Inactive,
                     };
                     if matches!(old_status, NodeStatus::Inactive | NodeStatus::Offline | NodeStatus::Syncing)
-                        && new_status == NodeStatus::Active {
+                        && matches!(new_status, NodeStatus::Active(_)) {
                         // Sync when we want to enter an active state
                         //
                         // The peer is running. But before we can reliably
@@ -312,7 +314,7 @@ impl Pool {
             tracing::info!(?participant, "reporting node synced");
             conn.status_tx.send_if_modified(|(status, _)| {
                 if *status == NodeStatus::Syncing {
-                    *status = NodeStatus::Active;
+                    *status = NodeStatus::Active(Utc::now());
                     true
                 } else {
                     false
@@ -339,7 +341,10 @@ pub struct ConnectionWatcher {
     // not just the latest entry with watcher channel.
     conn_update: broadcast::Receiver<ConnectionUpdate>,
     /// Set of active connections that we are watching.
-    watchers: StreamMap<Participant, WatchStream<(NodeStatus, ParticipantInfo)>>,
+    watchers: StreamMap<
+        Participant,
+        WatchStream<(NodeStatus, ParticipantInfo)>,
+    >,
 }
 
 impl ConnectionWatcher {
@@ -350,7 +355,13 @@ impl ConnectionWatcher {
         }
     }
 
-    pub async fn next(&mut self) -> (Participant, NodeStatus, ParticipantInfo) {
+    pub async fn next(
+        &mut self,
+    ) -> (
+        Participant,
+        NodeStatus,
+        ParticipantInfo,
+    ) {
         loop {
             tokio::select! {
                 // Update our watchers if the connections changed.
