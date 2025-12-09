@@ -71,6 +71,7 @@ mpc-contract.workspace = true
 mpc-keys.workspace = true
 mpc-node = { path = "../chain-signatures/node", features = ["test-feature", "debug-page"] }
 mpc-primitives.workspace = true
+mpc-redis-module = { path = "../chain-signatures/redis-module" }
 
 [dev-dependencies]
 criterion = "0.5.1"

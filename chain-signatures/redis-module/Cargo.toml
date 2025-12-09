@@ -1,0 +1,29 @@
+[package]
+name = "mpc-redis-module"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+redis-module = "2.0"
+
+[dev-dependencies]
+proptest = "1.0"
+redis = "0.24"
+testcontainers = "0.23.1"
+deadpool-redis = "0.18.0"
+tokio = { version = "1.45.1", features = ["full"] }
+near-account-id = "1.0.0"
+borsh = "1.5.3"
+cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
+k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
+elliptic-curve = { version = "0.13.5", default-features = false }
+rand = "0.8"
+tracing = "0.1"
+url = "2.5"
+anyhow = "1.0"
+bollard = "0.17.0"
+mpc-node = { path = "../node", features = ["test-feature"] }
+mpc-contract = { path = "../contract" }

@@ -318,123 +318,44 @@ impl Default for DockerClient {
     }
 }
 
+// Wrapper around redis-module's Redis for backward compatibility
 pub struct Redis {
-    pub container: Container,
-    pub internal_address: String,
-    pub external_address: String,
+    inner: mpc_redis_module::test_utils::Redis,
 }
 
 impl Redis {
-    const DEFAULT_REDIS_PORT: u16 = 6379;
-
     pub async fn run(spawner: &ClusterSpawner) -> Self {
-        tracing::info!("Running Redis container...");
-        let container = GenericImage::new("redis", "7.4.2")
-            .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
-            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-            .with_network(&spawner.network)
-            .start()
-            .await
-            .unwrap();
-        let network_ip = spawner
-            .docker
-            .get_network_ip_address(&container, &spawner.network)
-            .await
-            .unwrap();
-
-        let external_address = format!("redis://{}:{}", network_ip, Self::DEFAULT_REDIS_PORT);
-
-        let host_port = container
-            .get_host_port_ipv4(Self::DEFAULT_REDIS_PORT)
-            .await
-            .unwrap();
-        let internal_address = format!("redis://127.0.0.1:{host_port}");
-
-        tracing::info!(
-            external_address,
-            internal_address,
-            "Redis container is running",
-        );
-
-        Self {
-            container,
-            internal_address,
-            external_address,
-        }
+        let inner = mpc_redis_module::test_utils::Redis::run(&spawner.network).await;
+        Self { inner }
     }
 
     pub fn pool(&self) -> deadpool_redis::Pool {
-        let redis_url = url::Url::parse(self.internal_address.as_str()).unwrap();
-        let redis_cfg = deadpool_redis::Config::from_url(redis_url);
-        redis_cfg
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .unwrap()
+        self.inner.pool()
     }
 
     pub fn triple_storage(&self, id: &AccountId) -> mpc_node::storage::TripleStorage {
-        TriplePair::storage(&self.pool(), id)
+        self.inner.triple_storage(id)
     }
 
     pub fn presignature_storage(&self, id: &AccountId) -> mpc_node::storage::PresignatureStorage {
-        Presignature::storage(&self.pool(), id)
+        self.inner.presignature_storage(id)
     }
 
     pub async fn stockpile_triples(&self, cfg: &NodeConfig, participants: &Participants, mul: u32) {
-        let pool = self.pool();
-        let storage = participants
-            .participants
-            .keys()
-            .map(|account_id| {
-                (
-                    Participant::from(
-                        *participants
-                            .account_to_participant_id
-                            .get(account_id)
-                            .unwrap(),
-                    ),
-                    TriplePair::storage(&pool, account_id),
-                )
-            })
-            .collect::<HashMap<_, _>>();
+        self.inner.stockpile_triples(cfg, participants, mul).await
+    }
 
-        let participant_ids = participants
-            .account_to_participant_id
-            .values()
-            .map(|id| Participant::from(*id))
-            .collect::<Vec<_>>();
-        let (public, shares): (TriplePub<Secp256k1>, Vec<TripleShare<Secp256k1>>) =
-            cait_sith::triples::deal(&mut OsRng, &participant_ids, cfg.threshold);
+    // Expose the inner container and addresses for compatibility
+    pub fn container(&self) -> &mpc_redis_module::test_utils::Container {
+        &self.inner.container
+    }
 
-        // - first/second loop add at least min_triples per node
-        // - third loop: for each pair, store the shares as pairs per node
-        let mut num_pairs = 0;
-        for owner in &participant_ids {
-            for _ in 0..(cfg.protocol.triple.min_triples * mul / 2) {
-                num_pairs += 1;
-                let pair_id = rand::random();
-                for ((me, triple0), triple1) in participant_ids
-                    .iter()
-                    .zip(shares_to_triples(&public, &shares))
-                    .zip(shares_to_triples(&public, &shares))
-                {
-                    let pair = TriplePair {
-                        id: pair_id,
-                        triple0,
-                        triple1,
-                    };
-                    storage
-                        .get(me)
-                        .unwrap()
-                        .reserve(pair_id)
-                        .await
-                        .unwrap()
-                        .insert(pair, *owner)
-                        .await;
-                }
-            }
-        }
+    pub fn internal_address(&self) -> &str {
+        &self.inner.internal_address
+    }
 
-        tracing::info!("stockpiled {num_pairs} triple pairs");
+    pub fn external_address(&self) -> &str {
+        &self.inner.external_address
     }
 }
 

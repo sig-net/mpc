@@ -89,6 +89,16 @@ impl Default for NodeConfig {
     }
 }
 
+impl mpc_redis_module::test_utils::StockpileConfig for NodeConfig {
+    fn threshold(&self) -> usize {
+        self.threshold
+    }
+
+    fn min_triples(&self) -> u32 {
+        self.protocol.triple.min_triples
+    }
+}
+
 pub enum Nodes {
     Local {
         next_id: usize,
