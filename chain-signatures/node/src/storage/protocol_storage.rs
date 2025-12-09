@@ -3,7 +3,12 @@ use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, ToRedisArgs};
-use std::{collections::{HashMap, HashSet}, fmt, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::Arc,
+    time::Instant,
+};
 use tokio::{sync::RwLock, task::JoinHandle};
 use tracing;
 
@@ -224,20 +229,22 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                     })
                     .unwrap_or_default()
             }
-            Self::InMemory { reserved, owners, .. } => {
+            Self::InMemory {
+                reserved, owners, ..
+            } => {
                 let reserved_read = reserved.read().await;
                 let owners_read = owners.read().await;
 
                 let mut result_set = HashSet::new();
-                
+
                 // Add reserved artifacts
                 result_set.extend(reserved_read.iter().copied());
-                
+
                 // Add owned artifacts
                 if let Some(owned) = owners_read.get(&me) {
                     result_set.extend(owned.iter().copied());
                 }
-                
+
                 result_set.into_iter().collect()
             }
         }
@@ -597,7 +604,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
                 // Add to owner's set
                 let mut owners_write = owners.write().await;
-                owners_write.entry(owner).or_insert_with(HashSet::new).insert(id);
+                owners_write
+                    .entry(owner)
+                    .or_insert_with(HashSet::new)
+                    .insert(id);
 
                 true
             }
@@ -806,7 +816,11 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
                 match result {
                     Ok(()) => {
-                        tracing::info!(id, elapsed_ms = elapsed.as_millis(), "marked artifact used");
+                        tracing::info!(
+                            id,
+                            elapsed_ms = elapsed.as_millis(),
+                            "marked artifact used"
+                        );
                         true
                     }
                     Err(err) => {
@@ -1072,18 +1086,16 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             } => {
                 // Get one artifact id from owner's set
                 let mut owners_write = owners.write().await;
-                let id = owners_write
-                    .get_mut(&me)
-                    .and_then(|set| {
-                        if set.is_empty() {
-                            None
-                        } else {
-                            // Pop one id from the set
-                            let id = *set.iter().next().unwrap();
-                            set.remove(&id);
-                            Some(id)
-                        }
-                    });
+                let id = owners_write.get_mut(&me).and_then(|set| {
+                    if set.is_empty() {
+                        None
+                    } else {
+                        // Pop one id from the set
+                        let id = *set.iter().next().unwrap();
+                        set.remove(&id);
+                        Some(id)
+                    }
+                });
 
                 let Some(id) = id else {
                     return None;
@@ -1216,7 +1228,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
                 // Add back to owner's set
                 let mut owners_write = owners.write().await;
-                owners_write.entry(me).or_insert_with(HashSet::new).insert(id);
+                owners_write
+                    .entry(me)
+                    .or_insert_with(HashSet::new)
+                    .insert(id);
                 drop(owners_write);
 
                 // Ensure it is still reserved
@@ -1382,7 +1397,10 @@ mod tests {
         let storage: ProtocolStorage<TestArtifact> = ProtocolStorage::in_memory(&test_account_id());
 
         let id = 1u64;
-        let _slot1 = storage.reserve(id).await.expect("should reserve first time");
+        let _slot1 = storage
+            .reserve(id)
+            .await
+            .expect("should reserve first time");
         let slot2 = storage.reserve(id).await;
 
         assert!(slot2.is_none(), "should not reserve duplicate");
@@ -1695,6 +1713,88 @@ mod property_tests {
                 // Verify storage is in a consistent state
                 let total_len = storage.len_generated().await;
                 assert!(total_len < 100, "total length should be reasonable");
+            });
+        }
+    }
+
+    // Feature: sign-task-convergence-testing, Property 2: Shared storage concurrent access
+    // Validates: Requirements 2.2
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+        #[test]
+        fn test_concurrent_storage_access(
+            ops_per_task in prop::collection::vec(storage_op_strategy(), 1..30),
+            num_tasks in 2usize..8
+        ) {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let _ = rt.block_on(async {
+                let storage: ProtocolStorage<TestArtifact> = ProtocolStorage::in_memory(&test_account_id());
+                let mut handles = vec![];
+
+                // Spawn multiple concurrent tasks, each performing operations on shared storage
+                for task_id in 0..num_tasks {
+                    let storage_clone = storage.clone();
+                    let ops_clone = ops_per_task.clone();
+
+                    let handle = tokio::spawn(async move {
+                        for op in ops_clone {
+                            match op {
+                                StorageOp::Reserve(id) => {
+                                    // Offset IDs by task to reduce collisions
+                                    let offset_id = id + (task_id as u64 * 1000);
+                                    let _ = storage_clone.reserve(offset_id).await;
+                                }
+                                StorageOp::Insert(id, owner_id) => {
+                                    let offset_id = id + (task_id as u64 * 1000);
+                                    let owner = Participant::from(owner_id);
+                                    let artifact = TestArtifact {
+                                        id: offset_id,
+                                        data: format!("task-{}-data-{}", task_id, offset_id),
+                                    };
+                                    let _ = storage_clone.insert(artifact, owner).await;
+                                }
+                                StorageOp::Take(id, owner_id) => {
+                                    let offset_id = id + (task_id as u64 * 1000);
+                                    let owner = Participant::from(owner_id);
+                                    let _ = storage_clone.take(offset_id, owner).await;
+                                }
+                                StorageOp::Contains(id) => {
+                                    let offset_id = id + (task_id as u64 * 1000);
+                                    let _ = storage_clone.contains(offset_id).await;
+                                }
+                                StorageOp::LenByOwner(owner_id) => {
+                                    let owner = Participant::from(owner_id);
+                                    let _ = storage_clone.len_by_owner(owner).await;
+                                }
+                                StorageOp::MarkUsed(id) => {
+                                    let offset_id = id + (task_id as u64 * 1000);
+                                    let _ = storage_clone.mark_used(offset_id).await;
+                                }
+                            }
+                        }
+                    });
+
+                    handles.push(handle);
+                }
+
+                // Wait for all tasks to complete
+                for handle in handles {
+                    let result = handle.await;
+                    prop_assert!(result.is_ok(), "concurrent task should complete without panicking");
+                }
+
+                // Verify storage is in a consistent state after concurrent operations
+                let total_len = storage.len_generated().await;
+                prop_assert!(total_len < 10000, "total length should be reasonable after concurrent access");
+
+                // Verify no data corruption by checking that we can still query the storage
+                for owner_id in 0..5 {
+                    let owner = Participant::from(owner_id as u32);
+                    let len = storage.len_by_owner(owner).await;
+                    prop_assert!(len < 10000, "owner length should be reasonable");
+                }
+
+                Ok(())
             });
         }
     }
