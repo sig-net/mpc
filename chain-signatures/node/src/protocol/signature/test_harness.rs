@@ -2,8 +2,8 @@ use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::{Presignature, PresignatureId};
-use crate::protocol::signature::{IndexedSignRequest, SignTask, SignTaskMessage};
 use crate::protocol::signature::convergence_monitor::{ConvergenceMonitor, RoundInfo};
+use crate::protocol::signature::{IndexedSignRequest, SignTask, SignTaskMessage};
 use crate::protocol::{Chain, SignRequestType};
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::PresignatureStorage;
@@ -36,8 +36,14 @@ pub struct ConvergenceStats {
 #[derive(Debug)]
 pub enum TestError {
     Timeout,
-    Stalled { sign_id: SignId, rounds: usize },
-    ConvergenceMismatch { expected_round: usize, actual_rounds: Vec<usize> },
+    Stalled {
+        sign_id: SignId,
+        rounds: usize,
+    },
+    ConvergenceMismatch {
+        expected_round: usize,
+        actual_rounds: Vec<usize>,
+    },
     NoSignatureGenerated,
 }
 
@@ -65,17 +71,17 @@ impl SignTaskTestHarness {
     /// Create a new test harness with the specified number of nodes and threshold
     pub fn new(num_nodes: usize, threshold: usize) -> Self {
         let participants: Vec<Participant> = (0..num_nodes as u32).map(Participant::from).collect();
-        
+
         // Create InMemory message bus
         let message_bus = Arc::new(InMemoryMessageBus::new(&participants));
-        
+
         // Create InMemory presignature storage
         let account_id = AccountId::from_str("test.near").unwrap();
         let presignature_storage = PresignatureStorage::in_memory(&account_id);
-        
+
         // Create convergence monitor with stall threshold of 100 rounds
         let convergence_monitor = Arc::new(ConvergenceMonitor::new(100));
-        
+
         // Create mesh state channel - start with all participants stable
         let mesh_state = MeshState {
             stable: participants.iter().copied().collect(),
@@ -83,7 +89,7 @@ impl SignTaskTestHarness {
             need_sync: crate::protocol::contract::primitives::Participants::default(),
         };
         let (mesh_state_tx, _) = watch::channel(mesh_state);
-        
+
         Self {
             tasks: Vec::new(),
             message_bus,
@@ -94,12 +100,12 @@ impl SignTaskTestHarness {
             mesh_state_tx,
         }
     }
-    
+
     /// Spawn a sign request with 12 SignTask instances (one per participant)
     pub async fn spawn_sign_request(&mut self, sign_id: SignId, args: SignArgs) {
         // Create mock presignatures for this sign request
         self.populate_mock_presignatures(12).await;
-        
+
         // Create indexed sign request
         let indexed = IndexedSignRequest {
             id: sign_id,
@@ -110,30 +116,30 @@ impl SignTaskTestHarness {
             total_timeout: Duration::from_secs(300),
             sign_request_type: SignRequestType::Sign,
         };
-        
+
         // Spawn a SignTask for each participant
         let participants = self.participants.clone();
         for &participant in &participants {
             self.spawn_task(participant, indexed.clone()).await;
         }
     }
-    
+
     /// Spawn a single SignTask instance
     async fn spawn_task(&mut self, participant: Participant, indexed: IndexedSignRequest) {
         let sign_id = indexed.id;
-        
+
         // Get message channel for this participant
         let msg_channel = self.message_bus.get_channel(participant);
-        
+
         // Create task message channel
         let (task_tx, task_rx) = mpsc::channel(1024);
-        
+
         // Create SignTask
         let participant_u32: u32 = participant.into();
         let account_id = AccountId::from_str(&format!("node{}.near", participant_u32)).unwrap();
         // Create a mock public key using the identity point
         let public_key = PublicKey::from(AffinePoint::IDENTITY);
-        
+
         let task = SignTask {
             me: participant,
             participants: self.participants.iter().copied().collect(),
@@ -147,21 +153,21 @@ impl SignTaskTestHarness {
             rpc: mock_rpc_channel(),
             backlog: mock_backlog(),
             cfg: ProtocolConfig::default(),
-            contract: mock_contract_watcher()
+            contract: mock_contract_watcher(),
         };
-        
+
         // Clone necessary data for the task
         let mesh_state_rx = self.mesh_state_tx.subscribe();
         let _monitor = self.convergence_monitor.clone();
-        
+
         // Create abort channel for stopping after posit phase
         let (abort_tx, mut abort_rx) = mpsc::channel(1);
-        
+
         // Spawn the task with monitoring and abort capability
         let handle = tokio::spawn(async move {
             // Create a wrapper that allows aborting the task
             let task_future = task.run(indexed, mesh_state_rx, task_rx);
-            
+
             tokio::select! {
                 result = task_future => {
                     // Task completed normally (or errored)
@@ -172,11 +178,11 @@ impl SignTaskTestHarness {
                     tracing::info!(?sign_id, ?participant, "task aborted after posit phase");
                 }
             }
-            
+
             // Record completion in monitor
             // (In a full implementation, we'd track round info here)
         });
-        
+
         self.tasks.push(SignTaskHandle {
             participant,
             handle,
@@ -184,19 +190,23 @@ impl SignTaskTestHarness {
             abort_tx,
         });
     }
-    
+
     /// Abort all tasks (used to stop after posit phase)
     pub async fn abort_all_tasks(&mut self) {
         for task in &self.tasks {
             let _ = task.abort_tx.send(()).await;
         }
     }
-    
+
     /// Wait for all tasks to complete the posit phase
-    pub async fn wait_for_posit_completion(&self, sign_id: SignId, timeout: Duration) -> Result<(), TestError> {
+    pub async fn wait_for_posit_completion(
+        &self,
+        sign_id: SignId,
+        timeout: Duration,
+    ) -> Result<(), TestError> {
         let deadline = tokio::time::sleep(timeout);
         tokio::pin!(deadline);
-        
+
         loop {
             tokio::select! {
                 _ = &mut deadline => {
@@ -210,7 +220,7 @@ impl SignTaskTestHarness {
                             rounds: stall.rounds,
                         });
                     }
-                    
+
                     // Check if all tasks have completed
                     // (In a full implementation, we'd check task status here)
                     // For now, we'll just wait for the timeout or stall
@@ -218,7 +228,7 @@ impl SignTaskTestHarness {
             }
         }
     }
-    
+
     /// Get convergence statistics for a sign request
     pub fn get_convergence_stats(&self, sign_id: SignId) -> ConvergenceStats {
         // This is a placeholder - in a full implementation, we'd gather stats from the monitor
@@ -231,15 +241,16 @@ impl SignTaskTestHarness {
             completion_time: None,
         }
     }
-    
+
     /// Populate storage with mock presignatures
     async fn populate_mock_presignatures(&self, count: usize) {
         for i in 0..count {
             let presignature_id = PresignatureId::from(i as u64);
-            
+
             // Reserve and insert mock presignature
             if let Some(mut slot) = self.presignature_storage.reserve(presignature_id).await {
-                let mock_presignature = create_mock_presignature(presignature_id, &self.participants);
+                let mock_presignature =
+                    create_mock_presignature(presignature_id, &self.participants);
                 let owner = self.participants[i % self.participants.len()];
                 slot.insert(mock_presignature, owner).await;
             }
@@ -248,7 +259,7 @@ impl SignTaskTestHarness {
 }
 
 /// In-memory message bus for routing messages between SignTask instances
-/// 
+///
 /// This creates real MessageChannel instances for each participant and routes
 /// messages through in-memory channels instead of the network.
 pub struct InMemoryMessageBus {
@@ -257,36 +268,37 @@ pub struct InMemoryMessageBus {
 
 impl InMemoryMessageBus {
     /// Create a new in-memory message bus for the given participants
-    /// 
+    ///
     /// Each participant gets a real MessageChannel that can send/receive messages.
     /// Messages are routed through in-memory channels for fast, deterministic testing.
     pub fn new(participants: &[Participant]) -> Self {
         let mut channels = HashMap::new();
-        
+
         // Create a MessageChannel for each participant
         // The MessageChannel handles its own inbox/outbox internally
         for &participant in participants {
             let (_inbox, _outbox, channel) = MessageChannel::new();
             channels.insert(participant, channel);
-            
+
             // Note: In a full implementation, we would:
             // 1. Spawn inbox/outbox tasks that route messages between participants
             // 2. Wire up the outbox of one participant to the inbox of another
             // 3. Handle message encryption/decryption in-memory
-            // 
+            //
             // For now, we rely on the MessageChannel's internal routing.
             // The SignTask will use these channels to send PositMessages during
             // the organizing/posit phases.
         }
-        
-        Self {
-            channels,
-        }
+
+        Self { channels }
     }
-    
+
     /// Get the message channel for a specific participant
     pub fn get_channel(&self, participant: Participant) -> MessageChannel {
-        self.channels.get(&participant).cloned().expect("participant not found")
+        self.channels
+            .get(&participant)
+            .cloned()
+            .expect("participant not found")
     }
 }
 
@@ -326,7 +338,7 @@ fn mock_contract_watcher() -> ContractStateWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_create_harness_with_12_participants() {
         let harness = SignTaskTestHarness::new(12, 8);
@@ -334,20 +346,20 @@ mod tests {
         assert_eq!(harness.threshold, 8);
         assert_eq!(harness.tasks.len(), 0); // No tasks spawned yet
     }
-    
+
     #[tokio::test]
     async fn test_populate_mock_presignatures() {
         let harness = SignTaskTestHarness::new(12, 8);
         harness.populate_mock_presignatures(10).await;
-        
+
         // Verify presignatures were created
         assert_eq!(harness.presignature_storage.len_generated().await, 10);
     }
-    
+
     #[tokio::test]
     async fn test_spawn_single_sign_request() {
         let mut harness = SignTaskTestHarness::new(12, 8);
-        
+
         // Create a sign request
         let sign_id = SignId::new([1u8; 32]);
         let args = SignArgs {
@@ -357,21 +369,21 @@ mod tests {
             epsilon: k256::Scalar::ZERO,
             entropy: [0u8; 32],
         };
-        
+
         // Spawn the sign request
         harness.spawn_sign_request(sign_id, args).await;
-        
+
         // Verify that 12 tasks were spawned (one per participant)
         assert_eq!(harness.tasks.len(), 12);
-        
+
         // Verify presignatures were populated
         assert!(harness.presignature_storage.len_generated().await > 0);
     }
-    
+
     #[tokio::test]
     async fn test_abort_after_posit_phase() {
         let mut harness = SignTaskTestHarness::new(12, 8);
-        
+
         // Create a sign request
         let sign_id = SignId::new([2u8; 32]);
         let args = SignArgs {
@@ -381,25 +393,25 @@ mod tests {
             epsilon: k256::Scalar::ZERO,
             entropy: [0u8; 32],
         };
-        
+
         // Spawn the sign request
         harness.spawn_sign_request(sign_id, args).await;
-        
+
         // Abort all tasks
         harness.abort_all_tasks().await;
-        
+
         // Give tasks time to process abort signal
         tokio::time::sleep(Duration::from_millis(100)).await;
-        
+
         // Verify tasks were aborted (they should complete quickly)
         // In a full implementation, we'd check task status here
     }
-    
+
     #[tokio::test]
     async fn test_convergence_monitor_integration() {
         let harness = SignTaskTestHarness::new(12, 8);
         let sign_id = SignId::new([3u8; 32]);
-        
+
         // Record some rounds in the monitor
         for round in 0..5 {
             let info = RoundInfo {
@@ -408,21 +420,28 @@ mod tests {
                 timestamp: Instant::now(),
                 participants: harness.participants.clone(),
             };
-            harness.convergence_monitor.record_round(sign_id, info).await;
+            harness
+                .convergence_monitor
+                .record_round(sign_id, info)
+                .await;
         }
-        
+
         // Verify rounds were recorded
         assert_eq!(harness.convergence_monitor.round_count(sign_id).await, 5);
-        
+
         // Check that no stall is detected (below threshold)
-        assert!(harness.convergence_monitor.check_for_stall(sign_id).await.is_none());
+        assert!(harness
+            .convergence_monitor
+            .check_for_stall(sign_id)
+            .await
+            .is_none());
     }
-    
+
     #[tokio::test]
     async fn test_message_bus_creation() {
         let participants: Vec<Participant> = (0..12).map(Participant::from).collect();
         let bus = InMemoryMessageBus::new(&participants);
-        
+
         // Verify we can get channels for all participants
         for &participant in &participants {
             let channel = bus.get_channel(participant);
@@ -430,27 +449,27 @@ mod tests {
             drop(channel);
         }
     }
-    
+
     #[tokio::test]
     async fn test_mock_presignature_creation() {
         let participants: Vec<Participant> = (0..12).map(Participant::from).collect();
         let presignature_id = PresignatureId::from(42u64);
-        
+
         let presignature = create_mock_presignature(presignature_id, &participants);
-        
+
         assert_eq!(presignature.id, presignature_id);
         assert_eq!(presignature.participants.len(), 12);
         assert_eq!(presignature.participants, participants);
     }
-    
+
     #[tokio::test]
     async fn test_get_convergence_stats() {
         let harness = SignTaskTestHarness::new(12, 8);
         let sign_id = SignId::new([4u8; 32]);
-        
+
         // Get stats for a sign request
         let stats = harness.get_convergence_stats(sign_id);
-        
+
         assert_eq!(stats.sign_id, sign_id);
         // Other fields are placeholders for now
     }

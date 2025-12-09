@@ -50,7 +50,7 @@ impl ConvergenceMonitor {
     /// Returns Some(StallReport) if stalled, None otherwise
     pub async fn check_for_stall(&self, sign_id: SignId) -> Option<StallReport> {
         let history = self.round_history.read().await;
-        
+
         if let Some(rounds) = history.get(&sign_id) {
             if let Some(last_round) = rounds.last() {
                 if last_round.round >= self.stall_threshold {
@@ -62,7 +62,7 @@ impl ConvergenceMonitor {
                 }
             }
         }
-        
+
         None
     }
 
@@ -70,7 +70,7 @@ impl ConvergenceMonitor {
     /// Returns the round number where convergence occurred, or None if not yet converged
     pub async fn get_convergence_round(&self, sign_id: SignId) -> Option<usize> {
         let history = self.round_history.read().await;
-        
+
         if let Some(rounds) = history.get(&sign_id) {
             // For now, we consider convergence to be when we have at least one round recorded
             // In a full implementation, this would check that all tasks agree on the same round
@@ -78,7 +78,7 @@ impl ConvergenceMonitor {
                 return Some(last_round.round);
             }
         }
-        
+
         None
     }
 
@@ -142,14 +142,18 @@ mod tests {
                 round,
                 proposer: Participant::from(round as u32 % 3),
                 timestamp: Instant::now(),
-                participants: vec![Participant::from(0), Participant::from(1), Participant::from(2)],
+                participants: vec![
+                    Participant::from(0),
+                    Participant::from(1),
+                    Participant::from(2),
+                ],
             };
             monitor.record_round(sign_id, info).await;
         }
 
         let rounds = monitor.get_rounds(sign_id).await;
         assert_eq!(rounds.len(), 5);
-        
+
         // Verify rounds are in order
         for (i, round_info) in rounds.iter().enumerate() {
             assert_eq!(round_info.round, i);
@@ -194,7 +198,7 @@ mod tests {
 
         let stall = monitor.check_for_stall(sign_id).await;
         assert!(stall.is_some(), "Should detect stall at threshold");
-        
+
         let report = stall.unwrap();
         assert_eq!(report.sign_id, sign_id);
         assert_eq!(report.rounds, 100);
@@ -219,7 +223,7 @@ mod tests {
 
         let stall = monitor.check_for_stall(sign_id).await;
         assert!(stall.is_some(), "Should detect stall above threshold");
-        
+
         let report = stall.unwrap();
         assert_eq!(report.rounds, 49); // Last round recorded
     }
@@ -274,13 +278,13 @@ mod tests {
     #[tokio::test]
     async fn test_clear_all() {
         let monitor = ConvergenceMonitor::new(100);
-        
+
         // Record rounds for multiple sign_ids
         for request_id in 1..=3 {
             let mut id_bytes = [0u8; 32];
             id_bytes[0] = request_id as u8;
             let sign_id = SignId::new(id_bytes);
-            
+
             for round in 0..5 {
                 let info = RoundInfo {
                     round,
@@ -315,7 +319,7 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_sign_ids() {
         let monitor = ConvergenceMonitor::new(100);
-        
+
         let sign_id_1 = SignId::new([1u8; 32]);
         let sign_id_2 = SignId::new([2u8; 32]);
 
