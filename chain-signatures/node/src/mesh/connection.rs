@@ -37,7 +37,7 @@ pub enum NodeStatus {
     /// The mirrored synchronization, with IDs owned by node B, should also
     /// happen. But this is irrelevant for what node A does. Hence, only node B
     /// tracks it.
-    Syncing,
+    Syncing(DateTime<Utc>),
     /// The node responds but is in an inactive NodeState, hence it is not ready
     /// for participating in any MPC protocols, yet.
     Inactive,
@@ -141,7 +141,7 @@ impl NodeConnection {
                         | OtherNodeStatus::Started
                         | OtherNodeStatus::WaitingForConsensus { .. } => NodeStatus::Inactive,
                     };
-                    if matches!(old_status, NodeStatus::Inactive | NodeStatus::Offline | NodeStatus::Syncing)
+                    if matches!(old_status, NodeStatus::Inactive | NodeStatus::Offline | NodeStatus::Syncing(_))
                         && matches!(new_status, NodeStatus::Active(_)) {
                         // Sync when we want to enter an active state
                         //
@@ -149,7 +149,7 @@ impl NodeConnection {
                         // use the connected node in protocols we initiate,
                         // we need to ensure the peer has the up-to-date
                         // data about out owned IDs.
-                        new_status = NodeStatus::Syncing;
+                        new_status = NodeStatus::Syncing(resp.time);
                     }
                     if old_status != new_status {
                         tracing::info!(?node, ?old_status, ?new_status, "updated with new status");
@@ -312,8 +312,8 @@ impl Pool {
         if let Some(conn) = self.connections.get(&participant) {
             tracing::info!(?participant, "reporting node synced");
             conn.status_tx.send_if_modified(|(status, _)| {
-                if *status == NodeStatus::Syncing {
-                    *status = NodeStatus::Active(Utc::now());
+                if let NodeStatus::Syncing(time) = *status {
+                    *status = NodeStatus::Active(time);
                     true
                 } else {
                     false

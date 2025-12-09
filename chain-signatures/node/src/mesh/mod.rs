@@ -73,7 +73,7 @@ impl MeshState {
                     changed |= self.stable.remove(&participant);
                 }
             }
-            NodeStatus::Syncing => {
+            NodeStatus::Syncing(_) => {
                 changed = if let Some(old) = self.need_sync.insert(&participant, info.clone()) {
                     old != info
                 } else {
@@ -240,6 +240,7 @@ mod tests {
                 if p == participant {
                     match (&status, &expected) {
                         (NodeStatus::Active(_), NodeStatus::Active(_)) => return,
+                        (NodeStatus::Syncing(_), NodeStatus::Syncing(_)) => return,
                         (s1, s2) if s1 == s2 => return,
                         _ => {}
                     }
@@ -267,7 +268,7 @@ mod tests {
             match tokio::time::timeout(Duration::from_millis(100), watcher.next()).await {
                 Ok((participant, status, _info)) => {
                     tracing::info!(?participant, ?status, "got connection update for syncing");
-                    if matches!(status, NodeStatus::Syncing) {
+                    if matches!(status, NodeStatus::Syncing(_)) {
                         syncing.insert(participant);
                     }
                 }
@@ -500,7 +501,7 @@ mod tests {
 
         let remote_id = servers[1].id();
 
-        expect_status(&mut watcher, remote_id, NodeStatus::Syncing).await;
+        expect_status(&mut watcher, remote_id, NodeStatus::Syncing(Utc::now())).await;
         pool.report_node_synced(remote_id).await;
         expect_status(&mut watcher, remote_id, NodeStatus::Active(Utc::now())).await;
 
@@ -508,7 +509,7 @@ mod tests {
         expect_status(&mut watcher, remote_id, NodeStatus::Offline).await;
 
         servers[1].make_online().await;
-        expect_status(&mut watcher, remote_id, NodeStatus::Syncing).await;
+        expect_status(&mut watcher, remote_id, NodeStatus::Syncing(Utc::now())).await;
         pool.report_node_synced(remote_id).await;
         expect_status(&mut watcher, remote_id, NodeStatus::Active(Utc::now())).await;
 
