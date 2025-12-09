@@ -127,33 +127,50 @@ impl RpcChannel {
 pub struct ContractStateWatcher {
     account_id: AccountId,
     contract_state: watch::Receiver<Option<ProtocolState>>,
+    timestamp: watch::Receiver<Option<u64>>,
 }
 
 impl ContractStateWatcher {
-    pub fn new(id: &AccountId) -> (Self, watch::Sender<Option<ProtocolState>>) {
+    pub fn new(
+        id: &AccountId,
+    ) -> (
+        Self,
+        watch::Sender<Option<ProtocolState>>,
+        watch::Sender<Option<u64>>,
+    ) {
         let (tx, rx) = watch::channel(None);
+        let (time_tx, time_rx) = watch::channel(None);
         (
             Self {
                 account_id: id.clone(),
                 contract_state: rx,
+                timestamp: time_rx,
             },
             tx,
+            time_tx,
         )
     }
 
     pub fn with(
         id: &AccountId,
         state: ProtocolState,
-    ) -> (Self, watch::Sender<Option<ProtocolState>>) {
+    ) -> (
+        Self,
+        watch::Sender<Option<ProtocolState>>,
+        watch::Sender<Option<u64>>,
+    ) {
         // Set the initial state to be None so that `changed()` will pick up the first state change.
         let (tx, rx) = watch::channel(None);
         let _ = tx.send(Some(state));
+        let (time_tx, time_rx) = watch::channel(None);
         (
             Self {
                 account_id: id.clone(),
                 contract_state: rx,
+                timestamp: time_rx,
             },
             tx,
+            time_tx,
         )
     }
 
@@ -162,7 +179,11 @@ impl ContractStateWatcher {
         public_key: AffinePoint,
         threshold: usize,
         participants: Participants,
-    ) -> (Self, watch::Sender<Option<ProtocolState>>) {
+    ) -> (
+        Self,
+        watch::Sender<Option<ProtocolState>>,
+        watch::Sender<Option<u64>>,
+    ) {
         Self::with(
             node_id,
             ProtocolState::Running(RunningContractState {
@@ -192,6 +213,10 @@ impl ContractStateWatcher {
     pub async fn next_state(&mut self) -> Option<ProtocolState> {
         let _ = self.contract_state.changed().await;
         self.contract_state.borrow_and_update().clone()
+    }
+
+    pub fn timestamp(&self) -> Option<u64> {
+        *self.timestamp.borrow()
     }
 
     pub fn mark_changed(&mut self) {
@@ -299,19 +324,26 @@ impl ContractStateWatcher {
 
     /// Create a list of contract states that share a single channel but use different account ids.
     #[cfg(feature = "test-feature")]
+    #[cfg(feature = "test-feature")]
     pub fn test_batch(
         ids: &[AccountId],
         state: ProtocolState,
-    ) -> (Vec<Self>, watch::Sender<Option<ProtocolState>>) {
+    ) -> (
+        Vec<Self>,
+        watch::Sender<Option<ProtocolState>>,
+        watch::Sender<Option<u64>>,
+    ) {
         let (tx, rx) = watch::channel(Some(state));
+        let (time_tx, time_rx) = watch::channel(None);
         let selfs = ids
             .iter()
             .map(|id| Self {
                 account_id: id.clone(),
                 contract_state: rx.clone(),
+                timestamp: time_rx.clone(),
             })
             .collect();
-        (selfs, tx)
+        (selfs, tx, time_tx)
     }
 }
 
@@ -348,6 +380,7 @@ impl RpcExecutor {
     pub async fn run(
         mut self,
         contract: watch::Sender<Option<ProtocolState>>,
+        timestamp: watch::Sender<Option<u64>>,
         config: watch::Sender<Config>,
     ) {
         // spin up update task for updating contract state and config
@@ -356,7 +389,11 @@ impl RpcExecutor {
             let mut interval = tokio::time::interval(UPDATE_INTERVAL);
             loop {
                 interval.tick().await;
-                tokio::spawn(update_contract(near.clone(), contract.clone()));
+                tokio::spawn(update_contract(
+                    near.clone(),
+                    contract.clone(),
+                    timestamp.clone(),
+                ));
                 tokio::spawn(update_config(near.clone(), config.clone()));
             }
         });
@@ -473,7 +510,7 @@ impl NearClient {
         self.client.rpc_addr()
     }
 
-    pub async fn fetch_state(&self) -> anyhow::Result<ProtocolState> {
+    pub async fn fetch_state(&self) -> anyhow::Result<(ProtocolState, u64)> {
         let contract_state: mpc_contract::ProtocolContractState =
             self.client.view(&self.contract_id, "state").await?.json()?;
 
@@ -481,8 +518,11 @@ impl NearClient {
             anyhow::anyhow!("failed to parse protocol state, has it been initialized?")
         })?;
 
-        tracing::debug!(?protocol_state, "protocol state");
-        Ok(protocol_state)
+        let block = self.client.view_block().await?;
+        let timestamp = block.header.timestamp_nanosec / 1_000_000;
+
+        tracing::debug!(timestamp, ?protocol_state, "protocol state");
+        Ok((protocol_state, timestamp))
     }
 
     pub async fn fetch_config(&self) -> Option<ContractConfig> {
@@ -651,8 +691,12 @@ pub enum ChainClient {
     Solana(SolanaClient),
 }
 
-async fn update_contract(near: NearClient, contract: watch::Sender<Option<ProtocolState>>) {
-    let new_state = match near.fetch_state().await {
+async fn update_contract(
+    near: NearClient,
+    contract: watch::Sender<Option<ProtocolState>>,
+    timestamp: watch::Sender<Option<u64>>,
+) {
+    let (new_state, new_timestamp) = match near.fetch_state().await {
         Ok(state) => state,
         Err(error) => {
             tracing::error!(?error, "could not fetch contract state");
@@ -669,6 +713,8 @@ async fn update_contract(near: NearClient, contract: watch::Sender<Option<Protoc
         *old_state = Some(new_state);
         true
     });
+
+    let _ = timestamp.send(Some(new_timestamp));
 }
 
 async fn update_config(near: NearClient, config: watch::Sender<Config>) {

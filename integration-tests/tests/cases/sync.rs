@@ -41,7 +41,7 @@ async fn test_state_sync_update() -> anyhow::Result<()> {
     let node0_triples = redis.triple_storage(&node0_account_id);
     let node0_presignatures = redis.presignature_storage(&node0_account_id);
 
-    let (contract_watcher, _contract_tx) = ContractStateWatcher::with(
+    let (contract_watcher, _contract_tx, _timestamp_tx) = ContractStateWatcher::with(
         &node0_account_id,
         ProtocolState::Running(RunningContractState {
             epoch: 0,

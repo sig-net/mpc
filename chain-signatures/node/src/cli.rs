@@ -260,7 +260,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
             let mesh = Mesh::new(&client, mesh_options, &account_id, synced_peer_rx);
             let mesh_state = mesh.watch();
-            let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(&account_id);
+            let (contract_watcher, contract_state_tx, timestamp_tx) =
+                ContractStateWatcher::new(&account_id);
 
             let eth = eth.into_config();
             let sol = sol.into_config();
@@ -326,7 +327,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tracing::info!("protocol initialized");
             tokio::spawn(sync.run());
-            tokio::spawn(rpc.run(contract_state_tx, config_tx.clone()));
+            tokio::spawn(rpc.run(contract_state_tx, timestamp_tx, config_tx.clone()));
 
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics(account_id.as_str()).await;

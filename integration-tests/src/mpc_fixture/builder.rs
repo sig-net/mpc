@@ -166,7 +166,7 @@ impl MpcFixtureBuilder {
             .iter()
             .map(|node| node.participant_info.account_id.clone())
             .collect();
-        let (contract_state_watchers, shared_contract_state_tx) =
+        let (contract_state_watchers, shared_contract_state_tx, _shared_timestamp_tx) =
             ContractStateWatcher::test_batch(&account_ids, self.protocol_state);
 
         // Start each node's tokio tasks

@@ -309,7 +309,7 @@ mod tests {
         let node_id = servers[0].account_id().clone();
         let expected_participants = participants.clone();
 
-        let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
+        let (contract_watcher, _contract_tx, _timestamp_tx) = ContractStateWatcher::with_running(
             &node_id,
             root_sk.public_key().into_affine_point(),
             2,
@@ -396,7 +396,7 @@ mod tests {
         let mut servers = MockServers::run(num_nodes).await;
         let node_id = servers[0].account_id().clone();
 
-        let (contract_watcher, contract_tx) = ContractStateWatcher::with_running(
+        let (contract_watcher, contract_tx, _timestamp_tx) = ContractStateWatcher::with_running(
             &node_id,
             root_sk.public_key().into_affine_point(),
             2,

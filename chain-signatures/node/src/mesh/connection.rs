@@ -61,8 +61,7 @@ impl NodeConnection {
         info: &ParticipantInfo,
         ping_interval: Duration,
     ) -> Self {
-        let (status_tx, status_rx) =
-            watch::channel((NodeStatus::Offline, info.clone()));
+        let (status_tx, status_rx) = watch::channel((NodeStatus::Offline, info.clone()));
         let (info_tx, info_rx) = watch::channel(info.clone());
         let task = tokio::spawn(Self::run(
             client.clone(),
@@ -341,10 +340,7 @@ pub struct ConnectionWatcher {
     // not just the latest entry with watcher channel.
     conn_update: broadcast::Receiver<ConnectionUpdate>,
     /// Set of active connections that we are watching.
-    watchers: StreamMap<
-        Participant,
-        WatchStream<(NodeStatus, ParticipantInfo)>,
-    >,
+    watchers: StreamMap<Participant, WatchStream<(NodeStatus, ParticipantInfo)>>,
 }
 
 impl ConnectionWatcher {
@@ -355,13 +351,7 @@ impl ConnectionWatcher {
         }
     }
 
-    pub async fn next(
-        &mut self,
-    ) -> (
-        Participant,
-        NodeStatus,
-        ParticipantInfo,
-    ) {
+    pub async fn next(&mut self) -> (Participant, NodeStatus, ParticipantInfo) {
         loop {
             tokio::select! {
                 // Update our watchers if the connections changed.
