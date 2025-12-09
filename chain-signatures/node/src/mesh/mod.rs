@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use crate::mesh::connection::NodeStatus;
@@ -55,29 +55,38 @@ impl MeshState {
         status: NodeStatus,
         info: ParticipantInfo,
     ) -> bool {
+        let mut changed = false;
         match status {
             NodeStatus::Active(time) => {
-                self.active.insert(&participant, info);
-                self.need_sync.remove(&participant);
+                changed = if let Some(old) = self.active.insert(&participant, info.clone()) {
+                    old != info
+                } else {
+                    true
+                };
+                changed |= self.need_sync.remove(&participant).is_some();
 
                 // Check drift is within the expected DRIFT_INTERVAL range.
                 let drift = (time - Utc::now()).num_milliseconds().abs();
                 if drift <= DRIFT_INTERVAL {
-                    self.stable.insert(participant);
+                    changed |= self.stable.insert(participant);
                 } else {
-                    self.stable.remove(&participant);
+                    changed |= self.stable.remove(&participant);
                 }
             }
             NodeStatus::Syncing => {
-                self.need_sync.insert(&participant, info);
+                changed = if let Some(old) = self.need_sync.insert(&participant, info.clone()) {
+                    old != info
+                } else {
+                    true
+                };
             }
             NodeStatus::Inactive | NodeStatus::Offline => {
-                self.active.remove(&participant);
-                self.need_sync.remove(&participant);
-                self.stable.remove(&participant);
+                changed |= self.active.remove(&participant).is_some();
+                changed |= self.need_sync.remove(&participant).is_some();
+                changed |= self.stable.remove(&participant);
             }
         }
-        true
+        changed
     }
 }
 
@@ -124,9 +133,7 @@ impl Mesh {
             loop {
                 let (p, status, info) = conn_update.next().await;
                 tracing::info!(?p, ?status, "mesh connection status changed");
-                state_tx.send_modify(|state| {
-                    state.update(p, status, info);
-                });
+                state_tx.send_if_modified(|state| state.update(p, status, info));
             }
         });
 
@@ -145,15 +152,17 @@ impl Mesh {
                             ProtocolState::Running(_) => NodeStatus::Active(Utc::now()),
                         };
                         self.connections.connect(contract).await;
-                        self.state_tx.send_modify(|state| {
+                        self.state_tx.send_if_modified(|state| {
+                            let mut changed = false;
                             // if the previous me is different from the current me, remove the
                             // previous me from the MeshState.
                             if let Some(previous_me) = previous_me.filter(|old| *old != participant) {
-                                state.active.remove(&previous_me);
-                                state.need_sync.remove(&previous_me);
-                                state.stable.remove(&previous_me);
+                                changed |= state.active.remove(&previous_me).is_some();
+                                changed |= state.need_sync.remove(&previous_me).is_some();
+                                changed |= state.stable.remove(&previous_me);
                             }
-                            state.update(participant, new_status, info);
+                            changed |= state.update(participant, new_status, info);
+                            changed
                         });
                     } else {
                         tracing::warn!(?previous_me, ?contract, "we are no longer part of the MPC network");
