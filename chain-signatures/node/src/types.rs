@@ -27,6 +27,17 @@ pub struct KeygenProtocol {
     protocol: Box<dyn Protocol<Output = KeygenOutput<Secp256k1>> + Send + Sync>,
 }
 
+impl std::fmt::Debug for KeygenProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeygenProtocol")
+            .field("me", &self.me)
+            .field("threshold", &self.threshold)
+            .field("participants", &self.participants)
+            .field("protocol", &"<protocol>")
+            .finish()
+    }
+}
+
 impl KeygenProtocol {
     pub fn new(
         participants: &[Participant],
