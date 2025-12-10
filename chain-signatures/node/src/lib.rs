@@ -20,3 +20,6 @@ pub mod storage;
 pub mod types;
 pub mod util;
 pub mod web;
+
+#[cfg(test)]
+pub mod test_utils;

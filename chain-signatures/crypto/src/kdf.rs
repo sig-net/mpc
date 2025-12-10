@@ -354,4 +354,103 @@ mod tests {
 
         assert_eq!(address, expected_address);
     }
+
+    // Property-based tests using proptest
+    #[cfg(test)]
+    mod property_tests {
+        use super::*;
+        use proptest::prelude::*;
+        use k256::ecdsa::signature::hazmat::PrehashVerifier;
+
+        // Property 11: Key Derivation Consistency
+        // For any input parameters, key derivation functions should produce consistent outputs across multiple invocations
+        // Validates: Requirements 4.1
+        proptest! {
+            #[test]
+            fn prop_key_derivation_consistency(
+                key_version in 0u32..=10,
+                sender in r"[a-zA-Z0-9._-]{1,20}",
+                path in r"[a-zA-Z0-9._-]{1,20}",
+            ) {
+                // Test Ethereum epsilon derivation consistency
+                let epsilon1 = derive_epsilon_eth(key_version, &sender, &path);
+                let epsilon2 = derive_epsilon_eth(key_version, &sender, &path);
+                prop_assert_eq!(epsilon1, epsilon2, "Ethereum epsilon derivation should be deterministic");
+
+                // Test Solana epsilon derivation consistency
+                let epsilon1 = derive_epsilon_sol(key_version, &sender, &path);
+                let epsilon2 = derive_epsilon_sol(key_version, &sender, &path);
+                prop_assert_eq!(epsilon1, epsilon2, "Solana epsilon derivation should be deterministic");
+            }
+        }
+
+        // Property 12: Signature Verification Round-trip
+        // For any message and key pair, signing the message then verifying the signature should always succeed
+        // Validates: Requirements 4.2, 4.4
+        proptest! {
+            #[test]
+            fn prop_signature_verification_roundtrip(
+                msg_hash_bytes in prop::array::uniform32(any::<u8>()),
+            ) {
+                // Create a message hash from the bytes
+                let msg_hash = match Scalar::from_bytes(msg_hash_bytes) {
+                    Some(scalar) => scalar,
+                    None => return Ok(()), // Skip if bytes are outside field
+                };
+
+                // Generate a random signing key
+                use k256::ecdsa::SigningKey;
+                let signing_key = SigningKey::random(&mut rand::thread_rng());
+                let verifying_key = signing_key.verifying_key();
+
+                // Sign the message
+                let (signature, _recovery_id) = signing_key
+                    .sign_prehash_recoverable(&msg_hash.to_bytes())
+                    .expect("Failed to sign message");
+
+                // Verify the signature using standard ECDSA verification
+                let result = verifying_key.verify_prehash(&msg_hash.to_bytes(), &signature);
+                prop_assert!(result.is_ok(), "Signature verification should succeed for valid signature");
+            }
+        }
+
+        // Property 13: Signature Verification Correctness
+        // For any signature verification operation, valid signatures should be accepted and invalid signatures should be rejected
+        // Validates: Requirements 4.3
+        proptest! {
+            #[test]
+            fn prop_signature_verification_correctness(
+                msg_hash_bytes in prop::array::uniform32(any::<u8>()),
+            ) {
+                // Create a message hash from the bytes
+                let msg_hash = match Scalar::from_bytes(msg_hash_bytes) {
+                    Some(scalar) => scalar,
+                    None => return Ok(()), // Skip if bytes are outside field
+                };
+
+                // Generate a random signing key
+                use k256::ecdsa::SigningKey;
+                let signing_key = SigningKey::random(&mut rand::thread_rng());
+                let verifying_key = signing_key.verifying_key();
+
+                // Sign the message
+                let (signature, _recovery_id) = signing_key
+                    .sign_prehash_recoverable(&msg_hash.to_bytes())
+                    .expect("Failed to sign message");
+
+                // Verify with correct public key should succeed
+                let result = verifying_key.verify_prehash(&msg_hash.to_bytes(), &signature);
+                prop_assert!(result.is_ok(), "Valid signature should be accepted");
+
+                // Verify with wrong message should fail
+                let wrong_msg_hash = match Scalar::from_bytes([1u8; 32]) {
+                    Some(scalar) => scalar,
+                    None => return Ok(()), // Skip if bytes are outside field
+                };
+
+                let result = verifying_key.verify_prehash(&wrong_msg_hash.to_bytes(), &signature);
+                prop_assert!(result.is_err(), "Invalid signature should be rejected");
+            }
+        }
+    }
 }

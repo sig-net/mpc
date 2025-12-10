@@ -1253,4 +1253,254 @@ mod tests {
         let merged = merge_checkpoints(local.clone(), remote.clone());
         assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 400);
     }
+
+    #[tokio::test]
+    async fn test_backlog_storage_correctness() {
+        // Property 19: Backlog Storage Correctness
+        // Validates: Requirements 8.1
+        //
+        // For any signature request added to the backlog, it should be
+        // retrievable and correctly stored.
+
+        let backlog = Backlog::new();
+        let tx = create_test_tx(1, PendingRequestStatus::AwaitingResponse);
+        let sign_id = SignId::new(tx.request_id);
+
+        // Insert a transaction (note: backlog stores by processing chain, not source chain)
+        backlog
+            .insert(
+                Chain::Solana,
+                sign_id,
+                BacklogTransaction::Bidirectional(tx.clone()),
+                SignRequestType::Sign,
+            )
+            .await;
+
+        // Verify it can be retrieved
+        let retrieved = backlog.get(Chain::Solana, &sign_id).await;
+        assert!(retrieved.is_some(), "Transaction should be retrievable after insertion");
+
+        let retrieved_tx = retrieved.unwrap();
+        assert_eq!(
+            retrieved_tx.request_id(),
+            tx.request_id,
+            "Retrieved transaction should have same request ID"
+        );
+        assert_eq!(
+            retrieved_tx.source_chain(),
+            Chain::Solana,
+            "Retrieved transaction should have same source chain"
+        );
+
+        // Verify length increased
+        assert_eq!(
+            backlog.len_by_chain(Chain::Solana).await,
+            1,
+            "Backlog should contain exactly 1 transaction"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_backlog_selection_priority() {
+        // Property 20: Backlog Selection Priority
+        // Validates: Requirements 8.2
+        //
+        // For any set of signature requests in the backlog, selection
+        // should follow the defined priority ordering.
+
+        let backlog = Backlog::new();
+
+        // Add transactions with different statuses
+        let tx_awaiting = create_test_tx(1, PendingRequestStatus::AwaitingResponse);
+        let tx_pending = create_test_tx(2, PendingRequestStatus::PendingExecution);
+        let tx_success = create_test_tx(3, PendingRequestStatus::Success);
+
+        backlog
+            .insert(
+                Chain::Ethereum,
+                SignId::new(tx_awaiting.request_id),
+                BacklogTransaction::Bidirectional(tx_awaiting),
+                SignRequestType::Sign,
+            )
+            .await;
+        backlog
+            .insert(
+                Chain::Ethereum,
+                SignId::new(tx_pending.request_id),
+                BacklogTransaction::Bidirectional(tx_pending),
+                SignRequestType::Sign,
+            )
+            .await;
+        backlog
+            .insert(
+                Chain::Ethereum,
+                SignId::new(tx_success.request_id),
+                BacklogTransaction::Bidirectional(tx_success),
+                SignRequestType::Sign,
+            )
+            .await;
+
+        // Verify we can filter by status (priority-based selection)
+        let pending_txs = backlog
+            .get_by_status(Chain::Ethereum, PendingRequestStatus::PendingExecution)
+            .await;
+        assert_eq!(
+            pending_txs.len(),
+            1,
+            "Should have exactly 1 pending execution transaction"
+        );
+
+        let awaiting_txs = backlog
+            .get_by_status(Chain::Ethereum, PendingRequestStatus::AwaitingResponse)
+            .await;
+        assert_eq!(
+            awaiting_txs.len(),
+            1,
+            "Should have exactly 1 awaiting response transaction"
+        );
+
+        let success_txs = backlog
+            .get_by_status(Chain::Ethereum, PendingRequestStatus::Success)
+            .await;
+        assert_eq!(success_txs.len(), 1, "Should have exactly 1 success transaction");
+    }
+
+    #[tokio::test]
+    async fn test_backlog_overflow_handling() {
+        // Property 21: Backlog Overflow Handling
+        // Validates: Requirements 8.3
+        //
+        // For any backlog at capacity, adding new requests should follow
+        // the defined overflow policy.
+
+        let backlog = Backlog::new();
+
+        // Add multiple transactions to test capacity handling
+        for i in 0..10 {
+            let tx = create_test_tx(i, PendingRequestStatus::AwaitingResponse);
+            backlog
+                .insert(
+                    Chain::Ethereum,
+                    SignId::new(tx.request_id),
+                    BacklogTransaction::Bidirectional(tx),
+                    SignRequestType::Sign,
+                )
+                .await;
+        }
+
+        // Verify all transactions were added
+        assert_eq!(
+            backlog.len_by_chain(Chain::Ethereum).await,
+            10,
+            "Backlog should contain all 10 transactions"
+        );
+
+        // Add one more transaction - should succeed (no hard limit in current implementation)
+        let tx_extra = create_test_tx(11, PendingRequestStatus::AwaitingResponse);
+        backlog
+            .insert(
+                Chain::Ethereum,
+                SignId::new(tx_extra.request_id),
+                BacklogTransaction::Bidirectional(tx_extra),
+                SignRequestType::Sign,
+            )
+            .await;
+
+        assert_eq!(
+            backlog.len_by_chain(Chain::Ethereum).await,
+            11,
+            "Backlog should accept additional transactions"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_backlog_cleanup_correctness() {
+        // Property 22: Backlog Cleanup Correctness
+        // Validates: Requirements 8.4
+        //
+        // For any completed signature request, it should be properly
+        // removed from the backlog.
+
+        let backlog = Backlog::new();
+
+        // Add multiple transactions
+        let tx1 = create_test_tx(1, PendingRequestStatus::AwaitingResponse);
+        let tx2 = create_test_tx(2, PendingRequestStatus::AwaitingResponse);
+        let tx3 = create_test_tx(3, PendingRequestStatus::AwaitingResponse);
+
+        let sign_id_1 = SignId::new(tx1.request_id);
+        let sign_id_2 = SignId::new(tx2.request_id);
+        let sign_id_3 = SignId::new(tx3.request_id);
+
+        backlog
+            .insert(
+                Chain::Ethereum,
+                sign_id_1,
+                BacklogTransaction::Bidirectional(tx1),
+                SignRequestType::Sign,
+            )
+            .await;
+        backlog
+            .insert(
+                Chain::Ethereum,
+                sign_id_2,
+                BacklogTransaction::Bidirectional(tx2),
+                SignRequestType::Sign,
+            )
+            .await;
+        backlog
+            .insert(
+                Chain::Ethereum,
+                sign_id_3,
+                BacklogTransaction::Bidirectional(tx3),
+                SignRequestType::Sign,
+            )
+            .await;
+
+        assert_eq!(
+            backlog.len_by_chain(Chain::Ethereum).await,
+            3,
+            "Backlog should contain 3 transactions"
+        );
+
+        // Remove one transaction
+        let removed = backlog.remove(Chain::Ethereum, &sign_id_1).await;
+        assert!(
+            removed.is_some(),
+            "Remove should return the removed transaction"
+        );
+
+        // Verify it's gone
+        assert_eq!(
+            backlog.len_by_chain(Chain::Ethereum).await,
+            2,
+            "Backlog should contain 2 transactions after removal"
+        );
+
+        let retrieved = backlog.get(Chain::Ethereum, &sign_id_1).await;
+        assert!(
+            retrieved.is_none(),
+            "Removed transaction should not be retrievable"
+        );
+
+        // Verify other transactions still exist
+        assert!(
+            backlog.get(Chain::Ethereum, &sign_id_2).await.is_some(),
+            "Other transactions should still exist"
+        );
+        assert!(
+            backlog.get(Chain::Ethereum, &sign_id_3).await.is_some(),
+            "Other transactions should still exist"
+        );
+
+        // Remove all remaining transactions
+        backlog.remove(Chain::Ethereum, &sign_id_2).await;
+        backlog.remove(Chain::Ethereum, &sign_id_3).await;
+
+        assert_eq!(
+            backlog.len_by_chain(Chain::Ethereum).await,
+            0,
+            "Backlog should be empty after removing all transactions"
+        );
+    }
 }

@@ -7384,6 +7384,8 @@ dependencies = [
  "k256",
  "near-account-id",
  "near-sdk",
+ "proptest",
+ "rand 0.8.5",
  "sha3",
 ]
 
@@ -7451,6 +7453,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "prometheus",
+ "proptest",
  "rand 0.8.5",
  "redis",
  "reqwest 0.11.27",
