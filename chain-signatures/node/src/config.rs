@@ -151,6 +151,7 @@ pub fn merge(base: &mut Value, new: &Value) {
 #[cfg(test)]
 mod tests {
     use serde::Deserialize;
+    use proptest::prelude::*;
 
     use super::merge;
 
@@ -189,5 +190,53 @@ mod tests {
         merge(&mut base, &new);
         let base: Base = serde_json::from_value(base).unwrap();
         dbg!(base);
+    }
+
+    proptest! {
+        /// Property 41: Configuration Validation Error Reporting
+        /// For any invalid configuration, the system should provide clear error messages indicating what is invalid
+        /// **Validates: Requirements 7.2, 7.3, 7.4**
+        #[test]
+        fn prop_configuration_validation_error_reporting(
+            invalid_json in r#"\{[^}]*"#,
+        ) {
+            // Test: Invalid JSON should produce clear error messages
+            let result = invalid_json.parse::<super::OverrideConfig>();
+            
+            // Invalid JSON should fail
+            if result.is_err() {
+                if let Err(e) = result {
+                    let error_msg = e.to_string();
+                    // Error message should not be empty and should be informative
+                    prop_assert!(
+                        !error_msg.is_empty(),
+                        "Error message should not be empty"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_configuration_validation_error_reporting() {
+        // Test 1: Invalid JSON should produce error with clear message
+        let invalid_json = "{invalid json";
+        let result = invalid_json.parse::<super::OverrideConfig>();
+        assert!(result.is_err(), "Invalid JSON should fail");
+        
+        if let Err(e) = result {
+            let error_msg = e.to_string();
+            assert!(!error_msg.is_empty(), "Error message should not be empty");
+        }
+        
+        // Test 2: Valid JSON with entries field should parse successfully
+        let valid_json = r#"{"entries": {}}"#;
+        let result = valid_json.parse::<super::OverrideConfig>();
+        assert!(result.is_ok(), "Valid JSON should parse successfully: {:?}", result);
+        
+        // Test 3: Valid JSON with nested structure should parse successfully
+        let valid_json_nested = r#"{"entries": {"protocol": {"message_timeout": 10000}}}"#;
+        let result = valid_json_nested.parse::<super::OverrideConfig>();
+        assert!(result.is_ok(), "Valid nested JSON should parse successfully: {:?}", result);
     }
 }

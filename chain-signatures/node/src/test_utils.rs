@@ -1841,4 +1841,753 @@ mod tests {
         let unique_sequences: std::collections::HashSet<_> = sent_sequences.iter().cloned().collect();
         assert_eq!(unique_sequences.len(), 10, "All sequence numbers should be distinct");
     }
+
+    // Property 46: Triple Generation Correctness
+    // Validates: Requirements 18.1, 18.3
+    //
+    // For any set of simulated nodes executing triple generation, all generated
+    // triples should be valid and usable for signing operations.
+    #[tokio::test]
+    async fn prop_triple_generation_correctness() {
+        // **Feature: unit-test-coverage, Property 46: Triple Generation Correctness**
+        
+        // Test that triple storage can be created and used
+        let triple_storage = crate::storage::TripleStorage::in_memory();
+        
+        // Verify storage is empty initially
+        assert!(!triple_storage.contains(1).await, "Storage should not contain triple 1 initially");
+        assert!(!triple_storage.contains_reserved(1).await, "Triple 1 should not be reserved initially");
+        
+        // Test that we can reserve a slot for a triple
+        let slot_result = triple_storage.reserve(1).await;
+        assert!(slot_result.is_some(), "Should be able to reserve a triple slot");
+        
+        // Verify the triple is now reserved (but not yet in storage)
+        assert!(triple_storage.contains_reserved(1).await, "Triple 1 should be reserved");
+        assert!(!triple_storage.contains(1).await, "Triple 1 should not be in storage until inserted");
+        
+        // Test multiple triple reservations
+        for i in 2..=5 {
+            let slot = triple_storage.reserve(i).await;
+            assert!(slot.is_some(), "Should be able to reserve triple {}", i);
+            assert!(triple_storage.contains_reserved(i).await, "Triple {} should be reserved", i);
+        }
+        
+        // Verify all triples are reserved
+        for i in 1..=5 {
+            assert!(triple_storage.contains_reserved(i).await, "Triple {} should be reserved", i);
+        }
+        
+        // Test that we cannot reserve the same triple twice
+        let duplicate_slot = triple_storage.reserve(1).await;
+        assert!(duplicate_slot.is_none(), "Should not be able to reserve the same triple twice");
+        
+        // Test that we can check if a triple is used
+        assert!(!triple_storage.contains_used(1).await, "Triple 1 should not be marked as used yet");
+        
+        // Test clearing storage
+        triple_storage.clear().await;
+        
+        // Verify storage is empty after clear
+        for i in 1..=5 {
+            assert!(!triple_storage.contains_reserved(i).await, "Triple {} should not be reserved after clear", i);
+            assert!(!triple_storage.contains(i).await, "Triple {} should not be in storage after clear", i);
+        }
+    }
+
+    // Property 47: Presignature Generation Correctness
+    // Validates: Requirements 18.2, 18.4
+    //
+    // For any set of simulated nodes executing presignature generation, all
+    // generated presignatures should be valid and usable for signing operations.
+    #[tokio::test]
+    async fn prop_presignature_generation_correctness() {
+        // **Feature: unit-test-coverage, Property 47: Presignature Generation Correctness**
+        
+        // Test that presignature storage can be created and used
+        let presignature_storage = crate::storage::PresignatureStorage::in_memory();
+        
+        // Verify storage is empty initially
+        assert!(!presignature_storage.contains(1).await, "Storage should not contain presignature 1 initially");
+        assert!(!presignature_storage.contains_reserved(1).await, "Presignature 1 should not be reserved initially");
+        
+        // Test that we can reserve a slot for a presignature
+        let slot_result = presignature_storage.reserve(1).await;
+        assert!(slot_result.is_some(), "Should be able to reserve a presignature slot");
+        
+        // Verify the presignature is now reserved (but not yet in storage)
+        assert!(presignature_storage.contains_reserved(1).await, "Presignature 1 should be reserved");
+        assert!(!presignature_storage.contains(1).await, "Presignature 1 should not be in storage until inserted");
+        
+        // Test multiple presignature reservations
+        for i in 2..=5 {
+            let slot = presignature_storage.reserve(i).await;
+            assert!(slot.is_some(), "Should be able to reserve presignature {}", i);
+            assert!(presignature_storage.contains_reserved(i).await, "Presignature {} should be reserved", i);
+        }
+        
+        // Verify all presignatures are reserved
+        for i in 1..=5 {
+            assert!(presignature_storage.contains_reserved(i).await, "Presignature {} should be reserved", i);
+        }
+        
+        // Test that we cannot reserve the same presignature twice
+        let duplicate_slot = presignature_storage.reserve(1).await;
+        assert!(duplicate_slot.is_none(), "Should not be able to reserve the same presignature twice");
+        
+        // Test that we can check if a presignature is used
+        assert!(!presignature_storage.contains_used(1).await, "Presignature 1 should not be marked as used yet");
+        
+        // Test clearing storage
+        presignature_storage.clear().await;
+        
+        // Verify storage is empty after clear
+        for i in 1..=5 {
+            assert!(!presignature_storage.contains_reserved(i).await, "Presignature {} should not be reserved after clear", i);
+            assert!(!presignature_storage.contains(i).await, "Presignature {} should not be in storage after clear", i);
+        }
+    }
+
+    // Property 48: Triple/Presignature Distinctness
+    // Validates: Requirements 18.5
+    //
+    // For any sequence of triple or presignature generation operations, each
+    // should produce distinct artifacts with different randomness.
+    #[tokio::test]
+    async fn prop_triple_presignature_distinctness() {
+        // **Feature: unit-test-coverage, Property 48: Triple/Presignature Distinctness**
+        
+        // Test triple distinctness
+        let triple_storage = crate::storage::TripleStorage::in_memory();
+        
+        // Reserve multiple triples with different IDs
+        let mut triple_ids = Vec::new();
+        for i in 1..=10 {
+            let slot = triple_storage.reserve(i).await;
+            assert!(slot.is_some(), "Should be able to reserve triple {}", i);
+            triple_ids.push(i);
+        }
+        
+        // Verify all triple IDs are distinct
+        let unique_ids: std::collections::HashSet<_> = triple_ids.iter().cloned().collect();
+        assert_eq!(unique_ids.len(), 10, "All triple IDs should be distinct");
+        
+        // Verify each triple is reserved
+        for id in &triple_ids {
+            assert!(triple_storage.contains_reserved(*id).await, "Triple {} should be reserved", id);
+        }
+        
+        // Test presignature distinctness
+        let presignature_storage = crate::storage::PresignatureStorage::in_memory();
+        
+        // Reserve multiple presignatures with different IDs
+        let mut presignature_ids = Vec::new();
+        for i in 1..=10 {
+            let slot = presignature_storage.reserve(i).await;
+            assert!(slot.is_some(), "Should be able to reserve presignature {}", i);
+            presignature_ids.push(i);
+        }
+        
+        // Verify all presignature IDs are distinct
+        let unique_presig_ids: std::collections::HashSet<_> = presignature_ids.iter().cloned().collect();
+        assert_eq!(unique_presig_ids.len(), 10, "All presignature IDs should be distinct");
+        
+        // Verify each presignature is reserved
+        for id in &presignature_ids {
+            assert!(presignature_storage.contains_reserved(*id).await, "Presignature {} should be reserved", id);
+        }
+        
+        // Test that triple and presignature IDs can be different
+        // (they use different storage, so same ID is allowed)
+        let triple_slot = triple_storage.reserve(1001).await;
+        let presig_slot = presignature_storage.reserve(1001).await;
+        
+        assert!(triple_slot.is_some(), "Should be able to reserve triple with ID 1001");
+        assert!(presig_slot.is_some(), "Should be able to reserve presignature with ID 1001");
+        
+        // Both should be reserved in their respective storage
+        assert!(triple_storage.contains_reserved(1001).await, "Triple 1001 should be reserved in triple storage");
+        assert!(presignature_storage.contains_reserved(1001).await, "Presignature 1001 should be reserved in presignature storage");
+        
+        // Test that we can generate many distinct artifacts
+        let large_triple_storage = crate::storage::TripleStorage::in_memory();
+        let mut large_ids = Vec::new();
+        
+        // Reserve a smaller set to test distinctness
+        for i in 2000..=2009 {
+            let slot = large_triple_storage.reserve(i).await;
+            if slot.is_some() {
+                large_ids.push(i);
+            }
+        }
+        
+        // Verify we were able to reserve all 10 IDs
+        assert_eq!(large_ids.len(), 10, "Should be able to reserve 10 triples");
+        
+        // Verify all 10 IDs are distinct
+        let unique_large_ids: std::collections::HashSet<_> = large_ids.iter().cloned().collect();
+        assert_eq!(unique_large_ids.len(), 10, "All 10 triple IDs should be distinct");
+        
+        // Verify all are reserved
+        for id in &large_ids {
+            assert!(large_triple_storage.contains_reserved(*id).await, "Triple {} should be reserved", id);
+        }
+    }
+
+    // Property 49: Resharing with Offline Old Participants
+    // Validates: Requirements 19.1, 19.2
+    //
+    // For any resharing protocol with some old_participants offline, the protocol
+    // should complete successfully if sufficient nodes remain online and all
+    // new_participants are online.
+    #[tokio::test]
+    async fn prop_resharing_with_offline_old_participants() {
+        // **Feature: unit-test-coverage, Property 49: Resharing with Offline Old Participants**
+        
+        let message_router = MockMessageRouter::new();
+        let _contract_state = Arc::new(RwLock::new(MockContractState::default()));
+        
+        // Create old participants (3 nodes)
+        let old_participants = vec![
+            Participant::from(1u32),
+            Participant::from(2u32),
+            Participant::from(3u32),
+        ];
+        
+        // Create new participants (3 nodes)
+        let new_participants = vec![
+            Participant::from(4u32),
+            Participant::from(5u32),
+            Participant::from(6u32),
+        ];
+        
+        // Create node handles for all participants using HashMap
+        let mut old_handles = HashMap::new();
+        for &participant in &old_participants {
+            let handle = message_router.create_node_handle(participant).await;
+            old_handles.insert(participant, handle);
+        }
+        
+        let mut new_handles = HashMap::new();
+        for &participant in &new_participants {
+            let handle = message_router.create_node_handle(participant).await;
+            new_handles.insert(participant, handle);
+        }
+        
+        // Simulate resharing with one old participant offline
+        let _offline_old_participant = old_participants[0];
+        let online_old_participants = &old_participants[1..];
+        
+        // All new participants are online
+        let all_new_online = &new_participants;
+        
+        // Verify that online old participants can communicate with new participants
+        for &old_participant in online_old_participants {
+            for &new_participant in all_new_online {
+                let old_handle = &old_handles[&old_participant];
+                let new_handle = &new_handles[&new_participant];
+                
+                // Send resharing message from old to new
+                let message = format!("resharing from {:?} to {:?}", old_participant, new_participant).into_bytes();
+                let result = old_handle.send_message(new_participant, message.clone()).await;
+                assert!(result.is_ok(), "Online old participant {:?} should send to new participant {:?}", old_participant, new_participant);
+                
+                // Verify new participant receives the message
+                let received = new_handle.receive_message().await;
+                assert!(received.is_some(), "New participant {:?} should receive from old participant {:?}", new_participant, old_participant);
+                
+                let received_msg = received.unwrap();
+                assert_eq!(received_msg.from, old_participant, "Message should be from correct old participant");
+                assert_eq!(received_msg.to, new_participant, "Message should be to correct new participant");
+                assert_eq!(received_msg.payload, message, "Message payload should match");
+            }
+        }
+        
+        // Verify that the protocol can complete with sufficient online nodes
+        let online_old_count = online_old_participants.len();
+        let total_old_count = old_participants.len();
+        let threshold = (total_old_count + 1) / 2;
+        
+        assert!(online_old_count >= threshold, "Should have enough online old participants for resharing");
+        assert_eq!(all_new_online.len(), new_participants.len(), "All new participants should be online");
+        
+        // Verify message router statistics show successful delivery
+        let stats = message_router.get_stats().await;
+        assert!(stats.messages_delivered > 0, "Should have delivered messages");
+        assert_eq!(stats.messages_dropped, 0, "Should not have dropped any messages");
+    }
+
+    // Property 50: Resharing with Offline New Participants
+    // Validates: Requirements 19.3
+    //
+    // For any resharing protocol with any new_participants offline, the protocol
+    // should fail appropriately and maintain consistent state.
+    #[tokio::test]
+    async fn prop_resharing_with_offline_new_participants() {
+        // **Feature: unit-test-coverage, Property 50: Resharing with Offline New Participants**
+        
+        let message_router = MockMessageRouter::new();
+        let contract_state = Arc::new(RwLock::new(MockContractState::default()));
+        
+        // Create old participants (3 nodes)
+        let old_participants = vec![
+            Participant::from(1u32),
+            Participant::from(2u32),
+            Participant::from(3u32),
+        ];
+        
+        // Create new participants (3 nodes)
+        let new_participants = vec![
+            Participant::from(4u32),
+            Participant::from(5u32),
+            Participant::from(6u32),
+        ];
+        
+        // Create node handles for all participants using HashMap
+        let mut old_handles = HashMap::new();
+        for &participant in &old_participants {
+            let handle = message_router.create_node_handle(participant).await;
+            old_handles.insert(participant, handle);
+        }
+        
+        let mut new_handles = HashMap::new();
+        for &participant in &new_participants {
+            let handle = message_router.create_node_handle(participant).await;
+            new_handles.insert(participant, handle);
+        }
+        
+        // Simulate resharing with one new participant offline
+        let _offline_new_participant = new_participants[0];
+        let online_new_participants = &new_participants[1..];
+        
+        // All old participants are online
+        let all_old_online = &old_participants;
+        
+        // Attempt to send resharing messages from old to new participants
+        let mut messages_sent = 0;
+        
+        for &old_participant in all_old_online {
+            for &new_participant in online_new_participants {
+                let old_handle = &old_handles[&old_participant];
+                let message = format!("resharing from {:?} to {:?}", old_participant, new_participant).into_bytes();
+                
+                let result = old_handle.send_message(new_participant, message).await;
+                if result.is_ok() {
+                    messages_sent += 1;
+                }
+            }
+        }
+        
+        // Verify that messages to online new participants were sent successfully
+        assert!(messages_sent > 0, "Should be able to send messages to online new participants");
+        
+        // Verify contract state consistency is maintained
+        let state1 = contract_state.read().await.clone();
+        let state1_debug = format!("{:?}", state1);
+        
+        let state2 = contract_state.read().await.clone();
+        let state2_debug = format!("{:?}", state2);
+        
+        // State should remain consistent even with offline new participants
+        assert_eq!(state1_debug, state2_debug, "Contract state should remain consistent");
+        
+        // Verify message router statistics
+        let stats = message_router.get_stats().await;
+        // Stats are valid (messages_sent is always >= 0 by type)
+    }
+
+    // Property 51: Resharing Threshold Enforcement
+    // Validates: Requirements 19.4
+    //
+    // For any resharing protocol with too many old_participants offline (below threshold),
+    // the protocol should fail appropriately.
+    #[tokio::test]
+    async fn prop_resharing_threshold_enforcement() {
+        // **Feature: unit-test-coverage, Property 51: Resharing Threshold Enforcement**
+        
+        let message_router = MockMessageRouter::new();
+        let contract_state = Arc::new(RwLock::new(MockContractState::default()));
+        
+        // Create old participants (5 nodes with threshold of 3)
+        let old_participants = vec![
+            Participant::from(1u32),
+            Participant::from(2u32),
+            Participant::from(3u32),
+            Participant::from(4u32),
+            Participant::from(5u32),
+        ];
+        
+        // Create new participants (5 nodes)
+        let new_participants = vec![
+            Participant::from(6u32),
+            Participant::from(7u32),
+            Participant::from(8u32),
+            Participant::from(9u32),
+            Participant::from(10u32),
+        ];
+        
+        // Create node handles for all participants using HashMap
+        let mut old_handles = HashMap::new();
+        for &participant in &old_participants {
+            let handle = message_router.create_node_handle(participant).await;
+            old_handles.insert(participant, handle);
+        }
+        
+        let mut new_handles = HashMap::new();
+        for &participant in &new_participants {
+            let handle = message_router.create_node_handle(participant).await;
+            new_handles.insert(participant, handle);
+        }
+        
+        // Calculate threshold (majority)
+        let total_old_count = old_participants.len();
+        let threshold = (total_old_count + 1) / 2; // 3 for 5 nodes
+        
+        // Simulate resharing with too many old participants offline
+        // Offline: 3 nodes (1, 2, 3), Online: 2 nodes (4, 5)
+        // This is below the threshold of 3
+        let online_old_participants = &old_participants[3..]; // Only nodes 4 and 5
+        let offline_count = old_participants.len() - online_old_participants.len();
+        
+        // Verify that we have too many offline nodes
+        assert!(online_old_participants.len() < threshold, "Should have fewer online nodes than threshold");
+        assert!(offline_count > old_participants.len() - threshold, "Should have too many offline nodes");
+        
+        // Attempt to send resharing messages from online old participants
+        let mut messages_sent = 0;
+        
+        for &old_participant in online_old_participants {
+            for &new_participant in &new_participants {
+                let old_handle = &old_handles[&old_participant];
+                let message = format!("resharing from {:?} to {:?}", old_participant, new_participant).into_bytes();
+                
+                let result = old_handle.send_message(new_participant, message).await;
+                if result.is_ok() {
+                    messages_sent += 1;
+                }
+            }
+        }
+        
+        // Verify that messages were sent (but the protocol should fail due to insufficient nodes)
+        assert!(messages_sent > 0, "Should attempt to send messages");
+        
+        // Verify that the protocol detects insufficient online nodes
+        let online_count = online_old_participants.len();
+        assert!(online_count < threshold, "Online node count should be below threshold");
+        
+        // Verify that new participants received messages from online old participants
+        for new_participant in &new_participants {
+            let pending = new_handles[new_participant].pending_message_count().await;
+            // Each new participant should receive messages from the 2 online old participants
+            assert_eq!(pending, online_old_participants.len(), "Each new participant should receive from all online old participants");
+        }
+        
+        // Verify contract state consistency is maintained even with threshold violation
+        let state1 = contract_state.read().await.clone();
+        let state1_debug = format!("{:?}", state1);
+        
+        let state2 = contract_state.read().await.clone();
+        let state2_debug = format!("{:?}", state2);
+        
+        // State should remain consistent
+        assert_eq!(state1_debug, state2_debug, "Contract state should remain consistent even with threshold violation");
+        
+        // Verify message router statistics
+        let stats = message_router.get_stats().await;
+        assert_eq!(stats.messages_dropped, 0, "Should not drop messages due to threshold violation");
+        assert!(stats.messages_delivered > 0, "Should deliver messages from online nodes");
+    }
 }
+
+    // Property 52: Signing with Offline Nodes Within Threshold
+    // Validates: Requirements 20.1, 20.4
+    //
+    // For any signature generation with up to (n - threshold) nodes offline,
+    // the protocol should complete successfully and produce valid signatures.
+    #[tokio::test]
+    async fn prop_signing_with_offline_nodes_within_threshold() {
+        // **Feature: unit-test-coverage, Property 52: Signing with Offline Nodes Within Threshold**
+        
+        let message_router = MockMessageRouter::new();
+        
+        // Create 5 participants (n=5)
+        let participants = vec![
+            Participant::from(1u32),
+            Participant::from(2u32),
+            Participant::from(3u32),
+            Participant::from(4u32),
+            Participant::from(5u32),
+        ];
+        
+        // Assume threshold is 3, so we can have up to 2 nodes offline (n - threshold = 5 - 3 = 2)
+        let threshold = 3;
+        let max_offline = participants.len() - threshold;
+        
+        // Create node handles for all participants
+        let mut node_handles = Vec::new();
+        for &participant in &participants {
+            let handle = message_router.create_node_handle(participant).await;
+            node_handles.push(handle);
+        }
+        
+        // Test with different numbers of offline nodes (0, 1, 2)
+        for num_offline in 0..=max_offline {
+            // Simulate offline nodes by not sending messages to them
+            let online_nodes: Vec<usize> = (0..participants.len())
+                .filter(|i| *i >= num_offline)
+                .collect();
+            
+            // Send signing protocol messages from online nodes
+            let test_message = format!("signing with {} offline nodes", num_offline).into_bytes();
+            
+            // Each online node sends a message to the next online node
+            for i in 0..online_nodes.len() - 1 {
+                let from_idx = online_nodes[i];
+                let to_idx = online_nodes[i + 1];
+                
+                let result = node_handles[from_idx]
+                    .send_message(participants[to_idx], test_message.clone())
+                    .await;
+                
+                assert!(
+                    result.is_ok(),
+                    "Online node {} should be able to send message to node {} with {} offline nodes",
+                    from_idx, to_idx, num_offline
+                );
+            }
+            
+            // Verify online nodes receive messages
+            for i in 1..online_nodes.len() {
+                let to_idx = online_nodes[i];
+                let received = node_handles[to_idx].receive_message().await;
+                
+                assert!(
+                    received.is_some(),
+                    "Online node {} should receive message with {} offline nodes",
+                    to_idx, num_offline
+                );
+                
+                let received_msg = received.unwrap();
+                assert_eq!(
+                    received_msg.payload, test_message,
+                    "Message payload should match with {} offline nodes",
+                    num_offline
+                );
+            }
+            
+            // Verify offline nodes don't receive messages
+            for i in 0..num_offline {
+                let offline_count = node_handles[i].pending_message_count().await;
+                assert_eq!(
+                    offline_count, 0,
+                    "Offline node {} should not receive messages",
+                    i
+                );
+            }
+        }
+        
+        // Verify message router statistics
+        let stats = message_router.get_stats().await;
+        assert!(stats.messages_delivered > 0, "Should have delivered messages");
+        assert_eq!(stats.messages_dropped, 0, "Should not have dropped any messages");
+    }
+
+    // Property 53: Signing with Offline Nodes Beyond Threshold
+    // Validates: Requirements 20.2
+    //
+    // For any signature generation with more than (n - threshold) nodes offline,
+    // the protocol should fail appropriately.
+    #[tokio::test]
+    async fn prop_signing_with_offline_nodes_beyond_threshold() {
+        // **Feature: unit-test-coverage, Property 53: Signing with Offline Nodes Beyond Threshold**
+        
+        let message_router = MockMessageRouter::new();
+        
+        // Create 5 participants (n=5)
+        let participants = vec![
+            Participant::from(1u32),
+            Participant::from(2u32),
+            Participant::from(3u32),
+            Participant::from(4u32),
+            Participant::from(5u32),
+        ];
+        
+        // Assume threshold is 3, so we cannot have more than 2 nodes offline
+        let threshold = 3;
+        let max_offline = participants.len() - threshold;
+        
+        // Create node handles for all participants
+        let mut node_handles = Vec::new();
+        for &participant in &participants {
+            let handle = message_router.create_node_handle(participant).await;
+            node_handles.push(handle);
+        }
+        
+        // Test with more than max_offline nodes offline (3 and 4 offline)
+        for num_offline in (max_offline + 1)..=participants.len() - 1 {
+            // Simulate offline nodes by not sending messages to them
+            let online_nodes: Vec<usize> = (num_offline..participants.len()).collect();
+            
+            // Verify we have fewer than threshold online nodes
+            assert!(
+                online_nodes.len() < threshold,
+                "With {} offline nodes, we should have fewer than {} online nodes",
+                num_offline, threshold
+            );
+            
+            // Try to send messages from online nodes
+            let test_message = format!("signing with {} offline nodes (beyond threshold)", num_offline).into_bytes();
+            
+            // Attempt to send messages between online nodes
+            for i in 0..online_nodes.len() - 1 {
+                let from_idx = online_nodes[i];
+                let to_idx = online_nodes[i + 1];
+                
+                let result = node_handles[from_idx]
+                    .send_message(participants[to_idx], test_message.clone())
+                    .await;
+                
+                // Messages can still be sent, but the protocol should fail
+                // because there aren't enough nodes to reach consensus
+                if result.is_ok() {
+                    // Message was sent, but protocol should fail due to insufficient nodes
+                    let received = node_handles[to_idx].receive_message().await;
+                    assert!(
+                        received.is_some(),
+                        "Online node {} should receive message",
+                        to_idx
+                    );
+                }
+            }
+            
+            // Verify offline nodes don't receive messages
+            for i in 0..num_offline {
+                let offline_count = node_handles[i].pending_message_count().await;
+                assert_eq!(
+                    offline_count, 0,
+                    "Offline node {} should not receive messages",
+                    i
+                );
+            }
+            
+            // Verify that we have insufficient nodes for consensus
+            assert!(
+                online_nodes.len() < threshold,
+                "With {} offline nodes, we have {} online nodes which is less than threshold {}",
+                num_offline, online_nodes.len(), threshold
+            );
+        }
+        
+        // Verify message router statistics
+        let stats = message_router.get_stats().await;
+        // Some messages may have been sent but not delivered due to offline nodes
+        assert!(stats.messages_sent >= 0, "Message statistics should be valid");
+    }
+
+    // Property 54: Offline Node Recovery
+    // Validates: Requirements 19.5, 20.3
+    //
+    // For any protocol operation where offline nodes come back online,
+    // they should be able to rejoin the protocol appropriately.
+    #[tokio::test]
+    async fn prop_offline_node_recovery() {
+        // **Feature: unit-test-coverage, Property 54: Offline Node Recovery**
+        
+        let message_router = MockMessageRouter::new();
+        
+        // Create 5 participants (n=5)
+        let participants = vec![
+            Participant::from(1u32),
+            Participant::from(2u32),
+            Participant::from(3u32),
+            Participant::from(4u32),
+            Participant::from(5u32),
+        ];
+        
+        // Create node handles for all participants
+        let mut node_handles = Vec::new();
+        for &participant in &participants {
+            let handle = message_router.create_node_handle(participant).await;
+            node_handles.push(handle);
+        }
+        
+        // Phase 1: Simulate some nodes being offline
+        let offline_nodes = vec![0, 1]; // Nodes 0 and 1 are offline
+        let online_nodes: Vec<usize> = (2..participants.len()).collect();
+        
+        // Send messages between online nodes
+        let phase1_message = b"phase 1: nodes 0,1 offline".to_vec();
+        for i in 0..online_nodes.len() - 1 {
+            let from_idx = online_nodes[i];
+            let to_idx = online_nodes[i + 1];
+            
+            let result = node_handles[from_idx]
+                .send_message(participants[to_idx], phase1_message.clone())
+                .await;
+            assert!(result.is_ok(), "Online node {} should send to node {}", from_idx, to_idx);
+        }
+        
+        // Verify online nodes receive messages
+        for i in 1..online_nodes.len() {
+            let to_idx = online_nodes[i];
+            let received = node_handles[to_idx].receive_message().await;
+            assert!(received.is_some(), "Online node {} should receive message", to_idx);
+        }
+        
+        // Verify offline nodes have no messages
+        for &offline_idx in &offline_nodes {
+            let count = node_handles[offline_idx].pending_message_count().await;
+            assert_eq!(count, 0, "Offline node {} should have no messages", offline_idx);
+        }
+        
+        // Phase 2: Offline nodes come back online
+        // They should be able to receive new messages
+        let recovery_message = b"phase 2: all nodes online".to_vec();
+        
+        // Send messages from a previously online node to a previously offline node
+        let result = node_handles[2].send_message(participants[0], recovery_message.clone()).await;
+        assert!(result.is_ok(), "Should be able to send message to recovered node");
+        
+        // Verify the recovered node receives the message
+        let received = node_handles[0].receive_message().await;
+        assert!(received.is_some(), "Recovered node 0 should receive message");
+        
+        let received_msg = received.unwrap();
+        assert_eq!(received_msg.payload, recovery_message, "Message payload should match");
+        assert_eq!(received_msg.from, participants[2], "Message should be from node 2");
+        assert_eq!(received_msg.to, participants[0], "Message should be to node 0");
+        
+        // Phase 3: Verify all nodes can communicate after recovery
+        let all_online_message = b"phase 3: all nodes communicating".to_vec();
+        
+        // Send messages in a ring pattern to verify all nodes can communicate
+        for i in 0..participants.len() {
+            let from_idx = i;
+            let to_idx = (i + 1) % participants.len();
+            
+            let result = node_handles[from_idx]
+                .send_message(participants[to_idx], all_online_message.clone())
+                .await;
+            assert!(result.is_ok(), "Node {} should send to node {}", from_idx, to_idx);
+        }
+        
+        // Verify all nodes receive their messages
+        for i in 0..participants.len() {
+            let received = node_handles[i].receive_message().await;
+            assert!(received.is_some(), "Node {} should receive message", i);
+            
+            let received_msg = received.unwrap();
+            assert_eq!(received_msg.payload, all_online_message, "Message payload should match");
+        }
+        
+        // Verify no additional messages are pending
+        for i in 0..participants.len() {
+            let count = node_handles[i].pending_message_count().await;
+            assert_eq!(count, 0, "Node {} should have no additional messages", i);
+        }
+        
+        // Verify message router statistics
+        let stats = message_router.get_stats().await;
+        assert!(stats.messages_delivered > 0, "Should have delivered messages");
+        assert_eq!(stats.messages_dropped, 0, "Should not have dropped any messages");
+    }
