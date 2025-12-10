@@ -56,6 +56,15 @@ struct SignTaskHandle {
     abort_tx: mpsc::Sender<()>,
 }
 
+/// Configuration for delaying task spawning
+#[derive(Debug, Clone)]
+pub struct SpawnDelayConfig {
+    /// Minimum delay before spawning a task
+    pub min_delay: Duration,
+    /// Maximum delay before spawning a task
+    pub max_delay: Duration,
+}
+
 /// Test harness for running multiple SignTask instances in a controlled environment
 pub struct SignTaskTestHarness {
     tasks: Vec<SignTaskHandle>,
@@ -65,6 +74,8 @@ pub struct SignTaskTestHarness {
     participants: Vec<Participant>,
     threshold: usize,
     mesh_state_tx: watch::Sender<MeshState>,
+    /// Optional delay configuration for spawning tasks
+    spawn_delay_config: Option<SpawnDelayConfig>,
 }
 
 impl SignTaskTestHarness {
@@ -98,10 +109,23 @@ impl SignTaskTestHarness {
             participants,
             threshold,
             mesh_state_tx,
+            spawn_delay_config: None,
         }
     }
 
+    /// Create a new test harness with random spawn delays for tasks
+    /// This simulates tasks arriving at different times, potentially past timeouts
+    pub fn with_spawn_delays(num_nodes: usize, threshold: usize, min_delay: Duration, max_delay: Duration) -> Self {
+        let mut harness = Self::new(num_nodes, threshold);
+        harness.spawn_delay_config = Some(SpawnDelayConfig {
+            min_delay,
+            max_delay,
+        });
+        harness
+    }
+
     /// Spawn a sign request with 12 SignTask instances (one per participant)
+    /// If spawn delays are configured, tasks will be spawned at random intervals
     pub async fn spawn_sign_request(&mut self, sign_id: SignId, args: SignArgs) {
         // Create mock presignatures for this sign request
         self.populate_mock_presignatures(12).await;
@@ -120,8 +144,23 @@ impl SignTaskTestHarness {
         // Spawn a SignTask for each participant
         let participants = self.participants.clone();
         for &participant in &participants {
+            // Apply spawn delay if configured
+            if let Some(ref delay_config) = self.spawn_delay_config {
+                let delay = self.random_delay(delay_config);
+                tokio::time::sleep(delay).await;
+            }
             self.spawn_task(participant, indexed.clone()).await;
         }
+    }
+
+    /// Generate a random delay within the configured range
+    fn random_delay(&self, config: &SpawnDelayConfig) -> Duration {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let min_ms = config.min_delay.as_millis() as u64;
+        let max_ms = config.max_delay.as_millis() as u64;
+        let random_ms = rng.gen_range(min_ms..=max_ms);
+        Duration::from_millis(random_ms)
     }
 
     /// Spawn a single SignTask instance
@@ -196,6 +235,11 @@ impl SignTaskTestHarness {
         for task in &self.tasks {
             let _ = task.abort_tx.send(()).await;
         }
+    }
+
+    /// Clear all task handles (used between test iterations)
+    pub fn clear_tasks(&mut self) {
+        self.tasks.clear();
     }
 
     /// Wait for all tasks to complete the posit phase
@@ -472,5 +516,40 @@ mod tests {
 
         assert_eq!(stats.sign_id, sign_id);
         // Other fields are placeholders for now
+    }
+
+    #[tokio::test]
+    async fn test_spawn_with_random_delays() {
+        let mut harness = SignTaskTestHarness::with_spawn_delays(
+            12,
+            8,
+            Duration::from_millis(20000),
+            Duration::from_millis(120000),
+        );
+
+        // Create a sign request
+        let sign_id = SignId::new([5u8; 32]);
+        let args = SignArgs {
+            payload: k256::Scalar::ZERO,
+            path: "test".to_string(),
+            key_version: 0,
+            epsilon: k256::Scalar::ZERO,
+            entropy: [0u8; 32],
+        };
+
+        let start = Instant::now();
+        harness.spawn_sign_request(sign_id, args).await;
+        let elapsed = start.elapsed();
+
+        // Verify that 12 tasks were spawned
+        assert_eq!(harness.tasks.len(), 12);
+
+        // Verify that the spawn took at least the minimum delay time
+        // (12 tasks * 10ms minimum = 120ms minimum)
+        assert!(elapsed.as_millis() >= 120, "Expected at least 120ms, got {:?}", elapsed);
+
+        // Verify that the spawn didn't take too long
+        // (12 tasks * 50ms maximum = 600ms maximum, plus some buffer)
+        assert!(elapsed.as_millis() <= 800, "Expected at most 800ms, got {:?}", elapsed);
     }
 }
