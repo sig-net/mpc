@@ -795,6 +795,8 @@ impl SignGenerator {
             crate::metrics::SIGNATURE_POKES_CNT.with_label_values(&[my_account_id.as_str()]);
         let signature_generator_failures_metric = crate::metrics::SIGNATURE_GENERATOR_FAILURES
             .with_label_values(&[my_account_id.as_str()]);
+        let signature_generator_success_metric = crate::metrics::SIGNATURE_GENERATOR_SUCCESS
+            .with_label_values(&[my_account_id.as_str()]);
         let poke_latency =
             crate::metrics::SIGNATURE_POKE_CPU_TIME.with_label_values(&[my_account_id.as_str()]);
 
@@ -896,6 +898,7 @@ impl SignGenerator {
                     crate::metrics::SIGN_GENERATION_LATENCY
                         .with_label_values(&[my_account_id.as_str()])
                         .observe(self.created.elapsed().as_secs_f64());
+                    signature_generator_success_metric.inc();
 
                     if self.proposer == me {
                         ctx.rpc.publish(

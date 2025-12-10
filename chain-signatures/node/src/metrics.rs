@@ -375,6 +375,15 @@ pub(crate) static SIGNATURE_GENERATOR_FAILURES: LazyLock<CounterVec> = LazyLock:
     .unwrap()
 });
 
+pub(crate) static SIGNATURE_GENERATOR_SUCCESS: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_num_total_historical_signature_generators_success",
+        "total signature generator success",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
 pub(crate) static PRESIGNATURE_GENERATOR_FAILURES: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec(
         "multichain_presignature_generator_failures",
