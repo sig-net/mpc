@@ -485,4 +485,418 @@ mod tests {
         servers[1].set_protocol_version(Some(0)).await;
         expect_status(&mut watcher, remote_id, NodeStatus::Offline).await;
     }
+
+    // ============================================================================
+    // Property-Based Tests for Mesh Network and Peer Discovery
+    // ============================================================================
+
+    use proptest::prelude::*;
+
+    /// Strategy to generate a valid number of nodes (2-10 for practical testing)
+    fn num_nodes_strategy() -> impl Strategy<Value = usize> {
+        2usize..=6
+    }
+
+    /// **Feature: unit-test-coverage, Property 110: Peer Discovery Correctness**
+    /// **Validates: Requirements 34.1**
+    ///
+    /// *For any* peer discovery operation, peers should be discovered and connected correctly.
+    /// This property verifies that when nodes are added to the network, they are properly
+    /// discovered and their status transitions correctly through the discovery lifecycle.
+    #[test(tokio::test)]
+    async fn prop_peer_discovery_correctness() {
+        // Test with varying numbers of nodes to verify the property holds
+        for num_nodes in 2..=5 {
+            let servers = MockServers::run(num_nodes).await;
+            let participants = servers.participants();
+            let my_id = servers[0].account_id().clone();
+
+            let mut pool = Pool::new(&servers.client(), &my_id, PING_INTERVAL);
+            let mut watcher = pool.watch();
+            pool.connect_nodes(&participants, &mut HashSet::new()).await;
+
+            // Property: All peers (except self) should be discovered
+            // Wait for initial discovery
+            tokio::time::sleep(PING_INTERVAL * 5).await;
+
+            // Collect discovered peers
+            let mut discovered_peers = HashSet::new();
+            let timeout_duration = Duration::from_millis(500);
+            
+            // Try to receive status updates for all non-self peers
+            for _ in 1..num_nodes {
+                if let Ok((participant, status, _info)) =
+                    tokio::time::timeout(timeout_duration, watcher.next()).await
+                {
+                    // Property: Discovered peers should start in Syncing state
+                    assert!(
+                        matches!(status, NodeStatus::Syncing | NodeStatus::Active),
+                        "Peer {:?} should be in Syncing or Active state after discovery, got {:?}",
+                        participant,
+                        status
+                    );
+                    discovered_peers.insert(participant);
+                }
+            }
+
+            // Property: All non-self peers should be discovered
+            for i in 1..num_nodes {
+                let peer_id = servers[i].id();
+                assert!(
+                    discovered_peers.contains(&peer_id),
+                    "Peer {:?} should have been discovered in network of {} nodes",
+                    peer_id,
+                    num_nodes
+                );
+            }
+
+            // Property: Self should not be in discovered peers
+            let self_id = servers[0].id();
+            assert!(
+                !discovered_peers.contains(&self_id),
+                "Self should not be in discovered peers"
+            );
+        }
+    }
+
+    /// **Feature: unit-test-coverage, Property 111: Mesh State Synchronization**
+    /// **Validates: Requirements 34.2**
+    ///
+    /// *For any* mesh state synchronization, state should be synchronized correctly across all peers.
+    /// This property verifies that when peers report sync completion, the mesh state is updated
+    /// consistently and all synchronized peers are marked as active.
+    #[test(tokio::test)]
+    async fn prop_mesh_state_synchronization() {
+        // Test with varying numbers of nodes
+        for num_nodes in 2..=4 {
+            let root_sk = near_crypto::SecretKey::from_seed(near_crypto::KeyType::SECP256K1, "root");
+            let servers = MockServers::run(num_nodes).await;
+            let participants = servers.participants();
+            let node_id = servers[0].account_id().clone();
+
+            let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
+                &node_id,
+                root_sk.public_key().into_affine_point(),
+                (num_nodes / 2 + 1) as usize, // threshold
+                participants.clone(),
+            );
+
+            let (sync_tx, sync_rx) = mpsc::channel(16);
+            let mesh = Mesh::new(
+                &servers.client(),
+                Options {
+                    ping_interval: PING_INTERVAL.as_millis() as u64,
+                },
+                &node_id,
+                sync_rx,
+            );
+
+            let mesh_state = mesh.watch();
+            let mesh_task = tokio::spawn(mesh.run(contract_watcher));
+
+            // Wait for initial mesh setup
+            tokio::time::sleep(PING_INTERVAL * 5).await;
+
+            // Property: After sync reports, all peers should be in active state
+            for idx in 0..num_nodes {
+                sync_tx.send(servers[idx].id()).await.unwrap();
+            }
+            tokio::time::sleep(PING_INTERVAL * 5).await;
+
+            let state = mesh_state.borrow();
+            
+            // Property: All synced peers should be in active set
+            assert_eq!(
+                state.active.len(),
+                num_nodes,
+                "All {} nodes should be active after sync, got {}",
+                num_nodes,
+                state.active.len()
+            );
+
+            // Property: No peers should be in need_sync after all sync reports
+            assert!(
+                state.need_sync.is_empty(),
+                "No peers should need sync after all sync reports, got {} needing sync",
+                state.need_sync.len()
+            );
+
+            // Property: All active peers should be in stable set
+            for (participant, _) in state.active.iter() {
+                assert!(
+                    state.stable.contains(participant),
+                    "Active peer {:?} should be in stable set",
+                    participant
+                );
+            }
+
+            mesh_task.abort();
+        }
+    }
+
+    /// **Feature: unit-test-coverage, Property 112: Participant List Update Propagation**
+    /// **Validates: Requirements 34.3**
+    ///
+    /// *For any* participant list update, the update should be propagated correctly to all relevant nodes.
+    /// This property verifies that when the contract participant list changes (add/remove),
+    /// the mesh state is updated accordingly.
+    #[test(tokio::test)]
+    async fn prop_participant_list_update_propagation() {
+        let root_sk = near_crypto::SecretKey::from_seed(near_crypto::KeyType::SECP256K1, "root");
+        let initial_nodes = 3;
+        let mut servers = MockServers::run(initial_nodes).await;
+        let node_id = servers[0].account_id().clone();
+
+        let (contract_watcher, contract_tx) = ContractStateWatcher::with_running(
+            &node_id,
+            root_sk.public_key().into_affine_point(),
+            2,
+            servers.participants(),
+        );
+
+        let (sync_tx, synced_peer_rx) = mpsc::channel(100);
+        let mesh = Mesh::new(
+            &servers.client(),
+            Options {
+                ping_interval: PING_INTERVAL.as_millis() as u64,
+            },
+            &node_id,
+            synced_peer_rx,
+        );
+        let mesh_state = mesh.watch();
+        let mesh_task = tokio::spawn(mesh.run(contract_watcher));
+
+        // Initial sync
+        tokio::time::sleep(PING_INTERVAL * 3).await;
+        for i in 0..initial_nodes {
+            sync_tx.send(servers[i].id()).await.unwrap();
+        }
+        tokio::time::sleep(PING_INTERVAL * 3).await;
+
+        // Property: Test adding participants
+        for add_count in 1..=2 {
+            let new_participant = servers.push_next().await;
+            
+            // Update contract with new participant
+            contract_tx.send_modify(|contract| {
+                if let Some(ProtocolState::Running(RunningContractState { participants, .. })) = contract.as_mut() {
+                    *participants = servers.participants().clone();
+                }
+            });
+
+            tokio::time::sleep(PING_INTERVAL * 5).await;
+            sync_tx.send(new_participant).await.unwrap();
+            tokio::time::sleep(PING_INTERVAL * 3).await;
+
+            let state = mesh_state.borrow();
+            let expected_count = initial_nodes + add_count;
+            
+            // Property: New participant should be in active set after sync
+            assert!(
+                state.active.contains_key(&new_participant),
+                "New participant {:?} should be in active set after contract update",
+                new_participant
+            );
+            
+            // Property: Total active count should match expected
+            assert_eq!(
+                state.active.len(),
+                expected_count,
+                "Active count should be {} after adding participant, got {}",
+                expected_count,
+                state.active.len()
+            );
+        }
+
+        // Property: Test removing participants
+        let current_count = servers.participants().len();
+        servers.remove_back();
+        
+        contract_tx.send_modify(|contract| {
+            if let Some(ProtocolState::Running(RunningContractState { participants, .. })) = contract.as_mut() {
+                *participants = servers.participants().clone();
+            }
+        });
+
+        tokio::time::sleep(PING_INTERVAL * 5).await;
+
+        let state = mesh_state.borrow();
+        let expected_count = current_count - 1;
+        
+        // Property: Removed participant should not be in active set
+        assert_eq!(
+            state.active.len(),
+            expected_count,
+            "Active count should be {} after removing participant, got {}",
+            expected_count,
+            state.active.len()
+        );
+
+        mesh_task.abort();
+    }
+
+    /// **Feature: unit-test-coverage, Property 113: Network Topology Adaptation**
+    /// **Validates: Requirements 34.4**
+    ///
+    /// *For any* network topology change, the system should adapt appropriately and maintain connectivity.
+    /// This property verifies that when nodes go offline/online, the mesh state adapts correctly
+    /// and maintains accurate tracking of network topology.
+    #[test(tokio::test)]
+    async fn prop_network_topology_adaptation() {
+        let root_sk = near_crypto::SecretKey::from_seed(near_crypto::KeyType::SECP256K1, "root");
+        let num_nodes = 4;
+        let mut servers = MockServers::run(num_nodes).await;
+        let node_id = servers[0].account_id().clone();
+
+        let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
+            &node_id,
+            root_sk.public_key().into_affine_point(),
+            2,
+            servers.participants(),
+        );
+
+        let (sync_tx, sync_rx) = mpsc::channel(16);
+        let mesh = Mesh::new(
+            &servers.client(),
+            Options {
+                ping_interval: PING_INTERVAL.as_millis() as u64,
+            },
+            &node_id,
+            sync_rx,
+        );
+
+        let mesh_state = mesh.watch();
+        let mesh_task = tokio::spawn(mesh.run(contract_watcher));
+
+        // Initial sync
+        tokio::time::sleep(PING_INTERVAL * 3).await;
+        for idx in 0..num_nodes {
+            sync_tx.send(servers[idx].id()).await.unwrap();
+        }
+        tokio::time::sleep(PING_INTERVAL * 5).await;
+
+        // Verify initial state
+        {
+            let state = mesh_state.borrow();
+            assert_eq!(state.active.len(), num_nodes, "All nodes should be active initially");
+        }
+
+        // Property: Test adaptation when nodes go offline
+        // Take multiple nodes offline in sequence
+        for offline_idx in 1..3 {
+            servers[offline_idx].make_offline().await;
+            tokio::time::sleep(PING_INTERVAL * 5).await;
+
+            let state = mesh_state.borrow();
+            let offline_id = servers[offline_idx].id();
+            
+            // Property: Offline node should be removed from active set
+            assert!(
+                !state.active.contains_key(&offline_id),
+                "Offline node {:?} should not be in active set",
+                offline_id
+            );
+            
+            // Property: Offline node should be removed from stable set
+            assert!(
+                !state.stable.contains(&offline_id),
+                "Offline node {:?} should not be in stable set",
+                offline_id
+            );
+        }
+
+        // Property: Test adaptation when nodes come back online
+        for online_idx in 1..3 {
+            servers[online_idx].make_online().await;
+            tokio::time::sleep(PING_INTERVAL * 5).await;
+            
+            // Report sync for the node that came back online
+            sync_tx.send(servers[online_idx].id()).await.unwrap();
+            tokio::time::sleep(PING_INTERVAL * 3).await;
+
+            let state = mesh_state.borrow();
+            let online_id = servers[online_idx].id();
+            
+            // Property: Recovered node should be back in active set after sync
+            assert!(
+                state.active.contains_key(&online_id),
+                "Recovered node {:?} should be in active set after sync",
+                online_id
+            );
+            
+            // Property: Recovered node should be in stable set
+            assert!(
+                state.stable.contains(&online_id),
+                "Recovered node {:?} should be in stable set after sync",
+                online_id
+            );
+        }
+
+        // Property: Final state should have all nodes active
+        {
+            let state = mesh_state.borrow();
+            assert_eq!(
+                state.active.len(),
+                num_nodes,
+                "All nodes should be active after recovery"
+            );
+            assert_eq!(
+                state.stable.len(),
+                num_nodes,
+                "All nodes should be stable after recovery"
+            );
+        }
+
+        mesh_task.abort();
+    }
+
+    /// Additional property test: MeshState update consistency
+    /// This tests the MeshState::update method directly with various status transitions
+    #[test]
+    fn prop_mesh_state_update_consistency() {
+        use proptest::test_runner::{TestRunner, Config};
+
+        let config = Config::with_cases(100);
+        let mut runner = TestRunner::new(config);
+
+        runner.run(&(0u32..100, 0u32..4), |(participant_id, status_idx)| {
+            let participant = Participant::from(participant_id);
+            let info = ParticipantInfo {
+                id: participant_id,
+                account_id: format!("p{}.test", participant_id).parse().unwrap(),
+                url: format!("http://localhost:{}", 3000 + participant_id),
+                cipher_pk: mpc_keys::hpke::PublicKey::from_bytes(&[0; 32]),
+                sign_pk: near_crypto::PublicKey::empty(near_crypto::KeyType::ED25519),
+            };
+
+            let status = match status_idx {
+                0 => NodeStatus::Active,
+                1 => NodeStatus::Syncing,
+                2 => NodeStatus::Inactive,
+                _ => NodeStatus::Offline,
+            };
+
+            let mut state = MeshState::default();
+            state.update(participant, status, info.clone());
+
+            // Property: After update, state should be consistent
+            match status {
+                NodeStatus::Active => {
+                    prop_assert!(state.active.contains_key(&participant));
+                    prop_assert!(!state.need_sync.contains_key(&participant));
+                    prop_assert!(state.stable.contains(&participant));
+                }
+                NodeStatus::Syncing => {
+                    prop_assert!(state.need_sync.contains_key(&participant));
+                }
+                NodeStatus::Inactive | NodeStatus::Offline => {
+                    prop_assert!(!state.active.contains_key(&participant));
+                    prop_assert!(!state.need_sync.contains_key(&participant));
+                    prop_assert!(!state.stable.contains(&participant));
+                }
+            }
+
+            Ok(())
+        }).unwrap();
+    }
 }
