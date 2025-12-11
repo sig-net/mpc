@@ -178,12 +178,14 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     }
 
     pub async fn reserve(&self, id: A::Id) -> Option<ArtifactSlot<A>> {
-        if self.used.read().await.contains(&id) {
+        let used = self.used.read().await;
+        if used.contains(&id) {
             return None;
         }
         if !self.reserved.write().await.insert(id) {
             return None;
         }
+        drop(used);
 
         let start = Instant::now();
         let Some(mut conn) = self.connect().await else {
@@ -333,8 +335,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let start = Instant::now();
         let id = artifact.id();
-        if self.used.read().await.contains(&id) {
-            tracing::warn!(id, "artifact already marked used (in-memory)");
+        let used = self.used.read().await;
+        if used.contains(&id) {
+            tracing::warn!(id, "artifact already marked used");
             return false;
         }
 
@@ -451,7 +454,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         match result {
             Ok(artifact) => {
-                // mark used in-memory so it cannot be reused locally
                 self.used.write().await.insert(id);
                 tracing::info!(id, elapsed_ms = elapsed.as_millis(), "took artifact");
                 Some(ArtifactTaken::new(artifact, self.clone()))
@@ -654,6 +656,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         match result {
             Ok(_) => {
+                self.reserved.write().await.remove(&id);
                 self.used.write().await.remove(&id);
                 tracing::info!(
                     id,
