@@ -375,14 +375,15 @@ pub(crate) static SIGNATURE_GENERATOR_FAILURES: LazyLock<CounterVec> = LazyLock:
     .unwrap()
 });
 
-pub(crate) static SIGNATURE_GENERATOR_SUCCESS: LazyLock<CounterVec> = LazyLock::new(|| {
-    try_create_counter_vec(
-        "multichain_num_total_historical_signature_generators_success",
-        "total signature generator success",
-        &["node_account_id"],
-    )
-    .unwrap()
-});
+pub(crate) static NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS_SUCCESS: LazyLock<CounterVec> =
+    LazyLock::new(|| {
+        try_create_counter_vec(
+            "multichain_num_total_historical_signature_generators_success",
+            "number of all successful signature generators historically on the node",
+            &["node_account_id"],
+        )
+        .unwrap()
+    });
 
 pub(crate) static PRESIGNATURE_GENERATOR_FAILURES: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec(
