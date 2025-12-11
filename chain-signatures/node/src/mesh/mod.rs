@@ -4,6 +4,7 @@ use std::time::Duration;
 use crate::mesh::connection::NodeStatus;
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::Participants;
+use crate::protocol::signature::DRIFT_INTERVAL;
 use crate::protocol::ParticipantInfo;
 use crate::protocol::ProtocolState;
 use crate::rpc::ContractStateWatcher;
@@ -31,9 +32,6 @@ impl Options {
         ]
     }
 }
-
-/// The +/- drift range in milliseconds.
-pub const DRIFT_INTERVAL: i64 = 3000;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MeshState {
@@ -67,7 +65,7 @@ impl MeshState {
 
                 // Check drift is within the expected DRIFT_INTERVAL range.
                 let drift = (time - Utc::now()).num_milliseconds().abs();
-                if drift <= DRIFT_INTERVAL {
+                if drift <= DRIFT_INTERVAL as i64 {
                     changed |= self.stable.insert(participant);
                 } else {
                     changed |= self.stable.remove(&participant);

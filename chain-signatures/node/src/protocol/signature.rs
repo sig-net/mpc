@@ -37,7 +37,8 @@ use near_account_id::AccountId;
 
 /// The round interval to search for a proposer in the organizing phase.
 const ROUND_INTERVAL: usize = 512;
-const DRIFT_INTERVAL: u64 = 35000;
+/// The +/- range of time drift to account for in milliseconds.
+pub const DRIFT_INTERVAL: u64 = 21000;
 
 /// All relevant info pertaining to an Indexed sign request from an indexer.
 #[derive(Debug, Clone, PartialEq)]
@@ -178,7 +179,7 @@ impl SignOrganizer {
             tracing::warn!("no timestamp available from contract, falling back to local time");
             Utc::now().timestamp_millis() as u64
         });
-        let round = ((now + DRIFT_INTERVAL) / (4 * DRIFT_INTERVAL)) as usize;
+        let round = ((now + DRIFT_INTERVAL) / (3 * DRIFT_INTERVAL)) as usize;
         state.round = round;
 
         tracing::info!(?sign_id, round, "entering organizing phase");
