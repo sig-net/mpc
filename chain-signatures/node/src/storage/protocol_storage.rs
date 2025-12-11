@@ -182,20 +182,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     }
 
     pub async fn reserve(&self, id: A::Id) -> Option<ArtifactSlot<A>> {
-        const SCRIPT: &str = r#"
-            local artifact_key = KEYS[1]
-            local artifact_id = ARGV[1]
-
-            -- cannot reserve this artifact if its already in storage.
-            if redis.call("HEXISTS", artifact_key, artifact_id) == 1 then
-                return {err = "WARN artifact " .. artifact_id .. " has already been stored"}
-            end
-        "#;
-
         if self.used.read().await.contains(&id) {
             return None;
         }
-
         if !self.reserved.write().await.insert(id) {
             return None;
         }
@@ -205,19 +194,22 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             self.reserved.write().await.remove(&id);
             return None;
         };
-        let result: Result<(), _> = redis::Script::new(SCRIPT)
-            .key(&self.artifact_key)
-            .arg(id)
-            .invoke_async(&mut conn)
-            .await;
 
+        // Check directly whether the artifact is already stored in Redis.
+        let artifact_exists: Result<bool, _> = conn.hexists(&self.artifact_key, id).await;
         let elapsed = start.elapsed();
         crate::metrics::REDIS_LATENCY
             .with_label_values(&[A::METRIC_LABEL, "reserve", self.account_id.as_str()])
             .observe(elapsed.as_millis() as f64);
 
-        match result {
-            Ok(_) => Some(ArtifactSlot {
+        match artifact_exists {
+            Ok(true) => {
+                // artifact already stored, reserve cannot be done, remove reservation
+                self.reserved.write().await.remove(&id);
+                None
+            }
+            // artifact does not exist, reservation successful
+            Ok(false) => Some(ArtifactSlot {
                 id,
                 storage: self.clone(),
                 stored: false,
