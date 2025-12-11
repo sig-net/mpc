@@ -34,24 +34,24 @@ pub struct PositMessage {
     pub id: PositProtocolId,
     pub from: Participant,
     pub action: PositAction,
+    /// Round information for King algorithm synchronization in signature protocol.
+    /// Only used by signature posit messages, None for triple/presignature.
+    #[serde(default)]
+    pub round: Option<usize>,
 }
 
 impl PositMessage {
     pub fn data_len(&self) -> usize {
-        match &self.action {
+        let action_len = match &self.action {
             PositAction::Propose => 0,
             PositAction::Start(participants) => {
                 participants.len() * std::mem::size_of::<Participant>()
             }
             PositAction::Accept => 0,
             PositAction::Reject => 0,
-            PositAction::ProposeWithRound { .. } => std::mem::size_of::<usize>(),
-            PositAction::AcceptWithRound { .. } => std::mem::size_of::<usize>(),
-            PositAction::RejectWithRound { .. } => std::mem::size_of::<usize>(),
-            PositAction::StartWithRound { participants, .. } => {
-                std::mem::size_of::<usize>() + participants.len() * std::mem::size_of::<Participant>()
-            }
-        }
+        };
+        // Add size of round if present
+        action_len + self.round.map_or(0, |_| std::mem::size_of::<usize>())
     }
 }
 

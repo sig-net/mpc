@@ -451,6 +451,7 @@ impl PresignatureSpawner {
                             id: PositProtocolId::Presignature(id),
                             from: self.me,
                             action,
+                            round: None,
                         },
                     )
                     .await;
@@ -503,6 +504,7 @@ impl PresignatureSpawner {
                         id: PositProtocolId::Presignature(id),
                         from: self.me,
                         action: PositAction::Propose,
+                        round: None,
                     },
                 )
                 .await;
@@ -654,6 +656,7 @@ impl PresignatureSpawner {
                             id: PositProtocolId::Presignature(id),
                             from: self.me,
                             action: PositAction::Start(participants.clone()),
+                            round: None,
                         },
                     )
                     .await;

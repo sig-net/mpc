@@ -68,7 +68,14 @@ pub struct MessageInbox {
     presignature: HashMap<PresignatureId, Subscriber<PresignatureMessage>>,
     presignature_init: Subscriber<(FullPresignatureId, Participant, PositAction)>,
     signature: HashMap<(SignId, PresignatureId), Subscriber<SignatureMessage>>,
-    signature_init: Subscriber<(SignId, PresignatureId, Participant, PositAction)>,
+    /// Signature init includes round for King algorithm synchronization
+    signature_init: Subscriber<(
+        SignId,
+        PresignatureId,
+        Participant,
+        PositAction,
+        Option<usize>,
+    )>,
 }
 
 impl MessageInbox {
@@ -113,7 +120,13 @@ impl MessageInbox {
                 PositProtocolId::Signature(sign_id, presignature_id) => {
                     let _ = self
                         .signature_init
-                        .send((sign_id, presignature_id, message.from, message.action))
+                        .send((
+                            sign_id,
+                            presignature_id,
+                            message.from,
+                            message.action,
+                            message.round,
+                        ))
                         .await;
                 }
             },
@@ -616,7 +629,13 @@ impl MessageChannel {
 
     pub async fn subscribe_signature_posit(
         &self,
-    ) -> mpsc::Receiver<(SignId, PresignatureId, Participant, PositAction)> {
+    ) -> mpsc::Receiver<(
+        SignId,
+        PresignatureId,
+        Participant,
+        PositAction,
+        Option<usize>,
+    )> {
         let Some(subscription) = self.subscribe(SubscribeId::Signatures).await else {
             tracing::warn!("failed to subscribe for signature posit");
             return mpsc::channel(1).1;

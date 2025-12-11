@@ -34,7 +34,15 @@ pub enum SubscribeResponse {
     Presignature(mpsc::Receiver<PresignatureMessage>),
     PresignaturePosit(mpsc::Receiver<(FullPresignatureId, Participant, PositAction)>),
     Signature(mpsc::Receiver<SignatureMessage>),
-    SignaturePosit(mpsc::Receiver<(SignId, PresignatureId, Participant, PositAction)>),
+    SignaturePosit(
+        mpsc::Receiver<(
+            SignId,
+            PresignatureId,
+            Participant,
+            PositAction,
+            Option<usize>,
+        )>,
+    ),
 }
 
 pub enum SubscribeRequestAction {

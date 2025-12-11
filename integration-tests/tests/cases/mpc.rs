@@ -749,10 +749,11 @@ async fn test_high_throughput_256_parallel_signatures() {
     let timeout = Duration::from_secs(TOTAL_TIMEOUT_SECS);
     let actions = tokio::time::timeout(timeout, network.wait_for_actions(NUM_SIGN_REQUESTS))
         .await
-        .expect(&format!(
-            "should complete all {} signatures within {} seconds",
-            NUM_SIGN_REQUESTS, TOTAL_TIMEOUT_SECS
-        ));
+        .unwrap_or_else(|_| {
+            panic!(
+                "should complete all {NUM_SIGN_REQUESTS} signatures within {TOTAL_TIMEOUT_SECS}s"
+            )
+        });
 
     let elapsed = start_time.elapsed();
     let final_presignatures = network[0].presignature_storage.len_generated().await;
