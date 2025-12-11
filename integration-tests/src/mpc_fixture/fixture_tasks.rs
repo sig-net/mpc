@@ -91,7 +91,7 @@ pub(super) fn test_mock_network(
                             )
                         },
                     };
-                    tracing::error!(target: "mock_network", ?action_str, "Received RPC action");
+                    tracing::info!(target: "mock_network", ?action_str, "Received RPC action");
                     let mut actions_log = rpc_actions.lock().await;
                     actions_log.insert(action_str);
                 }
