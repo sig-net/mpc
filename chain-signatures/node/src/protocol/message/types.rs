@@ -45,6 +45,12 @@ impl PositMessage {
             }
             PositAction::Accept => 0,
             PositAction::Reject => 0,
+            PositAction::ProposeWithRound { .. } => std::mem::size_of::<usize>(),
+            PositAction::AcceptWithRound { .. } => std::mem::size_of::<usize>(),
+            PositAction::RejectWithRound { .. } => std::mem::size_of::<usize>(),
+            PositAction::StartWithRound { participants, .. } => {
+                std::mem::size_of::<usize>() + participants.len() * std::mem::size_of::<Participant>()
+            }
         }
     }
 }

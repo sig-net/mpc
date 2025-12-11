@@ -36,11 +36,49 @@ pub enum PositAction {
     Accept,
     // TODO: Reject can also have a reason
     Reject,
+    /// Signature-specific actions with round information for King algorithm.
+    /// The round helps nodes synchronize and adopt the king's round.
+    ProposeWithRound { round: usize },
+    AcceptWithRound { round: usize },
+    RejectWithRound { round: usize },
+    StartWithRound { round: usize, participants: Vec<Participant> },
 }
 
 impl PositAction {
     pub fn is_accept(&self) -> bool {
-        matches!(self, PositAction::Accept)
+        matches!(self, PositAction::Accept | PositAction::AcceptWithRound { .. })
+    }
+
+    pub fn is_reject(&self) -> bool {
+        matches!(self, PositAction::Reject | PositAction::RejectWithRound { .. })
+    }
+
+    pub fn is_propose(&self) -> bool {
+        matches!(self, PositAction::Propose | PositAction::ProposeWithRound { .. })
+    }
+
+    pub fn is_start(&self) -> bool {
+        matches!(self, PositAction::Start(_) | PositAction::StartWithRound { .. })
+    }
+
+    /// Extract round from round-aware variants, returns None for legacy variants.
+    pub fn round(&self) -> Option<usize> {
+        match self {
+            PositAction::ProposeWithRound { round } => Some(*round),
+            PositAction::AcceptWithRound { round } => Some(*round),
+            PositAction::RejectWithRound { round } => Some(*round),
+            PositAction::StartWithRound { round, .. } => Some(*round),
+            _ => None,
+        }
+    }
+
+    /// Extract participants from Start variants.
+    pub fn start_participants(&self) -> Option<&Vec<Participant>> {
+        match self {
+            PositAction::Start(participants) => Some(participants),
+            PositAction::StartWithRound { participants, .. } => Some(participants),
+            _ => None,
+        }
     }
 }
 
@@ -136,7 +174,7 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
         // it to proceed and be acted upon.
 
         match action {
-            PositAction::Propose => {
+            PositAction::Propose | PositAction::ProposeWithRound { .. } => {
                 // We have no information about this posit, so we can just accept it.
                 let Some((positor, _)) = self.posits.get(&id) else {
                     self.posits
@@ -163,7 +201,7 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                     PositInternalAction::Reply(PositAction::Accept)
                 }
             }
-            PositAction::Start(participants) => {
+            PositAction::Start(participants) | PositAction::StartWithRound { participants, .. } => {
                 // Checks:
                 // 1. We are a participant in the protocol.
                 // 2. We are not the proposer.
@@ -208,7 +246,7 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                     Positor::Deliberator(from),
                 )
             }
-            PositAction::Accept | PositAction::Reject => {
+            PositAction::Accept | PositAction::AcceptWithRound { .. } | PositAction::Reject | PositAction::RejectWithRound { .. } => {
                 let mut entry = match self.posits.entry(id) {
                     Entry::Occupied(entry) => entry,
                     Entry::Vacant(_) => {
@@ -389,16 +427,16 @@ impl SinglePositCounter {
         if !self.participants.contains(&from) {
             return false;
         }
-        match action {
-            PositAction::Accept => {
-                self.accepts.insert(from);
-            }
-            PositAction::Reject => {
-                self.rejects.insert(from);
-            }
-            _ => return false,
+        // Handle both legacy and round-aware variants
+        if action.is_accept() {
+            self.accepts.insert(from);
+            true
+        } else if action.is_reject() {
+            self.rejects.insert(from);
+            true
+        } else {
+            false
         }
-        true
     }
 }
 

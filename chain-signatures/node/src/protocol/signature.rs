@@ -92,6 +92,24 @@ impl SignState {
         // Reset the budget for the new attempt
         self.budget.reset(ORGANIZE_POSIT_TIMEOUT);
     }
+
+    /// King algorithm: adopt a higher round from an incoming message.
+    /// Returns true if the round was adopted (caller should restart organizing).
+    fn maybe_adopt_round(&mut self, incoming_round: usize, sign_id: SignId) -> bool {
+        if incoming_round > self.round {
+            tracing::info!(
+                ?sign_id,
+                my_round = self.round,
+                incoming_round,
+                "adopting higher round from king"
+            );
+            self.round = incoming_round;
+            self.budget.reset(ORGANIZE_POSIT_TIMEOUT);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 struct SignPositor {
@@ -276,6 +294,7 @@ impl SignOrganizer {
             tracing::info!(?sign_id, presignature_id, "proposer got presignature");
 
             // broadcast to participants and let them reject if they don't have the presignature.
+            let current_round = state.round;
             for &p in &participants {
                 if p == ctx.me {
                     continue;
@@ -287,7 +306,7 @@ impl SignOrganizer {
                         PositMessage {
                             id: PositProtocolId::Signature(sign_id, presignature_id),
                             from: ctx.me,
-                            action: PositAction::Propose,
+                            action: PositAction::ProposeWithRound { round: current_round },
                         },
                     )
                     .await;
@@ -320,6 +339,13 @@ impl SignPositor {
         let sign_id = ctx.sign_id;
         let round = state.round;
         let remaining = state.budget.remaining();
+        
+        // WaitProposeResult to distinguish between finding a presig vs detecting higher round
+        enum WaitProposeResult {
+            FoundPresignature(PresignatureId),
+            AdoptRound(usize),
+        }
+        
         let outcome = tokio::time::timeout(remaining, async {
             loop {
                 let Some(task_msg) = task_rx.recv().await else {
@@ -329,10 +355,25 @@ impl SignPositor {
                     presignature_id,
                     from,
                     action,
+                    round: _,
                 } = &task_msg;
 
-                if !matches!(action, PositAction::Propose) {
+                if !action.is_propose() {
                     continue;
+                }
+
+                // King algorithm: check if incoming round is higher and adopt it
+                if let Some(incoming_round) = action.round() {
+                    if incoming_round > round {
+                        // We're behind - need to adopt the higher round and restart
+                        tracing::info!(
+                            ?sign_id,
+                            my_round = round,
+                            incoming_round,
+                            "deliberator received Propose from higher round, adopting"
+                        );
+                        return WaitProposeResult::AdoptRound(incoming_round);
+                    }
                 }
 
                 if from == &proposer {
@@ -357,14 +398,14 @@ impl SignPositor {
                                 PositMessage {
                                     id: PositProtocolId::Signature(sign_id, *presignature_id),
                                     from: ctx.me,
-                                    action: PositAction::Reject,
+                                    action: PositAction::RejectWithRound { round },
                                 },
                             )
                             .await;
                         continue;
                     }
 
-                    break *presignature_id;
+                    return WaitProposeResult::FoundPresignature(*presignature_id);
                 } else {
                     tracing::warn!(
                         ?sign_id,
@@ -380,7 +421,7 @@ impl SignPositor {
                             PositMessage {
                                 id: PositProtocolId::Signature(sign_id, *presignature_id),
                                 from: ctx.me,
-                                action: PositAction::Reject,
+                                action: PositAction::RejectWithRound { round },
                             },
                         )
                         .await;
@@ -390,7 +431,11 @@ impl SignPositor {
         .await;
 
         let presignature_id = match outcome {
-            Ok(id) => id,
+            Ok(WaitProposeResult::FoundPresignature(id)) => id,
+            Ok(WaitProposeResult::AdoptRound(incoming_round)) => {
+                state.maybe_adopt_round(incoming_round, sign_id);
+                return Err(SignPhase::Organizing(SignOrganizer));
+            }
             Err(_) => {
                 tracing::warn!(
                     ?sign_id,
@@ -403,7 +448,7 @@ impl SignPositor {
             }
         };
 
-        // received propose, send Accept
+        // received propose, send Accept with our round
         ctx.msg
             .send(
                 ctx.me,
@@ -411,7 +456,7 @@ impl SignPositor {
                 PositMessage {
                     id: PositProtocolId::Signature(sign_id, presignature_id),
                     from: ctx.me,
-                    action: PositAction::Accept,
+                    action: PositAction::AcceptWithRound { round: state.round },
                 },
             )
             .await;
@@ -478,9 +523,34 @@ impl SignPositor {
         let accepted_participants = loop {
             tokio::select! {
                 Some(task_msg) = task_rx.recv() => {
-                    let SignTaskMessage::PositMessage { presignature_id: _, from, action } = task_msg;
+                    let SignTaskMessage::PositMessage { presignature_id: _, from, action, round: msg_round } = task_msg;
+                    
+                    // King algorithm: check if incoming round is higher and adopt it
+                    if let Some(incoming_round) = msg_round {
+                        if incoming_round > round {
+                            tracing::info!(
+                                ?sign_id,
+                                my_round = round,
+                                incoming_round,
+                                "received message from higher round, adopting and reorganizing"
+                            );
+                            state.round = incoming_round;
+                            state.budget.reset(ORGANIZE_POSIT_TIMEOUT);
+                            return SignPhase::Organizing(SignOrganizer);
+                        } else if incoming_round < round {
+                            tracing::debug!(
+                                ?sign_id,
+                                my_round = round,
+                                incoming_round,
+                                "ignoring message from lower round"
+                            );
+                            continue;
+                        }
+                    }
+                    
                     if is_deliberator {
-                        if let PositAction::Start(participants) = action {
+                        // Handle both Start and StartWithRound variants
+                        if let Some(participants) = action.start_participants() {
                             if from != proposer {
                                 tracing::warn!(?sign_id, ?from, ?proposer, "received Start from non-proposer, ignoring");
                                 continue;
@@ -497,7 +567,7 @@ impl SignPositor {
                             }
 
                             tracing::info!(?sign_id, participant = ?ctx.me, ?participants, "deliberator received Start");
-                            break participants;
+                            break participants.clone();
                         }
                     } else {
                         if !counter.process_action(from, &action) {
@@ -550,7 +620,7 @@ impl SignPositor {
                                         PositMessage {
                                             id: PositProtocolId::Signature(sign_id, presignature_id),
                                             from: ctx.me,
-                                            action: PositAction::Start(participants.clone()),
+                                            action: PositAction::StartWithRound { round, participants: participants.clone() },
                                         },
                                     )
                                     .await;
@@ -597,7 +667,7 @@ impl SignPositor {
                                         PositMessage {
                                             id: PositProtocolId::Signature(sign_id, presignature_id),
                                             from: ctx.me,
-                                            action: PositAction::Start(participants.clone()),
+                                            action: PositAction::StartWithRound { round, participants: participants.clone() },
                                         },
                                     )
                                     .await;
@@ -1038,6 +1108,9 @@ enum SignTaskMessage {
         presignature_id: PresignatureId,
         from: Participant,
         action: PositAction,
+        /// Round extracted from round-aware PositAction variants.
+        /// Used for King algorithm round synchronization.
+        round: Option<usize>,
     },
 }
 
@@ -1108,6 +1181,8 @@ impl SignatureSpawner {
         if from == self.me {
             return;
         }
+        // Extract round from round-aware action variants for King algorithm
+        let round = action.round();
         let _ = self
             .inboxes
             .entry(sign_id)
@@ -1116,6 +1191,7 @@ impl SignatureSpawner {
                 presignature_id,
                 from,
                 action,
+                round,
             })
             .await;
     }
