@@ -795,9 +795,11 @@ impl SignGenerator {
             crate::metrics::SIGNATURE_POKES_CNT.with_label_values(&[my_account_id.as_str()]);
         let signature_generator_failures_metric = crate::metrics::SIGNATURE_GENERATOR_FAILURES
             .with_label_values(&[my_account_id.as_str()]);
+
         let signature_generator_success_metric =
             crate::metrics::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS_SUCCESS
                 .with_label_values(&[my_account_id.as_str()]);
+
         let poke_latency =
             crate::metrics::SIGNATURE_POKE_CPU_TIME.with_label_values(&[my_account_id.as_str()]);
 
