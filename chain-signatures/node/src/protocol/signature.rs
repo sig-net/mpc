@@ -38,7 +38,7 @@ use near_account_id::AccountId;
 /// The round interval to search for a proposer in the organizing phase.
 const ROUND_INTERVAL: usize = 512;
 /// The +/- range of time drift to account for in milliseconds.
-pub const DRIFT_INTERVAL: u64 = 21000;
+pub const DRIFT_INTERVAL: u64 = 20000;
 
 /// All relevant info pertaining to an Indexed sign request from an indexer.
 #[derive(Debug, Clone, PartialEq)]
@@ -175,10 +175,10 @@ impl SignOrganizer {
         let entropy = state.indexed.args.entropy;
         let participants = ctx.participants.iter().copied().collect::<Vec<_>>();
 
-        let now = ctx.contract.timestamp().unwrap_or_else(|| {
-            tracing::warn!("no timestamp available from contract, falling back to local time");
-            Utc::now().timestamp_millis() as u64
-        });
+        let Some(now) = ctx.contract.timestamp() else {
+            tracing::error!(?sign_id, "unexpected missing timestamp for round calc");
+            return SignPhase::Organizing(self);
+        };
         let round = ((now + DRIFT_INTERVAL) / (3 * DRIFT_INTERVAL)) as usize;
         state.round = round;
 

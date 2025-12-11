@@ -12,6 +12,7 @@ use crate::metrics::WEB_ENDPOINT_LATENCY;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus, ResharingStatus};
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
 use crate::protocol::{Chain, MessageChannel};
+use crate::rpc::ContractStateWatcher;
 use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::web::cbor::Cbor;
 use crate::web::error::Result;
@@ -35,6 +36,7 @@ use std::time::Instant;
 
 struct AxumState {
     node: NodeStateWatcher,
+    contract_state: ContractStateWatcher,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
@@ -48,6 +50,7 @@ pub async fn run(
     port: u16,
     msg_channel: MessageChannel,
     node: NodeStateWatcher,
+    contract_state: ContractStateWatcher,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
@@ -58,6 +61,7 @@ pub async fn run(
     let axum_state = AxumState {
         msg_channel,
         node,
+        contract_state,
         triple_storage,
         presignature_storage,
         sync_channel,
@@ -214,15 +218,21 @@ pub struct StatusResponse {
     pub status: NodeStatus,
     #[serde(default)]
     pub protocol_version: u64,
+    #[serde(default)]
     pub time: DateTime<Utc>,
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
 async fn status(Extension(web): Extension<Arc<AxumState>>) -> Json<StatusResponse> {
+    let time = web
+        .contract_state
+        .timestamp()
+        .and_then(|ts| DateTime::from_timestamp_millis(ts as i64))
+        .unwrap_or_else(Utc::now);
     Json(StatusResponse {
         status: web.node.status(),
         protocol_version: crate::PROTOCOL_VERSION,
-        time: Utc::now(),
+        time,
     })
 }
 

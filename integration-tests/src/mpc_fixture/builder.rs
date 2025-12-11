@@ -166,7 +166,7 @@ impl MpcFixtureBuilder {
             .iter()
             .map(|node| node.participant_info.account_id.clone())
             .collect();
-        let (contract_state_watchers, shared_contract_state_tx, _shared_timestamp_tx) =
+        let (contract_state_watchers, shared_contract_state_tx, _timestamp_tx) =
             ContractStateWatcher::test_batch(&account_ids, self.protocol_state);
 
         // Start each node's tokio tasks
@@ -451,6 +451,7 @@ impl MpcFixtureNodeBuilder {
         let account_id = protocol.my_account_id().clone();
         let node = protocol::Node::new();
         let node_state = node.watch();
+        let contract_state_for_fixture = context.contract_state.clone();
         let _protocol_handle = tokio::spawn(protocol.run(
             node,
             MockGovernance {
@@ -476,6 +477,7 @@ impl MpcFixtureNodeBuilder {
         let mut node = MpcFixtureNode {
             me: self.me,
             state: node_state,
+            contract_state: contract_state_for_fixture,
             mesh: mesh_tx,
             config: config_tx,
             sign_tx,
