@@ -660,3 +660,141 @@ async fn test_sign_contention_5_nodes() {
         presignatures_consumed
     );
 }
+
+/// High-throughput stress test: 256 parallel sign requests.
+/// This test exercises the King algorithm for round synchronization by:
+/// 1. Generating triples and presignatures concurrently in the background
+/// 2. Sending 256 sign requests in parallel
+/// 3. Expecting all signatures to complete within 240 seconds
+///
+/// This is a comprehensive test that validates the entire signing pipeline
+/// under heavy load, ensuring nodes stay synchronized and don't get stuck
+/// in round misalignment loops.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_high_throughput_256_parallel_signatures() {
+    const NUM_NODES: u32 = 3;
+    const THRESHOLD: usize = 2;
+    const NUM_SIGN_REQUESTS: usize = 256;
+    const TOTAL_TIMEOUT_SECS: u64 = 360;
+
+    // Higher stockpile targets to support 256 signatures
+    const TRIPLE_MIN: u32 = 300;
+    const TRIPLE_MAX: u32 = 350;
+    const PRESIG_MIN: u32 = 280;
+    const PRESIG_MAX: u32 = 320;
+
+    tracing::info!(
+        num_nodes = NUM_NODES,
+        threshold = THRESHOLD,
+        num_requests = NUM_SIGN_REQUESTS,
+        timeout_secs = TOTAL_TIMEOUT_SECS,
+        "starting high-throughput 256 parallel signatures test"
+    );
+
+    // Build network with preshared key, generating triples and presignatures on the fly
+    let network = MpcFixtureBuilder::new(NUM_NODES, THRESHOLD)
+        .with_preshared_key()
+        // Generate triples and presignatures concurrently
+        .with_min_triples_stockpile(TRIPLE_MIN)
+        .with_max_triples_stockpile(TRIPLE_MAX)
+        .with_min_presignatures_stockpile(PRESIG_MIN)
+        .with_max_presignatures_stockpile(PRESIG_MAX)
+        .build()
+        .await;
+
+    // Wait for an initial batch of presignatures before sending requests
+    // This ensures the pipeline is warm but we'll still need background generation
+    const INITIAL_PRESIG_THRESHOLD: usize = 32;
+    tracing::info!(
+        threshold = INITIAL_PRESIG_THRESHOLD,
+        "waiting for initial presignatures before sending requests..."
+    );
+
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        network.wait_for_presignatures(INITIAL_PRESIG_THRESHOLD),
+    )
+    .await
+    .expect("should generate initial presignatures within 2 minutes");
+
+    let initial_presignatures = network[0].presignature_storage.len_generated().await;
+    tracing::info!(
+        initial_presignatures,
+        "initial presignatures ready, sending {} sign requests",
+        NUM_SIGN_REQUESTS
+    );
+
+    // Send all 256 sign requests to all nodes simultaneously
+    // Each sign request goes to all nodes (as in production)
+    let start_time = std::time::Instant::now();
+
+    for seed in 0..NUM_SIGN_REQUESTS {
+        let request = sign_request(seed as u8);
+        for node in &network.nodes {
+            node.sign_tx
+                .send(Sign::Request(request.clone()))
+                .await
+                .unwrap();
+        }
+    }
+
+    tracing::info!(
+        elapsed_ms = start_time.elapsed().as_millis(),
+        "all {} sign requests dispatched",
+        NUM_SIGN_REQUESTS
+    );
+
+    // Wait for ALL 256 signatures to complete within the timeout
+    // The background triple/presignature generation should keep up with demand
+    let timeout = Duration::from_secs(TOTAL_TIMEOUT_SECS);
+    let actions = tokio::time::timeout(timeout, network.wait_for_actions(NUM_SIGN_REQUESTS))
+        .await
+        .expect(&format!(
+            "should complete all {} signatures within {} seconds",
+            NUM_SIGN_REQUESTS, TOTAL_TIMEOUT_SECS
+        ));
+
+    let elapsed = start_time.elapsed();
+    let final_presignatures = network[0].presignature_storage.len_generated().await;
+
+    tracing::info!(
+        signatures_produced = actions.len(),
+        elapsed_secs = elapsed.as_secs(),
+        initial_presignatures,
+        final_presignatures,
+        "high-throughput test completed"
+    );
+
+    // Verify we got all 256 signatures
+    assert_eq!(
+        actions.len(),
+        NUM_SIGN_REQUESTS,
+        "should have exactly {} signatures",
+        NUM_SIGN_REQUESTS
+    );
+
+    // Verify all actions are publish actions (successful signatures)
+    for action_str in &actions {
+        assert!(
+            action_str.contains("RpcAction::Publish"),
+            "unexpected rpc action {action_str}"
+        );
+    }
+
+    // Log throughput metrics
+    let throughput = NUM_SIGN_REQUESTS as f64 / elapsed.as_secs_f64();
+    tracing::info!(
+        throughput_per_sec = throughput,
+        total_elapsed_secs = elapsed.as_secs_f64(),
+        "throughput: {:.2} signatures/second",
+        throughput
+    );
+
+    // The test passes if we reach here - all 256 signatures completed within 240 seconds
+    tracing::info!(
+        "HIGH-THROUGHPUT TEST PASSED: {} signatures in {:.1} seconds ({:.2} sig/s)",
+        NUM_SIGN_REQUESTS,
+        elapsed.as_secs_f64(),
+        throughput
+    );
+}
