@@ -14,7 +14,7 @@ use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
-use crate::util::{AffinePointExt, JoinMap};
+use crate::util::{AffinePointExt, JoinMap, TimeoutBudget};
 
 use crate::protocol::SignRequestType;
 use cait_sith::protocol::{Action, InitializationError, Participant};
@@ -37,6 +37,9 @@ use near_account_id::AccountId;
 
 /// The round interval to search for a proposer in the organizing phase.
 const ROUND_INTERVAL: usize = 512;
+
+/// The default timeout budget for organizing and posit phases.
+const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// All relevant info pertaining to an Indexed sign request from an indexer.
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +69,8 @@ struct SignState {
     round: usize,
     indexed: IndexedSignRequest,
     mesh_state: watch::Receiver<MeshState>,
+    /// Budget for the current organizing+posit attempt.
+    budget: TimeoutBudget,
 }
 
 impl SignState {
@@ -74,6 +79,7 @@ impl SignState {
             round: 0,
             indexed,
             mesh_state,
+            budget: TimeoutBudget::new(ORGANIZE_POSIT_TIMEOUT),
         }
     }
 
@@ -83,6 +89,8 @@ impl SignState {
 
     fn bump_round(&mut self) {
         self.round += 1;
+        // Reset the budget for the new attempt
+        self.budget.reset(ORGANIZE_POSIT_TIMEOUT);
     }
 }
 
@@ -226,7 +234,8 @@ impl SignOrganizer {
             tracing::info!(?sign_id, round = ?state.round, "proposer waiting for presignature");
             let stable = stable.iter().copied().collect::<Vec<_>>();
             let mut recycle = Vec::new();
-            let fetch = tokio::time::timeout(Duration::from_secs(30), async {
+            let remaining = state.budget.remaining();
+            let fetch = tokio::time::timeout(remaining, async {
                 loop {
                     if let Some(taken) = ctx.presignatures.take_mine(ctx.me).await {
                         let participants = intersect_vec(&[&taken.artifact.participants, &stable]);
@@ -310,7 +319,8 @@ impl SignPositor {
     ) -> Result<PresignatureId, SignPhase> {
         let sign_id = ctx.sign_id;
         let round = state.round;
-        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+        let remaining = state.budget.remaining();
+        let outcome = tokio::time::timeout(remaining, async {
             loop {
                 let Some(task_msg) = task_rx.recv().await else {
                     continue;
@@ -461,8 +471,8 @@ impl SignPositor {
         let posit_participants = stable.iter().copied().collect::<Vec<_>>();
         let mut counter = SinglePositCounter::new(ctx.me, &posit_participants);
 
-        let posit_timeout = Duration::from_secs(60);
-        let posit_deadline = tokio::time::sleep(posit_timeout);
+        let remaining = state.budget.remaining();
+        let posit_deadline = tokio::time::sleep(remaining);
         tokio::pin!(posit_deadline);
 
         let accepted_participants = loop {
