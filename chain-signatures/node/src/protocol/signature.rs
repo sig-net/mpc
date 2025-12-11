@@ -81,10 +81,6 @@ impl SignState {
     fn indexed(&self) -> &IndexedSignRequest {
         &self.indexed
     }
-
-    fn bump_round(&mut self) {
-        self.round += 1;
-    }
 }
 
 struct SignPositor {
@@ -178,22 +174,21 @@ impl SignOrganizer {
         let entropy = state.indexed.args.entropy;
         let participants = ctx.participants.iter().copied().collect::<Vec<_>>();
 
-        // Deterministic round based on time
         let now = ctx.contract.timestamp().unwrap_or_else(|| {
             tracing::warn!("no timestamp available from contract, falling back to local time");
             Utc::now().timestamp_millis() as u64
         });
-        let drift_interval = DRIFT_INTERVAL as u64;
-        state.round = ((now + drift_interval) / (4 * drift_interval)) as usize;
+        let round = ((now + DRIFT_INTERVAL) / (4 * DRIFT_INTERVAL)) as usize;
+        state.round = round;
 
-        tracing::info!(?sign_id, round = ?state.round, "entering organizing phase");
+        tracing::info!(?sign_id, round, "entering organizing phase");
         let (stable, proposer) = {
             let Some(stable) = self.wait_stable(ctx, state, threshold).await else {
-                tracing::warn!(?sign_id, round = ?state.round, "no stable participants, reorganizing");
+                tracing::warn!(?sign_id, round, "no stable participants, reorganizing");
                 return SignPhase::Organizing(self);
             };
 
-            let proposer = (state.round..state.round + ROUND_INTERVAL)
+            let proposer = (round..round + ROUND_INTERVAL)
                 .map(|r| Self::proposer_per_round(r, &participants, &entropy))
                 .find(|potential_proposer| stable.contains(potential_proposer))
                 .unwrap_or_else(|| {
@@ -207,7 +202,7 @@ impl SignOrganizer {
 
             tracing::info!(
                 ?sign_id,
-                round = state.round,
+                round,
                 ?proposer,
                 ?me,
                 is_mine,
@@ -215,7 +210,7 @@ impl SignOrganizer {
                 "organized: selected proposer"
             );
 
-            if is_mine && state.round == 0 {
+            if is_mine && round == 0 {
                 crate::metrics::NUM_SIGN_REQUESTS_MINE
                     .with_label_values(&[ctx.my_account_id.as_str()])
                     .inc();
@@ -226,7 +221,7 @@ impl SignOrganizer {
 
         let is_proposer = proposer == ctx.me;
         let (presignature_id, presignature, stable) = if is_proposer {
-            tracing::info!(?sign_id, round = ?state.round, "proposer waiting for presignature");
+            tracing::info!(?sign_id, round, "proposer waiting for presignature");
             let stable = stable.iter().copied().collect::<Vec<_>>();
             let mut recycle = Vec::new();
             let fetch = tokio::time::timeout(Duration::from_secs(30), async {
@@ -257,16 +252,14 @@ impl SignOrganizer {
                 Err(_) => {
                     tracing::warn!(
                         ?sign_id,
-                        round = ?state.round,
+                        round,
                         "proposer timeout waiting for presignature, reorganizing"
                     );
-                    state.bump_round();
                     return SignPhase::Organizing(self);
                 }
             };
 
             let presignature_id = taken.artifact.id;
-
             tracing::info!(?sign_id, presignature_id, "proposer got presignature");
 
             // broadcast to participants and let them reject if they don't have the presignature.
@@ -391,7 +384,6 @@ impl SignPositor {
                     ?proposer,
                     "deliberator timeout waiting for Propose, reorganizing"
                 );
-                state.bump_round();
                 return Err(SignPhase::Organizing(SignOrganizer));
             }
         };
@@ -485,7 +477,6 @@ impl SignPositor {
                                     ?round,
                                     "not enough start participants"
                                 );
-                                state.bump_round();
                                 return SignPhase::Organizing(SignOrganizer);
                             }
 
@@ -503,7 +494,6 @@ impl SignPositor {
                                 tracing::warn!(?sign_id, "recycling presignature due to REJECTs");
                                 ctx.presignatures.recycle_mine(ctx.me, taken).await;
                             }
-                            state.bump_round();
                             return SignPhase::Organizing(SignOrganizer);
                         }
 
@@ -527,7 +517,6 @@ impl SignPositor {
                                     tracing::warn!(?sign_id, "recycling presignature due to insufficient participants");
                                     ctx.presignatures.recycle_mine(ctx.me, taken).await;
                                 }
-                                state.bump_round();
                                 return SignPhase::Organizing(SignOrganizer);
                             }
 
@@ -574,7 +563,6 @@ impl SignPositor {
                                     tracing::warn!(?sign_id, "recycling presignature due to posit timeout");
                                     ctx.presignatures.recycle_mine(ctx.me, taken).await;
                                 }
-                                state.bump_round();
                                 return SignPhase::Organizing(SignOrganizer);
                             }
 
@@ -602,12 +590,10 @@ impl SignPositor {
                                 tracing::warn!(?sign_id, "recycling presignature due to posit timeout (no accepts)");
                                 ctx.presignatures.recycle_mine(ctx.me, taken).await;
                             }
-                            state.bump_round();
                             return SignPhase::Organizing(SignOrganizer);
                         }
                     } else {
                         tracing::warn!(?sign_id, "deliberator posit timeout waiting for Start, reorganizing");
-                        state.bump_round();
                         return SignPhase::Organizing(SignOrganizer);
                     }
                 }
@@ -662,7 +648,6 @@ impl SignGenerating {
                     ?err,
                     "failed to create generator, reorganizing"
                 );
-                state.bump_round();
                 return SignPhase::Organizing(SignOrganizer);
             }
         };
@@ -681,7 +666,6 @@ impl SignGenerating {
                     ?err,
                     "signature generation failed, reorganizing"
                 );
-                state.bump_round();
                 SignPhase::Organizing(SignOrganizer)
             }
         }

@@ -108,7 +108,7 @@ fn env() -> (Runtime, SyncEnv) {
 
         let sk = k256::SecretKey::random(&mut rand::thread_rng());
         let pk = sk.public_key();
-        let (contract_watcher, _contract_tx) = ContractStateWatcher::with(
+        let (contract_watcher, _contract_tx, _timestamp_tx) = ContractStateWatcher::with(
             &node_id,
             ProtocolState::Running(RunningContractState {
                 epoch: 0,
