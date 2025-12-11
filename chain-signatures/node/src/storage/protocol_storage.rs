@@ -1,5 +1,4 @@
 use cait_sith::protocol::Participant;
-use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, ToRedisArgs};
@@ -11,8 +10,6 @@ use tokio::task::JoinHandle;
 use tracing;
 
 use super::{owner_key, STORAGE_VERSION};
-
-const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
 /// Trait for protocol artifacts that can be stored in Redis.
 pub trait ProtocolArtifact:
@@ -214,20 +211,14 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             }),
             Err(err) => {
                 self.reserved.write().await.remove(&id);
-                tracing::warn!(
-                    id,
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to reserve artifact"
-                );
+                tracing::warn!(id, ?err, ?elapsed, "failed to reserve artifact");
                 None
             }
         }
     }
 
-    async fn unreserve(&self, id: A::Id) {
-        let mut reserved_guard = self.reserved.write().await;
-        reserved_guard.remove(&id);
+    async fn unreserve(&self, id: A::Id) -> bool {
+        self.reserved.write().await.remove(&id)
     }
 
     pub async fn remove_outdated(&self, owner: Participant, owner_shares: &[A::Id]) -> Vec<A::Id> {
@@ -288,11 +279,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         match result {
             Ok(outdated) => {
                 if !outdated.is_empty() {
-                    tracing::info!(
-                        ?outdated,
-                        elapsed_ms = elapsed.as_millis(),
-                        "removed outdated artifacts"
-                    );
+                    tracing::info!(?outdated, ?elapsed, "removed outdated artifacts");
                     // remove outdated entries from our in-memory reserved set
                     let mut reserved = self.reserved.write().await;
                     for id in outdated.iter() {
@@ -308,11 +295,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 outdated
             }
             Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to remove outdated artifacts"
-                );
+                tracing::warn!(?err, ?elapsed, "failed to remove outdated artifacts");
                 Vec::new()
             }
         }
@@ -353,6 +336,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .arg(artifact)
             .invoke_async(&mut conn)
             .await;
+        drop(used);
 
         let elapsed = start.elapsed();
         crate::metrics::REDIS_LATENCY
@@ -361,17 +345,11 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         match outcome {
             Ok(()) => {
-                // ensure reservation is removed from in-memory set
                 self.reserved.write().await.remove(&id);
                 true
             }
             Err(err) => {
-                tracing::warn!(
-                    id,
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to insert artifact"
-                );
+                tracing::warn!(id, ?err, ?elapsed, "failed to insert artifact");
                 false
             }
         }
@@ -431,13 +409,14 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         "#;
 
         let start = Instant::now();
-        if self.used.read().await.contains(&id) {
+        if !self.used.write().await.insert(id) {
             tracing::warn!(id, "taking artifact that is already used");
             return None;
         }
 
         let Some(mut conn) = self.connect().await else {
             tracing::warn!(id, "failed to take artifact: connection failed");
+            self.used.write().await.remove(&id);
             return None;
         };
         let result: Result<A, _> = redis::Script::new(SCRIPT)
@@ -454,17 +433,12 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         match result {
             Ok(artifact) => {
-                self.used.write().await.insert(id);
-                tracing::info!(id, elapsed_ms = elapsed.as_millis(), "took artifact");
+                tracing::info!(id, ?elapsed, "took artifact");
                 Some(ArtifactTaken::new(artifact, self.clone()))
             }
             Err(err) => {
-                tracing::warn!(
-                    id,
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to take artifact"
-                );
+                self.used.write().await.remove(&id);
+                tracing::warn!(id, ?err, ?elapsed, "failed to take artifact");
                 None
             }
         }
@@ -528,11 +502,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .await
             .inspect_err(|err| {
                 let elapsed = start.elapsed();
-                tracing::warn!(
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to clear artifact storage"
-                );
+                tracing::warn!(?err, ?elapsed, "failed to clear artifact storage");
             })
             .ok();
 
@@ -555,7 +525,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]
             local mine_key = KEYS[2]
-            local expire_time = ARGV[1]
 
             if redis.call("SCARD", mine_key) < 1 then
                 return nil
@@ -582,7 +551,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         let result: Result<Option<A>, _> = redis::Script::new(SCRIPT)
             .key(&self.artifact_key)
             .key(owner_key(&self.owner_keys, me))
-            .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await;
 
@@ -598,16 +566,12 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 self.reserved.write().await.insert(id);
                 self.used.write().await.insert(id);
                 let taken = ArtifactTaken::new(artifact, self.clone());
-                tracing::debug!(id, elapsed_ms = elapsed.as_millis(), "took mine artifact");
+                tracing::debug!(id, ?elapsed, "took mine artifact");
                 Some(taken)
             }
             Ok(None) => None,
             Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to take mine artifact from storage"
-                );
+                tracing::warn!(?err, ?elapsed, "failed to take mine artifact from storage");
                 None
             }
         }
@@ -658,20 +622,11 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             Ok(_) => {
                 self.reserved.write().await.remove(&id);
                 self.used.write().await.remove(&id);
-                tracing::info!(
-                    id,
-                    elapsed_ms = elapsed.as_millis(),
-                    "returned mine artifact"
-                );
+                tracing::info!(id, ?elapsed, "returned mine artifact");
                 true
             }
             Err(err) => {
-                tracing::warn!(
-                    id,
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to return mine artifact"
-                );
+                tracing::warn!(id, ?err, ?elapsed, "failed to return mine artifact");
                 false
             }
         }
