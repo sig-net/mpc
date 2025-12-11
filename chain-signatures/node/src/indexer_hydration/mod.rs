@@ -645,7 +645,7 @@ pub async fn run(
                     event
                 );
 
-                let entropy: [u8; 32] = rand::random();
+                let entropy: [u8; 32] = ev.bytes().to_vec()[..32].try_into().unwrap();
 
                 if let Err(e) = crate::indexer_common::process_sign_event(
                     Box::new(event),
