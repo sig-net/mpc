@@ -5,7 +5,7 @@ use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use k256::{AffinePoint, EncodedPoint};
 use tokio::task::{AbortHandle, JoinSet};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::hash::Hash;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -221,5 +221,59 @@ impl TimeoutBudget {
     pub fn reset(&mut self, timeout: Duration) {
         self.started = Instant::now();
         self.timeout = timeout;
+    }
+}
+
+pub struct ExpirationMap<K, V> {
+    ttl: Duration,
+    map: HashMap<K, V>,
+    order: VecDeque<(K, Instant)>,
+}
+
+impl<K, V> ExpirationMap<K, V> {
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            ttl,
+            map: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+}
+
+impl<K: Eq + Hash + Clone, V> ExpirationMap<K, V> {
+    fn evict_expired(&mut self) {
+        let now = Instant::now();
+        while let Some((_, inserted_at)) = self.order.front() {
+            if now.duration_since(*inserted_at) < self.ttl {
+                break;
+            }
+
+            let (key, _) = self.order.pop_front().unwrap();
+            self.map.remove(&key);
+        }
+    }
+
+    pub fn insert(&mut self, key: K, value: V) {
+        self.evict_expired();
+        self.map.insert(key.clone(), value);
+        self.order.push_back((key, Instant::now()));
+    }
+
+    pub fn get(&mut self, key: &K) -> Option<&V> {
+        self.evict_expired();
+        self.map.get(key)
+    }
+
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        self.map.remove(key)
+    }
+
+    pub fn len(&mut self) -> usize {
+        self.evict_expired();
+        self.map.len()
+    }
+
+    pub fn is_empty(&mut self) -> bool {
+        self.len() == 0
     }
 }

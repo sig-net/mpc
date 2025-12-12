@@ -27,7 +27,7 @@ use mpc_primitives::{SignArgs, SignId};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
@@ -1051,6 +1051,9 @@ pub struct SignatureSpawner {
     tasks: JoinMap<SignId, Result<(), SignError>>,
     /// Buffered inboxes for posit messages, allowing us to queue before tasks spawn
     inboxes: HashMap<SignId, Subscriber<SignTaskMessage>>,
+    /// Tracks sign_ids for which we've received completion events before the request.
+    /// This prevents spawning tasks for requests that are already completed.
+    completed: HashSet<SignId>,
     mesh_state: watch::Receiver<MeshState>,
 
     me: Participant,
@@ -1123,15 +1126,6 @@ impl SignatureSpawner {
             .await;
     }
 
-    fn handle_completion(&mut self, sign_id: SignId) {
-        self.inboxes.remove(&sign_id);
-        if self.tasks.abort(sign_id) {
-            tracing::info!(?sign_id, "aborting signature task due to completion event");
-        } else {
-            tracing::info!(?sign_id, "task already completed or unable to be aborted");
-        }
-    }
-
     fn handle_request(
         &mut self,
         sign: Sign,
@@ -1141,10 +1135,27 @@ impl SignatureSpawner {
     ) {
         match sign {
             Sign::Completion(sign_id) => {
-                self.handle_completion(sign_id);
+                self.inboxes.remove(&sign_id);
+                self.completed.insert(sign_id);
+                if self.tasks.abort(sign_id) {
+                    tracing::info!(?sign_id, "aborting signature task due to completion event");
+                } else {
+                    tracing::info!(
+                        ?sign_id,
+                        "completion received before task spawn, tracking for later"
+                    );
+                }
             }
             Sign::Request(indexed) => {
                 let sign_id = indexed.id;
+
+                // Skip if we already received a completion event for this request.
+                // This can happen when the completion arrives before the request due to
+                // finalization delays (e.g., Ethereum waiting for block finalization).
+                if self.completed.remove(&sign_id) {
+                    tracing::info!(?sign_id, "skipping sign request - already completed");
+                    return;
+                }
 
                 // Skip if we already have a task handling this request.
                 // Use tasks instead of inbox map since it may already contain buffered messages
@@ -1248,6 +1259,7 @@ impl SignatureSpawnerTask {
             me,
             tasks: JoinMap::new(),
             inboxes: HashMap::new(),
+            completed: HashSet::new(),
             my_account_id: ctx.my_account_id.clone(),
             threshold,
             public_key,
