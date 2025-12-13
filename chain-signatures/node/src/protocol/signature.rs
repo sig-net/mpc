@@ -14,7 +14,7 @@ use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
-use crate::util::{AffinePointExt, JoinMap, TimeoutBudget};
+use crate::util::{AffinePointExt, ExpirationSet, JoinMap, TimeoutBudget};
 
 use crate::protocol::SignRequestType;
 use cait_sith::protocol::{Action, InitializationError, Participant};
@@ -27,7 +27,7 @@ use mpc_primitives::{SignArgs, SignId};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
@@ -40,6 +40,10 @@ const ROUND_INTERVAL: usize = 512;
 
 /// The default timeout budget for organizing and posit phases.
 const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The TTL is determined by the maximum expected time for the longest finalization
+/// time of whatever chains are being supported, plus some buffer.
+const COMPLETION_TTL: Duration = Duration::from_secs(1200);
 
 /// All relevant info pertaining to an Indexed sign request from an indexer.
 #[derive(Debug, Clone, PartialEq)]
@@ -1053,7 +1057,7 @@ pub struct SignatureSpawner {
     inboxes: HashMap<SignId, Subscriber<SignTaskMessage>>,
     /// Tracks sign_ids for which we've received completion events before the request.
     /// This prevents spawning tasks for requests that are already completed.
-    completed: HashSet<SignId>,
+    completed: ExpirationSet<SignId>,
     mesh_state: watch::Receiver<MeshState>,
 
     me: Participant,
@@ -1152,7 +1156,7 @@ impl SignatureSpawner {
                 // Skip if we already received a completion event for this request.
                 // This can happen when the completion arrives before the request due to
                 // finalization delays (e.g., Ethereum waiting for block finalization).
-                if self.completed.remove(&sign_id) {
+                if self.completed.contains(&sign_id) {
                     tracing::info!(?sign_id, "skipping sign request - already completed");
                     return;
                 }
@@ -1259,7 +1263,7 @@ impl SignatureSpawnerTask {
             me,
             tasks: JoinMap::new(),
             inboxes: HashMap::new(),
-            completed: HashSet::new(),
+            completed: ExpirationSet::new(COMPLETION_TTL),
             my_account_id: ctx.my_account_id.clone(),
             threshold,
             public_key,

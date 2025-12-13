@@ -253,10 +253,11 @@ impl<K: Eq + Hash + Clone, V> ExpirationMap<K, V> {
         }
     }
 
-    pub fn insert(&mut self, key: K, value: V) {
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         self.evict_expired();
-        self.map.insert(key.clone(), value);
+        let old = self.map.insert(key.clone(), value);
         self.order.push_back((key, Instant::now()));
+        old
     }
 
     pub fn get(&mut self, key: &K) -> Option<&V> {
@@ -275,5 +276,29 @@ impl<K: Eq + Hash + Clone, V> ExpirationMap<K, V> {
 
     pub fn is_empty(&mut self) -> bool {
         self.len() == 0
+    }
+}
+
+pub struct ExpirationSet<K> {
+    inner: ExpirationMap<K, ()>,
+}
+
+impl<K: Eq + Hash + Clone> ExpirationSet<K> {
+    pub fn new(ttl: Duration) -> Self {
+        Self {
+            inner: ExpirationMap::new(ttl),
+        }
+    }
+
+    pub fn insert(&mut self, key: K) -> bool {
+        self.inner.insert(key, ()).is_none()
+    }
+
+    pub fn remove(&mut self, key: &K) -> bool {
+        self.inner.remove(key).is_some()
+    }
+
+    pub fn contains(&mut self, key: &K) -> bool {
+        self.inner.get(key).is_some()
     }
 }
