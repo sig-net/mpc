@@ -43,7 +43,9 @@ const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The TTL is determined by the maximum expected time for the longest finalization
 /// time of whatever chains are being supported, plus some buffer.
-const COMPLETION_TTL: Duration = Duration::from_secs(1200);
+/// One of our longest finalizing chain is Ethereum with 32 slots ≈ 6.4 minutes.
+/// Bitcoin has a practical finalization time of around 1 hour (6 blocks).
+const COMPLETION_TTL: Duration = Duration::from_secs(3600);
 
 /// All relevant info pertaining to an Indexed sign request from an indexer.
 #[derive(Debug, Clone, PartialEq)]
@@ -1144,10 +1146,7 @@ impl SignatureSpawner {
                 if self.tasks.abort(sign_id) {
                     tracing::info!(?sign_id, "aborting signature task due to completion event");
                 } else {
-                    tracing::info!(
-                        ?sign_id,
-                        "completion received before task spawn, tracking for later"
-                    );
+                    tracing::info!(?sign_id, "task already completed or unable to be aborted");
                 }
             }
             Sign::Request(indexed) => {
