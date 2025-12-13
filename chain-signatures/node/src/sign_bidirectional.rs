@@ -48,7 +48,7 @@ pub enum PendingRequestStatus {
 #[derive(Debug, Clone, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BidirectionalTx {
     pub id: BidirectionalTxId,
-    pub sender: Pubkey,
+    pub sender: [u8; 32],
     pub serialized_transaction: Vec<u8>,
     pub source_chain: Chain,
     pub target_chain: Chain,
@@ -113,6 +113,32 @@ impl BidirectionalTx {
             nonce,
             status: PendingRequestStatus::AwaitingResponse,
         })
+    }
+
+    pub fn sender_string(&self) -> anyhow::Result<String> {
+        match self.source_chain {
+            Chain::Solana => Ok(Pubkey::new_from_array(self.sender).to_string()),
+            Chain::Hydration => Ok(crate::indexer_hydration::ss58_address_from_account32(
+                self.sender,
+            )),
+            _ => anyhow::bail!("Unsupported chain: {}", self.source_chain),
+        }
+    }
+
+    pub fn epsilon(&self, path: &str) -> anyhow::Result<Scalar> {
+        match self.source_chain {
+            Chain::Solana => Ok(mpc_crypto::kdf::derive_epsilon_sol(
+                self.key_version,
+                &self.sender_string()?,
+                path,
+            )),
+            Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
+                self.key_version,
+                &self.sender_string()?,
+                path,
+            )),
+            _ => anyhow::bail!("Unsupported chain: {}", self.source_chain),
+        }
     }
 }
 

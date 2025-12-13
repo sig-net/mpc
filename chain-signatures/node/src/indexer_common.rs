@@ -16,7 +16,6 @@ use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::BidirectionalTx;
 use crate::sign_bidirectional::BidirectionalTxId;
 use crate::sign_bidirectional::PendingRequestStatus;
-use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
 use mpc_primitives::SignId;
 use mpc_primitives::Signature;
@@ -33,10 +32,19 @@ pub enum SignBidirectionalEvent {
 }
 
 impl SignBidirectionalEvent {
-    pub fn sender(&self) -> Pubkey {
+    pub fn sender(&self) -> [u8; 32] {
         match self {
-            SignBidirectionalEvent::Solana(event) => event.sender,
-            SignBidirectionalEvent::Hydration(event) => Pubkey::new_from_array(event.sender),
+            SignBidirectionalEvent::Solana(event) => event.sender.to_bytes(),
+            SignBidirectionalEvent::Hydration(event) => event.sender,
+        }
+    }
+
+    pub fn sender_string(&self) -> String {
+        match self {
+            SignBidirectionalEvent::Solana(event) => event.sender.to_string(),
+            SignBidirectionalEvent::Hydration(event) => {
+                crate::indexer_hydration::ss58_address_from_account32(event.sender)
+            }
         }
     }
 
@@ -112,15 +120,15 @@ impl SignBidirectionalEvent {
 
     pub fn epsilon(&self) -> Scalar {
         match self {
-            SignBidirectionalEvent::Solana(event) => mpc_crypto::kdf::derive_epsilon_sol(
-                event.key_version,
-                &event.sender.to_string(),
-                &event.path,
+            SignBidirectionalEvent::Solana(_) => mpc_crypto::kdf::derive_epsilon_sol(
+                self.key_version(),
+                &self.sender_string(),
+                &self.path(),
             ),
-            SignBidirectionalEvent::Hydration(event) => mpc_crypto::kdf::derive_epsilon_hydration(
-                event.key_version,
-                &Pubkey::new_from_array(event.sender).to_string(),
-                &event.path,
+            SignBidirectionalEvent::Hydration(_) => mpc_crypto::kdf::derive_epsilon_hydration(
+                self.key_version(),
+                &self.sender_string(),
+                &self.path(),
             ),
         }
     }
@@ -169,6 +177,13 @@ pub enum SignatureRespondedEvent {
 }
 
 impl SignatureRespondedEvent {
+    pub fn source_chain(&self) -> Chain {
+        match self {
+            SignatureRespondedEvent::Solana(_) => Chain::Solana,
+            SignatureRespondedEvent::Hydration(_) => Chain::Hydration,
+        }
+    }
+
     pub fn request_id(&self) -> [u8; 32] {
         match self {
             SignatureRespondedEvent::Solana(event) => event.request_id,
@@ -301,7 +316,7 @@ pub(crate) async fn process_respond_event(
         SignRequestType::SignBidirectional(event) => event,
         SignRequestType::Sign => {
             tracing::info!(?sign_id, "sign request completed successfully");
-            backlog.remove(Chain::Solana, &sign_id).await;
+            backlog.remove(respond_event.source_chain(), &sign_id).await;
             if let Err(err) = sign_tx.send(Sign::Completion(sign_id)).await {
                 anyhow::bail!("failed to send completion for respond event: {err:?}");
             }
@@ -314,7 +329,11 @@ pub(crate) async fn process_respond_event(
 
     tracing::info!(?sign_id, "bidirectional processing initial respond event");
     let target_chain = Chain::from_str(&event.dest())
-        .map_err(|err| anyhow::anyhow!("unable to parse target chain from dest: {err:?}"))?;
+        .map_err(|err| anyhow::anyhow!("unable to parse target chain from dest: {err:?}"));
+    let target_chain = match target_chain {
+        Ok(chain) => chain,
+        Err(_) => Chain::Ethereum,
+    };
 
     let Some(BacklogTransaction::Sign(_)) = backlog.get(source_chain, &sign_id).await else {
         anyhow::bail!("bidirectional tx not found for advancement: {sign_id:?}");

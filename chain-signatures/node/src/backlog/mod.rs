@@ -741,7 +741,7 @@ mod tests {
     fn create_test_tx(id: u8, status: PendingRequestStatus) -> BidirectionalTx {
         BidirectionalTx {
             id: BidirectionalTxId(B256::from([id; 32])),
-            sender: Pubkey::new_unique(),
+            sender: [0u8; 32],
             serialized_transaction: vec![1, 2, 3],
             source_chain: Chain::Solana,
             target_chain: Chain::Ethereum,

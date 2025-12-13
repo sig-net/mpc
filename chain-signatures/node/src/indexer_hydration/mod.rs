@@ -8,9 +8,7 @@ use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
-use alloy::primitives::hex::ToHexExt;
 use alloy_sol_types::SolValue;
-use anchor_lang::prelude::Pubkey;
 use anyhow::{anyhow, Result};
 use ethabi::{encode, Token};
 use hydration::runtime_types::pallet_signet::pallet::Signature as HydrationSignature;
@@ -21,6 +19,7 @@ use mpc_primitives::Signature;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use near_account_id::AccountId;
 use sha3::{Digest, Keccak256};
+use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{twox_128, H256};
 use sp_runtime::traits::BlakeTwo256;
 use sp_state_machine::read_proof_check;
@@ -152,9 +151,10 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {}
 
 impl SignatureEventTrait for HydrationSignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
+        let sender_str = ss58_address_from_account32(self.sender);
         // Encode the event data in ABI format
         let encoded = encode(&[
-            Token::String(hex::encode(self.sender)),
+            Token::String(sender_str),
             Token::Bytes(self.payload.to_vec()),
             Token::String(self.path.clone()),
             Token::Uint(self.key_version.into()),
@@ -198,9 +198,10 @@ impl SignatureEventTrait for HydrationSignatureRequestedEvent {
             anyhow::bail!("payload exceeds secp256k1 curve order");
         }
 
+        let sender_str = ss58_address_from_account32(self.sender);
         let epsilon = mpc_crypto::kdf::derive_epsilon_hydration(
             self.key_version,
-            format!("0x{}", self.sender.encode_hex()).as_str(),
+            sender_str.as_str(),
             &self.path,
         );
 
@@ -278,9 +279,10 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {}
 
 impl SignatureEventTrait for HydrationSignBidirectionalRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
+        let sender_str = ss58_address_from_account32(self.sender);
         // Match TypeScript implementation using ABI encoding
         let encoded = (
-            Pubkey::new_from_array(self.sender).to_string(),
+            sender_str,
             self.serialized_transaction.clone(),
             self.caip2_id.clone(),
             self.key_version,
@@ -313,11 +315,13 @@ impl SignatureEventTrait for HydrationSignBidirectionalRequestedEvent {
         let request_id = self.generate_request_id();
         let rlp_encoded_tx = self.serialized_transaction.clone();
 
+        let sender_str = ss58_address_from_account32(self.sender);
+
         // Call the existing derive_epsilon_sol function with the correct parameters
         // to match the TypeScript implementation
         let epsilon = mpc_crypto::kdf::derive_epsilon_hydration(
             self.key_version,
-            format!("0x{}", self.sender.encode_hex()).as_str(),
+            sender_str.as_str(),
             &self.path,
         );
 
@@ -466,6 +470,11 @@ async fn fetch_proven_system_events_bytes(
         .to_vec();
 
     Ok(events_bytes)
+}
+
+pub fn ss58_address_from_account32(sender: [u8; 32]) -> String {
+    let acc = SpAccountId32::from(sender);
+    acc.to_ss58check_with_version(Ss58AddressFormatRegistry::PolkadotAccount.into())
 }
 
 pub async fn run(

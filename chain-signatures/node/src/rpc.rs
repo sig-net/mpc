@@ -46,7 +46,11 @@ use hydration::runtime_types::bounded_collections::bounded_vec::BoundedVec as Hy
 use hydration::runtime_types::pallet_signet::pallet::{
     AffinePoint as HydrationAffinePoint, Signature as HydrationSignature,
 };
-use subxt::{OnlineClient, SubstrateConfig};
+use subxt::config::substrate::{
+    BlakeTwo256, SubstrateConfig, SubstrateExtrinsicParams, SubstrateHeader,
+};
+use subxt::Config as SubxtConfig;
+use subxt::OnlineClient;
 use subxt_signer::{sr25519, SecretUri};
 
 /// The maximum amount of times to retry publishing a signature.
@@ -670,14 +674,26 @@ impl SolanaClient {
     }
 }
 
+pub enum HydradxConfig {}
+
+impl SubxtConfig for HydradxConfig {
+    type AccountId = <SubstrateConfig as SubxtConfig>::AccountId;
+    type Address = <SubstrateConfig as SubxtConfig>::AccountId;
+    type Signature = <SubstrateConfig as SubxtConfig>::Signature;
+    type Hasher = BlakeTwo256;
+    type Header = SubstrateHeader<u32, BlakeTwo256>;
+    type ExtrinsicParams = SubstrateExtrinsicParams<Self>;
+    type AssetId = <SubstrateConfig as SubxtConfig>::AssetId;
+}
+
 #[subxt::subxt(runtime_metadata_path = "src/indexer_hydration/artifacts/hydration_metadata.scale")]
 pub mod hydration {}
 #[derive(Clone)]
 pub struct HydrationClient {
-    api: OnlineClient<SubstrateConfig>,
+    api: OnlineClient<HydradxConfig>,
     signer: sr25519::Keypair,
 }
-type TxHash = subxt::config::HashFor<SubstrateConfig>;
+type TxHash = subxt::config::HashFor<HydradxConfig>;
 
 impl HydrationClient {
     /// Create a new Hydration client.
@@ -685,7 +701,7 @@ impl HydrationClient {
     /// `rpc_url`: e.g. "ws://127.0.0.1:9944" or "wss://rpc.hydration.cloud"
     /// `signer_uri`: sr25519 secret URI, e.g. "//Alice" or a mnemonic.
     pub async fn new(config: &HydrationConfig) -> anyhow::Result<Self> {
-        let api = OnlineClient::<SubstrateConfig>::from_url(&config.rpc_ws_url).await?;
+        let api = OnlineClient::<HydradxConfig>::from_url(&config.rpc_ws_url).await?;
 
         let uri = SecretUri::from_str(&config.signer_uri)?;
         let signer = sr25519::Keypair::from_uri(&uri)?;

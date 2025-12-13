@@ -1096,7 +1096,15 @@ impl EthereumIndexer {
                             serialized_output,
                             total_timeout,
                         ) {
-                            Ok(sign_request) => respond_requests.push(sign_request),
+                            Ok(sign_request) => {
+                                tracing::info!(
+                                    ?tx_id,
+                                    ?sign_id,
+                                    ?sign_request,
+                                    "sign_request from serialized output"
+                                );
+                                respond_requests.push(sign_request);
+                            }
                             Err(err) => tracing::warn!(
                                 ?tx_id,
                                 ?sign_id,
