@@ -16,6 +16,7 @@ use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::BidirectionalTx;
 use crate::sign_bidirectional::BidirectionalTxId;
 use crate::sign_bidirectional::PendingRequestStatus;
+use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
 use mpc_primitives::SignId;
 use mpc_primitives::Signature;
@@ -39,12 +40,14 @@ impl SignBidirectionalEvent {
         }
     }
 
-    pub fn sender_string(&self) -> String {
+    pub(crate) fn sender_string(&self) -> anyhow::Result<String> {
+        crate::indexer_common::sender_string(self.sender(), self.source_chain())
+    }
+
+    pub(crate) fn source_chain(&self) -> Chain {
         match self {
-            SignBidirectionalEvent::Solana(event) => event.sender.to_string(),
-            SignBidirectionalEvent::Hydration(event) => {
-                crate::indexer_hydration::ss58_address_from_account32(event.sender)
-            }
+            SignBidirectionalEvent::Solana(_) => Chain::Solana,
+            SignBidirectionalEvent::Hydration(_) => Chain::Hydration,
         }
     }
 
@@ -118,18 +121,18 @@ impl SignBidirectionalEvent {
         }
     }
 
-    pub fn epsilon(&self) -> Scalar {
+    pub fn epsilon(&self) -> anyhow::Result<Scalar> {
         match self {
-            SignBidirectionalEvent::Solana(_) => mpc_crypto::kdf::derive_epsilon_sol(
+            SignBidirectionalEvent::Solana(_) => Ok(mpc_crypto::kdf::derive_epsilon_sol(
                 self.key_version(),
-                &self.sender_string(),
+                &self.sender_string()?,
                 &self.path(),
-            ),
-            SignBidirectionalEvent::Hydration(_) => mpc_crypto::kdf::derive_epsilon_hydration(
+            )),
+            SignBidirectionalEvent::Hydration(_) => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
                 self.key_version(),
-                &self.sender_string(),
+                &self.sender_string()?,
                 &self.path(),
-            ),
+            )),
         }
     }
 }
@@ -209,6 +212,7 @@ pub(crate) trait SignatureEventTrait {
         total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest>;
     fn source_chain(&self) -> Chain;
+    fn sender_string(&self) -> String;
 }
 
 pub(crate) trait SignatureEvent: SignatureEventTrait + std::fmt::Debug {}
@@ -351,7 +355,7 @@ pub(crate) async fn process_respond_event(
 
     // Get the MPC public key and derive the from_address
     let root_public_key = contract_watcher.wait_public_key().await;
-    let epsilon = event.epsilon();
+    let epsilon = event.epsilon()?;
     let from_address = crate::sign_bidirectional::derive_user_address(root_public_key, epsilon);
 
     let bidirectional_tx = BidirectionalTx {
@@ -428,4 +432,14 @@ pub(crate) async fn process_respond_bidirectional_event(
         )
     };
     Ok(())
+}
+
+pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Result<String> {
+    match source_chain {
+        Chain::Solana => Ok(Pubkey::new_from_array(sender).to_string()),
+        Chain::Hydration => Ok(crate::indexer_hydration::ss58_address_from_account32(
+            sender,
+        )),
+        _ => anyhow::bail!("Unsupported chain: {source_chain}"),
+    }
 }

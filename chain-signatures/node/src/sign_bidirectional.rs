@@ -1,8 +1,7 @@
-use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+use crate::protocol::{Chain, IndexedSignRequest};
 use crate::respond_bidirectional::SerDeserFormat;
 use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
-use anchor_lang::prelude::Pubkey;
 use borsh::BorshSerialize;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::{AffinePoint, Scalar};
@@ -13,7 +12,6 @@ use serde_json::Value;
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use std::io::Write;
-use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Copy)]
 pub struct BidirectionalTxId(pub B256);
@@ -68,64 +66,11 @@ pub struct BidirectionalTx {
 }
 
 impl BidirectionalTx {
-    pub fn new(signature: SignBidirectionalSignature) -> anyhow::Result<Self> {
-        let SignRequestType::SignBidirectional(event) = signature.indexed.sign_request_type.clone()
-        else {
-            anyhow::bail!("sign request is not a sign bidirectional");
-        };
-
-        let unsigned_rlp_data = &event.serialized_transaction();
-        let target_chain = Chain::from_str(&event.dest()).map_err(|err| {
-            anyhow::anyhow!(
-                "invalid target chain '{}' for bidirectional transaction: {err}",
-                event.dest()
-            )
-        })?;
-        let source_chain = signature.indexed.chain;
-
-        let (signed_transaction_hash, nonce) =
-            sign_and_hash_transaction(unsigned_rlp_data, signature.signature)?;
-
-        tracing::info!(signed_transaction_hash = ?signed_transaction_hash, "signed_transaction_hash");
-
-        let from_address =
-            derive_user_address(signature.public_key, signature.indexed.args.epsilon);
-
-        tracing::info!(from_address = ?from_address, "from_address");
-
-        Ok(Self {
-            id: BidirectionalTxId(signed_transaction_hash.into()),
-            sender: event.sender(),
-            serialized_transaction: event.serialized_transaction(),
-            source_chain,
-            target_chain,
-            caip2_id: event.caip2_id(),
-            key_version: event.key_version(),
-            deposit: event.deposit(),
-            path: event.path(),
-            algo: event.algo(),
-            dest: event.dest(),
-            params: event.params(),
-            output_deserialization_schema: event.output_deserialization_schema(),
-            respond_serialization_schema: event.respond_serialization_schema(),
-            request_id: signature.indexed.id.request_id,
-            from_address,
-            nonce,
-            status: PendingRequestStatus::AwaitingResponse,
-        })
+    pub(crate) fn sender_string(&self) -> anyhow::Result<String> {
+        crate::indexer_common::sender_string(self.sender, self.source_chain)
     }
 
-    pub fn sender_string(&self) -> anyhow::Result<String> {
-        match self.source_chain {
-            Chain::Solana => Ok(Pubkey::new_from_array(self.sender).to_string()),
-            Chain::Hydration => Ok(crate::indexer_hydration::ss58_address_from_account32(
-                self.sender,
-            )),
-            _ => anyhow::bail!("Unsupported chain: {}", self.source_chain),
-        }
-    }
-
-    pub fn epsilon(&self, path: &str) -> anyhow::Result<Scalar> {
+    pub(crate) fn epsilon(&self, path: &str) -> anyhow::Result<Scalar> {
         match self.source_chain {
             Chain::Solana => Ok(mpc_crypto::kdf::derive_epsilon_sol(
                 self.key_version,

@@ -11,3 +11,4 @@ hex = "0.4.3"
 near-crypto = "0.27"
 mpc-keys = { path = "../../../chain-signatures/keys" }
 rand = "0.8"
+sp-core = { version = "38.1", default-features = false, features = ["std"] }

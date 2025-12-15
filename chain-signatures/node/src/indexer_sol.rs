@@ -215,7 +215,7 @@ impl SignatureEventTrait for SignatureRequestedEvent {
 
         // Call the existing derive_epsilon_sol function with the correct parameters
         // to match the TypeScript implementation
-        let epsilon = derive_epsilon_sol(self.key_version, &self.sender.to_string(), &self.path);
+        let epsilon = derive_epsilon_sol(self.key_version, &self.sender_string(), &self.path);
 
         // Use transaction signature as entropy
         // let mut entropy = [0u8; 32];
@@ -243,6 +243,10 @@ impl SignatureEventTrait for SignatureRequestedEvent {
 
     fn source_chain(&self) -> Chain {
         Chain::Solana
+    }
+
+    fn sender_string(&self) -> String {
+        self.sender.to_string()
     }
 }
 
@@ -287,7 +291,7 @@ impl SignatureEventTrait for SignBidirectionalEvent {
 
         // Call the existing derive_epsilon_sol function with the correct parameters
         // to match the TypeScript implementation
-        let epsilon = derive_epsilon_sol(self.key_version, &self.sender.to_string(), &self.path);
+        let epsilon = derive_epsilon_sol(self.key_version, &self.sender_string(), &self.path);
 
         let sign_id = SignId::new(request_id);
         tracing::info!(?sign_id, "solana signature requested");
@@ -322,6 +326,10 @@ impl SignatureEventTrait for SignBidirectionalEvent {
 
     fn source_chain(&self) -> Chain {
         Chain::Solana
+    }
+
+    fn sender_string(&self) -> String {
+        self.sender.to_string()
     }
 }
 

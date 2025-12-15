@@ -151,10 +151,9 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {}
 
 impl SignatureEventTrait for HydrationSignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
-        let sender_str = ss58_address_from_account32(self.sender);
         // Encode the event data in ABI format
         let encoded = encode(&[
-            Token::String(sender_str),
+            Token::String(self.sender_string()),
             Token::Bytes(self.payload.to_vec()),
             Token::String(self.path.clone()),
             Token::Uint(self.key_version.into()),
@@ -198,10 +197,9 @@ impl SignatureEventTrait for HydrationSignatureRequestedEvent {
             anyhow::bail!("payload exceeds secp256k1 curve order");
         }
 
-        let sender_str = ss58_address_from_account32(self.sender);
         let epsilon = mpc_crypto::kdf::derive_epsilon_hydration(
             self.key_version,
-            sender_str.as_str(),
+            &self.sender_string(),
             &self.path,
         );
 
@@ -227,6 +225,10 @@ impl SignatureEventTrait for HydrationSignatureRequestedEvent {
 
     fn source_chain(&self) -> Chain {
         Chain::Hydration
+    }
+
+    fn sender_string(&self) -> String {
+        ss58_address_from_account32(self.sender)
     }
 }
 
@@ -279,10 +281,9 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {}
 
 impl SignatureEventTrait for HydrationSignBidirectionalRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
-        let sender_str = ss58_address_from_account32(self.sender);
         // Match TypeScript implementation using ABI encoding
         let encoded = (
-            sender_str,
+            self.sender_string(),
             self.serialized_transaction.clone(),
             self.caip2_id.clone(),
             self.key_version,
@@ -315,13 +316,11 @@ impl SignatureEventTrait for HydrationSignBidirectionalRequestedEvent {
         let request_id = self.generate_request_id();
         let rlp_encoded_tx = self.serialized_transaction.clone();
 
-        let sender_str = ss58_address_from_account32(self.sender);
-
         // Call the existing derive_epsilon_sol function with the correct parameters
         // to match the TypeScript implementation
         let epsilon = mpc_crypto::kdf::derive_epsilon_hydration(
             self.key_version,
-            sender_str.as_str(),
+            &self.sender_string(),
             &self.path,
         );
 
@@ -358,6 +357,10 @@ impl SignatureEventTrait for HydrationSignBidirectionalRequestedEvent {
 
     fn source_chain(&self) -> Chain {
         Chain::Hydration
+    }
+
+    fn sender_string(&self) -> String {
+        ss58_address_from_account32(self.sender)
     }
 }
 
@@ -472,7 +475,7 @@ async fn fetch_proven_system_events_bytes(
     Ok(events_bytes)
 }
 
-pub fn ss58_address_from_account32(sender: [u8; 32]) -> String {
+pub(crate) fn ss58_address_from_account32(sender: [u8; 32]) -> String {
     let acc = SpAccountId32::from(sender);
     acc.to_ss58check_with_version(Ss58AddressFormatRegistry::PolkadotAccount.into())
 }
@@ -492,7 +495,7 @@ pub async fn run(
     };
     let total_timeout = Duration::from_secs(hydration.total_timeout);
 
-    let ws_url = "ws://127.0.0.1:8000";
+    let ws_url: &str = hydration.rpc_ws_url.as_str();
 
     tracing::info!("connecting to hydration rpc at {}", ws_url);
 
