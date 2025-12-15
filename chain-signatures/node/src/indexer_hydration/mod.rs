@@ -127,23 +127,23 @@ pub struct HydrationSignatureRequestedEvent {
     pub params: String,
 }
 
-impl From<hydration::signet::events::SignatureRequested> for HydrationSignatureRequestedEvent {
-    fn from(event: hydration::signet::events::SignatureRequested) -> Self {
+impl HydrationSignatureRequestedEvent {
+    fn from(event: hydration::signet::events::SignatureRequested) -> anyhow::Result<Self> {
         let mut sender = [0u8; 32];
         let sender_array: &[u8; 32] =
             <subxt::utils::AccountId32 as AsRef<[u8; 32]>>::as_ref(&event.sender);
         sender.copy_from_slice(sender_array);
-        Self {
+        Ok(Self {
             sender,
             payload: event.payload,
-            path: String::from_utf8(event.path).unwrap(),
+            path: String::from_utf8(event.path)?,
             key_version: event.key_version,
-            deposit: event.deposit.try_into().unwrap(),
-            chain_id: String::from_utf8(event.chain_id).unwrap(),
-            algo: String::from_utf8(event.algo).unwrap(),
-            dest: String::from_utf8(event.dest).unwrap(),
-            params: String::from_utf8(event.params).unwrap(),
-        }
+            deposit: event.deposit.try_into()?,
+            chain_id: String::from_utf8(event.chain_id)?,
+            algo: String::from_utf8(event.algo)?,
+            dest: String::from_utf8(event.dest)?,
+            params: String::from_utf8(event.params)?,
+        })
     }
 }
 
@@ -248,10 +248,8 @@ pub struct HydrationSignBidirectionalRequestedEvent {
     pub respond_serialization_schema: Vec<u8>,
 }
 
-impl From<hydration::signet::events::SignBidirectionalRequested>
-    for HydrationSignBidirectionalRequestedEvent
-{
-    fn from(event: hydration::signet::events::SignBidirectionalRequested) -> Self {
+impl HydrationSignBidirectionalRequestedEvent {
+    fn from(event: hydration::signet::events::SignBidirectionalRequested) -> anyhow::Result<Self> {
         let mut sender = [0u8; 32];
         let sender_array: &[u8; 32] =
             <subxt::utils::AccountId32 as AsRef<[u8; 32]>>::as_ref(&event.sender);
@@ -260,20 +258,20 @@ impl From<hydration::signet::events::SignBidirectionalRequested>
         let program_id_array: &[u8; 32] =
             <subxt::utils::AccountId32 as AsRef<[u8; 32]>>::as_ref(&event.program_id);
         program_id.copy_from_slice(program_id_array);
-        Self {
+        Ok(Self {
             sender,
             serialized_transaction: event.serialized_transaction,
-            caip2_id: String::from_utf8(event.caip2_id).unwrap(),
-            path: String::from_utf8(event.path).unwrap(),
+            caip2_id: String::from_utf8(event.caip2_id)?,
+            path: String::from_utf8(event.path)?,
             key_version: event.key_version,
-            deposit: event.deposit.try_into().unwrap(),
-            algo: String::from_utf8(event.algo).unwrap(),
-            dest: String::from_utf8(event.dest).unwrap(),
-            params: String::from_utf8(event.params).unwrap(),
+            deposit: event.deposit.try_into()?,
+            algo: String::from_utf8(event.algo)?,
+            dest: String::from_utf8(event.dest)?,
+            params: String::from_utf8(event.params)?,
             program_id,
             output_deserialization_schema: event.output_deserialization_schema,
             respond_serialization_schema: event.respond_serialization_schema,
-        }
+        })
     }
 }
 
@@ -372,18 +370,16 @@ pub struct HydrationRespondBidirectionalEvent {
     pub signature: Signature,
 }
 
-impl From<hydration::signet::events::RespondBidirectionalEvent>
-    for HydrationRespondBidirectionalEvent
-{
-    fn from(event: hydration::signet::events::RespondBidirectionalEvent) -> Self {
-        let signature = to_mpc_signature(event.signature).unwrap();
+impl HydrationRespondBidirectionalEvent {
+    fn from(event: hydration::signet::events::RespondBidirectionalEvent) -> anyhow::Result<Self> {
+        let signature = to_mpc_signature(event.signature)?;
         let responder = account32_to_bytes(&event.responder);
-        Self {
+        Ok(Self {
             request_id: event.request_id,
             responder,
             serialized_output: event.serialized_output,
             signature,
-        }
+        })
     }
 }
 
@@ -394,15 +390,15 @@ pub struct HydrationSignatureRespondedEvent {
     pub signature: Signature,
 }
 
-impl From<hydration::signet::events::SignatureResponded> for HydrationSignatureRespondedEvent {
-    fn from(event: hydration::signet::events::SignatureResponded) -> Self {
-        let signature = to_mpc_signature(event.signature).unwrap();
+impl HydrationSignatureRespondedEvent {
+    fn from(event: hydration::signet::events::SignatureResponded) -> anyhow::Result<Self> {
+        let signature = to_mpc_signature(event.signature)?;
         let responder = account32_to_bytes(&event.responder);
-        Self {
+        Ok(Self {
             request_id: event.request_id,
             responder,
             signature,
-        }
+        })
     }
 }
 
@@ -606,13 +602,27 @@ pub async fn run(
 
             // SignatureRequested
             if let Ok(Some(req)) = ev.as_event::<hydration::signet::events::SignatureRequested>() {
-                let event = HydrationSignatureRequestedEvent::from(req);
+                let event = match HydrationSignatureRequestedEvent::from(req) {
+                    Ok(event) => event,
+                    Err(e) => {
+                        tracing::error!(
+                            "failed to convert event to HydrationSignatureRequestedEvent: {e}"
+                        );
+                        continue;
+                    }
+                };
                 tracing::info!(
                     "Hydration::Signet::SignatureRequested in block #{number} ({hash:?}): {:?}",
                     event
                 );
 
-                let entropy: [u8; 32] = ev.bytes().to_vec()[..32].try_into().unwrap();
+                let entropy = match entropy_from_event(&ev) {
+                    Ok(entropy) => entropy,
+                    Err(e) => {
+                        tracing::error!("failed to extract entropy from event: {e}");
+                        continue;
+                    }
+                };
 
                 if let Err(e) = crate::indexer_common::process_sign_event(
                     Box::new(event),
@@ -630,7 +640,15 @@ pub async fn run(
 
             // SignatureResponded
             if let Ok(Some(resp)) = ev.as_event::<hydration::signet::events::SignatureResponded>() {
-                let event = HydrationSignatureRespondedEvent::from(resp);
+                let event = match HydrationSignatureRespondedEvent::from(resp) {
+                    Ok(event) => event,
+                    Err(e) => {
+                        tracing::error!(
+                            "failed to convert event to HydrationSignatureRespondedEvent: {e}"
+                        );
+                        continue;
+                    }
+                };
                 tracing::info!(
                     "Hydration::Signet::SignatureResponded in block #{number} ({hash:?}): {:?}",
                     event
@@ -651,13 +669,25 @@ pub async fn run(
             if let Ok(Some(req_bi)) =
                 ev.as_event::<hydration::signet::events::SignBidirectionalRequested>()
             {
-                let event = HydrationSignBidirectionalRequestedEvent::from(req_bi);
+                let event = match HydrationSignBidirectionalRequestedEvent::from(req_bi) {
+                    Ok(event) => event,
+                    Err(e) => {
+                        tracing::error!("failed to convert event to HydrationSignBidirectionalRequestedEvent: {e}");
+                        continue;
+                    }
+                };
                 tracing::info!(
                     "Hydration::Signet::SignBidirectionalRequested in block #{number} ({hash:?}): {:?}",
                     event
                 );
 
-                let entropy: [u8; 32] = ev.bytes().to_vec()[..32].try_into().unwrap();
+                let entropy = match entropy_from_event(&ev) {
+                    Ok(entropy) => entropy,
+                    Err(e) => {
+                        tracing::error!("failed to extract entropy from event: {e}");
+                        continue;
+                    }
+                };
 
                 if let Err(e) = crate::indexer_common::process_sign_event(
                     Box::new(event),
@@ -677,7 +707,15 @@ pub async fn run(
             if let Ok(Some(resp_bi)) =
                 ev.as_event::<hydration::signet::events::RespondBidirectionalEvent>()
             {
-                let event = HydrationRespondBidirectionalEvent::from(resp_bi);
+                let event = match HydrationRespondBidirectionalEvent::from(resp_bi) {
+                    Ok(event) => event,
+                    Err(e) => {
+                        tracing::error!(
+                            "failed to convert event to HydrationRespondBidirectionalEvent: {e}"
+                        );
+                        continue;
+                    }
+                };
                 tracing::info!(
                     "Hydration::Signet::RespondBidirectionalEvent in block #{number} ({hash:?}): {:?}",
                     event
@@ -694,4 +732,12 @@ pub async fn run(
             }
         }
     }
+}
+
+fn entropy_from_event(
+    ev: &subxt::events::EventDetails<SubstrateConfig>,
+) -> anyhow::Result<[u8; 32]> {
+    ev.bytes().to_vec()[..32]
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("failed to convert event bytes to [u8; 32]"))
 }

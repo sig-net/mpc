@@ -172,6 +172,13 @@ impl RespondBidirectionalEvent {
             RespondBidirectionalEvent::Hydration(event) => event.signature.clone(),
         }
     }
+
+    pub fn source_chain(&self) -> Chain {
+        match self {
+            RespondBidirectionalEvent::Solana(_) => Chain::Solana,
+            RespondBidirectionalEvent::Hydration(_) => Chain::Hydration,
+        }
+    }
 }
 
 pub enum SignatureRespondedEvent {
@@ -265,7 +272,8 @@ pub(crate) async fn process_sign_event(
 
     if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
         // TODO: handle error to ensure 100% success rate
-        tracing::error!(?err, "Failed to send Solana sign request into queue");
+        let chain = sign_event.source_chain();
+        tracing::error!(?err, chain = %chain, "Failed to send {} sign request into queue", chain.as_str());
     } else {
         crate::metrics::NUM_SIGN_REQUESTS
             .with_label_values(&[
@@ -306,21 +314,19 @@ pub(crate) async fn process_respond_event(
 ) -> anyhow::Result<()> {
     let sign_id = SignId::new(respond_event.request_id());
 
-    let source_chain = match respond_event {
-        SignatureRespondedEvent::Solana(_) => Chain::Solana,
-        SignatureRespondedEvent::Hydration(_) => Chain::Hydration,
-    };
+    let source_chain = respond_event.source_chain();
 
     let Some(sign_type) = backlog.sign_type(source_chain, &sign_id).await else {
         anyhow::bail!(
             "sign type not found for respond event (may have already been processed): {sign_id:?}"
         )
     };
+
     let event = match sign_type {
         SignRequestType::SignBidirectional(event) => event,
         SignRequestType::Sign => {
             tracing::info!(?sign_id, "sign request completed successfully");
-            backlog.remove(respond_event.source_chain(), &sign_id).await;
+            backlog.remove(source_chain, &sign_id).await;
             if let Err(err) = sign_tx.send(Sign::Completion(sign_id)).await {
                 anyhow::bail!("failed to send completion for respond event: {err:?}");
             }
@@ -420,7 +426,11 @@ pub(crate) async fn process_respond_bidirectional_event(
 ) -> anyhow::Result<()> {
     let sign_id = SignId::new(event.request_id());
     tracing::info!(?sign_id, "processing RespondBidirectionalEvent");
-    if backlog.remove(Chain::Solana, &sign_id).await.is_some() {
+    if backlog
+        .remove(event.source_chain(), &sign_id)
+        .await
+        .is_some()
+    {
         tracing::info!(?sign_id, "bidirectional tx completed");
     } else {
         tracing::warn!(?sign_id, "bidirectional tx not found on completion");
