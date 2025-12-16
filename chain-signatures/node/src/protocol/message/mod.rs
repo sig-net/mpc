@@ -359,7 +359,7 @@ impl MessageInbox {
                     let messages_len = messages.len();
                     self.publish(messages).await;
 
-                    crate::metrics::NUM_RECEIVED_ENCRYPTED_TOTAL
+                    crate::metrics::messaging::NUM_RECEIVED_ENCRYPTED_TOTAL
                         .with_label_values(&[my_account_id.as_str()])
                         .inc_by(messages_len as f64);
                 }
@@ -856,14 +856,16 @@ impl MessageOutbox {
         let start = Instant::now();
         let timeout = Duration::from_millis(cfg.message_timeout);
 
-        let msg_send_delay_metric =
-            crate::metrics::MSG_CLIENT_SEND_DELAY.with_label_values(&[account_id.as_str()]);
+        let msg_send_delay_metric = crate::metrics::messaging::MSG_CLIENT_SEND_DELAY
+            .with_label_values(&[account_id.as_str()]);
         let num_send_encrypted_failure_metric =
-            crate::metrics::NUM_SEND_ENCRYPTED_FAILURE.with_label_values(&[account_id.as_str()]);
-        let send_encrypted_latency_metric =
-            crate::metrics::SEND_ENCRYPTED_LATENCY.with_label_values(&[account_id.as_str()]);
+            crate::metrics::messaging::NUM_SEND_ENCRYPTED_FAILURE
+                .with_label_values(&[account_id.as_str()]);
+        let send_encrypted_latency_metric = crate::metrics::messaging::SEND_ENCRYPTED_LATENCY
+            .with_label_values(&[account_id.as_str()]);
         let failed_send_encrypted_latency_metric =
-            crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY.with_label_values(&[account_id.as_str()]);
+            crate::metrics::messaging::FAILED_SEND_ENCRYPTED_LATENCY
+                .with_label_values(&[account_id.as_str()]);
 
         for ((_from, to), encrypted) in encrypted {
             for (encrypted_partition, timestamp, message_len) in encrypted {
@@ -871,7 +873,7 @@ impl MessageOutbox {
                 let info = participants.get(&to).unwrap();
                 let url = info.url.clone();
 
-                crate::metrics::NUM_SEND_ENCRYPTED_TOTAL
+                crate::metrics::messaging::NUM_SEND_ENCRYPTED_TOTAL
                     .with_label_values(&[account_id.as_str()])
                     .inc_by(message_len as f64);
 

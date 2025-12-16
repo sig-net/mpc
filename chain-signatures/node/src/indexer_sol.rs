@@ -519,7 +519,7 @@ async fn process_anchor_sign_event(
         // TODO: handle error to ensure 100% success rate
         tracing::error!(?err, "Failed to send Solana sign request into queue");
     } else {
-        crate::metrics::NUM_SIGN_REQUESTS
+        crate::metrics::requests::NUM_SIGN_REQUESTS
             .with_label_values(&[Chain::Solana.as_str(), node_near_account_id.as_str()])
             .inc();
     }
@@ -749,7 +749,7 @@ where
         }
 
         // Update block height metric
-        crate::metrics::LATEST_BLOCK_NUMBER
+        crate::metrics::indexers::LATEST_BLOCK_NUMBER
             .with_label_values(&[Chain::Solana.as_str(), node_near_account_id.as_str()])
             .set(response.context.slot as i64);
     }

@@ -544,7 +544,7 @@ fn send_indexed_requests_to_sign_queue(
         tokio::spawn(async move {
             match sign_tx.send(Sign::Request(request)).await {
                 Ok(_) => {
-                    crate::metrics::NUM_SIGN_REQUESTS
+                    crate::metrics::requests::NUM_SIGN_REQUESTS
                         .with_label_values(&[
                             Chain::Ethereum.as_str(),
                             node_near_account_id.as_str(),
@@ -883,7 +883,7 @@ impl EthereumIndexer {
                     tracing::info!("Processed new block number {block_number}");
                 }
             }
-            crate::metrics::LATEST_BLOCK_NUMBER
+            crate::metrics::indexers::LATEST_BLOCK_NUMBER
                 .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
                 .set(block_number as i64);
         }
@@ -941,7 +941,7 @@ impl EthereumIndexer {
         );
         let start = Instant::now();
         let block_receipts_result = client.get_block_receipts(block_number.into()).await;
-        crate::metrics::ETH_BLOCK_RECEIPT_LATENCY
+        crate::metrics::indexers::ETH_BLOCK_RECEIPT_LATENCY
             .with_label_values(&[node_near_account_id.as_str()])
             .observe(start.elapsed().as_millis() as f64);
         let Some(block_receipts) = block_receipts_result.map_err(|err| {
@@ -1017,7 +1017,7 @@ impl EthereumIndexer {
                 .map_err(|err| anyhow::anyhow!("Failed to send indexed requests: {:?}", err))?;
 
             for request_timestamp in timestamps {
-                crate::metrics::INDEXER_DELAY
+                crate::metrics::indexers::INDEXER_DELAY
                     .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
                     .observe(
                         crate::util::duration_between_unix(block_timestamp, request_timestamp)

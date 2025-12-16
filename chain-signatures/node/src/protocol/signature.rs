@@ -221,7 +221,7 @@ impl SignOrganizer {
             );
 
             if is_mine && state.round == 0 {
-                crate::metrics::NUM_SIGN_REQUESTS_MINE
+                crate::metrics::requests::NUM_SIGN_REQUESTS_MINE
                     .with_label_values(&[ctx.my_account_id.as_str()])
                     .inc();
             }
@@ -675,7 +675,7 @@ impl SignGenerating {
         };
 
         // Track that we've created a generator
-        crate::metrics::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS
+        crate::metrics::protocols::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS
             .with_label_values(&[ctx.my_account_id.as_str()])
             .inc();
 
@@ -799,16 +799,18 @@ impl SignGenerator {
         let me = ctx.me;
         let epoch = ctx.epoch;
 
-        let accrued_wait_delay = crate::metrics::SIGNATURE_ACCRUED_WAIT_DELAY
+        let accrued_wait_delay = crate::metrics::protocols::SIGNATURE_ACCRUED_WAIT_DELAY
             .with_label_values(&[my_account_id.as_str()]);
-        let poke_counts =
-            crate::metrics::SIGNATURE_POKES_CNT.with_label_values(&[my_account_id.as_str()]);
-        let signature_generator_failures_metric = crate::metrics::SIGNATURE_GENERATOR_FAILURES
+        let poke_counts = crate::metrics::protocols::SIGNATURE_POKES_CNT
             .with_label_values(&[my_account_id.as_str()]);
-        let signature_generator_success_metric = crate::metrics::SIGNATURE_GENERATOR_SUCCESS
+        let signature_generator_failures_metric =
+            crate::metrics::protocols::SIGNATURE_GENERATOR_FAILURES
+                .with_label_values(&[my_account_id.as_str()]);
+        let signature_generator_success_metric =
+            crate::metrics::protocols::SIGNATURE_GENERATOR_SUCCESS
+                .with_label_values(&[my_account_id.as_str()]);
+        let poke_latency = crate::metrics::protocols::SIGNATURE_POKE_CPU_TIME
             .with_label_values(&[my_account_id.as_str()]);
-        let poke_latency =
-            crate::metrics::SIGNATURE_POKE_CPU_TIME.with_label_values(&[my_account_id.as_str()]);
 
         let sign_id = self.indexed.id;
         let presignature_id = self.dropper.id;
@@ -816,7 +818,7 @@ impl SignGenerator {
         let mut total_wait = Duration::from_millis(0);
         let mut total_pokes = 0;
         let mut poke_last_time = self.created;
-        crate::metrics::SIGNATURE_BEFORE_POKE_DELAY
+        crate::metrics::protocols::SIGNATURE_BEFORE_POKE_DELAY
             .with_label_values(&[my_account_id.as_str()])
             .observe(self.created.elapsed().as_millis() as f64);
 
@@ -905,7 +907,7 @@ impl SignGenerator {
 
                     accrued_wait_delay.observe(total_wait.as_millis() as f64);
                     poke_counts.observe(total_pokes as f64);
-                    crate::metrics::SIGN_GENERATION_LATENCY
+                    crate::metrics::protocols::SIGN_GENERATION_LATENCY
                         .with_label_values(&[my_account_id.as_str()])
                         .observe(self.created.elapsed().as_secs_f64());
                     signature_generator_success_metric.inc();
@@ -1155,7 +1157,7 @@ impl SignatureSpawner {
                     return;
                 }
 
-                crate::metrics::NUM_UNIQUE_SIGN_REQUESTS
+                crate::metrics::requests::NUM_UNIQUE_SIGN_REQUESTS
                     .with_label_values(&[indexed.chain.as_str(), self.my_account_id.as_str()])
                     .inc();
 
@@ -1164,7 +1166,7 @@ impl SignatureSpawner {
         }
 
         // Update metrics
-        crate::metrics::SIGN_QUEUE_SIZE
+        crate::metrics::requests::SIGN_QUEUE_SIZE
             .with_label_values(&[self.my_account_id.as_str()])
             .set(self.tasks.len() as i64);
     }

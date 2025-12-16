@@ -827,7 +827,7 @@ async fn try_publish_near(
                 ?err,
                 "failed to publish signature",
             );
-            crate::metrics::SIGNATURE_PUBLISH_FAILURES
+            crate::metrics::requests::SIGNATURE_PUBLISH_FAILURES
                 .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
                 .inc();
         })?;
@@ -840,7 +840,7 @@ async fn try_publish_near(
             ?err,
             "smart contract threw error",
         );
-        crate::metrics::SIGNATURE_PUBLISH_RESPONSE_ERRORS
+        crate::metrics::requests::SIGNATURE_PUBLISH_RESPONSE_ERRORS
             .with_label_values(&[near.my_account_id.as_str()])
             .inc();
     })?;
@@ -853,17 +853,17 @@ async fn try_publish_near(
     );
 
     let elapsed = action.indexed.timestamp_sign_queue.elapsed();
-    crate::metrics::NUM_SIGN_SUCCESS
+    crate::metrics::requests::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .inc();
-    crate::metrics::SIGN_TOTAL_LATENCY
+    crate::metrics::requests::SIGN_TOTAL_LATENCY
         .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .observe(elapsed.as_secs_f64());
-    crate::metrics::SIGN_RESPOND_LATENCY
+    crate::metrics::requests::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
     if elapsed.as_secs() <= 30 {
-        crate::metrics::NUM_SIGN_SUCCESS_30S
+        crate::metrics::requests::NUM_SIGN_SUCCESS_30S
             .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
             .inc();
     }
@@ -884,7 +884,7 @@ async fn handle_wait_for_polling_retry(
     tracing::error!(?sign_ids, attempt = *attempt, "{}", error_msg);
     if *attempt >= max_attempts {
         tracing::error!(?sign_ids, "exceeded max attempts");
-        crate::metrics::SIGNATURE_PUBLISH_FAILURES
+        crate::metrics::requests::SIGNATURE_PUBLISH_FAILURES
             .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
             .inc();
         return Err(());
@@ -1060,7 +1060,7 @@ async fn send_eth_transaction(
             ?sign_ids,
             "timeout while sending ethereum signature transaction"
         );
-        crate::metrics::SIGNATURE_PUBLISH_FAILURES
+        crate::metrics::requests::SIGNATURE_PUBLISH_FAILURES
             .with_label_values(&[chain.as_str(), near_account_id.as_str()])
             .inc();
     })?
@@ -1070,7 +1070,7 @@ async fn send_eth_transaction(
             ?err,
             "failed to send ethereum signature transaction"
         );
-        crate::metrics::SIGNATURE_PUBLISH_FAILURES
+        crate::metrics::requests::SIGNATURE_PUBLISH_FAILURES
             .with_label_values(&[chain.as_str(), near_account_id.as_str()])
             .inc();
     })?;
@@ -1126,7 +1126,7 @@ async fn try_publish_eth(
             tx_hash = ?receipt.transaction_hash,
             "transaction failed"
         );
-        crate::metrics::SIGNATURE_PUBLISH_FAILURES
+        crate::metrics::requests::SIGNATURE_PUBLISH_FAILURES
             .with_label_values(&[action.indexed.chain.as_str(), near_account_id.as_str()])
             .inc();
         return Err(());
@@ -1140,20 +1140,20 @@ async fn try_publish_eth(
         "published ethereum signature successfully"
     );
 
-    crate::metrics::NUM_SIGN_SUCCESS
+    crate::metrics::requests::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .inc();
     let elapsed = action.indexed.timestamp_sign_queue.elapsed();
-    crate::metrics::SIGN_TOTAL_LATENCY
+    crate::metrics::requests::SIGN_TOTAL_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(elapsed.as_secs_f64());
     if elapsed.as_secs() <= 30 {
-        crate::metrics::NUM_SIGN_SUCCESS_30S
+        crate::metrics::requests::NUM_SIGN_SUCCESS_30S
             .with_label_values(&[chain.as_str(), near_account_id.as_str()])
             .inc();
     }
 
-    crate::metrics::SIGN_RESPOND_LATENCY
+    crate::metrics::requests::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
 
@@ -1229,7 +1229,7 @@ async fn try_batch_publish_eth(
             tx_hash = ?receipt.transaction_hash,
             "eth batch transaction failed"
         );
-        crate::metrics::SIGNATURE_PUBLISH_FAILURES
+        crate::metrics::requests::SIGNATURE_PUBLISH_FAILURES
             .with_label_values(&[chain.as_str(), near_account_id.as_str()])
             .inc();
         return Err(());
@@ -1244,21 +1244,21 @@ async fn try_batch_publish_eth(
         "eth batch published ethereum signatures successfully"
     );
 
-    crate::metrics::NUM_SIGN_SUCCESS
+    crate::metrics::requests::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .inc_by(num_requests as f64);
     for action in actions {
         let elapsed = action.indexed.timestamp_sign_queue.elapsed();
-        crate::metrics::SIGN_TOTAL_LATENCY
+        crate::metrics::requests::SIGN_TOTAL_LATENCY
             .with_label_values(&[chain.as_str(), near_account_id.as_str()])
             .observe(elapsed.as_secs_f64());
         if elapsed.as_secs() <= 30 {
-            crate::metrics::NUM_SIGN_SUCCESS_30S
+            crate::metrics::requests::NUM_SIGN_SUCCESS_30S
                 .with_label_values(&[chain.as_str(), near_account_id.as_str()])
                 .inc();
         }
     }
-    crate::metrics::SIGN_RESPOND_LATENCY
+    crate::metrics::requests::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(start.elapsed().as_secs_f64());
 
@@ -1390,7 +1390,7 @@ async fn try_publish_sol(
                         error = ?err,
                         "failed to publish solana signature"
                     );
-                    crate::metrics::SIGNATURE_PUBLISH_FAILURES
+                    crate::metrics::requests::SIGNATURE_PUBLISH_FAILURES
                         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
                         .inc();
                 })?;
@@ -1429,7 +1429,7 @@ async fn try_publish_sol(
                         error = ?err,
                         "failed to publish respond bidirectional solana signature"
                     );
-                    crate::metrics::SIGNATURE_PUBLISH_FAILURES
+                    crate::metrics::requests::SIGNATURE_PUBLISH_FAILURES
                         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
                         .inc();
                 })?;
@@ -1443,7 +1443,7 @@ async fn try_publish_sol(
         }
     }
 
-    crate::metrics::NUM_SIGN_SUCCESS
+    crate::metrics::requests::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .inc();
     let sign_latency_in_secs = crate::util::duration_between_unix(
@@ -1451,14 +1451,14 @@ async fn try_publish_sol(
         crate::util::current_unix_timestamp(),
     )
     .as_secs();
-    crate::metrics::SIGN_TOTAL_LATENCY
+    crate::metrics::requests::SIGN_TOTAL_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(sign_latency_in_secs as f64);
-    crate::metrics::SIGN_RESPOND_LATENCY
+    crate::metrics::requests::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
     if sign_latency_in_secs <= 30 {
-        crate::metrics::NUM_SIGN_SUCCESS_30S
+        crate::metrics::requests::NUM_SIGN_SUCCESS_30S
             .with_label_values(&[chain.as_str(), near_account_id.as_str()])
             .inc();
     }
