@@ -827,9 +827,6 @@ async fn try_publish_near(
                 ?err,
                 "failed to publish signature",
             );
-            crate::metrics::requests::SIGNATURE_PUBLISH_FAILURES
-                .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
-                .inc();
         })?;
 
     let _: () = outcome.json().inspect_err(|err| {
@@ -840,9 +837,6 @@ async fn try_publish_near(
             ?err,
             "smart contract threw error",
         );
-        crate::metrics::requests::SIGNATURE_PUBLISH_RESPONSE_ERRORS
-            .with_label_values(&[near.my_account_id.as_str()])
-            .inc();
     })?;
     tracing::info!(
         sign_id = ?action.indexed.id,
@@ -862,12 +856,6 @@ async fn try_publish_near(
     crate::metrics::requests::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
-    if elapsed.as_secs() <= 30 {
-        crate::metrics::requests::NUM_SIGN_SUCCESS_30S
-            .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
-            .inc();
-    }
-
     Ok(())
 }
 
@@ -876,7 +864,6 @@ async fn handle_wait_for_polling_retry(
     attempt: &mut usize,
     max_attempts: usize,
     sign_ids: &[SignId],
-    near_account_id: &AccountId,
     error_msg: &str,
     initial_delay: Duration,
 ) -> Result<(), ()> {
@@ -884,9 +871,6 @@ async fn handle_wait_for_polling_retry(
     tracing::error!(?sign_ids, attempt = *attempt, "{}", error_msg);
     if *attempt >= max_attempts {
         tracing::error!(?sign_ids, "exceeded max attempts");
-        crate::metrics::requests::SIGNATURE_PUBLISH_FAILURES
-            .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
-            .inc();
         return Err(());
     }
     let backoff = initial_delay * 2u64.pow((*attempt - 1) as u32) as u32;
@@ -898,7 +882,6 @@ async fn handle_wait_for_polling_retry(
 async fn wait_for_pending_tx(
     provider: &EthContractFillProvider,
     tx_hash: alloy::primitives::B256,
-    near_account_id: &AccountId,
     sign_ids: Vec<SignId>,
     max_attempts: usize,
 ) -> Result<Transaction, ()> {
@@ -921,7 +904,6 @@ async fn wait_for_pending_tx(
                         &mut attempt,
                         max_attempts,
                         &sign_ids,
-                        near_account_id,
                         "eth signature respond pending transaction not found, retrying",
                         initial_delay,
                     )
@@ -932,7 +914,6 @@ async fn wait_for_pending_tx(
                         &mut attempt,
                         max_attempts,
                         &sign_ids,
-                        near_account_id,
                         &format!("failed to get eth signature respond pending transaction, retrying: {err:?}"),
                         initial_delay,
                     ).await?;
@@ -943,7 +924,6 @@ async fn wait_for_pending_tx(
                     &mut attempt,
                     max_attempts,
                     &sign_ids,
-                    near_account_id,
                     "timeout while getting eth signature respond pending transaction, retrying",
                     initial_delay,
                 )
@@ -957,7 +937,6 @@ async fn wait_for_pending_tx(
 async fn wait_for_transaction_receipt(
     provider: &EthContractFillProvider,
     tx_hash: alloy::primitives::B256,
-    near_account_id: &AccountId,
     sign_ids: Vec<SignId>,
     max_attempts: usize,
 ) -> Result<TransactionReceipt, ()> {
@@ -980,7 +959,6 @@ async fn wait_for_transaction_receipt(
                         &mut attempt,
                         max_attempts,
                         &sign_ids,
-                        near_account_id,
                         "eth signature respond transaction receipt not found, retrying",
                         initial_delay,
                     )
@@ -991,7 +969,6 @@ async fn wait_for_transaction_receipt(
                         &mut attempt,
                         max_attempts,
                         &sign_ids,
-                        near_account_id,
                         &format!("failed to get eth signature respond transaction receipt, retrying: {err:?}"),
                         initial_delay,
                     ).await?;
@@ -1002,7 +979,6 @@ async fn wait_for_transaction_receipt(
                     &mut attempt,
                     max_attempts,
                     &sign_ids,
-                    near_account_id,
                     "timeout while getting eth signature respond transaction receipt, retrying",
                     initial_delay,
                 )
@@ -1017,9 +993,7 @@ async fn send_eth_transaction(
     params: &[DynSolValue],
     gas: u64,
     sign_ids: &[SignId],
-    near_account_id: &AccountId,
 ) -> Result<alloy::primitives::B256, ()> {
-    let chain = Chain::Ethereum;
     // fetch nonce manually since the automatic nonce management in ContractInstance is lagging
     let nonce = match tokio::time::timeout(
         Duration::from_secs(10),
@@ -1060,9 +1034,6 @@ async fn send_eth_transaction(
             ?sign_ids,
             "timeout while sending ethereum signature transaction"
         );
-        crate::metrics::requests::SIGNATURE_PUBLISH_FAILURES
-            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-            .inc();
     })?
     .map_err(|err| {
         tracing::error!(
@@ -1070,9 +1041,6 @@ async fn send_eth_transaction(
             ?err,
             "failed to send ethereum signature transaction"
         );
-        crate::metrics::requests::SIGNATURE_PUBLISH_FAILURES
-            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-            .inc();
     })?;
 
     Ok(*result.tx_hash())
@@ -1106,14 +1074,12 @@ async fn try_publish_eth(
         &params,
         40000,
         std::slice::from_ref(&action.indexed.id),
-        near_account_id,
     )
     .await?;
 
     let receipt = wait_for_transaction_receipt(
         eth.contract.provider(),
         tx_hash,
-        near_account_id,
         vec![action.indexed.id],
         ETH_TX_RECEIPT_MAX_ATTEMPTS,
     )
@@ -1126,9 +1092,6 @@ async fn try_publish_eth(
             tx_hash = ?receipt.transaction_hash,
             "transaction failed"
         );
-        crate::metrics::requests::SIGNATURE_PUBLISH_FAILURES
-            .with_label_values(&[action.indexed.chain.as_str(), near_account_id.as_str()])
-            .inc();
         return Err(());
     }
 
@@ -1147,11 +1110,6 @@ async fn try_publish_eth(
     crate::metrics::requests::SIGN_TOTAL_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(elapsed.as_secs_f64());
-    if elapsed.as_secs() <= 30 {
-        crate::metrics::requests::NUM_SIGN_SUCCESS_30S
-            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-            .inc();
-    }
 
     crate::metrics::requests::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
@@ -1197,15 +1155,13 @@ async fn try_batch_publish_eth(
     let params = [DynSolValue::Array(params_vec.clone())];
     let gas = std::cmp::max(40000, 20000 * num_requests as u64);
 
-    let tx_hash =
-        send_eth_transaction(&eth.contract, &params, gas, &sign_ids, near_account_id).await?;
+    let tx_hash = send_eth_transaction(&eth.contract, &params, gas, &sign_ids).await?;
 
     tracing::info!(?tx_hash, "sent eth tx");
 
     let tx = wait_for_pending_tx(
         eth.contract.provider(),
         tx_hash,
-        near_account_id,
         sign_ids.clone(),
         ETH_TX_RECEIPT_MAX_ATTEMPTS,
     )
@@ -1216,7 +1172,6 @@ async fn try_batch_publish_eth(
     let receipt = wait_for_transaction_receipt(
         eth.contract.provider(),
         tx_hash,
-        near_account_id,
         sign_ids.clone(),
         ETH_TX_RECEIPT_MAX_ATTEMPTS,
     )
@@ -1229,9 +1184,6 @@ async fn try_batch_publish_eth(
             tx_hash = ?receipt.transaction_hash,
             "eth batch transaction failed"
         );
-        crate::metrics::requests::SIGNATURE_PUBLISH_FAILURES
-            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-            .inc();
         return Err(());
     }
 
@@ -1252,11 +1204,6 @@ async fn try_batch_publish_eth(
         crate::metrics::requests::SIGN_TOTAL_LATENCY
             .with_label_values(&[chain.as_str(), near_account_id.as_str()])
             .observe(elapsed.as_secs_f64());
-        if elapsed.as_secs() <= 30 {
-            crate::metrics::requests::NUM_SIGN_SUCCESS_30S
-                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .inc();
-        }
     }
     crate::metrics::requests::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
@@ -1390,9 +1337,6 @@ async fn try_publish_sol(
                         error = ?err,
                         "failed to publish solana signature"
                     );
-                    crate::metrics::requests::SIGNATURE_PUBLISH_FAILURES
-                        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                        .inc();
                 })?;
 
             tracing::info!(
@@ -1429,9 +1373,6 @@ async fn try_publish_sol(
                         error = ?err,
                         "failed to publish respond bidirectional solana signature"
                     );
-                    crate::metrics::requests::SIGNATURE_PUBLISH_FAILURES
-                        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                        .inc();
                 })?;
 
             tracing::info!(
@@ -1457,11 +1398,5 @@ async fn try_publish_sol(
     crate::metrics::requests::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
-    if sign_latency_in_secs <= 30 {
-        crate::metrics::requests::NUM_SIGN_SUCCESS_30S
-            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-            .inc();
-    }
-
     Ok(())
 }
