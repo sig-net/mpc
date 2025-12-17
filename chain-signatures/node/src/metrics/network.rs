@@ -13,6 +13,15 @@ pub(crate) static NODE_RUNNING: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     .unwrap()
 });
 
+pub(crate) static PROCESS_START_TIME: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    try_create_int_gauge_vec(
+        "multichain_process_start_time_seconds",
+        "Unix timestamp of when the process started",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
 pub(crate) static NODE_VERSION: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     try_create_int_gauge_vec(
         "multichain_node_version",

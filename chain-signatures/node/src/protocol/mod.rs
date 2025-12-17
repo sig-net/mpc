@@ -94,6 +94,14 @@ impl MpcSignProtocol {
         crate::metrics::network::NODE_VERSION
             .with_label_values(&[my_account_id.as_str()])
             .set(node_version());
+        crate::metrics::network::PROCESS_START_TIME
+            .with_label_values(&[my_account_id.as_str()])
+            .set(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64,
+            );
 
         loop {
             let protocol_time = Instant::now();
