@@ -40,15 +40,6 @@ pub(crate) static NUM_SIGN_SUCCESS: LazyLock<CounterVec> = LazyLock::new(|| {
     .unwrap()
 });
 
-pub(crate) static NUM_SIGN_SUCCESS_30S: LazyLock<CounterVec> = LazyLock::new(|| {
-    try_create_counter_vec(
-            "multichain_sign_requests_success_30s",
-            "number of successful multichain sign requests that finished within 30s, marked by publish()",
-            &["chain", "node_account_id"],
-        )
-        .unwrap()
-});
-
 pub(crate) static SIGN_TOTAL_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_sign_latency_sec",
@@ -72,24 +63,6 @@ pub(crate) static SIGN_QUEUE_SIZE: LazyLock<prometheus::IntGaugeVec> = LazyLock:
     super::try_create_int_gauge_vec(
         "multichain_sign_queue_size",
         "number of requests in sign queue",
-        &["node_account_id"],
-    )
-    .unwrap()
-});
-
-pub(crate) static SIGNATURE_PUBLISH_FAILURES: LazyLock<CounterVec> = LazyLock::new(|| {
-    try_create_counter_vec(
-        "multichain_signature_publish_failures",
-        "number of failed signature publish",
-        &["chain", "node_account_id"],
-    )
-    .unwrap()
-});
-
-pub(crate) static SIGNATURE_PUBLISH_RESPONSE_ERRORS: LazyLock<CounterVec> = LazyLock::new(|| {
-    try_create_counter_vec(
-        "multichain_signature_publish_response_errors",
-        "number of respond calls with response that cannot be converted to json",
         &["node_account_id"],
     )
     .unwrap()
