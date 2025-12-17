@@ -60,3 +60,13 @@ pub(crate) static MSG_CLIENT_SEND_DELAY: LazyLock<HistogramVec> = LazyLock::new(
     )
     .unwrap()
 });
+
+pub(crate) static WEB_ENDPOINT_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
+    try_create_histogram_vec(
+        "multichain_web_endpoint_duration_ms",
+        "Web endpoint response time in milliseconds",
+        &["endpoint", "node_account_id"],
+        Some(exponential_buckets(1.0, 1.5, 25).unwrap()),
+    )
+    .unwrap()
+});
