@@ -88,13 +88,13 @@ impl MpcSignProtocol {
         let _span = tracing::info_span!("running", my_account_id);
         let my_account_id = self.my_account_id.clone();
 
-        crate::metrics::network::NODE_RUNNING
+        crate::metrics::nodes::NODE_RUNNING
             .with_label_values(&[my_account_id.as_str()])
             .set(1);
-        crate::metrics::network::NODE_VERSION
+        crate::metrics::nodes::NODE_VERSION
             .with_label_values(&[my_account_id.as_str()])
             .set(node_version());
-        crate::metrics::network::PROCESS_START_TIME
+        crate::metrics::nodes::PROCESS_START_TIME
             .with_label_values(&[my_account_id.as_str()])
             .set(
                 std::time::SystemTime::now()

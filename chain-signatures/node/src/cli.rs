@@ -199,7 +199,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 eth.clone(),
             );
 
-            crate::metrics::network::CONFIGURATION_DIGEST
+            crate::metrics::nodes::CONFIGURATION_DIGEST
                 .with_label_values(&[account_id.as_str()])
                 .set(digest);
 
