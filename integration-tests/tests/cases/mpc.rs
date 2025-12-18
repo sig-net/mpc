@@ -700,7 +700,7 @@ async fn test_sign_missing_presignature() {
 
     // give 2 minutes to resolve the problem
     // expectation: the node without the presignature will reject a posit, or if
-    // they are deliberator, a timeout will let the next deliberator take over
+    // they are proposer, a timeout will let the next proposer take over
     let timeout = Duration::from_secs(120);
     let actions = tokio::time::timeout(timeout, network.wait_for_actions(1))
         .await
@@ -741,7 +741,7 @@ async fn test_sign_missing_presignature_after_posits() {
 
     // 3 nodes, threshold 2, should be possible to generate a signature with one
     // node missing their presignatures
-    // note: bad node must not be the first deliberator for this test to work as intended
+    // note: bad node must not be the first proposer for this test to work as intended
     let bad_node = 1;
     let network = MpcFixtureBuilder::new(3, 2)
         .only_generate_signatures()
@@ -782,8 +782,8 @@ async fn test_sign_missing_presignature_after_posits() {
     // give 2 minutes to resolve the problem
     // expectation: The current signature fails and eventually a new round of
     // posits starts. Then, the node without the presignature will reject a
-    // posit, or if they are deliberator, a timeout will let the next
-    // deliberator take over.
+    // posit, or if they are proposer, a timeout will let the next
+    // proposer take over.
     let timeout = Duration::from_secs(120);
     let actions = tokio::time::timeout(timeout, network.wait_for_actions(1))
         .await
