@@ -7,6 +7,7 @@ pub use sub::Subscriber;
 use crate::protocol::message::sub::{
     SubscribeId, SubscribeRequest, SubscribeRequestAction, SubscribeResponse,
 };
+use crate::protocol::message::types::Round;
 pub use crate::protocol::message::types::{
     GeneratingMessage, Message, MessageError, MessageFilterId, PositMessage, PositProtocolId,
     PresignatureMessage, Protocols, ReadyMessage, ResharingMessage, SignatureMessage,
@@ -68,7 +69,7 @@ pub struct MessageInbox {
     presignature: HashMap<PresignatureId, Subscriber<PresignatureMessage>>,
     presignature_init: Subscriber<(FullPresignatureId, Participant, PositAction)>,
     signature: HashMap<(SignId, PresignatureId), Subscriber<SignatureMessage>>,
-    signature_init: Subscriber<(SignId, PresignatureId, Participant, PositAction)>,
+    signature_init: Subscriber<(SignId, PresignatureId, Round, Participant, PositAction)>,
 }
 
 impl MessageInbox {
@@ -110,10 +111,16 @@ impl MessageInbox {
                         .send((id, message.from, message.action))
                         .await;
                 }
-                PositProtocolId::Signature(sign_id, presignature_id) => {
+                PositProtocolId::Signature(sign_id, presignature_id, round) => {
                     let _ = self
                         .signature_init
-                        .send((sign_id, presignature_id, message.from, message.action))
+                        .send((
+                            sign_id,
+                            presignature_id,
+                            round,
+                            message.from,
+                            message.action,
+                        ))
                         .await;
                 }
             },
@@ -616,7 +623,7 @@ impl MessageChannel {
 
     pub async fn subscribe_signature_posit(
         &self,
-    ) -> mpsc::Receiver<(SignId, PresignatureId, Participant, PositAction)> {
+    ) -> mpsc::Receiver<(SignId, PresignatureId, Round, Participant, PositAction)> {
         let Some(subscription) = self.subscribe(SubscribeId::Signatures).await else {
             tracing::warn!("failed to subscribe for signature posit");
             return mpsc::channel(1).1;

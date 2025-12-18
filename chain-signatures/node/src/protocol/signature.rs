@@ -27,7 +27,7 @@ use mpc_primitives::{SignArgs, SignId};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
@@ -39,7 +39,7 @@ use near_account_id::AccountId;
 const ROUND_INTERVAL: usize = 512;
 
 /// The default timeout budget for organizing and posit phases.
-const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(60);
+const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// All relevant info pertaining to an Indexed sign request from an indexer.
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +71,17 @@ struct SignState {
     mesh_state: watch::Receiver<MeshState>,
     /// Budget for the current organizing+posit attempt.
     budget: TimeoutBudget,
+    /// The highest round sent by a peer
+    highest_seen_round: usize,
+    /// Posit message for `highest_seen_round` round.
+    ///
+    /// These are later processed, if the task reaches the `highest_seen_round`
+    /// as a deliberator. Proposers do not reprocess old messages. A valid peer
+    /// would not have sent a posit message before the proposer proposes.
+    ///
+    /// INVARIANT: All messages stored here are for `highest_seen_round`. Must
+    /// be cleared when `highest_seen_round` changes.
+    buffered_messages: VecDeque<SignTaskMessage>,
 }
 
 impl SignState {
@@ -80,6 +91,8 @@ impl SignState {
             indexed,
             mesh_state,
             budget: TimeoutBudget::new(ORGANIZE_POSIT_TIMEOUT),
+            highest_seen_round: 0,
+            buffered_messages: VecDeque::new(),
         }
     }
 
@@ -88,9 +101,38 @@ impl SignState {
     }
 
     fn bump_round(&mut self) {
-        self.round += 1;
+        let prev_round = self.round;
+        self.round = std::cmp::max(self.round + 1, self.highest_seen_round);
         // Reset the budget for the new attempt
         self.budget.reset(ORGANIZE_POSIT_TIMEOUT);
+        tracing::debug!(prev_round, new_round = self.round, "bumped round");
+    }
+
+    /// When receiving posit message for future rounds, store them away until
+    /// that round is reached.
+    fn store_future_posit_message(&mut self, msg: SignTaskMessage) {
+        let SignTaskMessage::PositMessage {
+            round: peer_round, ..
+        } = msg;
+
+        if peer_round < self.highest_seen_round {
+            return;
+        }
+        if peer_round > self.highest_seen_round {
+            self.highest_seen_round = peer_round;
+            self.buffered_messages.clear();
+        }
+        self.buffered_messages.push_back(msg);
+    }
+
+    /// Remove a buffered message for processing, if there is one for the
+    /// current round.
+    fn take_buffered_posit_message(&mut self) -> Option<SignTaskMessage> {
+        if self.highest_seen_round == self.round {
+            self.buffered_messages.pop_front()
+        } else {
+            None
+        }
     }
 }
 
@@ -285,7 +327,7 @@ impl SignOrganizer {
                         ctx.me,
                         p,
                         PositMessage {
-                            id: PositProtocolId::Signature(sign_id, presignature_id),
+                            id: PositProtocolId::Signature(sign_id, presignature_id, state.round),
                             from: ctx.me,
                             action: PositAction::Propose,
                         },
@@ -322,14 +364,58 @@ impl SignPositor {
         let remaining = state.budget.remaining();
         let outcome = tokio::time::timeout(remaining, async {
             loop {
-                let Some(task_msg) = task_rx.recv().await else {
-                    continue;
+                // Prioritize buffered messages, if any for the current round
+                let task_msg = match state.take_buffered_posit_message() {
+                    Some(buffered) => buffered,
+                    None => {
+                        let Some(task_msg) = task_rx.recv().await else {
+                            continue;
+                        };
+                        task_msg
+                    }
                 };
+
                 let SignTaskMessage::PositMessage {
                     presignature_id,
                     from,
                     action,
+                    round: peer_round,
                 } = &task_msg;
+
+                // reject any messages with a different round than ours
+                //
+                // note: Rejecting messages of older rounds is always the right
+                // choice. But for newer messages, we could buffer them and try
+                // that round later. What we must not do is immediately jump to
+                // that higher round, or else any peer could force themselves to
+                // be the proposer every time.
+                if state.round > *peer_round {
+                    ctx.msg
+                        .send(
+                            ctx.me,
+                            proposer,
+                            PositMessage {
+                                id: PositProtocolId::Signature(
+                                    sign_id,
+                                    *presignature_id,
+                                    *peer_round,
+                                ),
+                                from: ctx.me,
+                                action: PositAction::Reject,
+                            },
+                        )
+                        .await;
+                    continue;
+                }
+
+                // Message can't be processed now but is crucial to make progress later.
+                // Note that we must first try and finish the current round and
+                // not immediately jump to that higher round. Otherwise, any peer
+                // could force themselves to be the proposer every time.
+                if state.round < *peer_round {
+                    state.store_future_posit_message(task_msg);
+                    continue;
+                }
 
                 if !matches!(action, PositAction::Propose) {
                     continue;
@@ -355,7 +441,11 @@ impl SignPositor {
                                 ctx.me,
                                 proposer,
                                 PositMessage {
-                                    id: PositProtocolId::Signature(sign_id, *presignature_id),
+                                    id: PositProtocolId::Signature(
+                                        sign_id,
+                                        *presignature_id,
+                                        state.round,
+                                    ),
                                     from: ctx.me,
                                     action: PositAction::Reject,
                                 },
@@ -378,7 +468,11 @@ impl SignPositor {
                             ctx.me,
                             *from,
                             PositMessage {
-                                id: PositProtocolId::Signature(sign_id, *presignature_id),
+                                id: PositProtocolId::Signature(
+                                    sign_id,
+                                    *presignature_id,
+                                    state.round,
+                                ),
                                 from: ctx.me,
                                 action: PositAction::Reject,
                             },
@@ -396,6 +490,7 @@ impl SignPositor {
                     ?sign_id,
                     ?round,
                     ?proposer,
+                    me=?ctx.me,
                     "deliberator timeout waiting for Propose, reorganizing"
                 );
                 state.bump_round();
@@ -409,7 +504,7 @@ impl SignPositor {
                 ctx.me,
                 proposer,
                 PositMessage {
-                    id: PositProtocolId::Signature(sign_id, presignature_id),
+                    id: PositProtocolId::Signature(sign_id, presignature_id, state.round),
                     from: ctx.me,
                     action: PositAction::Accept,
                 },
@@ -478,7 +573,25 @@ impl SignPositor {
         let accepted_participants = loop {
             tokio::select! {
                 Some(task_msg) = task_rx.recv() => {
-                    let SignTaskMessage::PositMessage { presignature_id: _, from, action } = task_msg;
+                    let SignTaskMessage::PositMessage { round: peer_round , ..} = task_msg;
+
+                    // Ignore messages for older rounds
+                    if state.round > peer_round {
+                        continue;
+                    }
+
+                    // Message can't be processed now but is crucial to make progress later.
+                    // Note that we must first try and finish the current round and
+                    // not immediately jump to that higher round. Otherwise, any peer
+                    // could force themselves to be the proposer every time.
+                    if state.round < peer_round {
+                        state.store_future_posit_message(task_msg);
+                        continue;
+                    }
+
+                    let SignTaskMessage::PositMessage { presignature_id: _, round: _peer_round, from, action } = task_msg;
+
+
                     if is_deliberator {
                         if let PositAction::Start(participants) = action {
                             if from != proposer {
@@ -548,7 +661,7 @@ impl SignPositor {
                                         ctx.me,
                                         p,
                                         PositMessage {
-                                            id: PositProtocolId::Signature(sign_id, presignature_id),
+                                            id: PositProtocolId::Signature(sign_id, presignature_id, state.round),
                                             from: ctx.me,
                                             action: PositAction::Start(participants.clone()),
                                         },
@@ -595,7 +708,7 @@ impl SignPositor {
                                         ctx.me,
                                         p,
                                         PositMessage {
-                                            id: PositProtocolId::Signature(sign_id, presignature_id),
+                                            id: PositProtocolId::Signature(sign_id, presignature_id, state.round),
                                             from: ctx.me,
                                             action: PositAction::Start(participants.clone()),
                                         },
@@ -604,7 +717,11 @@ impl SignPositor {
                             }
                             break participants;
                         } else {
-                            tracing::warn!(?sign_id, "posit timeout without enough accepts, reorganizing");
+                            tracing::warn!(
+                                ?sign_id,
+                                accepts=counter.accepts.len(),
+                                threshold=ctx.threshold,
+                                "posit timeout without enough accepts, reorganizing");
                             if let Some(taken) = presignature {
                                 tracing::warn!(?sign_id, "recycling presignature due to posit timeout (no accepts)");
                                 ctx.presignatures.recycle_mine(ctx.me, taken).await;
@@ -686,6 +803,7 @@ impl SignGenerating {
                     ?sign_id,
                     ?round,
                     ?err,
+                    me=?ctx.me,
                     "signature generation failed, reorganizing"
                 );
                 state.bump_round();
@@ -1041,6 +1159,7 @@ impl SignTask {
 enum SignTaskMessage {
     PositMessage {
         presignature_id: PresignatureId,
+        round: usize,
         from: Participant,
         action: PositAction,
     },
@@ -1106,6 +1225,7 @@ impl SignatureSpawner {
         &mut self,
         sign_id: SignId,
         presignature_id: PresignatureId,
+        round: usize,
         from: Participant,
         action: PositAction,
     ) {
@@ -1119,6 +1239,7 @@ impl SignatureSpawner {
             .or_default()
             .send(SignTaskMessage::PositMessage {
                 presignature_id,
+                round,
                 from,
                 action,
             })
@@ -1196,8 +1317,8 @@ impl SignatureSpawner {
                     };
                     self.handle_request(sign, &protocol, &all_participants, &contract);
                 }
-                Some((sign_id, presignature_id, from, action)) = posits.recv() => {
-                    self.handle_posit(sign_id, presignature_id, from, action).await;
+                Some((sign_id, presignature_id, round, from, action)) = posits.recv() => {
+                    self.handle_posit(sign_id, presignature_id, round, from, action).await;
                 }
                 Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     let (sign_id, result) = match result {
