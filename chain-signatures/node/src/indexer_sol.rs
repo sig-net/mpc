@@ -5,7 +5,7 @@ use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
 
-use crate::indexer_common::{SignatureEvent, SignatureEventBox, SignatureEventTrait};
+use crate::indexer_common::{SignatureEvent, SignatureEventBox};
 use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_client::{Client, Cluster, Program};
@@ -163,9 +163,7 @@ pub struct SolSignRequest {
     pub key_version: u32,
 }
 
-impl SignatureEvent for SignatureRequestedEvent {}
-
-impl SignatureEventTrait for SignatureRequestedEvent {
+impl SignatureEvent for SignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
         // Encode the event data in ABI format
         let encoded = encode(&[
@@ -217,10 +215,6 @@ impl SignatureEventTrait for SignatureRequestedEvent {
         // to match the TypeScript implementation
         let epsilon = derive_epsilon_sol(self.key_version, &self.sender_string(), &self.path);
 
-        // Use transaction signature as entropy
-        // let mut entropy = [0u8; 32];
-        // entropy.copy_from_slice(&tx_sig[..32]);
-
         let sign_id = SignId::new(self.generate_request_id());
         tracing::info!(?sign_id, "solana signature requested");
 
@@ -250,9 +244,7 @@ impl SignatureEventTrait for SignatureRequestedEvent {
     }
 }
 
-impl SignatureEvent for SignBidirectionalEvent {}
-
-impl SignatureEventTrait for SignBidirectionalEvent {
+impl SignatureEvent for SignBidirectionalEvent {
     fn generate_request_id(&self) -> [u8; 32] {
         // Match TypeScript implementation using ABI encoding
         let encoded = (

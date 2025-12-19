@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 
 use crate::backlog::Backlog;
-use crate::indexer_common::{SignatureEvent, SignatureEventTrait};
+use crate::indexer_common::SignatureEvent;
 use crate::indexer_sol::MAX_SECP256K1_SCALAR;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
@@ -147,9 +147,7 @@ impl HydrationSignatureRequestedEvent {
     }
 }
 
-impl SignatureEvent for HydrationSignatureRequestedEvent {}
-
-impl SignatureEventTrait for HydrationSignatureRequestedEvent {
+impl SignatureEvent for HydrationSignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
         // Encode the event data in ABI format
         let encoded = encode(&[
@@ -275,9 +273,7 @@ impl HydrationSignBidirectionalRequestedEvent {
     }
 }
 
-impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {}
-
-impl SignatureEventTrait for HydrationSignBidirectionalRequestedEvent {
+impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
         // Match TypeScript implementation using ABI encoding
         let encoded = (
@@ -535,7 +531,6 @@ pub async fn run(
     };
 
     while let Some(block_res) = blocks.next().await {
-        tracing::info!("received block from hydration rpc");
         let block = match block_res {
             Ok(block) => block,
             Err(e) => {
@@ -546,6 +541,7 @@ pub async fn run(
         let number = block.number();
         let hash = block.hash();
         let header = block.header().clone();
+        tracing::info!("received block from hydration rpc: block number {number}, hash {hash:?}");
 
         // Subxt's Substrate header uses H256 as state root (BlakeTwo256 hash).
         let state_root: H256 = header.state_root;

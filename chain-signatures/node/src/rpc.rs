@@ -734,9 +734,6 @@ impl HydrationClient {
     }
 
     /// Call the Signet pallet's `respond()` extrinsic for a *single* request.
-    ///
-    /// You can extend this to true batching later; for now we just send 1-element
-    /// vectors, which is perfectly fine for the BoundedVec arguments.
     pub async fn call_respond(&self, id: &SignId, response: &Signature) -> anyhow::Result<()> {
         // Signet's request_id is a [u8; 32]; you already use it for Ethereum:
         // DynSolValue::FixedBytes(action.indexed.id.request_id.into(), 32)
@@ -1569,7 +1566,7 @@ async fn try_publish_hydration(
     action: &PublishAction,
     timestamp: &Instant,
     signature: &Signature,
-    near_account_id: &AccountId, // you already pass this around for metrics labels
+    near_account_id: &AccountId,
 ) -> Result<(), ()> {
     let chain = action.indexed.chain;
     let sign_id = action.indexed.id;
@@ -1589,9 +1586,6 @@ async fn try_publish_hydration(
                 .await
                 .map_err(|e| {
                     tracing::error!(?sign_id, ?e, "Hydration: failed to publish signature");
-                    crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                        .inc();
                 })?;
             tracing::info!(
                 ?sign_id,
@@ -1616,9 +1610,6 @@ async fn try_publish_hydration(
                         ?e,
                         "Hydration: failed to publish respond bidirectional signature"
                     );
-                    crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                        .inc();
                 })?;
             tracing::info!(
                 ?sign_id,
@@ -1629,7 +1620,7 @@ async fn try_publish_hydration(
         }
     }
 
-    crate::metrics::NUM_SIGN_SUCCESS
+    crate::metrics::requests::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .inc();
     let sign_latency_in_secs = crate::util::duration_between_unix(
@@ -1637,17 +1628,12 @@ async fn try_publish_hydration(
         crate::util::current_unix_timestamp(),
     )
     .as_secs();
-    crate::metrics::SIGN_TOTAL_LATENCY
+    crate::metrics::requests::SIGN_TOTAL_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(sign_latency_in_secs as f64);
-    crate::metrics::SIGN_RESPOND_LATENCY
+    crate::metrics::requests::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
-    if sign_latency_in_secs <= 30 {
-        crate::metrics::NUM_SIGN_SUCCESS_30S
-            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-            .inc();
-    }
 
     Ok(())
 }

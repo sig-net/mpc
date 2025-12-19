@@ -123,7 +123,6 @@ impl CompletedTx {
             Chain::Hydration => HYDRATION_RESPOND_BIDIRECTIONAL_PATH.to_string(),
             _ => anyhow::bail!("Unsupported chain: {}", chain),
         };
-        tracing::info!("requester to derive epsilon: {:?}", self.tx.sender);
         let epsilon = self.tx.epsilon(&path)?;
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest {

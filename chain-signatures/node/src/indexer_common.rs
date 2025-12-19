@@ -211,7 +211,7 @@ impl SignatureRespondedEvent {
     }
 }
 
-pub(crate) trait SignatureEventTrait {
+pub(crate) trait SignatureEvent: std::fmt::Debug {
     fn generate_request_id(&self) -> [u8; 32];
     fn generate_sign_request(
         &self,
@@ -221,8 +221,6 @@ pub(crate) trait SignatureEventTrait {
     fn source_chain(&self) -> Chain;
     fn sender_string(&self) -> String;
 }
-
-pub(crate) trait SignatureEvent: SignatureEventTrait + std::fmt::Debug {}
 
 pub(crate) type SignatureEventBox = Box<dyn SignatureEvent + Send>;
 
@@ -275,7 +273,7 @@ pub(crate) async fn process_sign_event(
         let chain = sign_event.source_chain();
         tracing::error!(?err, chain = %chain, "Failed to send {} sign request into queue", chain.as_str());
     } else {
-        crate::metrics::NUM_SIGN_REQUESTS
+        crate::metrics::requests::NUM_SIGN_REQUESTS
             .with_label_values(&[
                 sign_event.source_chain().as_str(),
                 node_near_account_id.as_str(),

@@ -40,13 +40,11 @@ alloy-signer-local = "1.0.38"
 alloy-sol-types = "1.4.1"
 helios = { git = "https://github.com/a16z/helios", rev = "e1f9a50f73d7af6f6ae4acf2b663d04aab6adb19" }
 ed25519-zebra = { version = "4.1", default-features = false, features = ["alloc"] }
-futures = "0.3.31"
 subxt = { version = "0.44", default-features = false, features = ["jsonrpsee","native","unstable-light-client"] }
 sp-core = { version = "38.1", default-features = false, features = ["std"] }
 sp-runtime = { version = "44.0.0", default-features = false, features = ["std"] }
 sp-trie = { version = "41.1.0", default-features = false, features = ["std"] }
 sp-state-machine = { version = "0.48", default-features = false, features = ["std"] }
-codec = { package = "parity-scale-codec", version = "3", features = ["derive"] }
 subxt-signer = "0.44"
 
 # workspace dependencies

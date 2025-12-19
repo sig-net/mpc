@@ -152,7 +152,7 @@ impl Chain {
             Chain::NEAR => return None,
             Chain::Ethereum => ("CHECKPOINT_INTERVAL_ETHEREUM", 20),
             Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 120),
-            Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 120),
+            Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 240),
         };
 
         let interval = std::env::var(key)
