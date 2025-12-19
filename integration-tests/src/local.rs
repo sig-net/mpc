@@ -65,6 +65,8 @@ impl Node {
         };
         let eth = mpc_node::indexer_eth::EthArgs::from_config(cfg.eth.clone());
         let sol = mpc_node::indexer_sol::SolArgs::from_config(cfg.sol.clone());
+        let hydration =
+            mpc_node::indexer_hydration::HydrationArgs::from_config(cfg.hydration.clone());
         let near_rpc = ctx.worker.rpc_addr();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let cli = mpc_node::cli::Cli::Start {
@@ -77,6 +79,7 @@ impl Node {
             sign_sk: Some(sign_sk.clone()),
             eth,
             sol,
+            hydration,
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
@@ -152,6 +155,8 @@ impl Node {
 
         let eth = EthArgs::from_config(config.cfg.eth.clone());
         let sol = mpc_node::indexer_sol::SolArgs::from_config(config.cfg.sol.clone());
+        let hydration =
+            mpc_node::indexer_hydration::HydrationArgs::from_config(config.cfg.hydration.clone());
         let cli = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
@@ -162,6 +167,7 @@ impl Node {
             sign_sk: Some(config.sign_sk.clone()),
             eth,
             sol,
+            hydration,
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),

@@ -19,6 +19,7 @@ pub enum Chain {
     Ethereum,
     Solana,
     Bitcoin,
+    Hydration,
 }
 
 impl Chain {
@@ -28,6 +29,7 @@ impl Chain {
             Chain::Ethereum => "0x1",
             Chain::Solana => "0x800001f5",
             Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
+            Chain::Hydration => "polkadot:2034",
         }
     }
 
@@ -37,6 +39,7 @@ impl Chain {
             Chain::Ethereum => "eip155:1",
             Chain::Solana => "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
             Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
+            Chain::Hydration => "polkadot:2034",
         }
     }
 }
@@ -87,6 +90,11 @@ pub fn derive_epsilon_eth(key_version: u32, sender: &str, path: &str) -> Scalar 
 
 pub fn derive_epsilon_sol(key_version: u32, sender: &str, path: &str) -> Scalar {
     let derivation_path = derivation_path(key_version, Chain::Solana, sender, path);
+    keccak(derivation_path.as_bytes())
+}
+
+pub fn derive_epsilon_hydration(key_version: u32, sender: &str, path: &str) -> Scalar {
+    let derivation_path = derivation_path(key_version, Chain::Hydration, sender, path);
     keccak(derivation_path.as_bytes())
 }
 

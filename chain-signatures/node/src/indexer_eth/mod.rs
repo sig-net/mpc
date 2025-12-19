@@ -2,7 +2,6 @@ pub mod indexer_eth_direct_rpc;
 pub mod indexer_eth_helios;
 
 use crate::backlog::Backlog;
-use crate::mesh::wait_threshold_active;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
@@ -721,8 +720,8 @@ impl EthereumIndexer {
 
     pub async fn run(self) {
         let backlog = self.backlog;
-        let contract_watcher = self.contract_watcher;
-        let mesh_state = self.mesh_state;
+        let mut contract_watcher = self.contract_watcher;
+        let mut mesh_state = self.mesh_state;
         let node_client = self.node_client;
         let app_data_storage = self.app_data_storage;
         let client = self.client;
@@ -730,7 +729,14 @@ impl EthereumIndexer {
         let sign_tx = self.sign_tx;
         let node_near_account_id = self.node_near_account_id;
 
-        Self::recover_backlog(&backlog, contract_watcher, mesh_state, node_client).await;
+        crate::indexer_common::recover_backlog(
+            &backlog,
+            &mut contract_watcher,
+            &mut mesh_state,
+            &node_client,
+            Chain::Ethereum,
+        )
+        .await;
 
         let last_processed_block = Self::get_last_processed_block(&app_data_storage).await;
 
@@ -1090,7 +1096,15 @@ impl EthereumIndexer {
                             serialized_output,
                             total_timeout,
                         ) {
-                            Ok(sign_request) => respond_requests.push(sign_request),
+                            Ok(sign_request) => {
+                                tracing::info!(
+                                    ?tx_id,
+                                    ?sign_id,
+                                    ?sign_request,
+                                    "sign_request from serialized output"
+                                );
+                                respond_requests.push(sign_request);
+                            }
                             Err(err) => tracing::warn!(
                                 ?tx_id,
                                 ?sign_id,
@@ -1415,25 +1429,6 @@ impl EthereumIndexer {
             {
                 tracing::warn!("Failed to send block to process: {err:?}");
             }
-        }
-    }
-
-    async fn recover_backlog(
-        backlog: &Backlog,
-        mut contract_watcher: ContractStateWatcher,
-        mut mesh_state: watch::Receiver<MeshState>,
-        node_client: NodeClient,
-    ) {
-        // Recover backlog before doing anything.
-        // Wait for threshold to be available
-        let threshold = contract_watcher.wait_threshold().await;
-        if threshold > 0 {
-            wait_threshold_active(&mut mesh_state, threshold).await;
-
-            let mesh_state = mesh_state.borrow().clone();
-            backlog
-                .recover(&mesh_state, &node_client, threshold, &[Chain::Ethereum])
-                .await;
         }
     }
 

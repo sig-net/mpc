@@ -125,6 +125,7 @@ pub enum Chain {
     NEAR,
     Ethereum,
     Solana,
+    Hydration,
 }
 
 impl Chain {
@@ -133,11 +134,17 @@ impl Chain {
             Chain::NEAR => "NEAR",
             Chain::Ethereum => "Ethereum",
             Chain::Solana => "Solana",
+            Chain::Hydration => "Hydration",
         }
     }
 
-    pub const fn iter() -> [Chain; 3] {
-        [Chain::NEAR, Chain::Ethereum, Chain::Solana]
+    pub const fn iter() -> [Chain; 4] {
+        [
+            Chain::NEAR,
+            Chain::Ethereum,
+            Chain::Solana,
+            Chain::Hydration,
+        ]
     }
 
     pub fn checkpoint_interval(&self) -> Option<u64> {
@@ -145,6 +152,7 @@ impl Chain {
             Chain::NEAR => return None,
             Chain::Ethereum => ("CHECKPOINT_INTERVAL_ETHEREUM", 20),
             Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 120),
+            Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 240),
         };
 
         let interval = std::env::var(key)
@@ -158,6 +166,7 @@ impl Chain {
         vec![
             ("CHECKPOINT_INTERVAL_ETHEREUM", "2"),
             ("CHECKPOINT_INTERVAL_SOLANA", "5"),
+            ("CHECKPOINT_INTERVAL_HYDRATION", "5"),
         ]
     }
 }
@@ -176,6 +185,7 @@ impl FromStr for Chain {
             "near" => Ok(Chain::NEAR),
             "ethereum" | "eth" => Ok(Chain::Ethereum),
             "solana" | "sol" => Ok(Chain::Solana),
+            "hydration" | "hyd" => Ok(Chain::Hydration),
             other => Err(format!("unknown or unsupported chain {other}")),
         }
     }

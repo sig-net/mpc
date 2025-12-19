@@ -11,7 +11,8 @@ use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::triple_storage::TriplePair;
-use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
+use crate::{indexer, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, storage, web};
+
 use clap::Parser;
 use deadpool_redis::Runtime;
 use k256::sha2::Sha256;
@@ -62,6 +63,9 @@ pub enum Cli {
         /// Solana Indexer options
         #[clap(flatten)]
         sol: indexer_sol::SolArgs,
+        /// Hydration Indexer options
+        #[clap(flatten)]
+        hydration: indexer_hydration::HydrationArgs,
         /// NEAR requests options
         #[clap(flatten)]
         indexer_options: indexer::Options,
@@ -104,6 +108,7 @@ impl Cli {
                 sign_sk,
                 eth,
                 sol,
+                hydration,
                 indexer_options,
                 my_address,
                 storage_options,
@@ -150,6 +155,7 @@ impl Cli {
 
                 args.extend(eth.into_str_args());
                 args.extend(sol.into_str_args());
+                args.extend(hydration.into_str_args());
                 args.extend(indexer_options.into_str_args());
                 args.extend(storage_options.into_str_args());
                 args.extend(log_options.into_str_args());
@@ -173,6 +179,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             sign_sk,
             eth,
             sol,
+            hydration,
             indexer_options,
             my_address,
             storage_options,
@@ -266,11 +273,13 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let eth = eth.into_config();
             let sol = sol.into_config();
+            let hydration = hydration.into_config();
             let network = NetworkConfig { cipher_sk, sign_sk };
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
 
-            let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth, &sol, backlog.clone());
+            let (rpc_channel, rpc) =
+                RpcExecutor::new(&near_client, &eth, &sol, &hydration, backlog.clone()).await;
 
             let (sync_channel, sync) = SyncTask::new(
                 &client,
@@ -373,6 +382,15 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tokio::spawn(indexer_sol::run(
                 sol,
+                sign_tx.clone(),
+                account_id.clone(),
+                backlog.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                client.clone(),
+            ));
+            tokio::spawn(indexer_hydration::run(
+                hydration,
                 sign_tx,
                 account_id,
                 backlog,

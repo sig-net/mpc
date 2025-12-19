@@ -658,8 +658,8 @@ impl SignatureGenerator {
                         // For now, we just complete the signature generation. The indexer will handle the promotion.
                         tracing::debug!(
                             ?sign_id,
-                            ?source_chain,
-                            ?event.dest,
+                            source_chain = ?self.indexed.chain,
+                            target_chain = ?event.dest(),
                             "generated signature for bidirectional request, awaiting indexer to process"
                         );
                     }
