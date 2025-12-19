@@ -842,32 +842,30 @@ fn value_to_vec_u8(v: &Value<u32>) -> Result<Vec<u8>> {
 
     match &v.value {
         ValueDef::Composite(Composite::Unnamed(vals)) => {
-            // newtype wrapper / tuple wrapper
             if vals.len() == 1 {
-                return value_to_vec_u8(&vals[0]);
-            }
-
-            let mut out = Vec::with_capacity(vals.len());
-            for x in vals {
-                if let Some(n) = x.as_u128() {
+                // if single element and element is Primitive, then Vec<u8> has only one byte
+                if let ValueDef::Primitive(_) = vals[0].value {
+                    let n = vals[0].as_u128().ok_or_else(|| {
+                        anyhow!("expected int-like primitive byte, got: {}", vals[0])
+                    })?;
                     if n > 255 {
                         return Err(anyhow!("byte out of range: {n}"));
                     }
-                    out.push(n as u8);
-                } else {
-                    // if element is still composite, recursively flatten
-                    // avoid crashing when encountering ( (u8,u8,...) ) or deeper
-                    match &x.value {
-                        ValueDef::Composite(Composite::Unnamed(_)) => {
-                            out.extend(value_to_vec_u8(x)?);
-                        }
-                        other => {
-                            return Err(anyhow!(
-                                "expected u8-like number in Vec<u8>, got: {x}; shape={other:?}"
-                            ));
-                        }
-                    }
+                    return Ok(vec![n as u8]);
                 }
+
+                //newtype wrapper unwrap (e.g. AccountId32([u8;32]))
+                return value_to_vec_u8(&vals[0]);
+            }
+            let mut out = Vec::with_capacity(vals.len());
+            for x in vals {
+                let n = x
+                    .as_u128()
+                    .ok_or_else(|| anyhow!("expected u8-like number in Vec<u8>, got: {x}"))?;
+                if n > 255 {
+                    return Err(anyhow!("byte out of range: {n}"));
+                }
+                out.push(n as u8);
             }
             Ok(out)
         }
