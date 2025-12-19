@@ -692,14 +692,14 @@ pub struct HydrationClient {
 
 const PALLET_SIGNET: &str = "Signet";
 
-// This type mirrors the on-chain representation of an affine point
+/// This type mirrors the on-chain representation of an affine point
 #[derive(Clone, Debug, Encode, Decode)]
 struct HydrationAffinePoint {
     pub x: [u8; 32],
     pub y: [u8; 32],
 }
 
-// This type mirrors the on-chain signature format
+/// This type mirrors the on-chain signature format
 #[derive(Clone, Debug, Encode, Decode)]
 struct HydrationSignature {
     pub big_r: HydrationAffinePoint,
@@ -707,10 +707,17 @@ struct HydrationSignature {
     pub recovery_id: u8,
 }
 
-// mirrors the onchain bounded vector
+/// A thin wrapper used to mirror the on-chain `BoundedVec` type for SCALE
+/// encoding/decoding. This type does **not** enforce any length bounds; it
+/// is effectively just a `Vec<T>` on the client side.
+///
+/// Callers are responsible for ensuring that the inner `Vec` length respects
+/// the maximum length enforced by the on-chain pallet, otherwise the
+/// resulting transaction may be rejected on-chain.
 #[derive(Clone, Debug, Encode, Decode)]
 struct BoundedVec<T>(pub Vec<T>);
 
+/// this type is used to construct tx to call respond() on pallet
 struct HydrationRespondTx {
     pub request_ids: BoundedVec<[u8; 32]>,
     pub signatures: BoundedVec<HydrationSignature>,
@@ -747,6 +754,7 @@ impl Payload for HydrationRespondTx {
     }
 }
 
+/// this type is used to construct tx to call respond_bidirectional() on pallet
 struct HydrationRespondBidirectionalTx {
     pub request_id: [u8; 32],
     pub serialized_output: BoundedVec<u8>,
