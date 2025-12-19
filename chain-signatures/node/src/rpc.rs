@@ -735,11 +735,6 @@ impl HydrationClient {
 
     /// Call the Signet pallet's `respond()` extrinsic for a *single* request.
     pub async fn call_respond(&self, id: &SignId, response: &Signature) -> anyhow::Result<()> {
-        // Signet's request_id is a [u8; 32]; you already use it for Ethereum:
-        // DynSolValue::FixedBytes(action.indexed.id.request_id.into(), 32)
-        //
-        // The `respond` extrinsic expects `BoundedVec` arguments, so wrap the 1-element
-        // `Vec` values in the generated `HydrationBoundedVec` newtype.
         let request_ids = HydrationBoundedVec(vec![id.request_id]);
 
         let signatures = HydrationBoundedVec(vec![Self::to_hydration_signature(response)]);
