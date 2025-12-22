@@ -43,13 +43,11 @@ use tokio::sync::{mpsc, watch};
 use url::Url;
 
 use crate::indexer_hydration::HydrationConfig;
-use hydration::runtime_types::bounded_collections::bounded_vec::BoundedVec as HydrationBoundedVec;
-use hydration::runtime_types::pallet_signet::pallet::{
-    AffinePoint as HydrationAffinePoint, Signature as HydrationSignature,
-};
+use parity_scale_codec::{Decode, Encode};
 use subxt::config::substrate::{
     BlakeTwo256, SubstrateConfig, SubstrateExtrinsicParams, SubstrateHeader,
 };
+use subxt::tx::Payload;
 use subxt::Config as SubxtConfig;
 use subxt::OnlineClient;
 use subxt_signer::{sr25519, SecretUri};
@@ -665,7 +663,7 @@ impl SolanaClient {
     }
 }
 
-pub enum HydradxConfig {}
+enum HydradxConfig {}
 
 impl SubxtConfig for HydradxConfig {
     type AccountId = <SubstrateConfig as SubxtConfig>::AccountId;
@@ -677,88 +675,178 @@ impl SubxtConfig for HydradxConfig {
     type AssetId = <SubstrateConfig as SubxtConfig>::AssetId;
 }
 
-#[subxt::subxt(runtime_metadata_path = "src/indexer_hydration/artifacts/hydration_metadata.scale")]
-pub mod hydration {}
 #[derive(Clone)]
 pub struct HydrationClient {
     api: OnlineClient<HydradxConfig>,
     signer: sr25519::Keypair,
 }
-type TxHash = subxt::config::HashFor<HydradxConfig>;
+
+const PALLET_SIGNET: &str = "Signet";
+
+/// This type mirrors the on-chain representation of an affine point
+#[derive(Clone, Debug, Encode, Decode)]
+struct HydrationAffinePoint {
+    pub x: [u8; 32],
+    pub y: [u8; 32],
+}
+
+/// This type mirrors the on-chain signature format
+#[derive(Clone, Debug, Encode, Decode)]
+struct HydrationSignature {
+    pub big_r: HydrationAffinePoint,
+    pub s: [u8; 32],
+    pub recovery_id: u8,
+}
+
+/// A thin wrapper used to mirror the on-chain `BoundedVec` type for SCALE
+/// encoding/decoding. This type does **not** enforce any length bounds; it
+/// is effectively just a `Vec<T>` on the client side.
+///
+/// Callers are responsible for ensuring that the inner `Vec` length respects
+/// the maximum length enforced by the on-chain pallet, otherwise the
+/// resulting transaction may be rejected on-chain.
+#[derive(Clone, Debug, Encode, Decode)]
+struct BoundedVec<T>(pub Vec<T>);
+
+/// this type is used to construct tx to call respond() on pallet
+struct HydrationRespondTx {
+    pub request_ids: BoundedVec<[u8; 32]>,
+    pub signatures: BoundedVec<HydrationSignature>,
+}
+
+impl Payload for HydrationRespondTx {
+    fn encode_call_data_to(
+        &self,
+        metadata: &subxt::Metadata,
+        out: &mut Vec<u8>,
+    ) -> std::result::Result<(), subxt::ext::subxt_core::Error> {
+        let pallet = metadata.pallet_by_name(PALLET_SIGNET).ok_or_else(|| {
+            subxt::ext::subxt_core::Error::Metadata(
+                subxt::error::MetadataError::PalletNameNotFound(PALLET_SIGNET.to_string()),
+            )
+        })?;
+
+        let respond_call_index = pallet
+            .call_variant_by_name("respond")
+            .ok_or_else(|| {
+                subxt::ext::subxt_core::Error::Metadata(
+                    subxt::error::MetadataError::CallNameNotFound("respond".to_string()),
+                )
+            })?
+            .index;
+
+        let pallet_index: u8 = pallet.index();
+
+        out.push(pallet_index);
+        out.push(respond_call_index);
+
+        (&self.request_ids, &self.signatures).encode_to(out);
+        Ok(())
+    }
+}
+
+/// this type is used to construct tx to call respond_bidirectional() on pallet
+struct HydrationRespondBidirectionalTx {
+    pub request_id: [u8; 32],
+    pub serialized_output: BoundedVec<u8>,
+    pub signature: HydrationSignature,
+}
+
+impl Payload for HydrationRespondBidirectionalTx {
+    fn encode_call_data_to(
+        &self,
+        metadata: &subxt::Metadata,
+        out: &mut Vec<u8>,
+    ) -> std::result::Result<(), subxt::ext::subxt_core::Error> {
+        let pallet = metadata.pallet_by_name(PALLET_SIGNET).ok_or_else(|| {
+            subxt::ext::subxt_core::Error::Metadata(
+                subxt::error::MetadataError::PalletNameNotFound(PALLET_SIGNET.to_string()),
+            )
+        })?;
+
+        let pallet_index: u8 = pallet.index();
+
+        let respond_bidirectional_call_index = pallet
+            .call_variant_by_name("respond_bidirectional")
+            .ok_or_else(|| {
+                subxt::ext::subxt_core::Error::Metadata(
+                    subxt::error::MetadataError::CallNameNotFound(
+                        "respond_bidirectional".to_string(),
+                    ),
+                )
+            })?
+            .index;
+
+        out.push(pallet_index);
+        out.push(respond_bidirectional_call_index);
+
+        // respond_bidirectional(origin, request_id, serialized_output, signature)
+        (&self.request_id, &self.serialized_output, &self.signature).encode_to(out);
+        Ok(())
+    }
+}
 
 impl HydrationClient {
-    /// Create a new Hydration client.
-    ///
-    /// `rpc_url`: e.g. "ws://127.0.0.1:9944" or "wss://rpc.hydration.cloud"
-    /// `signer_uri`: sr25519 secret URI, e.g. "//Alice" or a mnemonic.
     pub async fn new(config: &HydrationConfig) -> anyhow::Result<Self> {
         let api = OnlineClient::<HydradxConfig>::from_url(&config.rpc_ws_url).await?;
-
         let uri = SecretUri::from_str(&config.signer_uri)?;
         let signer = sr25519::Keypair::from_uri(&uri)?;
-
         Ok(Self { api, signer })
     }
 
-    /// Helper to convert your MPC signature type into the pallet_signet Signature.
-    fn to_hydration_signature(sig: &Signature) -> HydrationSignature {
+    fn to_hydration_signature(sig: &Signature) -> anyhow::Result<HydrationSignature> {
         let enc = sig.big_r.to_encoded_point(false);
 
         let x: [u8; 32] = enc
             .x()
-            .map(|x| x.as_slice())
-            .map(|x| x.try_into().expect("x must be 32 bytes"))
-            .expect("missing x");
+            .ok_or_else(|| anyhow::anyhow!("missing x"))?
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("x must be 32 bytes"))?;
+
         let y: [u8; 32] = enc
             .y()
-            .map(|y| y.as_slice())
-            .map(|y| y.try_into().expect("y must be 32 bytes"))
-            .expect("missing y");
+            .ok_or_else(|| anyhow::anyhow!("missing y"))?
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("y must be 32 bytes"))?;
 
-        let s_bytes: [u8; 32] = sig.s.to_bytes().into();
+        let s: [u8; 32] = sig.s.to_bytes().into();
 
-        HydrationSignature {
+        Ok(HydrationSignature {
             big_r: HydrationAffinePoint { x, y },
-            s: s_bytes,
+            s,
             recovery_id: sig.recovery_id,
-        }
+        })
     }
 
-    /// Call the Signet pallet's `respond()` extrinsic for a *single* request.
-    pub async fn call_respond(&self, id: &SignId, response: &Signature) -> anyhow::Result<()> {
-        let request_ids = HydrationBoundedVec(vec![id.request_id]);
+    async fn call_respond(&self, id: &SignId, response: &Signature) -> anyhow::Result<()> {
+        let tx = HydrationRespondTx {
+            request_ids: BoundedVec(vec![id.request_id]),
+            signatures: BoundedVec(vec![Self::to_hydration_signature(response)?]),
+        };
 
-        let signatures = HydrationBoundedVec(vec![Self::to_hydration_signature(response)]);
-
-        // Build the call: signet::respond(request_ids, signatures)
-        let tx = hydration::tx().signet().respond(request_ids, signatures);
-
-        // Sign, submit, and wait for finalized success.
         let progress = self
             .api
             .tx()
             .sign_and_submit_then_watch_default(&tx, &self.signer)
             .await?;
 
-        let _events = progress.wait_for_finalized_success().await?;
-
+        progress.wait_for_finalized_success().await?;
         Ok(())
     }
 
-    pub async fn call_respond_bidirectional(
+    async fn call_respond_bidirectional(
         &self,
         id: &SignId,
         serialized_output: Vec<u8>,
         response: &Signature,
-    ) -> anyhow::Result<TxHash> {
-        let request_id: [u8; 32] = id.request_id;
-        let hyd_sig = Self::to_hydration_signature(response);
-
-        let tx = hydration::tx().signet().respond_bidirectional(
-            request_id,
-            HydrationBoundedVec(serialized_output),
-            hyd_sig,
-        );
+    ) -> anyhow::Result<subxt::config::HashFor<HydradxConfig>> {
+        let tx = HydrationRespondBidirectionalTx {
+            request_id: id.request_id,
+            serialized_output: BoundedVec(serialized_output),
+            signature: Self::to_hydration_signature(response)?,
+        };
 
         let progress = self
             .api
@@ -767,10 +855,7 @@ impl HydrationClient {
             .await?;
 
         let events = progress.wait_for_finalized_success().await?;
-
-        let tx_hash = events.extrinsic_hash();
-
-        Ok(tx_hash)
+        Ok(events.extrinsic_hash())
     }
 }
 

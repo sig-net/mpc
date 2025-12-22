@@ -1,5 +1,3 @@
-#![allow(missing_docs)]
-
 use crate::backlog::Backlog;
 use crate::indexer_common::SignatureEvent;
 use crate::indexer_sol::MAX_SECP256K1_SCALAR;
@@ -11,7 +9,6 @@ use crate::sign_bidirectional::hash_rlp_data;
 use alloy_sol_types::SolValue;
 use anyhow::{anyhow, Result};
 use ethabi::{encode, Token};
-use hydration::runtime_types::pallet_signet::pallet::Signature as HydrationSignature;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
@@ -30,6 +27,8 @@ use std::time::Duration;
 use std::time::Instant;
 use subxt::backend::{legacy::LegacyRpcMethods, rpc::RpcClient};
 use subxt::config::HashFor;
+use subxt::events::EventDetails;
+use subxt::ext::scale_value::{Composite, Value, ValueDef};
 use subxt::{client::OnlineClient, SubstrateConfig};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -125,26 +124,6 @@ pub struct HydrationSignatureRequestedEvent {
     pub algo: String,
     pub dest: String,
     pub params: String,
-}
-
-impl HydrationSignatureRequestedEvent {
-    fn from(event: hydration::signet::events::SignatureRequested) -> anyhow::Result<Self> {
-        let mut sender = [0u8; 32];
-        let sender_array: &[u8; 32] =
-            <subxt::utils::AccountId32 as AsRef<[u8; 32]>>::as_ref(&event.sender);
-        sender.copy_from_slice(sender_array);
-        Ok(Self {
-            sender,
-            payload: event.payload,
-            path: String::from_utf8(event.path)?,
-            key_version: event.key_version,
-            deposit: event.deposit.try_into()?,
-            chain_id: String::from_utf8(event.chain_id)?,
-            algo: String::from_utf8(event.algo)?,
-            dest: String::from_utf8(event.dest)?,
-            params: String::from_utf8(event.params)?,
-        })
-    }
 }
 
 impl SignatureEvent for HydrationSignatureRequestedEvent {
@@ -246,33 +225,6 @@ pub struct HydrationSignBidirectionalRequestedEvent {
     pub respond_serialization_schema: Vec<u8>,
 }
 
-impl HydrationSignBidirectionalRequestedEvent {
-    fn from(event: hydration::signet::events::SignBidirectionalRequested) -> anyhow::Result<Self> {
-        let mut sender = [0u8; 32];
-        let sender_array: &[u8; 32] =
-            <subxt::utils::AccountId32 as AsRef<[u8; 32]>>::as_ref(&event.sender);
-        sender.copy_from_slice(sender_array);
-        let mut program_id = [0u8; 32];
-        let program_id_array: &[u8; 32] =
-            <subxt::utils::AccountId32 as AsRef<[u8; 32]>>::as_ref(&event.program_id);
-        program_id.copy_from_slice(program_id_array);
-        Ok(Self {
-            sender,
-            serialized_transaction: event.serialized_transaction,
-            caip2_id: String::from_utf8(event.caip2_id)?,
-            path: String::from_utf8(event.path)?,
-            key_version: event.key_version,
-            deposit: event.deposit.try_into()?,
-            algo: String::from_utf8(event.algo)?,
-            dest: String::from_utf8(event.dest)?,
-            params: String::from_utf8(event.params)?,
-            program_id,
-            output_deserialization_schema: event.output_deserialization_schema,
-            respond_serialization_schema: event.respond_serialization_schema,
-        })
-    }
-}
-
 impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
         // Match TypeScript implementation using ABI encoding
@@ -366,62 +318,12 @@ pub struct HydrationRespondBidirectionalEvent {
     pub signature: Signature,
 }
 
-impl HydrationRespondBidirectionalEvent {
-    fn from(event: hydration::signet::events::RespondBidirectionalEvent) -> anyhow::Result<Self> {
-        let signature = to_mpc_signature(event.signature)?;
-        let responder = account32_to_bytes(&event.responder);
-        Ok(Self {
-            request_id: event.request_id,
-            responder,
-            serialized_output: event.serialized_output,
-            signature,
-        })
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HydrationSignatureRespondedEvent {
     pub request_id: [u8; 32],
     pub responder: [u8; 32],
     pub signature: Signature,
 }
-
-impl HydrationSignatureRespondedEvent {
-    fn from(event: hydration::signet::events::SignatureResponded) -> anyhow::Result<Self> {
-        let signature = to_mpc_signature(event.signature)?;
-        let responder = account32_to_bytes(&event.responder);
-        Ok(Self {
-            request_id: event.request_id,
-            responder,
-            signature,
-        })
-    }
-}
-
-fn to_mpc_signature(sig: HydrationSignature) -> anyhow::Result<Signature> {
-    let x_bytes: FieldBytes = sig.big_r.x.into();
-    let y_bytes: FieldBytes = sig.big_r.y.into();
-    let enc = EncodedPoint::from_affine_coordinates(&x_bytes, &y_bytes, false);
-
-    let big_r = AffinePoint::from_encoded_point(&enc)
-        .into_option()
-        .ok_or_else(|| anyhow::anyhow!("invalid affine point in HydrationSignature"))?;
-
-    let s = Scalar::from_bytes(sig.s)
-        .ok_or_else(|| anyhow::anyhow!("invalid scalar in HydrationSignature"))?;
-
-    Ok(Signature::new(big_r, s, sig.recovery_id))
-}
-
-fn account32_to_bytes(account: &subxt::utils::AccountId32) -> [u8; 32] {
-    let mut result = [0u8; 32];
-    let account_array: &[u8; 32] = <subxt::utils::AccountId32 as AsRef<[u8; 32]>>::as_ref(account);
-    result.copy_from_slice(account_array);
-    result
-}
-
-#[subxt::subxt(runtime_metadata_path = "src/indexer_hydration/artifacts/hydration_metadata.scale")]
-pub mod hydration {}
 
 /// Storage key for `frame_system::Events`.
 fn system_events_key() -> Vec<u8> {
@@ -521,6 +423,7 @@ pub async fn run(
     )
     .await;
 
+    spawn_runtime_updater(hydration_api.clone());
     // Subscribe to finalized Hydration blocks.
     let mut blocks = match hydration_api.blocks().subscribe_finalized().await {
         Ok(blocks) => blocks,
@@ -597,13 +500,11 @@ pub async fn run(
             };
 
             // SignatureRequested
-            if let Ok(Some(req)) = ev.as_event::<hydration::signet::events::SignatureRequested>() {
-                let event = match HydrationSignatureRequestedEvent::from(req) {
+            if ev.pallet_name() == PALLET_SIGNET && ev.variant_name() == EVENT_SIGNATURE_REQUESTED {
+                let event = match decode_signature_requested(&ev) {
                     Ok(event) => event,
                     Err(e) => {
-                        tracing::error!(
-                            "failed to convert event to HydrationSignatureRequestedEvent: {e}"
-                        );
+                        tracing::error!("failed to decode signature requested event: {e}");
                         continue;
                     }
                 };
@@ -612,13 +513,7 @@ pub async fn run(
                     event
                 );
 
-                let entropy = match entropy_from_event(&ev) {
-                    Ok(entropy) => entropy,
-                    Err(e) => {
-                        tracing::error!("failed to extract entropy from event: {e}");
-                        continue;
-                    }
-                };
+                let entropy = sp_core::hashing::blake2_256(ev.bytes());
 
                 if let Err(e) = crate::indexer_common::process_sign_event(
                     Box::new(event),
@@ -633,15 +528,12 @@ pub async fn run(
                     tracing::error!("failed to process sign event: {e}");
                 }
             }
-
             // SignatureResponded
-            if let Ok(Some(resp)) = ev.as_event::<hydration::signet::events::SignatureResponded>() {
-                let event = match HydrationSignatureRespondedEvent::from(resp) {
+            if ev.pallet_name() == PALLET_SIGNET && ev.variant_name() == EVENT_SIGNATURE_RESPONDED {
+                let event = match decode_signature_responded(&ev) {
                     Ok(event) => event,
                     Err(e) => {
-                        tracing::error!(
-                            "failed to convert event to HydrationSignatureRespondedEvent: {e}"
-                        );
+                        tracing::error!("failed to decode signature responded event: {e}");
                         continue;
                     }
                 };
@@ -662,28 +554,22 @@ pub async fn run(
             }
 
             // Bidirectional request
-            if let Ok(Some(req_bi)) =
-                ev.as_event::<hydration::signet::events::SignBidirectionalRequested>()
+            if ev.pallet_name() == PALLET_SIGNET
+                && ev.variant_name() == EVENT_SIGN_BIDIRECTIONAL_REQUESTED
             {
-                let event = match HydrationSignBidirectionalRequestedEvent::from(req_bi) {
+                let event = match decode_sign_bidirectional_requested(&ev) {
                     Ok(event) => event,
                     Err(e) => {
-                        tracing::error!("failed to convert event to HydrationSignBidirectionalRequestedEvent: {e}");
+                        tracing::error!("failed to decode sign bidirectional requested event: {e}");
                         continue;
                     }
                 };
                 tracing::info!(
                     "Hydration::Signet::SignBidirectionalRequested in block #{number} ({hash:?}): {:?}",
-                    event
+                event
                 );
 
-                let entropy = match entropy_from_event(&ev) {
-                    Ok(entropy) => entropy,
-                    Err(e) => {
-                        tracing::error!("failed to extract entropy from event: {e}");
-                        continue;
-                    }
-                };
+                let entropy = sp_core::hashing::blake2_256(ev.bytes());
 
                 if let Err(e) = crate::indexer_common::process_sign_event(
                     Box::new(event),
@@ -700,15 +586,12 @@ pub async fn run(
             }
 
             // Bidirectional response
-            if let Ok(Some(resp_bi)) =
-                ev.as_event::<hydration::signet::events::RespondBidirectionalEvent>()
+            if ev.pallet_name() == PALLET_SIGNET && ev.variant_name() == EVENT_RESPOND_BIDIRECTIONAL
             {
-                let event = match HydrationRespondBidirectionalEvent::from(resp_bi) {
+                let event = match decode_respond_bidirectional(&ev) {
                     Ok(event) => event,
                     Err(e) => {
-                        tracing::error!(
-                            "failed to convert event to HydrationRespondBidirectionalEvent: {e}"
-                        );
+                        tracing::error!("failed to decode respond bidirectional event: {e}");
                         continue;
                     }
                 };
@@ -730,10 +613,262 @@ pub async fn run(
     }
 }
 
-fn entropy_from_event(
-    ev: &subxt::events::EventDetails<SubstrateConfig>,
-) -> anyhow::Result<[u8; 32]> {
-    ev.bytes().to_vec()[..32]
+const PALLET_SIGNET: &str = "Signet";
+const EVENT_SIGNATURE_REQUESTED: &str = "SignatureRequested";
+const EVENT_SIGNATURE_RESPONDED: &str = "SignatureResponded";
+const EVENT_SIGN_BIDIRECTIONAL_REQUESTED: &str = "SignBidirectionalRequested";
+const EVENT_RESPOND_BIDIRECTIONAL: &str = "RespondBidirectionalEvent";
+
+pub fn spawn_runtime_updater(api: OnlineClient<SubstrateConfig>) {
+    let updater = api.updater();
+    tokio::spawn(async move {
+        if let Err(e) = updater.perform_runtime_updates().await {
+            tracing::error!("runtime updater stopped: {e}");
+        }
+    });
+}
+
+fn decode_signature_requested(
+    ev: &EventDetails<SubstrateConfig>,
+) -> anyhow::Result<HydrationSignatureRequestedEvent> {
+    let fields = ev.field_values()?;
+
+    let sender = get_named_bytes32(&fields, "sender")?;
+    let payload = get_named_bytes32(&fields, "payload")?;
+
+    let path = get_named_utf8(&fields, "path")?;
+    let chain_id = get_named_utf8(&fields, "chain_id")?;
+    let algo = get_named_utf8(&fields, "algo")?;
+    let dest = get_named_utf8(&fields, "dest")?;
+    let params = get_named_utf8(&fields, "params")?;
+
+    let key_version = get_named_u32(&fields, "key_version")?;
+    let deposit = get_named_u64(&fields, "deposit")?;
+
+    Ok(HydrationSignatureRequestedEvent {
+        sender,
+        payload,
+        path,
+        key_version,
+        deposit,
+        chain_id,
+        algo,
+        dest,
+        params,
+    })
+}
+
+fn decode_signature_responded(
+    ev: &EventDetails<SubstrateConfig>,
+) -> anyhow::Result<HydrationSignatureRespondedEvent> {
+    let fields = ev.field_values()?;
+
+    let request_id = get_named_bytes32(&fields, "request_id")?;
+    let responder = get_named_bytes32(&fields, "responder")?; // Hydration 一般是 AccountId32
+
+    // signature: pallet 的 Signature 结构（嵌套）
+    let sig_value = get_named(&fields, "signature")?;
+    let mpc_sig = parse_signature(sig_value)?;
+
+    Ok(HydrationSignatureRespondedEvent {
+        request_id,
+        responder,
+        signature: mpc_sig,
+    })
+}
+
+fn decode_sign_bidirectional_requested(
+    ev: &EventDetails<SubstrateConfig>,
+) -> anyhow::Result<HydrationSignBidirectionalRequestedEvent> {
+    let fields = ev.field_values()?;
+
+    let sender = get_named_bytes32(&fields, "sender")?;
+    let serialized_transaction = get_named_vec_u8(&fields, "serialized_transaction")?;
+
+    let caip2_id = get_named_utf8(&fields, "caip2_id")?;
+    let key_version = get_named_u32(&fields, "key_version")?;
+    let deposit = get_named_u64(&fields, "deposit")?;
+
+    let path = get_named_utf8(&fields, "path")?;
+    let algo = get_named_utf8(&fields, "algo")?;
+    let dest = get_named_utf8(&fields, "dest")?;
+    let params = get_named_utf8(&fields, "params")?;
+    let program_id = get_named_bytes32(&fields, "program_id")?;
+
+    let output_deserialization_schema = get_named_vec_u8(&fields, "output_deserialization_schema")?;
+    let respond_serialization_schema = get_named_vec_u8(&fields, "respond_serialization_schema")?;
+
+    Ok(HydrationSignBidirectionalRequestedEvent {
+        sender,
+        serialized_transaction,
+        caip2_id,
+        key_version,
+        deposit,
+        path,
+        algo,
+        dest,
+        params,
+        program_id,
+        output_deserialization_schema,
+        respond_serialization_schema,
+    })
+}
+
+fn decode_respond_bidirectional(
+    ev: &EventDetails<SubstrateConfig>,
+) -> anyhow::Result<HydrationRespondBidirectionalEvent> {
+    let fields = ev.field_values()?;
+
+    let request_id = get_named_bytes32(&fields, "request_id")?;
+    let responder = get_named_bytes32(&fields, "responder")?;
+    let serialized_output = get_named_vec_u8(&fields, "serialized_output")?;
+
+    let sig_val = get_named(&fields, "signature")?;
+    let mpc_sig = parse_signature(sig_val)?;
+
+    Ok(HydrationRespondBidirectionalEvent {
+        request_id,
+        responder,
+        serialized_output,
+        signature: mpc_sig,
+    })
+}
+
+fn parse_signature(v: &Value<u32>) -> Result<Signature> {
+    let sig_c = as_composite(v).ok_or_else(|| anyhow!("signature is not composite: {v}"))?;
+
+    // Signature { big_r, s, recovery_id }
+    let big_r_v = get_named(sig_c, "big_r")?;
+    let big_r_c = as_composite(big_r_v).ok_or_else(|| anyhow!("big_r is not composite"))?;
+
+    // AffinePoint { x, y }
+    let x = get_named_bytes32(big_r_c, "x")?;
+    let y = get_named_bytes32(big_r_c, "y")?;
+
+    // s: [u8;32]
+    let s_v = get_named(sig_c, "s")?;
+    let s_bytes_vec = value_to_vec_u8(s_v)?;
+    if s_bytes_vec.len() != 32 {
+        return Err(anyhow!(
+            "signature.s expected 32 bytes, got {}",
+            s_bytes_vec.len()
+        ));
+    }
+    let s_arr: [u8; 32] = s_bytes_vec.try_into().unwrap();
+
+    // recovery_id: u8
+    let rec_v = get_named(sig_c, "recovery_id")?;
+    let recovery_id_u8 = rec_v
+        .as_u128()
+        .ok_or_else(|| anyhow!("recovery_id expected int, got: {rec_v}"))?;
+    let recovery_id = recovery_id_u8 as u8;
+
+    let x_bytes: FieldBytes = x.into();
+    let y_bytes: FieldBytes = y.into();
+    let enc = EncodedPoint::from_affine_coordinates(&x_bytes, &y_bytes, false);
+
+    let big_r = AffinePoint::from_encoded_point(&enc)
+        .into_option()
+        .ok_or_else(|| anyhow!("invalid affine point in Signature.big_r"))?;
+
+    let s_scalar =
+        Scalar::from_bytes(s_arr).ok_or_else(|| anyhow!("invalid scalar in Signature.s"))?;
+
+    Ok(Signature::new(big_r, s_scalar, recovery_id))
+}
+
+fn get_named_vec_u8(fields: &Composite<u32>, name: &str) -> Result<Vec<u8>> {
+    let v = get_named(fields, name)?;
+    value_to_vec_u8(v)
+}
+
+fn get_named_bytes32(fields: &Composite<u32>, name: &str) -> Result<[u8; 32]> {
+    let v = get_named(fields, name)?;
+    let bytes = value_to_vec_u8(v)?;
+    let len = bytes.len();
+    let arr: [u8; 32] = bytes
         .try_into()
-        .map_err(|_| anyhow::anyhow!("failed to convert event bytes to [u8; 32]"))
+        .map_err(|_| anyhow!("{name} expected 32 bytes, got {}", len))?;
+    Ok(arr)
+}
+
+fn get_named_utf8(fields: &Composite<u32>, name: &str) -> Result<String> {
+    let v = get_named(fields, name)?;
+    let bytes = value_to_vec_u8(v)?;
+    Ok(String::from_utf8(bytes)?)
+}
+
+fn get_named_u32(fields: &Composite<u32>, name: &str) -> Result<u32> {
+    let v = get_named(fields, name)?;
+    let n = v
+        .as_u128()
+        .ok_or_else(|| anyhow!("field {name} expected integer, got: {v}"))?;
+    Ok(n.try_into()?)
+}
+
+fn get_named_u64(fields: &Composite<u32>, name: &str) -> Result<u64> {
+    let v = get_named(fields, name)?;
+    let n = v
+        .as_u128()
+        .ok_or_else(|| anyhow!("field {name} expected integer, got: {v}"))?;
+    Ok(n.try_into()?)
+}
+
+fn as_composite(v: &Value<u32>) -> Option<&Composite<u32>> {
+    match &v.value {
+        ValueDef::Composite(c) => Some(c),
+        _ => None,
+    }
+}
+
+fn get_named<'a>(fields: &'a Composite<u32>, name: &str) -> Result<&'a Value<u32>> {
+    match fields {
+        Composite::Named(kvs) => kvs
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v)
+            .ok_or_else(|| anyhow!("missing field: {name}")),
+        Composite::Unnamed(_) => Err(anyhow!("fields are unnamed; can't lookup '{name}'")),
+    }
+}
+
+fn value_to_vec_u8(v: &Value<u32>) -> Result<Vec<u8>> {
+    if let Some(s) = v.as_str() {
+        if let Some(hex_str) = s.strip_prefix("0x") {
+            return hex::decode(hex_str).map_err(|e| anyhow!("bad 0x hex string: {e}; s={s}"));
+        }
+        return Ok(s.as_bytes().to_vec());
+    }
+
+    match &v.value {
+        ValueDef::Composite(Composite::Unnamed(vals)) => {
+            if vals.len() == 1 {
+                // if single element and element is Primitive, then Vec<u8> has only one byte
+                if let ValueDef::Primitive(_) = vals[0].value {
+                    let n = vals[0].as_u128().ok_or_else(|| {
+                        anyhow!("expected int-like primitive byte, got: {}", vals[0])
+                    })?;
+                    if n > 255 {
+                        return Err(anyhow!("byte out of range: {n}"));
+                    }
+                    return Ok(vec![n as u8]);
+                }
+
+                //newtype wrapper unwrap (e.g. AccountId32([u8;32]))
+                return value_to_vec_u8(&vals[0]);
+            }
+            let mut out = Vec::with_capacity(vals.len());
+            for x in vals {
+                let n = x
+                    .as_u128()
+                    .ok_or_else(|| anyhow!("expected u8-like number in Vec<u8>, got: {x}"))?;
+                if n > 255 {
+                    return Err(anyhow!("byte out of range: {n}"));
+                }
+                out.push(n as u8);
+            }
+            Ok(out)
+        }
+        other => Err(anyhow!("unsupported Vec<u8> shape: {other:?}")),
+    }
 }
