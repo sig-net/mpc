@@ -373,6 +373,51 @@ impl SignOrganizer {
 }
 
 impl SignPositor {
+    fn classify_round(state: &mut SignState, msg: SignTaskMessage) -> RoundDisposition {
+        let SignTaskMessage::PositMessage {
+            presignature_id,
+            round: peer_round,
+            from,
+            action,
+        } = msg;
+        if state.round > peer_round {
+            return RoundDisposition::Past;
+        }
+
+        if state.round < peer_round {
+            state.store_future_posit_message(SignTaskMessage::PositMessage {
+                presignature_id,
+                round: peer_round,
+                from,
+                action,
+            });
+            return RoundDisposition::Future;
+        }
+
+        RoundDisposition::Current(SignTaskMessage::PositMessage {
+            presignature_id,
+            round: peer_round,
+            from,
+            action,
+        })
+    }
+
+    async fn next_current_round_message(
+        state: &mut SignState,
+        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
+    ) -> Option<SignTaskMessage> {
+        if let Some(buffered) = state.take_buffered_posit_message() {
+            return Some(buffered);
+        }
+
+        loop {
+            let msg = task_rx.recv().await?;
+            if let RoundDisposition::Current(msg) = Self::classify_round(state, msg) {
+                return Some(msg);
+            }
+        }
+    }
+
     /// Deliberator waits for the proposer to send a Propose message with a presignature_id.
     async fn wait_propose(
         ctx: &SignTask,
@@ -385,15 +430,9 @@ impl SignPositor {
         let remaining = state.budget.remaining();
         let outcome = tokio::time::timeout(remaining, async {
             loop {
-                // Prioritize buffered messages, if any for the current round
-                let task_msg = match state.take_buffered_posit_message() {
-                    Some(buffered) => buffered,
-                    None => {
-                        let Some(task_msg) = task_rx.recv().await else {
-                            continue;
-                        };
-                        task_msg
-                    }
+                let task_msg = match Self::next_current_round_message(state, task_rx).await {
+                    Some(msg) => msg,
+                    None => continue,
                 };
 
                 let SignTaskMessage::PositMessage {
@@ -401,16 +440,9 @@ impl SignPositor {
                     from,
                     action,
                     round: peer_round,
-                } = &task_msg;
+                } = task_msg;
 
-                // reject any messages with a different round than ours
-                //
-                // note: Rejecting messages of older rounds is always the right
-                // choice. But for newer messages, we could buffer them and try
-                // that round later. What we must not do is immediately jump to
-                // that higher round, or else any peer could force themselves to
-                // be the proposer every time.
-                if state.round > *peer_round {
+                if state.round > peer_round {
                     ctx.msg
                         .send(
                             ctx.me,
@@ -418,8 +450,8 @@ impl SignPositor {
                             PositMessage {
                                 id: PositProtocolId::Signature(
                                     sign_id,
-                                    *presignature_id,
-                                    *peer_round,
+                                    presignature_id,
+                                    peer_round,
                                 ),
                                 from: ctx.me,
                                 action: PositAction::Reject,
@@ -429,20 +461,11 @@ impl SignPositor {
                     continue;
                 }
 
-                // Message can't be processed now but is crucial to make progress later.
-                // Note that we must first try and finish the current round and
-                // not immediately jump to that higher round. Otherwise, any peer
-                // could force themselves to be the proposer every time.
-                if state.round < *peer_round {
-                    state.store_future_posit_message(task_msg);
-                    continue;
-                }
-
                 if !matches!(action, PositAction::Propose) {
                     continue;
                 }
 
-                if from == &proposer {
+                if from == proposer {
                     tracing::info!(
                         ?sign_id,
                         presignature_id,
@@ -450,8 +473,7 @@ impl SignPositor {
                         "deliberator received Propose"
                     );
 
-                    // Check if we have access to this presignature (in storage or generating)
-                    if !ctx.presignatures.contains(*presignature_id).await {
+                    if !ctx.presignatures.contains(presignature_id).await {
                         tracing::warn!(
                             ?sign_id,
                             presignature_id,
@@ -464,7 +486,7 @@ impl SignPositor {
                                 PositMessage {
                                     id: PositProtocolId::Signature(
                                         sign_id,
-                                        *presignature_id,
+                                        presignature_id,
                                         state.round,
                                     ),
                                     from: ctx.me,
@@ -475,31 +497,31 @@ impl SignPositor {
                         continue;
                     }
 
-                    break *presignature_id;
-                } else {
-                    tracing::warn!(
-                        ?sign_id,
-                        ?from,
-                        ?proposer,
-                        "received Propose from non-proposer, rejecting"
-                    );
-
-                    ctx.msg
-                        .send(
-                            ctx.me,
-                            *from,
-                            PositMessage {
-                                id: PositProtocolId::Signature(
-                                    sign_id,
-                                    *presignature_id,
-                                    state.round,
-                                ),
-                                from: ctx.me,
-                                action: PositAction::Reject,
-                            },
-                        )
-                        .await;
+                    break presignature_id;
                 }
+
+                tracing::warn!(
+                    ?sign_id,
+                    ?from,
+                    ?proposer,
+                    "received Propose from non-proposer, rejecting"
+                );
+
+                ctx.msg
+                    .send(
+                        ctx.me,
+                        from,
+                        PositMessage {
+                            id: PositProtocolId::Signature(
+                                sign_id,
+                                presignature_id,
+                                state.round,
+                            ),
+                            from: ctx.me,
+                            action: PositAction::Reject,
+                        },
+                    )
+                    .await;
             }
         })
         .await;
@@ -671,33 +693,27 @@ impl SignPositor {
         loop {
             tokio::select! {
                 Some(task_msg) = task_rx.recv() => {
-                    let SignTaskMessage::PositMessage { presignature_id, round: peer_round, from, action } = task_msg;
+                    match Self::classify_round(state, task_msg) {
+                        RoundDisposition::Past | RoundDisposition::Future => continue,
+                        RoundDisposition::Current(SignTaskMessage::PositMessage { presignature_id: _, round: _, from, action }) => {
+                            if from != proposer {
+                                if matches!(action, PositAction::Start(_)) {
+                                    tracing::warn!(?sign_id, ?from, ?proposer, "received Start from non-proposer, ignoring");
+                                }
+                                continue;
+                            }
 
-                    if state.round > peer_round {
-                        continue;
-                    }
+                            if let PositAction::Start(participants) = action {
+                                if participants.len() < ctx.threshold {
+                                    tracing::warn!(?sign_id, round = ?state.round, "not enough start participants");
+                                    state.bump_round();
+                                    return Err(SignPhase::Organizing(SignOrganizer));
+                                }
 
-                    if state.round < peer_round {
-                        state.store_future_posit_message(SignTaskMessage::PositMessage { presignature_id, round: peer_round, from, action });
-                        continue;
-                    }
-
-                    if from != proposer {
-                        if matches!(action, PositAction::Start(_)) {
-                            tracing::warn!(?sign_id, ?from, ?proposer, "received Start from non-proposer, ignoring");
+                                tracing::info!(?sign_id, participant = ?ctx.me, ?participants, "deliberator received Start");
+                                return Ok(participants);
+                            }
                         }
-                        continue;
-                    }
-
-                    if let PositAction::Start(participants) = action {
-                        if participants.len() < ctx.threshold {
-                            tracing::warn!(?sign_id, round = ?state.round, "not enough start participants");
-                            state.bump_round();
-                            return Err(SignPhase::Organizing(SignOrganizer));
-                        }
-
-                        tracing::info!(?sign_id, participant = ?ctx.me, ?participants, "deliberator received Start");
-                        return Ok(participants);
                     }
                 }
                 _ = &mut deadline => {
@@ -725,53 +741,47 @@ impl SignPositor {
         loop {
             tokio::select! {
                 Some(task_msg) = task_rx.recv() => {
-                    let SignTaskMessage::PositMessage { presignature_id, round: peer_round, from, action } = task_msg;
-
-                    if state.round > peer_round {
-                        continue;
-                    }
-
-                    if state.round < peer_round {
-                        state.store_future_posit_message(SignTaskMessage::PositMessage { presignature_id, round: peer_round, from, action });
-                        continue;
-                    }
-
-                    if !counter.process_action(from, &action) {
-                        continue;
-                    }
-
-                    if counter.enough_rejects(ctx.threshold) {
-                        tracing::warn!(?sign_id, ?from, "received enough REJECTs, reorganizing");
-                        if let Some(taken) = presignature.take() {
-                            tracing::warn!(?sign_id, "recycling presignature due to REJECTs");
-                            ctx.presignatures.recycle_mine(ctx.me, taken).await;
-                        }
-                        state.bump_round();
-                        return Err(SignPhase::Organizing(SignOrganizer));
-                    }
-
-                    if counter.meets_totality() {
-                        let participants = Self::filter_participants(&counter.accepts, presignature_participants);
-                        if participants.len() < ctx.threshold {
-                            tracing::warn!(
-                                ?sign_id,
-                                presig_participants = ?presignature_participants,
-                                accepts = ?counter.accepts,
-                                filtered_participants = ?participants,
-                                threshold = ctx.threshold,
-                                "not enough presignature participants accepted, reorganizing"
-                            );
-                            if let Some(taken) = presignature.take() {
-                                tracing::warn!(?sign_id, "recycling presignature due to insufficient participants");
-                                ctx.presignatures.recycle_mine(ctx.me, taken).await;
+                    match Self::classify_round(state, task_msg) {
+                        RoundDisposition::Past | RoundDisposition::Future => continue,
+                        RoundDisposition::Current(SignTaskMessage::PositMessage { presignature_id: _, round: _, from, action }) => {
+                            if !counter.process_action(from, &action) {
+                                continue;
                             }
-                            state.bump_round();
-                            return Err(SignPhase::Organizing(SignOrganizer));
-                        }
 
-                        tracing::info!(?sign_id, me = ?ctx.me, ?participants, "proposer broadcasting Start");
-                        Self::broadcast_start(ctx, sign_id, presignature_id, state.round, &participants).await;
-                        return Ok(participants);
+                            if counter.enough_rejects(ctx.threshold) {
+                                tracing::warn!(?sign_id, ?from, "received enough REJECTs, reorganizing");
+                                if let Some(taken) = presignature.take() {
+                                    tracing::warn!(?sign_id, "recycling presignature due to REJECTs");
+                                    ctx.presignatures.recycle_mine(ctx.me, taken).await;
+                                }
+                                state.bump_round();
+                                return Err(SignPhase::Organizing(SignOrganizer));
+                            }
+
+                            if counter.meets_totality() {
+                                let participants = Self::filter_participants(&counter.accepts, presignature_participants);
+                                if participants.len() < ctx.threshold {
+                                    tracing::warn!(
+                                        ?sign_id,
+                                        presig_participants = ?presignature_participants,
+                                        accepts = ?counter.accepts,
+                                        filtered_participants = ?participants,
+                                        threshold = ctx.threshold,
+                                        "not enough presignature participants accepted, reorganizing"
+                                    );
+                                    if let Some(taken) = presignature.take() {
+                                        tracing::warn!(?sign_id, "recycling presignature due to insufficient participants");
+                                        ctx.presignatures.recycle_mine(ctx.me, taken).await;
+                                    }
+                                    state.bump_round();
+                                    return Err(SignPhase::Organizing(SignOrganizer));
+                                }
+
+                                tracing::info!(?sign_id, me = ?ctx.me, ?participants, "proposer broadcasting Start");
+                                Self::broadcast_start(ctx, sign_id, presignature_id, state.round, &participants).await;
+                                return Ok(participants);
+                            }
+                        }
                     }
                 }
                 _ = &mut deadline => {
@@ -1232,6 +1242,13 @@ enum SignTaskMessage {
         from: Participant,
         action: PositAction,
     },
+}
+
+/// How a posit message relates to the current round.
+enum RoundDisposition {
+    Past,
+    Future,
+    Current(SignTaskMessage),
 }
 
 pub struct SignatureSpawner {
