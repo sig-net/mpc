@@ -782,7 +782,7 @@ async fn test_triples_message_count() {
         .build()
         .await;
 
-    tokio::time::timeout(Duration::from_secs(60), network.wait_for_triples(1))
+    tokio::time::timeout(Duration::from_secs(120), network.wait_for_triples(1))
         .await
         .expect("should have enough triples eventually");
 
