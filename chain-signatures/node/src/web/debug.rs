@@ -1,14 +1,15 @@
 //! A debug page showing a live view of what the node it currently doing.
 
+use crate::protocol::state::NodeStatus;
+use crate::web::AxumState;
 use alloy_primitives::map::HashMap;
 use axum::response::Html;
 use axum::Extension;
 use maud::{html, Markup, Render};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::{sync::LazyLock, time::Instant};
 use tokio::sync::{watch, Mutex, RwLock};
-
-use crate::web::AxumState;
 
 /// Global state used for easy access.
 ///
@@ -85,24 +86,64 @@ pub(super) async fn page(Extension(web): Extension<Arc<AxumState>>) -> Html<Stri
     let registry = read_registry(web.my_account_id.as_str()).await;
     let tasks = registry.lock().await;
 
+    // Render all registered tasks and group them
+    let mut rendered_tasks: BTreeMap<&str, Vec<_>> = BTreeMap::new();
+
+    for t in tasks.iter() {
+        // Take first word as key for grouping tasks (e.g. "TripleGenerator")
+        let key = t.name.split_whitespace().next().unwrap_or_default();
+        let data = (
+            t.name.clone(),
+            format!("{:#.2?}", t.registered.elapsed()),
+            t.state.borrow().render(),
+        );
+        rendered_tasks.entry(key).or_default().push(data);
+    }
+
+    // read data that's also visible on /state
+    // and create a title from it
+    let title = match web.node.status() {
+        NodeStatus::Starting => "Node Starting".to_owned(),
+        NodeStatus::Started => "Node Started".to_owned(),
+        NodeStatus::Generating { .. } => "Node Generating Keys".to_owned(),
+        NodeStatus::WaitingForConsensus { .. } => "Node Waiting For Consensus".to_owned(),
+        NodeStatus::Running { me, .. } => format!("{me:?} Running"),
+        NodeStatus::Resharing { phase, .. } => format!("Resharing in Phase {phase:?}"),
+        NodeStatus::Joining { .. } => "Node Joining".to_owned(),
+    };
+
+    let current_t = web.triple_storage.len_generated().await;
+    let current_p = web.presignature_storage.len_generated().await;
+
     let markup = html! {
-        h1 { "Registered Tasks (" (tasks.len())  ")"}
+        title { "Debug Page"}
+        h1 { (title)}
+        h2 { "Stockpile"}
+        p { "T=" (current_t)  ", P=" (current_p)}
+        h2 { "Registered Tasks (" (tasks.len())  ")"}
         style {
             ".tasks { display: flex; flex-wrap: wrap; }"
-            ".task { margin: 1rem; padding: 1rem; border: solid 1px; }"
+            ".task { margin: 1rem; padding: 1rem; border: solid 1px; width: 15rem; }"
             ".task-title { font-weight: bold; }"
         }
 
-        .tasks {
-            @for task in tasks.iter() {
-                @let age = format!("{:#.2?}", task.registered.elapsed());
-                .task {
-                    .task-title {
-                        (task.name)
-                    }
-                    .task-state {
-                        "age: " (age)
-                        (task.state.borrow().render())
+        @for (task_group_name, task_group) in rendered_tasks.iter() {
+            details {
+                summary {
+                    (task_group_name) "(" (task_group.len()) " running tasks)"
+                }
+                .tasks {
+                    @for task in task_group.iter() {
+                        @let (name, age, markup) = task;
+                        .task {
+                            .task-title {
+                                (name)
+                            }
+                            .task-state {
+                                "age: " (age)
+                                (markup)
+                            }
+                        }
                     }
                 }
             }

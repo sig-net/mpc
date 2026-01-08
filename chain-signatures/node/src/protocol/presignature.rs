@@ -160,24 +160,24 @@ impl PresignatureGenerator {
     }
 
     pub async fn run(mut self, my_account_id: &AccountId, me: Participant, epoch: u64) {
-        let failure_counts = crate::metrics::PRESIGNATURE_GENERATOR_FAILURES
+        let failure_counts = crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES
             .with_label_values(&[my_account_id.as_str()]);
-        let before_first_poke_delay = crate::metrics::PRESIGNATURE_BEFORE_POKE_DELAY
+        let before_first_poke_delay = crate::metrics::protocols::PRESIGNATURE_BEFORE_POKE_DELAY
             .with_label_values(&[my_account_id.as_str()]);
-        let accrued_wait_delay = crate::metrics::PRESIGNATURE_ACCRUED_WAIT_DELAY
+        let accrued_wait_delay = crate::metrics::protocols::PRESIGNATURE_ACCRUED_WAIT_DELAY
             .with_label_values(&[my_account_id.as_str()]);
-        let poke_counts =
-            crate::metrics::PRESIGNATURE_POKES_CNT.with_label_values(&[my_account_id.as_str()]);
-        let runtime_latency =
-            crate::metrics::PRESIGNATURE_LATENCY.with_label_values(&[my_account_id.as_str()]);
+        let poke_counts = crate::metrics::protocols::PRESIGNATURE_POKES_CNT
+            .with_label_values(&[my_account_id.as_str()]);
+        let runtime_latency = crate::metrics::protocols::PRESIGNATURE_LATENCY
+            .with_label_values(&[my_account_id.as_str()]);
         let success_owned_counts: prometheus::core::GenericCounter<prometheus::core::AtomicF64> =
-            crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS
+            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS
                 .with_label_values(&[my_account_id.as_str()]);
         let success_total_counts =
-            crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS
+            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS
                 .with_label_values(&[my_account_id.as_str()]);
-        let poke_latency =
-            crate::metrics::PRESIGNATURE_POKE_CPU_TIME.with_label_values(&[my_account_id.as_str()]);
+        let poke_latency = crate::metrics::protocols::PRESIGNATURE_POKE_CPU_TIME
+            .with_label_values(&[my_account_id.as_str()]);
 
         let start_time = Instant::now();
         let mut total_wait = Duration::from_millis(0);
@@ -596,11 +596,11 @@ impl PresignatureSpawner {
                 }
             };
 
-            crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS
+            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS
                 .with_label_values(&[my_account_id.as_str()])
                 .inc();
             if owner == me {
-                crate::metrics::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE
+                crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE
                     .with_label_values(&[my_account_id.as_str()])
                     .inc();
             }
@@ -721,13 +721,13 @@ impl PresignatureSpawner {
                     self.stockpile(&active, &protocol).await;
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
 
-                    crate::metrics::NUM_PRESIGNATURES_MINE
+                    crate::metrics::storage::NUM_PRESIGNATURES_MINE
                         .with_label_values(&[self.my_account_id.as_str()])
                         .set(self.len_mine().await as i64);
-                    crate::metrics::NUM_PRESIGNATURES_TOTAL
+                    crate::metrics::storage::NUM_PRESIGNATURES_TOTAL
                         .with_label_values(&[self.my_account_id.as_str()])
                         .set(self.len_generated().await as i64);
-                    crate::metrics::NUM_PRESIGNATURE_GENERATORS_TOTAL
+                    crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL
                         .with_label_values(&[self.my_account_id.as_str()])
                         .set(self.len_potential().await as i64 - self.len_generated().await as i64);
                 }

@@ -63,6 +63,7 @@ alloy-json-abi = "1.4.1"
 alloy-rlp = "0.3.12"
 solana-client = "2.2.7"
 futures-util = "0.3.31"
+parity-scale-codec = { version = "3", features = ["derive"] }
 
 near-account-id = "1.0.0"
 near-primitives = "0.26.0"

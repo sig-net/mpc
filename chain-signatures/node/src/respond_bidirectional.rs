@@ -13,6 +13,7 @@ use tokio::time::Duration;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
+const HYDRATION_RESPOND_BIDIRECTIONAL_PATH: &str = "hydration response key";
 // Use Borsh as this is what we are using for solana
 pub(crate) const RESPOND_SERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Borsh;
 // Use Abi as this is what we are using for ethereum
@@ -117,16 +118,12 @@ impl CompletedTx {
         let Some(payload) = Scalar::from_bytes(message) else {
             anyhow::bail!("Failed to convert respond bidirectional message to scalar: {message:?}");
         };
-        let path = SOLANA_RESPOND_BIDIRECTIONAL_PATH.to_string();
-        tracing::info!(
-            "requester to derive epsilon: {:?}",
-            self.tx.sender.to_string()
-        );
-        let epsilon = mpc_crypto::kdf::derive_epsilon_sol(
-            self.tx.key_version,
-            &self.tx.sender.to_string(),
-            &path,
-        );
+        let path = match chain {
+            Chain::Solana => SOLANA_RESPOND_BIDIRECTIONAL_PATH.to_string(),
+            Chain::Hydration => HYDRATION_RESPOND_BIDIRECTIONAL_PATH.to_string(),
+            _ => anyhow::bail!("Unsupported chain: {}", chain),
+        };
+        let epsilon = self.tx.epsilon(&path)?;
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest {
             id: SignId::new(request_id_bytes),

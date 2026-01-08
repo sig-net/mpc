@@ -8,7 +8,7 @@ use tokio::task::{AbortHandle, JoinSet};
 use std::collections::HashMap;
 use std::future::Future;
 use std::hash::Hash;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub trait NearPublicKeyExt {
     fn into_affine_point(self) -> PublicKey;
@@ -189,5 +189,37 @@ impl<T, U> Drop for JoinMap<T, U> {
         for handle in self.mapping.values() {
             handle.abort();
         }
+    }
+}
+
+/// Tracks the remaining time budget for a signature attempt.
+/// When the budget is exhausted, the attempt fails and we reorganize.
+pub struct TimeoutBudget {
+    started: Instant,
+    timeout: Duration,
+}
+
+impl TimeoutBudget {
+    pub fn new(timeout: Duration) -> Self {
+        Self {
+            started: Instant::now(),
+            timeout,
+        }
+    }
+
+    /// Returns the remaining time in the budget, or Duration::ZERO if exhausted.
+    pub fn remaining(&self) -> Duration {
+        self.timeout.saturating_sub(self.started.elapsed())
+    }
+
+    /// Returns true if the budget is exhausted.
+    pub fn is_exhausted(&self) -> bool {
+        self.started.elapsed() >= self.timeout
+    }
+
+    /// Resets the budget with a new timeout (used when starting a new attempt).
+    pub fn reset(&mut self, timeout: Duration) {
+        self.started = Instant::now();
+        self.timeout = timeout;
     }
 }

@@ -7,6 +7,7 @@ pub use sub::Subscriber;
 use crate::protocol::message::sub::{
     SubscribeId, SubscribeRequest, SubscribeRequestAction, SubscribeResponse,
 };
+use crate::protocol::message::types::Round;
 pub use crate::protocol::message::types::{
     GeneratingMessage, Message, MessageError, MessageFilterId, PositMessage, PositProtocolId,
     PresignatureMessage, Protocols, ReadyMessage, ResharingMessage, SignatureMessage,
@@ -68,7 +69,7 @@ pub struct MessageInbox {
     presignature: HashMap<PresignatureId, Subscriber<PresignatureMessage>>,
     presignature_init: Subscriber<(FullPresignatureId, Participant, PositAction)>,
     signature: HashMap<(SignId, PresignatureId), Subscriber<SignatureMessage>>,
-    signature_init: Subscriber<(SignId, PresignatureId, Participant, PositAction)>,
+    signature_init: Subscriber<(SignId, PresignatureId, Round, Participant, PositAction)>,
 }
 
 impl MessageInbox {
@@ -110,10 +111,16 @@ impl MessageInbox {
                         .send((id, message.from, message.action))
                         .await;
                 }
-                PositProtocolId::Signature(sign_id, presignature_id) => {
+                PositProtocolId::Signature(sign_id, presignature_id, round) => {
                     let _ = self
                         .signature_init
-                        .send((sign_id, presignature_id, message.from, message.action))
+                        .send((
+                            sign_id,
+                            presignature_id,
+                            round,
+                            message.from,
+                            message.action,
+                        ))
                         .await;
                 }
             },
@@ -359,7 +366,7 @@ impl MessageInbox {
                     let messages_len = messages.len();
                     self.publish(messages).await;
 
-                    crate::metrics::NUM_RECEIVED_ENCRYPTED_TOTAL
+                    crate::metrics::messaging::NUM_RECEIVED_ENCRYPTED_TOTAL
                         .with_label_values(&[my_account_id.as_str()])
                         .inc_by(messages_len as f64);
                 }
@@ -616,7 +623,7 @@ impl MessageChannel {
 
     pub async fn subscribe_signature_posit(
         &self,
-    ) -> mpsc::Receiver<(SignId, PresignatureId, Participant, PositAction)> {
+    ) -> mpsc::Receiver<(SignId, PresignatureId, Round, Participant, PositAction)> {
         let Some(subscription) = self.subscribe(SubscribeId::Signatures).await else {
             tracing::warn!("failed to subscribe for signature posit");
             return mpsc::channel(1).1;
@@ -856,14 +863,16 @@ impl MessageOutbox {
         let start = Instant::now();
         let timeout = Duration::from_millis(cfg.message_timeout);
 
-        let msg_send_delay_metric =
-            crate::metrics::MSG_CLIENT_SEND_DELAY.with_label_values(&[account_id.as_str()]);
+        let msg_send_delay_metric = crate::metrics::messaging::MSG_CLIENT_SEND_DELAY
+            .with_label_values(&[account_id.as_str()]);
         let num_send_encrypted_failure_metric =
-            crate::metrics::NUM_SEND_ENCRYPTED_FAILURE.with_label_values(&[account_id.as_str()]);
-        let send_encrypted_latency_metric =
-            crate::metrics::SEND_ENCRYPTED_LATENCY.with_label_values(&[account_id.as_str()]);
+            crate::metrics::messaging::NUM_SEND_ENCRYPTED_FAILURE
+                .with_label_values(&[account_id.as_str()]);
+        let send_encrypted_latency_metric = crate::metrics::messaging::SEND_ENCRYPTED_LATENCY
+            .with_label_values(&[account_id.as_str()]);
         let failed_send_encrypted_latency_metric =
-            crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY.with_label_values(&[account_id.as_str()]);
+            crate::metrics::messaging::FAILED_SEND_ENCRYPTED_LATENCY
+                .with_label_values(&[account_id.as_str()]);
 
         for ((_from, to), encrypted) in encrypted {
             for (encrypted_partition, timestamp, message_len) in encrypted {
@@ -871,7 +880,7 @@ impl MessageOutbox {
                 let info = participants.get(&to).unwrap();
                 let url = info.url.clone();
 
-                crate::metrics::NUM_SEND_ENCRYPTED_TOTAL
+                crate::metrics::messaging::NUM_SEND_ENCRYPTED_TOTAL
                     .with_label_values(&[account_id.as_str()])
                     .inc_by(message_len as f64);
 

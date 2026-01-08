@@ -186,7 +186,7 @@ async fn poll_pending_requests(ctx: &mut Context) -> anyhow::Result<()> {
     ctx.indexer.update_timestamp();
 
     // Update metrics
-    crate::metrics::LATEST_BLOCK_NUMBER
+    crate::metrics::indexers::LATEST_BLOCK_NUMBER
         .with_label_values(&[Chain::NEAR.as_str(), ctx.node_account_id.as_str()])
         .set(latest_height as i64);
 
@@ -199,7 +199,7 @@ async fn poll_pending_requests(ctx: &mut Context) -> anyhow::Result<()> {
         if let Err(err) = ctx.sign_tx.send(Sign::Request(request)).await {
             tracing::error!(?err, "failed to send the sign request into sign queue");
         } else {
-            crate::metrics::NUM_SIGN_REQUESTS
+            crate::metrics::requests::NUM_SIGN_REQUESTS
                 .with_label_values(&[Chain::NEAR.as_str(), ctx.node_account_id.as_str()])
                 .inc();
         }

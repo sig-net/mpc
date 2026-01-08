@@ -74,6 +74,14 @@ impl MpcFixture {
             tokio::time::sleep(interval).await;
         }
     }
+
+    /// Print all messages to debug.
+    pub async fn print_msg_log(&self) {
+        let guard = self.output.msg_log.lock().await;
+        for msg in guard.iter() {
+            tracing::debug!("{msg}");
+        }
+    }
 }
 
 impl MpcFixtureNode {

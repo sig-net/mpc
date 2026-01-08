@@ -7,6 +7,7 @@ use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState, Sign};
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use test_log::test;
+use tokio::sync::oneshot;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -658,5 +659,142 @@ async fn test_sign_contention_5_nodes() {
         "5-node test passed: {} signatures with {} presignatures consumed",
         actions.len(),
         presignatures_consumed
+    );
+}
+
+/// Test that a node losing their presignatures locally doesn't prevent
+/// signatures from going through.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sign_missing_presignature() {
+    // 3 nodes, threshold 2, should be possible to generate a signature with one
+    // node missing their presignatures
+    let network = MpcFixtureBuilder::new(3, 2)
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    tokio::time::timeout(
+        Duration::from_millis(300),
+        network.wait_for_presignatures(2),
+    )
+    .await
+    .expect("should start with enough presignatures");
+
+    // Now delete presignatures of one node
+    let bad_node = 0;
+    let success = network.nodes[bad_node].presignature_storage.clear().await;
+    assert!(success, "failed to clear presignature storage");
+    // give some time for redis to fully delete state
+    // (the test is flaky without this delay)
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Now we submit the request
+    tracing::info!("sending requests now");
+    let request = sign_request(0);
+    for node in &network.nodes {
+        node.sign_tx
+            .send(Sign::Request(request.clone()))
+            .await
+            .unwrap();
+    }
+
+    // give 2 minutes to resolve the problem
+    // expectation: the node without the presignature will reject a posit, or if
+    // they are proposer, a timeout will let the next proposer take over
+    let timeout = Duration::from_secs(120);
+    let actions = tokio::time::timeout(timeout, network.wait_for_actions(1))
+        .await
+        .expect("should publish RPC action eventually");
+
+    network.print_msg_log().await;
+
+    assert_eq!(actions.len(), 1);
+    let action_str = actions.iter().next().unwrap();
+    assert!(
+        action_str.contains("RpcAction::Publish"),
+        "unexpected rpc action {action_str}"
+    );
+}
+
+/// Test that a node losing their presignatures locally doesn't prevent
+/// signatures from going through, even if it happens after the posits were
+/// accepted.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sign_missing_presignature_after_posits() {
+    // never send signature messages and trigger presignature deletion when this
+    // node would be involved in signing the first time
+    fn create_filter(tx: oneshot::Sender<()>) -> MessageFilter {
+        let mut maybe_tx = Some(tx);
+        Box::new(move |(msg, _)| match msg {
+            mpc_node::protocol::Message::Signature(_signature_message) => {
+                if let Some(tx) = maybe_tx.take() {
+                    tx.send(()).unwrap();
+                };
+                false
+            }
+            _ => true,
+        })
+    }
+
+    // trigger deletion of presignatures when signature messages start
+    let (tx, rx) = oneshot::channel();
+
+    // 3 nodes, threshold 2, should be possible to generate a signature with one
+    // node missing their presignatures
+    // note: bad node must not be the first proposer for this test to work as intended
+    let bad_node = 1;
+    let network = MpcFixtureBuilder::new(3, 2)
+        .only_generate_signatures()
+        .with_outgoing_message_filter(bad_node, create_filter(tx))
+        .build()
+        .await;
+
+    tokio::time::timeout(
+        Duration::from_millis(300),
+        network.wait_for_presignatures(2),
+    )
+    .await
+    .expect("should start with enough presignatures");
+
+    // Now we submit the request
+    tracing::info!("sending requests now");
+    let request = sign_request(0);
+    for node in &network.nodes {
+        node.sign_tx
+            .send(Sign::Request(request.clone()))
+            .await
+            .unwrap();
+    }
+
+    // Wait for first round of posits to go through.
+    tokio::time::timeout(Duration::from_millis(5000), rx)
+        .await
+        .expect("should quickly start signing")
+        .unwrap();
+
+    // Now delete presignatures of one node, which will make it reject future posits
+    let success = network.nodes[bad_node].presignature_storage.clear().await;
+    assert!(success, "failed to clear presignature storage");
+    // give some time for redis to fully delete state
+    // (the test is flaky without this delay)
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // give 2 minutes to resolve the problem
+    // expectation: The current signature fails and eventually a new round of
+    // posits starts. Then, the node without the presignature will reject a
+    // posit, or if they are proposer, a timeout will let the next
+    // proposer take over.
+    let timeout = Duration::from_secs(120);
+    let actions = tokio::time::timeout(timeout, network.wait_for_actions(1))
+        .await
+        .expect("should publish RPC action eventually");
+
+    network.print_msg_log().await;
+
+    assert_eq!(actions.len(), 1);
+    let action_str = actions.iter().next().unwrap();
+    assert!(
+        action_str.contains("RpcAction::Publish"),
+        "unexpected rpc action {action_str}"
     );
 }

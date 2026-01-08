@@ -8,7 +8,7 @@ pub mod debug;
 
 use self::error::Error;
 use crate::backlog::{Backlog, Checkpoint};
-use crate::metrics::WEB_ENDPOINT_LATENCY;
+use crate::metrics::messaging::WEB_ENDPOINT_LATENCY;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus, ResharingStatus};
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
 use crate::protocol::{Chain, MessageChannel};
@@ -260,9 +260,9 @@ pub struct BenchMetrics {
 #[tracing::instrument(level = "debug", skip_all)]
 async fn bench_metrics() -> Json<BenchMetrics> {
     Json(BenchMetrics {
-        sig_gen: crate::metrics::SIGN_GENERATION_LATENCY.exact(),
-        sig_respond: crate::metrics::SIGN_RESPOND_LATENCY.exact(),
-        presig_gen: crate::metrics::PRESIGNATURE_LATENCY.exact(),
+        sig_gen: crate::metrics::protocols::SIGN_GENERATION_LATENCY.exact(),
+        sig_respond: crate::metrics::requests::SIGN_RESPOND_LATENCY.exact(),
+        presig_gen: crate::metrics::protocols::PRESIGNATURE_LATENCY.exact(),
     })
 }
 

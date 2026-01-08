@@ -1,0 +1,107 @@
+use std::sync::Mutex;
+
+use prometheus::{HistogramOpts, HistogramVec, Opts, Result};
+
+pub mod hardware;
+pub mod indexers;
+pub mod messaging;
+pub mod nodes;
+pub mod protocols;
+pub mod requests;
+pub mod storage;
+
+pub fn try_create_int_gauge_vec(
+    name: &str,
+    help: &str,
+    labels: &[&str],
+) -> Result<prometheus::IntGaugeVec> {
+    check_metric_multichain_prefix(name)?;
+    let opts = Opts::new(name, help);
+    let gauge = prometheus::IntGaugeVec::new(opts, labels)?;
+    prometheus::register(Box::new(gauge.clone()))?;
+    Ok(gauge)
+}
+
+pub fn try_create_counter_vec(
+    name: &str,
+    help: &str,
+    labels: &[&str],
+) -> Result<prometheus::CounterVec> {
+    check_metric_multichain_prefix(name)?;
+    let opts = Opts::new(name, help);
+    let counter = prometheus::CounterVec::new(opts, labels)?;
+    prometheus::register(Box::new(counter.clone()))?;
+    Ok(counter)
+}
+
+/// Attempts to create a `HistogramVector`, returning `Err` if the registry does not accept the counter
+/// (potentially due to naming conflict).
+pub fn try_create_histogram_vec(
+    name: &str,
+    help: &str,
+    labels: &[&str],
+    buckets: Option<Vec<f64>>,
+) -> Result<HistogramVec> {
+    check_metric_multichain_prefix(name)?;
+    let mut opts = HistogramOpts::new(name, help);
+    if let Some(buckets) = buckets {
+        opts = opts.buckets(buckets);
+    }
+    let histogram = HistogramVec::new(opts, labels)?;
+    prometheus::register(Box::new(histogram.clone()))?;
+    Ok(histogram)
+}
+
+fn check_metric_multichain_prefix(name: &str) -> Result<()> {
+    if name.starts_with("multichain_") {
+        Ok(())
+    } else {
+        Err(prometheus::Error::Msg(format!(
+            "Metrics are expected to start with 'multichain_', got {name}"
+        )))
+    }
+}
+
+pub struct Histogram {
+    pub histogram: HistogramVec,
+    pub label_values: Mutex<Vec<String>>,
+    pub exact: Mutex<Vec<f64>>,
+}
+
+impl Histogram {
+    pub fn new(name: &str, help: &str, labels: &[&str], buckets: Option<Vec<f64>>) -> Self {
+        let histogram = try_create_histogram_vec(name, help, labels, buckets).unwrap();
+        Self {
+            histogram,
+            label_values: Mutex::new(Vec::new()),
+            exact: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[cfg(feature = "bench")]
+    pub fn with_label_values(&self, values: &[&str]) -> &Self {
+        let mut label_values = self.label_values.lock().unwrap();
+        *label_values = values.iter().map(|s| s.to_string()).collect();
+        self
+    }
+
+    #[cfg(not(feature = "bench"))]
+    pub fn with_label_values(&self, values: &[&str]) -> prometheus::Histogram {
+        self.histogram.with_label_values(values)
+    }
+
+    pub fn observe(&self, value: f64) {
+        let mut exact = self.exact.lock().unwrap();
+        exact.push(value);
+
+        let label_values = self.label_values.lock().unwrap();
+        let label_values = label_values.iter().map(String::as_str).collect::<Vec<_>>();
+        self.histogram
+            .with_label_values(&label_values)
+            .observe(value);
+    }
+
+    pub fn exact(&self) -> Vec<f64> {
+        self.exact.lock().unwrap().clone()
+    }
+}

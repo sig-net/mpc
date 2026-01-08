@@ -41,6 +41,16 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
+use crate::indexer_hydration::HydrationConfig;
+use parity_scale_codec::{Decode, Encode};
+use subxt::config::substrate::{
+    BlakeTwo256, SubstrateConfig, SubstrateExtrinsicParams, SubstrateHeader,
+};
+use subxt::tx::Payload;
+use subxt::Config as SubxtConfig;
+use subxt::OnlineClient;
+use subxt_signer::{sr25519, SecretUri};
+
 /// The maximum amount of times to retry publishing a signature.
 const MAX_PUBLISH_RETRY: usize = 6;
 /// The maximum number of concurrent RPC requests the system can make
@@ -319,19 +329,31 @@ pub struct RpcExecutor {
     near: NearClient,
     eth: Option<EthClient>,
     solana: Option<SolanaClient>,
+    hydration: Option<HydrationClient>,
     action_rx: mpsc::Receiver<RpcAction>,
     backlog: Backlog,
 }
 
 impl RpcExecutor {
-    pub fn new(
+    pub async fn new(
         near: &NearClient,
         eth: &Option<EthConfig>,
         solana: &Option<SolConfig>,
+        hydration: &Option<HydrationConfig>,
         backlog: Backlog,
     ) -> (RpcChannel, Self) {
         let eth = eth.as_ref().map(EthClient::new);
         let solana = solana.as_ref().map(SolanaClient::new);
+        let hydration = match hydration {
+            Some(h) => match HydrationClient::new(h).await {
+                Ok(client) => Some(client),
+                Err(e) => {
+                    tracing::error!(%e, "failed to create hydration client");
+                    None
+                }
+            },
+            None => None,
+        };
         let (tx, rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
         (
             RpcChannel { tx },
@@ -339,6 +361,7 @@ impl RpcExecutor {
                 near: near.clone(),
                 eth,
                 solana,
+                hydration,
                 action_rx: rx,
                 backlog,
             },
@@ -390,7 +413,7 @@ impl RpcExecutor {
 
             tokio::spawn(async move {
                 match chain {
-                    Chain::NEAR | Chain::Solana => {
+                    Chain::NEAR | Chain::Solana | Chain::Hydration => {
                         execute_publish(client, action, near_account_id, backlog).await;
                     }
                     Chain::Ethereum => {
@@ -419,6 +442,13 @@ impl RpcExecutor {
                     ChainClient::Solana(sol.clone())
                 } else {
                     ChainClient::Err("no solana client available for node")
+                }
+            }
+            Chain::Hydration => {
+                if let Some(hydration) = &self.hydration {
+                    ChainClient::Hydration(hydration.clone())
+                } else {
+                    ChainClient::Err("no hydration client available for node")
                 }
             }
         }
@@ -642,6 +672,202 @@ impl SolanaClient {
     }
 }
 
+enum HydradxConfig {}
+
+impl SubxtConfig for HydradxConfig {
+    type AccountId = <SubstrateConfig as SubxtConfig>::AccountId;
+    type Address = <SubstrateConfig as SubxtConfig>::AccountId;
+    type Signature = <SubstrateConfig as SubxtConfig>::Signature;
+    type Hasher = BlakeTwo256;
+    type Header = SubstrateHeader<u32, BlakeTwo256>;
+    type ExtrinsicParams = SubstrateExtrinsicParams<Self>;
+    type AssetId = <SubstrateConfig as SubxtConfig>::AssetId;
+}
+
+#[derive(Clone)]
+pub struct HydrationClient {
+    api: OnlineClient<HydradxConfig>,
+    signer: sr25519::Keypair,
+}
+
+const PALLET_SIGNET: &str = "Signet";
+
+/// This type mirrors the on-chain representation of an affine point
+#[derive(Clone, Debug, Encode, Decode)]
+struct HydrationAffinePoint {
+    pub x: [u8; 32],
+    pub y: [u8; 32],
+}
+
+/// This type mirrors the on-chain signature format
+#[derive(Clone, Debug, Encode, Decode)]
+struct HydrationSignature {
+    pub big_r: HydrationAffinePoint,
+    pub s: [u8; 32],
+    pub recovery_id: u8,
+}
+
+/// A thin wrapper used to mirror the on-chain `BoundedVec` type for SCALE
+/// encoding/decoding. This type does **not** enforce any length bounds; it
+/// is effectively just a `Vec<T>` on the client side.
+///
+/// Callers are responsible for ensuring that the inner `Vec` length respects
+/// the maximum length enforced by the on-chain pallet, otherwise the
+/// resulting transaction may be rejected on-chain.
+#[derive(Clone, Debug, Encode, Decode)]
+struct BoundedVec<T>(pub Vec<T>);
+
+/// this type is used to construct tx to call respond() on pallet
+struct HydrationRespondTx {
+    pub request_ids: BoundedVec<[u8; 32]>,
+    pub signatures: BoundedVec<HydrationSignature>,
+}
+
+impl Payload for HydrationRespondTx {
+    fn encode_call_data_to(
+        &self,
+        metadata: &subxt::Metadata,
+        out: &mut Vec<u8>,
+    ) -> std::result::Result<(), subxt::ext::subxt_core::Error> {
+        let pallet = metadata.pallet_by_name(PALLET_SIGNET).ok_or_else(|| {
+            subxt::ext::subxt_core::Error::Metadata(
+                subxt::error::MetadataError::PalletNameNotFound(PALLET_SIGNET.to_string()),
+            )
+        })?;
+
+        let respond_call_index = pallet
+            .call_variant_by_name("respond")
+            .ok_or_else(|| {
+                subxt::ext::subxt_core::Error::Metadata(
+                    subxt::error::MetadataError::CallNameNotFound("respond".to_string()),
+                )
+            })?
+            .index;
+
+        let pallet_index: u8 = pallet.index();
+
+        out.push(pallet_index);
+        out.push(respond_call_index);
+
+        (&self.request_ids, &self.signatures).encode_to(out);
+        Ok(())
+    }
+}
+
+/// this type is used to construct tx to call respond_bidirectional() on pallet
+struct HydrationRespondBidirectionalTx {
+    pub request_id: [u8; 32],
+    pub serialized_output: BoundedVec<u8>,
+    pub signature: HydrationSignature,
+}
+
+impl Payload for HydrationRespondBidirectionalTx {
+    fn encode_call_data_to(
+        &self,
+        metadata: &subxt::Metadata,
+        out: &mut Vec<u8>,
+    ) -> std::result::Result<(), subxt::ext::subxt_core::Error> {
+        let pallet = metadata.pallet_by_name(PALLET_SIGNET).ok_or_else(|| {
+            subxt::ext::subxt_core::Error::Metadata(
+                subxt::error::MetadataError::PalletNameNotFound(PALLET_SIGNET.to_string()),
+            )
+        })?;
+
+        let pallet_index: u8 = pallet.index();
+
+        let respond_bidirectional_call_index = pallet
+            .call_variant_by_name("respond_bidirectional")
+            .ok_or_else(|| {
+                subxt::ext::subxt_core::Error::Metadata(
+                    subxt::error::MetadataError::CallNameNotFound(
+                        "respond_bidirectional".to_string(),
+                    ),
+                )
+            })?
+            .index;
+
+        out.push(pallet_index);
+        out.push(respond_bidirectional_call_index);
+
+        // respond_bidirectional(origin, request_id, serialized_output, signature)
+        (&self.request_id, &self.serialized_output, &self.signature).encode_to(out);
+        Ok(())
+    }
+}
+
+impl HydrationClient {
+    pub async fn new(config: &HydrationConfig) -> anyhow::Result<Self> {
+        let api = OnlineClient::<HydradxConfig>::from_url(&config.rpc_ws_url).await?;
+        let uri = SecretUri::from_str(&config.signer_uri)?;
+        let signer = sr25519::Keypair::from_uri(&uri)?;
+        Ok(Self { api, signer })
+    }
+
+    fn to_hydration_signature(sig: &Signature) -> anyhow::Result<HydrationSignature> {
+        let enc = sig.big_r.to_encoded_point(false);
+
+        let x: [u8; 32] = enc
+            .x()
+            .ok_or_else(|| anyhow::anyhow!("missing x"))?
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("x must be 32 bytes"))?;
+
+        let y: [u8; 32] = enc
+            .y()
+            .ok_or_else(|| anyhow::anyhow!("missing y"))?
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("y must be 32 bytes"))?;
+
+        let s: [u8; 32] = sig.s.to_bytes().into();
+
+        Ok(HydrationSignature {
+            big_r: HydrationAffinePoint { x, y },
+            s,
+            recovery_id: sig.recovery_id,
+        })
+    }
+
+    async fn call_respond(&self, id: &SignId, response: &Signature) -> anyhow::Result<()> {
+        let tx = HydrationRespondTx {
+            request_ids: BoundedVec(vec![id.request_id]),
+            signatures: BoundedVec(vec![Self::to_hydration_signature(response)?]),
+        };
+
+        let progress = self
+            .api
+            .tx()
+            .sign_and_submit_then_watch_default(&tx, &self.signer)
+            .await?;
+
+        progress.wait_for_finalized_success().await?;
+        Ok(())
+    }
+
+    async fn call_respond_bidirectional(
+        &self,
+        id: &SignId,
+        serialized_output: Vec<u8>,
+        response: &Signature,
+    ) -> anyhow::Result<subxt::config::HashFor<HydradxConfig>> {
+        let tx = HydrationRespondBidirectionalTx {
+            request_id: id.request_id,
+            serialized_output: BoundedVec(serialized_output),
+            signature: Self::to_hydration_signature(response)?,
+        };
+
+        let progress = self
+            .api
+            .tx()
+            .sign_and_submit_then_watch_default(&tx, &self.signer)
+            .await?;
+
+        let events = progress.wait_for_finalized_success().await?;
+        Ok(events.extrinsic_hash())
+    }
+}
+
 /// Client related to a specific chain
 #[allow(clippy::large_enum_variant)]
 pub enum ChainClient {
@@ -649,6 +875,7 @@ pub enum ChainClient {
     Near(NearClient),
     Ethereum(EthClient),
     Solana(SolanaClient),
+    Hydration(HydrationClient),
 }
 
 async fn update_contract(near: NearClient, contract: watch::Sender<Option<ProtocolState>>) {
@@ -730,6 +957,15 @@ async fn execute_publish(
             }
             ChainClient::Solana(sol) => try_publish_sol(
                 sol,
+                &action,
+                &action.timestamp,
+                &signature,
+                &near_account_id,
+            )
+            .await
+            .map_err(|_| ()),
+            ChainClient::Hydration(hyd) => try_publish_hydration(
+                hyd,
                 &action,
                 &action.timestamp,
                 &signature,
@@ -827,9 +1063,6 @@ async fn try_publish_near(
                 ?err,
                 "failed to publish signature",
             );
-            crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
-                .inc();
         })?;
 
     let _: () = outcome.json().inspect_err(|err| {
@@ -840,9 +1073,6 @@ async fn try_publish_near(
             ?err,
             "smart contract threw error",
         );
-        crate::metrics::SIGNATURE_PUBLISH_RESPONSE_ERRORS
-            .with_label_values(&[near.my_account_id.as_str()])
-            .inc();
     })?;
     tracing::info!(
         sign_id = ?action.indexed.id,
@@ -853,21 +1083,15 @@ async fn try_publish_near(
     );
 
     let elapsed = action.indexed.timestamp_sign_queue.elapsed();
-    crate::metrics::NUM_SIGN_SUCCESS
+    crate::metrics::requests::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .inc();
-    crate::metrics::SIGN_TOTAL_LATENCY
+    crate::metrics::requests::SIGN_TOTAL_LATENCY
         .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .observe(elapsed.as_secs_f64());
-    crate::metrics::SIGN_RESPOND_LATENCY
+    crate::metrics::requests::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
-    if elapsed.as_secs() <= 30 {
-        crate::metrics::NUM_SIGN_SUCCESS_30S
-            .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
-            .inc();
-    }
-
     Ok(())
 }
 
@@ -876,7 +1100,6 @@ async fn handle_wait_for_polling_retry(
     attempt: &mut usize,
     max_attempts: usize,
     sign_ids: &[SignId],
-    near_account_id: &AccountId,
     error_msg: &str,
     initial_delay: Duration,
 ) -> Result<(), ()> {
@@ -884,9 +1107,6 @@ async fn handle_wait_for_polling_retry(
     tracing::error!(?sign_ids, attempt = *attempt, "{}", error_msg);
     if *attempt >= max_attempts {
         tracing::error!(?sign_ids, "exceeded max attempts");
-        crate::metrics::SIGNATURE_PUBLISH_FAILURES
-            .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
-            .inc();
         return Err(());
     }
     let backoff = initial_delay * 2u64.pow((*attempt - 1) as u32) as u32;
@@ -898,7 +1118,6 @@ async fn handle_wait_for_polling_retry(
 async fn wait_for_pending_tx(
     provider: &EthContractFillProvider,
     tx_hash: alloy::primitives::B256,
-    near_account_id: &AccountId,
     sign_ids: Vec<SignId>,
     max_attempts: usize,
 ) -> Result<Transaction, ()> {
@@ -921,7 +1140,6 @@ async fn wait_for_pending_tx(
                         &mut attempt,
                         max_attempts,
                         &sign_ids,
-                        near_account_id,
                         "eth signature respond pending transaction not found, retrying",
                         initial_delay,
                     )
@@ -932,7 +1150,6 @@ async fn wait_for_pending_tx(
                         &mut attempt,
                         max_attempts,
                         &sign_ids,
-                        near_account_id,
                         &format!("failed to get eth signature respond pending transaction, retrying: {err:?}"),
                         initial_delay,
                     ).await?;
@@ -943,7 +1160,6 @@ async fn wait_for_pending_tx(
                     &mut attempt,
                     max_attempts,
                     &sign_ids,
-                    near_account_id,
                     "timeout while getting eth signature respond pending transaction, retrying",
                     initial_delay,
                 )
@@ -957,7 +1173,6 @@ async fn wait_for_pending_tx(
 async fn wait_for_transaction_receipt(
     provider: &EthContractFillProvider,
     tx_hash: alloy::primitives::B256,
-    near_account_id: &AccountId,
     sign_ids: Vec<SignId>,
     max_attempts: usize,
 ) -> Result<TransactionReceipt, ()> {
@@ -980,7 +1195,6 @@ async fn wait_for_transaction_receipt(
                         &mut attempt,
                         max_attempts,
                         &sign_ids,
-                        near_account_id,
                         "eth signature respond transaction receipt not found, retrying",
                         initial_delay,
                     )
@@ -991,7 +1205,6 @@ async fn wait_for_transaction_receipt(
                         &mut attempt,
                         max_attempts,
                         &sign_ids,
-                        near_account_id,
                         &format!("failed to get eth signature respond transaction receipt, retrying: {err:?}"),
                         initial_delay,
                     ).await?;
@@ -1002,7 +1215,6 @@ async fn wait_for_transaction_receipt(
                     &mut attempt,
                     max_attempts,
                     &sign_ids,
-                    near_account_id,
                     "timeout while getting eth signature respond transaction receipt, retrying",
                     initial_delay,
                 )
@@ -1017,9 +1229,7 @@ async fn send_eth_transaction(
     params: &[DynSolValue],
     gas: u64,
     sign_ids: &[SignId],
-    near_account_id: &AccountId,
 ) -> Result<alloy::primitives::B256, ()> {
-    let chain = Chain::Ethereum;
     // fetch nonce manually since the automatic nonce management in ContractInstance is lagging
     let nonce = match tokio::time::timeout(
         Duration::from_secs(10),
@@ -1060,9 +1270,6 @@ async fn send_eth_transaction(
             ?sign_ids,
             "timeout while sending ethereum signature transaction"
         );
-        crate::metrics::SIGNATURE_PUBLISH_FAILURES
-            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-            .inc();
     })?
     .map_err(|err| {
         tracing::error!(
@@ -1070,9 +1277,6 @@ async fn send_eth_transaction(
             ?err,
             "failed to send ethereum signature transaction"
         );
-        crate::metrics::SIGNATURE_PUBLISH_FAILURES
-            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-            .inc();
     })?;
 
     Ok(*result.tx_hash())
@@ -1106,14 +1310,12 @@ async fn try_publish_eth(
         &params,
         40000,
         std::slice::from_ref(&action.indexed.id),
-        near_account_id,
     )
     .await?;
 
     let receipt = wait_for_transaction_receipt(
         eth.contract.provider(),
         tx_hash,
-        near_account_id,
         vec![action.indexed.id],
         ETH_TX_RECEIPT_MAX_ATTEMPTS,
     )
@@ -1126,9 +1328,6 @@ async fn try_publish_eth(
             tx_hash = ?receipt.transaction_hash,
             "transaction failed"
         );
-        crate::metrics::SIGNATURE_PUBLISH_FAILURES
-            .with_label_values(&[action.indexed.chain.as_str(), near_account_id.as_str()])
-            .inc();
         return Err(());
     }
 
@@ -1140,20 +1339,15 @@ async fn try_publish_eth(
         "published ethereum signature successfully"
     );
 
-    crate::metrics::NUM_SIGN_SUCCESS
+    crate::metrics::requests::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .inc();
     let elapsed = action.indexed.timestamp_sign_queue.elapsed();
-    crate::metrics::SIGN_TOTAL_LATENCY
+    crate::metrics::requests::SIGN_TOTAL_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(elapsed.as_secs_f64());
-    if elapsed.as_secs() <= 30 {
-        crate::metrics::NUM_SIGN_SUCCESS_30S
-            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-            .inc();
-    }
 
-    crate::metrics::SIGN_RESPOND_LATENCY
+    crate::metrics::requests::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
 
@@ -1197,15 +1391,13 @@ async fn try_batch_publish_eth(
     let params = [DynSolValue::Array(params_vec.clone())];
     let gas = std::cmp::max(40000, 20000 * num_requests as u64);
 
-    let tx_hash =
-        send_eth_transaction(&eth.contract, &params, gas, &sign_ids, near_account_id).await?;
+    let tx_hash = send_eth_transaction(&eth.contract, &params, gas, &sign_ids).await?;
 
     tracing::info!(?tx_hash, "sent eth tx");
 
     let tx = wait_for_pending_tx(
         eth.contract.provider(),
         tx_hash,
-        near_account_id,
         sign_ids.clone(),
         ETH_TX_RECEIPT_MAX_ATTEMPTS,
     )
@@ -1216,7 +1408,6 @@ async fn try_batch_publish_eth(
     let receipt = wait_for_transaction_receipt(
         eth.contract.provider(),
         tx_hash,
-        near_account_id,
         sign_ids.clone(),
         ETH_TX_RECEIPT_MAX_ATTEMPTS,
     )
@@ -1229,9 +1420,6 @@ async fn try_batch_publish_eth(
             tx_hash = ?receipt.transaction_hash,
             "eth batch transaction failed"
         );
-        crate::metrics::SIGNATURE_PUBLISH_FAILURES
-            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-            .inc();
         return Err(());
     }
 
@@ -1244,21 +1432,16 @@ async fn try_batch_publish_eth(
         "eth batch published ethereum signatures successfully"
     );
 
-    crate::metrics::NUM_SIGN_SUCCESS
+    crate::metrics::requests::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .inc_by(num_requests as f64);
     for action in actions {
         let elapsed = action.indexed.timestamp_sign_queue.elapsed();
-        crate::metrics::SIGN_TOTAL_LATENCY
+        crate::metrics::requests::SIGN_TOTAL_LATENCY
             .with_label_values(&[chain.as_str(), near_account_id.as_str()])
             .observe(elapsed.as_secs_f64());
-        if elapsed.as_secs() <= 30 {
-            crate::metrics::NUM_SIGN_SUCCESS_30S
-                .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                .inc();
-        }
     }
-    crate::metrics::SIGN_RESPOND_LATENCY
+    crate::metrics::requests::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(start.elapsed().as_secs_f64());
 
@@ -1306,6 +1489,10 @@ async fn execute_batch_publish(
             }
             ChainClient::Ethereum(eth) => {
                 try_batch_publish_eth(eth, actions, &signatures, near_account_id, start).await
+            }
+            ChainClient::Hydration(_) => {
+                tracing::error!("Hydration has no batch publish");
+                Ok(())
             }
             ChainClient::Err(msg) => {
                 tracing::warn!(msg, "no client for chain");
@@ -1390,9 +1577,6 @@ async fn try_publish_sol(
                         error = ?err,
                         "failed to publish solana signature"
                     );
-                    crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                        .inc();
                 })?;
 
             tracing::info!(
@@ -1429,9 +1613,6 @@ async fn try_publish_sol(
                         error = ?err,
                         "failed to publish respond bidirectional solana signature"
                     );
-                    crate::metrics::SIGNATURE_PUBLISH_FAILURES
-                        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-                        .inc();
                 })?;
 
             tracing::info!(
@@ -1443,7 +1624,7 @@ async fn try_publish_sol(
         }
     }
 
-    crate::metrics::NUM_SIGN_SUCCESS
+    crate::metrics::requests::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .inc();
     let sign_latency_in_secs = crate::util::duration_between_unix(
@@ -1451,17 +1632,88 @@ async fn try_publish_sol(
         crate::util::current_unix_timestamp(),
     )
     .as_secs();
-    crate::metrics::SIGN_TOTAL_LATENCY
+    crate::metrics::requests::SIGN_TOTAL_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(sign_latency_in_secs as f64);
-    crate::metrics::SIGN_RESPOND_LATENCY
+    crate::metrics::requests::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
-    if sign_latency_in_secs <= 30 {
-        crate::metrics::NUM_SIGN_SUCCESS_30S
-            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-            .inc();
+    Ok(())
+}
+
+async fn try_publish_hydration(
+    hyd: &HydrationClient,
+    action: &PublishAction,
+    timestamp: &Instant,
+    signature: &Signature,
+    near_account_id: &AccountId,
+) -> Result<(), ()> {
+    let chain = action.indexed.chain;
+    let sign_id = action.indexed.id;
+    let request_ids = [action.indexed.id.request_id];
+
+    tracing::info!(
+        ?sign_id,
+        ?chain,
+        elapsed = ?timestamp.elapsed(),
+        request_id = ?request_ids[0],
+        "Hydration: publishing signature"
+    );
+
+    match &action.indexed.sign_request_type {
+        SignRequestType::Sign | SignRequestType::SignBidirectional(_) => {
+            hyd.call_respond(&action.indexed.id, signature)
+                .await
+                .map_err(|e| {
+                    tracing::error!(?sign_id, ?e, "Hydration: failed to publish signature");
+                })?;
+            tracing::info!(
+                ?sign_id,
+                elapsed = ?timestamp.elapsed(),
+                "published hydration signature successfully"
+            );
+        }
+        SignRequestType::RespondBidirectional(respond_bidirectional_tx) => {
+            let serialized_output = respond_bidirectional_tx.output.clone();
+            tracing::debug!(
+                ?sign_id,
+                request_id = ?request_ids[0],
+                serialized_output_len = serialized_output.len(),
+                "try_publish_hydration: entering RespondBidirectional arm"
+            );
+            let tx_hash = hyd
+                .call_respond_bidirectional(&action.indexed.id, serialized_output, signature)
+                .await
+                .map_err(|e| {
+                    tracing::error!(
+                        ?sign_id,
+                        ?e,
+                        "Hydration: failed to publish respond bidirectional signature"
+                    );
+                })?;
+            tracing::info!(
+                ?sign_id,
+                tx_hash = ?tx_hash,
+                elapsed = ?timestamp.elapsed(),
+                "published respond bidirectional hydration signature successfully"
+            );
+        }
     }
+
+    crate::metrics::requests::NUM_SIGN_SUCCESS
+        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+        .inc();
+    let sign_latency_in_secs = crate::util::duration_between_unix(
+        action.indexed.unix_timestamp_indexed,
+        crate::util::current_unix_timestamp(),
+    )
+    .as_secs();
+    crate::metrics::requests::SIGN_TOTAL_LATENCY
+        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+        .observe(sign_latency_in_secs as f64);
+    crate::metrics::requests::SIGN_RESPOND_LATENCY
+        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+        .observe(timestamp.elapsed().as_secs_f64());
 
     Ok(())
 }

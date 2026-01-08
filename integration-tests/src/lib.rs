@@ -22,6 +22,7 @@ use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
 use mpc_node::indexer_eth::EthConfig;
+use mpc_node::indexer_hydration::HydrationConfig;
 use mpc_node::indexer_sol::SolConfig;
 use mpc_node::storage::triple_storage::{TriplePair, TripleStorage};
 use mpc_node::{logs, mesh, node_client, storage};
@@ -61,6 +62,7 @@ pub struct NodeConfig {
     pub protocol: ProtocolConfig,
     pub eth: Option<EthConfig>,
     pub sol: Option<SolConfig>,
+    pub hydration: Option<HydrationConfig>,
 }
 
 impl Default for NodeConfig {
@@ -85,6 +87,7 @@ impl Default for NodeConfig {
             },
             eth: None,
             sol: None,
+            hydration: None,
         }
     }
 }
