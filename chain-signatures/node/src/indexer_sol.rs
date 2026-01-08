@@ -11,7 +11,7 @@ use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_client::{Client, Cluster, Program};
 use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
-use ethabi::{encode, Token};
+
 use futures_util::StreamExt;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
@@ -165,17 +165,19 @@ pub struct SolSignRequest {
 
 impl SignatureEvent for SignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
-        // Encode the event data in ABI format
-        let encoded = encode(&[
-            Token::String(self.sender.to_string()),
-            Token::Bytes(self.payload.to_vec()),
-            Token::String(self.path.clone()),
-            Token::Uint(self.key_version.into()),
-            Token::String(self.chain_id.clone()),
-            Token::String(self.algo.clone()),
-            Token::String(self.dest.clone()),
-            Token::String(self.params.clone()),
-        ]);
+        // Encode the event data in ABI format using alloy
+        let encoded = (
+            self.sender.to_string(),
+            self.payload.to_vec(),
+            self.path.clone(),
+            u32::from(self.key_version),
+            self.chain_id.clone(),
+            self.algo.clone(),
+            self.dest.clone(),
+            self.params.clone(),
+        )
+            .abi_encode();
+
         // Calculate keccak256 hash
         let mut hasher = Keccak256::new();
         hasher.update(&encoded);
