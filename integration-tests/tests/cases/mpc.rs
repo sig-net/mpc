@@ -790,28 +790,25 @@ async fn test_triples_message_count() {
     let msg_log = network.output.msg_log.lock().await;
     msg_log.print_summary();
 
-    // Check message counts are as expected. Right now, the expectation is:
-    // Particpants with a lower id send around 10 messages to participant with higher ids.
-    // Particpants with a higher id send around 135 messages to participant with lower ids.
-    // Tolerance +/- 6 for the smaller case, +/- 20 in the larger case.
+    // Check there are not too many sent messages.
     //
-    // Note: We don't actually care about these sepcific numbers. But we want to
-    // understand it and know it if somehow these numbers change.
+    // For finished protocols, there should be message counts as follows:
+    // Participants with a lower id send at most 16 messages to participant with higher ids.
+    // Participants with a higher id send at most 141 messages to participant with lower ids.
+    // In both cases, fewer messages are observed for ongoing protocols that
+    // already started but got interrupted.
+    //
+    // Note: We don't actually care about these specific numbers. But we want to
+    // understand what the numbers are and check they do not increase unexpectedly.
     for (from, to, link_stats) in msg_log.clone_as_message_counter().unwrap().link_stats() {
         for (key, num) in &link_stats.message_counts {
             if key.contains("Triple") {
                 if from < to {
-                    let tolerance = 6;
-                    assert!(
-                        num.abs_diff(10) <= tolerance,
-                        "{from:?} -> {to:?} sent {num} messages"
-                    );
+                    // receiver in shared multiplication sends fewer messages
+                    assert!(*num <= 16, "{from:?} -> {to:?} sent {num} messages");
                 } else {
-                    let tolerance = 20;
-                    assert!(
-                        num.abs_diff(135) <= tolerance,
-                        "{from:?} -> {to:?} sent {num} messages"
-                    );
+                    // sender in shared multiplication sends more messages
+                    assert!(*num <= 141, "{from:?} -> {to:?} sent {num} messages");
                 }
             }
         }
@@ -834,12 +831,14 @@ async fn test_presignature_message_count() {
     let msg_log = network.output.msg_log.lock().await;
     msg_log.print_summary();
 
-    // Check message counts are as expected. Right now, the expectation is:
-    // Exactly 2 messages per link
+    // Check there are not too many sent messages.
+    // There should be exactly 2 messages per link for finished protocols.
+    // But fewer messages are observed for ongoing protocols that already
+    // started but got interrupted.
     for (from, to, link_stats) in msg_log.clone_as_message_counter().unwrap().link_stats() {
         for (key, num) in &link_stats.message_counts {
             if key.contains("Presignature") {
-                assert_eq!(2, *num, "{from:?} -> {to:?} sent {num} messages");
+                assert!(*num <= 2, "{from:?} -> {to:?} sent {num} messages");
             }
         }
     }
