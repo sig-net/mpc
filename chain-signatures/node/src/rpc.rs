@@ -1672,6 +1672,13 @@ async fn try_publish_hydration(
                 elapsed = ?timestamp.elapsed(),
                 "published hydration signature successfully"
             );
+            // For integration tests: store published signature for lookup via web debug endpoint
+            let request_id_hex = hex::encode(action.indexed.id.request_id);
+            if let Ok(mut map) = crate::web::PUBLISHED_SIGNATURES.lock() {
+                map.insert(request_id_hex, signature.clone());
+            } else {
+                tracing::warn!("failed to lock PUBLISHED_SIGNATURES map");
+            }
         }
         SignRequestType::RespondBidirectional(respond_bidirectional_tx) => {
             let serialized_output = respond_bidirectional_tx.output.clone();

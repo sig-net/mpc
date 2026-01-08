@@ -123,6 +123,7 @@ pub struct ClusterSpawner {
     pub redis: Option<containers::Redis>,
     pub worker: Option<Worker<Sandbox>>,
     pub solana: Option<containers::Solana>,
+    pub hydration: Option<containers::Hydration>,
     pub program_address: Option<String>,
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
@@ -157,6 +158,7 @@ impl Default for ClusterSpawner {
             redis: None,
             worker: None,
             solana: None,
+            hydration: None,
             program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
             pregenerated_keys: PregeneratedKeys::load(nodes).unwrap(),
@@ -259,6 +261,20 @@ impl ClusterSpawner {
                 rpc_http_url: String::new(),    // Will be filled in later
                 rpc_ws_url: String::new(),      // Will be filled in later
                 program_address: String::new(), // Will be filled in later
+                total_timeout: 60,
+            });
+        }
+        self
+    }
+
+    /// Configures the cluster to spawn with Hydration sandbox.
+    /// This method sets up a Hydration test validator and configures the HydrationConfig.
+    pub fn hydration(mut self) -> Self {
+        // Enable Hydration by setting a placeholder if not already configured
+        if self.cfg.hydration.is_none() {
+            self.cfg.hydration = Some(mpc_node::indexer_hydration::HydrationConfig {
+                rpc_ws_url: String::new(),  // Will be filled in later
+                signer_uri: String::new(),  // Will be filled in later
                 total_timeout: 60,
             });
         }
@@ -369,6 +385,34 @@ impl ClusterSpawner {
         }
     }
 
+    /// Prespawns a Hydration test validator instance for integration testing.
+    pub async fn prespawn_hydration(&mut self) -> anyhow::Result<&containers::Hydration> {
+        let hydration = containers::Hydration::run().await?;
+        self.hydration = Some(hydration);
+        Ok(self.hydration.as_ref().unwrap())
+    }
+
+    /// Grabs the underlying Hydration instance that was prespawned, or if not prespawned, create a
+    /// new one from start up.
+    pub async fn take_hydration(&mut self) -> Option<containers::Hydration> {
+        match self.hydration.take() {
+            Some(hydration) => Some(hydration),
+            None => {
+                if self.cfg.hydration.is_some() {
+                    match containers::Hydration::run().await {
+                        Ok(hydration) => Some(hydration),
+                        Err(e) => {
+                            tracing::warn!("failed to spawn Hydration: {}", e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
     pub async fn presetup(&mut self) -> anyhow::Result<&containers::Redis> {
         let worker = self.prespawn_sandbox().await?.clone();
         self.create_accounts(&worker).await;
@@ -388,7 +432,7 @@ impl IntoFuture for ClusterSpawner {
     type Output = anyhow::Result<Cluster>;
     type IntoFuture = std::pin::Pin<Box<dyn Future<Output = Self::Output> + Send>>;
 
-    fn into_future(mut self) -> Self::IntoFuture {
+        fn into_future(mut self) -> Self::IntoFuture {
         Box::pin(async move {
             self = self.load_pregenerated_keys().init_network().await?;
 
@@ -413,6 +457,25 @@ impl IntoFuture for ClusterSpawner {
                 self.solana = Some(solana);
             }
 
+            // Check if Hydration is enabled and spawn if needed
+            if self.cfg.hydration.is_some() {
+                match containers::Hydration::run().await {
+                    Ok(hydration) => {
+                        // Update the config with actual RPC URLs
+                        self.cfg.hydration = Some(mpc_node::indexer_hydration::HydrationConfig {
+                            rpc_ws_url: hydration.rpc_ws_url.clone(),
+                            signer_uri: hydration.signer_uri.clone(),
+                            total_timeout: 60,
+                        });
+                        self.hydration = Some(hydration);
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to spawn Hydration test validator: {}", e);
+                        tracing::warn!("make sure substrate-contracts-node is installed: cargo install contracts-node --locked");
+                    }
+                }
+            }
+
             let nodes = self.run().await?;
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
@@ -425,6 +488,7 @@ impl IntoFuture for ClusterSpawner {
                 docker_client: self.docker,
                 account_idx: nodes.len(),
                 solana: self.solana.take(),
+                hydration: self.hydration.take(),
                 nodes,
             };
 

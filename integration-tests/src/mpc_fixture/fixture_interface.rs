@@ -116,6 +116,7 @@ impl MpcFixtureNode {
             SyncChannel::new().1,
             account_id,
             self.backlog.clone(),
+            self.sign_tx.clone(),
         );
         self.web_handle = Some(tokio::spawn(task));
     }

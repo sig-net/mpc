@@ -354,6 +354,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sync_channel,
                 account_id.clone(),
                 backlog.clone(),
+                sign_tx.clone(),
             ));
 
             match indexer_eth::EthereumIndexer::new(

@@ -1145,6 +1145,85 @@ impl Drop for Solana {
     }
 }
 
+/// Hydration test validator container
+#[derive(Clone)]
+pub struct Hydration {
+    pub rpc_ws_url: String,
+    pub signer_uri: String,
+    pub rpc_http_url: String,
+}
+
+impl Hydration {
+    /// Create a new Hydration test validator running a local Substrate node
+    pub async fn run() -> anyhow::Result<Self> {
+        let port = pick_preferred_or_unused_port(9944).await;
+        let rpc_ws_url = format!("ws://127.0.0.1:{}", port);
+        let rpc_http_url = format!("http://127.0.0.1:{}", port);
+
+        // Use substrate-contracts-node which is lightweight and works for testing
+        // In production, this would be a proper Hydration validator
+        let mut cmd = Command::new("substrate-contracts-node");
+        cmd.arg("--dev")
+            .arg("--rpc-port")
+            .arg(port.to_string())
+            .arg("--tmp");
+
+        // Try to start the node
+        let _process = cmd.spawn().map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to spawn substrate-contracts-node: {}. \
+                 Make sure substrate-contracts-node is installed: \
+                 cargo install contracts-node --locked",
+                e
+            )
+        })?;
+
+        // Wait for the RPC endpoint to be available
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(30);
+        let client = reqwest::Client::new();
+
+        loop {
+            if start.elapsed() > timeout {
+                anyhow::bail!("Timeout waiting for Substrate node RPC to be ready");
+            }
+
+            match client
+                .post(&rpc_http_url)
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "system_health",
+                    "params": []
+                }))
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => {
+                    tracing::info!("Substrate node RPC ready at {}", rpc_ws_url);
+                    break;
+                }
+                _ => {
+                    sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+
+        tracing::info!("Hydration test validator started at {}", rpc_ws_url);
+
+        Ok(Hydration {
+            rpc_ws_url,
+            rpc_http_url,
+            signer_uri: "//Alice".to_string(), // Default test account
+        })
+    }
+
+    /// Get the RPC WebSocket URL for the Hydration node
+    pub fn ws_url(&self) -> &str {
+        &self.rpc_ws_url
+    }
+}
+
 #[derive(BorshSerialize, BorshDeserialize)]
 struct SignArgs {
     payload: [u8; 32],

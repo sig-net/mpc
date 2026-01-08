@@ -117,6 +117,10 @@ pub struct SignOutcome {
     pub payload: [u8; 32],
     pub payload_hash: [u8; 32],
     pub signature: FullSignature<Secp256k1>,
+
+    /// For Hydration flows, the indexer returns the sender as an SS58 string to
+    /// derive the epsilon; tests use this value to compute expected keys.
+    pub sender_ss58: Option<String>,
 }
 
 impl fmt::Debug for SignOutcome {
@@ -259,6 +263,11 @@ impl<'a> SignAction<'a> {
     /// Create a Solana-specific sign action that calls the Solana contract's sign function
     pub fn solana(self) -> SolSignAction<'a> {
         SolSignAction::new(self)
+    }
+
+    /// Create a Hydration-specific sign action (placeholder for future implementation)
+    pub fn hydration(self) -> HydrationSignAction<'a> {
+        HydrationSignAction::new(self)
     }
 }
 
@@ -879,6 +888,7 @@ impl SignAction<'_> {
             signature,
             payload,
             payload_hash,
+            sender_ss58: None,
         })
     }
 
@@ -1327,5 +1337,164 @@ impl EthSignAction<'_> {
                 });
             }
         }
+    }
+}
+/// Placeholder for Hydration-specific sign action
+/// To be implemented when Hydration test validator is available
+pub struct HydrationSignAction<'a> {
+    _sign_action: SignAction<'a>,
+    payload: Option<[u8; 32]>,
+    path: Option<String>,
+    key_version: Option<u32>,
+}
+
+impl<'a> HydrationSignAction<'a> {
+    pub fn new(sign_action: SignAction<'a>) -> Self {
+        Self {
+            _sign_action: sign_action,
+            payload: None,
+            path: None,
+            key_version: None,
+        }
+    }
+
+    pub fn payload(mut self, payload: [u8; 32]) -> Self {
+        self.payload = Some(payload);
+        self
+    }
+
+    pub fn path(mut self, path: &str) -> Self {
+        self.path = Some(path.to_string());
+        self
+    }
+
+    pub fn key_version(mut self, key_version: u32) -> Self {
+        self.key_version = Some(key_version);
+        self
+    }
+
+    async fn execute(self) -> anyhow::Result<SignOutcome> {
+        tracing::info!("Hydration E2E signing starting - using Hydration debug injection");
+
+        let real_sign = &self._sign_action;
+
+        // Create or reuse a NEAR account to identify this sign request
+        let account = real_sign.account_or_new().await;
+
+        // Prepare serialized transaction bytes. If caller supplied an explicit payload,
+        // we use that as the raw bytes for the "serialized transaction" so the
+        // keccak(serialized_transaction) == keccak(payload) used in other sign flows.
+        let payload_bytes = self.payload.unwrap_or_else(|| rand::thread_rng().gen());
+        let serialized_transaction = payload_bytes.to_vec();
+        let serialized_transaction_b64 = base64::encode(&serialized_transaction);
+
+        // Determine path and key version
+        let path = self.path.clone().unwrap_or_else(|| real_sign.path.clone());
+        let key_version = self.key_version.unwrap_or(real_sign.key_version);
+
+        // Build the inject payload
+        let inject = serde_json::json!({
+            "sender_hex": hex::encode([0u8;32]), // placeholder sender; indexer will accept
+            "serialized_transaction_b64": serialized_transaction_b64,
+            "caip2_id": "eth:1",
+            "key_version": key_version,
+            "deposit": 1,
+            "path": path,
+            "algo": real_sign.algo,
+            "dest": real_sign.dest,
+            "params": real_sign.params,
+            "program_id_hex": hex::encode([0u8;32]),
+            "output_deserialization_schema_b64": base64::encode(&[]),
+            "respond_serialization_schema_b64": base64::encode(&[]),
+        });
+
+        // POST to the first node's debug injection endpoint
+        let url = self._sign_action.nodes.url(0).join("/debug/hydration/sign_bidirectional")?;
+        tracing::debug!(%url, "posting hydration injection request");
+        let client = reqwest::Client::new();
+        let resp = client.post(url).json(&inject).send().await?;
+        let resp_json: serde_json::Value = resp.json().await?;
+        let request_id = resp_json["request_id"].as_str().ok_or_else(|| anyhow::anyhow!("missing request_id"))?.to_string();
+        let sender_ss58 = resp_json["sender_ss58"].as_str().map(|s| s.to_string());
+
+        // Poll the node debug endpoint for the published signature
+        let sig_url = self
+            ._sign_action
+            .nodes
+            .url(0)
+            .join(&format!("/debug/signature/{}", request_id))?;
+        tracing::debug!(%sig_url, "polling for published hydration signature");
+
+        let mut elapsed = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(30);
+        let mut signature_json: Option<serde_json::Value> = None;
+
+        while elapsed.elapsed() < timeout {
+            let r = client.get(sig_url.clone()).send().await;
+            match r {
+                Ok(r) => {
+                    if r.status().is_success() {
+                        signature_json = Some(r.json().await?);
+                        break;
+                    }
+                }
+                Err(_) => {}
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        let signature_json = signature_json.ok_or_else(|| anyhow::anyhow!("timeout waiting for hydration signature"))?;
+
+        // Parse signature fields
+        let big_r_x = hex::decode(signature_json["big_r_x"].as_str().ok_or_else(|| anyhow::anyhow!("missing big_r_x"))?)?;
+        let big_r_y = hex::decode(signature_json["big_r_y"].as_str().ok_or_else(|| anyhow::anyhow!("missing big_r_y"))?)?;
+        let s_bytes = hex::decode(signature_json["s"].as_str().ok_or_else(|| anyhow::anyhow!("missing s"))?)?;
+        let _recovery_id = signature_json["recovery_id"].as_u64().ok_or_else(|| anyhow::anyhow!("missing recovery_id"))? as u8;
+
+        // Reconstruct AffinePoint from x/y
+        use k256::FieldBytes;
+        let x_fb = FieldBytes::from_slice(&big_r_x);
+        let y_fb = FieldBytes::from_slice(&big_r_y);
+        let encoded = k256::EncodedPoint::from_affine_coordinates(&x_fb, &y_fb, false);
+        let big_r = k256::AffinePoint::from_encoded_point(&encoded)
+            .into_option()
+            .ok_or_else(|| anyhow::anyhow!("invalid big_r point"))?;
+
+        // Reconstruct scalar s
+        use elliptic_curve::PrimeField;
+        let mut s_arr = [0u8; 32];
+        s_arr.copy_from_slice(&s_bytes);
+        let s = k256::Scalar::from_repr_vartime(s_arr.into()).ok_or_else(|| anyhow::anyhow!("invalid s scalar"))?;
+
+        // Build FullSignature (note: FullSignature does not contain recovery_id)
+        let signature = FullSignature { big_r, s };
+
+        // Compute payload_hash as keccak(serialized_transaction)
+        let payload_hash = {
+            use sha3::Digest;
+            let mut hasher = sha3::Keccak256::new();
+            hasher.update(&serialized_transaction);
+            hasher.finalize().into()
+        };
+
+        // Return SignOutcome
+        Ok(SignOutcome {
+            account,
+            rogue: None,
+            signature,
+            payload: payload_bytes,
+            payload_hash,
+            sender_ss58,
+        })
+    }
+}
+
+impl<'a> IntoFuture for HydrationSignAction<'a> {
+    type Output = anyhow::Result<SignOutcome>;
+    type IntoFuture =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Self::Output> + Send + 'a>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(self.execute())
     }
 }

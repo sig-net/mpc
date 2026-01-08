@@ -28,6 +28,17 @@ use near_account_id::AccountId;
 use near_primitives::types::BlockHeight;
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
+use hex;
+use mpc_primitives::Signature as MpcSignature;
+use axum::extract::Path;
+use base64;
+use std::time::Duration;
+use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+use crate::indexer_common::SignatureEvent;
+
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -40,6 +51,7 @@ struct AxumState {
     msg_channel: MessageChannel,
     my_account_id: AccountId,
     backlog: Backlog,
+    sign_tx: tokio::sync::mpsc::Sender<crate::protocol::Sign>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -52,6 +64,7 @@ pub async fn run(
     sync_channel: SyncChannel,
     my_account_id: AccountId,
     backlog: Backlog,
+    sign_tx: tokio::sync::mpsc::Sender<crate::protocol::Sign>,
 ) {
     tracing::info!("starting web server");
     let axum_state = AxumState {
@@ -62,6 +75,7 @@ pub async fn run(
         sync_channel,
         my_account_id,
         backlog,
+        sign_tx,
     };
 
     // Sync can be a large payload, so we set a higher limit for payload.
@@ -84,6 +98,9 @@ pub async fn run(
         .route("/metrics", get(metrics))
         .route("/checkpoint", get(checkpoint))
         .route("/debug", get(debug::page))
+        // Test-only Hydration injection and signature fetch endpoints
+        .route("/debug/hydration/sign_bidirectional", post(debug_inject_hydration_sign))
+        .route("/debug/signature/:request_id", get(debug_get_signature))
         .merge(sync);
 
     if cfg!(feature = "bench") {
@@ -370,6 +387,117 @@ async fn checkpoint(
         .observe(start.elapsed().as_millis() as f64);
 
     Ok(Cbor(resp))
+}
+
+/// Payload used by tests to inject a Hydration SignBidirectionalRequested event
+#[derive(Debug, Clone, Deserialize)]
+pub struct HydrationInjectRequest {
+    /// hex 32-byte sender account id (no 0x)
+    pub sender_hex: String,
+    pub serialized_transaction_b64: String,
+    pub caip2_id: String,
+    pub key_version: u32,
+    pub deposit: u64,
+    pub path: String,
+    pub algo: String,
+    pub dest: String,
+    pub params: String,
+    pub program_id_hex: String,
+    pub output_deserialization_schema_b64: String,
+    pub respond_serialization_schema_b64: String,
+}
+
+pub(crate) static PUBLISHED_SIGNATURES: Lazy<Mutex<HashMap<String, MpcSignature>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn debug_inject_hydration_sign(
+    Extension(state): Extension<Arc<AxumState>>,
+    Json(payload): Json<HydrationInjectRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let _start = Instant::now();
+
+    // Convert sender hex string to 32 bytes
+    let sender_bytes_vec = hex::decode(payload.sender_hex.trim_start_matches("0x")).map_err(|e| Error::InvalidParameters(format!("invalid sender hex: {e}")))?;
+    if sender_bytes_vec.len() != 32 {
+        return Err(Error::InvalidParameters("sender hex must be 32 bytes".to_string()));
+    }
+    let mut sender_bytes = [0u8; 32];
+    sender_bytes.copy_from_slice(&sender_bytes_vec);
+
+    let serialized_transaction = base64::decode(&payload.serialized_transaction_b64)
+        .map_err(|e| Error::InvalidParameters(format!("invalid base64 tx: {e}")))?;
+
+    let program_id_bytes = hex::decode(payload.program_id_hex.trim_start_matches("0x"))
+        .map_err(|e| Error::InvalidParameters(format!("invalid hex program_id: {e}")))?;
+    let mut program_id = [0u8; 32];
+    if program_id_bytes.len() != 32 {
+        return Err(Error::InvalidParameters("program_id must be 32 bytes".to_string()));
+    }
+    program_id.copy_from_slice(&program_id_bytes);
+
+    let output_deserialization_schema = base64::decode(&payload.output_deserialization_schema_b64)
+        .map_err(|e| Error::InvalidParameters(format!("invalid base64 schema: {e}")))?;
+    let respond_serialization_schema = base64::decode(&payload.respond_serialization_schema_b64)
+        .map_err(|e| Error::InvalidParameters(format!("invalid base64 schema: {e}")))?;
+
+    // Build the event struct expected by indexer_common
+    let event = crate::indexer_hydration::HydrationSignBidirectionalRequestedEvent {
+        sender: sender_bytes,
+        serialized_transaction,
+        caip2_id: payload.caip2_id,
+        key_version: payload.key_version,
+        deposit: payload.deposit,
+        path: payload.path,
+        algo: payload.algo,
+        dest: payload.dest,
+        params: payload.params,
+        program_id,
+        output_deserialization_schema,
+        respond_serialization_schema,
+    };
+
+    let entropy: [u8; 32] = rand::random();
+
+    // Calculate the request id and sender ss58 to return to the test
+    let request_id = hex::encode(event.generate_request_id());
+    let sender_ss58 = event.sender_string();
+
+    // Call process_sign_event to insert into backlog and kick off signing
+    let event_clone = event.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::indexer_common::process_sign_event(
+            Box::new(event_clone),
+            entropy,
+            state.sign_tx.clone(),
+            state.my_account_id.clone(),
+            Duration::from_secs(60),
+            state.backlog.clone(),
+        )
+        .await
+        {
+            tracing::error!(?e, "debug injection failed to process sign event");
+        }
+    });
+
+    Ok(Json(serde_json::json!({"status": "injected", "request_id": request_id, "sender_ss58": sender_ss58})))
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn debug_get_signature(
+    Path(request_id): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    let map = PUBLISHED_SIGNATURES.lock().unwrap();
+    if let Some(sig) = map.get(&request_id) {
+        // Convert to hex
+        let big_r = sig.big_r.to_encoded_point(false);
+        let x = hex::encode(big_r.x().unwrap());
+        let y = hex::encode(big_r.y().unwrap());
+        let s = hex::encode(sig.s.to_bytes());
+        let recovery_id = sig.recovery_id;
+        Ok(Json(serde_json::json!({"big_r_x": x, "big_r_y": y, "s": s, "recovery_id": recovery_id})))
+    } else {
+        Err(Error::InvalidParameters(format!("signature not found")))
+    }
 }
 
 #[cfg(not(feature = "debug-page"))]

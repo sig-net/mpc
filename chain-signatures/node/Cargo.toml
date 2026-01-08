@@ -79,6 +79,8 @@ solana-transaction-status.workspace = true
 solana-client.workspace = true
 futures-util.workspace = true
 parity-scale-codec.workspace = true
+once_cell = "1.18"
+base64 = "0.21"
 
 near-account-id.workspace = true
 near-crypto = "0.26.0"

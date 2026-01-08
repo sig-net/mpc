@@ -39,6 +39,7 @@ pub struct Cluster {
     pub nodes: Nodes,
     pub account_idx: usize,
     pub solana: Option<containers::Solana>,
+    pub hydration: Option<containers::Hydration>,
 }
 
 impl Cluster {

@@ -21,13 +21,11 @@ pub enum Protocols {
     Signature,
 }
 
-pub type Round = usize;
-
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum PositProtocolId {
     Triple(TripleId),
     Presignature(FullPresignatureId),
-    Signature(SignId, PresignatureId, Round),
+    Signature(SignId, PresignatureId),
 }
 
 /// The message associated with positing a new protocol.
