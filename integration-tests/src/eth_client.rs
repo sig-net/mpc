@@ -58,7 +58,10 @@ impl EthClient {
             .await?
             .json::<serde_json::Value>()
             .await?;
-        let result = resp.get("result").ok_or_else(|| anyhow!("no result in rpc"))?;
+        if let Some(err) = resp.get("error") {
+            return Err(anyhow!("rpc error: {}", err));
+        }
+        let result = resp.get("result").ok_or_else(|| anyhow!("no result in rpc: {}", resp))?;
         let s = result.as_str().ok_or_else(|| anyhow!("invalid result type"))?;
         let nonce = u64::from_str_radix(s.trim_start_matches("0x"), 16).unwrap_or(0);
         Ok(nonce)
@@ -141,7 +144,10 @@ impl EthClient {
             .await?
             .json::<serde_json::Value>()
             .await?;
-        let result = resp.get("result").ok_or_else(|| anyhow!("no result in rpc"))?;
+        if let Some(err) = resp.get("error") {
+            return Err(anyhow!("rpc error: {}", err));
+        }
+        let result = resp.get("result").ok_or_else(|| anyhow!("no result in rpc: {}", resp))?;
         let tx_hash = result.as_str().ok_or_else(|| anyhow!("invalid tx hash type"))?;
         Ok(tx_hash.to_string())
     }
@@ -194,7 +200,10 @@ impl EthClient {
             .await?
             .json::<serde_json::Value>()
             .await?;
-        let result = resp.get("result").ok_or_else(|| anyhow!("no result in rpc"))?;
+        if let Some(err) = resp.get("error") {
+            return Err(anyhow!("rpc error: {}", err));
+        }
+        let result = resp.get("result").ok_or_else(|| anyhow!("no result in rpc: {}", resp))?;
         let arr = result.as_array().ok_or_else(|| anyhow!("invalid logs result"))?.clone();
         Ok(arr)
     }
