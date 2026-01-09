@@ -6,8 +6,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use crate::eth_client::EthClient;
-
+pub use crate::eth_client::EthClient;
 pub fn client(endpoint: &str, secret_key: &str, chain_id: u64) -> Result<EthClient> {
     Ok(EthClient::new(endpoint, secret_key, chain_id)?)
 }
@@ -96,4 +95,3 @@ pub async fn send_sign_request(client: &EthClient, contract: AlloyAddress, reque
 
     client.send_raw_tx(Some(contract), value, data).await
 }
-

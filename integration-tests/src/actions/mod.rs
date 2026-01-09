@@ -198,7 +198,7 @@ mod tests {
     use mpc_crypto::{derive_epsilon_near, derive_key, ScalarExt as _};
     use mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
 
-    use super::{public_key_to_address, recover, recover_eth_address, x_coordinate};
+    use super::{public_key_to_address, recover_eth_address, x_coordinate};
 
     // This test hardcodes the output of the signing process and checks that everything verifies as expected
     // If you find yourself changing the constants in this test you are likely breaking backwards compatibility
@@ -294,24 +294,7 @@ mod tests {
         // let k256_verify_result = k256_verify_key.verify(&payload_hash_reversed, &k256_sig);
         // assert!(k256_verify_result.is_ok());
 
-        // Check signature using etheres tooling
-        let ethers_r = ethers_core::types::U256::from_big_endian(r.to_bytes().as_slice());
-        let ethers_s = ethers_core::types::U256::from_big_endian(s.to_bytes().as_slice());
-        let ethers_v = to_eip155_v(multichain_sig.recovery_id, CHAIN_ID_ETH);
-
-        let signature = ethers_core::types::Signature {
-            r: ethers_r,
-            s: ethers_s,
-            v: ethers_v,
-        };
-
-        let verifying_user_pk = ecdsa::VerifyingKey::from(&user_pk_k256);
-        let user_address_ethers: ethers_core::types::H160 =
-            ethers_core::utils::public_key_to_address(&verifying_user_pk);
-
-        assert!(signature.verify(payload_hash, user_address_ethers).is_ok());
-
-        // Check if recovered address is the same as the user address
+        // Check signature using our local tools
         let signature_for_recovery: [u8; 64] = {
             let mut signature = [0u8; 64]; // TODO: is there a better way to get these bytes?
             signature[..32].copy_from_slice(&r.to_bytes());
@@ -326,10 +309,13 @@ mod tests {
         );
         assert_eq!(user_address_from_pk, recovered_from_signature_address_web3);
 
-        // Recovered address using k256 verification and web3-style recovery
-        // (ethers-style `signature.recover` not used) - ensure recovery agrees
-        let recovered_from_signature_address_ethers = recovered_from_signature_address_web3;
-        assert_eq!(user_address_from_pk, recovered_from_signature_address_ethers);
+        // Compute the address from the verifying key to compare
+        let verifying_user_pk = ecdsa::VerifyingKey::from(&user_pk_k256);
+        let verifying_bytes = verifying_user_pk.to_encoded_point(false);
+        let verifying_public = secp256k1::PublicKey::from_slice(verifying_bytes.as_bytes()).unwrap();
+        let user_address_ethers = public_key_to_address(&verifying_public);
+
+        assert_eq!(user_address_from_pk, user_address_ethers);
 
         assert_eq!(user_address_from_pk, user_address_ethers);
     }

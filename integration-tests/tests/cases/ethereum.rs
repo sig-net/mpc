@@ -127,7 +127,9 @@ async fn test_signature_ethereum() -> Result<()> {
     let user_public_key = K256PublicKey::from_affine(user_affine)
         .map_err(|_| anyhow!("invalid derived public key"))?;
     let verifying_key = VerifyingKey::from(&user_public_key);
-    let expected_address = ethers::utils::public_key_to_address(&verifying_key);
+    let verifying_bytes = verifying_key.to_encoded_point(false);
+    let verifying_pub = secp256k1::PublicKey::from_slice(verifying_bytes.as_bytes()).unwrap();
+    let expected_address = actions::public_key_to_address(&verifying_pub);
 
     anyhow::ensure!(
         recovered_address == expected_address,
@@ -181,21 +183,17 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
         params: params.to_string(),
     };
 
-    let call = contract.sign(request).value(U256::from(1_u64));
-    let pending = call.send().await?;
-    let receipt = pending.await?.context("sign transaction failed")?;
-    let from_block = BlockNumber::Number(
-        receipt
-            .block_number
-            .context("missing block number in receipt")?,
-    );
+    let tx_hash = eth::send_sign_request(&client, contract_address, request.clone(), 1).await?;
+    let receipt = client.wait_for_receipt(&tx_hash, Duration::from_secs(10)).await?;
+    let block_hex = receipt.get("blockNumber").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("missing block number"))?;
+    let from_block = u64::from_str_radix(block_hex.trim_start_matches("0x"), 16)?;
 
     let expected_request_id = eth::compute_request_id(
         requester,
         payload,
         path,
         LATEST_MPC_KEY_VERSION,
-        U256::from(chain_id),
+        chain_id,
         algo,
         dest,
         params,
@@ -218,25 +216,26 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
         "pending transactions in checkpoint"
     );
 
-    // Wait for the signature response
-    let mut matching_event = None;
+    // Poll logs for the expected request id
+    let mut matching_log = None;
     for _ in 0..30 {
-        let events = contract
-            .event::<eth::SignatureRespondedFilter>()
-            .from_block(from_block)
-            .query()
-            .await?;
-        if let Some(event) = events.into_iter().find(|event| {
-            event.request_id == expected_request_id[..] && event.responder == requester
+        let topics = vec![None, Some(format!("0x{}", hex::encode(expected_request_id)))];
+        let logs = client.get_logs(from_block, from_block + 20, Some(contract_address), topics).await?;
+        if let Some(log) = logs.into_iter().find(|l| {
+            if let Some(topics) = l.get("topics").and_then(|t| t.as_array()) {
+                if topics.len() > 1 {
+                    return topics[1].as_str().map(|s| s == format!("0x{}", hex::encode(expected_request_id))).unwrap_or(false);
+                }
+            }
+            false
         }) {
-            matching_event = Some(event);
+            matching_log = Some(log);
             break;
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
-    let _event =
-        matching_event.ok_or_else(|| anyhow!("did not observe signature response on ethereum"))?;
+    let _log = matching_log.ok_or_else(|| anyhow!("did not observe signature response on ethereum"))?;
 
     tracing::info!("signature response observed on-chain");
 
@@ -256,11 +255,11 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
         "pending transactions count after response"
     );
 
-    let expected_request_bytes = expected_request_id.as_bytes();
+    let expected_request_bytes = expected_request_id;
     let request_still_present = checkpoint
         .pending_requests
         .iter()
-        .any(|tx| tx.sign_id.request_id == *expected_request_bytes);
+        .any(|tx| tx.sign_id.request_id == expected_request_bytes);
 
     assert!(
         !request_still_present,
@@ -293,7 +292,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
 
     // Produce a few sign requests up front so nodes create initial checkpoints
     for i in 0..5 {
-        submit_eth_sign_request(&eth_contract, i).await?;
+        submit_eth_sign_request(&eth_client, eth_contract, i).await?;
     }
 
     let active_idx = 1usize;
@@ -318,7 +317,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
     let mut elapsed = Duration::default();
     let mut seed = 100usize;
     while elapsed < offline_duration {
-        submit_eth_sign_request(&eth_contract, seed).await?;
+        submit_eth_sign_request(&eth_client, eth_contract, seed).await?;
         seed += 1;
         tokio::time::sleep(Duration::from_secs(2)).await;
         elapsed += Duration::from_secs(2);
