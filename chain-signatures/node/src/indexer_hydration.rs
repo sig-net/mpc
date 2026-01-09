@@ -8,14 +8,12 @@ use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
 use alloy_sol_types::SolValue;
 use anyhow::{anyhow, Result};
-use ethabi::{encode, Token};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::Signature;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use near_account_id::AccountId;
-use sha3::{Digest, Keccak256};
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{twox_128, H256};
 use sp_runtime::traits::BlakeTwo256;
@@ -128,21 +126,20 @@ pub struct HydrationSignatureRequestedEvent {
 
 impl SignatureEvent for HydrationSignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
-        // Encode the event data in ABI format
-        let encoded = encode(&[
-            Token::String(self.sender_string()),
-            Token::Bytes(self.payload.to_vec()),
-            Token::String(self.path.clone()),
-            Token::Uint(self.key_version.into()),
-            Token::String(self.chain_id.clone()),
-            Token::String(self.algo.clone()),
-            Token::String(self.dest.clone()),
-            Token::String(self.params.clone()),
-        ]);
-        // Calculate keccak256 hash
-        let mut hasher = Keccak256::new();
-        hasher.update(&encoded);
-        hasher.finalize().into()
+        // Encode the event data in ABI format using alloy
+        let encoded = (
+            self.sender_string(),
+            self.payload.to_vec(),
+            self.path.clone(),
+            self.key_version,
+            self.chain_id.clone(),
+            self.algo.clone(),
+            self.dest.clone(),
+            self.params.clone(),
+        )
+            .abi_encode_packed();
+
+        alloy::primitives::keccak256(encoded).into()
     }
 
     fn generate_sign_request(
