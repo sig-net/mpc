@@ -303,9 +303,12 @@ async fn ensure_eth_signer_funded(
     };
 
     let gas_limit = U256::from(FUNDING_GAS_LIMIT);
+    // Consider the maximum gas limit we might need for subsequent operations (e.g., contract deployment)
+    let deploy_gas_limit = U256::from(3_000_000u64);
     let payer_hex = format_alloy_address(&payer_alloy);
     let payer_balance = get_eth_balance(client, rpc_url, &payer_hex).await?;
-    let total_cost = gas_price * gas_limit + top_up;
+    let required_gas_limit = std::cmp::max(gas_limit, deploy_gas_limit);
+    let total_cost = gas_price * required_gas_limit + top_up;
     anyhow::ensure!(
         payer_balance >= total_cost,
         "payer account {} has insufficient balance for funding: needs {}, has {}",

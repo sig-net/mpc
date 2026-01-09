@@ -71,7 +71,8 @@ impl EthClient {
     pub async fn send_raw_tx(&self, to: Option<Address>, value: u64, data: Vec<u8>) -> Result<String> {
         let nonce = self.get_nonce().await?;
         let gas_price = 1_000_000_000u64; // 1 gwei
-        let gas_limit = 3_000_000u64;
+        // Use a conservative gas limit: high for contract creation, low for simple transfers/calls
+        let gas_limit = if to.is_none() { 3_000_000u64 } else { 21_000u64 };
 
         // RLP encode: [nonce, gas_price, gas_limit, to, value, data, chain_id, 0, 0]
         let mut stream = RlpStream::new();
