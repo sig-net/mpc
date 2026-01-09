@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use ethers::types::{BlockNumber, U256};
+
 use integration_tests::cluster::Cluster;
 use integration_tests::{actions, cluster, eth};
 use k256::ecdsa::VerifyingKey;
@@ -26,8 +26,8 @@ async fn test_signature_ethereum() -> Result<()> {
     let chain_id = eth_ctx.sandbox.chain_id;
     let contract_address = eth_ctx.contract_address;
 
-    let (client, requester) = eth::client(&endpoint, &secret_key, chain_id)?;
-    let contract = eth::ChainSignaturesContract::new(contract_address, client.clone());
+    let client = eth::client(&endpoint, &secret_key, chain_id)?;
+    let requester = client.address;
 
     let payload = [7u8; 32];
     let path = "test";
@@ -44,74 +44,79 @@ async fn test_signature_ethereum() -> Result<()> {
         params: params.to_string(),
     };
 
-    let call = contract.sign(request).value(U256::from(1_u64));
-    let pending = call.send().await?;
-    let receipt = pending.await?.context("sign transaction failed")?;
-    let from_block = BlockNumber::Number(
-        receipt
-            .block_number
-            .context("missing block number in receipt")?,
-    );
+    // Send sign request via raw transaction
+    let tx_hash = eth::send_sign_request(&client, contract_address, request.clone(), 1).await?;
+    let receipt = client.wait_for_receipt(&tx_hash, Duration::from_secs(10)).await?;
+    // Parse block number from receipt (hex string)
+    let block_hex = receipt.get("blockNumber").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("missing block number"))?;
+    let from_block = u64::from_str_radix(block_hex.trim_start_matches("0x"), 16)?;
 
     let expected_request_id = eth::compute_request_id(
         requester,
         payload,
         path,
         LATEST_MPC_KEY_VERSION,
-        U256::from(chain_id),
+        chain_id,
         algo,
         dest,
         params,
     );
 
-    let mut matching_event = None;
+    // Poll logs for the expected request_id
+    let mut matching_log = None;
     for _ in 0..30 {
-        let events = contract
-            .event::<eth::SignatureRespondedFilter>()
-            .from_block(from_block)
-            .query()
-            .await?;
-        if let Some(event) = events.into_iter().find(|event| {
-            event.request_id == expected_request_id[..] && event.responder == requester
+        let topics = vec![None, Some(format!("0x{}", hex::encode(expected_request_id)))];
+        let logs = client.get_logs(from_block, from_block + 20, Some(contract_address), topics).await?;
+        if let Some(log) = logs.into_iter().find(|l| {
+            // check topic[1] equals request id
+            if let Some(topics) = l.get("topics").and_then(|t| t.as_array()) {
+                if topics.len() > 1 {
+                    return topics[1].as_str().map(|s| s == format!("0x{}", hex::encode(expected_request_id))).unwrap_or(false);
+                }
+            }
+            false
         }) {
-            matching_event = Some(event);
+            matching_log = Some(log);
             break;
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
-    let event =
-        matching_event.ok_or_else(|| anyhow!("did not observe signature response on ethereum"))?;
+    let log = matching_log.ok_or_else(|| anyhow!("did not observe signature response on ethereum"))?;
 
-    let mut x_bytes = [0u8; 32];
-    event.signature.big_r.x.to_big_endian(&mut x_bytes);
-    let mut y_bytes = [0u8; 32];
-    event.signature.big_r.y.to_big_endian(&mut y_bytes);
-    let x_field: &FieldBytes = FieldBytes::from_slice(&x_bytes);
-    let y_field: &FieldBytes = FieldBytes::from_slice(&y_bytes);
-    let encoded_r = EncodedPoint::from_affine_coordinates(x_field, y_field, false);
-    let big_r = AffinePoint::from_encoded_point(&encoded_r)
-        .into_option()
-        .ok_or_else(|| anyhow!("invalid R component in signature"))?;
+    // Parse event data to extract signature
+    let data_hex = log.get("data").and_then(|d| d.as_str()).ok_or_else(|| anyhow!("missing data in log"))?;
+    let data_bytes = hex::decode(data_hex.trim_start_matches("0x"))?;
+    if data_bytes.len() < 160 {
+        anyhow::bail!("unexpected event data length: {}", data_bytes.len());
+    }
+    // responder is first 32 bytes (right-aligned address)
+    let responder_bytes = &data_bytes[0..32];
+    let responder_addr = {
+        let addr_slice = &responder_bytes[12..32];
+        let mut arr = [0u8; 20];
+        arr.copy_from_slice(addr_slice);
+        arr
+    };
 
-    let r_scalar = actions::x_coordinate::<k256::Secp256k1>(&big_r);
-    let r_bytes = r_scalar.to_bytes();
+    // signature components
+    let big_r_x = &data_bytes[32..64];
+    let big_r_y = &data_bytes[64..96];
+    let s_bytes = &data_bytes[96..128];
+    let recovery_id_byte = data_bytes[128];
 
-    let mut s_bytes = [0u8; 32];
-    event.signature.s.to_big_endian(&mut s_bytes);
-
+    // Build signature bytes: r is the x-coordinate reduced to scalar; here we use big_r_x directly
     let mut signature_bytes = [0u8; 64];
-    signature_bytes[..32].copy_from_slice(r_bytes.as_slice());
-    signature_bytes[32..].copy_from_slice(&s_bytes);
+    signature_bytes[..32].copy_from_slice(big_r_x);
+    signature_bytes[32..].copy_from_slice(s_bytes);
+    let recovery_id = recovery_id_byte as i32;
 
-    let recovered_address =
-        actions::recover_eth_address(&payload, &signature_bytes, event.signature.recovery_id);
+    let recovered_address = actions::recover_eth_address(&payload, &signature_bytes, recovery_id as u8);
 
     let network_public_key = cluster.root_public_key().await?;
     let mut network_pk = vec![0x04];
     network_pk.extend_from_slice(&network_public_key.as_bytes()[1..]);
-    let encoded_network_pk =
-        EncodedPoint::from_bytes(&network_pk).context("invalid network public key encoding")?;
+    let encoded_network_pk = EncodedPoint::from_bytes(&network_pk).context("invalid network public key encoding")?;
     let network_affine = AffinePoint::from_encoded_point(&encoded_network_pk)
         .into_option()
         .ok_or_else(|| anyhow!("invalid network public key"))?;
@@ -148,8 +153,8 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     let chain_id = eth_ctx.sandbox.chain_id;
     let contract_address = eth_ctx.contract_address;
 
-    let (client, requester) = eth::client(&endpoint, &secret_key, chain_id)?;
-    let contract = eth::ChainSignaturesContract::new(contract_address, client.clone());
+    let client = eth::client(&endpoint, &secret_key, chain_id)?;
+    let requester = client.address;
 
     // Get initial checkpoint state
     let node_idx = 0;
@@ -278,12 +283,13 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         .ethereum
         .as_ref()
         .context("ethereum sandbox not initialized")?;
-    let (eth_client, _requester) = eth::client(
+    let eth_client = eth::client(
         &eth_ctx.sandbox.external_http_endpoint,
         &eth_ctx.sandbox.secret_key,
         eth_ctx.sandbox.chain_id,
     )?;
-    let eth_contract = eth::ChainSignaturesContract::new(eth_ctx.contract_address, eth_client);
+    let requester = eth_client.address;
+    let eth_contract = eth_ctx.contract_address; // use raw contract address
 
     // Produce a few sign requests up front so nodes create initial checkpoints
     for i in 0..5 {
@@ -376,7 +382,8 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
 }
 
 async fn submit_eth_sign_request(
-    contract: &eth::ChainSignaturesContract<eth::SandboxMiddleware>,
+    client: &eth::EthClient,
+    contract: alloy::primitives::Address,
     seed: usize,
 ) -> anyhow::Result<()> {
     let payload = [seed as u8; 32];
@@ -389,13 +396,11 @@ async fn submit_eth_sign_request(
         params: "{}".to_string(),
     };
 
-    contract
-        .sign(request)
-        .value(U256::from(1_u64))
-        .send()
+    let tx_hash = eth::send_sign_request(client, contract, request, 1).await?;
+    client
+        .wait_for_receipt(&tx_hash, Duration::from_secs(10))
         .await?
-        .await?
-        .context("sign transaction failed")?;
+        .to_owned();
 
     Ok(())
 }

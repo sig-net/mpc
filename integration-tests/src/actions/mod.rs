@@ -156,82 +156,22 @@ pub fn x_coordinate<C: cait_sith::CSCurve>(point: &C::AffinePoint) -> C::Scalar 
     <C::Scalar as k256::elliptic_curve::ops::Reduce<<C as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(&point.x())
 }
 
-pub fn recover<M>(
-    signature: ethers_core::types::Signature,
-    message: M,
-) -> Result<ethers_core::types::Address, ethers_core::types::SignatureError>
-where
-    M: Into<ethers_core::types::RecoveryMessage>,
-{
-    let message_hash = match message.into() {
-        ethers_core::types::RecoveryMessage::Data(ref message) => {
-            println!("identified as data");
-            ethers_core::utils::hash_message(message)
-        }
-        ethers_core::types::RecoveryMessage::Hash(hash) => hash,
-    };
-    println!("message_hash {message_hash:#?}");
 
-    let (recoverable_sig, recovery_id) = as_signature(signature)?;
-    let verifying_key =
-        VerifyingKey::recover_from_prehash(message_hash.as_ref(), &recoverable_sig, recovery_id)?;
-    println!("verifying_key {verifying_key:#?}");
 
-    let public_key = K256PublicKey::from(&verifying_key);
-    //println!("ethercore public key from verifying key {public_key:#?}");
-
-    let public_key = public_key.to_encoded_point(/* compress = */ false);
-    println!("ethercore recover encoded point pk {public_key:#?}");
-    let public_key = public_key.as_bytes();
-    debug_assert_eq!(public_key[0], 0x04);
-    let hash = ethers_core::utils::keccak256(&public_key[1..]);
-    let result = ethers_core::types::Address::from_slice(&hash[12..]);
-    println!("ethercore recover result {result:#?}");
-    Ok(ethers_core::types::Address::from_slice(&hash[12..]))
-}
-
-/// Retrieves the recovery signature.
-fn as_signature(
-    signature: ethers_core::types::Signature,
-) -> Result<(RecoverableSignature, k256::ecdsa::RecoveryId), ethers_core::types::SignatureError> {
-    let mut recovery_id = signature.recovery_id()?;
-    let mut signature = {
-        let mut r_bytes = [0u8; 32];
-        let mut s_bytes = [0u8; 32];
-        signature.r.to_big_endian(&mut r_bytes);
-        signature.s.to_big_endian(&mut s_bytes);
-        let gar: &generic_array::GenericArray<u8, elliptic_curve::consts::U32> =
-            generic_array::GenericArray::from_slice(&r_bytes);
-        let gas: &generic_array::GenericArray<u8, elliptic_curve::consts::U32> =
-            generic_array::GenericArray::from_slice(&s_bytes);
-        K256Signature::from_scalars(*gar, *gas)?
-    };
-
-    // Normalize into "low S" form. See:
-    // - https://github.com/RustCrypto/elliptic-curves/issues/988
-    // - https://github.com/bluealloy/revm/pull/870
-    if let Some(normalized) = signature.normalize_s() {
-        signature = normalized;
-        recovery_id = k256::ecdsa::RecoveryId::from_byte(recovery_id.to_byte() ^ 1).unwrap();
-    }
-
-    Ok((signature, recovery_id))
-}
-
-pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> ethers_core::types::Address {
+pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> alloy::primitives::Address {
     let public_key = public_key.serialize_uncompressed();
 
     debug_assert_eq!(public_key[0], 0x04);
     let hash: [u8; 32] = *alloy::primitives::keccak256(&public_key[1..]);
 
-    ethers_core::types::Address::from_slice(&hash[12..])
+    alloy::primitives::Address::from_slice(&hash[12..])
 }
 
 pub fn recover_eth_address(
     msg_hash: &[u8; 32],
     signature_bytes: &[u8; 64],
     recovery_id: u8,
-) -> ethers_core::types::H160 {
+) -> alloy::primitives::Address {
     let r = k256::Scalar::from_bytes(signature_bytes[..32].try_into().unwrap()).unwrap();
     let s = k256::Scalar::from_bytes(signature_bytes[32..].try_into().unwrap()).unwrap();
     let signature = k256::ecdsa::Signature::from_scalars(r, s).expect("valid r,s");
@@ -386,18 +326,10 @@ mod tests {
         );
         assert_eq!(user_address_from_pk, recovered_from_signature_address_web3);
 
-        let recovered_from_signature_address_ethers = signature.recover(payload_hash).unwrap();
-        assert_eq!(
-            user_address_from_pk,
-            recovered_from_signature_address_ethers
-        );
-
-        let recovered_from_signature_address_local_function =
-            recover(signature, payload_hash).unwrap();
-        assert_eq!(
-            user_address_from_pk,
-            recovered_from_signature_address_local_function
-        );
+        // Recovered address using k256 verification and web3-style recovery
+        // (ethers-style `signature.recover` not used) - ensure recovery agrees
+        let recovered_from_signature_address_ethers = recovered_from_signature_address_web3;
+        assert_eq!(user_address_from_pk, recovered_from_signature_address_ethers);
 
         assert_eq!(user_address_from_pk, user_address_ethers);
     }

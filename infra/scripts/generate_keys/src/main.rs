@@ -1,9 +1,23 @@
-use ethers::signers::LocalWallet;
-use ethers::signers::Signer;
+use k256::ecdsa::SigningKey;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
+use rand::RngCore;
 use mpc_keys::hpke;
 use sp_core::crypto::{Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{sr25519, Pair};
 use std::env;
+
+fn new_eth_wallet_from_entropy() -> (Vec<u8>, Vec<u8>) {
+    // Generate a random 32-byte private key for test wallets
+    let mut rng = rand::thread_rng();
+    let mut private = [0u8; 32];
+    rng.fill_bytes(&mut private);
+
+    let signing_key = SigningKey::from_bytes(&private).unwrap();
+    let verifying_key = signing_key.verifying_key();
+    let encoded = verifying_key.to_encoded_point(false);
+
+    (private.to_vec(), encoded.as_bytes().to_vec())
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -47,13 +61,11 @@ fn main() {
     println!("near account secret key: {}", near_account_sk);
 
     // generate ethereum account secret and public key
-    let wallet = LocalWallet::new(&mut rand::thread_rng());
-    let private_key = wallet.signer().to_bytes();
-    let public_key = wallet.signer().verifying_key().to_encoded_point(false);
+    let (private_key, public_key, phrase) = new_eth_wallet_from_entropy();
     println!("ethereum account private key: {}", hex::encode(private_key));
     println!(
         "ethereum account public key: {}",
-        hex::encode(public_key.as_bytes())
+        hex::encode(public_key)
     );
-    println!("Ethereum Address: {:?}", wallet.address());
+    println!("Ethereum mnemonic phrase: {}", phrase);
 }

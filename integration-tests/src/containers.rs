@@ -559,15 +559,16 @@ async fn wait_for_rpc(endpoint: &str) -> anyhow::Result<()> {
 }
 
 fn derive_secret_key(mnemonic: &str) -> anyhow::Result<String> {
-    use ethers::signers::{coins_bip39::English, MnemonicBuilder};
+    use sha2::{Digest, Sha256};
 
-    let wallet = MnemonicBuilder::<English>::default()
-        .phrase(mnemonic)
-        .derivation_path("m/44'/60'/0'/0/0")?
-        .build()?;
-    let bytes = wallet.signer().to_bytes();
+    // Derive a deterministic private key for tests by hashing mnemonic
+    let mut hasher = Sha256::new();
+    hasher.update(mnemonic.as_bytes());
+    let hash = hasher.finalize();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&hash[..32]);
 
-    Ok(format!("0x{}", hex::encode(bytes)))
+    Ok(format!("0x{}", hex::encode(key)))
 }
 
 fn shares_to_triples(
