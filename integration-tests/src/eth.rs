@@ -1,11 +1,11 @@
 use anyhow::Result;
-use ethers::abi::{encode, Token};
+use alloy::primitives::{keccak256, Address as AlloyAddress};
+use alloy_sol_types::SolValue;
 use ethers::contract::abigen;
 use ethers::middleware::SignerMiddleware;
 use ethers::providers::{Http, Provider};
 use ethers::signers::{LocalWallet, Signer};
 use ethers::types::{Address, H256, U256};
-use ethers::utils::keccak256;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -52,17 +52,21 @@ pub fn compute_request_id(
     dest: &str,
     params: &str,
 ) -> H256 {
-    let tokens = vec![
-        Token::Address(requester),
-        Token::Bytes(payload.to_vec()),
-        Token::String(path.to_string()),
-        Token::Uint(U256::from(key_version)),
-        Token::Uint(chain_id),
-        Token::String(algo.to_string()),
-        Token::String(dest.to_string()),
-        Token::String(params.to_string()),
-    ];
-    H256::from(keccak256(encode(&tokens)))
+    // Encode using alloy ABI encode (non-packed) to match solidity `abi.encode(...)`
+    let encoded = (
+        AlloyAddress::from(requester.0),
+        payload.to_vec(),
+        path.to_string(),
+        key_version,
+        chain_id.as_u64(),
+        algo.to_string(),
+        dest.to_string(),
+        params.to_string(),
+    )
+    .abi_encode();
+
+    let hash: [u8; 32] = *keccak256(&encoded);
+    H256::from(hash)
 }
 
 pub use chain_signatures_contract::{

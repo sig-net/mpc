@@ -6527,6 +6527,7 @@ name = "integration-tests"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "alloy-sol-types",
  "anchor-client",
  "anyhow",
  "async-process 1.8.1",
