@@ -4,7 +4,6 @@ use alloy_sol_types::SolValue;
 use serde_json::Value;
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
 
 pub use crate::eth_client::EthClient;
 pub fn client(endpoint: &str, secret_key: &str, chain_id: u64) -> Result<EthClient> {

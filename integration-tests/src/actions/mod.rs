@@ -6,7 +6,6 @@ use crate::cluster::Cluster;
 
 use anyhow::Context as _;
 use cait_sith::FullSignature;
-use elliptic_curve::sec1::ToEncodedPoint;
 use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -26,11 +25,6 @@ use rand::Rng;
 use wait_for::{SignatureError, WaitForError};
 
 use std::time::Duration;
-
-use k256::{
-    ecdsa::{Signature as RecoverableSignature, Signature as K256Signature},
-    PublicKey as K256PublicKey,
-};
 
 pub async fn request_batch_random_sign(
     nodes: &Cluster,

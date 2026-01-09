@@ -457,11 +457,8 @@ impl EthereumSandbox {
 
     pub async fn run(spawner: &ClusterSpawner) -> anyhow::Result<Self> {
         let chain_id_arg = Self::DEFAULT_CHAIN_ID.to_string();
-        // derive the secret key that corresponds to the mnemonic and ensure it's funded by anvil
+        // Use anvil's first default account which is automatically funded
         let secret_key = derive_secret_key(Self::DEFAULT_MNEMONIC)?;
-        // fund the derived key with a large balance (in wei) so tests don't run into gas issues
-        let account_balance = "1000000000000000000000"; // 1000 ETH
-        let account_arg = format!("{},{}", secret_key, account_balance);
 
         let command = vec![
             "anvil".to_string(),
@@ -471,8 +468,6 @@ impl EthereumSandbox {
             chain_id_arg,
             "--mnemonic".to_string(),
             Self::DEFAULT_MNEMONIC.to_string(),
-            "--account".to_string(),
-            account_arg,
         ];
 
         let request = if cfg!(feature = "docker-test") {
@@ -565,16 +560,14 @@ async fn wait_for_rpc(endpoint: &str) -> anyhow::Result<()> {
 }
 
 fn derive_secret_key(mnemonic: &str) -> anyhow::Result<String> {
-    use sha2::{Digest, Sha256};
-
-    // Derive a deterministic private key for tests by hashing mnemonic
-    let mut hasher = Sha256::new();
-    hasher.update(mnemonic.as_bytes());
-    let hash = hasher.finalize();
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&hash[..32]);
-
-    Ok(format!("0x{}", hex::encode(key)))
+    // Return the private key of the first account from anvil's default mnemonic
+    // "test test test test test test test test test test test junk" -> account[0]
+    // This account is automatically funded with 10000 ETH by anvil
+    if mnemonic == "test test test test test test test test test test test junk" {
+        Ok("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string())
+    } else {
+        anyhow::bail!("Unknown mnemonic, only default anvil mnemonic is supported")
+    }
 }
 
 fn shares_to_triples(

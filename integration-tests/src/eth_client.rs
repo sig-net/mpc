@@ -4,7 +4,7 @@ use reqwest::Client as HttpClient;
 use serde_json::json;
 use sha3::{Digest, Keccak256};
 use secp256k1::{Secp256k1, Message, SecretKey};
-use secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
+use secp256k1::ecdsa::RecoverableSignature;
 use std::time::Duration;
 
 use alloy::primitives::Address;
@@ -71,8 +71,14 @@ impl EthClient {
     pub async fn send_raw_tx(&self, to: Option<Address>, value: u64, data: Vec<u8>) -> Result<String> {
         let nonce = self.get_nonce().await?;
         let gas_price = 1_000_000_000u64; // 1 gwei
-        // Use a conservative gas limit: high for contract creation, low for simple transfers/calls
-        let gas_limit = if to.is_none() { 3_000_000u64 } else { 21_000u64 };
+        // Use a conservative gas limit: high for contract creation, moderate for contract calls
+        let gas_limit = if to.is_none() {
+            3_000_000u64
+        } else if !data.is_empty() {
+            500_000u64 // Contract calls need more gas
+        } else {
+            21_000u64 // Simple transfers
+        };
 
         // RLP encode: [nonce, gas_price, gas_limit, to, value, data, chain_id, 0, 0]
         let mut stream = RlpStream::new();
@@ -101,7 +107,7 @@ impl EthClient {
 
         // sign digest using secp256k1 recoverable signature
         let secp = Secp256k1::new();
-        let msg = Message::from_slice(&digest).map_err(|e| anyhow!("invalid digest: {e:?}"))?;
+        let msg = Message::from_digest_slice(&digest).map_err(|e| anyhow!("invalid digest: {e:?}"))?;
         let sk = SecretKey::from_slice(&self.signing_key_bytes).map_err(|e| anyhow!("invalid secret key: {e:?}"))?;
         let sig: RecoverableSignature = secp.sign_ecdsa_recoverable(&msg, &sk);
         let (rid, out) = sig.serialize_compact();
@@ -183,7 +189,8 @@ impl EthClient {
         filter.insert("fromBlock".to_string(), serde_json::Value::String(format!("0x{:x}", from_block)));
         filter.insert("toBlock".to_string(), serde_json::Value::String(format!("0x{:x}", to_block)));
         if let Some(addr) = address {
-            filter.insert("address".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(format!("{}", addr).trim_start_matches("0x")))));
+            // Address is already in bytes, just hex encode it directly
+            filter.insert("address".to_string(), serde_json::Value::String(format!("0x{}", hex::encode(addr.as_slice()))));
         }
         if !topics.is_empty() {
             let t: Vec<serde_json::Value> = topics.into_iter().map(|opt| match opt {
