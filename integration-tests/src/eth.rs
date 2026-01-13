@@ -1,44 +1,134 @@
-use anyhow::Result;
-use ethers::abi::{encode, Token};
-use ethers::contract::abigen;
-use ethers::middleware::SignerMiddleware;
-use ethers::providers::{Http, Provider};
-use ethers::signers::{LocalWallet, Signer};
-use ethers::types::{Address, H256, U256};
-use ethers::utils::keccak256;
-use std::str::FromStr;
-use std::sync::Arc;
+use alloy::network::{Ethereum, EthereumWallet, TransactionBuilder};
+use alloy::primitives::{Address, B256, U256};
+use alloy::providers::Provider;
+use alloy::providers::ProviderBuilder;
+use alloy::rpc::types::request::TransactionRequest;
+use alloy::signers::local::PrivateKeySigner;
+use alloy::signers::Signer;
+use alloy::sol_types::{SolEvent, SolValue};
+use anyhow::{Context, Result};
+use serde_json::Value;
 
-abigen!(
-    ChainSignaturesContract,
-    "../chain-signatures/contract-eth/artifacts/contracts/ChainSignatures.sol/ChainSignatures.json"
-);
+alloy::sol! {
+    #[sol(rpc)]
+    contract ChainSignatures {
+        struct SignRequest {
+            bytes32 payload;
+            string path;
+            uint32 keyVersion;
+            string algo;
+            string dest;
+            string params;
+        }
 
-pub type SandboxMiddleware = SignerMiddleware<Provider<Http>, LocalWallet>;
+        struct AffinePoint {
+            uint256 x;
+            uint256 y;
+        }
+
+        struct Signature {
+            AffinePoint bigR;
+            uint256 s;
+            uint8 recoveryId;
+        }
+
+        function sign(SignRequest memory _request) external payable;
+        function getSignatureDeposit() external view returns (uint256);
+
+        event SignatureRequested(
+            address sender,
+            bytes32 payload,
+            uint32 keyVersion,
+            uint256 deposit,
+            uint256 chainId,
+            string path,
+            string algo,
+            string dest,
+            string params
+        );
+
+        event SignatureResponded(
+            bytes32 indexed requestId,
+            address responder,
+            Signature signature
+        );
+    }
+
+    // Event encoding used to derive the off-chain request id
+    event SignatureRequestedEncoding(
+        address sender,
+        bytes payload,
+        string path,
+        uint32 keyVersion,
+        uint256 chainId,
+        string algo,
+        string dest,
+        string params
+    );
+
+    // Constructor args for deployment
+    struct ChainSignaturesConstructor {
+        address mpcNetwork;
+        uint256 signatureDeposit;
+    }
+}
 
 pub fn client(
     endpoint: &str,
     secret_key: &str,
     chain_id: u64,
-) -> Result<(Arc<SandboxMiddleware>, Address)> {
-    let provider = Provider::<Http>::try_from(endpoint)?;
-    let wallet = LocalWallet::from_str(secret_key)?;
-    let address = wallet.address();
-    let wallet = wallet.with_chain_id(chain_id);
-    let client = Arc::new(SignerMiddleware::new(provider, wallet));
-    Ok((client, address))
+) -> Result<(impl Provider + Clone + Send + Sync + 'static, Address)> {
+    let signer: PrivateKeySigner = secret_key.parse()?;
+    let signer = signer.with_chain_id(Some(chain_id));
+    let address = signer.address();
+    let wallet = EthereumWallet::from(signer);
+    let provider = ProviderBuilder::new()
+        .wallet(wallet)
+        .connect_http(endpoint.parse()?);
+    Ok((provider, address))
 }
 
-pub async fn deploy_chain_signatures(
-    client: Arc<SandboxMiddleware>,
+pub async fn deploy_chain_signatures<P>(
+    client: P,
+    deployer_address: Address,
     mpc_address: Address,
     signature_deposit: U256,
-) -> Result<Address> {
-    let contract =
-        ChainSignaturesContract::deploy(client.clone(), (mpc_address, signature_deposit))?
-            .send()
-            .await?;
-    Ok(contract.address())
+) -> Result<Address>
+where
+    P: Provider + Clone + Send + Sync + 'static,
+{
+    let artifact: Value = serde_json::from_slice(include_bytes!(
+        "../../chain-signatures/contract-eth/artifacts/contracts/ChainSignatures.sol/ChainSignatures.json"
+    ))?;
+
+    let bytecode = artifact
+        .get("bytecode")
+        .and_then(Value::as_str)
+        .context("bytecode missing from artifact")?;
+    let mut deployment = hex::decode(bytecode.trim_start_matches("0x"))?;
+
+    let constructor_args = ChainSignaturesConstructor {
+        mpcNetwork: mpc_address,
+        signatureDeposit: signature_deposit,
+    };
+    deployment.extend_from_slice(&constructor_args.abi_encode());
+
+    let tx = <TransactionRequest as TransactionBuilder<Ethereum>>::with_input(
+        <TransactionRequest as TransactionBuilder<Ethereum>>::with_from(
+            <TransactionRequest as TransactionBuilder<Ethereum>>::into_create(
+                TransactionRequest::default(),
+            ),
+            deployer_address,
+        ),
+        deployment,
+    );
+
+    let pending = client.send_transaction(tx).await?;
+    let receipt = pending.get_receipt().await?;
+    let contract_address = receipt
+        .contract_address
+        .context("deployment receipt missing contract address")?;
+    Ok(contract_address)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -51,20 +141,20 @@ pub fn compute_request_id(
     algo: &str,
     dest: &str,
     params: &str,
-) -> H256 {
-    let tokens = vec![
-        Token::Address(requester),
-        Token::Bytes(payload.to_vec()),
-        Token::String(path.to_string()),
-        Token::Uint(U256::from(key_version)),
-        Token::Uint(chain_id),
-        Token::String(algo.to_string()),
-        Token::String(dest.to_string()),
-        Token::String(params.to_string()),
-    ];
-    H256::from(keccak256(encode(&tokens)))
+) -> B256 {
+    let encoding = SignatureRequestedEncoding {
+        sender: requester,
+        payload: payload.to_vec().into(),
+        path: path.to_string(),
+        keyVersion: key_version,
+        chainId: chain_id,
+        algo: algo.to_string(),
+        dest: dest.to_string(),
+        params: params.to_string(),
+    };
+
+    alloy::primitives::keccak256(encoding.encode_data())
 }
 
-pub use chain_signatures_contract::{
-    ChainSignaturesContract, ChainSignaturesContractEvents, SignRequest, SignatureRespondedFilter,
-};
+pub use ChainSignatures::SignRequest;
+pub use ChainSignatures::SignatureResponded;
