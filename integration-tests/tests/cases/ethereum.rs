@@ -4,7 +4,7 @@ use integration_tests::cluster::Cluster;
 use integration_tests::{actions, cluster, eth};
 use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
-use k256::{AffinePoint, EncodedPoint, FieldBytes, PublicKey as K256PublicKey};
+use k256::{AffinePoint, EncodedPoint, FieldBytes};
 use mpc_crypto::derive_key;
 use mpc_crypto::kdf::derive_epsilon_eth;
 use mpc_primitives::{Chain, Checkpoint, LATEST_MPC_KEY_VERSION};
@@ -119,7 +119,7 @@ async fn test_signature_ethereum() -> Result<()> {
     let sender_hex = format!("0x{}", hex::encode(requester));
     let epsilon = derive_epsilon_eth(LATEST_MPC_KEY_VERSION, &sender_hex, path);
     let user_affine = derive_key(network_affine, epsilon);
-    let user_public_key = K256PublicKey::from_affine(user_affine)
+    let user_public_key = k256::PublicKey::from_affine(user_affine)
         .map_err(|_| anyhow!("invalid derived public key"))?;
     let verifying_key = VerifyingKey::from(&user_public_key);
     let expected_address = ethers::utils::public_key_to_address(&verifying_key);

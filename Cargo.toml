@@ -54,7 +54,6 @@ solana-sdk = "2.2.2"
 solana-transaction-status = "2.2.6"
 alloy-dyn-abi = "1.4.1"
 ethers-core = "2.0.13"
-secp256k1 = "0.28.2"
 rlp = "0.5"
 alloy-consensus = { version = "1.0.38", features = ["serde"] }
 alloy-primitives = "1.4.1"

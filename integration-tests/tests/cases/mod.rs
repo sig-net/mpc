@@ -2,7 +2,7 @@ use integration_tests::actions;
 use integration_tests::cluster;
 use integration_tests::utils;
 
-use k256::elliptic_curve::point::AffineCoordinates;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use mpc_contract::config::Config;
 use mpc_contract::update::ProposeUpdateArgs;
 use mpc_crypto::{self, derive_epsilon_near, derive_key, x_coordinate, ScalarExt};
@@ -137,16 +137,7 @@ async fn test_key_derivation() -> anyhow::Result<()> {
         .unwrap();
 
         // start recovering the address and compare them:
-        let user_pk_x = x_coordinate(&user_pk);
-        let user_pk_y_parity = match user_pk.y_is_odd().unwrap_u8() {
-            1 => secp256k1::Parity::Odd,
-            0 => secp256k1::Parity::Even,
-            _ => unreachable!(),
-        };
-        let user_pk_x = secp256k1::XOnlyPublicKey::from_slice(&user_pk_x.to_bytes()).unwrap();
-        let user_secp_pk =
-            secp256k1::PublicKey::from_x_only_public_key(user_pk_x, user_pk_y_parity);
-        let user_addr = actions::public_key_to_address(&user_secp_pk);
+        let user_addr = derive_user_address(user_pk);
         let r = x_coordinate(&multichain_sig.big_r);
         let s = multichain_sig.s;
         let signature_for_recovery: [u8; 64] = {
@@ -160,7 +151,7 @@ async fn test_key_derivation() -> anyhow::Result<()> {
             &signature_for_recovery,
             multichain_sig.recovery_id,
         );
-        assert_eq!(user_addr, recovered_addr);
+        assert_eq!(user_addr, *recovered_addr.as_bytes());
     }
 
     Ok(())
@@ -474,4 +465,18 @@ async fn wait_for_resharing_phase(
 
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+pub fn derive_user_address(user_pk: k256::AffinePoint) -> [u8; 20] {
+    // Convert to uncompressed format for address derivation
+    let point = user_pk.to_encoded_point(false);
+    let public_key_bytes = point.as_bytes();
+
+    // Skip the 0x04 prefix and hash the coordinates
+    let hash = alloy::primitives::keccak256(&public_key_bytes[1..]);
+
+    // Take the last 20 bytes as the address
+    let mut addr = [0u8; 20];
+    addr.copy_from_slice(&hash[12..]);
+    addr
 }

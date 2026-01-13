@@ -2,6 +2,7 @@ use alloy::primitives::{keccak256, Address as AlloyAddress, U256};
 use anyhow::Context as _;
 use anyhow::Result;
 use cait_sith::FullSignature;
+use integration_tests::utils::public_key_to_address;
 use integration_tests::{actions, cluster};
 use k256::ecdsa::SigningKey;
 use k256::elliptic_curve::ops::Reduce;
@@ -12,8 +13,6 @@ use mpc_crypto::{derive_epsilon_sol, derive_key, near_public_key_to_affine_point
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use reqwest::Client;
 use rlp::RlpStream;
-use secp256k1::PublicKey as SecpPublicKey;
-use secp256k1::{Secp256k1 as LibSecp256k1, SecretKey as SecpSecretKey};
 use serde_json::json;
 use sha3::{Digest, Keccak256};
 use solana_sdk::signer::Signer as _;
@@ -60,7 +59,7 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
     let epsilon = derive_epsilon_sol(key_version, &signer_account, path);
     let user_pk = derive_key(root_pk, epsilon);
     let user_pk_bytes = user_pk.to_encoded_point(false);
-    let user_secp_pk = SecpPublicKey::from_slice(user_pk_bytes.as_bytes())
+    let user_secp_pk = k256::PublicKey::from_sec1_bytes(user_pk_bytes.as_bytes())
         .context("failed to convert user public key")?;
     let user_address = actions::public_key_to_address(&user_secp_pk);
     let user_alloy_address = AlloyAddress::from_slice(user_address.as_bytes());
@@ -270,11 +269,10 @@ async fn ensure_eth_signer_funded(
         .as_slice()
         .try_into()
         .map_err(|_| anyhow::anyhow!("expected 32-byte ethereum secret key"))?;
-    let payer_sk = SecpSecretKey::from_slice(&payer_sk_array)?;
-    let secp = LibSecp256k1::signing_only();
-    let payer_pk = SecpPublicKey::from_secret_key(&secp, &payer_sk);
-    let payer_address = actions::public_key_to_address(&payer_pk);
-    let payer_alloy = AlloyAddress::from_slice(payer_address.as_bytes());
+    let payer_sk = k256::SecretKey::from_slice(&payer_sk_array)?;
+    let payer_pk = payer_sk.public_key();
+    let payer_address = public_key_to_address(&payer_pk);
+    let payer_alloy = AlloyAddress::from_slice(&payer_address);
     let signing_key = SigningKey::from_bytes(&payer_sk_array.into())?;
 
     let mut gas_price = fetch_gas_price(client, rpc_url).await?;

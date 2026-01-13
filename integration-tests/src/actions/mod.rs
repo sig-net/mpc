@@ -7,7 +7,6 @@ use crate::cluster::Cluster;
 use anyhow::Context as _;
 use cait_sith::FullSignature;
 use elliptic_curve::sec1::ToEncodedPoint;
-use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, Scalar, Secp256k1};
@@ -27,10 +26,7 @@ use wait_for::{SignatureError, WaitForError};
 
 use std::time::Duration;
 
-use k256::{
-    ecdsa::{Signature as RecoverableSignature, Signature as K256Signature},
-    PublicKey as K256PublicKey,
-};
+use k256::ecdsa::VerifyingKey;
 
 pub async fn request_batch_random_sign(
     nodes: &Cluster,
@@ -177,7 +173,7 @@ where
         VerifyingKey::recover_from_prehash(message_hash.as_ref(), &recoverable_sig, recovery_id)?;
     println!("verifying_key {verifying_key:#?}");
 
-    let public_key = K256PublicKey::from(&verifying_key);
+    let public_key = k256::PublicKey::from(&verifying_key);
     //println!("ethercore public key from verifying key {public_key:#?}");
 
     let public_key = public_key.to_encoded_point(/* compress = */ false);
@@ -193,7 +189,7 @@ where
 /// Retrieves the recovery signature.
 fn as_signature(
     signature: ethers_core::types::Signature,
-) -> Result<(RecoverableSignature, k256::ecdsa::RecoveryId), ethers_core::types::SignatureError> {
+) -> Result<(k256::ecdsa::Signature, k256::ecdsa::RecoveryId), ethers_core::types::SignatureError> {
     let mut recovery_id = signature.recovery_id()?;
     let mut signature = {
         let mut r_bytes = [0u8; 32];
@@ -204,7 +200,7 @@ fn as_signature(
             generic_array::GenericArray::from_slice(&r_bytes);
         let gas: &generic_array::GenericArray<u8, elliptic_curve::consts::U32> =
             generic_array::GenericArray::from_slice(&s_bytes);
-        K256Signature::from_scalars(*gar, *gas)?
+        k256::ecdsa::Signature::from_scalars(*gar, *gas)?
     };
 
     // Normalize into "low S" form. See:
@@ -218,11 +214,12 @@ fn as_signature(
     Ok((signature, recovery_id))
 }
 
-pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> ethers_core::types::Address {
-    let public_key = public_key.serialize_uncompressed();
+pub fn public_key_to_address(public_key: &k256::PublicKey) -> ethers_core::types::Address {
+    let point = public_key.to_encoded_point(false);
+    let public_key_bytes = point.as_bytes();
 
-    debug_assert_eq!(public_key[0], 0x04);
-    let hash: [u8; 32] = *alloy::primitives::keccak256(&public_key[1..]);
+    debug_assert_eq!(public_key_bytes[0], 0x04);
+    let hash: [u8; 32] = *alloy::primitives::keccak256(&public_key_bytes[1..]);
 
     ethers_core::types::Address::from_slice(&hash[12..])
 }
@@ -240,16 +237,14 @@ pub fn recover_eth_address(
     let verifying_key = VerifyingKey::recover_from_prehash(msg_hash, &signature, recid)
         .expect("failed to recover pubkey");
 
-    let encoded = verifying_key.to_encoded_point(false);
-    let public_key =
-        secp256k1::PublicKey::from_slice(encoded.as_bytes()).expect("valid secp256k1 pubkey");
-
+    let public_key = k256::PublicKey::from(&verifying_key);
     public_key_to_address(&public_key)
 }
 
 #[cfg(test)]
 mod tests {
     use elliptic_curve::sec1::FromEncodedPoint as _;
+    use elliptic_curve::sec1::ToEncodedPoint as _;
     use k256::ecdsa::VerifyingKey;
     use k256::elliptic_curve::ops::{Invert, Reduce};
     use k256::elliptic_curve::point::AffineCoordinates;
@@ -287,15 +282,10 @@ mod tests {
         let derivation_epsilon: k256::Scalar =
             derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test");
         let user_pk: AffinePoint = derive_key(mpc_pk, derivation_epsilon);
-        let user_pk_y_parity = match user_pk.y_is_odd().unwrap_u8() {
-            0 => secp256k1::Parity::Even,
-            1 => secp256k1::Parity::Odd,
-            _ => unreachable!(),
-        };
-        let user_pk_x = x_coordinate::<k256::Secp256k1>(&user_pk);
-        let user_pk_x = secp256k1::XOnlyPublicKey::from_slice(&user_pk_x.to_bytes()).unwrap();
-        let user_secp_pk: secp256k1::PublicKey =
-            secp256k1::PublicKey::from_x_only_public_key(user_pk_x, user_pk_y_parity);
+
+        // Convert AffinePoint to k256::PublicKey for address derivation
+        let encoded_point = user_pk.to_encoded_point(false);
+        let user_secp_pk = k256::PublicKey::from_sec1_bytes(encoded_point.as_bytes()).unwrap();
         let user_address_from_pk = public_key_to_address(&user_secp_pk);
 
         // Prepare R ans s signature values

@@ -1,4 +1,6 @@
+use alloy::primitives::keccak256;
 use anyhow::Context;
+use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use near_workspaces::{
     network::Sandbox,
     types::{KeyType, SecretKey},
@@ -185,4 +187,19 @@ pub async fn dev_gen_indexed(worker: &Worker<Sandbox>, index: usize) -> anyhow::
         .await?
         .into_result()?;
     Ok(account)
+}
+
+// Helper function to derive Ethereum address from k256 public key
+pub fn public_key_to_address(public_key: &k256::PublicKey) -> [u8; 20] {
+    let point = public_key.to_encoded_point(false);
+    let public_key_bytes = point.as_bytes();
+    debug_assert_eq!(public_key_bytes[0], 0x04);
+
+    // Skip the 0x04 prefix and hash the coordinates
+    let hash = keccak256(&public_key_bytes[1..]);
+
+    // Take the last 20 bytes as the address
+    let mut addr = [0u8; 20];
+    addr.copy_from_slice(&hash[12..]);
+    addr
 }
