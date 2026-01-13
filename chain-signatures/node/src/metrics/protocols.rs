@@ -192,6 +192,16 @@ pub(crate) static PRESIGNATURE_GENERATOR_FAILURES: LazyLock<CounterVec> = LazyLo
     .unwrap()
 });
 
+pub(crate) static PRESIGNATURE_GENERATOR_MINE_FAILURES: LazyLock<CounterVec> =
+    LazyLock::new(|| {
+        try_create_counter_vec(
+            "multichain_presignature_generator_mine_failures",
+            "mine presignature generator failures",
+            &["node_account_id"],
+        )
+        .unwrap()
+    });
+
 pub(crate) static PRESIGNATURE_BEFORE_POKE_DELAY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_presignature_before_poke_delay_ms",

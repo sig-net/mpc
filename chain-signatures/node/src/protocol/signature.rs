@@ -951,6 +951,10 @@ impl SignGenerator {
             let action = match self.protocol.poke() {
                 Ok(action) => action,
                 Err(err) => {
+                    signature_generator_failures_metric.inc();
+                    if self.proposer == me {
+                        signature_generator_failures_mine_metric.inc();
+                    }
                     tracing::error!(
                         ?sign_id,
                         ?err,

@@ -162,6 +162,8 @@ impl PresignatureGenerator {
     pub async fn run(mut self, my_account_id: &AccountId, me: Participant, epoch: u64) {
         let failure_counts = crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES
             .with_label_values(&[my_account_id.as_str()]);
+        let failure_mine_counts = crate::metrics::protocols::PRESIGNATURE_GENERATOR_MINE_FAILURES
+            .with_label_values(&[my_account_id.as_str()]);
         let before_first_poke_delay = crate::metrics::protocols::PRESIGNATURE_BEFORE_POKE_DELAY
             .with_label_values(&[my_account_id.as_str()]);
         let accrued_wait_delay = crate::metrics::protocols::PRESIGNATURE_ACCRUED_WAIT_DELAY
@@ -191,6 +193,9 @@ impl PresignatureGenerator {
                 Ok(action) => action,
                 Err(err) => {
                     failure_counts.inc();
+                    if self.owner == me {
+                        failure_mine_counts.inc();
+                    }
                     tracing::warn!(
                         id = ?self.id,
                         owner = ?self.owner,
@@ -213,6 +218,9 @@ impl PresignatureGenerator {
                     // Wait for the next set of messages to arrive.
                     let Some(msg) = self.recv().await else {
                         failure_counts.inc();
+                        if self.owner == me {
+                            failure_mine_counts.inc();
+                        }
                         break;
                     };
                     self.protocol.message(msg.from, msg.data);
