@@ -84,6 +84,15 @@ pub(crate) static TRIPLE_GENERATOR_FAILURES: LazyLock<CounterVec> = LazyLock::ne
     .unwrap()
 });
 
+pub(crate) static TRIPLE_GENERATOR_MINE_FAILURES: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_triple_generator_mine_failures",
+        "mine triple generator failures",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
 pub(crate) static TRIPLE_BEFORE_POKE_DELAY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec(
         "multichain_triple_before_poke_delay_ms",

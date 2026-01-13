@@ -40,6 +40,7 @@ pub struct Triple {
 struct TripleGenerator {
     id: TripleId,
     me: Participant,
+    proposer: Participant,
     participants: Vec<Participant>,
     protocol: TripleProtocol,
     timeout: Duration,
@@ -56,6 +57,7 @@ impl TripleGenerator {
     pub async fn new(
         id: TripleId,
         me: Participant,
+        proposer: Participant,
         threshold: usize,
         participants: &[Participant],
         timeout: Duration,
@@ -75,6 +77,7 @@ impl TripleGenerator {
         Ok(Self {
             id,
             me,
+            proposer,
             participants,
             protocol: Box::new(protocol),
             timeout,
@@ -132,6 +135,8 @@ impl TripleGenerator {
                 .with_label_values(&[my_account_id.as_str()]);
         let failure_counts = crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES
             .with_label_values(&[my_account_id.as_str()]);
+        let failure_mine_counts = crate::metrics::protocols::TRIPLE_GENERATOR_MINE_FAILURES
+            .with_label_values(&[my_account_id.as_str()]);
 
         let start_time = Instant::now();
         let mut total_wait = Duration::from_millis(0);
@@ -145,6 +150,9 @@ impl TripleGenerator {
                 Ok(action) => action,
                 Err(err) => {
                     failure_counts.inc();
+                    if self.proposer == self.me {
+                        failure_mine_counts.inc();
+                    }
                     tracing::warn!(
                         id = self.id,
                         ?err,
@@ -167,6 +175,9 @@ impl TripleGenerator {
                     // Wait for the next set of messages to arrive.
                     let Some(msg) = self.recv().await else {
                         failure_counts.inc();
+                        if self.proposer == self.me {
+                            failure_mine_counts.inc();
+                        }
                         break;
                     };
                     self.protocol.message(msg.from, msg.data);
@@ -464,7 +475,10 @@ impl TripleSpawner {
             self.ongoing_introduced.insert(id);
         }
 
-        if let Err(err) = self.generate_with_id(id, &participants, timeout).await {
+        if let Err(err) = self
+            .generate_with_id(id, &participants, positor.id(), timeout)
+            .await
+        {
             self.ongoing_introduced.remove(&id);
             tracing::warn!(
                 id,
@@ -480,6 +494,7 @@ impl TripleSpawner {
         &mut self,
         id: TripleId,
         participants: &[Participant],
+        proposer: Participant,
         timeout: Duration,
     ) -> Result<(), InitializationError> {
         // Check if the `id` is already in the system. Error out and have the next cycle try again.
@@ -493,6 +508,7 @@ impl TripleSpawner {
         let generator = TripleGenerator::new(
             id,
             self.me,
+            proposer,
             self.threshold,
             participants,
             timeout,
