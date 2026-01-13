@@ -924,8 +924,14 @@ impl SignGenerator {
         let signature_generator_failures_metric =
             crate::metrics::protocols::SIGNATURE_GENERATOR_FAILURES
                 .with_label_values(&[my_account_id.as_str()]);
+        let signature_generator_failures_mine_metric =
+            crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_FAILURES
+                .with_label_values(&[my_account_id.as_str()]);
         let signature_generator_success_metric =
             crate::metrics::protocols::SIGNATURE_GENERATOR_SUCCESS
+                .with_label_values(&[my_account_id.as_str()]);
+        let signature_generator_success_mine_metric =
+            crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS
                 .with_label_values(&[my_account_id.as_str()]);
         let poke_latency = crate::metrics::protocols::SIGNATURE_POKE_CPU_TIME
             .with_label_values(&[my_account_id.as_str()]);
@@ -965,8 +971,9 @@ impl SignGenerator {
                 Action::Wait => {
                     // Wait for the next set of messages to arrive.
                     let msg = self.recv().await.inspect_err(|_| {
+                        signature_generator_failures_metric.inc();
                         if self.proposer == me {
-                            signature_generator_failures_metric.inc();
+                            signature_generator_failures_mine_metric.inc();
                         }
                     })?;
                     self.protocol.message(msg.from, msg.data);
@@ -1031,6 +1038,7 @@ impl SignGenerator {
                     signature_generator_success_metric.inc();
 
                     if self.proposer == me {
+                        signature_generator_success_mine_metric.inc();
                         ctx.rpc.publish(
                             ctx.public_key,
                             self.indexed.clone(),

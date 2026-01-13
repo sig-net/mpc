@@ -261,10 +261,28 @@ pub(crate) static SIGNATURE_GENERATOR_FAILURES: LazyLock<CounterVec> = LazyLock:
     .unwrap()
 });
 
+pub(crate) static SIGNATURE_GENERATOR_MINE_FAILURES: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_signature_generator_mine_failures",
+        "mine signature generator failures",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
 pub(crate) static SIGNATURE_GENERATOR_SUCCESS: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec(
         "multichain_num_total_historical_signature_generators_success",
         "total signature generator success",
+        &["node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static SIGNATURE_GENERATOR_MINE_SUCCESS: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_signature_generator_mine_success",
+        "mine signature generator success",
         &["node_account_id"],
     )
     .unwrap()
