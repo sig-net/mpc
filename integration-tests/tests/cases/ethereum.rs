@@ -335,7 +335,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
 
     // Produce a few sign requests up front so nodes create initial checkpoints
     for i in 0..5 {
-        submit_eth_sign_request(&eth_contract, i).await?;
+        eth::submit_sign_request(&eth_contract, i).await?;
     }
 
     let active_idx = 1usize;
@@ -360,7 +360,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
     let mut elapsed = Duration::default();
     let mut seed = 100usize;
     while elapsed < offline_duration {
-        submit_eth_sign_request(&eth_contract, seed).await?;
+        eth::submit_sign_request(&eth_contract, seed).await?;
         seed += 1;
         tokio::time::sleep(Duration::from_secs(2)).await;
         elapsed += Duration::from_secs(2);
@@ -419,34 +419,6 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         node_active_checkpoint, active_checkpoint_after_restart,
         "active node checkpoint should remain aligned after peer recovery"
     );
-
-    Ok(())
-}
-
-async fn submit_eth_sign_request<P>(
-    contract: &eth::ChainSignatures::ChainSignaturesInstance<P>,
-    seed: usize,
-) -> anyhow::Result<()>
-where
-    P: Provider + Clone + Send + Sync + 'static,
-{
-    let payload = [seed as u8; 32];
-    let request = eth::SignRequest {
-        payload: payload.into(),
-        path: format!("offline_test_{seed}"),
-        keyVersion: LATEST_MPC_KEY_VERSION,
-        algo: "secp256k1".to_string(),
-        dest: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1".to_string(),
-        params: "{}".to_string(),
-    };
-
-    contract
-        .sign(request)
-        .value(U256::from(1_u64))
-        .send()
-        .await?
-        .get_receipt()
-        .await?;
 
     Ok(())
 }

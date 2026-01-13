@@ -7,7 +7,12 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
 use alloy::sol_types::{SolEvent, SolValue};
 use anyhow::{Context, Result};
+use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use serde_json::Value;
+use std::time::Duration;
+
+pub use ChainSignatures::SignRequest;
+pub use ChainSignatures::SignatureResponded;
 
 alloy::sol! {
     #[sol(rpc)]
@@ -156,5 +161,48 @@ pub fn compute_request_id(
     alloy::primitives::keccak256(encoding.encode_data())
 }
 
-pub use ChainSignatures::SignRequest;
-pub use ChainSignatures::SignatureResponded;
+pub async fn submit_sign_request<P>(
+    contract: &ChainSignatures::ChainSignaturesInstance<P>,
+    seed: usize,
+) -> anyhow::Result<()>
+where
+    P: Provider + Clone + Send + Sync + 'static,
+{
+    let payload = [seed as u8; 32];
+    // The anvil RPC occasionally reports "nonce too low" even though we send
+    // sequentially and await receipts; retry once or twice to smooth out that
+    // transient behaviour.
+    const MAX_ATTEMPTS: usize = 3;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        let request = SignRequest {
+            payload: payload.into(),
+            path: format!("offline_test_{seed}"),
+            keyVersion: LATEST_MPC_KEY_VERSION,
+            algo: "secp256k1".to_string(),
+            dest: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1".to_string(),
+            params: "{}".to_string(),
+        };
+
+        match contract.sign(request).value(U256::from(1_u64)).send().await {
+            Ok(pending) => {
+                pending.get_receipt().await?;
+                return Ok(());
+            }
+            Err(err) => {
+                let err_msg = err.to_string();
+                let is_nonce_race = err_msg.contains("nonce too low");
+
+                if is_nonce_race && attempt < MAX_ATTEMPTS {
+                    tracing::warn!(attempt, "retrying ethereum sign after nonce too low");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+
+                return Err(err.into());
+            }
+        }
+    }
+
+    Ok(())
+}
