@@ -17,6 +17,7 @@ google-secretmanager1 = "5"
 hkdf = "0.12.4"
 highway = "1.1.0"
 http = "1.1.0"
+hyper = { version = "0.14", features = ["full"] }
 hyper-rustls = { version = "=0.24", features = ["http2"] }
 local-ip-address = "0.5.4"
 lru = "0.13.0"
@@ -57,7 +58,6 @@ ciborium.workspace = true
 clap.workspace = true
 deadpool-redis.workspace = true
 hex.workspace = true
-hyper.workspace = true
 k256.workspace = true
 rand.workspace = true
 reqwest.workspace = true
