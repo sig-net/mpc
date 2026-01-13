@@ -946,35 +946,20 @@ async fn execute_publish(
                     .map_err(|_| ())
             }
             ChainClient::Ethereum(eth) => {
-                try_publish_eth(
-                    eth,
-                    &action,
-                    &action.timestamp,
-                    &signature,
-                    &near_account_id,
-                )
-                .await
+                try_publish_eth(eth, &action, &action.timestamp, &signature).await
             }
-            ChainClient::Solana(sol) => try_publish_sol(
-                sol,
-                &action,
-                &action.timestamp,
-                &signature,
-                &near_account_id,
-            )
-            .await
-            .map_err(|_| ()),
-            ChainClient::Hydration(hyd) => try_publish_hydration(
-                hyd,
-                &action,
-                &action.timestamp,
-                &signature,
-                &near_account_id,
-            )
-            .await
-            .map_err(|_| ()),
+            ChainClient::Solana(sol) => {
+                try_publish_sol(sol, &action, &action.timestamp, &signature)
+                    .await
+                    .map_err(|_| ())
+            }
+            ChainClient::Hydration(hyd) => {
+                try_publish_hydration(hyd, &action, &action.timestamp, &signature)
+                    .await
+                    .map_err(|_| ())
+            }
             ChainClient::Err(msg) => {
-                tracing::warn!(msg, "no client for chain");
+                tracing::error!(msg, "no client for chain");
                 Ok(())
             }
         };
@@ -1000,6 +985,24 @@ async fn execute_publish(
             );
         }
     };
+
+    let chain_str = chain.as_str();
+    let account_str = near_account_id.as_str();
+
+    if publish_result.is_ok() {
+        let elapsed = action.indexed.timestamp_sign_queue.elapsed();
+        if elapsed.as_secs() <= chain.expected_response_time_secs() {
+            crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_IN_TIME
+                .with_label_values(&[chain_str, account_str])
+                .inc();
+        }
+        crate::metrics::requests::SIGN_TOTAL_LATENCY
+            .with_label_values(&[chain_str, account_str])
+            .observe(elapsed.as_secs_f64());
+        crate::metrics::requests::SIGN_RESPOND_LATENCY
+            .with_label_values(&[chain_str, account_str])
+            .observe(action.timestamp.elapsed().as_secs_f64());
+    }
 
     // Mark completion in Backlog for SignBidirectional requests
     if matches!(
@@ -1053,7 +1056,6 @@ async fn try_publish_near(
     timestamp: &Instant,
     signature: &Signature,
 ) -> Result<(), near_fetch::Error> {
-    let chain = action.indexed.chain;
     let outcome = near
         .call_respond(&action.indexed.id, signature)
         .await
@@ -1081,17 +1083,6 @@ async fn try_publish_near(
         elapsed = ?timestamp.elapsed(),
         "published signature sucessfully",
     );
-
-    let elapsed = action.indexed.timestamp_sign_queue.elapsed();
-    crate::metrics::requests::NUM_SIGN_SUCCESS
-        .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
-        .inc();
-    crate::metrics::requests::SIGN_TOTAL_LATENCY
-        .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
-        .observe(elapsed.as_secs_f64());
-    crate::metrics::requests::SIGN_RESPOND_LATENCY
-        .with_label_values(&[chain.as_str(), near.my_account_id.as_str()])
-        .observe(timestamp.elapsed().as_secs_f64());
     Ok(())
 }
 
@@ -1287,9 +1278,7 @@ async fn try_publish_eth(
     action: &PublishAction,
     timestamp: &Instant,
     signature: &Signature,
-    near_account_id: &AccountId,
 ) -> Result<(), ()> {
-    let chain = action.indexed.chain;
     let sign_id = action.indexed.id;
     let params = [DynSolValue::Array(vec![DynSolValue::Tuple(vec![
         DynSolValue::FixedBytes(action.indexed.id.request_id.into(), 32),
@@ -1338,19 +1327,6 @@ async fn try_publish_eth(
         elapsed = ?timestamp.elapsed(),
         "published ethereum signature successfully"
     );
-
-    crate::metrics::requests::NUM_SIGN_SUCCESS
-        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-        .inc();
-    let elapsed = action.indexed.timestamp_sign_queue.elapsed();
-    crate::metrics::requests::SIGN_TOTAL_LATENCY
-        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-        .observe(elapsed.as_secs_f64());
-
-    crate::metrics::requests::SIGN_RESPOND_LATENCY
-        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-        .observe(timestamp.elapsed().as_secs_f64());
-
     Ok(())
 }
 
@@ -1358,8 +1334,6 @@ async fn try_batch_publish_eth(
     eth: &EthClient,
     actions: &Vec<PublishAction>,
     signatures: &HashMap<SignId, Signature>,
-    near_account_id: &AccountId,
-    start: Instant,
 ) -> Result<(), ()> {
     let chain = Chain::Ethereum;
     let mut params_vec = vec![];
@@ -1432,19 +1406,6 @@ async fn try_batch_publish_eth(
         "eth batch published ethereum signatures successfully"
     );
 
-    crate::metrics::requests::NUM_SIGN_SUCCESS
-        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-        .inc_by(num_requests as f64);
-    for action in actions {
-        let elapsed = action.indexed.timestamp_sign_queue.elapsed();
-        crate::metrics::requests::SIGN_TOTAL_LATENCY
-            .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-            .observe(elapsed.as_secs_f64());
-    }
-    crate::metrics::requests::SIGN_RESPOND_LATENCY
-        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-        .observe(start.elapsed().as_secs_f64());
-
     Ok(())
 }
 
@@ -1487,19 +1448,33 @@ async fn execute_batch_publish(
                 tracing::error!("Solana has no batch publish");
                 Ok(())
             }
-            ChainClient::Ethereum(eth) => {
-                try_batch_publish_eth(eth, actions, &signatures, near_account_id, start).await
-            }
+            ChainClient::Ethereum(eth) => try_batch_publish_eth(eth, actions, &signatures).await,
             ChainClient::Hydration(_) => {
                 tracing::error!("Hydration has no batch publish");
                 Ok(())
             }
             ChainClient::Err(msg) => {
-                tracing::warn!(msg, "no client for chain");
+                tracing::error!(msg, "no client for chain");
                 Ok(())
             }
         };
         if publish.is_ok() {
+            // Record metrics for successful batch publish
+            for action in actions.iter() {
+                let chain = action.indexed.chain;
+                let elapsed = action.indexed.timestamp_sign_queue.elapsed();
+                if elapsed.as_secs() <= chain.expected_response_time_secs() {
+                    crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_IN_TIME
+                        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                        .inc();
+                }
+                crate::metrics::requests::SIGN_TOTAL_LATENCY
+                    .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                    .observe(elapsed.as_secs_f64());
+            }
+            crate::metrics::requests::SIGN_RESPOND_LATENCY
+                .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
+                .observe(start.elapsed().as_secs_f64());
             actions.clear();
             break;
         }
@@ -1530,9 +1505,7 @@ async fn try_publish_sol(
     action: &PublishAction,
     timestamp: &Instant,
     signature: &Signature,
-    near_account_id: &AccountId,
 ) -> Result<(), ()> {
-    let chain = action.indexed.chain;
     let program = sol.client.program(sol.program_id).map_err(|_| ())?;
 
     let sign_id = action.indexed.id;
@@ -1624,20 +1597,6 @@ async fn try_publish_sol(
         }
     }
 
-    crate::metrics::requests::NUM_SIGN_SUCCESS
-        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-        .inc();
-    let sign_latency_in_secs = crate::util::duration_between_unix(
-        action.indexed.unix_timestamp_indexed,
-        crate::util::current_unix_timestamp(),
-    )
-    .as_secs();
-    crate::metrics::requests::SIGN_TOTAL_LATENCY
-        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-        .observe(sign_latency_in_secs as f64);
-    crate::metrics::requests::SIGN_RESPOND_LATENCY
-        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-        .observe(timestamp.elapsed().as_secs_f64());
     Ok(())
 }
 
@@ -1646,7 +1605,6 @@ async fn try_publish_hydration(
     action: &PublishAction,
     timestamp: &Instant,
     signature: &Signature,
-    near_account_id: &AccountId,
 ) -> Result<(), ()> {
     let chain = action.indexed.chain;
     let sign_id = action.indexed.id;
@@ -1699,21 +1657,6 @@ async fn try_publish_hydration(
             );
         }
     }
-
-    crate::metrics::requests::NUM_SIGN_SUCCESS
-        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-        .inc();
-    let sign_latency_in_secs = crate::util::duration_between_unix(
-        action.indexed.unix_timestamp_indexed,
-        crate::util::current_unix_timestamp(),
-    )
-    .as_secs();
-    crate::metrics::requests::SIGN_TOTAL_LATENCY
-        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-        .observe(sign_latency_in_secs as f64);
-    crate::metrics::requests::SIGN_RESPOND_LATENCY
-        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
-        .observe(timestamp.elapsed().as_secs_f64());
 
     Ok(())
 }

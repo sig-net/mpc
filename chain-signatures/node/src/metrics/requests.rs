@@ -31,10 +31,19 @@ pub(crate) static NUM_UNIQUE_SIGN_REQUESTS: LazyLock<CounterVec> = LazyLock::new
     .unwrap()
 });
 
-pub(crate) static NUM_SIGN_SUCCESS: LazyLock<CounterVec> = LazyLock::new(|| {
+pub(crate) static NUM_SIGN_REQUESTS_MINE_IN_TIME: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec(
         "multichain_sign_requests_success",
-        "number of successful multichain sign requests, marked by publish()",
+        "number of mine sign requests with in time response",
+        &["chain", "node_account_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) static NUM_SIGN_REQUESTS_MINE_DELAYED: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec(
+        "multichain_sign_requests_deleyed",
+        "number of mine sign requests that are delayed",
         &["chain", "node_account_id"],
     )
     .unwrap()
