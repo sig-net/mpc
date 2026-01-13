@@ -145,7 +145,7 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {
                 alloy::dyn_abi::DynSolValue::String(data.0),
                 alloy::dyn_abi::DynSolValue::Bytes(data.1.to_vec()),
                 alloy::dyn_abi::DynSolValue::String(data.2),
-                alloy::dyn_abi::DynSolValue::Uint(data.3.into(), 256),
+                alloy::dyn_abi::DynSolValue::Uint(data.3, 256),
                 alloy::dyn_abi::DynSolValue::String(data.4),
                 alloy::dyn_abi::DynSolValue::String(data.5),
                 alloy::dyn_abi::DynSolValue::String(data.6),

@@ -170,7 +170,7 @@ impl SignatureEvent for SignatureRequestedEvent {
             self.sender.to_string(),
             self.payload.to_vec(),
             self.path.clone(),
-            u32::from(self.key_version),
+            self.key_version,
             self.chain_id.clone(),
             self.algo.clone(),
             self.dest.clone(),

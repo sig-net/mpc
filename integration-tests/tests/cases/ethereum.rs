@@ -1,4 +1,4 @@
-use alloy::primitives::{FixedBytes, U256};
+use alloy::primitives::U256;
 use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
 use alloy::sol_types::SolEvent;
@@ -93,8 +93,7 @@ async fn test_signature_ethereum() -> Result<()> {
                 eth::SignatureResponded::decode_log(&prim_log)
                     .ok()
                     .filter(|event| {
-                        event.requestId == FixedBytes::<32>::from(expected_request_id)
-                            && event.responder == requester
+                        event.requestId == expected_request_id && event.responder == requester
                     })
             })
         }) {
@@ -268,8 +267,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
                 eth::SignatureResponded::decode_log(&prim_log)
                     .ok()
                     .filter(|event| {
-                        event.requestId == FixedBytes::<32>::from(expected_request_id)
-                            && event.responder == requester
+                        event.requestId == expected_request_id && event.responder == requester
                     })
             })
         }) {

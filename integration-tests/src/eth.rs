@@ -77,7 +77,7 @@ pub fn client(
     endpoint: &str,
     secret_key: &str,
     chain_id: u64,
-) -> Result<(impl Provider + Clone + Send + Sync + 'static, Address)> {
+) -> Result<(impl Provider + Clone + 'static, Address)> {
     let signer: PrivateKeySigner = secret_key.parse()?;
     let signer = signer.with_chain_id(Some(chain_id));
     let address = signer.address();

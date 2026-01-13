@@ -566,7 +566,7 @@ fn derive_secret_key(mnemonic: &str) -> anyhow::Result<String> {
     let mnemonic = Mnemonic::parse(mnemonic)?;
     let seed = mnemonic.to_seed("");
     let derivation_path = DerivationPath::from_str("m/44'/60'/0'/0/0")?;
-    let xprv = XPrv::derive_from_path(&seed, &derivation_path)?;
+    let xprv = XPrv::derive_from_path(seed, &derivation_path)?;
     let secret_key = xprv.private_key();
 
     Ok(format!("0x{}", hex::encode(secret_key.to_bytes())))
