@@ -804,7 +804,6 @@ impl EthereumIndexer {
         let node_near_account_id_clone2 = node_near_account_id.clone();
         let requests_indexed_send_clone = requests_indexed_send.clone();
         let backlog_clone2 = backlog.clone();
-        let sign_tx_clone = sign_tx.clone();
         let client_clone = Arc::clone(&client);
         tokio::spawn(async move {
             Self::retry_failed_blocks(
@@ -816,7 +815,6 @@ impl EthereumIndexer {
                 requests_indexed_send_clone,
                 total_timeout,
                 backlog_clone2,
-                sign_tx_clone,
             )
             .await;
         });
@@ -875,7 +873,6 @@ impl EthereumIndexer {
                 requests_indexed_send_clone.clone(),
                 total_timeout,
                 backlog.clone(),
-                sign_tx.clone(),
             )
             .await
             {
@@ -938,7 +935,6 @@ impl EthereumIndexer {
         requests_indexed: mpsc::Sender<BlockAndRequests>,
         total_timeout: Duration,
         backlog: Backlog,
-        sign_tx: mpsc::Sender<Sign>,
     ) -> anyhow::Result<()> {
         let block_number = block.header.number;
         let block_hash = block.header.hash;
@@ -1316,7 +1312,6 @@ impl EthereumIndexer {
         requests_indexed: mpsc::Sender<BlockAndRequests>,
         total_timeout: Duration,
         backlog: Backlog,
-        sign_tx: mpsc::Sender<Sign>,
     ) {
         loop {
             let Some(block) = blocks_failed_rx.recv().await else {
@@ -1332,7 +1327,6 @@ impl EthereumIndexer {
                 requests_indexed.clone(),
                 total_timeout,
                 backlog.clone(),
-                sign_tx.clone(),
             )
             .await
             {
