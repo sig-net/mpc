@@ -42,7 +42,7 @@ pub(crate) static NUM_SIGN_REQUESTS_MINE_IN_TIME: LazyLock<CounterVec> = LazyLoc
 
 pub(crate) static NUM_SIGN_REQUESTS_MINE_DELAYED: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec(
-        "multichain_sign_requests_deleyed",
+        "multichain_sign_requests_delayed",
         "number of mine sign requests that are delayed",
         &["chain", "node_account_id"],
     )

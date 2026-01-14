@@ -1172,6 +1172,8 @@ pub struct SignatureSpawner {
     tasks: JoinMap<SignId, Result<(), SignError>>,
     /// Buffered inboxes for posit messages, allowing us to queue before tasks spawn
     inboxes: HashMap<SignId, Subscriber<SignTaskMessage>>,
+    /// Tracks delay watcher tasks that will increment the delayed metric when response time exceeds expected
+    delayed_watchers: HashMap<SignId, JoinHandle<()>>,
     mesh_state: watch::Receiver<MeshState>,
 
     me: Participant,
@@ -1196,6 +1198,30 @@ impl SignatureSpawner {
     ) {
         let sign_id = indexed.id;
         tracing::info!(?sign_id, "spawning signature task");
+
+        // Spawn a reactive watcher task that increments the delayed metric
+        // if the signature is not completed within the expected response time
+        let chain = indexed.chain;
+        let timestamp_sign_queue = indexed.timestamp_sign_queue;
+        let my_account_id = self.my_account_id.clone();
+        let expected_response_time = Duration::from_secs(chain.expected_response_time_secs());
+        let watcher = tokio::spawn(async move {
+            tokio::time::sleep(expected_response_time).await;
+            // If we reach here, the expected response time has been exceeded
+            // and the task is still running (not completed)
+            let elapsed = timestamp_sign_queue.elapsed();
+            tracing::warn!(
+                ?sign_id,
+                ?chain,
+                elapsed_secs = elapsed.as_secs(),
+                expected_secs = expected_response_time.as_secs(),
+                "signature request delayed beyond expected response time"
+            );
+            crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_DELAYED
+                .with_label_values(&[chain.as_str(), my_account_id.as_str()])
+                .inc();
+        });
+        self.delayed_watchers.insert(sign_id, watcher);
 
         // Subscribe to (or create) the posit inbox for this sign request
         let rx = self.inboxes.entry(sign_id).or_default().subscribe();
@@ -1248,10 +1274,20 @@ impl SignatureSpawner {
 
     fn handle_completion(&mut self, sign_id: SignId) {
         self.inboxes.remove(&sign_id);
+        self.abort_delayed_watcher(sign_id, "completion");
         if self.tasks.abort(sign_id) {
             tracing::info!(?sign_id, "aborting signature task due to completion event");
         } else {
             tracing::info!(?sign_id, "task already completed or unable to be aborted");
+        }
+    }
+
+    fn abort_delayed_watcher(&mut self, sign_id: SignId, reason: &str) {
+        if let Some(watcher) = self.delayed_watchers.remove(&sign_id) {
+            tracing::info!(?sign_id, reason = %reason, "aborting delayed watcher");
+            watcher.abort();
+        } else {
+            tracing::debug!(?sign_id, reason = %reason, "no delayed watcher to abort");
         }
     }
 
@@ -1326,11 +1362,13 @@ impl SignatureSpawner {
                         Err(sign_id) => {
                             tracing::warn!(?sign_id, "signature task interrupted");
                             self.inboxes.remove(&sign_id);
+                            self.abort_delayed_watcher(sign_id, "interruption");
                             continue;
                         }
                     };
 
                     self.inboxes.remove(&sign_id);
+                    self.abort_delayed_watcher(sign_id, "task completion");
                     match result {
                         Ok(()) => {
                             tracing::info!(?sign_id, "signature task completed successfully");
@@ -1371,6 +1409,7 @@ impl SignatureSpawnerTask {
             me,
             tasks: JoinMap::new(),
             inboxes: HashMap::new(),
+            delayed_watchers: HashMap::new(),
             my_account_id: ctx.my_account_id.clone(),
             threshold,
             public_key,
