@@ -231,10 +231,10 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             }
             tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
 
-            let backlog = Backlog::persisted(CheckpointStorage::Redis(
-                redis_pool.clone(),
-                account_id.clone(),
-            ));
+            let backlog = Backlog::persisted(
+                CheckpointStorage::Redis(redis_pool.clone(), account_id.clone()),
+                Some(account_id.to_string()),
+            );
 
             // NEAR Indexer is only used for integration tests
             // TODO: Remove this once we have integration tests built on other chains

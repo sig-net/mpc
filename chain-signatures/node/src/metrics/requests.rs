@@ -67,3 +67,12 @@ pub(crate) static SIGN_QUEUE_SIZE: LazyLock<prometheus::IntGaugeVec> = LazyLock:
     )
     .unwrap()
 });
+
+pub(crate) static BACKLOG_SIZE: LazyLock<prometheus::IntGaugeVec> = LazyLock::new(|| {
+    super::try_create_int_gauge_vec(
+        "multichain_backlog_size",
+        "number of pending backlog requests by chain",
+        &["chain", "node_account_id"],
+    )
+    .unwrap()
+});

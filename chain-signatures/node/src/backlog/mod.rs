@@ -192,6 +192,7 @@ pub struct Backlog {
     sign_request_types: Arc<RwLock<HashMap<(Chain, SignId), SignRequestType>>>,
     /// Historical checkpoints kept for 30 minutes, indexed by chain
     historical_checkpoints: Arc<RwLock<HashMap<Chain, Vec<HistoricalCheckpoint>>>>,
+    node_account_id: Option<String>,
 }
 
 impl Default for Backlog {
@@ -202,16 +203,17 @@ impl Default for Backlog {
 
 impl Backlog {
     pub fn new() -> Self {
-        Self::persisted(CheckpointStorage::in_memory())
+        Self::persisted(CheckpointStorage::in_memory(), None)
     }
 
-    pub fn persisted(storage: CheckpointStorage) -> Self {
+    pub fn persisted(storage: CheckpointStorage, node_account_id: Option<String>) -> Self {
         Self {
             storage,
             requests: Arc::new(RwLock::new(HashMap::new())),
             execution_watchers: Arc::new(RwLock::new(HashMap::new())),
             sign_request_types: Arc::new(RwLock::new(HashMap::new())),
             historical_checkpoints: Arc::new(RwLock::new(HashMap::new())),
+            node_account_id,
         }
     }
 
@@ -226,24 +228,30 @@ impl Backlog {
         self.set_sign_request_type(chain, id, sign_request_type)
             .await;
 
-        self.requests
-            .write()
-            .await
-            .entry(chain)
-            .or_insert_with(PendingRequests::new)
-            .insert(id, tx)
+        let (prev, len) = {
+            let mut requests = self.requests.write().await;
+            let pending = requests.entry(chain).or_insert_with(PendingRequests::new);
+            let p = pending.insert(id, tx);
+            (p, pending.len())
+        };
+
+        self.observe_backlog_size(chain, len);
+        prev
     }
 
     pub async fn remove(&self, chain: Chain, id: &SignId) -> Option<BacklogTransaction> {
         // Also remove the sign request type tracking
         self.remove_sign_request_type(chain, id).await;
 
-        self.requests
-            .write()
-            .await
-            .entry(chain)
-            .or_insert_with(PendingRequests::new)
-            .remove(id)
+        let (removed, len) = {
+            let mut requests = self.requests.write().await;
+            let pending = requests.entry(chain).or_insert_with(PendingRequests::new);
+            let rem = pending.remove(id);
+            (rem, pending.len())
+        };
+
+        self.observe_backlog_size(chain, len);
+        removed
     }
 
     pub async fn get(&self, chain: Chain, id: &SignId) -> Option<BacklogTransaction> {
@@ -295,6 +303,14 @@ impl Backlog {
     /// Remove the sign request type tracking for a given sign ID (internal only, removed during remove)
     async fn remove_sign_request_type(&self, chain: Chain, id: &SignId) {
         self.sign_request_types.write().await.remove(&(chain, *id));
+    }
+
+    fn observe_backlog_size(&self, chain: Chain, len: usize) {
+        if let Some(account_id) = &self.node_account_id {
+            crate::metrics::requests::BACKLOG_SIZE
+                .with_label_values(&[chain.as_str(), account_id.as_str()])
+                .set(len as i64);
+        }
     }
 
     /// Returns all sign-respond transactions with a specific status
