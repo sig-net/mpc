@@ -576,7 +576,7 @@ pub async fn run(
                 };
                 tracing::info!(
                     "Hydration::Signet::SignBidirectionalRequested in block #{number} ({hash:?}): {:?}",
-                event
+                    event
                 );
 
                 let entropy = sp_core::hashing::blake2_256(ev.bytes());
@@ -880,5 +880,33 @@ fn value_to_vec_u8(v: &Value<u32>) -> Result<Vec<u8>> {
             Ok(out)
         }
         other => Err(anyhow!("unsupported Vec<u8> shape: {other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signature_requested_request_id_matches_golden_value() {
+        let event = HydrationSignatureRequestedEvent {
+            sender: [0xAA; 32],
+            payload: [0xBB; 32],
+            path: "m/44'/60'/0'/0/0".to_string(),
+            key_version: 3,
+            deposit: 999,
+            chain_id: "hydration-testnet".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "dest-address".to_string(),
+            params: "payload-params".to_string(),
+        };
+
+        let request_id = event.generate_request_id();
+        let request_id_hex = hex::encode(request_id);
+
+        assert_eq!(
+            request_id_hex,
+            "67a3a9bf9d424d85bef21cf9780a0634c6a06061265ce9d1063f30f1eec84821"
+        );
     }
 }

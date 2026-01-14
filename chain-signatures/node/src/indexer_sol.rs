@@ -949,3 +949,32 @@ pub fn to_mpc_signature(
         recovery_id: sig.recovery_id,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signature_requested_request_id_matches_golden_value() {
+        let event = SignatureRequestedEvent {
+            sender: Pubkey::new_from_array([0x11; 32]),
+            payload: [0x22; 32],
+            key_version: 7,
+            deposit: 12345,
+            chain_id: "solana-test-chain".to_string(),
+            path: "m/44'/501'/0'/0'".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "destination-address".to_string(),
+            params: "params-json".to_string(),
+            fee_payer: None,
+        };
+
+        let request_id = event.generate_request_id();
+        let request_id_hex = hex::encode(request_id);
+
+        assert_eq!(
+            request_id_hex,
+            "7f7aee49c2a994cc17f85058f7e0b19a44603d619a7e738522f9aa329e457879"
+        );
+    }
+}
