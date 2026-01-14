@@ -1201,12 +1201,16 @@ impl SignatureSpawner {
 
         // Spawn a reactive watcher task that increments the delayed metric
         // if the signature is not completed within the expected response time
+        // The time is measured from when the request was indexed, not when the task was spawned
         let chain = indexed.chain;
         let timestamp_sign_queue = indexed.timestamp_sign_queue;
         let my_account_id = self.my_account_id.clone();
         let expected_response_time = Duration::from_secs(chain.expected_response_time_secs());
         let watcher = tokio::spawn(async move {
-            tokio::time::sleep(expected_response_time).await;
+            // Calculate how much time is remaining until expected_response_time from indexing
+            let already_elapsed = timestamp_sign_queue.elapsed();
+            let remaining_time = expected_response_time.saturating_sub(already_elapsed);
+            tokio::time::sleep(remaining_time).await;
             // If we reach here, the expected response time has been exceeded
             // and the task is still running (not completed)
             let elapsed = timestamp_sign_queue.elapsed();
