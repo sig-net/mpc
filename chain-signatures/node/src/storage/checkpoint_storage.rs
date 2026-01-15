@@ -10,6 +10,8 @@ use tokio::sync::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+const CHECKPOINT_VERSION: &str = "v0";
+
 #[derive(Clone, Debug)]
 pub enum CheckpointStorage {
     Redis(Pool, AccountId),
@@ -30,7 +32,7 @@ impl CheckpointStorage {
     fn checkpoint_key(&self, chain: Chain) -> String {
         match self {
             CheckpointStorage::Redis(_, account_id) => {
-                format!("{account_id}:checkpoint:latest:{chain}")
+                format!("{account_id}:checkpoint:latest:{CHECKPOINT_VERSION}:{chain}")
             }
             CheckpointStorage::InMemory(_) => format!("checkpoint:latest:{chain}"),
         }
