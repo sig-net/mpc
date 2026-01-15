@@ -39,7 +39,7 @@ struct AxumState {
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
     msg_channel: MessageChannel,
-    #[allow(dead_code)]  // used by debug-page
+    #[allow(dead_code)] // used by debug-page
     my_account_id: AccountId,
     backlog: Backlog,
 }
