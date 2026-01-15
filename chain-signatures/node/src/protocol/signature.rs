@@ -1201,31 +1201,30 @@ impl SignatureSpawner {
 
         // Spawn a reactive watcher task that increments the delayed metric
         // if the signature is not completed within the expected response time
-        // The time is measured from when the request was indexed, not when the task was spawned
         let chain = indexed.chain;
         let timestamp_sign_queue = indexed.timestamp_sign_queue;
         let my_account_id = self.my_account_id.clone();
         let expected_response_time = Duration::from_secs(chain.expected_response_time_secs());
-        let watcher = tokio::spawn(async move {
-            // Calculate how much time is remaining until expected_response_time from indexing
-            let already_elapsed = timestamp_sign_queue.elapsed();
-            let remaining_time = expected_response_time.saturating_sub(already_elapsed);
-            tokio::time::sleep(remaining_time).await;
-            // If we reach here, the expected response time has been exceeded
-            // and the task is still running (not completed)
-            let elapsed = timestamp_sign_queue.elapsed();
-            tracing::warn!(
-                ?sign_id,
-                ?chain,
-                elapsed_secs = elapsed.as_secs(),
-                expected_secs = expected_response_time.as_secs(),
-                "signature request delayed beyond expected response time"
-            );
-            crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_DELAYED
-                .with_label_values(&[chain.as_str(), my_account_id.as_str()])
-                .inc();
-        });
-        self.delayed_watchers.insert(sign_id, watcher);
+        let already_elapsed = timestamp_sign_queue.elapsed();
+        let remaining_time = expected_response_time.saturating_sub(already_elapsed);
+        // prevent incrementing delayed metric for already delayed requests
+        if remaining_time > Duration::from_secs(0) {
+            let watcher = tokio::spawn(async move {
+                tokio::time::sleep(remaining_time).await;
+                let elapsed = timestamp_sign_queue.elapsed();
+                tracing::warn!(
+                    ?sign_id,
+                    ?chain,
+                    elapsed_secs = elapsed.as_secs(),
+                    expected_secs = expected_response_time.as_secs(),
+                    "signature request delayed beyond expected response time"
+                );
+                crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_DELAYED
+                    .with_label_values(&[chain.as_str(), my_account_id.as_str()])
+                    .inc();
+            });
+            self.delayed_watchers.insert(sign_id, watcher);
+        }
 
         // Subscribe to (or create) the posit inbox for this sign request
         let rx = self.inboxes.entry(sign_id).or_default().subscribe();
