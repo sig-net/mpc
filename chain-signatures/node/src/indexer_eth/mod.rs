@@ -732,12 +732,17 @@ impl EthereumIndexer {
         let sign_tx = self.sign_tx;
         let node_near_account_id = self.node_near_account_id;
 
+        let total_timeout = Duration::from_secs(eth.total_timeout);
+
         crate::indexer_common::recover_backlog(
             &backlog,
             &mut contract_watcher,
             &mut mesh_state,
             &node_client,
             Chain::Ethereum,
+            sign_tx.clone(),
+            node_near_account_id.clone(),
+            total_timeout,
         )
         .await;
 
@@ -758,8 +763,6 @@ impl EthereumIndexer {
             );
             return;
         };
-        let total_timeout = Duration::from_secs(eth.total_timeout);
-
         let (blocks_failed_send, blocks_failed_recv) = failed_blocks_channel();
 
         let (requests_indexed_send, requests_indexed_recv) = indexed_channel();

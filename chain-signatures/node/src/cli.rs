@@ -209,7 +209,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 .with_label_values(&[account_id.as_str()])
                 .set(digest);
 
-            let (sign_tx, sign_rx) = mpsc::channel(1024);
+            let (sign_tx, sign_rx) = mpsc::channel(16384);
 
             let gcp_service = GcpService::init(&account_id, &storage_options).await?;
 

@@ -16,13 +16,14 @@ use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::BidirectionalTx;
 use crate::sign_bidirectional::BidirectionalTxId;
 use crate::sign_bidirectional::PendingRequestStatus;
+use crate::util::current_unix_timestamp;
 use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
 use mpc_primitives::SignId;
 use mpc_primitives::Signature;
 use near_account_id::AccountId;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 
@@ -245,6 +246,7 @@ pub(crate) async fn process_sign_event(
             source_chain: sign_event.source_chain(),
             key_version: sign_request.args.key_version,
             status: PendingRequestStatus::AwaitingResponse,
+            args: sign_request.args.clone(),
         }),
         SignRequestType::SignBidirectional(_event) => {
             // For bidirectional requests, start with a Sign transaction
@@ -254,6 +256,7 @@ pub(crate) async fn process_sign_event(
                 source_chain: sign_event.source_chain(),
                 key_version: sign_request.args.key_version,
                 status: PendingRequestStatus::AwaitingResponse,
+                args: sign_request.args.clone(),
             })
         }
         _ => anyhow::bail!("Unexpected sign request type"),
@@ -284,12 +287,16 @@ pub(crate) async fn process_sign_event(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn recover_backlog(
     backlog: &Backlog,
     contract_watcher: &mut ContractStateWatcher,
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
     source_chain: Chain,
+    sign_tx: mpsc::Sender<Sign>,
+    node_near_account_id: AccountId,
+    total_timeout: Duration,
 ) {
     // Recover backlog before doing anything.
     // Wait for threshold to be available
@@ -298,9 +305,53 @@ pub(crate) async fn recover_backlog(
         wait_threshold_active(mesh_state, threshold).await;
 
         let mesh_state = mesh_state.borrow().clone();
-        backlog
+        let mut pending = backlog
             .recover(&mesh_state, node_client, threshold, &[source_chain])
             .await;
+
+        // Re-enqueue any pending sign requests so the node processes them after recovery
+        let pending = pending.remove(&source_chain).unwrap_or_default();
+
+        for (sign_id, tx) in pending
+            .into_iter()
+            .filter(|(_, tx)| matches!(tx.status(), PendingRequestStatus::AwaitingResponse))
+        {
+            let BacklogTransaction::Sign(sign_tx_entry) = tx else {
+                continue;
+            };
+
+            let Some(sign_type) = backlog.sign_type(source_chain, &sign_id).await else {
+                tracing::warn!(
+                    ?sign_id,
+                    ?source_chain,
+                    "sign type missing during backlog recovery"
+                );
+                continue;
+            };
+
+            let sign_request = IndexedSignRequest {
+                id: sign_id,
+                args: sign_tx_entry.args.clone(),
+                chain: sign_tx_entry.source_chain,
+                unix_timestamp_indexed: current_unix_timestamp(),
+                timestamp_sign_queue: Instant::now(),
+                total_timeout,
+                sign_request_type: sign_type,
+            };
+
+            if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
+                tracing::error!(
+                    ?err,
+                    ?sign_id,
+                    ?source_chain,
+                    "failed to requeue sign request after recovery"
+                );
+            } else {
+                crate::metrics::requests::NUM_SIGN_REQUESTS
+                    .with_label_values(&[source_chain.as_str(), node_near_account_id.as_str()])
+                    .inc();
+            }
+        }
     }
 }
 
