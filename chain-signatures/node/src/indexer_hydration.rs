@@ -6,7 +6,7 @@ use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
-use alloy::primitives::{keccak256, Bytes};
+use alloy::primitives::keccak256;
 use alloy_sol_types::SolValue;
 use anyhow::{anyhow, Result};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -127,32 +127,49 @@ pub struct HydrationSignatureRequestedEvent {
 
 impl SignatureEvent for HydrationSignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
-        // Encode the event data in ABI format using alloy
-        let data = (
-            self.sender_string(),
-            Bytes::from(self.payload.to_vec()),
-            self.path.clone(),
-            alloy::primitives::U256::from(self.key_version),
-            self.chain_id.clone(),
-            self.algo.clone(),
-            self.dest.clone(),
-            self.params.clone(),
-        );
+        const HEAD_WORDS: usize = 8;
+        const WORD_SIZE: usize = 32;
 
-        // Encode as ABI-encoded tuple and calculate keccak256 hash
-        *keccak256(
-            alloy::dyn_abi::DynSolValue::Tuple(vec![
-                alloy::dyn_abi::DynSolValue::String(data.0),
-                alloy::dyn_abi::DynSolValue::Bytes(data.1.to_vec()),
-                alloy::dyn_abi::DynSolValue::String(data.2),
-                alloy::dyn_abi::DynSolValue::Uint(data.3, 256),
-                alloy::dyn_abi::DynSolValue::String(data.4),
-                alloy::dyn_abi::DynSolValue::String(data.5),
-                alloy::dyn_abi::DynSolValue::String(data.6),
-                alloy::dyn_abi::DynSolValue::String(data.7),
-            ])
-            .abi_encode(),
-        )
+        fn u256_word(value: u64) -> [u8; WORD_SIZE] {
+            let mut word = [0u8; WORD_SIZE];
+            word[WORD_SIZE - 8..].copy_from_slice(&value.to_be_bytes());
+            word
+        }
+
+        let head_size = HEAD_WORDS * WORD_SIZE;
+        let mut heads: Vec<[u8; WORD_SIZE]> = Vec::with_capacity(HEAD_WORDS);
+        let mut tails: Vec<u8> = Vec::new();
+
+        fn push_dynamic(
+            heads: &mut Vec<[u8; WORD_SIZE]>,
+            tails: &mut Vec<u8>,
+            head_size: usize,
+            bytes: &[u8],
+        ) {
+            let offset = head_size + tails.len();
+            heads.push(u256_word(offset as u64));
+            tails.extend_from_slice(&u256_word(bytes.len() as u64));
+            tails.extend_from_slice(bytes);
+            let padding = (WORD_SIZE - (bytes.len() % WORD_SIZE)) % WORD_SIZE;
+            tails.extend(std::iter::repeat(0u8).take(padding));
+        }
+
+        push_dynamic(&mut heads, &mut tails, head_size, self.sender_string().as_bytes());
+        push_dynamic(&mut heads, &mut tails, head_size, self.payload.as_slice());
+        push_dynamic(&mut heads, &mut tails, head_size, self.path.as_bytes());
+        heads.push(u256_word(self.key_version as u64));
+        push_dynamic(&mut heads, &mut tails, head_size, self.chain_id.as_bytes());
+        push_dynamic(&mut heads, &mut tails, head_size, self.algo.as_bytes());
+        push_dynamic(&mut heads, &mut tails, head_size, self.dest.as_bytes());
+        push_dynamic(&mut heads, &mut tails, head_size, self.params.as_bytes());
+
+        let mut encoded = Vec::with_capacity(head_size + tails.len());
+        for head in heads {
+            encoded.extend_from_slice(&head);
+        }
+        encoded.extend_from_slice(&tails);
+
+        *keccak256(encoded)
     }
 
     fn generate_sign_request(
@@ -576,7 +593,7 @@ pub async fn run(
                 };
                 tracing::info!(
                     "Hydration::Signet::SignBidirectionalRequested in block #{number} ({hash:?}): {:?}",
-                    event
+                event
                 );
 
                 let entropy = sp_core::hashing::blake2_256(ev.bytes());
@@ -888,25 +905,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn signature_requested_request_id_matches_golden_value() {
+    fn hydration_signature_requested_request_id_matches_golden_value() {
         let event = HydrationSignatureRequestedEvent {
-            sender: [0xAA; 32],
-            payload: [0xBB; 32],
-            path: "m/44'/60'/0'/0/0".to_string(),
-            key_version: 3,
-            deposit: 999,
-            chain_id: "hydration-testnet".to_string(),
+            sender: [0x11; 32],
+            payload: [0x22; 32],
+            path: "m/44'/354'/0'/0'".to_string(),
+            key_version: 7,
+            deposit: 12_345,
+            chain_id: "hydration-test-chain".to_string(),
             algo: "secp256k1".to_string(),
-            dest: "dest-address".to_string(),
-            params: "payload-params".to_string(),
+            dest: "destination-address".to_string(),
+            params: "params-json".to_string(),
         };
 
         let request_id = event.generate_request_id();
         let request_id_hex = hex::encode(request_id);
 
-        assert_eq!(
-            request_id_hex,
-            "67a3a9bf9d424d85bef21cf9780a0634c6a06061265ce9d1063f30f1eec84821"
-        );
+        assert_eq!(request_id_hex, "015ab295ee90ae76ee526f559ea3a1fddc28dd05b40976cdbc08dbd08d93b4ec");
     }
 }

@@ -165,20 +165,50 @@ pub struct SolSignRequest {
 
 impl SignatureEvent for SignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
-        // Encode the event data in ABI format using alloy
-        let encoded = (
-            self.sender.to_string(),
-            self.payload.to_vec(),
-            self.path.clone(),
-            self.key_version,
-            self.chain_id.clone(),
-            self.algo.clone(),
-            self.dest.clone(),
-            self.params.clone(),
-        )
-            .abi_encode();
+        // Encode exactly as the legacy ethabi version:
+        // (string, bytes, string, uint256, string, string, string, string)
+        const HEAD_WORDS: usize = 8;
+        const WORD_SIZE: usize = 32;
 
-        // Calculate keccak256 hash
+        fn u256_word(value: u64) -> [u8; WORD_SIZE] {
+            let mut word = [0u8; WORD_SIZE];
+            word[WORD_SIZE - 8..].copy_from_slice(&value.to_be_bytes());
+            word
+        }
+
+        let head_size = HEAD_WORDS * WORD_SIZE;
+        let mut heads: Vec<[u8; WORD_SIZE]> = Vec::with_capacity(HEAD_WORDS);
+        let mut tails: Vec<u8> = Vec::new();
+
+        fn push_dynamic(
+            heads: &mut Vec<[u8; WORD_SIZE]>,
+            tails: &mut Vec<u8>,
+            head_size: usize,
+            bytes: &[u8],
+        ) {
+            let offset = head_size + tails.len();
+            heads.push(u256_word(offset as u64));
+            tails.extend_from_slice(&u256_word(bytes.len() as u64));
+            tails.extend_from_slice(bytes);
+            let padding = (WORD_SIZE - (bytes.len() % WORD_SIZE)) % WORD_SIZE;
+            tails.extend(std::iter::repeat(0u8).take(padding));
+        }
+
+        push_dynamic(&mut heads, &mut tails, head_size, self.sender.to_string().as_bytes());
+        push_dynamic(&mut heads, &mut tails, head_size, self.payload.as_slice());
+        push_dynamic(&mut heads, &mut tails, head_size, self.path.as_bytes());
+        heads.push(u256_word(self.key_version as u64));
+        push_dynamic(&mut heads, &mut tails, head_size, self.chain_id.as_bytes());
+        push_dynamic(&mut heads, &mut tails, head_size, self.algo.as_bytes());
+        push_dynamic(&mut heads, &mut tails, head_size, self.dest.as_bytes());
+        push_dynamic(&mut heads, &mut tails, head_size, self.params.as_bytes());
+
+        let mut encoded = Vec::with_capacity(head_size + tails.len());
+        for head in heads {
+            encoded.extend_from_slice(&head);
+        }
+        encoded.extend_from_slice(&tails);
+
         let mut hasher = Keccak256::new();
         hasher.update(&encoded);
         hasher.finalize().into()
