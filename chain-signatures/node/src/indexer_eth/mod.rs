@@ -18,7 +18,6 @@ use alloy::sol_types::{sol, SolEvent};
 use k256::Scalar;
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
-use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -539,7 +538,6 @@ fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
 fn send_indexed_requests_to_sign_queue(
     requests: Vec<IndexedSignRequest>,
     sign_tx: mpsc::Sender<Sign>,
-    node_near_account_id: AccountId,
 ) {
     for request in requests {
         let sign_tx = sign_tx.clone();
@@ -678,7 +676,6 @@ pub struct EthereumIndexer {
     eth: EthConfig,
     sign_tx: mpsc::Sender<Sign>,
     app_data_storage: AppDataStorage,
-    node_near_account_id: AccountId,
     backlog: Backlog,
     contract_watcher: ContractStateWatcher,
     mesh_state: watch::Receiver<MeshState>,
@@ -692,7 +689,6 @@ impl EthereumIndexer {
         eth: Option<EthConfig>,
         sign_tx: mpsc::Sender<Sign>,
         app_data_storage: AppDataStorage,
-        node_near_account_id: AccountId,
         backlog: Backlog,
         contract_watcher: ContractStateWatcher,
         mesh_state: watch::Receiver<MeshState>,
@@ -709,7 +705,6 @@ impl EthereumIndexer {
             eth,
             sign_tx,
             app_data_storage,
-            node_near_account_id,
             backlog,
             contract_watcher,
             mesh_state,
@@ -727,7 +722,6 @@ impl EthereumIndexer {
         let client = self.client;
         let eth = self.eth;
         let sign_tx = self.sign_tx;
-        let node_near_account_id = self.node_near_account_id;
 
         crate::indexer_common::recover_backlog(
             &backlog,
@@ -778,7 +772,6 @@ impl EthereumIndexer {
             .await;
         });
 
-        let node_near_account_id_clone = node_near_account_id.clone();
         let backlog_clone = backlog.clone();
         let client_clone = Arc::clone(&client);
         let optimistic_requests = eth.optimistic_requests;
@@ -790,7 +783,6 @@ impl EthereumIndexer {
                 finalized_block_recv,
                 sign_tx_clone,
                 app_data_storage.clone(),
-                node_near_account_id_clone,
                 optimistic_requests,
                 backlog_clone,
             )
@@ -798,7 +790,6 @@ impl EthereumIndexer {
         });
 
         let blocks_failed_send_clone = blocks_failed_send.clone();
-        let node_near_account_id_clone2 = node_near_account_id.clone();
         let requests_indexed_send_clone = requests_indexed_send.clone();
         let backlog_clone2 = backlog.clone();
         let client_clone = Arc::clone(&client);
@@ -808,7 +799,6 @@ impl EthereumIndexer {
                 blocks_failed_recv,
                 blocks_failed_send_clone,
                 contract_address,
-                node_near_account_id_clone2,
                 requests_indexed_send_clone,
                 total_timeout,
                 backlog_clone2,
@@ -866,7 +856,6 @@ impl EthereumIndexer {
                 client.clone(),
                 block.clone(),
                 contract_address,
-                node_near_account_id.clone(),
                 requests_indexed_send_clone.clone(),
                 total_timeout,
                 backlog.clone(),
@@ -928,7 +917,6 @@ impl EthereumIndexer {
         client: Arc<EthereumClient>,
         block: alloy::rpc::types::Block,
         contract_address: Address,
-        node_near_account_id: AccountId,
         requests_indexed: mpsc::Sender<BlockAndRequests>,
         total_timeout: Duration,
         backlog: Backlog,
@@ -1216,7 +1204,6 @@ impl EthereumIndexer {
         mut finalized_block_rx: mpsc::Receiver<BlockNumber>,
         sign_tx: mpsc::Sender<Sign>,
         app_data_storage: AppDataStorage,
-        node_near_account_id: AccountId,
         optimistic_requests: bool,
         backlog: Backlog,
     ) {
@@ -1270,7 +1257,6 @@ impl EthereumIndexer {
                 send_indexed_requests_to_sign_queue(
                     indexed_requests,
                     sign_tx.clone(),
-                    node_near_account_id.clone(),
                 );
 
                 if !respond_logs.is_empty() {
@@ -1305,7 +1291,6 @@ impl EthereumIndexer {
         mut blocks_failed_rx: mpsc::Receiver<alloy::rpc::types::Block>,
         blocks_failed_tx: mpsc::Sender<alloy::rpc::types::Block>,
         contract_address: Address,
-        node_near_account_id: AccountId,
         requests_indexed: mpsc::Sender<BlockAndRequests>,
         total_timeout: Duration,
         backlog: Backlog,
@@ -1320,7 +1305,6 @@ impl EthereumIndexer {
                 client.clone(),
                 block.clone(),
                 contract_address,
-                node_near_account_id.clone(),
                 requests_indexed.clone(),
                 total_timeout,
                 backlog.clone(),

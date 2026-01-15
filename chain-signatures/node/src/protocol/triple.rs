@@ -17,7 +17,6 @@ use chrono::Utc;
 use highway::{HighwayHash, HighwayHasher};
 use k256::elliptic_curve::group::GroupEncoding;
 use k256::Secp256k1;
-use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;

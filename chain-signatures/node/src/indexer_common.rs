@@ -21,7 +21,6 @@ use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
 use mpc_primitives::SignId;
 use mpc_primitives::Signature;
-use near_account_id::AccountId;
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -229,7 +228,6 @@ pub(crate) async fn process_sign_event(
     sign_event: SignatureEventBox,
     entropy: [u8; 32],
     sign_tx: mpsc::Sender<Sign>,
-    node_near_account_id: AccountId,
     total_timeout: Duration,
     backlog: Backlog,
 ) -> anyhow::Result<()> {

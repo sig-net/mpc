@@ -29,7 +29,6 @@ use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke::{self, Ciphered};
 use mpc_primitives::SignId;
-use near_account_id::AccountId;
 use near_crypto::Signature;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -1358,7 +1357,7 @@ mod tests {
             participants,
         );
         let (inbox, _outbox, channel) = MessageChannel::new();
-        let inbox = tokio::spawn(inbox.run(node_id.clone(), config_rx, contract_watcher));
+        let inbox = tokio::spawn(inbox.run(config_rx, contract_watcher));
 
         // Case 1:
         // Check that the inbox received our messages correctly:

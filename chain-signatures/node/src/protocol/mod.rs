@@ -84,9 +84,7 @@ impl MpcSignProtocol {
         contract_state: ContractStateWatcher,
         mesh_state: watch::Receiver<MeshState>,
     ) {
-        let my_account_id = self.my_account_id.as_str();
-        let _span = tracing::info_span!("running", my_account_id);
-        let my_account_id = self.my_account_id.clone();
+        let _span = tracing::info_span!("running", "{}", self.my_account_id.as_str());
 
         crate::metrics::nodes::NODE_RUNNING
             .with_label_values(&[node_account_id()])

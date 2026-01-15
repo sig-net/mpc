@@ -351,7 +351,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 triple_storage,
                 presignature_storage,
                 sync_channel,
-                account_id.clone(),
+                account_id,
                 backlog.clone(),
             ));
 
@@ -359,7 +359,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 eth,
                 sign_tx.clone(),
                 app_data_storage.clone(),
-                account_id.clone(),
                 backlog.clone(),
                 contract_watcher.clone(),
                 mesh_state.clone(),
@@ -378,7 +377,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tokio::spawn(indexer_sol::run(
                 sol,
                 sign_tx.clone(),
-                account_id.clone(),
                 backlog.clone(),
                 contract_watcher.clone(),
                 mesh_state.clone(),
@@ -387,7 +385,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tokio::spawn(indexer_hydration::run(
                 hydration,
                 sign_tx,
-                account_id,
                 backlog,
                 contract_watcher,
                 mesh_state,

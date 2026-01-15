@@ -14,7 +14,6 @@ use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::Signature;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
-use near_account_id::AccountId;
 use sha3::{Digest, Keccak256};
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{twox_128, H256};
@@ -377,7 +376,6 @@ pub(crate) fn ss58_address_from_account32(sender: [u8; 32]) -> String {
 pub async fn run(
     hydration: Option<HydrationConfig>,
     sign_tx: mpsc::Sender<Sign>,
-    node_near_account_id: AccountId,
     backlog: Backlog,
     mut contract_watcher: ContractStateWatcher,
     mut mesh_state: watch::Receiver<MeshState>,
@@ -487,7 +485,6 @@ pub async fn run(
         // → Safe to trust individual decoded events.
 
         let sign_tx = sign_tx.clone();
-        let node_near_account_id = node_near_account_id.clone();
         let backlog = backlog.clone();
 
         for ev in events.iter() {
@@ -519,7 +516,6 @@ pub async fn run(
                     Box::new(event),
                     entropy,
                     sign_tx.clone(),
-                    node_near_account_id.clone(),
                     total_timeout,
                     backlog.clone(),
                 )
@@ -575,7 +571,6 @@ pub async fn run(
                     Box::new(event),
                     entropy,
                     sign_tx.clone(),
-                    node_near_account_id.clone(),
                     total_timeout,
                     backlog.clone(),
                 )

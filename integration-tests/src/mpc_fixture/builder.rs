@@ -81,6 +81,8 @@ struct MockedNodeContext {
     redis_pool: deadpool_redis::Pool,
     init_mesh: MeshState,
     contract_state: ContractStateWatcher,
+
+    #[allow(dead_code)]
     node_account_id: AccountId,
 }
 
@@ -436,7 +438,6 @@ impl MpcFixtureNodeBuilder {
         // `MpcSignProtocol::new_test` or else subscribing to messages will
         // await the subscription response forever.
         let _inbox_handle = tokio::spawn(self.messaging.inbox.run(
-            context.node_account_id,
             config_rx.clone(),
             context.contract_state.clone(),
         ));

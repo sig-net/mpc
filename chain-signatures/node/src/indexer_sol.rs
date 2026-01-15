@@ -19,7 +19,6 @@ use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
-use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use signet_program::{
@@ -331,7 +330,6 @@ type Result<T> = anyhow::Result<T>;
 pub async fn run(
     sol: Option<SolConfig>,
     sign_tx: mpsc::Sender<Sign>,
-    node_near_account_id: AccountId,
     backlog: Backlog,
     mut contract_watcher: ContractStateWatcher,
     mut mesh_state: watch::Receiver<MeshState>,
@@ -383,7 +381,6 @@ pub async fn run(
         sol.rpc_http_url.clone(),
         sol.rpc_ws_url.clone(),
         sign_tx.clone(),
-        node_near_account_id.clone(),
         total_timeout,
         backlog.clone(),
     ));
@@ -417,7 +414,6 @@ pub async fn run(
         let unsub = subscribe_to_program_non_cpi_events(
             &program,
             sign_tx.clone(),
-            node_near_account_id.clone(),
             total_timeout,
             backlog.clone(),
         )
@@ -435,7 +431,6 @@ pub async fn run(
 async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>(
     program: &Program<C>,
     sign_tx: mpsc::Sender<Sign>,
-    node_near_account_id: AccountId,
     total_timeout: Duration,
     backlog: Backlog,
 ) -> anyhow::Result<anchor_client::EventUnsubscriber<'_>> {
@@ -457,7 +452,6 @@ async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>
             Box::new(event),
             tx_sig,
             sign_tx.clone(),
-            node_near_account_id.clone(),
             total_timeout,
             backlog.clone(),
         )
@@ -474,7 +468,6 @@ async fn process_anchor_sign_event(
     sign_event: SignatureEventBox,
     tx_sig: Vec<u8>,
     sign_tx: mpsc::Sender<Sign>,
-    node_near_account_id: AccountId,
     total_timeout: Duration,
     backlog: Backlog,
 ) -> anyhow::Result<()> {
@@ -484,7 +477,6 @@ async fn process_anchor_sign_event(
         sign_event,
         entropy,
         sign_tx,
-        node_near_account_id,
         total_timeout,
         backlog,
     )
@@ -498,13 +490,11 @@ async fn subscribe_and_process_sign_events(
     rpc_url: String,
     ws_url: String,
     sign_tx: mpsc::Sender<Sign>,
-    node_near_account_id: AccountId,
     total_timeout: Duration,
     backlog: Backlog,
 ) {
     loop {
         let sign_tx_clone = sign_tx.clone();
-        let node_near_account_id_clone = node_near_account_id.clone();
         let backlog = backlog.clone();
 
         let result = subscribe_to_program_cpi_events(
@@ -517,7 +507,6 @@ async fn subscribe_and_process_sign_events(
                 let tx_sig: Vec<u8> = signature.as_ref().to_vec();
 
                 let sign_tx_inner = sign_tx_clone.clone();
-                let node_near_account_id_inner = node_near_account_id_clone.clone();
                 let backlog = backlog.clone();
 
                 tokio::spawn(async move {
@@ -525,7 +514,6 @@ async fn subscribe_and_process_sign_events(
                         event,
                         tx_sig,
                         sign_tx_inner,
-                        node_near_account_id_inner,
                         total_timeout,
                         backlog,
                     )
@@ -535,7 +523,6 @@ async fn subscribe_and_process_sign_events(
                     }
                 });
             },
-            node_near_account_id.clone(),
         )
         .await;
 
@@ -651,7 +638,6 @@ async fn subscribe_to_program_cpi_events<F>(
     ws_url: &str,
     backlog: Backlog,
     mut event_handler: F,
-    node_near_account_id: AccountId,
 ) -> Result<()>
 where
     F: FnMut(SignatureEventBox, Signature, u64) + Send,

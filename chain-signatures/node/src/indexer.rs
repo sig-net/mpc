@@ -139,7 +139,6 @@ impl NearIndexer {
 
 struct Context {
     mpc_contract_id: AccountId,
-    node_account_id: AccountId,
     sign_tx: mpsc::Sender<Sign>,
     indexer: NearIndexer,
     rpc_client: near_fetch::Client,
@@ -245,7 +244,6 @@ pub fn run(
     let indexer = NearIndexer::new(options);
     let mut context = Context {
         mpc_contract_id: mpc_contract_id.clone(),
-        node_account_id: node_account_id.clone(),
         sign_tx,
         indexer,
         rpc_client,
