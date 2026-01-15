@@ -26,7 +26,7 @@ pub fn node_account_id() -> &'static str {
     NODE_ACCOUNT_ID
         .get()
         .map(String::as_str)
-        .expect("node account id must be initialized before emitting metrics")
+        .unwrap_or("default-account.near")
 }
 
 pub fn try_create_int_gauge_vec(

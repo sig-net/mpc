@@ -437,10 +437,11 @@ impl MpcFixtureNodeBuilder {
         // We have to start the inbox job before calling
         // `MpcSignProtocol::new_test` or else subscribing to messages will
         // await the subscription response forever.
-        let _inbox_handle = tokio::spawn(self.messaging.inbox.run(
-            config_rx.clone(),
-            context.contract_state.clone(),
-        ));
+        let _inbox_handle = tokio::spawn(
+            self.messaging
+                .inbox
+                .run(config_rx.clone(), context.contract_state.clone()),
+        );
 
         let protocol = MpcSignProtocol::new_test(
             self.participant_info.account_id.clone(),

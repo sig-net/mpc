@@ -1,11 +1,11 @@
 use crate::backlog::Backlog;
+use crate::indexer_common::{SignatureEvent, SignatureEventBox};
 use crate::mesh::MeshState;
 use crate::metrics::node_account_id;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::indexer_common::{SignatureEvent, SignatureEventBox};
 
 use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
@@ -473,14 +473,8 @@ async fn process_anchor_sign_event(
 ) -> anyhow::Result<()> {
     let mut entropy = [0u8; 32];
     entropy.copy_from_slice(&tx_sig[..32]);
-    crate::indexer_common::process_sign_event(
-        sign_event,
-        entropy,
-        sign_tx,
-        total_timeout,
-        backlog,
-    )
-    .await
+    crate::indexer_common::process_sign_event(sign_event, entropy, sign_tx, total_timeout, backlog)
+        .await
 }
 
 // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L31

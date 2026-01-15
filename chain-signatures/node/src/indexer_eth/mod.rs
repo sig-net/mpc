@@ -1251,10 +1251,7 @@ impl EthereumIndexer {
 
             if block.header.hash == block_hash {
                 tracing::info!("Block {block_number} is finalized!");
-                send_indexed_requests_to_sign_queue(
-                    indexed_requests,
-                    sign_tx.clone(),
-                );
+                send_indexed_requests_to_sign_queue(indexed_requests, sign_tx.clone());
 
                 if !respond_logs.is_empty() {
                     process_respond_events(&respond_logs, &backlog, sign_tx.clone()).await;
