@@ -169,6 +169,19 @@ impl Chain {
             ("CHECKPOINT_INTERVAL_HYDRATION", "5"),
         ]
     }
+
+    pub fn expected_finality_time_secs(&self) -> u64 {
+        match self {
+            Chain::NEAR => 3,
+            Chain::Ethereum => 15 * 60,
+            Chain::Solana => 3,
+            Chain::Hydration => 12,
+        }
+    }
+
+    pub fn expected_response_time_secs(&self) -> u64 {
+        self.expected_finality_time_secs() + 60
+    }
 }
 
 impl fmt::Display for Chain {
