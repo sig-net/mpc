@@ -502,3 +502,97 @@ pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Re
         _ => anyhow::bail!("Unsupported chain: {source_chain}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backlog::Backlog;
+    use crate::mesh::wait_threshold_active;
+    use crate::node_client::NodeClient;
+    use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
+    use crate::util::current_unix_timestamp;
+    use cait_sith::protocol::Participant;
+    use k256::ProjectivePoint;
+    use mpc_primitives::SignArgs;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+    use tokio::time::timeout;
+
+    #[tokio::test]
+    async fn recover_backlog_requeues_pending_signs() {
+        // Prepare backlog with a single pending sign request
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([9u8; 32]);
+        let args = SignArgs {
+            entropy: [1u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+
+        // Add a request and persist a checkpoint so recover() can load it
+        backlog
+            .insert(
+                Chain::Ethereum,
+                sign_id,
+                BacklogTransaction::Sign(SignTx {
+                    request_id: sign_id.request_id,
+                    source_chain: Chain::Ethereum,
+                    key_version: args.key_version,
+                    status: PendingRequestStatus::AwaitingResponse,
+                    args: args.clone(),
+                }),
+                SignRequestType::Sign,
+            )
+            .await;
+        backlog.checkpoint(Chain::Ethereum).await;
+
+        let threshold = 1;
+        let mut mesh_state = MeshState::default();
+        let participant = Participant::from(0u32);
+        mesh_state
+            .active
+            .insert(&participant, ParticipantInfo::new(0));
+        mesh_state.stable.insert(participant);
+        let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
+        wait_threshold_active(&mut mesh_rx, threshold).await;
+
+        let account_id: AccountId = "test.near".parse().unwrap();
+        let public_key = ProjectivePoint::GENERATOR.to_affine();
+        let participants = Participants::default();
+        let (mut contract_watcher, _tx) =
+            ContractStateWatcher::with_running(&account_id, public_key, threshold, participants);
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        let node_client = NodeClient::new(&Default::default());
+
+        recover_backlog(
+            &backlog,
+            &mut contract_watcher,
+            &mut mesh_rx,
+            &node_client,
+            Chain::Ethereum,
+            sign_tx,
+            account_id,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        // We should receive the recovered sign request
+        let msg = timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .expect("recv should not timeout");
+
+        match msg.expect("sign_rx should contain a message") {
+            Sign::Request(req) => {
+                assert_eq!(req.id, sign_id);
+                assert_eq!(req.args, args);
+                assert_eq!(req.chain, Chain::Ethereum);
+                assert_eq!(req.sign_request_type, SignRequestType::Sign);
+                assert!(req.unix_timestamp_indexed <= current_unix_timestamp());
+            }
+            other => panic!("unexpected message: {:?}", other),
+        }
+    }
+}
