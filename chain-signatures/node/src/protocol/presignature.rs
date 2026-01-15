@@ -3,6 +3,7 @@ use super::posit::{PositAction, Positor, Posits};
 use super::triple::TripleId;
 use crate::config::Config;
 use crate::mesh::MeshState;
+use crate::metrics::node_account_id;
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::posit::PositInternalAction;
 use crate::protocol::MpcSignProtocol;
@@ -11,7 +12,6 @@ use crate::storage::triple_storage::{TriplesTaken, TriplesTakenDropper};
 use crate::storage::TripleStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
 use crate::util::{AffinePointExt, JoinMap};
-use crate::metrics::node_account_id;
 
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::{KeygenOutput, PresignArguments, PresignOutput};
@@ -171,8 +171,8 @@ impl PresignatureGenerator {
             .with_label_values(&[node_account_id()]);
         let poke_counts = crate::metrics::protocols::PRESIGNATURE_POKES_CNT
             .with_label_values(&[node_account_id()]);
-        let runtime_latency = crate::metrics::protocols::PRESIGNATURE_LATENCY
-            .with_label_values(&[node_account_id()]);
+        let runtime_latency =
+            crate::metrics::protocols::PRESIGNATURE_LATENCY.with_label_values(&[node_account_id()]);
         let success_owned_counts: prometheus::core::GenericCounter<prometheus::core::AtomicF64> =
             crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS
                 .with_label_values(&[node_account_id()]);

@@ -24,6 +24,7 @@ pub use state::{Node, NodeState};
 use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::mesh::MeshState;
+use crate::metrics::node_account_id;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
@@ -32,7 +33,6 @@ use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
-use crate::metrics::node_account_id;
 
 use near_account_id::AccountId;
 use semver::Version;

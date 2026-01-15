@@ -3,6 +3,7 @@ use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
+use crate::metrics::node_account_id;
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{
     MessageChannel, PositMessage, PositProtocolId, SignatureMessage, Subscriber,
@@ -15,7 +16,6 @@ use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenD
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap, TimeoutBudget};
-use crate::metrics::node_account_id;
 
 use crate::protocol::SignRequestType;
 use cait_sith::protocol::{Action, InitializationError, Participant};
@@ -920,8 +920,8 @@ impl SignGenerator {
 
         let accrued_wait_delay = crate::metrics::protocols::SIGNATURE_ACCRUED_WAIT_DELAY
             .with_label_values(&[node_account_id()]);
-        let poke_counts = crate::metrics::protocols::SIGNATURE_POKES_CNT
-            .with_label_values(&[node_account_id()]);
+        let poke_counts =
+            crate::metrics::protocols::SIGNATURE_POKES_CNT.with_label_values(&[node_account_id()]);
         let signature_generator_failures_metric =
             crate::metrics::protocols::SIGNATURE_GENERATOR_FAILURES
                 .with_label_values(&[node_account_id()]);

@@ -1,3 +1,4 @@
+use crate::metrics::node_account_id;
 use cait_sith::protocol::Participant;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
@@ -194,7 +195,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         let artifact_exists: Result<bool, _> = conn.hexists(&self.artifact_key, id).await;
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "reserve", self.account_id.as_str()])
+            .with_label_values(&[A::METRIC_LABEL, "reserve", node_account_id()])
             .observe(elapsed.as_millis() as f64);
 
         match artifact_exists {
@@ -273,7 +274,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "remove_outdated", self.account_id.as_str()])
+            .with_label_values(&[A::METRIC_LABEL, "remove_outdated", node_account_id()])
             .observe(elapsed.as_millis() as f64);
 
         match result {
@@ -340,7 +341,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "insert", self.account_id.as_str()])
+            .with_label_values(&[A::METRIC_LABEL, "insert", node_account_id()])
             .observe(elapsed.as_millis() as f64);
 
         match outcome {
@@ -428,7 +429,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "take", self.account_id.as_str()])
+            .with_label_values(&[A::METRIC_LABEL, "take", node_account_id()])
             .observe(elapsed.as_millis() as f64);
 
         match result {
@@ -508,7 +509,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "clear", self.account_id.as_str()])
+            .with_label_values(&[A::METRIC_LABEL, "clear", node_account_id()])
             .observe(elapsed.as_millis() as f64);
 
         self.reserved.write().await.clear();
@@ -556,7 +557,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "take_mine", self.account_id.as_str()])
+            .with_label_values(&[A::METRIC_LABEL, "take_mine", node_account_id()])
             .observe(elapsed.as_millis() as f64);
 
         match result {
@@ -615,7 +616,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "return_mine", self.account_id.as_str()])
+            .with_label_values(&[A::METRIC_LABEL, "return_mine", node_account_id()])
             .observe(elapsed.as_millis() as f64);
 
         match result {

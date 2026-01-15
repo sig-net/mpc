@@ -20,10 +20,10 @@ use crate::rpc::ContractStateWatcher;
 use super::contract::primitives::{ParticipantMap, Participants};
 use super::presignature::PresignatureId;
 use super::triple::TripleId;
+use crate::metrics::node_account_id;
 use crate::node_client::NodeClient;
 use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::Config;
-use crate::metrics::node_account_id;
 
 use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;

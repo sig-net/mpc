@@ -7,6 +7,7 @@ use crate::indexer_hydration::{
 };
 use crate::mesh::wait_threshold_active;
 use crate::mesh::MeshState;
+use crate::metrics::node_account_id;
 use crate::node_client::NodeClient;
 use crate::protocol::Chain;
 use crate::protocol::IndexedSignRequest;
@@ -16,7 +17,6 @@ use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::BidirectionalTx;
 use crate::sign_bidirectional::BidirectionalTxId;
 use crate::sign_bidirectional::PendingRequestStatus;
-use crate::metrics::node_account_id;
 use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
 use mpc_primitives::SignId;

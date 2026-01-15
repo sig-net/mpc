@@ -1,10 +1,10 @@
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
+use crate::metrics::node_account_id;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::metrics::node_account_id;
 
 use crate::indexer_common::{SignatureEvent, SignatureEventBox};
 use alloy_sol_types::SolValue;

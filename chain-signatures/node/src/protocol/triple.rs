@@ -3,11 +3,11 @@ use super::posit::{PositAction, PositInternalAction, Posits};
 use super::MpcSignProtocol;
 use crate::config::Config;
 use crate::mesh::MeshState;
+use crate::metrics::node_account_id;
 use crate::protocol::posit::Positor;
 use crate::storage::triple_storage::{TriplePair, TriplePairSlot, TripleStorage};
 use crate::types::TripleProtocol;
 use crate::util::{AffinePointExt, JoinMap};
-use crate::metrics::node_account_id;
 
 use mpc_contract::config::ProtocolConfig;
 
@@ -120,14 +120,14 @@ impl TripleGenerator {
             .with_label_values(&[node_account_id()]);
         let accrued_wait_delay = crate::metrics::protocols::TRIPLE_ACCRUED_WAIT_DELAY
             .with_label_values(&[node_account_id()]);
-        let runtime_latency = crate::metrics::protocols::TRIPLE_LATENCY
-            .with_label_values(&[node_account_id()]);
-        let total_latency = crate::metrics::protocols::TRIPLE_LATENCY_TOTAL
-            .with_label_values(&[node_account_id()]);
-        let poke_latency = crate::metrics::protocols::TRIPLE_POKE_CPU_TIME
-            .with_label_values(&[node_account_id()]);
-        let poke_counts = crate::metrics::protocols::TRIPLE_POKES_CNT
-            .with_label_values(&[node_account_id()]);
+        let runtime_latency =
+            crate::metrics::protocols::TRIPLE_LATENCY.with_label_values(&[node_account_id()]);
+        let total_latency =
+            crate::metrics::protocols::TRIPLE_LATENCY_TOTAL.with_label_values(&[node_account_id()]);
+        let poke_latency =
+            crate::metrics::protocols::TRIPLE_POKE_CPU_TIME.with_label_values(&[node_account_id()]);
+        let poke_counts =
+            crate::metrics::protocols::TRIPLE_POKES_CNT.with_label_values(&[node_account_id()]);
         let success_owned_counts =
             crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_MINE_SUCCESS
                 .with_label_values(&[node_account_id()]);

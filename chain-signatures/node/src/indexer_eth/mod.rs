@@ -3,13 +3,13 @@ pub mod indexer_eth_helios;
 
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
+use crate::metrics::node_account_id;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::PendingRequestStatus;
 use crate::storage::app_data_storage::AppDataStorage;
-use crate::metrics::node_account_id;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};

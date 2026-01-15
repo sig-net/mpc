@@ -2,6 +2,7 @@ use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
 use crate::mesh::Mesh;
+use crate::metrics::node_account_id;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
@@ -13,7 +14,6 @@ use crate::storage::app_data_storage;
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::triple_storage::TriplePair;
 use crate::{indexer, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, storage, web};
-use crate::metrics::node_account_id;
 
 use clap::Parser;
 use deadpool_redis::Runtime;
