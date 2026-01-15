@@ -366,9 +366,10 @@ impl MessageInbox {
                     let messages_len = messages.len();
                     self.publish(messages).await;
 
-                    crate::metrics::messaging::NUM_RECEIVED_ENCRYPTED_TOTAL
-                        .with_label_values(&[my_account_id.as_str()])
-                        .inc_by(messages_len as f64);
+                    crate::metrics::with_node_counter(
+                        &crate::metrics::messaging::NUM_RECEIVED_ENCRYPTED_TOTAL,
+                    )
+                    .inc_by(messages_len as f64);
                 }
             }
         }
@@ -854,7 +855,7 @@ impl MessageOutbox {
     /// Send the encrypted messages to other participants.
     pub async fn send(
         &mut self,
-        account_id: &AccountId,
+        _account_id: &AccountId,
         client: &NodeClient,
         participants: &Participants,
         cfg: &ProtocolConfig,
@@ -863,16 +864,18 @@ impl MessageOutbox {
         let start = Instant::now();
         let timeout = Duration::from_millis(cfg.message_timeout);
 
-        let msg_send_delay_metric = crate::metrics::messaging::MSG_CLIENT_SEND_DELAY
-            .with_label_values(&[account_id.as_str()]);
-        let num_send_encrypted_failure_metric =
-            crate::metrics::messaging::NUM_SEND_ENCRYPTED_FAILURE
-                .with_label_values(&[account_id.as_str()]);
-        let send_encrypted_latency_metric = crate::metrics::messaging::SEND_ENCRYPTED_LATENCY
-            .with_label_values(&[account_id.as_str()]);
-        let failed_send_encrypted_latency_metric =
-            crate::metrics::messaging::FAILED_SEND_ENCRYPTED_LATENCY
-                .with_label_values(&[account_id.as_str()]);
+        let msg_send_delay_metric = crate::metrics::with_node_histogram(
+            &crate::metrics::messaging::MSG_CLIENT_SEND_DELAY,
+        );
+        let num_send_encrypted_failure_metric = crate::metrics::with_node_counter(
+            &crate::metrics::messaging::NUM_SEND_ENCRYPTED_FAILURE,
+        );
+        let send_encrypted_latency_metric = crate::metrics::with_node_histogram(
+            &crate::metrics::messaging::SEND_ENCRYPTED_LATENCY,
+        );
+        let failed_send_encrypted_latency_metric = crate::metrics::with_node_histogram(
+            &crate::metrics::messaging::FAILED_SEND_ENCRYPTED_LATENCY,
+        );
 
         for ((_from, to), encrypted) in encrypted {
             for (encrypted_partition, timestamp, message_len) in encrypted {
@@ -880,9 +883,10 @@ impl MessageOutbox {
                 let info = participants.get(&to).unwrap();
                 let url = info.url.clone();
 
-                crate::metrics::messaging::NUM_SEND_ENCRYPTED_TOTAL
-                    .with_label_values(&[account_id.as_str()])
-                    .inc_by(message_len as f64);
+                crate::metrics::with_node_counter(
+                    &crate::metrics::messaging::NUM_SEND_ENCRYPTED_TOTAL,
+                )
+                .inc_by(message_len as f64);
 
                 let msg_send_delay_metric = msg_send_delay_metric.clone();
                 let num_send_encrypted_failure_metric = num_send_encrypted_failure_metric.clone();

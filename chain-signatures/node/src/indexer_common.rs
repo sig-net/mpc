@@ -273,12 +273,11 @@ pub(crate) async fn process_sign_event(
         let chain = sign_event.source_chain();
         tracing::error!(?err, chain = %chain, "Failed to send {} sign request into queue", chain.as_str());
     } else {
-        crate::metrics::requests::NUM_SIGN_REQUESTS
-            .with_label_values(&[
-                sign_event.source_chain().as_str(),
-                node_near_account_id.as_str(),
-            ])
-            .inc();
+        crate::metrics::with_chain_and_node_counter(
+            &crate::metrics::requests::NUM_SIGN_REQUESTS,
+            sign_event.source_chain().as_str(),
+        )
+        .inc();
     }
 
     Ok(())

@@ -87,34 +87,29 @@ impl MpcSignProtocol {
         let _span = tracing::info_span!("running", my_account_id);
         let my_account_id = self.my_account_id.clone();
 
-        crate::metrics::nodes::NODE_RUNNING
-            .with_label_values(&[my_account_id.as_str()])
-            .set(1);
-        crate::metrics::nodes::NODE_VERSION
-            .with_label_values(&[my_account_id.as_str()])
+        crate::metrics::with_node_gauge(&crate::metrics::nodes::NODE_RUNNING).set(1);
+        crate::metrics::with_node_gauge(&crate::metrics::nodes::NODE_VERSION)
             .set(node_version());
-        crate::metrics::nodes::PROCESS_START_TIME
-            .with_label_values(&[my_account_id.as_str()])
-            .set(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64,
-            );
+        crate::metrics::with_node_gauge(&crate::metrics::nodes::PROCESS_START_TIME).set(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+        );
 
         loop {
             let protocol_time = Instant::now();
-            crate::metrics::protocols::PROTOCOL_ITER_CNT
-                .with_label_values(&[my_account_id.as_str()])
+            crate::metrics::with_node_counter(&crate::metrics::protocols::PROTOCOL_ITER_CNT)
                 .inc();
 
             let mesh_state = mesh_state.borrow().clone();
             let crypto_time = Instant::now();
             node.state = node.state.progress(&mut self, mesh_state).await;
             node.update_watchers().await;
-            crate::metrics::protocols::PROTOCOL_LATENCY_ITER_CRYPTO
-                .with_label_values(&[my_account_id.as_str()])
-                .observe(crypto_time.elapsed().as_secs_f64());
+            crate::metrics::with_node_histogram(
+                &crate::metrics::protocols::PROTOCOL_LATENCY_ITER_CRYPTO,
+            )
+            .observe(crypto_time.elapsed().as_secs_f64());
 
             if let Some(contract_state) = contract_state.state() {
                 let consensus_time = Instant::now();
@@ -122,9 +117,10 @@ impl MpcSignProtocol {
                     .state
                     .advance(&mut self, &mut gov_client, contract_state)
                     .await;
-                crate::metrics::protocols::PROTOCOL_LATENCY_ITER_CONSENSUS
-                    .with_label_values(&[my_account_id.as_str()])
-                    .observe(consensus_time.elapsed().as_secs_f64());
+                crate::metrics::with_node_histogram(
+                    &crate::metrics::protocols::PROTOCOL_LATENCY_ITER_CONSENSUS,
+                )
+                .observe(consensus_time.elapsed().as_secs_f64());
                 node.update_watchers().await;
             }
 
@@ -139,9 +135,10 @@ impl MpcSignProtocol {
                 NodeState::Joining(_) => 1000,
             };
 
-            crate::metrics::protocols::PROTOCOL_LATENCY_ITER_TOTAL
-                .with_label_values(&[my_account_id.as_str()])
-                .observe(protocol_time.elapsed().as_secs_f64());
+            crate::metrics::with_node_histogram(
+                &crate::metrics::protocols::PROTOCOL_LATENCY_ITER_TOTAL,
+            )
+            .observe(protocol_time.elapsed().as_secs_f64());
             tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
         }
     }
@@ -172,8 +169,7 @@ fn parse_node_version(version: &str) -> i64 {
     (rc_num + version.patch * 1000 + version.minor * 1000000 + version.major * 1000000000) as i64
 }
 
-pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHandle<()> {
-    let node_account_id = node_account_id.to_string();
+pub async fn spawn_system_metrics() -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
         loop {
             let mut system = System::new_all();
@@ -191,21 +187,27 @@ pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHan
 
             // Update CPU usage metric
             let cpu_usage = s.global_cpu_usage() as i64;
-            crate::metrics::hardware::CPU_USAGE_PERCENTAGE
-                .with_label_values(&["global", &node_account_id])
-                .set(cpu_usage);
+            crate::metrics::with_chain_and_node_gauge(
+                &crate::metrics::hardware::CPU_USAGE_PERCENTAGE,
+                "global",
+            )
+            .set(cpu_usage);
 
             // Update available memory metric
             let available_memory = system.available_memory() as i64;
-            crate::metrics::hardware::AVAILABLE_MEMORY_BYTES
-                .with_label_values(&["available_mem", &node_account_id])
-                .set(available_memory);
+            crate::metrics::with_chain_and_node_gauge(
+                &crate::metrics::hardware::AVAILABLE_MEMORY_BYTES,
+                "available_mem",
+            )
+            .set(available_memory);
 
             // Update used memory metric
             let used_memory = system.used_memory() as i64;
-            crate::metrics::hardware::USED_MEMORY_BYTES
-                .with_label_values(&["used", &node_account_id])
-                .set(used_memory);
+            crate::metrics::with_chain_and_node_gauge(
+                &crate::metrics::hardware::USED_MEMORY_BYTES,
+                "used",
+            )
+            .set(used_memory);
 
             let root_mount_point = Path::new("/");
             // Update available disk space metric
@@ -214,9 +216,11 @@ pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHan
                 .find(|d| d.mount_point() == root_mount_point)
                 .expect("No disk found mounted at '/'")
                 .available_space() as i64;
-            crate::metrics::hardware::AVAILABLE_DISK_SPACE_BYTES
-                .with_label_values(&["available_disk", &node_account_id])
-                .set(available_disk_space);
+            crate::metrics::with_chain_and_node_gauge(
+                &crate::metrics::hardware::AVAILABLE_DISK_SPACE_BYTES,
+                "available_disk",
+            )
+            .set(available_disk_space);
 
             // Update total disk space metric
             let total_disk_space = Disks::new_with_refreshed_list()
@@ -224,9 +228,11 @@ pub async fn spawn_system_metrics(node_account_id: &str) -> tokio::task::JoinHan
                 .find(|d| d.mount_point() == root_mount_point)
                 .expect("No disk found mounted at '/'")
                 .total_space() as i64;
-            crate::metrics::hardware::TOTAL_DISK_SPACE_BYTES
-                .with_label_values(&["total_disk", &node_account_id])
-                .set(total_disk_space);
+            crate::metrics::with_chain_and_node_gauge(
+                &crate::metrics::hardware::TOTAL_DISK_SPACE_BYTES,
+                "total_disk",
+            )
+            .set(total_disk_space);
 
             std::thread::sleep(Duration::from_secs(5));
         }

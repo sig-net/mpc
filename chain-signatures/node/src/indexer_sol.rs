@@ -712,9 +712,11 @@ where
         }
 
         // Update block height metric
-        crate::metrics::indexers::LATEST_BLOCK_NUMBER
-            .with_label_values(&[Chain::Solana.as_str(), node_near_account_id.as_str()])
-            .set(response.context.slot as i64);
+        crate::metrics::with_chain_and_node_gauge(
+            &crate::metrics::indexers::LATEST_BLOCK_NUMBER,
+            Chain::Solana.as_str(),
+        )
+        .set(response.context.slot as i64);
     }
 
     Ok(())

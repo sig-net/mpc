@@ -112,8 +112,7 @@ async fn msg(
             }
         });
     }
-    WEB_ENDPOINT_LATENCY
-        .with_label_values(&["msg", state.my_account_id.as_str()])
+    crate::metrics::with_endpoint_and_node_histogram(&WEB_ENDPOINT_LATENCY, "msg")
         .observe(start.elapsed().as_millis() as f64);
 }
 
@@ -202,8 +201,7 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
             Ok(Json(StateView::NotRunning))
         }
     };
-    WEB_ENDPOINT_LATENCY
-        .with_label_values(&["state", web.my_account_id.as_str()])
+    crate::metrics::with_endpoint_and_node_histogram(&WEB_ENDPOINT_LATENCY, "state")
         .observe(start.elapsed().as_millis() as f64);
     result
 }
@@ -273,8 +271,7 @@ async fn sync(
 ) -> Result<Json<()>> {
     let start = Instant::now();
     state.sync_channel.request_update(update).await;
-    WEB_ENDPOINT_LATENCY
-        .with_label_values(&["sync", state.my_account_id.as_str()])
+    crate::metrics::with_endpoint_and_node_histogram(&WEB_ENDPOINT_LATENCY, "sync")
         .observe(start.elapsed().as_millis() as f64);
     Ok(Json(()))
 }
@@ -365,8 +362,7 @@ async fn checkpoint(
         resp.insert(chain, checkpoint);
     }
 
-    WEB_ENDPOINT_LATENCY
-        .with_label_values(&["checkpoint", state.my_account_id.as_str()])
+    crate::metrics::with_endpoint_and_node_histogram(&WEB_ENDPOINT_LATENCY, "checkpoint")
         .observe(start.elapsed().as_millis() as f64);
 
     Ok(Cbor(resp))

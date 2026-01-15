@@ -194,6 +194,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let _span = tracing::trace_span!("cli").entered();
 
+            crate::metrics::init_node_account_id(&account_id);
+
             let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
 
             let digest = configuration_digest(
@@ -205,8 +207,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 eth.clone(),
             );
 
-            crate::metrics::nodes::CONFIGURATION_DIGEST
-                .with_label_values(&[account_id.as_str()])
+            crate::metrics::with_node_gauge(&crate::metrics::nodes::CONFIGURATION_DIGEST)
                 .set(digest);
 
             let (sign_tx, sign_rx) = mpsc::channel(1024);
@@ -337,7 +338,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tokio::spawn(rpc.run(contract_state_tx, config_tx.clone()));
 
             tokio::spawn(mesh.run(contract_watcher.clone()));
-            let system_handle = spawn_system_metrics(account_id.as_str()).await;
+            let system_handle = spawn_system_metrics().await;
             let protocol_handle = tokio::spawn(protocol.run(
                 node,
                 near_client,
