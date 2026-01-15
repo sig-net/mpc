@@ -655,7 +655,6 @@ pub enum BacklogError {
 pub struct SignTx {
     pub request_id: [u8; 32],
     pub source_chain: Chain,
-    pub key_version: u32,
     pub status: PendingRequestStatus,
     pub args: SignArgs,
 }

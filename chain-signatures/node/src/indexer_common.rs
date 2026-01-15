@@ -244,7 +244,6 @@ pub(crate) async fn process_sign_event(
         SignRequestType::Sign => BacklogTransaction::Sign(SignTx {
             request_id: sign_id.request_id,
             source_chain: sign_event.source_chain(),
-            key_version: sign_request.args.key_version,
             status: PendingRequestStatus::AwaitingResponse,
             args: sign_request.args.clone(),
         }),
@@ -254,7 +253,6 @@ pub(crate) async fn process_sign_event(
             BacklogTransaction::Sign(SignTx {
                 request_id: sign_id.request_id,
                 source_chain: sign_event.source_chain(),
-                key_version: sign_request.args.key_version,
                 status: PendingRequestStatus::AwaitingResponse,
                 args: sign_request.args.clone(),
             })
@@ -539,7 +537,6 @@ mod tests {
                 BacklogTransaction::Sign(SignTx {
                     request_id: sign_id.request_id,
                     source_chain: Chain::Ethereum,
-                    key_version: args.key_version,
                     status: PendingRequestStatus::AwaitingResponse,
                     args: args.clone(),
                 }),
