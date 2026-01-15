@@ -160,7 +160,7 @@ impl PresignatureGenerator {
         }
     }
 
-    pub async fn run(mut self, _my_account_id: &AccountId, me: Participant, epoch: u64) {
+    pub async fn run(mut self, me: Participant, epoch: u64) {
         let failure_counts = crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES
             .with_label_values(&[node_account_id()]);
         let failure_mine_counts = crate::metrics::protocols::PRESIGNATURE_GENERATOR_MINE_FAILURES
@@ -327,7 +327,6 @@ pub struct PresignatureSpawner {
     me: Participant,
     threshold: usize,
     epoch: u64,
-    my_account_id: AccountId,
     private_share: SecretKeyShare,
     public_key: PublicKey,
     msg: MessageChannel,
@@ -341,7 +340,6 @@ impl PresignatureSpawner {
         epoch: u64,
         private_share: &SecretKeyShare,
         public_key: &PublicKey,
-        my_account_id: &AccountId,
         triples: &TripleStorage,
         presignatures: &PresignatureStorage,
         msg: MessageChannel,
@@ -357,7 +355,6 @@ impl PresignatureSpawner {
             epoch,
             private_share: *private_share,
             public_key: *public_key,
-            my_account_id: my_account_id.clone(),
             msg,
         }
     }
@@ -572,7 +569,6 @@ impl PresignatureSpawner {
         let threshold = self.threshold;
         let epoch = self.epoch;
         let msg = self.msg.clone();
-        let my_account_id = self.my_account_id.clone();
         let keygen_out = KeygenOutput {
             private_share: self.private_share,
             public_key: self.public_key,
@@ -628,11 +624,11 @@ impl PresignatureSpawner {
                 msg,
                 #[cfg(feature = "debug-page")]
                 debug_view: crate::web::debug::register_task(
-                    my_account_id.to_string(),
+                    node_account_id().to_string(),
                     format!("PresignatureGenerator {id:#?}"),
                 ),
             };
-            generator.run(&my_account_id, me, epoch).await;
+            generator.run(me, epoch).await;
         };
 
         self.ongoing.spawn(id.id, task);
@@ -790,7 +786,6 @@ impl PresignatureSpawnerTask {
             epoch,
             private_share,
             public_key,
-            &ctx.my_account_id,
             &ctx.triple_storage,
             &ctx.presignature_storage,
             ctx.msg_channel.clone(),

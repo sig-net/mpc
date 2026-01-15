@@ -313,7 +313,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let msg_channel = MessageChannel::spawn(
                 client.clone(),
-                &account_id,
                 config_rx.clone(),
                 contract_watcher.clone(),
             )

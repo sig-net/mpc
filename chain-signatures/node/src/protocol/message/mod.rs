@@ -340,7 +340,6 @@ impl MessageInbox {
 
     pub async fn run(
         mut self,
-        my_account_id: AccountId,
         config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
     ) {
@@ -405,13 +404,12 @@ impl MessageChannel {
 
     pub async fn spawn(
         client: NodeClient,
-        id: &AccountId,
         config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
     ) -> Self {
         let (inbox, outbox, channel) = Self::new();
-        tokio::spawn(inbox.run(id.clone(), config.clone(), contract.clone()));
-        tokio::spawn(outbox.run(id.clone(), client, config, contract));
+        tokio::spawn(inbox.run(config.clone(), contract.clone()));
+        tokio::spawn(outbox.run(client, config, contract));
 
         channel
     }
@@ -855,7 +853,6 @@ impl MessageOutbox {
     /// Send the encrypted messages to other participants.
     pub async fn send(
         &mut self,
-        _account_id: &AccountId,
         client: &NodeClient,
         participants: &Participants,
         cfg: &ProtocolConfig,
@@ -934,7 +931,6 @@ impl MessageOutbox {
     /// Publish messages to other nodes
     async fn publish(
         &mut self,
-        id: &AccountId,
         client: &NodeClient,
         config: &watch::Receiver<Config>,
         contract: &ContractStateWatcher,
@@ -945,13 +941,12 @@ impl MessageOutbox {
         let config = config.borrow().clone();
         let compacted = self.compact();
         let encrypted = self.encrypt(&config.local.network.sign_sk, &participants, compacted);
-        self.send(id, client, &participants, &config.protocol, encrypted)
+        self.send(client, &participants, &config.protocol, encrypted)
             .await;
     }
 
     pub async fn run(
         mut self,
-        id: AccountId,
         client: NodeClient,
         config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
@@ -965,7 +960,7 @@ impl MessageOutbox {
                     entry.push((msg, timestamp));
                 }
                 _ = interval.tick() => {
-                    self.publish(&id, &client, &config, &contract).await;
+                    self.publish(&client, &config, &contract).await;
                 }
             }
         }

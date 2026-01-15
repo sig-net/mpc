@@ -64,7 +64,6 @@ impl TripleGenerator {
         timeout: Duration,
         slot: TriplePairSlot,
         msg: &MessageChannel,
-        _my_account_id: &AccountId,
     ) -> Result<Self, InitializationError> {
         let mut participants = participants.to_vec();
         // Participants can be out of order, so let's sort them before doing anything. Critical
@@ -88,7 +87,7 @@ impl TripleGenerator {
             msg: msg.clone(),
             #[cfg(feature = "debug-page")]
             debug_view: crate::web::debug::register_task(
-                _my_account_id.to_string(),
+                node_account_id().to_string(),
                 format!("TripleGenerator {id:#?}"),
             ),
         })
@@ -115,7 +114,7 @@ impl TripleGenerator {
         }
     }
 
-    async fn run(mut self, my_account_id: AccountId, epoch: u64) {
+    async fn run(mut self, epoch: u64) {
         let before_first_poke_delay = crate::metrics::protocols::TRIPLE_BEFORE_POKE_DELAY
             .with_label_values(&[node_account_id()]);
         let accrued_wait_delay = crate::metrics::protocols::TRIPLE_ACCRUED_WAIT_DELAY
@@ -313,7 +312,6 @@ pub struct TripleSpawner {
     me: Participant,
     threshold: usize,
     epoch: u64,
-    my_account_id: AccountId,
     msg: MessageChannel,
 }
 
@@ -323,7 +321,6 @@ impl fmt::Debug for TripleSpawner {
             .field("me", &self.me)
             .field("threshold", &self.threshold)
             .field("epoch", &self.epoch)
-            .field("my_account_id", &self.my_account_id)
             .field("ongoing_introduced", &self.ongoing_introduced)
             .finish()
     }
@@ -334,7 +331,6 @@ impl TripleSpawner {
         me: Participant,
         threshold: usize,
         epoch: u64,
-        my_account_id: &AccountId,
         storage: &TripleStorage,
         msg: MessageChannel,
     ) -> Self {
@@ -346,7 +342,6 @@ impl TripleSpawner {
             ongoing: JoinMap::new(),
             ongoing_introduced: HashSet::new(),
             posits: Posits::new(me),
-            my_account_id: my_account_id.clone(),
             msg,
         }
     }
@@ -515,12 +510,11 @@ impl TripleSpawner {
             timeout,
             slot,
             &self.msg,
-            &self.my_account_id,
         )
         .await?;
 
         self.ongoing
-            .spawn(id, generator.run(self.my_account_id.clone(), self.epoch));
+            .spawn(id, generator.run(self.epoch));
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
             .with_label_values(&[node_account_id()])
             .inc();
@@ -641,7 +635,6 @@ impl TripleSpawnerTask {
             me,
             threshold,
             epoch,
-            &ctx.my_account_id,
             &ctx.triple_storage,
             ctx.msg_channel.clone(),
         );

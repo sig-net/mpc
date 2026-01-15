@@ -34,8 +34,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
 use tokio::task::JoinHandle;
 
-use near_account_id::AccountId;
-
 /// The round interval to search for a proposer in the organizing phase.
 const ROUND_INTERVAL: usize = 512;
 
@@ -885,7 +883,7 @@ impl SignGenerator {
             msg: ctx.msg.clone(),
             #[cfg(feature = "debug-page")]
             debug_view: crate::web::debug::register_task(
-                ctx.my_account_id.to_string(),
+                node_account_id().to_string(),
                 format!("SignatureGenerator {sign_id:#?}"),
             ),
         })
@@ -914,7 +912,6 @@ impl SignGenerator {
     }
 
     async fn run(mut self, ctx: &SignTask) -> Result<(), SignError> {
-        let my_account_id = &ctx.my_account_id;
         let me = ctx.me;
         let epoch = ctx.epoch;
 
@@ -1100,7 +1097,6 @@ struct SignTask {
     threshold: usize,
     public_key: PublicKey,
     epoch: u64,
-    my_account_id: AccountId,
     presignatures: PresignatureStorage,
     msg: MessageChannel,
     rpc: RpcChannel,
@@ -1188,7 +1184,6 @@ pub struct SignatureSpawner {
     mesh_state: watch::Receiver<MeshState>,
 
     me: Participant,
-    my_account_id: AccountId,
     threshold: usize,
     public_key: PublicKey,
     epoch: u64,
@@ -1219,7 +1214,6 @@ impl SignatureSpawner {
             threshold: self.threshold,
             public_key: self.public_key,
             epoch: self.epoch,
-            my_account_id: self.my_account_id.clone(),
             presignatures: self.presignatures.clone(),
             msg: self.msg.clone(),
             rpc: self.rpc.clone(),
@@ -1384,7 +1378,6 @@ impl SignatureSpawnerTask {
             me,
             tasks: JoinMap::new(),
             inboxes: HashMap::new(),
-            my_account_id: ctx.my_account_id.clone(),
             threshold,
             public_key,
             epoch,
