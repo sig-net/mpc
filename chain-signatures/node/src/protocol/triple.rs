@@ -513,8 +513,7 @@ impl TripleSpawner {
         )
         .await?;
 
-        self.ongoing
-            .spawn(id, generator.run(self.epoch));
+        self.ongoing.spawn(id, generator.run(self.epoch));
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
             .with_label_values(&[node_account_id()])
             .inc();

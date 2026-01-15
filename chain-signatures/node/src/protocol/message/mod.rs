@@ -338,11 +338,7 @@ impl MessageInbox {
         }
     }
 
-    pub async fn run(
-        mut self,
-        config: watch::Receiver<Config>,
-        contract: ContractStateWatcher,
-    ) {
+    pub async fn run(mut self, config: watch::Receiver<Config>, contract: ContractStateWatcher) {
         loop {
             tokio::select! {
                 _ = self.filter.update() => {}

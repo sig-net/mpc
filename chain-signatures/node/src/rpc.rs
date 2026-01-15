@@ -386,7 +386,6 @@ impl RpcExecutor {
         });
 
         let eth_client = self.client(&Chain::Ethereum);
-        let near_account_id_clone = self.near.my_account_id.clone();
         let (eth_rpc_tx, eth_rpc_rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
         // spin up update task for batch sending eth responses
         tokio::spawn({
@@ -395,7 +394,6 @@ impl RpcExecutor {
                 eth_rpc_rx,
                 ETH_RESPOND_BATCH_INTERVAL,
                 ETH_RESPOND_BATCH_SIZE,
-                near_account_id_clone.clone(),
             )
         });
 
@@ -408,14 +406,13 @@ impl RpcExecutor {
 
             let chain = action.indexed.chain;
             let client = self.client(&chain);
-            let near_account_id = self.near.my_account_id.clone();
             let eth_rpc_tx = eth_rpc_tx.clone(); // clone for task use
             let backlog = self.backlog.clone();
 
             tokio::spawn(async move {
                 match chain {
                     Chain::NEAR | Chain::Solana | Chain::Hydration => {
-                        execute_publish(client, action, near_account_id, backlog).await;
+                        execute_publish(client, action, backlog).await;
                     }
                     Chain::Ethereum => {
                         if let Err(err) = eth_rpc_tx.send(action).await {
@@ -908,12 +905,7 @@ async fn update_config(near: NearClient, config: watch::Sender<Config>) {
 }
 
 /// Publish the signature and retry if it fails
-async fn execute_publish(
-    client: ChainClient,
-    mut action: PublishAction,
-    near_account_id: AccountId,
-    backlog: Backlog,
-) {
+async fn execute_publish(client: ChainClient, mut action: PublishAction, backlog: Backlog) {
     let chain = action.indexed.chain;
     let sign_id = action.indexed.id;
     tracing::info!(
@@ -947,33 +939,18 @@ async fn execute_publish(
                     .map_err(|_| ())
             }
             ChainClient::Ethereum(eth) => {
-                try_publish_eth(
-                    eth,
-                    &action,
-                    &action.timestamp,
-                    &signature,
-                    &near_account_id,
-                )
-                .await
+                try_publish_eth(eth, &action, &action.timestamp, &signature).await
             }
-            ChainClient::Solana(sol) => try_publish_sol(
-                sol,
-                &action,
-                &action.timestamp,
-                &signature,
-                &near_account_id,
-            )
-            .await
-            .map_err(|_| ()),
-            ChainClient::Hydration(hyd) => try_publish_hydration(
-                hyd,
-                &action,
-                &action.timestamp,
-                &signature,
-                &near_account_id,
-            )
-            .await
-            .map_err(|_| ()),
+            ChainClient::Solana(sol) => {
+                try_publish_sol(sol, &action, &action.timestamp, &signature)
+                    .await
+                    .map_err(|_| ())
+            }
+            ChainClient::Hydration(hyd) => {
+                try_publish_hydration(hyd, &action, &action.timestamp, &signature)
+                    .await
+                    .map_err(|_| ())
+            }
             ChainClient::Err(msg) => {
                 tracing::warn!(msg, "no client for chain");
                 Ok(())
@@ -1019,7 +996,6 @@ async fn run_batch_respond(
     mut actions_rx: mpsc::Receiver<PublishAction>,
     batch_interval: Duration,
     batch_size: usize,
-    near_account_id: AccountId,
 ) {
     let mut start = Instant::now();
     let mut actions_batch: Vec<PublishAction> = vec![];
@@ -1033,13 +1009,7 @@ async fn run_batch_respond(
                 num_requests = actions_batch.len(),
                 "publishing batch of signatures",
             );
-            execute_batch_publish(
-                &client,
-                &mut actions_batch,
-                &near_account_id,
-                Instant::now(),
-            )
-            .await;
+            execute_batch_publish(&client, &mut actions_batch, Instant::now()).await;
             start = Instant::now();
         }
         if let Ok(action) = actions_rx.try_recv() {
@@ -1288,7 +1258,6 @@ async fn try_publish_eth(
     action: &PublishAction,
     timestamp: &Instant,
     signature: &Signature,
-    near_account_id: &AccountId,
 ) -> Result<(), ()> {
     let chain = action.indexed.chain;
     let sign_id = action.indexed.id;
@@ -1359,7 +1328,6 @@ async fn try_batch_publish_eth(
     eth: &EthClient,
     actions: &Vec<PublishAction>,
     signatures: &HashMap<SignId, Signature>,
-    near_account_id: &AccountId,
     start: Instant,
 ) -> Result<(), ()> {
     let chain = Chain::Ethereum;
@@ -1452,7 +1420,6 @@ async fn try_batch_publish_eth(
 async fn execute_batch_publish(
     client: &ChainClient,
     actions: &mut Vec<PublishAction>,
-    near_account_id: &AccountId,
     start: Instant,
 ) {
     let mut signatures: HashMap<SignId, Signature> = HashMap::new();
@@ -1489,7 +1456,7 @@ async fn execute_batch_publish(
                 Ok(())
             }
             ChainClient::Ethereum(eth) => {
-                try_batch_publish_eth(eth, actions, &signatures, near_account_id, start).await
+                try_batch_publish_eth(eth, actions, &signatures, start).await
             }
             ChainClient::Hydration(_) => {
                 tracing::error!("Hydration has no batch publish");
@@ -1531,7 +1498,6 @@ async fn try_publish_sol(
     action: &PublishAction,
     timestamp: &Instant,
     signature: &Signature,
-    near_account_id: &AccountId,
 ) -> Result<(), ()> {
     let chain = action.indexed.chain;
     let program = sol.client.program(sol.program_id).map_err(|_| ())?;
@@ -1647,7 +1613,6 @@ async fn try_publish_hydration(
     action: &PublishAction,
     timestamp: &Instant,
     signature: &Signature,
-    near_account_id: &AccountId,
 ) -> Result<(), ()> {
     let chain = action.indexed.chain;
     let sign_id = action.indexed.id;

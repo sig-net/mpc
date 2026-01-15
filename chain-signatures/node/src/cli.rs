@@ -311,12 +311,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let node = Node::new();
             let node_watcher = node.watch();
 
-            let msg_channel = MessageChannel::spawn(
-                client.clone(),
-                config_rx.clone(),
-                contract_watcher.clone(),
-            )
-            .await;
+            let msg_channel =
+                MessageChannel::spawn(client.clone(), config_rx.clone(), contract_watcher.clone())
+                    .await;
             let protocol = MpcSignProtocol {
                 my_account_id: account_id.clone(),
                 rpc_channel,
