@@ -532,14 +532,6 @@ impl SignPositor {
         let is_proposer = proposer == ctx.me;
         let is_deliberator = !is_proposer;
 
-        // Get the presignature participants - only these nodes participated in generating it
-        let presignature_participants = if let Some(ref taken) = presignature {
-            taken.artifact.participants.clone()
-        } else {
-            // Deliberators don't have the presignature yet, will verify when they receive Propose
-            Vec::new()
-        };
-
         tracing::info!(
             ?sign_id,
             ?presignature_id,
@@ -628,8 +620,7 @@ impl SignPositor {
 
                         // Start as soon as we have enough accepts
                         if counter.enough_accepts(ctx.threshold) {
-                            // Only include participants who both accepted AND were part of the presignature generation
-                            let mut participants = counter.accepts.iter().copied().collect::<Vec<_>>();
+                            let participants = counter.accepts.into_iter().collect::<Vec<_>>();
                             tracing::info!(?sign_id, ?round, me = ?ctx.me, ?participants, "proposer broadcasting Start");
 
                             for &p in &participants {
