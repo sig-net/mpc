@@ -5,8 +5,8 @@ use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
-
 use crate::indexer_common::{SignatureEvent, SignatureEventBox};
+
 use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_client::{Client, Cluster, Program};
@@ -484,7 +484,6 @@ async fn process_anchor_sign_event(
 }
 
 // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L31
-#[allow(clippy::too_many_arguments)]
 async fn subscribe_and_process_sign_events(
     program_id: Pubkey,
     rpc_url: String,

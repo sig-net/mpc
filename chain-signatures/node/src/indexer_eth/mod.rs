@@ -684,7 +684,6 @@ pub struct EthereumIndexer {
 }
 
 impl EthereumIndexer {
-    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         eth: Option<EthConfig>,
         sign_tx: mpsc::Sender<Sign>,
@@ -912,7 +911,6 @@ impl EthereumIndexer {
         client.get_latest_block_number().await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn process_block(
         client: Arc<EthereumClient>,
         block: alloy::rpc::types::Block,
@@ -1197,7 +1195,6 @@ impl EthereumIndexer {
     }
 
     /// Sends a request to the sign queue when the block where the request is in is finalized.
-    #[allow(clippy::too_many_arguments)]
     async fn send_requests_when_final(
         client: Arc<EthereumClient>,
         mut requests_indexed: mpsc::Receiver<BlockAndRequests>,
@@ -1285,7 +1282,6 @@ impl EthereumIndexer {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn retry_failed_blocks(
         client: Arc<EthereumClient>,
         mut blocks_failed_rx: mpsc::Receiver<alloy::rpc::types::Block>,

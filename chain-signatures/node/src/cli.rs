@@ -192,13 +192,10 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             message_options,
         } => {
             let _guard = logs::setup(&storage_options.env, account_id.as_str(), &log_options).await;
-
             let _span = tracing::trace_span!("cli").entered();
-
             crate::metrics::init_node_account_id(&account_id);
 
             let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
-
             let digest = configuration_digest(
                 mpc_contract_id.clone(),
                 account_id.clone(),
@@ -207,7 +204,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sign_sk.clone(),
                 eth.clone(),
             );
-
             crate::metrics::nodes::CONFIGURATION_DIGEST
                 .with_label_values(&[node_account_id()])
                 .set(digest);
@@ -215,7 +211,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let (sign_tx, sign_rx) = mpsc::channel(1024);
 
             let gcp_service = GcpService::init(&account_id, &storage_options).await?;
-
             let key_storage =
                 storage::secret_storage::init(Some(&gcp_service), &storage_options, &account_id);
 
