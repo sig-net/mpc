@@ -193,11 +193,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         // Check directly whether the artifact is already stored in Redis.
         let artifact_exists: Result<bool, _> = conn.hexists(&self.artifact_key, id).await;
         let elapsed = start.elapsed();
-        crate::metrics::with_labels_and_node_histogram(
-            &crate::metrics::storage::REDIS_LATENCY,
-            &[A::METRIC_LABEL, "reserve"],
-        )
-        .observe(elapsed.as_millis() as f64);
+        crate::metrics::storage::REDIS_LATENCY
+            .with_label_values(&[A::METRIC_LABEL, "reserve", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
 
         match artifact_exists {
             Ok(true) => {
@@ -274,11 +272,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .await;
 
         let elapsed = start.elapsed();
-        crate::metrics::with_labels_and_node_histogram(
-            &crate::metrics::storage::REDIS_LATENCY,
-            &[A::METRIC_LABEL, "remove_outdated"],
-        )
-        .observe(elapsed.as_millis() as f64);
+        crate::metrics::storage::REDIS_LATENCY
+            .with_label_values(&[A::METRIC_LABEL, "remove_outdated", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
 
         match result {
             Ok(outdated) => {
@@ -343,11 +339,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         drop(used);
 
         let elapsed = start.elapsed();
-        crate::metrics::with_labels_and_node_histogram(
-            &crate::metrics::storage::REDIS_LATENCY,
-            &[A::METRIC_LABEL, "insert"],
-        )
-        .observe(elapsed.as_millis() as f64);
+        crate::metrics::storage::REDIS_LATENCY
+            .with_label_values(&[A::METRIC_LABEL, "insert", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
 
         match outcome {
             Ok(()) => {
@@ -433,11 +427,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .await;
 
         let elapsed = start.elapsed();
-        crate::metrics::with_labels_and_node_histogram(
-            &crate::metrics::storage::REDIS_LATENCY,
-            &[A::METRIC_LABEL, "take"],
-        )
-        .observe(elapsed.as_millis() as f64);
+        crate::metrics::storage::REDIS_LATENCY
+            .with_label_values(&[A::METRIC_LABEL, "take", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
 
         match result {
             Ok(artifact) => {
@@ -515,11 +507,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .ok();
 
         let elapsed = start.elapsed();
-        crate::metrics::with_labels_and_node_histogram(
-            &crate::metrics::storage::REDIS_LATENCY,
-            &[A::METRIC_LABEL, "clear"],
-        )
-        .observe(elapsed.as_millis() as f64);
+        crate::metrics::storage::REDIS_LATENCY
+            .with_label_values(&[A::METRIC_LABEL, "clear", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
 
         self.reserved.write().await.clear();
         self.used.write().await.clear();
@@ -565,11 +555,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .await;
 
         let elapsed = start.elapsed();
-        crate::metrics::with_labels_and_node_histogram(
-            &crate::metrics::storage::REDIS_LATENCY,
-            &[A::METRIC_LABEL, "take_mine"],
-        )
-        .observe(elapsed.as_millis() as f64);
+        crate::metrics::storage::REDIS_LATENCY
+            .with_label_values(&[A::METRIC_LABEL, "take_mine", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
 
         match result {
             Ok(Some(artifact)) => {
@@ -626,11 +614,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .await;
 
         let elapsed = start.elapsed();
-        crate::metrics::with_labels_and_node_histogram(
-            &crate::metrics::storage::REDIS_LATENCY,
-            &[A::METRIC_LABEL, "return_mine"],
-        )
-        .observe(elapsed.as_millis() as f64);
+        crate::metrics::storage::REDIS_LATENCY
+            .with_label_values(&[A::METRIC_LABEL, "return_mine", self.account_id.as_str()])
+            .observe(elapsed.as_millis() as f64);
 
         match result {
             Ok(_) => {

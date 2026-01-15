@@ -9,6 +9,7 @@ use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::PendingRequestStatus;
 use crate::storage::app_data_storage::AppDataStorage;
+use crate::metrics::node_account_id;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
@@ -545,11 +546,9 @@ fn send_indexed_requests_to_sign_queue(
         tokio::spawn(async move {
             match sign_tx.send(Sign::Request(request)).await {
                 Ok(_) => {
-                    crate::metrics::with_chain_and_node_counter(
-                        &crate::metrics::requests::NUM_SIGN_REQUESTS,
-                        Chain::Ethereum.as_str(),
-                    )
-                    .inc();
+                    crate::metrics::requests::NUM_SIGN_REQUESTS
+                        .with_label_values(&[Chain::Ethereum.as_str(), node_account_id()])
+                        .inc();
                 }
                 Err(err) => {
                     tracing::error!(?err, "Failed to send ETH sign request into queue");
@@ -887,11 +886,9 @@ impl EthereumIndexer {
                     tracing::info!("Processed new block number {block_number}");
                 }
             }
-            crate::metrics::with_chain_and_node_gauge(
-                &crate::metrics::indexers::LATEST_BLOCK_NUMBER,
-                Chain::Ethereum.as_str(),
-            )
-            .set(block_number as i64);
+            crate::metrics::indexers::LATEST_BLOCK_NUMBER
+                .with_label_values(&[Chain::Ethereum.as_str(), node_account_id()])
+                .set(block_number as i64);
         }
     }
 
@@ -946,7 +943,8 @@ impl EthereumIndexer {
         );
         let start = Instant::now();
         let block_receipts_result = client.get_block_receipts(block_number.into()).await;
-        crate::metrics::with_node_histogram(&crate::metrics::indexers::ETH_BLOCK_RECEIPT_LATENCY)
+        crate::metrics::indexers::ETH_BLOCK_RECEIPT_LATENCY
+            .with_label_values(&[node_account_id()])
             .observe(start.elapsed().as_millis() as f64);
         let Some(block_receipts) = block_receipts_result.map_err(|err| {
             anyhow::anyhow!(
@@ -1018,14 +1016,12 @@ impl EthereumIndexer {
                 .map_err(|err| anyhow::anyhow!("Failed to send indexed requests: {:?}", err))?;
 
             for request_timestamp in timestamps {
-                crate::metrics::with_chain_and_node_histogram(
-                    &crate::metrics::indexers::INDEXER_DELAY,
-                    Chain::Ethereum.as_str(),
-                )
-                .observe(
-                    crate::util::duration_between_unix(block_timestamp, request_timestamp)
-                        .as_secs() as f64,
-                );
+                crate::metrics::indexers::INDEXER_DELAY
+                    .with_label_values(&[Chain::Ethereum.as_str(), node_account_id()])
+                    .observe(
+                        crate::util::duration_between_unix(block_timestamp, request_timestamp)
+                            .as_secs() as f64,
+                    );
             }
         }
 

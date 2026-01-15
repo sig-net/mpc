@@ -13,6 +13,7 @@ use crate::storage::app_data_storage;
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::triple_storage::TriplePair;
 use crate::{indexer, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, storage, web};
+use crate::metrics::node_account_id;
 
 use clap::Parser;
 use deadpool_redis::Runtime;
@@ -207,7 +208,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 eth.clone(),
             );
 
-            crate::metrics::with_node_gauge(&crate::metrics::nodes::CONFIGURATION_DIGEST)
+            crate::metrics::nodes::CONFIGURATION_DIGEST
+                .with_label_values(&[node_account_id()])
                 .set(digest);
 
             let (sign_tx, sign_rx) = mpsc::channel(1024);

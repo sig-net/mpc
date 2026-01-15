@@ -6,6 +6,7 @@ use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, SignRequestType};
 use crate::util::AffinePointExt as _;
+use crate::metrics::node_account_id;
 
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
@@ -1083,18 +1084,14 @@ async fn try_publish_near(
     );
 
     let elapsed = action.indexed.timestamp_sign_queue.elapsed();
-    crate::metrics::with_chain_and_node_counter(
-        &crate::metrics::requests::NUM_SIGN_SUCCESS,
-        chain.as_str(),
-    )
-    .inc();
-    crate::metrics::with_chain_and_node_histogram(
-        &crate::metrics::requests::SIGN_TOTAL_LATENCY,
-        chain.as_str(),
-    )
-    .observe(elapsed.as_secs_f64());
+    crate::metrics::requests::NUM_SIGN_SUCCESS
+        .with_label_values(&[chain.as_str(), node_account_id()])
+        .inc();
+    crate::metrics::requests::SIGN_TOTAL_LATENCY
+        .with_label_values(&[chain.as_str(), node_account_id()])
+        .observe(elapsed.as_secs_f64());
     crate::metrics::requests::SIGN_RESPOND_LATENCY
-        .with_chain_and_node(chain.as_str())
+        .with_label_values(&[chain.as_str(), node_account_id()])
         .observe(timestamp.elapsed().as_secs_f64());
     Ok(())
 }
@@ -1343,20 +1340,16 @@ async fn try_publish_eth(
         "published ethereum signature successfully"
     );
 
-    crate::metrics::with_chain_and_node_counter(
-        &crate::metrics::requests::NUM_SIGN_SUCCESS,
-        chain.as_str(),
-    )
-    .inc();
+    crate::metrics::requests::NUM_SIGN_SUCCESS
+        .with_label_values(&[chain.as_str(), node_account_id()])
+        .inc();
     let elapsed = action.indexed.timestamp_sign_queue.elapsed();
-    crate::metrics::with_chain_and_node_histogram(
-        &crate::metrics::requests::SIGN_TOTAL_LATENCY,
-        chain.as_str(),
-    )
-    .observe(elapsed.as_secs_f64());
+    crate::metrics::requests::SIGN_TOTAL_LATENCY
+        .with_label_values(&[chain.as_str(), node_account_id()])
+        .observe(elapsed.as_secs_f64());
 
     crate::metrics::requests::SIGN_RESPOND_LATENCY
-        .with_chain_and_node(chain.as_str())
+        .with_label_values(&[chain.as_str(), node_account_id()])
         .observe(timestamp.elapsed().as_secs_f64());
 
     Ok(())
@@ -1440,21 +1433,17 @@ async fn try_batch_publish_eth(
         "eth batch published ethereum signatures successfully"
     );
 
-    crate::metrics::with_chain_and_node_counter(
-        &crate::metrics::requests::NUM_SIGN_SUCCESS,
-        chain.as_str(),
-    )
-    .inc_by(num_requests as f64);
+    crate::metrics::requests::NUM_SIGN_SUCCESS
+        .with_label_values(&[chain.as_str(), node_account_id()])
+        .inc_by(num_requests as f64);
     for action in actions {
         let elapsed = action.indexed.timestamp_sign_queue.elapsed();
-        crate::metrics::with_chain_and_node_histogram(
-            &crate::metrics::requests::SIGN_TOTAL_LATENCY,
-            chain.as_str(),
-        )
-        .observe(elapsed.as_secs_f64());
+        crate::metrics::requests::SIGN_TOTAL_LATENCY
+            .with_label_values(&[chain.as_str(), node_account_id()])
+            .observe(elapsed.as_secs_f64());
     }
     crate::metrics::requests::SIGN_RESPOND_LATENCY
-        .with_chain_and_node(chain.as_str())
+        .with_label_values(&[chain.as_str(), node_account_id()])
         .observe(start.elapsed().as_secs_f64());
 
     Ok(())
@@ -1636,23 +1625,19 @@ async fn try_publish_sol(
         }
     }
 
-    crate::metrics::with_chain_and_node_counter(
-        &crate::metrics::requests::NUM_SIGN_SUCCESS,
-        chain.as_str(),
-    )
-    .inc();
+    crate::metrics::requests::NUM_SIGN_SUCCESS
+        .with_label_values(&[chain.as_str(), node_account_id()])
+        .inc();
     let sign_latency_in_secs = crate::util::duration_between_unix(
         action.indexed.unix_timestamp_indexed,
         crate::util::current_unix_timestamp(),
     )
     .as_secs();
-    crate::metrics::with_chain_and_node_histogram(
-        &crate::metrics::requests::SIGN_TOTAL_LATENCY,
-        chain.as_str(),
-    )
-    .observe(sign_latency_in_secs as f64);
+    crate::metrics::requests::SIGN_TOTAL_LATENCY
+        .with_label_values(&[chain.as_str(), node_account_id()])
+        .observe(sign_latency_in_secs as f64);
     crate::metrics::requests::SIGN_RESPOND_LATENCY
-        .with_chain_and_node(chain.as_str())
+        .with_label_values(&[chain.as_str(), node_account_id()])
         .observe(timestamp.elapsed().as_secs_f64());
     Ok(())
 }
@@ -1716,23 +1701,19 @@ async fn try_publish_hydration(
         }
     }
 
-    crate::metrics::with_chain_and_node_counter(
-        &crate::metrics::requests::NUM_SIGN_SUCCESS,
-        chain.as_str(),
-    )
-    .inc();
+    crate::metrics::requests::NUM_SIGN_SUCCESS
+        .with_label_values(&[chain.as_str(), node_account_id()])
+        .inc();
     let sign_latency_in_secs = crate::util::duration_between_unix(
         action.indexed.unix_timestamp_indexed,
         crate::util::current_unix_timestamp(),
     )
     .as_secs();
-    crate::metrics::with_chain_and_node_histogram(
-        &crate::metrics::requests::SIGN_TOTAL_LATENCY,
-        chain.as_str(),
-    )
-    .observe(sign_latency_in_secs as f64);
+    crate::metrics::requests::SIGN_TOTAL_LATENCY
+        .with_label_values(&[chain.as_str(), node_account_id()])
+        .observe(sign_latency_in_secs as f64);
     crate::metrics::requests::SIGN_RESPOND_LATENCY
-        .with_chain_and_node(chain.as_str())
+        .with_label_values(&[chain.as_str(), node_account_id()])
         .observe(timestamp.elapsed().as_secs_f64());
 
     Ok(())

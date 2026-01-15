@@ -1,5 +1,7 @@
 use crate::backlog::Backlog;
+use crate::metrics::node_account_id;
 use crate::protocol::{Chain, IndexedSignRequest, Sign};
+
 use mpc_contract::primitives::PendingRequest;
 use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
@@ -186,11 +188,9 @@ async fn poll_pending_requests(ctx: &mut Context) -> anyhow::Result<()> {
     ctx.indexer.update_timestamp();
 
     // Update metrics
-    crate::metrics::with_chain_and_node_gauge(
-        &crate::metrics::indexers::LATEST_BLOCK_NUMBER,
-        Chain::NEAR.as_str(),
-    )
-    .set(latest_height as i64);
+    crate::metrics::indexers::LATEST_BLOCK_NUMBER
+        .with_label_values(&[Chain::NEAR.as_str(), node_account_id()])
+        .set(latest_height as i64);
 
     // Send all new requests
     for request in new_requests {
@@ -201,11 +201,9 @@ async fn poll_pending_requests(ctx: &mut Context) -> anyhow::Result<()> {
         if let Err(err) = ctx.sign_tx.send(Sign::Request(request)).await {
             tracing::error!(?err, "failed to send the sign request into sign queue");
         } else {
-            crate::metrics::with_chain_and_node_counter(
-                &crate::metrics::requests::NUM_SIGN_REQUESTS,
-                Chain::NEAR.as_str(),
-            )
-            .inc();
+            crate::metrics::requests::NUM_SIGN_REQUESTS
+                .with_label_values(&[Chain::NEAR.as_str(), node_account_id()])
+                .inc();
         }
     }
 

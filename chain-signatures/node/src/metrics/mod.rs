@@ -1,7 +1,7 @@
 use std::sync::{Mutex, OnceLock};
 
-use prometheus::{HistogramOpts, HistogramVec, Opts, Result};
 use near_account_id::AccountId;
+use prometheus::{HistogramOpts, HistogramVec, Opts, Result};
 
 pub mod hardware;
 pub mod indexers;
@@ -22,57 +22,11 @@ pub fn init_node_account_id(account_id: &AccountId) {
     }
 }
 
-fn node_account_id() -> &'static str {
+pub fn node_account_id() -> &'static str {
     NODE_ACCOUNT_ID
         .get()
         .map(String::as_str)
         .expect("node account id must be initialized before emitting metrics")
-}
-
-pub fn with_node(counter: &prometheus::CounterVec) -> prometheus::Counter {
-    counter.with_label_values(&[node_account_id()])
-}
-
-pub fn with_node_gauge(gauge: &prometheus::IntGaugeVec) -> prometheus::IntGauge {
-    gauge.with_label_values(&[node_account_id()])
-}
-
-pub fn with_node_histogram(histogram: &HistogramVec) -> prometheus::Histogram {
-    histogram.with_label_values(&[node_account_id()])
-}
-
-pub fn with_chain_and_node_counter(counter: &prometheus::CounterVec, chain: &str) -> prometheus::Counter {
-    counter.with_label_values(&[chain, node_account_id()])
-}
-
-pub fn with_chain_and_node_gauge(gauge: &prometheus::IntGaugeVec, chain: &str) -> prometheus::IntGauge {
-    gauge.with_label_values(&[chain, node_account_id()])
-}
-
-pub fn with_chain_and_node_histogram(histogram: &HistogramVec, chain: &str) -> prometheus::Histogram {
-    histogram.with_label_values(&[chain, node_account_id()])
-}
-
-pub fn with_endpoint_and_node_histogram(histogram: &HistogramVec, endpoint: &str) -> prometheus::Histogram {
-    histogram.with_label_values(&[endpoint, node_account_id()])
-}
-
-pub fn with_labels_and_node_counter(counter: &prometheus::CounterVec, labels: &[&str]) -> prometheus::Counter {
-    let mut full = labels.to_vec();
-    full.push(node_account_id());
-    counter.with_label_values(&full)
-}
-
-pub fn with_labels_and_node_gauge(gauge: &prometheus::IntGaugeVec, labels: &[&str]) -> prometheus::IntGauge {
-    let mut full = labels.to_vec();
-    full.push(node_account_id());
-    gauge.with_label_values(&full)
-}
-
-pub fn with_labels_and_node_histogram(histogram: &HistogramVec, labels: &[&str]) -> prometheus::Histogram {
-    let mut full = labels.to_vec();
-    full.push(node_account_id());
-    histogram.with_label_values(&full)
 }
 
 pub fn try_create_int_gauge_vec(
@@ -168,35 +122,5 @@ impl Histogram {
 
     pub fn exact(&self) -> Vec<f64> {
         self.exact.lock().unwrap().clone()
-    }
-
-    #[cfg(feature = "bench")]
-    pub fn with_node(&self) -> &Self {
-        self.with_label_values(&[node_account_id()])
-    }
-
-    #[cfg(not(feature = "bench"))]
-    pub fn with_node(&self) -> prometheus::Histogram {
-        self.with_label_values(&[node_account_id()])
-    }
-
-    #[cfg(feature = "bench")]
-    pub fn with_chain_and_node(&self, chain: &str) -> &Self {
-        self.with_label_values(&[chain, node_account_id()])
-    }
-
-    #[cfg(not(feature = "bench"))]
-    pub fn with_chain_and_node(&self, chain: &str) -> prometheus::Histogram {
-        self.with_label_values(&[chain, node_account_id()])
-    }
-
-    #[cfg(feature = "bench")]
-    pub fn with_endpoint_and_node(&self, endpoint: &str) -> &Self {
-        self.with_label_values(&[endpoint, node_account_id()])
-    }
-
-    #[cfg(not(feature = "bench"))]
-    pub fn with_endpoint_and_node(&self, endpoint: &str) -> prometheus::Histogram {
-        self.with_label_values(&[endpoint, node_account_id()])
     }
 }

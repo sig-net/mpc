@@ -4,6 +4,7 @@ use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
+use crate::metrics::node_account_id;
 
 use crate::indexer_common::{SignatureEvent, SignatureEventBox};
 use alloy_sol_types::SolValue;
@@ -712,11 +713,9 @@ where
         }
 
         // Update block height metric
-        crate::metrics::with_chain_and_node_gauge(
-            &crate::metrics::indexers::LATEST_BLOCK_NUMBER,
-            Chain::Solana.as_str(),
-        )
-        .set(response.context.slot as i64);
+        crate::metrics::indexers::LATEST_BLOCK_NUMBER
+            .with_label_values(&[Chain::Solana.as_str(), node_account_id()])
+            .set(response.context.slot as i64);
     }
 
     Ok(())
