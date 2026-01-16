@@ -741,7 +741,6 @@ impl EthereumIndexer {
             &node_client,
             Chain::Ethereum,
             sign_tx.clone(),
-            node_near_account_id.clone(),
             total_timeout,
         )
         .await;

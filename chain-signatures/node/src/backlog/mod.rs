@@ -657,6 +657,7 @@ pub struct SignTx {
     pub source_chain: Chain,
     pub status: PendingRequestStatus,
     pub args: SignArgs,
+    pub unix_timestamp_indexed: u64,
 }
 
 /// Pending transaction in the backlog - can be either a sign-only or bidirectional.
