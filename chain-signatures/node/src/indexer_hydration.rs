@@ -1,5 +1,5 @@
 use crate::backlog::Backlog;
-use crate::indexer_common::SignatureEvent;
+use crate::indexer_common::{ethabi_request_id, SignatureEvent};
 use crate::indexer_sol::MAX_SECP256K1_SCALAR;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
@@ -7,7 +7,6 @@ use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
 
-use alloy::primitives::keccak256;
 use alloy_sol_types::SolValue;
 use anyhow::{anyhow, Result};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -128,54 +127,16 @@ pub struct HydrationSignatureRequestedEvent {
 
 impl SignatureEvent for HydrationSignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
-        const HEAD_WORDS: usize = 8;
-        const WORD_SIZE: usize = 32;
-
-        fn u256_word(value: u64) -> [u8; WORD_SIZE] {
-            let mut word = [0u8; WORD_SIZE];
-            word[WORD_SIZE - 8..].copy_from_slice(&value.to_be_bytes());
-            word
-        }
-
-        let head_size = HEAD_WORDS * WORD_SIZE;
-        let mut heads: Vec<[u8; WORD_SIZE]> = Vec::with_capacity(HEAD_WORDS);
-        let mut tails: Vec<u8> = Vec::new();
-
-        fn push_dynamic(
-            heads: &mut Vec<[u8; WORD_SIZE]>,
-            tails: &mut Vec<u8>,
-            head_size: usize,
-            bytes: &[u8],
-        ) {
-            let offset = head_size + tails.len();
-            heads.push(u256_word(offset as u64));
-            tails.extend_from_slice(&u256_word(bytes.len() as u64));
-            tails.extend_from_slice(bytes);
-            let padding = (WORD_SIZE - (bytes.len() % WORD_SIZE)) % WORD_SIZE;
-            tails.extend(std::iter::repeat(0u8).take(padding));
-        }
-
-        push_dynamic(
-            &mut heads,
-            &mut tails,
-            head_size,
-            self.sender_string().as_bytes(),
-        );
-        push_dynamic(&mut heads, &mut tails, head_size, self.payload.as_slice());
-        push_dynamic(&mut heads, &mut tails, head_size, self.path.as_bytes());
-        heads.push(u256_word(self.key_version as u64));
-        push_dynamic(&mut heads, &mut tails, head_size, self.chain_id.as_bytes());
-        push_dynamic(&mut heads, &mut tails, head_size, self.algo.as_bytes());
-        push_dynamic(&mut heads, &mut tails, head_size, self.dest.as_bytes());
-        push_dynamic(&mut heads, &mut tails, head_size, self.params.as_bytes());
-
-        let mut encoded = Vec::with_capacity(head_size + tails.len());
-        for head in heads {
-            encoded.extend_from_slice(&head);
-        }
-        encoded.extend_from_slice(&tails);
-
-        *keccak256(encoded)
+        ethabi_request_id(
+            self.sender_string(),
+            self.payload,
+            self.path.clone(),
+            self.key_version,
+            self.chain_id.clone(),
+            self.algo.clone(),
+            self.dest.clone(),
+            self.params.clone(),
+        )
     }
 
     fn generate_sign_request(
@@ -911,7 +872,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn signature_requested_request_id_matches_golden_value() {
+    fn request_id_matches_ethabi() {
         let event = HydrationSignatureRequestedEvent {
             sender: [0xAA; 32],
             payload: [0xBB; 32],
@@ -927,6 +888,22 @@ mod tests {
         let request_id = event.generate_request_id();
         let request_id_hex = hex::encode(request_id);
 
+        // The expected request id encoded from ethabi:
+        // ```
+        // let encoded = encode(&[
+        //     Token::String(self.sender_string()),
+        //     Token::Bytes(self.payload.to_vec()),
+        //     Token::String(self.path.clone()),
+        //     Token::Uint(self.key_version.into()),
+        //     Token::String(self.chain_id.clone()),
+        //     Token::String(self.algo.clone()),
+        //     Token::String(self.dest.clone()),
+        //     Token::String(self.params.clone()),
+        // ]);
+        // let mut hasher = Keccak256::new();
+        // hasher.update(&encoded);
+        // hasher.finalize().into()
+        // ```
         assert_eq!(
             request_id_hex,
             "67a3a9bf9d424d85bef21cf9780a0634c6a06061265ce9d1063f30f1eec84821"

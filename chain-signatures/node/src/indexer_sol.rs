@@ -1,17 +1,16 @@
 use crate::backlog::Backlog;
+use crate::indexer_common::{ethabi_request_id, SignatureEvent, SignatureEventBox};
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
 
-use crate::indexer_common::{SignatureEvent, SignatureEventBox};
 use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_client::{Client, Cluster, Program};
 use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
-
 use futures_util::StreamExt;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
@@ -20,7 +19,6 @@ use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
-use sha3::{Digest, Keccak256};
 use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
     SignatureRespondedEvent,
@@ -165,58 +163,16 @@ pub struct SolSignRequest {
 
 impl SignatureEvent for SignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
-        // Encode exactly as the legacy ethabi version:
-        // (string, bytes, string, uint256, string, string, string, string)
-        const HEAD_WORDS: usize = 8;
-        const WORD_SIZE: usize = 32;
-
-        fn u256_word(value: u64) -> [u8; WORD_SIZE] {
-            let mut word = [0u8; WORD_SIZE];
-            word[WORD_SIZE - 8..].copy_from_slice(&value.to_be_bytes());
-            word
-        }
-
-        let head_size = HEAD_WORDS * WORD_SIZE;
-        let mut heads: Vec<[u8; WORD_SIZE]> = Vec::with_capacity(HEAD_WORDS);
-        let mut tails: Vec<u8> = Vec::new();
-
-        fn push_dynamic(
-            heads: &mut Vec<[u8; WORD_SIZE]>,
-            tails: &mut Vec<u8>,
-            head_size: usize,
-            bytes: &[u8],
-        ) {
-            let offset = head_size + tails.len();
-            heads.push(u256_word(offset as u64));
-            tails.extend_from_slice(&u256_word(bytes.len() as u64));
-            tails.extend_from_slice(bytes);
-            let padding = (WORD_SIZE - (bytes.len() % WORD_SIZE)) % WORD_SIZE;
-            tails.extend(std::iter::repeat(0u8).take(padding));
-        }
-
-        push_dynamic(
-            &mut heads,
-            &mut tails,
-            head_size,
-            self.sender.to_string().as_bytes(),
-        );
-        push_dynamic(&mut heads, &mut tails, head_size, self.payload.as_slice());
-        push_dynamic(&mut heads, &mut tails, head_size, self.path.as_bytes());
-        heads.push(u256_word(self.key_version as u64));
-        push_dynamic(&mut heads, &mut tails, head_size, self.chain_id.as_bytes());
-        push_dynamic(&mut heads, &mut tails, head_size, self.algo.as_bytes());
-        push_dynamic(&mut heads, &mut tails, head_size, self.dest.as_bytes());
-        push_dynamic(&mut heads, &mut tails, head_size, self.params.as_bytes());
-
-        let mut encoded = Vec::with_capacity(head_size + tails.len());
-        for head in heads {
-            encoded.extend_from_slice(&head);
-        }
-        encoded.extend_from_slice(&tails);
-
-        let mut hasher = Keccak256::new();
-        hasher.update(&encoded);
-        hasher.finalize().into()
+        ethabi_request_id(
+            self.sender_string(),
+            self.payload,
+            self.path.clone(),
+            self.key_version,
+            self.chain_id.clone(),
+            self.algo.clone(),
+            self.dest.clone(),
+            self.params.clone(),
+        )
     }
 
     fn generate_sign_request(
@@ -990,7 +946,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn signature_requested_request_id_matches_golden_value() {
+    fn request_id_matches_ethabi() {
         let event = SignatureRequestedEvent {
             sender: Pubkey::new_from_array([0x11; 32]),
             payload: [0x22; 32],
@@ -1007,6 +963,22 @@ mod tests {
         let request_id = event.generate_request_id();
         let request_id_hex = hex::encode(request_id);
 
+        // The expected request id encoded from ethabi:
+        // ```
+        // let encoded = encode(&[
+        //     Token::String(self.sender_string()),
+        //     Token::Bytes(self.payload.to_vec()),
+        //     Token::String(self.path.clone()),
+        //     Token::Uint(self.key_version.into()),
+        //     Token::String(self.chain_id.clone()),
+        //     Token::String(self.algo.clone()),
+        //     Token::String(self.dest.clone()),
+        //     Token::String(self.params.clone()),
+        // ]);
+        // let mut hasher = Keccak256::new();
+        // hasher.update(&encoded);
+        // hasher.finalize().into()
+        // ```
         assert_eq!(
             request_id_hex,
             "7f7aee49c2a994cc17f85058f7e0b19a44603d619a7e738522f9aa329e457879"
