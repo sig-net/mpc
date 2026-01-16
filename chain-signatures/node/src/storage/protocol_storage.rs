@@ -1,4 +1,3 @@
-use crate::metrics::node_account_id;
 use cait_sith::protocol::Participant;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;

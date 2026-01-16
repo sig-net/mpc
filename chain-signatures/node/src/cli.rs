@@ -203,7 +203,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sign_sk.clone(),
                 eth.clone(),
             );
-            crate::metrics::nodes::CONFIGURATION_DIGEST.set(digest);
+            crate::metrics::nodes::CONFIGURATION_DIGEST
+                .with_label_values::<&str>(&[])
+                .set(digest);
 
             let (sign_tx, sign_rx) = mpsc::channel(1024);
 

@@ -929,6 +929,7 @@ impl EthereumIndexer {
         let start = Instant::now();
         let block_receipts_result = client.get_block_receipts(block_number.into()).await;
         crate::metrics::indexers::ETH_BLOCK_RECEIPT_LATENCY
+            .with_label_values::<&str>(&[])
             .observe(start.elapsed().as_millis() as f64);
         let Some(block_receipts) = block_receipts_result.map_err(|err| {
             anyhow::anyhow!(
