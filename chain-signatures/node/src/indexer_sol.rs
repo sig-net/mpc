@@ -194,7 +194,12 @@ impl SignatureEvent for SignatureRequestedEvent {
             tails.extend(std::iter::repeat(0u8).take(padding));
         }
 
-        push_dynamic(&mut heads, &mut tails, head_size, self.sender.to_string().as_bytes());
+        push_dynamic(
+            &mut heads,
+            &mut tails,
+            head_size,
+            self.sender.to_string().as_bytes(),
+        );
         push_dynamic(&mut heads, &mut tails, head_size, self.payload.as_slice());
         push_dynamic(&mut heads, &mut tails, head_size, self.path.as_bytes());
         heads.push(u256_word(self.key_version as u64));

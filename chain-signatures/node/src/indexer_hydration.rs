@@ -6,6 +6,7 @@ use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
+
 use alloy::primitives::keccak256;
 use alloy_sol_types::SolValue;
 use anyhow::{anyhow, Result};
@@ -154,7 +155,12 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {
             tails.extend(std::iter::repeat(0u8).take(padding));
         }
 
-        push_dynamic(&mut heads, &mut tails, head_size, self.sender_string().as_bytes());
+        push_dynamic(
+            &mut heads,
+            &mut tails,
+            head_size,
+            self.sender_string().as_bytes(),
+        );
         push_dynamic(&mut heads, &mut tails, head_size, self.payload.as_slice());
         push_dynamic(&mut heads, &mut tails, head_size, self.path.as_bytes());
         heads.push(u256_word(self.key_version as u64));
@@ -593,7 +599,7 @@ pub async fn run(
                 };
                 tracing::info!(
                     "Hydration::Signet::SignBidirectionalRequested in block #{number} ({hash:?}): {:?}",
-                event
+                    event
                 );
 
                 let entropy = sp_core::hashing::blake2_256(ev.bytes());
@@ -905,22 +911,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hydration_signature_requested_request_id_matches_golden_value() {
+    fn signature_requested_request_id_matches_golden_value() {
         let event = HydrationSignatureRequestedEvent {
-            sender: [0x11; 32],
-            payload: [0x22; 32],
-            path: "m/44'/354'/0'/0'".to_string(),
-            key_version: 7,
-            deposit: 12_345,
-            chain_id: "hydration-test-chain".to_string(),
+            sender: [0xAA; 32],
+            payload: [0xBB; 32],
+            path: "m/44'/60'/0'/0/0".to_string(),
+            key_version: 3,
+            deposit: 999,
+            chain_id: "hydration-testnet".to_string(),
             algo: "secp256k1".to_string(),
-            dest: "destination-address".to_string(),
-            params: "params-json".to_string(),
+            dest: "dest-address".to_string(),
+            params: "payload-params".to_string(),
         };
 
         let request_id = event.generate_request_id();
         let request_id_hex = hex::encode(request_id);
 
-        assert_eq!(request_id_hex, "015ab295ee90ae76ee526f559ea3a1fddc28dd05b40976cdbc08dbd08d93b4ec");
+        assert_eq!(
+            request_id_hex,
+            "67a3a9bf9d424d85bef21cf9780a0634c6a06061265ce9d1063f30f1eec84821"
+        );
     }
 }
