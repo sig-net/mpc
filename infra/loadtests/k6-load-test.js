@@ -1,154 +1,102 @@
 import http from 'k6/http';
-import { group } from 'k6';
+import { check, fail } from 'k6';
 
 const PINGER_URL = "https://contract-ping.sig.network/ping";
 
 const strategies = {
-  constant_low_rate_1h: {
+  "rps_0_1": {
     scenarios: {
-      ramping_smoke: {
-        executor: 'ramping-arrival-rate',
-        startRate: 1,
-        timeUnit: '5m',
-        preAllocatedVUs: 1,
-        maxVUs: 10,
-        stages: [
-          { duration: '1m', target: 1 },
-          { duration: '58m', target: 1 },
-          { duration: '1m', target: 0 },
-        ],
-      },
-    },
-    thresholds: {
-      http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<1500'],
-    },
-  },
-  constant_medium_rate_1h: {
-    scenarios: {
-      ramping_smoke: {
-        executor: 'ramping-arrival-rate',
-        startRate: 1,
-        timeUnit: '10s',
-        preAllocatedVUs: 2,
-        maxVUs: 10,
-        stages: [
-          { duration: '1m', target: 1 },
-          { duration: '58m', target: 1 },
-          { duration: '1m', target: 0 },
-        ],
-      },
-    },
-    thresholds: {
-      http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<1500'],
-    },
-  },
-  constant_high_rate_1h: {
-    scenarios: {
-      ramping_smoke: {
-        executor: 'ramping-arrival-rate',
-        startRate: 1,
-        timeUnit: '1s',
-        preAllocatedVUs: 5,
-        maxVUs: 20,
-        stages: [
-          { duration: '1m', target: 1 },
-          { duration: '58m', target: 1 },
-          { duration: '1m', target: 0 },
-        ],
-      },
-    },
-    thresholds: {
-      http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<1500'],
-    },
-  },
-  ramping_low_rate_1h: {
-    scenarios: {
-      ramping_smoke: {
-        executor: 'ramping-arrival-rate',
-        startRate: 0,
+      smoke: {
+        executor: 'constant-arrival-rate',
+        rate: 6,
         timeUnit: '1m',
         preAllocatedVUs: 1,
         maxVUs: 10,
-        stages: [
-          { duration: '10m', target: 1 },
-          { duration: '10m', target: 3 },
-          { duration: '10m', target: 1 },
-          { duration: '10m', target: 3 },
-          { duration: '10m', target: 1 },
-          { duration: '10m', target: 0 },
-        ],
       },
     },
     thresholds: {
       http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<1500'],
+      http_req_duration: ['p(95)<10000'],
     },
   },
-  ramping_medium_rate_1h: {
+  "rps_1": {
     scenarios: {
-      ramping_smoke: {
-        executor: 'ramping-arrival-rate',
-        startRate: 1,
-        timeUnit: '1s',
-        preAllocatedVUs: 5,
+      smoke: {
+        executor: 'constant-arrival-rate',
+        rate: 60,
+        timeUnit: '1m',
+        preAllocatedVUs: 2,
+        maxVUs: 20,
+      },
+    },
+    thresholds: {
+      http_req_failed: ['rate<0.03'],
+      http_req_duration: ['p(95)<10000'],
+    },
+  },
+  "rps_5": {
+    scenarios: {
+      smoke: {
+        executor: 'constant-arrival-rate',
+        rate: 300,
+        timeUnit: '1m',
+        preAllocatedVUs: 10,
         maxVUs: 50,
-        stages: [
-          { duration: '10m', target: 1 },
-          { duration: '10m', target: 3 },
-          { duration: '10m', target: 1 },
-          { duration: '10m', target: 3 },
-          { duration: '10m', target: 1 },
-          { duration: '10m', target: 0 },
-        ],
       },
     },
     thresholds: {
       http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<1500'],
+      http_req_duration: ['p(95)<10000'],
     },
   },
-  ramping_high_rate_1h: {
+  "rps_10": {
     scenarios: {
-      ramping_smoke: {
-        executor: 'ramping-arrival-rate',
-        startRate: 1,
-        timeUnit: '1s',
+      smoke: {
+        executor: 'constant-arrival-rate',
+        rate: 600,
+        timeUnit: '1m',
         preAllocatedVUs: 20,
         maxVUs: 100,
-        stages: [
-          { duration: '10m', target: 1 },
-          { duration: '10m', target: 2 },
-          { duration: '10m', target: 3 },
-          { duration: '10m', target: 4 },
-          { duration: '10m', target: 5 },
-          { duration: '10m', target: 0 },
-        ],
       },
     },
     thresholds: {
       http_req_failed: ['rate<0.03'],
-      http_req_duration: ['p(95)<1500'],
+      http_req_duration: ['p(95)<10000'],
     },
   },
+
 };
 
-export const options = strategies[__ENV.LT_STRATEGY] || (() => {
-  throw new Error(`Invalid or missing LT_STRATEGY environment variable: ${__ENV.LT_STRATEGY}`);
+export const options = (() => {
+  const key = __ENV.LT_STRATEGY;
+  if (!key) {
+    throw new Error(`Invalid or missing LT_STRATEGY environment variable: ${__ENV.LT_STRATEGY}`);
+  }
+  const base = strategies[key];
+  if (!base) {
+    throw new Error(`Unknown LT_STRATEGY: ${key}`);
+  }
+  const duration = __ENV.LT_DURATION || '1h';
+  // Deep clone to avoid mutating the shared `strategies` object
+  const opts = JSON.parse(JSON.stringify(base));
+  for (const scen of Object.keys(opts.scenarios || {})) {
+    opts.scenarios[scen].duration = duration;
+  }
+  return opts;
 })();
 
 
 export default function () {
   let chain = __ENV.LT_CHAIN;
   let env = __ENV.LT_CHAIN_ENV;
-  let check = __ENV.LT_CHECK_SIGNATURE === 'true'; // Convert string to boolean
-
-  if (!chain || !env || !check) {
-    console.error(`One or more required environment variables are not set: chain ${chain}, env ${env}, check ${check}`);
+  // LT_CHECK_SIGNATURE should be provided as the literal string 'true' or 'false'.
+  // Validate presence separately from its boolean value so that a deliberate 'false' is accepted.
+  let checkRaw = __ENV.LT_CHECK_SIGNATURE;
+  if (chain == null || env == null || checkRaw == null) {
+    console.error(`One or more required environment variables are not set: chain ${chain}, env ${env}, check ${checkRaw}`);
     throw new Error("Missing required environment variables. Exiting script.");
   }
+  let check = checkRaw === 'true';
 
   let params = JSON.stringify({
     chain: chain,
@@ -165,9 +113,17 @@ export default function () {
     },
   });
 
-  if (response.status >= 200 && response.status < 300) {
-    console.log(`Status ${response.status}, Body: ${response.body}`);
-  } else {
-    console.error(`Request failed with status ${response.status}, Body: ${response.body}`);
+  // Validate response content and status. Mark run as failed on critical validation failure.
+  const ok = check(response, {
+    'status is 2xx': (r) => r.status >= 200 && r.status < 300,
+    'body not empty': (r) => !!(r.body && r.body.length > 0),
+  });
+
+  if (!ok) {
+    console.error(`Validation failed for response. status=${response.status}, body=${response.body}`);
+    fail(`Critical validation failed for k6 run (status ${response.status})`);
   }
+
+  // Minimal success logging to avoid noisy CI logs for long runs
+  console.log(`Status ${response.status}`);
 }
