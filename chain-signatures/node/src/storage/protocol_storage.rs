@@ -195,7 +195,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         let artifact_exists: Result<bool, _> = conn.hexists(&self.artifact_key, id).await;
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "reserve", node_account_id()])
+            .with_label_values(&[A::METRIC_LABEL, "reserve"])
             .observe(elapsed.as_millis() as f64);
 
         match artifact_exists {
@@ -274,7 +274,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "remove_outdated", node_account_id()])
+            .with_label_values(&[A::METRIC_LABEL, "remove_outdated"])
             .observe(elapsed.as_millis() as f64);
 
         match result {
@@ -341,7 +341,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "insert", node_account_id()])
+            .with_label_values(&[A::METRIC_LABEL, "insert"])
             .observe(elapsed.as_millis() as f64);
 
         match outcome {
@@ -429,7 +429,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "take", node_account_id()])
+            .with_label_values(&[A::METRIC_LABEL, "take"])
             .observe(elapsed.as_millis() as f64);
 
         match result {
@@ -509,7 +509,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "clear", node_account_id()])
+            .with_label_values(&[A::METRIC_LABEL, "clear"])
             .observe(elapsed.as_millis() as f64);
 
         self.reserved.write().await.clear();
@@ -557,7 +557,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "take_mine", node_account_id()])
+            .with_label_values(&[A::METRIC_LABEL, "take_mine"])
             .observe(elapsed.as_millis() as f64);
 
         match result {
@@ -616,7 +616,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "return_mine", node_account_id()])
+            .with_label_values(&[A::METRIC_LABEL, "return_mine"])
             .observe(elapsed.as_millis() as f64);
 
         match result {

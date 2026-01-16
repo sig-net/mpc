@@ -114,28 +114,18 @@ impl TripleGenerator {
     }
 
     async fn run(mut self, epoch: u64) {
-        let before_first_poke_delay = crate::metrics::protocols::TRIPLE_BEFORE_POKE_DELAY
-            .with_label_values(&[node_account_id()]);
-        let accrued_wait_delay = crate::metrics::protocols::TRIPLE_ACCRUED_WAIT_DELAY
-            .with_label_values(&[node_account_id()]);
-        let runtime_latency =
-            crate::metrics::protocols::TRIPLE_LATENCY.with_label_values(&[node_account_id()]);
-        let total_latency =
-            crate::metrics::protocols::TRIPLE_LATENCY_TOTAL.with_label_values(&[node_account_id()]);
-        let poke_latency =
-            crate::metrics::protocols::TRIPLE_POKE_CPU_TIME.with_label_values(&[node_account_id()]);
-        let poke_counts =
-            crate::metrics::protocols::TRIPLE_POKES_CNT.with_label_values(&[node_account_id()]);
+        let before_first_poke_delay = crate::metrics::protocols::TRIPLE_BEFORE_POKE_DELAY;
+        let accrued_wait_delay = crate::metrics::protocols::TRIPLE_ACCRUED_WAIT_DELAY;
+        let runtime_latency = crate::metrics::protocols::TRIPLE_LATENCY;
+        let total_latency = crate::metrics::protocols::TRIPLE_LATENCY_TOTAL;
+        let poke_latency = crate::metrics::protocols::TRIPLE_POKE_CPU_TIME;
+        let poke_counts = crate::metrics::protocols::TRIPLE_POKES_CNT;
         let success_owned_counts =
-            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_MINE_SUCCESS
-                .with_label_values(&[node_account_id()]);
+            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_MINE_SUCCESS;
         let success_total_counts =
-            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS_SUCCESS
-                .with_label_values(&[node_account_id()]);
-        let failure_counts = crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES
-            .with_label_values(&[node_account_id()]);
-        let failure_mine_counts = crate::metrics::protocols::TRIPLE_GENERATOR_MINE_FAILURES
-            .with_label_values(&[node_account_id()]);
+            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS_SUCCESS;
+        let failure_counts = crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES;
+        let failure_mine_counts = crate::metrics::protocols::TRIPLE_GENERATOR_MINE_FAILURES;
 
         let start_time = Instant::now();
         let mut total_wait = Duration::from_millis(0);
@@ -513,9 +503,7 @@ impl TripleSpawner {
         .await?;
 
         self.ongoing.spawn(id, generator.run(self.epoch));
-        crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
-            .with_label_values(&[node_account_id()])
-            .inc();
+        crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS.inc();
 
         Ok(())
     }
@@ -591,16 +579,12 @@ impl TripleSpawner {
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
 
                     crate::metrics::storage::NUM_TRIPLES_MINE
-                        .with_label_values(&[node_account_id()])
                         .set(self.len_mine().await as i64);
                     crate::metrics::storage::NUM_TRIPLES_TOTAL
-                        .with_label_values(&[node_account_id()])
                         .set(self.triple_storage.len_generated().await as i64);
                     crate::metrics::protocols::NUM_TRIPLE_GENERATORS_INTRODUCED
-                        .with_label_values(&[node_account_id()])
                         .set(self.len_introduced() as i64);
                     crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL
-                        .with_label_values(&[node_account_id()])
                         .set(self.len_ongoing() as i64);
                 }
                 Ok(()) = cfg.changed() => {

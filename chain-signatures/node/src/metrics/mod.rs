@@ -26,7 +26,7 @@ pub fn node_account_id() -> &'static str {
     NODE_ACCOUNT_ID
         .get()
         .map(String::as_str)
-        .unwrap_or("default-account.near")
+        .unwrap_or("default-account.near") 
 }
 
 pub fn try_create_int_gauge_vec(
@@ -35,7 +35,7 @@ pub fn try_create_int_gauge_vec(
     labels: &[&str],
 ) -> Result<prometheus::IntGaugeVec> {
     check_metric_multichain_prefix(name)?;
-    let opts = Opts::new(name, help);
+    let opts = Opts::new(name, help).const_label("node_account_id", node_account_id());
     let gauge = prometheus::IntGaugeVec::new(opts, labels)?;
     prometheus::register(Box::new(gauge.clone()))?;
     Ok(gauge)
@@ -47,7 +47,7 @@ pub fn try_create_counter_vec(
     labels: &[&str],
 ) -> Result<prometheus::CounterVec> {
     check_metric_multichain_prefix(name)?;
-    let opts = Opts::new(name, help);
+    let opts = Opts::new(name, help).const_label("node_account_id", node_account_id());
     let counter = prometheus::CounterVec::new(opts, labels)?;
     prometheus::register(Box::new(counter.clone()))?;
     Ok(counter)
@@ -63,6 +63,7 @@ pub fn try_create_histogram_vec(
 ) -> Result<HistogramVec> {
     check_metric_multichain_prefix(name)?;
     let mut opts = HistogramOpts::new(name, help);
+    opts = opts.const_label("node_account_id", node_account_id());
     if let Some(buckets) = buckets {
         opts = opts.buckets(buckets);
     }

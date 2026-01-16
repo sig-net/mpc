@@ -159,26 +159,17 @@ impl PresignatureGenerator {
     }
 
     pub async fn run(mut self, me: Participant, epoch: u64) {
-        let failure_counts = crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES
-            .with_label_values(&[node_account_id()]);
-        let failure_mine_counts = crate::metrics::protocols::PRESIGNATURE_GENERATOR_MINE_FAILURES
-            .with_label_values(&[node_account_id()]);
-        let before_first_poke_delay = crate::metrics::protocols::PRESIGNATURE_BEFORE_POKE_DELAY
-            .with_label_values(&[node_account_id()]);
-        let accrued_wait_delay = crate::metrics::protocols::PRESIGNATURE_ACCRUED_WAIT_DELAY
-            .with_label_values(&[node_account_id()]);
-        let poke_counts = crate::metrics::protocols::PRESIGNATURE_POKES_CNT
-            .with_label_values(&[node_account_id()]);
-        let runtime_latency =
-            crate::metrics::protocols::PRESIGNATURE_LATENCY.with_label_values(&[node_account_id()]);
+        let failure_counts = crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES;
+        let failure_mine_counts = crate::metrics::protocols::PRESIGNATURE_GENERATOR_MINE_FAILURES;
+        let before_first_poke_delay = crate::metrics::protocols::PRESIGNATURE_BEFORE_POKE_DELAY;
+        let accrued_wait_delay = crate::metrics::protocols::PRESIGNATURE_ACCRUED_WAIT_DELAY;
+        let poke_counts = crate::metrics::protocols::PRESIGNATURE_POKES_CNT;
+        let runtime_latency = crate::metrics::protocols::PRESIGNATURE_LATENCY;
         let success_owned_counts: prometheus::core::GenericCounter<prometheus::core::AtomicF64> =
-            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS
-                .with_label_values(&[node_account_id()]);
+            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS;
         let success_total_counts =
-            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS
-                .with_label_values(&[node_account_id()]);
-        let poke_latency = crate::metrics::protocols::PRESIGNATURE_POKE_CPU_TIME
-            .with_label_values(&[node_account_id()]);
+            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS;
+        let poke_latency = crate::metrics::protocols::PRESIGNATURE_POKE_CPU_TIME;
 
         let start_time = Instant::now();
         let mut total_wait = Duration::from_millis(0);
@@ -599,13 +590,9 @@ impl PresignatureSpawner {
                 }
             };
 
-            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS
-                .with_label_values(&[node_account_id()])
-                .inc();
+            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS.inc();
             if owner == me {
-                crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE
-                    .with_label_values(&[node_account_id()])
-                    .inc();
+                crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE.inc();
             }
 
             let inbox = msg.subscribe_presignature(id.id).await;
@@ -725,13 +712,10 @@ impl PresignatureSpawner {
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
 
                     crate::metrics::storage::NUM_PRESIGNATURES_MINE
-                        .with_label_values(&[node_account_id()])
                         .set(self.len_mine().await as i64);
                     crate::metrics::storage::NUM_PRESIGNATURES_TOTAL
-                        .with_label_values(&[node_account_id()])
                         .set(self.len_generated().await as i64);
                     crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL
-                        .with_label_values(&[node_account_id()])
                         .set(
                             self.len_potential().await as i64 - self.len_generated().await as i64,
                         );

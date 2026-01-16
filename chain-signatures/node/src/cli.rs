@@ -2,7 +2,6 @@ use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
 use crate::mesh::Mesh;
-use crate::metrics::node_account_id;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
@@ -191,9 +190,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             mesh_options,
             message_options,
         } => {
+            crate::metrics::init_node_account_id(&account_id);
             let _guard = logs::setup(&storage_options.env, account_id.as_str(), &log_options).await;
             let _span = tracing::trace_span!("cli").entered();
-            crate::metrics::init_node_account_id(&account_id);
 
             let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
             let digest = configuration_digest(
@@ -204,9 +203,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sign_sk.clone(),
                 eth.clone(),
             );
-            crate::metrics::nodes::CONFIGURATION_DIGEST
-                .with_label_values(&[node_account_id()])
-                .set(digest);
+            crate::metrics::nodes::CONFIGURATION_DIGEST.set(digest);
 
             let (sign_tx, sign_rx) = mpsc::channel(1024);
 
@@ -229,10 +226,10 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             }
             tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
 
-            let backlog = Backlog::persisted(
-                CheckpointStorage::Redis(redis_pool.clone(), account_id.clone()),
-                Some(account_id.to_string()),
-            );
+            let backlog = Backlog::persisted(CheckpointStorage::Redis(
+                redis_pool.clone(),
+                account_id.clone(),
+            ));
 
             // NEAR Indexer is only used for integration tests
             // TODO: Remove this once we have integration tests built on other chains
