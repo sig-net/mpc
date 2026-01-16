@@ -1445,15 +1445,15 @@ async fn execute_batch_publish(
                 let elapsed = action.indexed.timestamp_sign_queue.elapsed();
                 if elapsed.as_secs() <= chain.expected_response_time_secs() {
                     crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_IN_TIME
-                        .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                        .with_label_values(&[chain.as_str(), node_account_id()])
                         .inc();
                 }
                 crate::metrics::requests::SIGN_TOTAL_LATENCY
-                    .with_label_values(&[chain.as_str(), near_account_id.as_str()])
+                    .with_label_values(&[chain.as_str(), node_account_id()])
                     .observe(elapsed.as_secs_f64());
             }
             crate::metrics::requests::SIGN_RESPOND_LATENCY
-                .with_label_values(&[Chain::Ethereum.as_str(), near_account_id.as_str()])
+                .with_label_values(&[Chain::Ethereum.as_str(), node_account_id()])
                 .observe(start.elapsed().as_secs_f64());
             actions.clear();
             break;

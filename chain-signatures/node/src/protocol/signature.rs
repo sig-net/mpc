@@ -1138,7 +1138,6 @@ impl SignatureSpawner {
         // if the signature is not completed within the expected response time
         let chain = indexed.chain;
         let timestamp_sign_queue = indexed.timestamp_sign_queue;
-        let my_account_id = self.my_account_id.clone();
         let expected_response_time = Duration::from_secs(chain.expected_response_time_secs());
         let already_elapsed = timestamp_sign_queue.elapsed();
         let remaining_time = expected_response_time.saturating_sub(already_elapsed);
@@ -1155,7 +1154,7 @@ impl SignatureSpawner {
                     "signature request delayed beyond expected response time"
                 );
                 crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_DELAYED
-                    .with_label_values(&[chain.as_str(), my_account_id.as_str()])
+                    .with_label_values(&[chain.as_str(), node_account_id()])
                     .inc();
             });
             self.delayed_watchers.insert(sign_id, watcher);

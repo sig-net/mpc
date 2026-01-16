@@ -2,10 +2,12 @@ pub mod selection;
 
 use self::selection::select_checkpoints;
 use crate::mesh::MeshState;
+use crate::metrics::node_account_id;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, SignRequestType};
 use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PendingRequestStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+
 use anyhow::Context;
 use mpc_primitives::{PendingTx, SignId};
 use std::collections::{hash_map, HashMap};
@@ -192,7 +194,6 @@ pub struct Backlog {
     sign_request_types: Arc<RwLock<HashMap<(Chain, SignId), SignRequestType>>>,
     /// Historical checkpoints kept for 30 minutes, indexed by chain
     historical_checkpoints: Arc<RwLock<HashMap<Chain, Vec<HistoricalCheckpoint>>>>,
-    node_account_id: Option<String>,
 }
 
 impl Default for Backlog {
@@ -203,17 +204,16 @@ impl Default for Backlog {
 
 impl Backlog {
     pub fn new() -> Self {
-        Self::persisted(CheckpointStorage::in_memory(), None)
+        Self::persisted(CheckpointStorage::in_memory())
     }
 
-    pub fn persisted(storage: CheckpointStorage, node_account_id: Option<String>) -> Self {
+    pub fn persisted(storage: CheckpointStorage) -> Self {
         Self {
             storage,
             requests: Arc::new(RwLock::new(HashMap::new())),
             execution_watchers: Arc::new(RwLock::new(HashMap::new())),
             sign_request_types: Arc::new(RwLock::new(HashMap::new())),
             historical_checkpoints: Arc::new(RwLock::new(HashMap::new())),
-            node_account_id,
         }
     }
 
@@ -306,11 +306,9 @@ impl Backlog {
     }
 
     fn observe_backlog_size(&self, chain: Chain, len: usize) {
-        if let Some(account_id) = &self.node_account_id {
-            crate::metrics::requests::BACKLOG_SIZE
-                .with_label_values(&[chain.as_str(), account_id.as_str()])
-                .set(len as i64);
-        }
+        crate::metrics::requests::BACKLOG_SIZE
+            .with_label_values(&[chain.as_str(), node_account_id()])
+            .set(len as i64);
     }
 
     /// Returns all sign-respond transactions with a specific status
