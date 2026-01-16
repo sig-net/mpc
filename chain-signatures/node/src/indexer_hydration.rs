@@ -220,7 +220,6 @@ pub struct HydrationSignBidirectionalRequestedEvent {
     pub algo: String,
     pub dest: String,
     pub params: String,
-    pub program_id: [u8; 32],
     pub output_deserialization_schema: Vec<u8>,
     pub respond_serialization_schema: Vec<u8>,
 }
@@ -693,7 +692,6 @@ fn decode_sign_bidirectional_requested(
     let algo = get_named_utf8(&fields, "algo")?;
     let dest = get_named_utf8(&fields, "dest")?;
     let params = get_named_utf8(&fields, "params")?;
-    let program_id = get_named_bytes32(&fields, "program_id")?;
 
     let output_deserialization_schema = get_named_vec_u8(&fields, "output_deserialization_schema")?;
     let respond_serialization_schema = get_named_vec_u8(&fields, "respond_serialization_schema")?;
@@ -708,7 +706,6 @@ fn decode_sign_bidirectional_requested(
         algo,
         dest,
         params,
-        program_id,
         output_deserialization_schema,
         respond_serialization_schema,
     })
