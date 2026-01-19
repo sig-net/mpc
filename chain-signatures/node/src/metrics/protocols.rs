@@ -65,11 +65,11 @@ pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS_SUCCESS: LazyLock<Count
         .unwrap()
     });
 
-pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_MINE_SUCCESS: LazyLock<CounterVec> =
+pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_OWNED_SUCCESS: LazyLock<CounterVec> =
     LazyLock::new(|| {
         try_create_counter_vec(
-            "multichain_num_total_historical_triple_generations_mine_success",
-            "number of successful triple generators that was mine historically on the node",
+            "multichain_num_total_historical_triple_generations_owned_success",
+            "number of successful triple generators that was owned historically on the node",
             &["node_account_id"],
         )
         .unwrap()
@@ -84,10 +84,10 @@ pub(crate) static TRIPLE_GENERATOR_FAILURES: LazyLock<CounterVec> = LazyLock::ne
     .unwrap()
 });
 
-pub(crate) static TRIPLE_GENERATOR_MINE_FAILURES: LazyLock<CounterVec> = LazyLock::new(|| {
+pub(crate) static TRIPLE_GENERATOR_OWNED_FAILURES: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec(
-        "multichain_triple_generator_mine_failures",
-        "mine triple generator failures",
+        "multichain_triple_generator_owned_failures",
+        "owned triple generator failures",
         &["node_account_id"],
     )
     .unwrap()

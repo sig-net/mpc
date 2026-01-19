@@ -127,14 +127,14 @@ impl TripleGenerator {
         let poke_counts =
             crate::metrics::protocols::TRIPLE_POKES_CNT.with_label_values(&[node_account_id()]);
         let success_owned_counts =
-            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_MINE_SUCCESS
+            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_OWNED_SUCCESS
                 .with_label_values(&[node_account_id()]);
         let success_total_counts =
             crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS_SUCCESS
                 .with_label_values(&[node_account_id()]);
         let failure_counts = crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES
             .with_label_values(&[node_account_id()]);
-        let failure_mine_counts = crate::metrics::protocols::TRIPLE_GENERATOR_MINE_FAILURES
+        let failure_mine_counts = crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES
             .with_label_values(&[node_account_id()]);
 
         let start_time = Instant::now();
@@ -245,6 +245,7 @@ impl TripleGenerator {
                     tracing::debug!(
                         id = self.id,
                         me = ?self.me,
+                        proposer = ?self.proposer,
                         ?triple_owner,
                         pair_is_mine,
                         participants = ?self.participants,
@@ -254,7 +255,7 @@ impl TripleGenerator {
                         "completed triple pair generation"
                     );
 
-                    if pair_is_mine {
+                    if self.proposer == self.me {
                         success_owned_counts.inc();
                     }
 
