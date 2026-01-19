@@ -1148,7 +1148,7 @@ impl SignatureSpawner {
         let already_elapsed =
             crate::util::duration_between_unix(unix_timestamp_indexed, current_timestamp);
         let remaining_time =
-            Duration::from_secs(expected_response_time_secs as u64).saturating_sub(already_elapsed);
+            Duration::from_secs(expected_response_time_secs).saturating_sub(already_elapsed);
         // prevent incrementing delayed metric for already delayed requests
         if remaining_time > Duration::from_secs(0) {
             let watcher = tokio::spawn(async move {
