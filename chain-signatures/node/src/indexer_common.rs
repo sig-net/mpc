@@ -504,6 +504,7 @@ mod tests {
     use cait_sith::protocol::Participant;
     use k256::ProjectivePoint;
     use mpc_primitives::SignArgs;
+    use near_primitives::types::AccountId;
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
