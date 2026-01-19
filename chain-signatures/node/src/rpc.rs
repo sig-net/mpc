@@ -979,7 +979,10 @@ async fn execute_publish(client: ChainClient, mut action: PublishAction, backlog
 
     let chain_str = chain.as_str();
     if publish_result.is_ok() {
-        let elapsed = action.indexed.timestamp_sign_queue.elapsed();
+        let elapsed = crate::util::duration_between_unix(
+            action.indexed.unix_timestamp_indexed,
+            crate::util::current_unix_timestamp(),
+        );
         if elapsed.as_secs() <= chain.expected_response_time_secs() {
             crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_IN_TIME
                 .with_label_values(&[chain_str, node_account_id()])
@@ -1440,9 +1443,13 @@ async fn execute_batch_publish(
         };
         if publish.is_ok() {
             // Record metrics for successful batch publish
+            let current_timestamp = crate::util::current_unix_timestamp();
             for action in actions.iter() {
                 let chain = action.indexed.chain;
-                let elapsed = action.indexed.timestamp_sign_queue.elapsed();
+                let elapsed = crate::util::duration_between_unix(
+                    action.indexed.unix_timestamp_indexed,
+                    current_timestamp,
+                );
                 if elapsed.as_secs() <= chain.expected_response_time_secs() {
                     crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_IN_TIME
                         .with_label_values(&[chain.as_str(), node_account_id()])
