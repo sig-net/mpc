@@ -1,5 +1,6 @@
 use deadpool_redis::redis::AsyncCommands;
 use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
+use integration_tests::mpc_fixture::message_collector::MessageCounter;
 use integration_tests::mpc_fixture::MpcFixtureBuilder;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::SignRequestType;
@@ -8,9 +9,11 @@ use mpc_node::storage::triple_storage::TriplePair;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use test_log::test;
 use tokio::sync::oneshot;
+use tokio::sync::Mutex;
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Use this toggle locally to regenerate hard-coded inputs such as key shares,
@@ -169,21 +172,9 @@ async fn test_basic_sign() {
 
     tracing::info!("sending requests now");
     let request = sign_request(0);
-    network[0]
-        .sign_tx
-        .send(Sign::Request(request.clone()))
-        .await
-        .unwrap();
-    network[1]
-        .sign_tx
-        .send(Sign::Request(request.clone()))
-        .await
-        .unwrap();
-    network[2]
-        .sign_tx
-        .send(Sign::Request(request.clone()))
-        .await
-        .unwrap();
+    network[0].sign_tx.send(request.clone()).await.unwrap();
+    network[1].sign_tx.send(request.clone()).await.unwrap();
+    network[2].sign_tx.send(request.clone()).await.unwrap();
 
     let timeout = Duration::from_secs(10);
 
@@ -199,8 +190,8 @@ async fn test_basic_sign() {
     );
 }
 
-fn sign_request(seed: u8) -> IndexedSignRequest {
-    IndexedSignRequest {
+fn sign_request(seed: u8) -> Sign {
+    Sign::Request(IndexedSignRequest {
         id: SignId::new([seed; 32]),
         args: sign_arg(seed),
         chain: Chain::NEAR,
@@ -208,7 +199,7 @@ fn sign_request(seed: u8) -> IndexedSignRequest {
         timestamp_sign_queue: std::time::Instant::now(),
         total_timeout: Duration::from_secs(45),
         sign_request_type: SignRequestType::Sign,
-    }
+    })
 }
 
 fn sign_arg(seed: u8) -> SignArgs {
@@ -295,10 +286,7 @@ async fn test_sign_adequate_stockpile() {
     for seed in 0..NUM_SIGN_REQUESTS {
         let request = sign_request(seed);
         for node in &network.nodes {
-            node.sign_tx
-                .send(Sign::Request(request.clone()))
-                .await
-                .unwrap();
+            node.sign_tx.send(request.clone()).await.unwrap();
         }
     }
 
@@ -382,10 +370,7 @@ async fn test_sign_limited_stockpile_contention() {
     for seed in 0..NUM_SIGN_REQUESTS {
         let request = sign_request(seed);
         for node in &network.nodes {
-            node.sign_tx
-                .send(Sign::Request(request.clone()))
-                .await
-                .unwrap();
+            node.sign_tx.send(request.clone()).await.unwrap();
         }
     }
 
@@ -482,10 +467,7 @@ async fn test_sign_requests_wait_for_presignatures() {
     for seed in 0..TOTAL_SIGN_REQUESTS {
         let request = sign_request(seed);
         for node in &network.nodes {
-            node.sign_tx
-                .send(Sign::Request(request.clone()))
-                .await
-                .unwrap();
+            node.sign_tx.send(request.clone()).await.unwrap();
         }
     }
 
@@ -607,10 +589,7 @@ async fn test_sign_contention_5_nodes() {
     for seed in 0..NUM_SIGN_REQUESTS {
         let request = sign_request(seed);
         for node in &network.nodes {
-            node.sign_tx
-                .send(Sign::Request(request.clone()))
-                .await
-                .unwrap();
+            node.sign_tx.send(request.clone()).await.unwrap();
         }
     }
 
@@ -692,10 +671,7 @@ async fn test_sign_missing_presignature() {
     tracing::info!("sending requests now");
     let request = sign_request(0);
     for node in &network.nodes {
-        node.sign_tx
-            .send(Sign::Request(request.clone()))
-            .await
-            .unwrap();
+        node.sign_tx.send(request.clone()).await.unwrap();
     }
 
     // give 2 minutes to resolve the problem
@@ -706,7 +682,8 @@ async fn test_sign_missing_presignature() {
         .await
         .expect("should publish RPC action eventually");
 
-    network.print_msg_log().await;
+    let msg_log = network.output.msg_log.lock().await;
+    msg_log.print_summary();
 
     assert_eq!(actions.len(), 1);
     let action_str = actions.iter().next().unwrap();
@@ -760,10 +737,7 @@ async fn test_sign_missing_presignature_after_posits() {
     tracing::info!("sending requests now");
     let request = sign_request(0);
     for node in &network.nodes {
-        node.sign_tx
-            .send(Sign::Request(request.clone()))
-            .await
-            .unwrap();
+        node.sign_tx.send(request.clone()).await.unwrap();
     }
 
     // Wait for first round of posits to go through.
@@ -789,7 +763,8 @@ async fn test_sign_missing_presignature_after_posits() {
         .await
         .expect("should publish RPC action eventually");
 
-    network.print_msg_log().await;
+    let msg_log = network.output.msg_log.lock().await;
+    msg_log.print_summary();
 
     assert_eq!(actions.len(), 1);
     let action_str = actions.iter().next().unwrap();
@@ -797,4 +772,116 @@ async fn test_sign_missing_presignature_after_posits() {
         action_str.contains("RpcAction::Publish"),
         "unexpected rpc action {action_str}"
     );
+}
+
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_triples_message_count() {
+    let network = MpcFixtureBuilder::default()
+        .only_generate_triples()
+        .with_message_collector(Arc::new(Mutex::new(MessageCounter::default())))
+        .build()
+        .await;
+
+    tokio::time::timeout(Duration::from_secs(120), network.wait_for_triples(1))
+        .await
+        .expect("should have enough triples eventually");
+
+    // This prints a summary of all sent message counts for debugging
+    let msg_log = network.output.msg_log.lock().await;
+    msg_log.print_summary();
+
+    // Check there are not too many sent messages.
+    //
+    // For finished protocols, there should be message counts as follows:
+    // Participants with a lower id send at most 16 messages to participant with higher ids.
+    // Participants with a higher id send at most 141 messages to participant with lower ids.
+    // In both cases, fewer messages are observed for ongoing protocols that
+    // already started but got interrupted.
+    //
+    // Note: We don't actually care about these specific numbers. But we want to
+    // understand what the numbers are and check they do not increase unexpectedly.
+    for (from, to, link_stats) in msg_log.clone_as_message_counter().unwrap().link_stats() {
+        for (key, num) in &link_stats.message_counts {
+            if key.contains("Triple") {
+                if from < to {
+                    // receiver in shared multiplication sends fewer messages
+                    assert!(*num <= 16, "{from:?} -> {to:?} sent {num} messages");
+                } else {
+                    // sender in shared multiplication sends more messages
+                    assert!(*num <= 141, "{from:?} -> {to:?} sent {num} messages");
+                }
+            }
+        }
+    }
+}
+
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_presignature_message_count() {
+    let network = MpcFixtureBuilder::default()
+        .only_generate_presignatures()
+        .with_message_collector(Arc::new(Mutex::new(MessageCounter::default())))
+        .build()
+        .await;
+
+    tokio::time::timeout(Duration::from_secs(10), network.wait_for_presignatures(1))
+        .await
+        .expect("should have enough presignatures eventually");
+
+    // This prints a summary of all sent message counts for debugging
+    let msg_log = network.output.msg_log.lock().await;
+    msg_log.print_summary();
+
+    // Check there are not too many sent messages.
+    // There should be exactly 2 messages per link for finished protocols.
+    // But fewer messages are observed for ongoing protocols that already
+    // started but got interrupted.
+    for (from, to, link_stats) in msg_log.clone_as_message_counter().unwrap().link_stats() {
+        for (key, num) in &link_stats.message_counts {
+            if key.contains("Presignature") {
+                assert!(*num <= 2, "{from:?} -> {to:?} sent {num} messages");
+            }
+        }
+    }
+}
+
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_signature_message_count() {
+    let network = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .with_message_collector(Arc::new(Mutex::new(MessageCounter::default())))
+        .build()
+        .await;
+
+    tokio::time::timeout(
+        Duration::from_millis(300),
+        network.wait_for_presignatures(2),
+    )
+    .await
+    .expect("should start with enough presignatures");
+
+    tracing::info!("sending requests now");
+    let request = sign_request(0);
+    network[0].sign_tx.send(request.clone()).await.unwrap();
+    network[1].sign_tx.send(request.clone()).await.unwrap();
+    network[2].sign_tx.send(request.clone()).await.unwrap();
+
+    let timeout = Duration::from_secs(10);
+
+    tokio::time::timeout(timeout, network.wait_for_actions(1))
+        .await
+        .expect("should publish RPC action eventually");
+
+    // This prints a summary of all sent message counts for debugging
+    let msg_log = network.output.msg_log.lock().await;
+    msg_log.print_summary();
+
+    // Check message counts are as expected. Right now, the expectation is:
+    // Exactly 1 message per link
+    for (from, to, link_stats) in msg_log.clone_as_message_counter().unwrap().link_stats() {
+        for (key, num) in &link_stats.message_counts {
+            if key.contains("Signature") {
+                assert_eq!(1, *num, "{from:?} -> {to:?} sent {num} messages");
+            }
+        }
+    }
 }

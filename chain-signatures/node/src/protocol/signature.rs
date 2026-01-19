@@ -3,6 +3,7 @@ use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
+use crate::metrics::node_account_id;
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{
     MessageChannel, PositMessage, PositProtocolId, SignatureMessage, Subscriber,
@@ -32,8 +33,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
 use tokio::task::JoinHandle;
-
-use near_account_id::AccountId;
 
 /// The round interval to search for a proposer in the organizing phase.
 const ROUND_INTERVAL: usize = 512;
@@ -264,7 +263,7 @@ impl SignOrganizer {
 
             if is_mine && state.round == 0 {
                 crate::metrics::requests::NUM_SIGN_REQUESTS_MINE
-                    .with_label_values(&[ctx.my_account_id.as_str()])
+                    .with_label_values(&[node_account_id()])
                     .inc();
             }
 
@@ -532,14 +531,6 @@ impl SignPositor {
         let is_proposer = proposer == ctx.me;
         let is_deliberator = !is_proposer;
 
-        // Get the presignature participants - only these nodes participated in generating it
-        let presignature_participants = if let Some(ref taken) = presignature {
-            taken.artifact.participants.clone()
-        } else {
-            // Deliberators don't have the presignature yet, will verify when they receive Propose
-            Vec::new()
-        };
-
         tracing::info!(
             ?sign_id,
             ?presignature_id,
@@ -591,11 +582,10 @@ impl SignPositor {
 
                     let SignTaskMessage::PositMessage { presignature_id: _, round: _peer_round, from, action } = task_msg;
 
-
                     if is_deliberator {
                         if let PositAction::Start(participants) = action {
                             if from != proposer {
-                                tracing::warn!(?sign_id, ?from, ?proposer, "received Start from non-proposer, ignoring");
+                                tracing::warn!(?sign_id, ?round, ?from, ?proposer, "received Start from non-proposer, ignoring");
                                 continue;
                             }
 
@@ -618,7 +608,7 @@ impl SignPositor {
                         }
 
                         if counter.enough_rejects(ctx.threshold) {
-                            tracing::warn!(?sign_id, ?from, "received enough REJECTs, reorganizing");
+                            tracing::warn!(?sign_id, ?round, ?from, "received enough REJECTs, reorganizing");
                             if let Some(taken) = presignature {
                                 tracing::warn!(?sign_id, "recycling presignature due to REJECTs");
                                 ctx.presignatures.recycle_mine(ctx.me, taken).await;
@@ -627,31 +617,11 @@ impl SignPositor {
                             return SignPhase::Organizing(SignOrganizer);
                         }
 
-                        if counter.meets_totality() {
-                            // Only include participants who both accepted AND were part of the presignature generation
-                            let mut participants = counter.accepts.iter().copied().collect::<Vec<_>>();
-                            if !presignature_participants.is_empty() {
-                                participants.retain(|p| presignature_participants.contains(p));
-                            }
+                        // Start as soon as we have enough accepts
+                        if counter.enough_accepts(ctx.threshold) {
+                            let participants = counter.accepts.into_iter().collect::<Vec<_>>();
+                            tracing::info!(?sign_id, ?round, me = ?ctx.me, ?participants, "proposer broadcasting Start");
 
-                            if participants.len() < ctx.threshold {
-                                tracing::warn!(
-                                    ?sign_id,
-                                    presig_participants = ?presignature_participants,
-                                    accepts = ?counter.accepts,
-                                    filtered_participants = ?participants,
-                                    threshold = ctx.threshold,
-                                    "not enough presignature participants accepted, reorganizing"
-                                );
-                                if let Some(taken) = presignature {
-                                    tracing::warn!(?sign_id, "recycling presignature due to insufficient participants");
-                                    ctx.presignatures.recycle_mine(ctx.me, taken).await;
-                                }
-                                state.bump_round();
-                                return SignPhase::Organizing(SignOrganizer);
-                            }
-
-                            tracing::info!(?sign_id, me = ?ctx.me, ?participants, "proposer broadcasting Start");
                             for &p in &participants {
                                 if p == ctx.me {
                                     continue;
@@ -674,66 +644,22 @@ impl SignPositor {
                 }
                 _ = &mut posit_deadline => {
                     if is_proposer {
-                        if counter.enough_accepts(ctx.threshold) {
-                            // Only include participants who both accepted AND were part of the presignature generation
-                            let mut participants = counter.accepts.iter().copied().collect::<Vec<_>>();
-                            if !presignature_participants.is_empty() {
-                                participants.retain(|p| presignature_participants.contains(p));
-                            }
-
-                            if participants.len() < ctx.threshold {
-                                tracing::warn!(
-                                    ?sign_id,
-                                    presig_participants = ?presignature_participants,
-                                    accepts = ?counter.accepts,
-                                    filtered_participants = ?participants,
-                                    threshold = ctx.threshold,
-                                    "posit timeout: not enough presignature participants accepted, reorganizing"
-                                );
-                                if let Some(taken) = presignature {
-                                    tracing::warn!(?sign_id, "recycling presignature due to posit timeout");
-                                    ctx.presignatures.recycle_mine(ctx.me, taken).await;
-                                }
-                                state.bump_round();
-                                return SignPhase::Organizing(SignOrganizer);
-                            }
-
-                            tracing::info!(?sign_id, "posit timeout with enough accepts, broadcasting Start");
-                            for &p in &participants {
-                                if p == ctx.me {
-                                    continue;
-                                }
-                                ctx.msg
-                                    .send(
-                                        ctx.me,
-                                        p,
-                                        PositMessage {
-                                            id: PositProtocolId::Signature(sign_id, presignature_id, state.round),
-                                            from: ctx.me,
-                                            action: PositAction::Start(participants.clone()),
-                                        },
-                                    )
-                                    .await;
-                            }
-                            break participants;
-                        } else {
-                            tracing::warn!(
-                                ?sign_id,
-                                accepts=counter.accepts.len(),
-                                threshold=ctx.threshold,
-                                "posit timeout without enough accepts, reorganizing");
-                            if let Some(taken) = presignature {
-                                tracing::warn!(?sign_id, "recycling presignature due to posit timeout (no accepts)");
-                                ctx.presignatures.recycle_mine(ctx.me, taken).await;
-                            }
-                            state.bump_round();
-                            return SignPhase::Organizing(SignOrganizer);
+                        tracing::warn!(
+                            ?sign_id,
+                            accepts = counter.accepts.len(),
+                            threshold = ctx.threshold,
+                            "proposer posit deadline reached, expiring round"
+                        );
+                        if let Some(taken) = presignature {
+                            tracing::warn!(?sign_id, "recycling presignature due to proposer timeout");
+                            ctx.presignatures.recycle_mine(ctx.me, taken).await;
                         }
                     } else {
                         tracing::warn!(?sign_id, "deliberator posit timeout waiting for Start, reorganizing");
-                        state.bump_round();
-                        return SignPhase::Organizing(SignOrganizer);
                     }
+
+                    state.bump_round();
+                    return SignPhase::Organizing(SignOrganizer);
                 }
             }
         };
@@ -793,7 +719,7 @@ impl SignGenerating {
 
         // Track that we've created a generator
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS
-            .with_label_values(&[ctx.my_account_id.as_str()])
+            .with_label_values(&[node_account_id()])
             .inc();
 
         match generator.run(ctx).await {
@@ -884,7 +810,7 @@ impl SignGenerator {
             msg: ctx.msg.clone(),
             #[cfg(feature = "debug-page")]
             debug_view: crate::web::debug::register_task(
-                ctx.my_account_id.to_string(),
+                node_account_id().to_string(),
                 format!("SignatureGenerator {sign_id:#?}"),
             ),
         })
@@ -913,22 +839,27 @@ impl SignGenerator {
     }
 
     async fn run(mut self, ctx: &SignTask) -> Result<(), SignError> {
-        let my_account_id = &ctx.my_account_id;
         let me = ctx.me;
         let epoch = ctx.epoch;
 
         let accrued_wait_delay = crate::metrics::protocols::SIGNATURE_ACCRUED_WAIT_DELAY
-            .with_label_values(&[my_account_id.as_str()]);
-        let poke_counts = crate::metrics::protocols::SIGNATURE_POKES_CNT
-            .with_label_values(&[my_account_id.as_str()]);
+            .with_label_values(&[node_account_id()]);
+        let poke_counts =
+            crate::metrics::protocols::SIGNATURE_POKES_CNT.with_label_values(&[node_account_id()]);
         let signature_generator_failures_metric =
             crate::metrics::protocols::SIGNATURE_GENERATOR_FAILURES
-                .with_label_values(&[my_account_id.as_str()]);
+                .with_label_values(&[node_account_id()]);
+        let signature_generator_failures_mine_metric =
+            crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_FAILURES
+                .with_label_values(&[node_account_id()]);
         let signature_generator_success_metric =
             crate::metrics::protocols::SIGNATURE_GENERATOR_SUCCESS
-                .with_label_values(&[my_account_id.as_str()]);
+                .with_label_values(&[node_account_id()]);
+        let signature_generator_success_mine_metric =
+            crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS
+                .with_label_values(&[node_account_id()]);
         let poke_latency = crate::metrics::protocols::SIGNATURE_POKE_CPU_TIME
-            .with_label_values(&[my_account_id.as_str()]);
+            .with_label_values(&[node_account_id()]);
 
         let sign_id = self.indexed.id;
         let presignature_id = self.dropper.id;
@@ -937,7 +868,7 @@ impl SignGenerator {
         let mut total_pokes = 0;
         let mut poke_last_time = self.created;
         crate::metrics::protocols::SIGNATURE_BEFORE_POKE_DELAY
-            .with_label_values(&[my_account_id.as_str()])
+            .with_label_values(&[node_account_id()])
             .observe(self.created.elapsed().as_millis() as f64);
 
         loop {
@@ -945,6 +876,10 @@ impl SignGenerator {
             let action = match self.protocol.poke() {
                 Ok(action) => action,
                 Err(err) => {
+                    signature_generator_failures_metric.inc();
+                    if self.proposer == me {
+                        signature_generator_failures_mine_metric.inc();
+                    }
                     tracing::error!(
                         ?sign_id,
                         ?err,
@@ -965,8 +900,9 @@ impl SignGenerator {
                 Action::Wait => {
                     // Wait for the next set of messages to arrive.
                     let msg = self.recv().await.inspect_err(|_| {
+                        signature_generator_failures_metric.inc();
                         if self.proposer == me {
-                            signature_generator_failures_metric.inc();
+                            signature_generator_failures_mine_metric.inc();
                         }
                     })?;
                     self.protocol.message(msg.from, msg.data);
@@ -1026,11 +962,12 @@ impl SignGenerator {
                     accrued_wait_delay.observe(total_wait.as_millis() as f64);
                     poke_counts.observe(total_pokes as f64);
                     crate::metrics::protocols::SIGN_GENERATION_LATENCY
-                        .with_label_values(&[my_account_id.as_str()])
+                        .with_label_values(&[node_account_id()])
                         .observe(self.created.elapsed().as_secs_f64());
                     signature_generator_success_metric.inc();
 
                     if self.proposer == me {
+                        signature_generator_success_mine_metric.inc();
                         ctx.rpc.publish(
                             ctx.public_key,
                             self.indexed.clone(),
@@ -1087,7 +1024,6 @@ struct SignTask {
     threshold: usize,
     public_key: PublicKey,
     epoch: u64,
-    my_account_id: AccountId,
     presignatures: PresignatureStorage,
     msg: MessageChannel,
     rpc: RpcChannel,
@@ -1172,10 +1108,11 @@ pub struct SignatureSpawner {
     tasks: JoinMap<SignId, Result<(), SignError>>,
     /// Buffered inboxes for posit messages, allowing us to queue before tasks spawn
     inboxes: HashMap<SignId, Subscriber<SignTaskMessage>>,
+    /// Tracks delay watcher tasks that will increment the delayed metric when response time exceeds expected
+    delayed_watchers: HashMap<SignId, JoinHandle<()>>,
     mesh_state: watch::Receiver<MeshState>,
 
     me: Participant,
-    my_account_id: AccountId,
     threshold: usize,
     public_key: PublicKey,
     epoch: u64,
@@ -1197,6 +1134,32 @@ impl SignatureSpawner {
         let sign_id = indexed.id;
         tracing::info!(?sign_id, "spawning signature task");
 
+        // Spawn a reactive watcher task that increments the delayed metric
+        // if the signature is not completed within the expected response time
+        let chain = indexed.chain;
+        let timestamp_sign_queue = indexed.timestamp_sign_queue;
+        let expected_response_time = Duration::from_secs(chain.expected_response_time_secs());
+        let already_elapsed = timestamp_sign_queue.elapsed();
+        let remaining_time = expected_response_time.saturating_sub(already_elapsed);
+        // prevent incrementing delayed metric for already delayed requests
+        if remaining_time > Duration::from_secs(0) {
+            let watcher = tokio::spawn(async move {
+                tokio::time::sleep(remaining_time).await;
+                let elapsed = timestamp_sign_queue.elapsed();
+                tracing::warn!(
+                    ?sign_id,
+                    ?chain,
+                    elapsed_secs = elapsed.as_secs(),
+                    expected_secs = expected_response_time.as_secs(),
+                    "signature request delayed beyond expected response time"
+                );
+                crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_DELAYED
+                    .with_label_values(&[chain.as_str(), node_account_id()])
+                    .inc();
+            });
+            self.delayed_watchers.insert(sign_id, watcher);
+        }
+
         // Subscribe to (or create) the posit inbox for this sign request
         let rx = self.inboxes.entry(sign_id).or_default().subscribe();
         let task = SignTask {
@@ -1206,7 +1169,6 @@ impl SignatureSpawner {
             threshold: self.threshold,
             public_key: self.public_key,
             epoch: self.epoch,
-            my_account_id: self.my_account_id.clone(),
             presignatures: self.presignatures.clone(),
             msg: self.msg.clone(),
             rpc: self.rpc.clone(),
@@ -1248,10 +1210,20 @@ impl SignatureSpawner {
 
     fn handle_completion(&mut self, sign_id: SignId) {
         self.inboxes.remove(&sign_id);
+        self.abort_delayed_watcher(sign_id, "completion");
         if self.tasks.abort(sign_id) {
             tracing::info!(?sign_id, "aborting signature task due to completion event");
         } else {
             tracing::info!(?sign_id, "task already completed or unable to be aborted");
+        }
+    }
+
+    fn abort_delayed_watcher(&mut self, sign_id: SignId, reason: &str) {
+        if let Some(watcher) = self.delayed_watchers.remove(&sign_id) {
+            tracing::info!(?sign_id, reason = %reason, "aborting delayed watcher");
+            watcher.abort();
+        } else {
+            tracing::debug!(?sign_id, reason = %reason, "no delayed watcher to abort");
         }
     }
 
@@ -1279,7 +1251,7 @@ impl SignatureSpawner {
                 }
 
                 crate::metrics::requests::NUM_UNIQUE_SIGN_REQUESTS
-                    .with_label_values(&[indexed.chain.as_str(), self.my_account_id.as_str()])
+                    .with_label_values(&[indexed.chain.as_str(), node_account_id()])
                     .inc();
 
                 self.spawn_task(indexed, participants.clone(), contract.clone(), cfg.clone());
@@ -1288,7 +1260,7 @@ impl SignatureSpawner {
 
         // Update metrics
         crate::metrics::requests::SIGN_QUEUE_SIZE
-            .with_label_values(&[self.my_account_id.as_str()])
+            .with_label_values(&[node_account_id()])
             .set(self.tasks.len() as i64);
     }
 
@@ -1326,11 +1298,13 @@ impl SignatureSpawner {
                         Err(sign_id) => {
                             tracing::warn!(?sign_id, "signature task interrupted");
                             self.inboxes.remove(&sign_id);
+                            self.abort_delayed_watcher(sign_id, "interruption");
                             continue;
                         }
                     };
 
                     self.inboxes.remove(&sign_id);
+                    self.abort_delayed_watcher(sign_id, "task completion");
                     match result {
                         Ok(()) => {
                             tracing::info!(?sign_id, "signature task completed successfully");
@@ -1371,7 +1345,7 @@ impl SignatureSpawnerTask {
             me,
             tasks: JoinMap::new(),
             inboxes: HashMap::new(),
-            my_account_id: ctx.my_account_id.clone(),
+            delayed_watchers: HashMap::new(),
             threshold,
             public_key,
             epoch,

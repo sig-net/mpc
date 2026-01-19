@@ -1,5 +1,6 @@
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
+use near_account_id::AccountId;
 use prometheus::{HistogramOpts, HistogramVec, Opts, Result};
 
 pub mod hardware;
@@ -9,6 +10,24 @@ pub mod nodes;
 pub mod protocols;
 pub mod requests;
 pub mod storage;
+
+static NODE_ACCOUNT_ID: OnceLock<String> = OnceLock::new();
+
+pub fn init_node_account_id(account_id: &AccountId) {
+    if let Err(existing) = NODE_ACCOUNT_ID.set(account_id.to_string()) {
+        // If set twice with a different value it is a programmer error; keep simple and panic.
+        if existing.as_str() != account_id.as_str() {
+            panic!("node account id already set to a different value");
+        }
+    }
+}
+
+pub fn node_account_id() -> &'static str {
+    NODE_ACCOUNT_ID
+        .get()
+        .map(String::as_str)
+        .unwrap_or("default-account.near")
+}
 
 pub fn try_create_int_gauge_vec(
     name: &str,

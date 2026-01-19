@@ -3,6 +3,7 @@ use super::posit::{PositAction, Positor, Posits};
 use super::triple::TripleId;
 use crate::config::Config;
 use crate::mesh::MeshState;
+use crate::metrics::node_account_id;
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::posit::PositInternalAction;
 use crate::protocol::MpcSignProtocol;
@@ -28,8 +29,6 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time;
 
-use near_account_id::AccountId;
-
 /// Unique number used to identify a specific ongoing presignature generation protocol.
 /// Without `PresignatureId` it would be unclear where to route incoming cait-sith presignature
 /// generation messages.
@@ -39,8 +38,8 @@ pub type PresignatureId = u64;
 /// that was used to generate it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct FullPresignatureId {
-    id: PresignatureId,
-    pair_id: TripleId,
+    pub id: PresignatureId,
+    pub pair_id: TripleId,
 }
 
 impl FullPresignatureId {
@@ -159,25 +158,27 @@ impl PresignatureGenerator {
         }
     }
 
-    pub async fn run(mut self, my_account_id: &AccountId, me: Participant, epoch: u64) {
+    pub async fn run(mut self, me: Participant, epoch: u64) {
         let failure_counts = crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES
-            .with_label_values(&[my_account_id.as_str()]);
+            .with_label_values(&[node_account_id()]);
+        let failure_mine_counts = crate::metrics::protocols::PRESIGNATURE_GENERATOR_MINE_FAILURES
+            .with_label_values(&[node_account_id()]);
         let before_first_poke_delay = crate::metrics::protocols::PRESIGNATURE_BEFORE_POKE_DELAY
-            .with_label_values(&[my_account_id.as_str()]);
+            .with_label_values(&[node_account_id()]);
         let accrued_wait_delay = crate::metrics::protocols::PRESIGNATURE_ACCRUED_WAIT_DELAY
-            .with_label_values(&[my_account_id.as_str()]);
+            .with_label_values(&[node_account_id()]);
         let poke_counts = crate::metrics::protocols::PRESIGNATURE_POKES_CNT
-            .with_label_values(&[my_account_id.as_str()]);
-        let runtime_latency = crate::metrics::protocols::PRESIGNATURE_LATENCY
-            .with_label_values(&[my_account_id.as_str()]);
+            .with_label_values(&[node_account_id()]);
+        let runtime_latency =
+            crate::metrics::protocols::PRESIGNATURE_LATENCY.with_label_values(&[node_account_id()]);
         let success_owned_counts: prometheus::core::GenericCounter<prometheus::core::AtomicF64> =
             crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS
-                .with_label_values(&[my_account_id.as_str()]);
+                .with_label_values(&[node_account_id()]);
         let success_total_counts =
             crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS
-                .with_label_values(&[my_account_id.as_str()]);
+                .with_label_values(&[node_account_id()]);
         let poke_latency = crate::metrics::protocols::PRESIGNATURE_POKE_CPU_TIME
-            .with_label_values(&[my_account_id.as_str()]);
+            .with_label_values(&[node_account_id()]);
 
         let start_time = Instant::now();
         let mut total_wait = Duration::from_millis(0);
@@ -191,6 +192,9 @@ impl PresignatureGenerator {
                 Ok(action) => action,
                 Err(err) => {
                     failure_counts.inc();
+                    if self.owner == me {
+                        failure_mine_counts.inc();
+                    }
                     tracing::warn!(
                         id = ?self.id,
                         owner = ?self.owner,
@@ -213,6 +217,9 @@ impl PresignatureGenerator {
                     // Wait for the next set of messages to arrive.
                     let Some(msg) = self.recv().await else {
                         failure_counts.inc();
+                        if self.owner == me {
+                            failure_mine_counts.inc();
+                        }
                         break;
                     };
                     self.protocol.message(msg.from, msg.data);
@@ -318,7 +325,6 @@ pub struct PresignatureSpawner {
     me: Participant,
     threshold: usize,
     epoch: u64,
-    my_account_id: AccountId,
     private_share: SecretKeyShare,
     public_key: PublicKey,
     msg: MessageChannel,
@@ -332,7 +338,6 @@ impl PresignatureSpawner {
         epoch: u64,
         private_share: &SecretKeyShare,
         public_key: &PublicKey,
-        my_account_id: &AccountId,
         triples: &TripleStorage,
         presignatures: &PresignatureStorage,
         msg: MessageChannel,
@@ -348,7 +353,6 @@ impl PresignatureSpawner {
             epoch,
             private_share: *private_share,
             public_key: *public_key,
-            my_account_id: my_account_id.clone(),
             msg,
         }
     }
@@ -563,7 +567,6 @@ impl PresignatureSpawner {
         let threshold = self.threshold;
         let epoch = self.epoch;
         let msg = self.msg.clone();
-        let my_account_id = self.my_account_id.clone();
         let keygen_out = KeygenOutput {
             private_share: self.private_share,
             public_key: self.public_key,
@@ -597,11 +600,11 @@ impl PresignatureSpawner {
             };
 
             crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS
-                .with_label_values(&[my_account_id.as_str()])
+                .with_label_values(&[node_account_id()])
                 .inc();
             if owner == me {
                 crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE
-                    .with_label_values(&[my_account_id.as_str()])
+                    .with_label_values(&[node_account_id()])
                     .inc();
             }
 
@@ -619,11 +622,11 @@ impl PresignatureSpawner {
                 msg,
                 #[cfg(feature = "debug-page")]
                 debug_view: crate::web::debug::register_task(
-                    my_account_id.to_string(),
+                    node_account_id().to_string(),
                     format!("PresignatureGenerator {id:#?}"),
                 ),
             };
-            generator.run(&my_account_id, me, epoch).await;
+            generator.run(me, epoch).await;
         };
 
         self.ongoing.spawn(id.id, task);
@@ -722,14 +725,16 @@ impl PresignatureSpawner {
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
 
                     crate::metrics::storage::NUM_PRESIGNATURES_MINE
-                        .with_label_values(&[self.my_account_id.as_str()])
+                        .with_label_values(&[node_account_id()])
                         .set(self.len_mine().await as i64);
                     crate::metrics::storage::NUM_PRESIGNATURES_TOTAL
-                        .with_label_values(&[self.my_account_id.as_str()])
+                        .with_label_values(&[node_account_id()])
                         .set(self.len_generated().await as i64);
                     crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL
-                        .with_label_values(&[self.my_account_id.as_str()])
-                        .set(self.len_potential().await as i64 - self.len_generated().await as i64);
+                        .with_label_values(&[node_account_id()])
+                        .set(
+                            self.len_potential().await as i64 - self.len_generated().await as i64,
+                        );
                 }
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();
@@ -779,7 +784,6 @@ impl PresignatureSpawnerTask {
             epoch,
             private_share,
             public_key,
-            &ctx.my_account_id,
             &ctx.triple_storage,
             &ctx.presignature_storage,
             ctx.msg_channel.clone(),

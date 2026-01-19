@@ -20,6 +20,7 @@ use crate::rpc::ContractStateWatcher;
 use super::contract::primitives::{ParticipantMap, Participants};
 use super::presignature::PresignatureId;
 use super::triple::TripleId;
+use crate::metrics::node_account_id;
 use crate::node_client::NodeClient;
 use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::Config;
@@ -28,7 +29,6 @@ use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke::{self, Ciphered};
 use mpc_primitives::SignId;
-use near_account_id::AccountId;
 use near_crypto::Signature;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -337,12 +337,7 @@ impl MessageInbox {
         }
     }
 
-    pub async fn run(
-        mut self,
-        my_account_id: AccountId,
-        config: watch::Receiver<Config>,
-        contract: ContractStateWatcher,
-    ) {
+    pub async fn run(mut self, config: watch::Receiver<Config>, contract: ContractStateWatcher) {
         loop {
             tokio::select! {
                 _ = self.filter.update() => {}
@@ -367,7 +362,7 @@ impl MessageInbox {
                     self.publish(messages).await;
 
                     crate::metrics::messaging::NUM_RECEIVED_ENCRYPTED_TOTAL
-                        .with_label_values(&[my_account_id.as_str()])
+                        .with_label_values(&[node_account_id()])
                         .inc_by(messages_len as f64);
                 }
             }
@@ -404,13 +399,12 @@ impl MessageChannel {
 
     pub async fn spawn(
         client: NodeClient,
-        id: &AccountId,
         config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
     ) -> Self {
         let (inbox, outbox, channel) = Self::new();
-        tokio::spawn(inbox.run(id.clone(), config.clone(), contract.clone()));
-        tokio::spawn(outbox.run(id.clone(), client, config, contract));
+        tokio::spawn(inbox.run(config.clone(), contract.clone()));
+        tokio::spawn(outbox.run(client, config, contract));
 
         channel
     }
@@ -854,7 +848,6 @@ impl MessageOutbox {
     /// Send the encrypted messages to other participants.
     pub async fn send(
         &mut self,
-        account_id: &AccountId,
         client: &NodeClient,
         participants: &Participants,
         cfg: &ProtocolConfig,
@@ -864,15 +857,15 @@ impl MessageOutbox {
         let timeout = Duration::from_millis(cfg.message_timeout);
 
         let msg_send_delay_metric = crate::metrics::messaging::MSG_CLIENT_SEND_DELAY
-            .with_label_values(&[account_id.as_str()]);
+            .with_label_values(&[node_account_id()]);
         let num_send_encrypted_failure_metric =
             crate::metrics::messaging::NUM_SEND_ENCRYPTED_FAILURE
-                .with_label_values(&[account_id.as_str()]);
+                .with_label_values(&[node_account_id()]);
         let send_encrypted_latency_metric = crate::metrics::messaging::SEND_ENCRYPTED_LATENCY
-            .with_label_values(&[account_id.as_str()]);
+            .with_label_values(&[node_account_id()]);
         let failed_send_encrypted_latency_metric =
             crate::metrics::messaging::FAILED_SEND_ENCRYPTED_LATENCY
-                .with_label_values(&[account_id.as_str()]);
+                .with_label_values(&[node_account_id()]);
 
         for ((_from, to), encrypted) in encrypted {
             for (encrypted_partition, timestamp, message_len) in encrypted {
@@ -881,7 +874,7 @@ impl MessageOutbox {
                 let url = info.url.clone();
 
                 crate::metrics::messaging::NUM_SEND_ENCRYPTED_TOTAL
-                    .with_label_values(&[account_id.as_str()])
+                    .with_label_values(&[node_account_id()])
                     .inc_by(message_len as f64);
 
                 let msg_send_delay_metric = msg_send_delay_metric.clone();
@@ -933,7 +926,6 @@ impl MessageOutbox {
     /// Publish messages to other nodes
     async fn publish(
         &mut self,
-        id: &AccountId,
         client: &NodeClient,
         config: &watch::Receiver<Config>,
         contract: &ContractStateWatcher,
@@ -944,13 +936,12 @@ impl MessageOutbox {
         let config = config.borrow().clone();
         let compacted = self.compact();
         let encrypted = self.encrypt(&config.local.network.sign_sk, &participants, compacted);
-        self.send(id, client, &participants, &config.protocol, encrypted)
+        self.send(client, &participants, &config.protocol, encrypted)
             .await;
     }
 
     pub async fn run(
         mut self,
-        id: AccountId,
         client: NodeClient,
         config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
@@ -964,7 +955,7 @@ impl MessageOutbox {
                     entry.push((msg, timestamp));
                 }
                 _ = interval.tick() => {
-                    self.publish(&id, &client, &config, &contract).await;
+                    self.publish(&client, &config, &contract).await;
                 }
             }
         }
@@ -1366,7 +1357,7 @@ mod tests {
             participants,
         );
         let (inbox, _outbox, channel) = MessageChannel::new();
-        let inbox = tokio::spawn(inbox.run(node_id.clone(), config_rx, contract_watcher));
+        let inbox = tokio::spawn(inbox.run(config_rx, contract_watcher));
 
         // Case 1:
         // Check that the inbox received our messages correctly:

@@ -1,15 +1,16 @@
+use crate::metrics::node_account_id;
 use cait_sith::protocol::Participant;
-use chrono::Duration;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, ToRedisArgs};
+use std::collections::HashSet;
+use std::sync::Arc;
 use std::{fmt, time::Instant};
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing;
 
 use super::{owner_key, STORAGE_VERSION};
-
-const USED_EXPIRE_TIME: Duration = Duration::hours(24);
 
 /// Trait for protocol artifacts that can be stored in Redis.
 pub trait ProtocolArtifact:
@@ -103,23 +104,23 @@ impl<A: ProtocolArtifact> ArtifactTaken<A> {
 }
 
 #[derive(Debug)]
-pub struct ProtocolStorage<A> {
+pub struct ProtocolStorage<A: ProtocolArtifact> {
     redis_pool: Pool,
     artifact_key: String,
-    used_key: String,
-    reserved_key: String,
+    used: Arc<RwLock<HashSet<A::Id>>>,
+    reserved: Arc<RwLock<HashSet<A::Id>>>,
     owner_keys: String,
     account_id: AccountId,
     _phantom: std::marker::PhantomData<A>,
 }
 
-impl<A> Clone for ProtocolStorage<A> {
+impl<A: ProtocolArtifact> Clone for ProtocolStorage<A> {
     fn clone(&self) -> Self {
         Self {
             redis_pool: self.redis_pool.clone(),
             artifact_key: self.artifact_key.clone(),
-            used_key: self.used_key.clone(),
-            reserved_key: self.reserved_key.clone(),
+            used: self.used.clone(),
+            reserved: self.reserved.clone(),
             owner_keys: self.owner_keys.clone(),
             account_id: self.account_id.clone(),
             _phantom: std::marker::PhantomData,
@@ -127,18 +128,18 @@ impl<A> Clone for ProtocolStorage<A> {
     }
 }
 
-impl<A> ProtocolStorage<A> {
+impl<A: ProtocolArtifact> ProtocolStorage<A> {
     pub fn new(pool: &Pool, account_id: &AccountId, base_prefix: &str) -> Self {
         let artifact_key = format!("{base_prefix}:{STORAGE_VERSION}:{account_id}");
-        let used_key = format!("{base_prefix}_used:{STORAGE_VERSION}:{account_id}");
-        let reserved_key = format!("{base_prefix}_reserved:{STORAGE_VERSION}:{account_id}");
+        let used = Arc::new(RwLock::new(HashSet::new()));
+        let reserved = Arc::new(RwLock::new(HashSet::new()));
         let owner_keys = format!("{base_prefix}_owners:{STORAGE_VERSION}:{account_id}");
 
         Self {
             redis_pool: pool.clone(),
             artifact_key,
-            used_key,
-            reserved_key,
+            used,
+            reserved,
             owner_keys,
             account_id: account_id.clone(),
             _phantom: std::marker::PhantomData,
@@ -162,84 +163,69 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             return Vec::new();
         };
 
-        conn.sunion((&self.reserved_key, owner_key(&self.owner_keys, me)))
+        // fetch owner set from redis and union with in-memory reservations
+        let owned: HashSet<A::Id> = conn
+            .smembers(owner_key(&self.owner_keys, me))
             .await
             .inspect_err(|err| {
-                tracing::warn!(?err, "failed to fetch (mine | reserved) artifacts");
+                tracing::warn!(?err, "failed to fetch my owned artifacts");
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+
+        owned.union(&*self.reserved.read().await).copied().collect()
     }
 
     pub async fn reserve(&self, id: A::Id) -> Option<ArtifactSlot<A>> {
-        const SCRIPT: &str = r#"
-            local artifact_key = KEYS[1]
-            local used_key = KEYS[2]
-            local reserved_key = KEYS[3]
-            local artifact_id = ARGV[1]
-
-            -- cannot reserve this artifact if its already in storage.
-            if redis.call("HEXISTS", artifact_key, artifact_id) == 1 then
-                return {err = "WARN artifact " .. artifact_id .. " has already been stored"}
-            end
-
-            -- cannot reserve this artifact if it has already been used.
-            if redis.call("HEXISTS", used_key, artifact_id) == 1 then
-                return {err = "WARN artifact " .. artifact_id .. " has already been used"}
-            end
-
-            -- cannot reserve this artifact if it already exists.
-            if redis.call("SADD", reserved_key, artifact_id) == 0 then
-                return {err = "WARN artifact " .. artifact_id .. " has already been reserved"}
-            end
-        "#;
+        let used = self.used.read().await;
+        if used.contains(&id) {
+            return None;
+        }
+        if !self.reserved.write().await.insert(id) {
+            return None;
+        }
+        drop(used);
 
         let start = Instant::now();
-        let mut conn = self.connect().await?;
-        let result: Result<(), _> = redis::Script::new(SCRIPT)
-            .key(&self.artifact_key)
-            .key(&self.used_key)
-            .key(&self.reserved_key)
-            .arg(id)
-            .invoke_async(&mut conn)
-            .await;
+        let Some(mut conn) = self.connect().await else {
+            self.reserved.write().await.remove(&id);
+            return None;
+        };
 
+        // Check directly whether the artifact is already stored in Redis.
+        let artifact_exists: Result<bool, _> = conn.hexists(&self.artifact_key, id).await;
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "reserve", self.account_id.as_str()])
+            .with_label_values(&[A::METRIC_LABEL, "reserve", node_account_id()])
             .observe(elapsed.as_millis() as f64);
 
-        match result {
-            Ok(_) => Some(ArtifactSlot {
+        match artifact_exists {
+            Ok(true) => {
+                // artifact already stored, reserve cannot be done, remove reservation
+                self.reserved.write().await.remove(&id);
+                None
+            }
+            // artifact does not exist, reservation successful
+            Ok(false) => Some(ArtifactSlot {
                 id,
                 storage: self.clone(),
                 stored: false,
             }),
             Err(err) => {
-                tracing::warn!(
-                    id,
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to reserve artifact"
-                );
+                self.reserved.write().await.remove(&id);
+                tracing::warn!(id, ?err, ?elapsed, "failed to reserve artifact");
                 None
             }
         }
     }
 
-    async fn unreserve(&self, id: A::Id) {
-        let Some(mut conn) = self.connect().await else {
-            return;
-        };
-        if let Err(err) = conn.srem::<'_, _, _, ()>(&self.reserved_key, id).await {
-            tracing::warn!(id, ?err, "failed to unreserve artifact");
-        }
+    async fn unreserve(&self, id: A::Id) -> bool {
+        self.reserved.write().await.remove(&id)
     }
 
     pub async fn remove_outdated(&self, owner: Participant, owner_shares: &[A::Id]) -> Vec<A::Id> {
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]
-            local reserved_key = KEYS[2]
-            local owner_key = KEYS[3]
+            local owner_key = KEYS[2]
 
             -- convert the list of ids to a table for easy lookup
             local owner_shares = {}
@@ -259,7 +245,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 -- already to be able to process them in one go.
                 if #outdated >= 4096 then
                     redis.call("SREM", owner_key, unpack(outdated))
-                    redis.call("SREM", reserved_key, unpack(outdated))
                     redis.call("HDEL", artifact_key, unpack(outdated))
                     -- clear the outdated list for the next batch
                     outdated = {}
@@ -269,7 +254,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             -- remove the remaining outdated shares from our node
             if #outdated > 0 then
                 redis.call("SREM", owner_key, unpack(outdated))
-                redis.call("SREM", reserved_key, unpack(outdated))
                 redis.call("HDEL", artifact_key, unpack(outdated))
             end
 
@@ -282,7 +266,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         };
         let result: Result<Vec<A::Id>, _> = redis::Script::new(SCRIPT)
             .key(&self.artifact_key)
-            .key(&self.reserved_key)
             .key(owner_key(&self.owner_keys, owner))
             // NOTE: this encodes each entry of owner_shares as a separate ARGV[index] entry.
             .arg(owner_shares)
@@ -291,26 +274,29 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "remove_outdated", self.account_id.as_str()])
+            .with_label_values(&[A::METRIC_LABEL, "remove_outdated", node_account_id()])
             .observe(elapsed.as_millis() as f64);
 
         match result {
             Ok(outdated) => {
                 if !outdated.is_empty() {
-                    tracing::info!(
-                        ?outdated,
-                        elapsed_ms = elapsed.as_millis(),
-                        "removed outdated artifacts"
-                    );
+                    tracing::info!(?outdated, ?elapsed, "removed outdated artifacts");
+                    // remove outdated entries from our in-memory reserved set
+                    let mut reserved = self.reserved.write().await;
+                    for id in outdated.iter() {
+                        reserved.remove(id);
+                    }
+                    drop(reserved);
+                    // remove outdated entries from our in-memory used set
+                    let mut used = self.used.write().await;
+                    for id in outdated.iter() {
+                        used.remove(id);
+                    }
                 }
                 outdated
             }
             Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to remove outdated artifacts"
-                );
+                tracing::warn!(?err, ?elapsed, "failed to remove outdated artifacts");
                 Vec::new()
             }
         }
@@ -321,22 +307,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     pub async fn insert(&self, artifact: A, owner: Participant) -> bool {
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]
-            local used_key = KEYS[2]
-            local reserved_key = KEYS[3]
-            local owner_keys = KEYS[4]
-            local owner_key = KEYS[5]
+            local owner_keys = KEYS[2]
+            local owner_key = KEYS[3]
             local artifact_id = ARGV[1]
             local artifact = ARGV[2]
-
-            -- if the artifact has NOT been reserved, then something went wrong when acquiring the
-            -- reservation for it via artifact slot.
-            if redis.call("SREM", reserved_key, artifact_id) == 0 then
-                return {err = "WARN artifact " .. artifact_id .. " has NOT been reserved"}
-            end
-
-            if redis.call('HEXISTS', used_key, artifact_id) == 1 then
-                return {err = 'WARN artifact ' .. artifact_id .. ' is already used'}
-            end
 
             redis.call("SADD", owner_key, artifact_id)
             redis.call("SADD", owner_keys, owner_key)
@@ -345,35 +319,38 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let start = Instant::now();
         let id = artifact.id();
+        let used = self.used.read().await;
+        if used.contains(&id) {
+            tracing::warn!(id, "artifact already marked used");
+            return false;
+        }
+
         let Some(mut conn) = self.connect().await else {
             tracing::warn!(id, "failed to insert artifact: connection failed");
             return false;
         };
         let outcome = redis::Script::new(SCRIPT)
             .key(&self.artifact_key)
-            .key(&self.used_key)
-            .key(&self.reserved_key)
             .key(&self.owner_keys)
             .key(owner_key(&self.owner_keys, owner))
             .arg(id)
             .arg(artifact)
             .invoke_async(&mut conn)
             .await;
+        drop(used);
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "insert", self.account_id.as_str()])
+            .with_label_values(&[A::METRIC_LABEL, "insert", node_account_id()])
             .observe(elapsed.as_millis() as f64);
 
         match outcome {
-            Ok(()) => true,
+            Ok(()) => {
+                self.reserved.write().await.remove(&id);
+                true
+            }
             Err(err) => {
-                tracing::warn!(
-                    id,
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to insert artifact"
-                );
+                tracing::warn!(id, ?err, ?elapsed, "failed to insert artifact");
                 false
             }
         }
@@ -411,28 +388,14 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     }
 
     pub async fn contains_used(&self, id: A::Id) -> bool {
-        let Some(mut conn) = self.connect().await else {
-            return false;
-        };
-        match conn.hexists(&self.used_key, id).await {
-            Ok(exists) => exists,
-            Err(err) => {
-                tracing::warn!(id, ?err, "failed to check if artifact is used");
-                false
-            }
-        }
+        self.used.read().await.contains(&id)
     }
 
     pub async fn take(&self, id: A::Id, owner: Participant) -> Option<ArtifactTaken<A>> {
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]
-            local used_key = KEYS[2]
-            local owner_key = KEYS[3]
+            local owner_key = KEYS[2]
             local artifact_id = ARGV[1]
-
-            if redis.call("HEXISTS", used_key, artifact_id) == 1 then
-                return {err = "WARN artifact " .. artifact_id .. " is already used"}
-            end
 
             if redis.call("SREM", owner_key, artifact_id) == 0 then
                 return {err = "WARN artifact " .. artifact_id .. " is not owned by this owner"}
@@ -442,21 +405,23 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             if not artifact then
                 return {err = "WARN artifact " .. artifact_id .. " not found"}
             end
-
-            redis.call("HSET", used_key, artifact_id, "")
             redis.call("HDEL", artifact_key, artifact_id)
-
             return artifact
         "#;
 
         let start = Instant::now();
+        if !self.used.write().await.insert(id) {
+            tracing::warn!(id, "taking artifact that is already used");
+            return None;
+        }
+
         let Some(mut conn) = self.connect().await else {
             tracing::warn!(id, "failed to take artifact: connection failed");
+            self.used.write().await.remove(&id);
             return None;
         };
         let result: Result<A, _> = redis::Script::new(SCRIPT)
             .key(&self.artifact_key)
-            .key(&self.used_key)
             .key(owner_key(&self.owner_keys, owner))
             .arg(id)
             .invoke_async(&mut conn)
@@ -464,65 +429,19 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "take", self.account_id.as_str()])
+            .with_label_values(&[A::METRIC_LABEL, "take", node_account_id()])
             .observe(elapsed.as_millis() as f64);
 
         match result {
             Ok(artifact) => {
-                tracing::info!(id, elapsed_ms = elapsed.as_millis(), "took artifact");
+                tracing::info!(id, ?elapsed, "took artifact");
                 Some(ArtifactTaken::new(artifact, self.clone()))
             }
             Err(err) => {
-                tracing::warn!(
-                    id,
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to take artifact"
-                );
+                self.used.write().await.remove(&id);
+                tracing::warn!(id, ?err, ?elapsed, "failed to take artifact");
                 None
             }
-        }
-    }
-
-    pub async fn mark_used(&self, id: A::Id) -> bool {
-        let start = Instant::now();
-        let Some(mut conn) = self.connect().await else {
-            tracing::warn!(id, "failed to mark artifact used: connection failed");
-            return false;
-        };
-        let result: Result<(), _> = conn.hset_nx(&self.used_key, id, "").await;
-
-        let elapsed = start.elapsed();
-        crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "mark_used", self.account_id.as_str()])
-            .observe(elapsed.as_millis() as f64);
-
-        match result {
-            Ok(()) => {
-                tracing::info!(id, elapsed_ms = elapsed.as_millis(), "marked artifact used");
-                true
-            }
-            Err(err) => {
-                tracing::warn!(
-                    id,
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to mark artifact used"
-                );
-                false
-            }
-        }
-    }
-
-    pub async fn expire_used(&self) {
-        let Some(mut conn) = self.connect().await else {
-            return;
-        };
-        if let Err(err) = conn
-            .expire::<_, ()>(&self.used_key, USED_EXPIRE_TIME.num_seconds())
-            .await
-        {
-            tracing::warn!(?err, "failed to expire used artifacts");
         }
     }
 
@@ -580,24 +499,21 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         let outcome: Option<()> = redis::Script::new(SCRIPT)
             .key(&self.owner_keys)
             .key(&self.artifact_key)
-            .key(&self.used_key)
-            .key(&self.reserved_key)
             .invoke_async(&mut conn)
             .await
             .inspect_err(|err| {
                 let elapsed = start.elapsed();
-                tracing::warn!(
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to clear artifact storage"
-                );
+                tracing::warn!(?err, ?elapsed, "failed to clear artifact storage");
             })
             .ok();
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "clear", self.account_id.as_str()])
+            .with_label_values(&[A::METRIC_LABEL, "clear", node_account_id()])
             .observe(elapsed.as_millis() as f64);
+
+        self.reserved.write().await.clear();
+        self.used.write().await.clear();
 
         // if the outcome is None, it means the script failed or there was an error.
         outcome.is_some()
@@ -609,10 +525,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     pub async fn take_mine(&self, me: Participant) -> Option<ArtifactTaken<A>> {
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]
-            local used_key = KEYS[2]
-            local mine_key = KEYS[3]
-            local reserved_key = KEYS[4]
-            local expire_time = ARGV[1]
+            local mine_key = KEYS[2]
 
             if redis.call("SCARD", mine_key) < 1 then
                 return nil
@@ -625,55 +538,41 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 return {err = "WARN unexpected, artifact " .. id .. " is missing"}
             end
 
-            -- reserve the artifact again, since the owner is taking it here, and should
-            -- not invalidate the other nodes when syncing.
-            redis.call("SADD", reserved_key, id)
-
             -- Delete the artifact from the hash map
             redis.call("HDEL", artifact_key, id)
             -- delete the artifact from our self owner set
             redis.call("SREM", mine_key, id)
 
-            -- Add the artifact to the used set and set expiration time.
-            redis.call("HSET", used_key, id, "1")
-            redis.call("HEXPIRE", used_key, expire_time, "FIELDS", 1, id)
             -- Return the artifact as a response
             return artifact
         "#;
 
         let start = Instant::now();
         let mut conn = self.connect().await?;
-        let result = redis::Script::new(SCRIPT)
+        let result: Result<Option<A>, _> = redis::Script::new(SCRIPT)
             .key(&self.artifact_key)
-            .key(&self.used_key)
             .key(owner_key(&self.owner_keys, me))
-            .key(&self.reserved_key)
-            .arg(USED_EXPIRE_TIME.num_seconds())
             .invoke_async(&mut conn)
             .await;
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "take_mine", self.account_id.as_str()])
+            .with_label_values(&[A::METRIC_LABEL, "take_mine", node_account_id()])
             .observe(elapsed.as_millis() as f64);
 
         match result {
             Ok(Some(artifact)) => {
+                // mark reserved and used in-memory so that it won't be reserved or reused locally
+                let id = artifact.id();
+                self.reserved.write().await.insert(id);
+                self.used.write().await.insert(id);
                 let taken = ArtifactTaken::new(artifact, self.clone());
-                tracing::debug!(
-                    id = taken.artifact.id(),
-                    elapsed_ms = elapsed.as_millis(),
-                    "took mine artifact"
-                );
+                tracing::debug!(id, ?elapsed, "took mine artifact");
                 Some(taken)
             }
             Ok(None) => None,
             Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to take mine artifact from storage"
-                );
+                tracing::warn!(?err, ?elapsed, "failed to take mine artifact from storage");
                 None
             }
         }
@@ -683,24 +582,16 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     pub async fn recycle_mine(&self, me: Participant, taken: ArtifactTaken<A>) -> bool {
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]
-            local used_key = KEYS[2]
-            local mine_key = KEYS[3]
-            local reserved_key = KEYS[4]
+            local mine_key = KEYS[2]
             local artifact_id = ARGV[1]
             local artifact = ARGV[2]
 
-            -- Remove from used set
-            redis.call("HDEL", used_key, artifact_id)
-            
             -- Add back to artifact hash map
             redis.call("HSET", artifact_key, artifact_id, artifact)
-            
+
             -- Add back to mine set
             redis.call("SADD", mine_key, artifact_id)
-            
-            -- Ensure it is still reserved
-            redis.call("SADD", reserved_key, artifact_id)
-            
+
             return 1
         "#;
 
@@ -717,9 +608,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let result: Result<i32, _> = redis::Script::new(SCRIPT)
             .key(&self.artifact_key)
-            .key(&self.used_key)
             .key(owner_key(&self.owner_keys, me))
-            .key(&self.reserved_key)
             .arg(id)
             .arg(artifact)
             .invoke_async(&mut conn)
@@ -727,25 +616,18 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "return_mine", self.account_id.as_str()])
+            .with_label_values(&[A::METRIC_LABEL, "return_mine", node_account_id()])
             .observe(elapsed.as_millis() as f64);
 
         match result {
             Ok(_) => {
-                tracing::info!(
-                    id,
-                    elapsed_ms = elapsed.as_millis(),
-                    "returned mine artifact"
-                );
+                self.reserved.write().await.remove(&id);
+                self.used.write().await.remove(&id);
+                tracing::info!(id, ?elapsed, "returned mine artifact");
                 true
             }
             Err(err) => {
-                tracing::warn!(
-                    id,
-                    ?err,
-                    elapsed_ms = elapsed.as_millis(),
-                    "failed to return mine artifact"
-                );
+                tracing::warn!(id, ?err, ?elapsed, "failed to return mine artifact");
                 false
             }
         }
@@ -753,17 +635,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
     /// Check if an artifact is reserved.
     pub async fn contains_reserved(&self, id: A::Id) -> bool {
-        let Some(mut conn) = self.connect().await else {
-            return false;
-        };
-        match conn.sismember(&self.reserved_key, id).await {
-            Ok(true) => true,
-            Ok(false) => false,
-            Err(err) => {
-                tracing::warn!(id, ?err, "failed to check if artifact is reserved");
-                false
-            }
-        }
+        self.reserved.read().await.contains(&id)
     }
 
     pub fn artifact_key(&self) -> &str {

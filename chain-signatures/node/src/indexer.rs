@@ -1,5 +1,7 @@
 use crate::backlog::Backlog;
+use crate::metrics::node_account_id;
 use crate::protocol::{Chain, IndexedSignRequest, Sign};
+
 use mpc_contract::primitives::PendingRequest;
 use mpc_primitives::{SignArgs, SignId};
 use near_account_id::AccountId;
@@ -137,7 +139,6 @@ impl NearIndexer {
 
 struct Context {
     mpc_contract_id: AccountId,
-    node_account_id: AccountId,
     sign_tx: mpsc::Sender<Sign>,
     indexer: NearIndexer,
     rpc_client: near_fetch::Client,
@@ -187,7 +188,7 @@ async fn poll_pending_requests(ctx: &mut Context) -> anyhow::Result<()> {
 
     // Update metrics
     crate::metrics::indexers::LATEST_BLOCK_NUMBER
-        .with_label_values(&[Chain::NEAR.as_str(), ctx.node_account_id.as_str()])
+        .with_label_values(&[Chain::NEAR.as_str(), node_account_id()])
         .set(latest_height as i64);
 
     // Send all new requests
@@ -200,7 +201,7 @@ async fn poll_pending_requests(ctx: &mut Context) -> anyhow::Result<()> {
             tracing::error!(?err, "failed to send the sign request into sign queue");
         } else {
             crate::metrics::requests::NUM_SIGN_REQUESTS
-                .with_label_values(&[Chain::NEAR.as_str(), ctx.node_account_id.as_str()])
+                .with_label_values(&[Chain::NEAR.as_str(), node_account_id()])
                 .inc();
         }
     }
@@ -243,7 +244,6 @@ pub fn run(
     let indexer = NearIndexer::new(options);
     let mut context = Context {
         mpc_contract_id: mpc_contract_id.clone(),
-        node_account_id: node_account_id.clone(),
         sign_tx,
         indexer,
         rpc_client,

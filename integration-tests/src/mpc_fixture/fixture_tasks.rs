@@ -6,7 +6,6 @@ use cait_sith::protocol::Participant;
 use mpc_keys::hpke::Ciphered;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
-use mpc_node::protocol;
 use mpc_node::protocol::message::{MessageOutbox, SendMessage, SignedMessage};
 use mpc_node::rpc::RpcAction;
 use std::collections::HashMap;
@@ -34,32 +33,17 @@ pub(super) fn test_mock_network(
         loop {
             tokio::select! {
                 Some(send_message) = outbox.intercept_outgoing_messages().recv() => {
-                    let (msg, (from, to, ts)) = &send_message;
-
-                    tracing::debug!(target: "mock_network", ?to, ?ts, "Received MPC message");
-
-                    let log_msg = match msg {
-                        protocol::Message::Posit(_) => "Posit",
-                        protocol::Message::Generating(_) => "Generating",
-                        protocol::Message::Ready(_) => "Ready",
-                        protocol::Message::Resharing(_) => "Resharing",
-                        protocol::Message::Triple(_) => "Triple",
-                        protocol::Message::Presignature(_) => "Presignature",
-                        protocol::Message::Signature(_) => "Signature",
-                        protocol::Message::Unknown(_) => "Unknown",
-                    };
-                    msg_log.lock().await.push(format!("{log_msg} from {from:?} to {to:?}"));
-
-                    if !filter(&send_message) {
-                        tracing::info!("Dropping a message because it didn't pass the test's filter");
+                    let passes_filter = filter(&send_message);
+                    msg_log.lock().await.observe_message(&send_message, passes_filter);
+                    if !passes_filter {
                         continue;
                     }
-
 
                     // directly send out single message, no batching
                     // (might want to add MessageOutbox, too, but for now this is easier)
                     let config = config.borrow().clone();
                     let participants = mesh.borrow().active.clone();
+                    let (msg, (from, to, _ts)) = &send_message;
                     let receiver_info = participants.get(to).expect("TODO: support sending to non-active participants in tests");
                     match SignedMessage::encrypt(
                         &[msg],

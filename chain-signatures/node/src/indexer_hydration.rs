@@ -14,7 +14,6 @@ use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::Signature;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
-use near_account_id::AccountId;
 use sha3::{Digest, Keccak256};
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{twox_128, H256};
@@ -220,7 +219,6 @@ pub struct HydrationSignBidirectionalRequestedEvent {
     pub algo: String,
     pub dest: String,
     pub params: String,
-    pub program_id: [u8; 32],
     pub output_deserialization_schema: Vec<u8>,
     pub respond_serialization_schema: Vec<u8>,
 }
@@ -377,7 +375,6 @@ pub(crate) fn ss58_address_from_account32(sender: [u8; 32]) -> String {
 pub async fn run(
     hydration: Option<HydrationConfig>,
     sign_tx: mpsc::Sender<Sign>,
-    node_near_account_id: AccountId,
     backlog: Backlog,
     mut contract_watcher: ContractStateWatcher,
     mut mesh_state: watch::Receiver<MeshState>,
@@ -420,6 +417,8 @@ pub async fn run(
         &mut mesh_state,
         &node_client,
         Chain::Hydration,
+        sign_tx.clone(),
+        total_timeout,
     )
     .await;
 
@@ -487,7 +486,6 @@ pub async fn run(
         // → Safe to trust individual decoded events.
 
         let sign_tx = sign_tx.clone();
-        let node_near_account_id = node_near_account_id.clone();
         let backlog = backlog.clone();
 
         for ev in events.iter() {
@@ -519,7 +517,6 @@ pub async fn run(
                     Box::new(event),
                     entropy,
                     sign_tx.clone(),
-                    node_near_account_id.clone(),
                     total_timeout,
                     backlog.clone(),
                 )
@@ -575,7 +572,6 @@ pub async fn run(
                     Box::new(event),
                     entropy,
                     sign_tx.clone(),
-                    node_near_account_id.clone(),
                     total_timeout,
                     backlog.clone(),
                 )
@@ -693,7 +689,6 @@ fn decode_sign_bidirectional_requested(
     let algo = get_named_utf8(&fields, "algo")?;
     let dest = get_named_utf8(&fields, "dest")?;
     let params = get_named_utf8(&fields, "params")?;
-    let program_id = get_named_bytes32(&fields, "program_id")?;
 
     let output_deserialization_schema = get_named_vec_u8(&fields, "output_deserialization_schema")?;
     let respond_serialization_schema = get_named_vec_u8(&fields, "respond_serialization_schema")?;
@@ -708,7 +703,6 @@ fn decode_sign_bidirectional_requested(
         algo,
         dest,
         params,
-        program_id,
         output_deserialization_schema,
         respond_serialization_schema,
     })

@@ -7,6 +7,7 @@ use crate::indexer_hydration::{
 };
 use crate::mesh::wait_threshold_active;
 use crate::mesh::MeshState;
+use crate::metrics::node_account_id;
 use crate::node_client::NodeClient;
 use crate::protocol::Chain;
 use crate::protocol::IndexedSignRequest;
@@ -20,9 +21,8 @@ use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
 use mpc_primitives::SignId;
 use mpc_primitives::Signature;
-use near_account_id::AccountId;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 
@@ -228,7 +228,6 @@ pub(crate) async fn process_sign_event(
     sign_event: SignatureEventBox,
     entropy: [u8; 32],
     sign_tx: mpsc::Sender<Sign>,
-    node_near_account_id: AccountId,
     total_timeout: Duration,
     backlog: Backlog,
 ) -> anyhow::Result<()> {
@@ -243,8 +242,9 @@ pub(crate) async fn process_sign_event(
         SignRequestType::Sign => BacklogTransaction::Sign(SignTx {
             request_id: sign_id.request_id,
             source_chain: sign_event.source_chain(),
-            key_version: sign_request.args.key_version,
             status: PendingRequestStatus::AwaitingResponse,
+            args: sign_request.args.clone(),
+            unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
         }),
         SignRequestType::SignBidirectional(_event) => {
             // For bidirectional requests, start with a Sign transaction
@@ -252,8 +252,9 @@ pub(crate) async fn process_sign_event(
             BacklogTransaction::Sign(SignTx {
                 request_id: sign_id.request_id,
                 source_chain: sign_event.source_chain(),
-                key_version: sign_request.args.key_version,
                 status: PendingRequestStatus::AwaitingResponse,
+                args: sign_request.args.clone(),
+                unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
             })
         }
         _ => anyhow::bail!("Unexpected sign request type"),
@@ -274,10 +275,7 @@ pub(crate) async fn process_sign_event(
         tracing::error!(?err, chain = %chain, "Failed to send {} sign request into queue", chain.as_str());
     } else {
         crate::metrics::requests::NUM_SIGN_REQUESTS
-            .with_label_values(&[
-                sign_event.source_chain().as_str(),
-                node_near_account_id.as_str(),
-            ])
+            .with_label_values(&[sign_event.source_chain().as_str(), node_account_id()])
             .inc();
     }
 
@@ -290,17 +288,60 @@ pub(crate) async fn recover_backlog(
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
     source_chain: Chain,
+    sign_tx: mpsc::Sender<Sign>,
+    total_timeout: Duration,
 ) {
     // Recover backlog before doing anything.
     // Wait for threshold to be available
     let threshold = contract_watcher.wait_threshold().await;
-    if threshold > 0 {
-        wait_threshold_active(mesh_state, threshold).await;
+    if threshold == 0 {
+        return;
+    }
+    wait_threshold_active(mesh_state, threshold).await;
 
-        let mesh_state = mesh_state.borrow().clone();
-        backlog
-            .recover(&mesh_state, node_client, threshold, &[source_chain])
-            .await;
+    let mesh_state = mesh_state.borrow().clone();
+    let mut pending = backlog
+        .recover(&mesh_state, node_client, threshold, &[source_chain])
+        .await;
+
+    // Re-enqueue any pending sign requests so the node processes them after recovery
+    let pending = pending.remove(&source_chain).unwrap_or_default();
+
+    for (sign_id, tx) in pending
+        .into_iter()
+        .filter(|(_, tx)| matches!(tx.status(), PendingRequestStatus::AwaitingResponse))
+    {
+        let BacklogTransaction::Sign(sign_tx_entry) = tx else {
+            continue;
+        };
+
+        let Some(sign_type) = backlog.sign_type(source_chain, &sign_id).await else {
+            tracing::warn!(
+                ?sign_id,
+                ?source_chain,
+                "sign type missing during backlog recovery"
+            );
+            continue;
+        };
+
+        let sign_request = IndexedSignRequest {
+            id: sign_id,
+            args: sign_tx_entry.args.clone(),
+            chain: sign_tx_entry.source_chain,
+            unix_timestamp_indexed: sign_tx_entry.unix_timestamp_indexed,
+            timestamp_sign_queue: Instant::now(),
+            total_timeout,
+            sign_request_type: sign_type,
+        };
+
+        if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
+            tracing::error!(
+                ?err,
+                ?sign_id,
+                ?source_chain,
+                "failed to requeue sign request after recovery"
+            );
+        }
     }
 }
 
@@ -449,5 +490,101 @@ pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Re
             sender,
         )),
         _ => anyhow::bail!("Unsupported chain: {source_chain}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backlog::Backlog;
+    use crate::mesh::wait_threshold_active;
+    use crate::node_client::NodeClient;
+    use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
+    use crate::util::current_unix_timestamp;
+    use cait_sith::protocol::Participant;
+    use k256::ProjectivePoint;
+    use mpc_primitives::SignArgs;
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+    use tokio::time::timeout;
+
+    #[tokio::test]
+    async fn recover_backlog_requeues_pending_signs() {
+        // Prepare backlog with a single pending sign request
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([9u8; 32]);
+        let args = SignArgs {
+            entropy: [1u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+
+        // Add a request and persist a checkpoint so recover() can load it
+        let unix_timestamp_indexed = current_unix_timestamp();
+        backlog
+            .insert(
+                Chain::Ethereum,
+                sign_id,
+                BacklogTransaction::Sign(SignTx {
+                    request_id: sign_id.request_id,
+                    source_chain: Chain::Ethereum,
+                    status: PendingRequestStatus::AwaitingResponse,
+                    args: args.clone(),
+                    unix_timestamp_indexed,
+                }),
+                SignRequestType::Sign,
+            )
+            .await;
+        backlog.checkpoint(Chain::Ethereum).await;
+
+        let threshold = 1;
+        let mut mesh_state = MeshState::default();
+        let participant = Participant::from(0u32);
+        mesh_state
+            .active
+            .insert(&participant, ParticipantInfo::new(0));
+        mesh_state.stable.insert(participant);
+        let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
+        wait_threshold_active(&mut mesh_rx, threshold).await;
+
+        let account_id: AccountId = "test.near".parse().unwrap();
+        let public_key = ProjectivePoint::GENERATOR.to_affine();
+        let participants = Participants::default();
+        let (mut contract_watcher, _tx) =
+            ContractStateWatcher::with_running(&account_id, public_key, threshold, participants);
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        let node_client = NodeClient::new(&Default::default());
+
+        recover_backlog(
+            &backlog,
+            &mut contract_watcher,
+            &mut mesh_rx,
+            &node_client,
+            Chain::Ethereum,
+            sign_tx,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        // We should receive the recovered sign request
+        let msg = timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .expect("recv should not timeout");
+
+        match msg.expect("sign_rx should contain a message") {
+            Sign::Request(req) => {
+                assert_eq!(req.id, sign_id);
+                assert_eq!(req.args, args);
+                assert_eq!(req.chain, Chain::Ethereum);
+                assert_eq!(req.sign_request_type, SignRequestType::Sign);
+                // Verify that the unix_timestamp_indexed is preserved from the original entry
+                assert_eq!(req.unix_timestamp_indexed, unix_timestamp_indexed);
+                assert!(req.unix_timestamp_indexed <= current_unix_timestamp());
+            }
+            other => panic!("unexpected message: {:?}", other),
+        }
     }
 }

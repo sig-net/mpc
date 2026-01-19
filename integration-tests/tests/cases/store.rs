@@ -26,7 +26,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let node0_id = "party0.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
     let triple_storage = redis.triple_storage(&node0_id);
-    let triple_spawner = TripleSpawner::new(node0, 5, 123, &node0_id, &triple_storage, msg);
+    let triple_spawner = TripleSpawner::new(node0, 5, 123, &triple_storage, msg);
 
     let triple_id1: u64 = 1;
     let triple_id2: u64 = 2;
@@ -183,7 +183,6 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
         123,
         &SecretKeyShare::default(),
         &PublicKey::default(),
-        &node0_id,
         &triple_storage,
         &presignature_storage,
         msg,

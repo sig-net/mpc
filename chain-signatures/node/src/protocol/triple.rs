@@ -3,6 +3,7 @@ use super::posit::{PositAction, PositInternalAction, Posits};
 use super::MpcSignProtocol;
 use crate::config::Config;
 use crate::mesh::MeshState;
+use crate::metrics::node_account_id;
 use crate::protocol::posit::Positor;
 use crate::storage::triple_storage::{TriplePair, TriplePairSlot, TripleStorage};
 use crate::types::TripleProtocol;
@@ -16,7 +17,6 @@ use chrono::Utc;
 use highway::{HighwayHash, HighwayHasher};
 use k256::elliptic_curve::group::GroupEncoding;
 use k256::Secp256k1;
-use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -40,6 +40,7 @@ pub struct Triple {
 struct TripleGenerator {
     id: TripleId,
     me: Participant,
+    proposer: Participant,
     participants: Vec<Participant>,
     protocol: TripleProtocol,
     timeout: Duration,
@@ -56,12 +57,12 @@ impl TripleGenerator {
     pub async fn new(
         id: TripleId,
         me: Participant,
+        proposer: Participant,
         threshold: usize,
         participants: &[Participant],
         timeout: Duration,
         slot: TriplePairSlot,
         msg: &MessageChannel,
-        _my_account_id: &AccountId,
     ) -> Result<Self, InitializationError> {
         let mut participants = participants.to_vec();
         // Participants can be out of order, so let's sort them before doing anything. Critical
@@ -75,6 +76,7 @@ impl TripleGenerator {
         Ok(Self {
             id,
             me,
+            proposer,
             participants,
             protocol: Box::new(protocol),
             timeout,
@@ -84,7 +86,7 @@ impl TripleGenerator {
             msg: msg.clone(),
             #[cfg(feature = "debug-page")]
             debug_view: crate::web::debug::register_task(
-                _my_account_id.to_string(),
+                node_account_id().to_string(),
                 format!("TripleGenerator {id:#?}"),
             ),
         })
@@ -111,27 +113,29 @@ impl TripleGenerator {
         }
     }
 
-    async fn run(mut self, my_account_id: AccountId, epoch: u64) {
+    async fn run(mut self, epoch: u64) {
         let before_first_poke_delay = crate::metrics::protocols::TRIPLE_BEFORE_POKE_DELAY
-            .with_label_values(&[my_account_id.as_str()]);
+            .with_label_values(&[node_account_id()]);
         let accrued_wait_delay = crate::metrics::protocols::TRIPLE_ACCRUED_WAIT_DELAY
-            .with_label_values(&[my_account_id.as_str()]);
+            .with_label_values(&[node_account_id()]);
         let runtime_latency =
-            crate::metrics::protocols::TRIPLE_LATENCY.with_label_values(&[my_account_id.as_str()]);
-        let total_latency = crate::metrics::protocols::TRIPLE_LATENCY_TOTAL
-            .with_label_values(&[my_account_id.as_str()]);
-        let poke_latency = crate::metrics::protocols::TRIPLE_POKE_CPU_TIME
-            .with_label_values(&[my_account_id.as_str()]);
-        let poke_counts = crate::metrics::protocols::TRIPLE_POKES_CNT
-            .with_label_values(&[my_account_id.as_str()]);
+            crate::metrics::protocols::TRIPLE_LATENCY.with_label_values(&[node_account_id()]);
+        let total_latency =
+            crate::metrics::protocols::TRIPLE_LATENCY_TOTAL.with_label_values(&[node_account_id()]);
+        let poke_latency =
+            crate::metrics::protocols::TRIPLE_POKE_CPU_TIME.with_label_values(&[node_account_id()]);
+        let poke_counts =
+            crate::metrics::protocols::TRIPLE_POKES_CNT.with_label_values(&[node_account_id()]);
         let success_owned_counts =
             crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_MINE_SUCCESS
-                .with_label_values(&[my_account_id.as_str()]);
+                .with_label_values(&[node_account_id()]);
         let success_total_counts =
             crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS_SUCCESS
-                .with_label_values(&[my_account_id.as_str()]);
+                .with_label_values(&[node_account_id()]);
         let failure_counts = crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES
-            .with_label_values(&[my_account_id.as_str()]);
+            .with_label_values(&[node_account_id()]);
+        let failure_mine_counts = crate::metrics::protocols::TRIPLE_GENERATOR_MINE_FAILURES
+            .with_label_values(&[node_account_id()]);
 
         let start_time = Instant::now();
         let mut total_wait = Duration::from_millis(0);
@@ -145,6 +149,9 @@ impl TripleGenerator {
                 Ok(action) => action,
                 Err(err) => {
                     failure_counts.inc();
+                    if self.proposer == self.me {
+                        failure_mine_counts.inc();
+                    }
                     tracing::warn!(
                         id = self.id,
                         ?err,
@@ -167,6 +174,9 @@ impl TripleGenerator {
                     // Wait for the next set of messages to arrive.
                     let Some(msg) = self.recv().await else {
                         failure_counts.inc();
+                        if self.proposer == self.me {
+                            failure_mine_counts.inc();
+                        }
                         break;
                     };
                     self.protocol.message(msg.from, msg.data);
@@ -301,7 +311,6 @@ pub struct TripleSpawner {
     me: Participant,
     threshold: usize,
     epoch: u64,
-    my_account_id: AccountId,
     msg: MessageChannel,
 }
 
@@ -311,7 +320,6 @@ impl fmt::Debug for TripleSpawner {
             .field("me", &self.me)
             .field("threshold", &self.threshold)
             .field("epoch", &self.epoch)
-            .field("my_account_id", &self.my_account_id)
             .field("ongoing_introduced", &self.ongoing_introduced)
             .finish()
     }
@@ -322,7 +330,6 @@ impl TripleSpawner {
         me: Participant,
         threshold: usize,
         epoch: u64,
-        my_account_id: &AccountId,
         storage: &TripleStorage,
         msg: MessageChannel,
     ) -> Self {
@@ -334,7 +341,6 @@ impl TripleSpawner {
             ongoing: JoinMap::new(),
             ongoing_introduced: HashSet::new(),
             posits: Posits::new(me),
-            my_account_id: my_account_id.clone(),
             msg,
         }
     }
@@ -464,7 +470,10 @@ impl TripleSpawner {
             self.ongoing_introduced.insert(id);
         }
 
-        if let Err(err) = self.generate_with_id(id, &participants, timeout).await {
+        if let Err(err) = self
+            .generate_with_id(id, &participants, positor.id(), timeout)
+            .await
+        {
             self.ongoing_introduced.remove(&id);
             tracing::warn!(
                 id,
@@ -480,6 +489,7 @@ impl TripleSpawner {
         &mut self,
         id: TripleId,
         participants: &[Participant],
+        proposer: Participant,
         timeout: Duration,
     ) -> Result<(), InitializationError> {
         // Check if the `id` is already in the system. Error out and have the next cycle try again.
@@ -493,19 +503,18 @@ impl TripleSpawner {
         let generator = TripleGenerator::new(
             id,
             self.me,
+            proposer,
             self.threshold,
             participants,
             timeout,
             slot,
             &self.msg,
-            &self.my_account_id,
         )
         .await?;
 
-        self.ongoing
-            .spawn(id, generator.run(self.my_account_id.clone(), self.epoch));
+        self.ongoing.spawn(id, generator.run(self.epoch));
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS
-            .with_label_values(&[self.my_account_id.as_str()])
+            .with_label_values(&[node_account_id()])
             .inc();
 
         Ok(())
@@ -582,16 +591,16 @@ impl TripleSpawner {
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
 
                     crate::metrics::storage::NUM_TRIPLES_MINE
-                        .with_label_values(&[self.my_account_id.as_str()])
+                        .with_label_values(&[node_account_id()])
                         .set(self.len_mine().await as i64);
                     crate::metrics::storage::NUM_TRIPLES_TOTAL
-                        .with_label_values(&[self.my_account_id.as_str()])
+                        .with_label_values(&[node_account_id()])
                         .set(self.triple_storage.len_generated().await as i64);
                     crate::metrics::protocols::NUM_TRIPLE_GENERATORS_INTRODUCED
-                        .with_label_values(&[self.my_account_id.as_str()])
+                        .with_label_values(&[node_account_id()])
                         .set(self.len_introduced() as i64);
                     crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL
-                        .with_label_values(&[self.my_account_id.as_str()])
+                        .with_label_values(&[node_account_id()])
                         .set(self.len_ongoing() as i64);
                 }
                 Ok(()) = cfg.changed() => {
@@ -624,7 +633,6 @@ impl TripleSpawnerTask {
             me,
             threshold,
             epoch,
-            &ctx.my_account_id,
             &ctx.triple_storage,
             ctx.msg_channel.clone(),
         );

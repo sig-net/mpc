@@ -5,6 +5,7 @@ use crate::containers::Redis;
 use crate::mpc_fixture::fixture_interface::SharedOutput;
 use crate::mpc_fixture::fixture_tasks::MessageFilter;
 use crate::mpc_fixture::input::FixtureInput;
+use crate::mpc_fixture::message_collector::CollectMessages;
 use crate::mpc_fixture::mock_governance::MockGovernance;
 use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
 use cait_sith::protocol::Participant;
@@ -29,8 +30,7 @@ use near_sdk::AccountId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, Sender};
-use tokio::sync::watch;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, Mutex, RwLock};
 
 pub struct MpcFixtureBuilder {
     prepared_nodes: Vec<MpcFixtureNodeBuilder>,
@@ -41,6 +41,7 @@ pub struct MpcFixtureBuilder {
     participants_by_id: ParticipantsById,
     candidates: Candidates,
     fixture_config: FixtureConfig,
+    output: SharedOutput,
 }
 
 struct MpcFixtureNodeBuilder {
@@ -81,6 +82,8 @@ struct MockedNodeContext {
     redis_pool: deadpool_redis::Pool,
     init_mesh: MeshState,
     contract_state: ContractStateWatcher,
+
+    #[allow(dead_code)]
     node_account_id: AccountId,
 }
 
@@ -150,6 +153,7 @@ impl MpcFixtureBuilder {
             participants_by_id,
             candidates,
             fixture_config: FixtureConfig::new(num_nodes),
+            output: SharedOutput::default(),
         }
     }
 
@@ -159,7 +163,7 @@ impl MpcFixtureBuilder {
         let routing_table = self.build_routing_table();
         let initial_mesh_state = self.build_mesh_state();
 
-        let output = SharedOutput::default();
+        let output = self.output;
         let mut nodes = vec![];
 
         let account_ids: Vec<_> = self
@@ -321,6 +325,15 @@ impl MpcFixtureBuilder {
         self
     }
 
+    /// Specify a method that acts as message filter for all sent messages the given node.
+    pub fn with_message_collector(
+        mut self,
+        collector: Arc<Mutex<dyn CollectMessages + Send>>,
+    ) -> Self {
+        self.output.msg_log = collector;
+        self
+    }
+
     /// Short-hand for creating an MPC setup that's prepared to produce triples.
     ///
     /// This setup will not attempt to stockpile presignatures.
@@ -435,11 +448,11 @@ impl MpcFixtureNodeBuilder {
         // We have to start the inbox job before calling
         // `MpcSignProtocol::new_test` or else subscribing to messages will
         // await the subscription response forever.
-        let _inbox_handle = tokio::spawn(self.messaging.inbox.run(
-            context.node_account_id,
-            config_rx.clone(),
-            context.contract_state.clone(),
-        ));
+        let _inbox_handle = tokio::spawn(
+            self.messaging
+                .inbox
+                .run(config_rx.clone(), context.contract_state.clone()),
+        );
 
         let protocol = MpcSignProtocol::new_test(
             self.participant_info.account_id.clone(),

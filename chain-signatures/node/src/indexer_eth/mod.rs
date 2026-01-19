@@ -3,6 +3,7 @@ pub mod indexer_eth_helios;
 
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
+use crate::metrics::node_account_id;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::respond_bidirectional::CompletedTx;
@@ -17,7 +18,6 @@ use alloy::sol_types::{sol, SolEvent};
 use k256::Scalar;
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
-use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -83,6 +83,7 @@ pub struct BlockAndRequests {
     block_number: u64,
     block_hash: alloy::primitives::B256,
     indexed_requests: Vec<IndexedSignRequest>,
+    respond_logs: Vec<Log>,
 }
 
 impl BlockAndRequests {
@@ -90,11 +91,13 @@ impl BlockAndRequests {
         block_number: u64,
         block_hash: alloy::primitives::B256,
         indexed_requests: Vec<IndexedSignRequest>,
+        respond_logs: Vec<Log>,
     ) -> Self {
         Self {
             block_number,
             block_hash,
             indexed_requests,
+            respond_logs,
         }
     }
 }
@@ -535,19 +538,14 @@ fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
 fn send_indexed_requests_to_sign_queue(
     requests: Vec<IndexedSignRequest>,
     sign_tx: mpsc::Sender<Sign>,
-    node_near_account_id: AccountId,
 ) {
     for request in requests {
         let sign_tx = sign_tx.clone();
-        let node_near_account_id = node_near_account_id.clone();
         tokio::spawn(async move {
             match sign_tx.send(Sign::Request(request)).await {
                 Ok(_) => {
                     crate::metrics::requests::NUM_SIGN_REQUESTS
-                        .with_label_values(&[
-                            Chain::Ethereum.as_str(),
-                            node_near_account_id.as_str(),
-                        ])
+                        .with_label_values(&[Chain::Ethereum.as_str(), node_account_id()])
                         .inc();
                 }
                 Err(err) => {
@@ -678,7 +676,6 @@ pub struct EthereumIndexer {
     eth: EthConfig,
     sign_tx: mpsc::Sender<Sign>,
     app_data_storage: AppDataStorage,
-    node_near_account_id: AccountId,
     backlog: Backlog,
     contract_watcher: ContractStateWatcher,
     mesh_state: watch::Receiver<MeshState>,
@@ -687,12 +684,10 @@ pub struct EthereumIndexer {
 }
 
 impl EthereumIndexer {
-    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         eth: Option<EthConfig>,
         sign_tx: mpsc::Sender<Sign>,
         app_data_storage: AppDataStorage,
-        node_near_account_id: AccountId,
         backlog: Backlog,
         contract_watcher: ContractStateWatcher,
         mesh_state: watch::Receiver<MeshState>,
@@ -709,7 +704,6 @@ impl EthereumIndexer {
             eth,
             sign_tx,
             app_data_storage,
-            node_near_account_id,
             backlog,
             contract_watcher,
             mesh_state,
@@ -727,7 +721,8 @@ impl EthereumIndexer {
         let client = self.client;
         let eth = self.eth;
         let sign_tx = self.sign_tx;
-        let node_near_account_id = self.node_near_account_id;
+
+        let total_timeout = Duration::from_secs(eth.total_timeout);
 
         crate::indexer_common::recover_backlog(
             &backlog,
@@ -735,6 +730,8 @@ impl EthereumIndexer {
             &mut mesh_state,
             &node_client,
             Chain::Ethereum,
+            sign_tx.clone(),
+            total_timeout,
         )
         .await;
 
@@ -755,8 +752,6 @@ impl EthereumIndexer {
             );
             return;
         };
-        let total_timeout = Duration::from_secs(eth.total_timeout);
-
         let (blocks_failed_send, blocks_failed_recv) = failed_blocks_channel();
 
         let (requests_indexed_send, requests_indexed_recv) = indexed_channel();
@@ -778,7 +773,6 @@ impl EthereumIndexer {
             .await;
         });
 
-        let node_near_account_id_clone = node_near_account_id.clone();
         let backlog_clone = backlog.clone();
         let client_clone = Arc::clone(&client);
         let optimistic_requests = eth.optimistic_requests;
@@ -790,7 +784,6 @@ impl EthereumIndexer {
                 finalized_block_recv,
                 sign_tx_clone,
                 app_data_storage.clone(),
-                node_near_account_id_clone,
                 optimistic_requests,
                 backlog_clone,
             )
@@ -798,10 +791,8 @@ impl EthereumIndexer {
         });
 
         let blocks_failed_send_clone = blocks_failed_send.clone();
-        let node_near_account_id_clone2 = node_near_account_id.clone();
         let requests_indexed_send_clone = requests_indexed_send.clone();
         let backlog_clone2 = backlog.clone();
-        let sign_tx_clone = sign_tx.clone();
         let client_clone = Arc::clone(&client);
         tokio::spawn(async move {
             Self::retry_failed_blocks(
@@ -809,11 +800,9 @@ impl EthereumIndexer {
                 blocks_failed_recv,
                 blocks_failed_send_clone,
                 contract_address,
-                node_near_account_id_clone2,
                 requests_indexed_send_clone,
                 total_timeout,
                 backlog_clone2,
-                sign_tx_clone,
             )
             .await;
         });
@@ -868,11 +857,9 @@ impl EthereumIndexer {
                 client.clone(),
                 block.clone(),
                 contract_address,
-                node_near_account_id.clone(),
                 requests_indexed_send_clone.clone(),
                 total_timeout,
                 backlog.clone(),
-                sign_tx.clone(),
             )
             .await
             {
@@ -890,7 +877,7 @@ impl EthereumIndexer {
                 }
             }
             crate::metrics::indexers::LATEST_BLOCK_NUMBER
-                .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
+                .with_label_values(&[Chain::Ethereum.as_str(), node_account_id()])
                 .set(block_number as i64);
         }
     }
@@ -926,16 +913,13 @@ impl EthereumIndexer {
         client.get_latest_block_number().await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn process_block(
         client: Arc<EthereumClient>,
         block: alloy::rpc::types::Block,
         contract_address: Address,
-        node_near_account_id: AccountId,
         requests_indexed: mpsc::Sender<BlockAndRequests>,
         total_timeout: Duration,
         backlog: Backlog,
-        sign_tx: mpsc::Sender<Sign>,
     ) -> anyhow::Result<()> {
         let block_number = block.header.number;
         let block_hash = block.header.hash;
@@ -948,7 +932,7 @@ impl EthereumIndexer {
         let start = Instant::now();
         let block_receipts_result = client.get_block_receipts(block_number.into()).await;
         crate::metrics::indexers::ETH_BLOCK_RECEIPT_LATENCY
-            .with_label_values(&[node_near_account_id.as_str()])
+            .with_label_values(&[node_account_id()])
             .observe(start.elapsed().as_millis() as f64);
         let Some(block_receipts) = block_receipts_result.map_err(|err| {
             anyhow::anyhow!(
@@ -981,10 +965,6 @@ impl EthereumIndexer {
                     .is_some_and(|topic| *topic == SignatureResponded::SIGNATURE_HASH)
             });
 
-        if !respond_logs.is_empty() {
-            process_respond_events(&respond_logs, &backlog, sign_tx.clone()).await;
-        }
-
         let request_logs: Vec<Log> = potential_request_logs
             .into_iter()
             .filter(|log| {
@@ -1007,7 +987,7 @@ impl EthereumIndexer {
         .await?;
         sign_requests.extend(respond_requests);
 
-        if !sign_requests.is_empty() {
+        if !sign_requests.is_empty() || !respond_logs.is_empty() {
             let timestamps = sign_requests
                 .iter()
                 .map(|r| r.unix_timestamp_indexed)
@@ -1018,13 +998,14 @@ impl EthereumIndexer {
                     block_number,
                     block_hash,
                     sign_requests.clone(),
+                    respond_logs,
                 ))
                 .await
                 .map_err(|err| anyhow::anyhow!("Failed to send indexed requests: {:?}", err))?;
 
             for request_timestamp in timestamps {
                 crate::metrics::indexers::INDEXER_DELAY
-                    .with_label_values(&[Chain::Ethereum.as_str(), node_near_account_id.as_str()])
+                    .with_label_values(&[Chain::Ethereum.as_str(), node_account_id()])
                     .observe(
                         crate::util::duration_between_unix(block_timestamp, request_timestamp)
                             .as_secs() as f64,
@@ -1216,14 +1197,12 @@ impl EthereumIndexer {
     }
 
     /// Sends a request to the sign queue when the block where the request is in is finalized.
-    #[allow(clippy::too_many_arguments)]
     async fn send_requests_when_final(
         client: Arc<EthereumClient>,
         mut requests_indexed: mpsc::Receiver<BlockAndRequests>,
         mut finalized_block_rx: mpsc::Receiver<BlockNumber>,
         sign_tx: mpsc::Sender<Sign>,
         app_data_storage: AppDataStorage,
-        node_near_account_id: AccountId,
         optimistic_requests: bool,
         backlog: Backlog,
     ) {
@@ -1241,6 +1220,7 @@ impl EthereumIndexer {
                 block_number,
                 block_hash,
                 indexed_requests,
+                respond_logs,
             }) = requests_indexed.recv().await
             else {
                 tracing::error!("Failed to receive indexed requests");
@@ -1273,11 +1253,11 @@ impl EthereumIndexer {
 
             if block.header.hash == block_hash {
                 tracing::info!("Block {block_number} is finalized!");
-                send_indexed_requests_to_sign_queue(
-                    indexed_requests,
-                    sign_tx.clone(),
-                    node_near_account_id.clone(),
-                );
+                send_indexed_requests_to_sign_queue(indexed_requests, sign_tx.clone());
+
+                if !respond_logs.is_empty() {
+                    process_respond_events(&respond_logs, &backlog, sign_tx.clone()).await;
+                }
                 if last_processed_block.is_none_or(|n| n < block_number) {
                     if let Err(err) = app_data_storage
                         .set_last_processed_block_eth(block_number)
@@ -1301,17 +1281,14 @@ impl EthereumIndexer {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn retry_failed_blocks(
         client: Arc<EthereumClient>,
         mut blocks_failed_rx: mpsc::Receiver<alloy::rpc::types::Block>,
         blocks_failed_tx: mpsc::Sender<alloy::rpc::types::Block>,
         contract_address: Address,
-        node_near_account_id: AccountId,
         requests_indexed: mpsc::Sender<BlockAndRequests>,
         total_timeout: Duration,
         backlog: Backlog,
-        sign_tx: mpsc::Sender<Sign>,
     ) {
         loop {
             let Some(block) = blocks_failed_rx.recv().await else {
@@ -1323,11 +1300,9 @@ impl EthereumIndexer {
                 client.clone(),
                 block.clone(),
                 contract_address,
-                node_near_account_id.clone(),
                 requests_indexed.clone(),
                 total_timeout,
                 backlog.clone(),
-                sign_tx.clone(),
             )
             .await
             {
