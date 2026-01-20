@@ -42,18 +42,6 @@ pub fn version() -> &'static str {
         .unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
-pub fn try_create_int_gauge_vec(
-    name: &str,
-    help: &str,
-    labels: &[&str],
-) -> Result<prometheus::IntGaugeVec> {
-    check_metric_multichain_prefix(name)?;
-    let opts = Opts::new(name, help);
-    let gauge = prometheus::IntGaugeVec::new(opts, labels)?;
-    prometheus::register(Box::new(gauge.clone()))?;
-    Ok(gauge)
-}
-
 pub fn try_create_int_gauge_vec_with_node_account_id(
     name: &str,
     help: &str,
@@ -65,18 +53,6 @@ pub fn try_create_int_gauge_vec_with_node_account_id(
     let gauge = prometheus::IntGaugeVec::new(opts, labels)?;
     prometheus::register(Box::new(gauge.clone()))?;
     Ok(gauge)
-}
-
-pub fn try_create_counter_vec(
-    name: &str,
-    help: &str,
-    labels: &[&str],
-) -> Result<prometheus::CounterVec> {
-    check_metric_multichain_prefix(name)?;
-    let opts = Opts::new(name, help);
-    let counter = prometheus::CounterVec::new(opts, labels)?;
-    prometheus::register(Box::new(counter.clone()))?;
-    Ok(counter)
 }
 
 pub fn try_create_counter_vec_with_node_and_version(
@@ -105,40 +81,6 @@ pub fn try_create_counter_vec_with_node_account_id(
     let counter = prometheus::CounterVec::new(opts, labels)?;
     prometheus::register(Box::new(counter.clone()))?;
     Ok(counter)
-}
-
-pub fn try_create_counter_vec_with_const_labels(
-    name: &str,
-    help: &str,
-    labels: &[&str],
-    const_labels: &[(&str, &str)],
-) -> Result<prometheus::CounterVec> {
-    check_metric_multichain_prefix(name)?;
-    let mut opts = Opts::new(name, help);
-    for (key, value) in const_labels {
-        opts = opts.const_label((*key).to_string(), (*value).to_string());
-    }
-    let counter = prometheus::CounterVec::new(opts, labels)?;
-    prometheus::register(Box::new(counter.clone()))?;
-    Ok(counter)
-}
-
-/// Attempts to create a `HistogramVector`, returning `Err` if the registry does not accept the counter
-/// (potentially due to naming conflict).
-pub fn try_create_histogram_vec(
-    name: &str,
-    help: &str,
-    labels: &[&str],
-    buckets: Option<Vec<f64>>,
-) -> Result<HistogramVec> {
-    check_metric_multichain_prefix(name)?;
-    let mut opts = HistogramOpts::new(name, help);
-    if let Some(buckets) = buckets {
-        opts = opts.buckets(buckets);
-    }
-    let histogram = HistogramVec::new(opts, labels)?;
-    prometheus::register(Box::new(histogram.clone()))?;
-    Ok(histogram)
 }
 
 pub fn try_create_histogram_vec_with_node_account_id(
