@@ -13,7 +13,7 @@ pub(crate) static NUM_SEND_ENCRYPTED_FAILURE: LazyLock<Counter> = LazyLock::new(
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static NUM_SEND_ENCRYPTED_TOTAL: LazyLock<Counter> = LazyLock::new(|| {
@@ -23,7 +23,7 @@ pub(crate) static NUM_SEND_ENCRYPTED_TOTAL: LazyLock<Counter> = LazyLock::new(||
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static NUM_RECEIVED_ENCRYPTED_TOTAL: LazyLock<Counter> = LazyLock::new(|| {
@@ -33,7 +33,7 @@ pub(crate) static NUM_RECEIVED_ENCRYPTED_TOTAL: LazyLock<Counter> = LazyLock::ne
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static SEND_ENCRYPTED_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
@@ -44,7 +44,7 @@ pub(crate) static SEND_ENCRYPTED_LATENCY: LazyLock<Histogram> = LazyLock::new(||
         Some(exponential_buckets(0.5, 1.5, 20).unwrap()),
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static FAILED_SEND_ENCRYPTED_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
@@ -55,7 +55,7 @@ pub(crate) static FAILED_SEND_ENCRYPTED_LATENCY: LazyLock<Histogram> = LazyLock:
         Some(exponential_buckets(0.5, 1.5, 20).unwrap()),
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static MSG_CLIENT_SEND_DELAY: LazyLock<Histogram> = LazyLock::new(|| {
@@ -66,7 +66,7 @@ pub(crate) static MSG_CLIENT_SEND_DELAY: LazyLock<Histogram> = LazyLock::new(|| 
         Some(exponential_buckets(0.5, 1.5, 20).unwrap()),
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static WEB_ENDPOINT_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {

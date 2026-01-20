@@ -15,7 +15,7 @@ pub(crate) static TRIPLE_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
         &[],
         Some(exponential_buckets(5.0, 1.5, 20).unwrap()),
     )
-    .unwrap().with_label_values(&[""])
+    .unwrap().with_label_values(&[] as &[&str])
 });
 
 pub(crate) static TRIPLE_LATENCY_TOTAL: LazyLock<Histogram> = LazyLock::new(|| {
@@ -25,7 +25,7 @@ pub(crate) static TRIPLE_LATENCY_TOTAL: LazyLock<Histogram> = LazyLock::new(|| {
         &[],
         Some(exponential_buckets(5.0, 1.5, 20).unwrap()),
     )
-    .unwrap().with_label_values(&[""])
+    .unwrap().with_label_values(&[] as &[&str])
 });
 
 pub(crate) static NUM_TRIPLE_GENERATORS_INTRODUCED: LazyLock<IntGauge> = LazyLock::new(|| {
@@ -35,7 +35,7 @@ pub(crate) static NUM_TRIPLE_GENERATORS_INTRODUCED: LazyLock<IntGauge> = LazyLoc
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static NUM_TRIPLE_GENERATORS_TOTAL: LazyLock<IntGauge> = LazyLock::new(|| {
@@ -45,7 +45,7 @@ pub(crate) static NUM_TRIPLE_GENERATORS_TOTAL: LazyLock<IntGauge> = LazyLock::ne
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS: LazyLock<Counter> = LazyLock::new(|| {
@@ -55,7 +55,7 @@ pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS: LazyLock<Counter> = La
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS_SUCCESS: LazyLock<Counter> =
@@ -66,7 +66,7 @@ pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS_SUCCESS: LazyLock<Count
             &[],
         )
         .unwrap()
-        .with_label_values(&[""])
+        .with_label_values(&[] as &[&str])
     });
 
 pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_MINE_SUCCESS: LazyLock<Counter> =
@@ -77,7 +77,7 @@ pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_MINE_SUCCESS: LazyLock
             &[],
         )
         .unwrap()
-        .with_label_values(&[""])
+        .with_label_values(&[] as &[&str])
     });
 
 pub(crate) static TRIPLE_GENERATOR_FAILURES: LazyLock<Counter> = LazyLock::new(|| {
@@ -87,7 +87,7 @@ pub(crate) static TRIPLE_GENERATOR_FAILURES: LazyLock<Counter> = LazyLock::new(|
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static TRIPLE_GENERATOR_MINE_FAILURES: LazyLock<Counter> = LazyLock::new(|| {
@@ -97,7 +97,7 @@ pub(crate) static TRIPLE_GENERATOR_MINE_FAILURES: LazyLock<Counter> = LazyLock::
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static TRIPLE_BEFORE_POKE_DELAY: LazyLock<Histogram> = LazyLock::new(|| {
@@ -107,7 +107,7 @@ pub(crate) static TRIPLE_BEFORE_POKE_DELAY: LazyLock<Histogram> = LazyLock::new(
         &[],
         Some(exponential_buckets(1.0, 1.5, 30).unwrap()),
     )
-    .unwrap().with_label_values(&[""])
+    .unwrap().with_label_values(&[] as &[&str])
 });
 
 pub(crate) static TRIPLE_ACCRUED_WAIT_DELAY: LazyLock<Histogram> = LazyLock::new(|| {
@@ -117,7 +117,7 @@ pub(crate) static TRIPLE_ACCRUED_WAIT_DELAY: LazyLock<Histogram> = LazyLock::new
         &[],
         Some(exponential_buckets(10.0, 1.5, 35).unwrap()),
     )
-    .unwrap().with_label_values(&[""])
+    .unwrap().with_label_values(&[] as &[&str])
 });
 
 pub(crate) static TRIPLE_POKE_CPU_TIME: LazyLock<Histogram> = LazyLock::new(|| {
@@ -128,7 +128,7 @@ pub(crate) static TRIPLE_POKE_CPU_TIME: LazyLock<Histogram> = LazyLock::new(|| {
         Some(exponential_buckets(1.0, 1.5, 5).unwrap()),
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static TRIPLE_POKES_CNT: LazyLock<Histogram> = LazyLock::new(|| {
@@ -139,7 +139,7 @@ pub(crate) static TRIPLE_POKES_CNT: LazyLock<Histogram> = LazyLock::new(|| {
         Some(linear_buckets(0.0, 1.0, 500).unwrap()),
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 // Presignature metrics
@@ -159,7 +159,7 @@ pub(crate) static NUM_PRESIGNATURE_GENERATORS_TOTAL: LazyLock<IntGauge> = LazyLo
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS: LazyLock<Counter> =
@@ -170,7 +170,7 @@ pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS: LazyLock<Counter
             &[],
         )
         .unwrap()
-        .with_label_values(&[""])
+        .with_label_values(&[] as &[&str])
     });
 
 pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS: LazyLock<Counter> =
@@ -181,7 +181,7 @@ pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS: LazyLock
             &[],
         )
         .unwrap()
-        .with_label_values(&[""])
+        .with_label_values(&[] as &[&str])
     });
 
 pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE: LazyLock<Counter> =
@@ -192,7 +192,7 @@ pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE: LazyLock<Co
             &[],
         )
         .unwrap()
-        .with_label_values(&[""])
+        .with_label_values(&[] as &[&str])
     });
 
 pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS: LazyLock<Counter> =
@@ -203,7 +203,7 @@ pub(crate) static NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS: Laz
             &[],
         )
         .unwrap()
-        .with_label_values(&[""])
+        .with_label_values(&[] as &[&str])
     });
 
 pub(crate) static PRESIGNATURE_GENERATOR_FAILURES: LazyLock<Counter> = LazyLock::new(|| {
@@ -213,7 +213,7 @@ pub(crate) static PRESIGNATURE_GENERATOR_FAILURES: LazyLock<Counter> = LazyLock:
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static PRESIGNATURE_GENERATOR_MINE_FAILURES: LazyLock<Counter> = LazyLock::new(|| {
@@ -223,7 +223,7 @@ pub(crate) static PRESIGNATURE_GENERATOR_MINE_FAILURES: LazyLock<Counter> = Lazy
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static PRESIGNATURE_BEFORE_POKE_DELAY: LazyLock<Histogram> = LazyLock::new(|| {
@@ -233,7 +233,7 @@ pub(crate) static PRESIGNATURE_BEFORE_POKE_DELAY: LazyLock<Histogram> = LazyLock
         &[],
         Some(exponential_buckets(1.0, 1.5, 25).unwrap()),
     )
-    .unwrap().with_label_values(&[""])
+    .unwrap().with_label_values(&[] as &[&str])
 });
 
 pub(crate) static PRESIGNATURE_ACCRUED_WAIT_DELAY: LazyLock<Histogram> = LazyLock::new(|| {
@@ -243,7 +243,7 @@ pub(crate) static PRESIGNATURE_ACCRUED_WAIT_DELAY: LazyLock<Histogram> = LazyLoc
         &[],
         Some(exponential_buckets(10.0, 1.5, 35).unwrap()),
     )
-    .unwrap().with_label_values(&[""])
+    .unwrap().with_label_values(&[] as &[&str])
 });
 
 pub(crate) static PRESIGNATURE_POKE_CPU_TIME: LazyLock<Histogram> = LazyLock::new(|| {
@@ -254,7 +254,7 @@ pub(crate) static PRESIGNATURE_POKE_CPU_TIME: LazyLock<Histogram> = LazyLock::ne
         Some(exponential_buckets(1.0, 1.5, 5).unwrap()),
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static PRESIGNATURE_POKES_CNT: LazyLock<Histogram> = LazyLock::new(|| {
@@ -265,7 +265,7 @@ pub(crate) static PRESIGNATURE_POKES_CNT: LazyLock<Histogram> = LazyLock::new(||
         Some(linear_buckets(0.0, 1.0, 30).unwrap()),
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 // Signature metrics
@@ -286,7 +286,7 @@ pub(crate) static NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS: LazyLock<Counter> =
             &[],
         )
         .unwrap()
-        .with_label_values(&[""])
+        .with_label_values(&[] as &[&str])
     });
 
 pub(crate) static SIGNATURE_GENERATOR_FAILURES: LazyLock<Counter> = LazyLock::new(|| {
@@ -296,7 +296,7 @@ pub(crate) static SIGNATURE_GENERATOR_FAILURES: LazyLock<Counter> = LazyLock::ne
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static SIGNATURE_GENERATOR_MINE_FAILURES: LazyLock<Counter> = LazyLock::new(|| {
@@ -306,7 +306,7 @@ pub(crate) static SIGNATURE_GENERATOR_MINE_FAILURES: LazyLock<Counter> = LazyLoc
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static SIGNATURE_GENERATOR_SUCCESS: LazyLock<Counter> = LazyLock::new(|| {
@@ -316,7 +316,7 @@ pub(crate) static SIGNATURE_GENERATOR_SUCCESS: LazyLock<Counter> = LazyLock::new
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static SIGNATURE_GENERATOR_MINE_SUCCESS: LazyLock<Counter> = LazyLock::new(|| {
@@ -326,7 +326,7 @@ pub(crate) static SIGNATURE_GENERATOR_MINE_SUCCESS: LazyLock<Counter> = LazyLock
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static SIGNATURE_BEFORE_POKE_DELAY: LazyLock<Histogram> = LazyLock::new(|| {
@@ -336,7 +336,7 @@ pub(crate) static SIGNATURE_BEFORE_POKE_DELAY: LazyLock<Histogram> = LazyLock::n
         &[],
         Some(exponential_buckets(1.0, 1.5, 25).unwrap()),
     )
-    .unwrap().with_label_values(&[""])
+    .unwrap().with_label_values(&[] as &[&str])
 });
 
 pub(crate) static SIGNATURE_ACCRUED_WAIT_DELAY: LazyLock<Histogram> = LazyLock::new(|| {
@@ -346,7 +346,7 @@ pub(crate) static SIGNATURE_ACCRUED_WAIT_DELAY: LazyLock<Histogram> = LazyLock::
         &[],
         Some(exponential_buckets(10.0, 1.5, 35).unwrap()),
     )
-    .unwrap().with_label_values(&[""])
+    .unwrap().with_label_values(&[] as &[&str])
 });
 
 pub(crate) static SIGNATURE_POKE_CPU_TIME: LazyLock<Histogram> = LazyLock::new(|| {
@@ -357,7 +357,7 @@ pub(crate) static SIGNATURE_POKE_CPU_TIME: LazyLock<Histogram> = LazyLock::new(|
         Some(exponential_buckets(1.0, 1.5, 5).unwrap()),
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static SIGNATURE_POKES_CNT: LazyLock<Histogram> = LazyLock::new(|| {
@@ -368,7 +368,7 @@ pub(crate) static SIGNATURE_POKES_CNT: LazyLock<Histogram> = LazyLock::new(|| {
         Some(linear_buckets(0.0, 1.0, 30).unwrap()),
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 // General protocol metrics
@@ -380,7 +380,7 @@ pub(crate) static PROTOCOL_LATENCY_ITER_TOTAL: LazyLock<Histogram> = LazyLock::n
         Some(exponential_buckets(0.001, 3.0, 20).unwrap()),
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static PROTOCOL_LATENCY_ITER_CRYPTO: LazyLock<Histogram> = LazyLock::new(|| {
@@ -391,7 +391,7 @@ pub(crate) static PROTOCOL_LATENCY_ITER_CRYPTO: LazyLock<Histogram> = LazyLock::
         Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static PROTOCOL_LATENCY_ITER_CONSENSUS: LazyLock<Histogram> = LazyLock::new(|| {
@@ -402,7 +402,7 @@ pub(crate) static PROTOCOL_LATENCY_ITER_CONSENSUS: LazyLock<Histogram> = LazyLoc
         Some(exponential_buckets(0.001, 2.0, 20).unwrap()),
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static PROTOCOL_ITER_CNT: LazyLock<Counter> = LazyLock::new(|| {
@@ -412,5 +412,5 @@ pub(crate) static PROTOCOL_ITER_CNT: LazyLock<Counter> = LazyLock::new(|| {
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });

@@ -11,7 +11,7 @@ pub(crate) static NODE_RUNNING: LazyLock<IntGauge> = LazyLock::new(|| {
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static PROCESS_START_TIME: LazyLock<IntGauge> = LazyLock::new(|| {
@@ -21,7 +21,7 @@ pub(crate) static PROCESS_START_TIME: LazyLock<IntGauge> = LazyLock::new(|| {
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static NODE_VERSION: LazyLock<IntGauge> = LazyLock::new(|| {
@@ -31,7 +31,7 @@ pub(crate) static NODE_VERSION: LazyLock<IntGauge> = LazyLock::new(|| {
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static CONFIGURATION_DIGEST: LazyLock<IntGauge> = LazyLock::new(|| {
@@ -41,5 +41,5 @@ pub(crate) static CONFIGURATION_DIGEST: LazyLock<IntGauge> = LazyLock::new(|| {
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });

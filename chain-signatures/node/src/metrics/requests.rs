@@ -23,7 +23,7 @@ pub(crate) static NUM_SIGN_REQUESTS_MINE: LazyLock<Counter> = LazyLock::new(|| {
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static NUM_UNIQUE_SIGN_REQUESTS: LazyLock<CounterVec> = LazyLock::new(|| {
@@ -79,7 +79,7 @@ pub(crate) static SIGN_QUEUE_SIZE: LazyLock<IntGauge> = LazyLock::new(|| {
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static BACKLOG_SIZE: LazyLock<prometheus::IntGaugeVec> = LazyLock::new(|| {

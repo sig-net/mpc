@@ -23,7 +23,7 @@ pub(crate) static NUM_TRIPLES_MINE: LazyLock<IntGauge> = LazyLock::new(|| {
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static NUM_TRIPLES_TOTAL: LazyLock<IntGauge> = LazyLock::new(|| {
@@ -33,7 +33,7 @@ pub(crate) static NUM_TRIPLES_TOTAL: LazyLock<IntGauge> = LazyLock::new(|| {
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static NUM_PRESIGNATURES_MINE: LazyLock<IntGauge> = LazyLock::new(|| {
@@ -43,7 +43,7 @@ pub(crate) static NUM_PRESIGNATURES_MINE: LazyLock<IntGauge> = LazyLock::new(|| 
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
 
 pub(crate) static NUM_PRESIGNATURES_TOTAL: LazyLock<IntGauge> = LazyLock::new(|| {
@@ -53,5 +53,5 @@ pub(crate) static NUM_PRESIGNATURES_TOTAL: LazyLock<IntGauge> = LazyLock::new(||
         &[],
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });

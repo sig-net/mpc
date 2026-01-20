@@ -33,5 +33,5 @@ pub(crate) static ETH_BLOCK_RECEIPT_LATENCY: LazyLock<Histogram> = LazyLock::new
         Some(exponential_buckets(5.0, 1.5, 20).unwrap()),
     )
     .unwrap()
-    .with_label_values(&[""])
+    .with_label_values(&[] as &[&str])
 });
