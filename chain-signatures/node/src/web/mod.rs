@@ -9,7 +9,6 @@ pub mod debug;
 use self::error::Error;
 use crate::backlog::{Backlog, Checkpoint};
 use crate::metrics::messaging::WEB_ENDPOINT_LATENCY;
-use crate::metrics::node_account_id;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus, ResharingStatus};
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
 use crate::protocol::{Chain, MessageChannel};
@@ -115,7 +114,7 @@ async fn msg(
         });
     }
     WEB_ENDPOINT_LATENCY
-        .with_label_values(&["msg", node_account_id()])
+        .with_label_values(&["msg"])
         .observe(start.elapsed().as_millis() as f64);
 }
 
@@ -205,7 +204,7 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
         }
     };
     WEB_ENDPOINT_LATENCY
-        .with_label_values(&["state", node_account_id()])
+        .with_label_values(&["state"])
         .observe(start.elapsed().as_millis() as f64);
     result
 }
@@ -276,7 +275,7 @@ async fn sync(
     let start = Instant::now();
     state.sync_channel.request_update(update).await;
     WEB_ENDPOINT_LATENCY
-        .with_label_values(&["sync", node_account_id()])
+        .with_label_values(&["sync"])
         .observe(start.elapsed().as_millis() as f64);
     Ok(Json(()))
 }
@@ -368,7 +367,7 @@ async fn checkpoint(
     }
 
     WEB_ENDPOINT_LATENCY
-        .with_label_values(&["checkpoint", node_account_id()])
+        .with_label_values(&["checkpoint"])
         .observe(start.elapsed().as_millis() as f64);
 
     Ok(Cbor(resp))

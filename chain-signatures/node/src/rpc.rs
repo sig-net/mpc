@@ -2,7 +2,6 @@ use crate::backlog::Backlog;
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
-use crate::metrics::node_account_id;
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, SignRequestType};
@@ -986,10 +985,10 @@ async fn execute_publish(client: ChainClient, mut action: PublishAction, backlog
                 .inc();
         }
         crate::metrics::requests::SIGN_TOTAL_LATENCY
-            .with_label_values(&[chain_str, node_account_id()])
+            .with_label_values(&[chain_str])
             .observe(elapsed.as_secs_f64());
         crate::metrics::requests::SIGN_RESPOND_LATENCY
-            .with_label_values(&[chain_str, node_account_id()])
+            .with_label_values(&[chain_str])
             .observe(action.timestamp.elapsed().as_secs_f64());
     }
 
@@ -1449,11 +1448,11 @@ async fn execute_batch_publish(
                         .inc();
                 }
                 crate::metrics::requests::SIGN_TOTAL_LATENCY
-                    .with_label_values(&[chain.as_str(), node_account_id()])
+                    .with_label_values(&[chain.as_str()])
                     .observe(elapsed.as_secs_f64());
             }
             crate::metrics::requests::SIGN_RESPOND_LATENCY
-                .with_label_values(&[Chain::Ethereum.as_str(), node_account_id()])
+                .with_label_values(&[Chain::Ethereum.as_str()])
                 .observe(start.elapsed().as_secs_f64());
             actions.clear();
             break;

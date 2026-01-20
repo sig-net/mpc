@@ -3,7 +3,7 @@ pub mod indexer_eth_helios;
 
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
-use crate::metrics::node_account_id;
+
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::respond_bidirectional::CompletedTx;
@@ -545,7 +545,7 @@ fn send_indexed_requests_to_sign_queue(
             match sign_tx.send(Sign::Request(request)).await {
                 Ok(_) => {
                     crate::metrics::requests::NUM_SIGN_REQUESTS
-                        .with_label_values(&[Chain::Ethereum.as_str(), node_account_id()])
+                        .with_label_values(&[Chain::Ethereum.as_str()])
                         .inc();
                 }
                 Err(err) => {
@@ -877,7 +877,7 @@ impl EthereumIndexer {
                 }
             }
             crate::metrics::indexers::LATEST_BLOCK_NUMBER
-                .with_label_values(&[Chain::Ethereum.as_str(), node_account_id()])
+                .with_label_values(&[Chain::Ethereum.as_str()])
                 .set(block_number as i64);
         }
     }
@@ -932,7 +932,6 @@ impl EthereumIndexer {
         let start = Instant::now();
         let block_receipts_result = client.get_block_receipts(block_number.into()).await;
         crate::metrics::indexers::ETH_BLOCK_RECEIPT_LATENCY
-            .with_label_values(&[node_account_id()])
             .observe(start.elapsed().as_millis() as f64);
         let Some(block_receipts) = block_receipts_result.map_err(|err| {
             anyhow::anyhow!(
@@ -1005,7 +1004,7 @@ impl EthereumIndexer {
 
             for request_timestamp in timestamps {
                 crate::metrics::indexers::INDEXER_DELAY
-                    .with_label_values(&[Chain::Ethereum.as_str(), node_account_id()])
+                    .with_label_values(&[Chain::Ethereum.as_str()])
                     .observe(
                         crate::util::duration_between_unix(block_timestamp, request_timestamp)
                             .as_secs() as f64,

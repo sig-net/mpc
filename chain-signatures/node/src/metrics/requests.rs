@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use prometheus::{exponential_buckets, CounterVec, HistogramVec};
+use prometheus::{exponential_buckets, Counter, CounterVec, HistogramVec, IntGauge};
 
 use super::{
     try_create_counter_vec_with_node_account_id, try_create_counter_vec_with_node_and_version,
@@ -16,13 +16,14 @@ pub(crate) static NUM_SIGN_REQUESTS: LazyLock<CounterVec> = LazyLock::new(|| {
     .unwrap()
 });
 
-pub(crate) static NUM_SIGN_REQUESTS_MINE: LazyLock<CounterVec> = LazyLock::new(|| {
+pub(crate) static NUM_SIGN_REQUESTS_MINE: LazyLock<Counter> = LazyLock::new(|| {
     try_create_counter_vec_with_node_account_id(
         "multichain_sign_requests_count_mine",
         "number of multichain sign requests, marked by sign requests indexed",
         &[],
     )
     .unwrap()
+    .with_label_values(&[""])
 });
 
 pub(crate) static NUM_UNIQUE_SIGN_REQUESTS: LazyLock<CounterVec> = LazyLock::new(|| {
@@ -71,13 +72,14 @@ pub(crate) static SIGN_RESPOND_LATENCY: LazyLock<Histogram> = LazyLock::new(|| {
     )
 });
 
-pub(crate) static SIGN_QUEUE_SIZE: LazyLock<prometheus::IntGaugeVec> = LazyLock::new(|| {
+pub(crate) static SIGN_QUEUE_SIZE: LazyLock<IntGauge> = LazyLock::new(|| {
     super::try_create_int_gauge_vec_with_node_account_id(
         "multichain_sign_queue_size",
         "number of requests in sign queue",
         &[],
     )
     .unwrap()
+    .with_label_values(&[""])
 });
 
 pub(crate) static BACKLOG_SIZE: LazyLock<prometheus::IntGaugeVec> = LazyLock::new(|| {

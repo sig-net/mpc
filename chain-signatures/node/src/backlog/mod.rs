@@ -2,7 +2,6 @@ pub mod selection;
 
 use self::selection::select_checkpoints;
 use crate::mesh::MeshState;
-use crate::metrics::node_account_id;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, SignRequestType};
 use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PendingRequestStatus};
@@ -307,7 +306,7 @@ impl Backlog {
 
     fn observe_backlog_size(&self, chain: Chain, len: usize) {
         crate::metrics::requests::BACKLOG_SIZE
-            .with_label_values(&[chain.as_str(), node_account_id()])
+            .with_label_values(&[chain.as_str()])
             .set(len as i64);
     }
 

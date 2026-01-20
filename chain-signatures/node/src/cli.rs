@@ -2,7 +2,6 @@ use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
 use crate::mesh::Mesh;
-use crate::metrics::node_account_id;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
@@ -204,9 +203,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sign_sk.clone(),
                 eth.clone(),
             );
-            crate::metrics::nodes::CONFIGURATION_DIGEST
-                .with_label_values(&[node_account_id()])
-                .set(digest);
+            crate::metrics::nodes::CONFIGURATION_DIGEST.set(digest);
 
             let (sign_tx, sign_rx) = mpsc::channel(16384);
 
