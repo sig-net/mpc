@@ -1154,7 +1154,7 @@ impl SignatureSpawner {
                     "signature request delayed beyond expected response time"
                 );
                 crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_DELAYED
-                    .with_label_values(&[chain.as_str(), node_account_id()])
+                    .with_label_values(&[chain.as_str()])
                     .inc();
             });
             self.delayed_watchers.insert(sign_id, watcher);

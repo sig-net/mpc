@@ -982,7 +982,7 @@ async fn execute_publish(client: ChainClient, mut action: PublishAction, backlog
         let elapsed = action.indexed.timestamp_sign_queue.elapsed();
         if elapsed.as_secs() <= chain.expected_response_time_secs() {
             crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_IN_TIME
-                .with_label_values(&[chain_str, node_account_id()])
+                .with_label_values(&[chain_str])
                 .inc();
         }
         crate::metrics::requests::SIGN_TOTAL_LATENCY
@@ -1445,7 +1445,7 @@ async fn execute_batch_publish(
                 let elapsed = action.indexed.timestamp_sign_queue.elapsed();
                 if elapsed.as_secs() <= chain.expected_response_time_secs() {
                     crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_IN_TIME
-                        .with_label_values(&[chain.as_str(), node_account_id()])
+                        .with_label_values(&[chain.as_str()])
                         .inc();
                 }
                 crate::metrics::requests::SIGN_TOTAL_LATENCY

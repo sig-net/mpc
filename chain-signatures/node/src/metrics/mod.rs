@@ -12,12 +12,18 @@ pub mod requests;
 pub mod storage;
 
 static NODE_ACCOUNT_ID: OnceLock<String> = OnceLock::new();
+static VERSION: OnceLock<String> = OnceLock::new();
 
-pub fn init_node_account_id(account_id: &AccountId) {
+pub fn init_metrics(account_id: &AccountId, version: &str) {
     if let Err(existing) = NODE_ACCOUNT_ID.set(account_id.to_string()) {
         // If set twice with a different value it is a programmer error; keep simple and panic.
         if existing.as_str() != account_id.as_str() {
             panic!("node account id already set to a different value");
+        }
+    }
+    if let Err(existing) = VERSION.set(version.to_string()) {
+        if existing.as_str() != version {
+            panic!("version already set to a different value");
         }
     }
 }
@@ -27,6 +33,13 @@ pub fn node_account_id() -> &'static str {
         .get()
         .map(String::as_str)
         .unwrap_or("default-account.near")
+}
+
+pub fn version() -> &'static str {
+    VERSION
+        .get()
+        .map(String::as_str)
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
 pub fn try_create_int_gauge_vec(
@@ -48,6 +61,22 @@ pub fn try_create_counter_vec(
 ) -> Result<prometheus::CounterVec> {
     check_metric_multichain_prefix(name)?;
     let opts = Opts::new(name, help);
+    let counter = prometheus::CounterVec::new(opts, labels)?;
+    prometheus::register(Box::new(counter.clone()))?;
+    Ok(counter)
+}
+
+pub fn try_create_counter_vec_with_const_labels(
+    name: &str,
+    help: &str,
+    labels: &[&str],
+    const_labels: &[(&str, &str)],
+) -> Result<prometheus::CounterVec> {
+    check_metric_multichain_prefix(name)?;
+    let mut opts = Opts::new(name, help);
+    for (key, value) in const_labels {
+        opts = opts.const_label((*key).to_string(), (*value).to_string());
+    }
     let counter = prometheus::CounterVec::new(opts, labels)?;
     prometheus::register(Box::new(counter.clone()))?;
     Ok(counter)

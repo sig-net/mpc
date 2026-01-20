@@ -2,7 +2,10 @@ use std::sync::LazyLock;
 
 use prometheus::{exponential_buckets, CounterVec, HistogramVec};
 
-use super::{try_create_counter_vec, try_create_histogram_vec, Histogram};
+use super::{
+    try_create_counter_vec, try_create_counter_vec_with_const_labels, try_create_histogram_vec,
+    Histogram,
+};
 
 pub(crate) static NUM_SIGN_REQUESTS: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec(
@@ -32,19 +35,27 @@ pub(crate) static NUM_UNIQUE_SIGN_REQUESTS: LazyLock<CounterVec> = LazyLock::new
 });
 
 pub(crate) static NUM_SIGN_REQUESTS_MINE_IN_TIME: LazyLock<CounterVec> = LazyLock::new(|| {
-    try_create_counter_vec(
+    try_create_counter_vec_with_const_labels(
         "multichain_sign_requests_success",
         "number of mine sign requests with in time response",
-        &["chain", "node_account_id"],
+        &["chain"],
+        &[
+            ("node_account_id", super::node_account_id()),
+            ("version", super::version()),
+        ],
     )
     .unwrap()
 });
 
 pub(crate) static NUM_SIGN_REQUESTS_MINE_DELAYED: LazyLock<CounterVec> = LazyLock::new(|| {
-    try_create_counter_vec(
+    try_create_counter_vec_with_const_labels(
         "multichain_sign_requests_delayed",
         "number of mine sign requests that are delayed",
-        &["chain", "node_account_id"],
+        &["chain"],
+        &[
+            ("node_account_id", super::node_account_id()),
+            ("version", super::version()),
+        ],
     )
     .unwrap()
 });
