@@ -361,7 +361,6 @@ impl MessageInbox {
                     self.publish(messages).await;
 
                     crate::metrics::messaging::NUM_RECEIVED_ENCRYPTED_TOTAL
-
                         .inc_by(messages_len as f64);
                 }
             }

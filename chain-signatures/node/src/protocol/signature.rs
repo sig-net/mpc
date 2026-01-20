@@ -760,6 +760,11 @@ impl SignGenerator {
         participants: Vec<Participant>,
         node_account_id: &str,
     ) -> Result<Self, InitializationError> {
+        #[cfg(feature = "debug-page")]
+        let node_account_id = node_account_id;
+        #[cfg(not(feature = "debug-page"))]
+        let _ = node_account_id;
+
         let presignature_id = presignature.id();
         let taken = presignature
             .fetch(Duration::from_millis(ctx.cfg.signature.generation_timeout))

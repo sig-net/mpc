@@ -553,7 +553,10 @@ impl PresignatureSpawner {
         let threshold = self.threshold;
         let epoch = self.epoch;
         let msg = self.msg.clone();
+        #[cfg(feature = "debug-page")]
         let node_account_id = self.node_account_id.clone();
+        #[cfg(not(feature = "debug-page"))]
+        let _ = self.node_account_id.clone();
         let keygen_out = KeygenOutput {
             private_share: self.private_share,
             public_key: self.public_key,

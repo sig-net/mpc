@@ -65,6 +65,11 @@ impl TripleGenerator {
         msg: &MessageChannel,
         node_account_id: &str,
     ) -> Result<Self, InitializationError> {
+        #[cfg(feature = "debug-page")]
+        let node_account_id = node_account_id;
+        #[cfg(not(feature = "debug-page"))]
+        let _ = node_account_id;
+
         let mut participants = participants.to_vec();
         // Participants can be out of order, so let's sort them before doing anything. Critical
         // for the triple_is_mine check:
