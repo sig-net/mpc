@@ -758,12 +758,12 @@ impl SignGenerator {
         indexed: IndexedSignRequest,
         presignature: PendingPresignature,
         participants: Vec<Participant>,
-        node_account_id: &str,
+        _node_account_id: &str,
     ) -> Result<Self, InitializationError> {
         #[cfg(feature = "debug-page")]
-        let node_account_id = node_account_id;
+        let node_account_id = _node_account_id;
         #[cfg(not(feature = "debug-page"))]
-        let _ = node_account_id;
+        let _ = _node_account_id;
 
         let presignature_id = presignature.id();
         let taken = presignature
