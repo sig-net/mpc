@@ -329,7 +329,7 @@ type Result<T> = anyhow::Result<T>;
 
 pub async fn run(
     sol: Option<SolConfig>,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    sign_tx: mpsc::Sender<crate::protocol::signature::Sign>,
     node_near_account_id: AccountId,
     backlog: Backlog,
     mut contract_watcher: ContractStateWatcher,
@@ -375,6 +375,7 @@ pub async fn run(
     let sol_for_respond = sol.clone();
     let backlog_for_respond = backlog.clone();
     let contract_watcher_for_respond = contract_watcher.clone();
+    let sign_tx_for_respond = sign_tx.clone();
 
     tokio::spawn(subscribe_and_process_sign_events(
         program_id,
@@ -395,6 +396,7 @@ pub async fn run(
                 &sol_for_respond.rpc_ws_url,
                 backlog_for_respond.clone(),
                 contract_watcher_for_respond.clone(),
+                sign_tx_for_respond.clone(),
             )
             .await
             {
@@ -431,7 +433,7 @@ pub async fn run(
 
 async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>(
     program: &Program<C>,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    sign_tx: mpsc::Sender<crate::protocol::signature::Sign>,
     node_near_account_id: AccountId,
     total_timeout: Duration,
     backlog: Backlog,
@@ -470,7 +472,7 @@ async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>
 async fn process_anchor_sign_event(
     sign_event: SignatureEventBox,
     tx_sig: Vec<u8>,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    sign_tx: mpsc::Sender<crate::protocol::signature::Sign>,
     node_near_account_id: AccountId,
     total_timeout: Duration,
     backlog: Backlog,
@@ -494,7 +496,7 @@ async fn subscribe_and_process_sign_events(
     program_id: Pubkey,
     rpc_url: String,
     ws_url: String,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    sign_tx: mpsc::Sender<crate::protocol::signature::Sign>,
     node_near_account_id: AccountId,
     total_timeout: Duration,
     backlog: Backlog,
@@ -840,6 +842,7 @@ async fn subscribe_to_program_respond_events(
     ws_url: &str,
     backlog: Backlog,
     mut contract_watcher: ContractStateWatcher,
+    sign_tx: mpsc::Sender<crate::protocol::Sign>,
 ) -> Result<()> {
     let rpc_client = RpcClient::new(rpc_url.to_string());
     let pubsub_client = PubsubClient::new(ws_url).await?;

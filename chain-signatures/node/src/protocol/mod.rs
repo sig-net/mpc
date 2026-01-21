@@ -47,7 +47,7 @@ pub struct MpcSignProtocol {
     pub(crate) secret_storage: SecretNodeStorageBox,
     pub(crate) triple_storage: TripleStorage,
     pub(crate) presignature_storage: PresignatureStorage,
-    pub(crate) sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
+    pub(crate) sign_rx: Arc<RwLock<mpsc::Receiver<crate::protocol::Sign>>>,
     pub(crate) generating: mpsc::Receiver<GeneratingMessage>,
     pub(crate) resharing: mpsc::Receiver<ResharingMessage>,
     pub(crate) ready: mpsc::Receiver<ReadyMessage>,

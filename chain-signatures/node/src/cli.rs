@@ -4,13 +4,13 @@ use crate::gcp::GcpService;
 use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
+use crate::protocol::signature::SignQueue;
 use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
-use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
+use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
 use crate::storage::checkpoint_storage::CheckpointStorage;
-use crate::storage::triple_storage::TriplePair;
 use crate::{indexer, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, storage, web};
 
 use clap::Parser;

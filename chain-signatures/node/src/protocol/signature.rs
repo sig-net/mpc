@@ -111,7 +111,7 @@ pub struct SignRequest {
 
 pub struct SignQueue {
     me: Participant,
-    sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
+    sign_rx: Arc<RwLock<mpsc::Receiver<crate::protocol::Sign>>>,
     /// The requests that belong to us where we will the propose the signature to the chain.
     my_requests: VecDeque<SignId>,
     /// Set of requests that failed to be processed during signature generation and need to
@@ -127,13 +127,16 @@ pub struct SignQueue {
 
 impl SignQueue {
     pub fn channel() -> (
-        mpsc::Sender<IndexedSignRequest>,
-        mpsc::Receiver<IndexedSignRequest>,
+        mpsc::Sender<crate::protocol::Sign>,
+        mpsc::Receiver<crate::protocol::Sign>,
     ) {
         mpsc::channel(MAX_SIGN_REQUESTS)
     }
 
-    pub fn new(me: Participant, sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>) -> Self {
+    pub fn new(
+        me: Participant,
+        sign_rx: Arc<RwLock<mpsc::Receiver<crate::protocol::Sign>>>,
+    ) -> Self {
         Self {
             me,
             sign_rx,
@@ -242,7 +245,7 @@ impl SignQueue {
 
         // try and organize the new incoming requests.
         let mut sign_rx = self.sign_rx.write().await;
-        while let Ok(indexed) = {
+        while let Ok(Sign::Request(indexed)) = {
             match sign_rx.try_recv() {
                 err @ Err(TryRecvError::Disconnected) => {
                     tracing::error!("sign queue channel disconnected");
@@ -651,14 +654,12 @@ impl SignatureGenerator {
                     if let SignRequestType::SignBidirectional(event) =
                         &self.request.indexed.sign_request_type
                     {
-                        let source_chain = self.request.indexed.chain;
-
                         // Note: The promotion to Bidirectional will happen when we receive the
                         // SignatureRespondedEvent in the Solana indexer, which has the signature data.
                         // For now, we just complete the signature generation. The indexer will handle the promotion.
                         tracing::debug!(
                             ?sign_id,
-                            source_chain = ?self.indexed.chain,
+                            source_chain = ?self.request.indexed.chain,
                             target_chain = ?event.dest(),
                             "generated signature for bidirectional request, awaiting indexer to process"
                         );
@@ -719,7 +720,7 @@ impl SignatureSpawner {
         threshold: usize,
         public_key: PublicKey,
         epoch: u64,
-        sign_rx: Arc<RwLock<mpsc::Receiver<IndexedSignRequest>>>,
+        sign_rx: Arc<RwLock<mpsc::Receiver<crate::protocol::Sign>>>,
         presignatures: &PresignatureStorage,
         msg: MessageChannel,
         rpc: RpcChannel,

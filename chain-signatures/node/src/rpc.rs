@@ -1704,9 +1704,9 @@ async fn try_publish_hydration(
     signature: &Signature,
     near_account_id: &AccountId,
 ) -> Result<(), ()> {
-    let chain = action.indexed.chain;
-    let sign_id = action.indexed.id;
-    let request_ids = [action.indexed.id.request_id];
+    let chain = action.request.indexed.chain;
+    let sign_id = action.request.indexed.id;
+    let request_ids = [action.request.indexed.id.request_id];
 
     tracing::info!(
         ?sign_id,
@@ -1716,9 +1716,9 @@ async fn try_publish_hydration(
         "Hydration: publishing signature"
     );
 
-    match &action.indexed.sign_request_type {
+    match &action.request.indexed.sign_request_type {
         SignRequestType::Sign | SignRequestType::SignBidirectional(_) => {
-            hyd.call_respond(&action.indexed.id, signature)
+            hyd.call_respond(&action.request.indexed.id, signature)
                 .await
                 .map_err(|e| {
                     tracing::error!(?sign_id, ?e, "Hydration: failed to publish signature");
@@ -1738,7 +1738,11 @@ async fn try_publish_hydration(
                 "try_publish_hydration: entering RespondBidirectional arm"
             );
             let tx_hash = hyd
-                .call_respond_bidirectional(&action.indexed.id, serialized_output, signature)
+                .call_respond_bidirectional(
+                    &action.request.indexed.id,
+                    serialized_output,
+                    signature,
+                )
                 .await
                 .map_err(|e| {
                     tracing::error!(
@@ -1756,18 +1760,18 @@ async fn try_publish_hydration(
         }
     }
 
-    crate::metrics::requests::NUM_SIGN_SUCCESS
+    crate::metrics::NUM_SIGN_SUCCESS
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .inc();
     let sign_latency_in_secs = crate::util::duration_between_unix(
-        action.indexed.unix_timestamp_indexed,
+        action.request.indexed.unix_timestamp_indexed,
         crate::util::current_unix_timestamp(),
     )
     .as_secs();
-    crate::metrics::requests::SIGN_TOTAL_LATENCY
+    crate::metrics::SIGN_TOTAL_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(sign_latency_in_secs as f64);
-    crate::metrics::requests::SIGN_RESPOND_LATENCY
+    crate::metrics::SIGN_RESPOND_LATENCY
         .with_label_values(&[chain.as_str(), near_account_id.as_str()])
         .observe(timestamp.elapsed().as_secs_f64());
 

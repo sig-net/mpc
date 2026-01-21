@@ -19,9 +19,10 @@ use mpc_node::mesh::MeshState;
 use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes, Votes};
 use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
 use mpc_node::protocol::message::{MessageInbox, MessageOutbox};
+use mpc_node::protocol::signature::SignQueue;
 use mpc_node::protocol::state::NodeKeyInfo;
 use mpc_node::protocol::triple::Triple;
-use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState, SignQueue};
+use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
 use mpc_node::storage::{

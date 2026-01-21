@@ -138,7 +138,7 @@ impl NearIndexer {
 struct Context {
     mpc_contract_id: AccountId,
     node_account_id: AccountId,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    sign_tx: mpsc::Sender<crate::protocol::Sign>,
     indexer: NearIndexer,
     rpc_client: near_fetch::Client,
     backlog: Backlog,
@@ -191,7 +191,11 @@ async fn poll_pending_requests(ctx: &Context) -> anyhow::Result<()> {
             sign_id = ?request.id,
             "sending new sign request to processing queue"
         );
-        if let Err(err) = ctx.sign_tx.send(request).await {
+        if let Err(err) = ctx
+            .sign_tx
+            .send(crate::protocol::Sign::Request(request))
+            .await
+        {
             tracing::error!(?err, "failed to send the sign request into sign queue");
         } else {
             crate::metrics::NUM_SIGN_REQUESTS
@@ -214,7 +218,7 @@ pub fn run(
     options: &Options,
     mpc_contract_id: &AccountId,
     node_account_id: &AccountId,
-    sign_tx: mpsc::Sender<IndexedSignRequest>,
+    sign_tx: mpsc::Sender<crate::protocol::Sign>,
     rpc_client: near_fetch::Client,
     backlog: Backlog,
 ) -> anyhow::Result<(JoinHandle<anyhow::Result<()>>, NearIndexer)> {

@@ -492,6 +492,6 @@ fn parse_borsh_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<Abi
 #[derive(Clone)]
 pub struct SignBidirectionalSignature {
     pub public_key: mpc_crypto::PublicKey,
-    pub request: SignRequest,
+    pub request: IndexedSignRequest,
     pub signature: Signature,
 }

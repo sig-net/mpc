@@ -173,9 +173,21 @@ async fn test_basic_sign() {
 
     tracing::info!("sending requests now");
     let request = sign_request(0);
-    network[0].sign_tx.send(request.clone()).await.unwrap();
-    network[1].sign_tx.send(request.clone()).await.unwrap();
-    network[2].sign_tx.send(request.clone()).await.unwrap();
+    network[0]
+        .sign_tx
+        .send(mpc_node::protocol::Sign::Request(request.clone()))
+        .await
+        .unwrap();
+    network[1]
+        .sign_tx
+        .send(mpc_node::protocol::Sign::Request(request.clone()))
+        .await
+        .unwrap();
+    network[2]
+        .sign_tx
+        .send(mpc_node::protocol::Sign::Request(request.clone()))
+        .await
+        .unwrap();
 
     let timeout = Duration::from_secs(10);
 
