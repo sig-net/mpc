@@ -889,7 +889,7 @@ async fn test_signature_message_count() {
     }
 }
 
-/// Check if presignatures are produced normally when one of three nodes is offline.
+/// Check if presignatures are produced normally when one of seven nodes is offline.
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 async fn test_presignature_with_offline_node() {
     let offline_node_filter: MessageFilter = Box::new(move |(_, _)| false);
@@ -906,23 +906,26 @@ async fn test_presignature_with_offline_node() {
         .build()
         .await;
 
-    let result = tokio::time::timeout(
-        Duration::from_secs(100),
-        network.wait_for_presignatures(target_num as usize),
-    )
-    .await;
-
-    result.expect("should have enough presignatures eventually");
+    // all nodes except the offline node should generate a presignature
+    tokio::time::timeout(Duration::from_secs(100), async {
+        for node_id in 1..7 {
+            network[node_id]
+                .wait_for_presignatures(target_num as usize)
+                .await
+        }
+    })
+    .await
+    .expect("should have enough presignatures eventually");
 }
 
-/// Check if triples are produced normally when one of three nodes is offline.
+/// Check if triples are produced normally when one of seven nodes is offline.
 #[test_log::test(tokio::test(flavor = "multi_thread"))]
 async fn test_triple_with_offline_node() {
     let offline_node_filter: MessageFilter = Box::new(move |(_, _)| false);
 
     // Must be small enough to not take too long. (generating triples is
     // computationally heavy)
-    let target_num = 3;
+    let target_num = 1;
 
     let network = MpcFixtureBuilder::new(7, 4)
         .only_generate_triples()
@@ -932,10 +935,12 @@ async fn test_triple_with_offline_node() {
         .build()
         .await;
 
-    tokio::time::timeout(
-        Duration::from_secs(100),
-        network.wait_for_triples(target_num as usize),
-    )
+    // all nodes except the offline node should generate a triple
+    tokio::time::timeout(Duration::from_secs(100), async {
+        for node_id in 1..7 {
+            network[node_id].wait_for_triples(target_num as usize).await;
+        }
+    })
     .await
     .expect("should have enough triples eventually");
 }
