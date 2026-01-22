@@ -74,7 +74,7 @@ pub(crate) static NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_OWNED_SUCCESS: LazyLoc
         try_create_counter_vec_with_node_account_id(
             "multichain_num_total_historical_triple_generations_owned_success",
             "number of successful triple generators that was owned historically on the node",
-            &["node_account_id"],
+            &[],
         )
         .unwrap()
         .with_label_values(&[] as &[&str])
@@ -94,7 +94,7 @@ pub(crate) static TRIPLE_GENERATOR_OWNED_FAILURES: LazyLock<Counter> = LazyLock:
     try_create_counter_vec_with_node_account_id(
         "multichain_triple_generator_owned_failures",
         "owned triple generator failures",
-        &["node_account_id"],
+        &[],
     )
     .unwrap()
     .with_label_values(&[] as &[&str])
