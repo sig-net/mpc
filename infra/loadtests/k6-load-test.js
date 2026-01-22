@@ -1,5 +1,5 @@
 import http from 'k6/http';
-import { check, fail } from 'k6';
+import { check } from 'k6';
 
 const PINGER_URL = "https://contract-ping.sig.network/ping";
 
@@ -8,9 +8,9 @@ const strategies = {
     scenarios: {
       smoke: {
         executor: 'constant-arrival-rate',
-        rate: 6,
-        timeUnit: '1m',
-        preAllocatedVUs: 1,
+        rate: 0.1,
+        timeUnit: '1s',
+        preAllocatedVUs: 2,
         maxVUs: 10,
       },
     },
@@ -23,10 +23,10 @@ const strategies = {
     scenarios: {
       smoke: {
         executor: 'constant-arrival-rate',
-        rate: 60,
-        timeUnit: '1m',
-        preAllocatedVUs: 2,
-        maxVUs: 20,
+        rate: 1,
+        timeUnit: '1s',
+        preAllocatedVUs: 5,
+        maxVUs: 50,
       },
     },
     thresholds: {
@@ -38,10 +38,10 @@ const strategies = {
     scenarios: {
       smoke: {
         executor: 'constant-arrival-rate',
-        rate: 300,
-        timeUnit: '1m',
-        preAllocatedVUs: 10,
-        maxVUs: 50,
+        rate: 5,
+        timeUnit: '1s',
+        preAllocatedVUs: 20,
+        maxVUs: 100,
       },
     },
     thresholds: {
@@ -53,10 +53,10 @@ const strategies = {
     scenarios: {
       smoke: {
         executor: 'constant-arrival-rate',
-        rate: 600,
-        timeUnit: '1m',
-        preAllocatedVUs: 20,
-        maxVUs: 100,
+        rate: 10,
+        timeUnit: '1s',
+        preAllocatedVUs: 40,
+        maxVUs: 200,
       },
     },
     thresholds: {
