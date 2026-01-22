@@ -20,7 +20,6 @@ use crate::rpc::ContractStateWatcher;
 use super::contract::primitives::{ParticipantMap, Participants};
 use super::presignature::PresignatureId;
 use super::triple::TripleId;
-use crate::metrics::node_account_id;
 use crate::node_client::NodeClient;
 use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::Config;
@@ -362,7 +361,6 @@ impl MessageInbox {
                     self.publish(messages).await;
 
                     crate::metrics::messaging::NUM_RECEIVED_ENCRYPTED_TOTAL
-                        .with_label_values(&[node_account_id()])
                         .inc_by(messages_len as f64);
                 }
             }
@@ -856,37 +854,19 @@ impl MessageOutbox {
         let start = Instant::now();
         let timeout = Duration::from_millis(cfg.message_timeout);
 
-        let msg_send_delay_metric = crate::metrics::messaging::MSG_CLIENT_SEND_DELAY
-            .with_label_values(&[node_account_id()]);
-        let num_send_encrypted_failure_metric =
-            crate::metrics::messaging::NUM_SEND_ENCRYPTED_FAILURE
-                .with_label_values(&[node_account_id()]);
-        let send_encrypted_latency_metric = crate::metrics::messaging::SEND_ENCRYPTED_LATENCY
-            .with_label_values(&[node_account_id()]);
-        let failed_send_encrypted_latency_metric =
-            crate::metrics::messaging::FAILED_SEND_ENCRYPTED_LATENCY
-                .with_label_values(&[node_account_id()]);
-
         for ((_from, to), encrypted) in encrypted {
             for (encrypted_partition, timestamp, message_len) in encrypted {
                 // guaranteed to unwrap due to our previous loop check:
                 let info = participants.get(&to).unwrap();
                 let url = info.url.clone();
 
-                crate::metrics::messaging::NUM_SEND_ENCRYPTED_TOTAL
-                    .with_label_values(&[node_account_id()])
-                    .inc_by(message_len as f64);
-
-                let msg_send_delay_metric = msg_send_delay_metric.clone();
-                let num_send_encrypted_failure_metric = num_send_encrypted_failure_metric.clone();
-                let send_encrypted_latency_metric = send_encrypted_latency_metric.clone();
-                let failed_send_encrypted_latency_metric =
-                    failed_send_encrypted_latency_metric.clone();
+                crate::metrics::messaging::NUM_SEND_ENCRYPTED_TOTAL.inc_by(message_len as f64);
 
                 let client = client.clone();
                 tokio::spawn(async move {
                     let instant = Instant::now();
-                    msg_send_delay_metric.observe((instant - timestamp).as_millis() as f64);
+                    crate::metrics::messaging::MSG_CLIENT_SEND_DELAY
+                        .observe((instant - timestamp).as_millis() as f64);
                     let payload = &[&encrypted_partition];
                     let timeout = tokio::time::sleep(timeout);
                     tokio::pin!(timeout);
@@ -903,7 +883,7 @@ impl MessageOutbox {
                             }
                             result = client.msg(&url, payload) => {
                                 let Err(err) = result else {
-                                    send_encrypted_latency_metric.observe(start.elapsed().as_millis() as f64);
+                                    crate::metrics::messaging::SEND_ENCRYPTED_LATENCY.observe(start.elapsed().as_millis() as f64);
                                     break;
                                 };
 
@@ -911,8 +891,8 @@ impl MessageOutbox {
                                     ?to, ?url, elapsed = ?attempt_timestamp.elapsed(), ?err,
                                     "outbox: failed to send messages, retrying...",
                                 );
-                                num_send_encrypted_failure_metric.inc_by(message_len as f64);
-                                failed_send_encrypted_latency_metric
+                                crate::metrics::messaging::NUM_SEND_ENCRYPTED_FAILURE.inc_by(message_len as f64);
+                                crate::metrics::messaging::FAILED_SEND_ENCRYPTED_LATENCY
                                     .observe(attempt_timestamp.elapsed().as_millis() as f64);
                             }
                         }

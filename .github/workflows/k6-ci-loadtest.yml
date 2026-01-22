@@ -17,13 +17,19 @@ on:
       lt_strategy:
         type: choice
         options:
-          - constant_low_rate_1h
-          - constant_medium_rate_1h
-          - constant_high_rate_1h
-          - ramping_low_rate_1h
-          - ramping_medium_rate_1h
-          - ramping_high_rate_1h
-        default: ramping_high_rate_1h
+          - rps_0_1
+          - rps_1
+          - rps_5
+          - rps_10
+        default: rps_5
+        required: true
+      lt_duration:
+        type: choice
+        options:
+          - 5m
+          - 20m
+          - 1h
+        default: 20m
         required: true
       environment:
         type: choice
@@ -38,7 +44,6 @@ on:
         options:
           - Solana
           - Ethereum
-          - NEAR
         default: Solana
         required: true
       check_signature:
@@ -51,9 +56,9 @@ jobs:
     if: ${{ github.event_name == 'push' || github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
     runs-on: ${{ github.event_name == 'schedule' && 'arc-runners-arc-runner-set' || 'ubuntu-latest' }}
     steps:
-      - name: Wait for 5 minutes due to new version deployment
+      - name: Wait for 1 hour due to new version deployment
         if: ${{ github.event.pull_request.merged == true }}
-        run: sleep 300
+        run: sleep 3600
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -61,22 +66,32 @@ jobs:
       - name: Normalize inputs
         id: normalized
         run: |
-          # Set defaults based on event type
+          # Set defaults based on event type (schedule, pull_request, else)
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
             echo "lt_chain=${CHAIN:-Solana}" >> "$GITHUB_OUTPUT"
             echo "lt_env=${ENV:-dev}" >> "$GITHUB_OUTPUT"
-            echo "lt_strategy=${STRATEGY:-constant_medium_rate_1h}" >> "$GITHUB_OUTPUT"
+            echo "lt_strategy=${STRATEGY:-rps_0_1}" >> "$GITHUB_OUTPUT"
+            echo "lt_duration=${DURATION:-1h}" >> "$GITHUB_OUTPUT"
+            echo "lt_check_signature=${CHECK_SIGNATURE:-true}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            # Short PR-friendly defaults
+            echo "lt_chain=${CHAIN:-Solana}" >> "$GITHUB_OUTPUT"
+            echo "lt_env=${ENV:-dev}" >> "$GITHUB_OUTPUT"
+            echo "lt_strategy=${STRATEGY:-rps_5}" >> "$GITHUB_OUTPUT"
+            echo "lt_duration=${DURATION:-5m}" >> "$GITHUB_OUTPUT"
             echo "lt_check_signature=${CHECK_SIGNATURE:-true}" >> "$GITHUB_OUTPUT"
           else
             echo "lt_chain=${CHAIN:-Solana}" >> "$GITHUB_OUTPUT"
             echo "lt_env=${ENV:-dev}" >> "$GITHUB_OUTPUT"
-            echo "lt_strategy=${STRATEGY:-ramping_high_rate_1h}" >> "$GITHUB_OUTPUT"
+            echo "lt_strategy=${STRATEGY:-rps_0_1}" >> "$GITHUB_OUTPUT"
+            echo "lt_duration=${DURATION:-20m}" >> "$GITHUB_OUTPUT"
             echo "lt_check_signature=${CHECK_SIGNATURE:-true}" >> "$GITHUB_OUTPUT"
           fi
         env:
           CHAIN: ${{ github.event.inputs.chain }}
           ENV: ${{ github.event.inputs.environment }}
           STRATEGY: ${{ github.event.inputs.lt_strategy }}
+          DURATION: ${{ github.event.inputs.lt_duration }}
           CHECK_SIGNATURE: ${{ github.event.inputs.check_signature }}
 
       - name: Setup K6
@@ -90,8 +105,9 @@ jobs:
           LT_PINGER_API_KEY: ${{ secrets.LT_PINGER_API_KEY }}
           LT_CHAIN: ${{ steps.normalized.outputs.lt_chain }}
           LT_CHAIN_ENV: ${{ steps.normalized.outputs.lt_env }}
-          LT_CHECK_SIGNATURE: ${{ steps.normalized.outputs.lt_check_signature == 'true' }}
+          LT_CHECK_SIGNATURE: ${{ steps.normalized.outputs.lt_check_signature }}
           LT_STRATEGY: ${{ steps.normalized.outputs.lt_strategy }}
+          LT_DURATION: ${{ steps.normalized.outputs.lt_duration }}
         with:
           path: ./infra/loadtests/k6-load-test.js
           cloud-run-locally: ${{ github.event_name == 'schedule' && 'true' || 'false' }}

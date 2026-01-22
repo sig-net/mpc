@@ -1,7 +1,7 @@
 use crate::backlog::Backlog;
 use crate::indexer_common::{SignatureEvent, SignatureEventBox};
 use crate::mesh::MeshState;
-use crate::metrics::node_account_id;
+
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::rpc::ContractStateWatcher;
@@ -695,7 +695,7 @@ where
 
         // Update block height metric
         crate::metrics::indexers::LATEST_BLOCK_NUMBER
-            .with_label_values(&[Chain::Solana.as_str(), node_account_id()])
+            .with_label_values(&[Chain::Solana.as_str()])
             .set(response.context.slot as i64);
     }
 

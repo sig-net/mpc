@@ -12,12 +12,18 @@ pub mod requests;
 pub mod storage;
 
 static NODE_ACCOUNT_ID: OnceLock<String> = OnceLock::new();
+static VERSION: OnceLock<String> = OnceLock::new();
 
-pub fn init_node_account_id(account_id: &AccountId) {
+pub fn init_metrics(account_id: &AccountId, version: &str) {
     if let Err(existing) = NODE_ACCOUNT_ID.set(account_id.to_string()) {
         // If set twice with a different value it is a programmer error; keep simple and panic.
         if existing.as_str() != account_id.as_str() {
             panic!("node account id already set to a different value");
+        }
+    }
+    if let Err(existing) = VERSION.set(version.to_string()) {
+        if existing.as_str() != version {
+            panic!("version already set to a different value");
         }
     }
 }
@@ -29,33 +35,55 @@ pub fn node_account_id() -> &'static str {
         .unwrap_or("default-account.near")
 }
 
-pub fn try_create_int_gauge_vec(
+pub fn version() -> &'static str {
+    VERSION
+        .get()
+        .map(String::as_str)
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+pub fn try_create_int_gauge_vec_with_node_account_id(
     name: &str,
     help: &str,
     labels: &[&str],
 ) -> Result<prometheus::IntGaugeVec> {
     check_metric_multichain_prefix(name)?;
-    let opts = Opts::new(name, help);
+    let mut opts = Opts::new(name, help);
+    opts = opts.const_label("node_account_id".to_string(), node_account_id().to_string());
     let gauge = prometheus::IntGaugeVec::new(opts, labels)?;
     prometheus::register(Box::new(gauge.clone()))?;
     Ok(gauge)
 }
 
-pub fn try_create_counter_vec(
+pub fn try_create_counter_vec_with_node_and_version(
     name: &str,
     help: &str,
     labels: &[&str],
 ) -> Result<prometheus::CounterVec> {
     check_metric_multichain_prefix(name)?;
-    let opts = Opts::new(name, help);
+    let mut opts = Opts::new(name, help);
+    opts = opts
+        .const_label("node_account_id".to_string(), node_account_id().to_string())
+        .const_label("version".to_string(), version().to_string());
     let counter = prometheus::CounterVec::new(opts, labels)?;
     prometheus::register(Box::new(counter.clone()))?;
     Ok(counter)
 }
 
-/// Attempts to create a `HistogramVector`, returning `Err` if the registry does not accept the counter
-/// (potentially due to naming conflict).
-pub fn try_create_histogram_vec(
+pub fn try_create_counter_vec_with_node_account_id(
+    name: &str,
+    help: &str,
+    labels: &[&str],
+) -> Result<prometheus::CounterVec> {
+    check_metric_multichain_prefix(name)?;
+    let mut opts = Opts::new(name, help);
+    opts = opts.const_label("node_account_id".to_string(), node_account_id().to_string());
+    let counter = prometheus::CounterVec::new(opts, labels)?;
+    prometheus::register(Box::new(counter.clone()))?;
+    Ok(counter)
+}
+
+pub fn try_create_histogram_vec_with_node_account_id(
     name: &str,
     help: &str,
     labels: &[&str],
@@ -66,6 +94,7 @@ pub fn try_create_histogram_vec(
     if let Some(buckets) = buckets {
         opts = opts.buckets(buckets);
     }
+    opts = opts.const_label("node_account_id".to_string(), node_account_id().to_string());
     let histogram = HistogramVec::new(opts, labels)?;
     prometheus::register(Box::new(histogram.clone()))?;
     Ok(histogram)
@@ -89,7 +118,8 @@ pub struct Histogram {
 
 impl Histogram {
     pub fn new(name: &str, help: &str, labels: &[&str], buckets: Option<Vec<f64>>) -> Self {
-        let histogram = try_create_histogram_vec(name, help, labels, buckets).unwrap();
+        let histogram =
+            try_create_histogram_vec_with_node_account_id(name, help, labels, buckets).unwrap();
         Self {
             histogram,
             label_values: Mutex::new(Vec::new()),

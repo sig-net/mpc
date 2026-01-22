@@ -2,7 +2,6 @@ use crate::backlog::Backlog;
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
-use crate::metrics::node_account_id;
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, SignRequestType};
@@ -979,17 +978,20 @@ async fn execute_publish(client: ChainClient, mut action: PublishAction, backlog
 
     let chain_str = chain.as_str();
     if publish_result.is_ok() {
-        let elapsed = action.indexed.timestamp_sign_queue.elapsed();
+        let elapsed = crate::util::duration_between_unix(
+            action.indexed.unix_timestamp_indexed,
+            crate::util::current_unix_timestamp(),
+        );
         if elapsed.as_secs() <= chain.expected_response_time_secs() {
             crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_IN_TIME
-                .with_label_values(&[chain_str, node_account_id()])
+                .with_label_values(&[chain_str])
                 .inc();
         }
         crate::metrics::requests::SIGN_TOTAL_LATENCY
-            .with_label_values(&[chain_str, node_account_id()])
+            .with_label_values(&[chain_str])
             .observe(elapsed.as_secs_f64());
         crate::metrics::requests::SIGN_RESPOND_LATENCY
-            .with_label_values(&[chain_str, node_account_id()])
+            .with_label_values(&[chain_str])
             .observe(action.timestamp.elapsed().as_secs_f64());
     }
 
@@ -1440,20 +1442,24 @@ async fn execute_batch_publish(
         };
         if publish.is_ok() {
             // Record metrics for successful batch publish
+            let current_timestamp = crate::util::current_unix_timestamp();
             for action in actions.iter() {
                 let chain = action.indexed.chain;
-                let elapsed = action.indexed.timestamp_sign_queue.elapsed();
+                let elapsed = crate::util::duration_between_unix(
+                    action.indexed.unix_timestamp_indexed,
+                    current_timestamp,
+                );
                 if elapsed.as_secs() <= chain.expected_response_time_secs() {
                     crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_IN_TIME
-                        .with_label_values(&[chain.as_str(), node_account_id()])
+                        .with_label_values(&[chain.as_str()])
                         .inc();
                 }
                 crate::metrics::requests::SIGN_TOTAL_LATENCY
-                    .with_label_values(&[chain.as_str(), node_account_id()])
+                    .with_label_values(&[chain.as_str()])
                     .observe(elapsed.as_secs_f64());
             }
             crate::metrics::requests::SIGN_RESPOND_LATENCY
-                .with_label_values(&[Chain::Ethereum.as_str(), node_account_id()])
+                .with_label_values(&[Chain::Ethereum.as_str()])
                 .observe(start.elapsed().as_secs_f64());
             actions.clear();
             break;
