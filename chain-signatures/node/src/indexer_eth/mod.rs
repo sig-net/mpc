@@ -196,7 +196,7 @@ pub struct EthArgs {
     pub eth_total_timeout: Option<u64>,
     /// Enable the indexer to just send requests optimistically instead waiting for final.
     /// Useful for testing where we do not want to reach finality due to how long it takes.
-    #[clap(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "false")]
+    #[clap(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "true")]
     pub eth_optimistic_requests: bool,
     /// light client is true if using helios, false if using direct rpc
     #[clap(long, env("MPC_ETH_LIGHT_CLIENT"), default_value = "false")]
