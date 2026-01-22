@@ -195,11 +195,14 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             crate::metrics::init_metrics(&account_id, env!("CARGO_PKG_VERSION"));
 
             let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
+
+            let cipher_pk_hex = hex::encode(cipher_sk.public_key().to_bytes());
+
             let digest = configuration_digest(
                 mpc_contract_id.clone(),
                 account_id.clone(),
                 account_sk.clone(),
-                format!("{:?}", cipher_sk.public_key()),
+                cipher_pk_hex.clone(),
                 sign_sk.clone(),
                 eth.clone(),
             );
@@ -284,13 +287,13 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tracing::info!(
                 %digest,
-                ?mpc_contract_id,
-                ?account_id,
-                ?my_address,
-                cipher_pk = ?network.cipher_sk.public_key(),
-                sign_pk = ?network.sign_sk.public_key(),
-                near_rpc_url = ?near_client.rpc_addr(),
-                eth_contract_address = ?eth.as_ref().map(|eth| eth.contract_address.as_str()),
+                %mpc_contract_id,
+                %account_id,
+                %my_address,
+                %cipher_pk_hex,
+                sign_pk = %network.sign_sk.public_key(),
+                near_rpc_url = %near_client.rpc_addr(),
+                eth_contract_address = %eth.as_ref().map(|eth| eth.contract_address.as_str()).unwrap_or("None"),
                 "starting node",
             );
 
@@ -394,7 +397,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 }
 
 fn configuration_digest(
-    mpc_contrac_id: AccountId,
+    mpc_contract_id: AccountId,
     account_id: AccountId,
     account_sk: SecretKey,
     cipher_pk: String,
@@ -404,7 +407,7 @@ fn configuration_digest(
     let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
     let eth_contract_address = eth.eth_contract_address.unwrap_or_default();
     calculate_digest(
-        mpc_contrac_id,
+        mpc_contract_id,
         account_id,
         account_sk.public_key(),
         cipher_pk,
@@ -421,13 +424,28 @@ fn calculate_digest(
     sign_pk: PublicKey,
     eth_contract_address: String,
 ) -> i64 {
+    let mpc_contract_id_str = mpc_contract_id.to_string();
+    let account_id_str = account_id.to_string();
+    let account_pk_str = account_pk.to_string();
+    let sign_pk_str = sign_pk.to_string();
+
+    tracing::info!(
+        %mpc_contract_id_str,
+        %account_id_str,
+        %account_pk_str,
+        %cipher_pk,
+        %sign_pk_str,
+        eth_contract_address = %eth_contract_address,
+        "digest hash inputs (exact strings)"
+    );
+
     let mut hasher = Sha256::new();
-    hasher.update(mpc_contract_id.to_string());
-    hasher.update(account_id.to_string());
-    hasher.update(account_pk.to_string());
-    hasher.update(cipher_pk);
-    hasher.update(sign_pk.to_string());
-    hasher.update(eth_contract_address);
+    hasher.update(&mpc_contract_id_str);
+    hasher.update(&account_id_str);
+    hasher.update(&account_pk_str);
+    hasher.update(&cipher_pk);
+    hasher.update(&sign_pk_str);
+    hasher.update(&eth_contract_address);
 
     let result = hasher.finalize();
     // Convert the first 8 bytes of the hash to an i64
@@ -464,7 +482,6 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        // Grafana value: -1051225187120159700
         assert_eq!(digest, -1051225187120159684);
     }
 
@@ -488,7 +505,6 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        // Grafana value: --4992003418219577000
         assert_eq!(digest, -4992003418219576839);
     }
 
@@ -512,7 +528,6 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        // Grafana value --930268115875971800
         assert_eq!(digest, -930268115875971858);
     }
 
@@ -560,7 +575,6 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        // Grafana value: 695826193095166700
         assert_eq!(digest, 695826193095166746);
     }
 
@@ -584,7 +598,6 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        // Grafana value: -8209029844787148000
         assert_eq!(digest, -8209029844787147492);
     }
 
@@ -607,7 +620,28 @@ mod tests {
             sign_pk,
             ETH_CONTRACT_ADDRESS.to_string(),
         );
-        // Grafana value: -4889179067099200000
         assert_eq!(digest, -4889179067099199685);
+    }
+
+    #[test]
+    fn test_digest_blacksand() {
+        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
+        let account_id = AccountId::from_str("blacksandtech-sig.near").unwrap();
+        let account_pk =
+            PublicKey::from_str("ed25519:67w2feimgcV21ZgEegvGhHTxyd9DR4yRxguqP8MctyJE").unwrap();
+        let cipher_pk = "231f6ddc22796c076dcc11a90b92c23e54071b1673abd2743fb84d5a1fc53f61";
+        let sign_pk =
+            PublicKey::from_str("ed25519:D5Pccv8i88AuDGXuXQoNSVGAZLfuHCZw2TQmoZxi2tEM").unwrap();
+
+        let digest = calculate_digest(
+            mpc_contract_id,
+            account_id,
+            account_pk,
+            cipher_pk.to_string(),
+            sign_pk,
+            ETH_CONTRACT_ADDRESS.to_string(),
+        );
+
+        assert_eq!(digest, -6950551088322443092);
     }
 }
