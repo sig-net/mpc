@@ -273,10 +273,6 @@ pub(crate) async fn process_sign_event(
         // TODO: handle error to ensure 100% success rate
         let chain = sign_event.source_chain();
         tracing::error!(?err, chain = %chain, "Failed to send {} sign request into queue", chain.as_str());
-    } else {
-        crate::metrics::requests::NUM_SIGN_REQUESTS
-            .with_label_values(&[sign_event.source_chain().as_str()])
-            .inc();
     }
 
     Ok(())

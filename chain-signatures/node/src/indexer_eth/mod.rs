@@ -4,6 +4,7 @@ pub mod indexer_eth_helios;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 
+use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::respond_bidirectional::CompletedTx;
@@ -542,15 +543,8 @@ fn send_indexed_requests_to_sign_queue(
     for request in requests {
         let sign_tx = sign_tx.clone();
         tokio::spawn(async move {
-            match sign_tx.send(Sign::Request(request)).await {
-                Ok(_) => {
-                    crate::metrics::requests::NUM_SIGN_REQUESTS
-                        .with_label_values(&[Chain::Ethereum.as_str()])
-                        .inc();
-                }
-                Err(err) => {
-                    tracing::error!(?err, "Failed to send ETH sign request into queue");
-                }
+            if let Err(err) = sign_tx.send(Sign::Request(request)).await {
+                tracing::error!(?err, "Failed to send ETH sign request into queue");
             }
         });
     }
@@ -929,17 +923,17 @@ impl EthereumIndexer {
             block_number,
             block_hash
         );
-        let start = Instant::now();
-        let block_receipts_result = client.get_block_receipts(block_number.into()).await;
-        crate::metrics::indexers::ETH_BLOCK_RECEIPT_LATENCY
-            .observe(start.elapsed().as_millis() as f64);
-        let Some(block_receipts) = block_receipts_result.map_err(|err| {
-            anyhow::anyhow!(
-                "Failed to get block receipts for block number {block_number}: {:?}",
-                err
-            )
-        })?
-        else {
+        let block_receipts = client
+            .get_block_receipts(block_number.into())
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "Failed to get block receipts for block number {block_number}: {:?}",
+                    err
+                )
+            })?;
+
+        let Some(block_receipts) = block_receipts else {
             tracing::info!("no receipts for block number {block_number}");
             return Ok(());
         };
@@ -987,11 +981,14 @@ impl EthereumIndexer {
         sign_requests.extend(respond_requests);
 
         if !sign_requests.is_empty() || !respond_logs.is_empty() {
-            let timestamps = sign_requests
-                .iter()
-                .map(|r| r.unix_timestamp_indexed)
-                .collect::<Vec<_>>();
-
+            for _request in &sign_requests {
+                record_request_latency(
+                    Chain::Ethereum,
+                    SignRequestStep::Indexing,
+                    "ok",
+                    block_timestamp,
+                );
+            }
             requests_indexed
                 .send(BlockAndRequests::new(
                     block_number,
@@ -1001,15 +998,6 @@ impl EthereumIndexer {
                 ))
                 .await
                 .map_err(|err| anyhow::anyhow!("Failed to send indexed requests: {:?}", err))?;
-
-            for request_timestamp in timestamps {
-                crate::metrics::indexers::INDEXER_DELAY
-                    .with_label_values(&[Chain::Ethereum.as_str()])
-                    .observe(
-                        crate::util::duration_between_unix(block_timestamp, request_timestamp)
-                            .as_secs() as f64,
-                    );
-            }
         }
 
         Ok(())

@@ -3,6 +3,7 @@ use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
+use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{
     MessageChannel, PositMessage, PositProtocolId, SignatureMessage, Subscriber,
@@ -264,10 +265,6 @@ impl SignOrganizer {
                 stable_count = stable.len(),
                 "organized: selected proposer"
             );
-
-            if is_mine && state.round == 0 {
-                crate::metrics::requests::NUM_SIGN_REQUESTS_MINE.inc();
-            }
 
             (stable, proposer)
         };
@@ -1129,19 +1126,14 @@ impl SignatureSpawner {
         let chain = indexed.chain;
         let unix_timestamp_indexed = indexed.unix_timestamp_indexed;
         let expected_response_time_secs = chain.expected_response_time_secs();
-        let current_timestamp = crate::util::current_unix_timestamp();
-        let already_elapsed =
-            crate::util::duration_between_unix(unix_timestamp_indexed, current_timestamp);
+        let already_elapsed = crate::util::unix_elapsed(unix_timestamp_indexed);
         let remaining_time =
             Duration::from_secs(expected_response_time_secs).saturating_sub(already_elapsed);
         // prevent incrementing delayed metric for already delayed requests
         if remaining_time > Duration::from_secs(0) {
             let watcher = tokio::spawn(async move {
                 tokio::time::sleep(remaining_time).await;
-                let elapsed = crate::util::duration_between_unix(
-                    unix_timestamp_indexed,
-                    crate::util::current_unix_timestamp(),
-                );
+                let elapsed = crate::util::unix_elapsed(unix_timestamp_indexed);
                 tracing::warn!(
                     ?sign_id,
                     ?chain,
@@ -1149,9 +1141,12 @@ impl SignatureSpawner {
                     expected_secs = expected_response_time_secs,
                     "signature request delayed beyond expected response time"
                 );
-                crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_DELAYED
-                    .with_label_values(&[chain.as_str()])
-                    .inc();
+                record_request_latency(
+                    chain,
+                    crate::metrics::requests::SignRequestStep::Other,
+                    "delayed",
+                    unix_timestamp_indexed,
+                );
             });
             self.delayed_watchers.insert(sign_id, watcher);
         }
@@ -1235,8 +1230,8 @@ impl SignatureSpawner {
             Sign::Completion(sign_id) => {
                 self.handle_completion(sign_id);
             }
-            Sign::Request(indexed) => {
-                let sign_id = indexed.id;
+            Sign::Request(request) => {
+                let sign_id = request.id;
 
                 // Skip if we already have a task handling this request.
                 // Use tasks instead of inbox map since it may already contain buffered messages
@@ -1247,11 +1242,15 @@ impl SignatureSpawner {
                     return;
                 }
 
-                crate::metrics::requests::NUM_UNIQUE_SIGN_REQUESTS
-                    .with_label_values(&[indexed.chain.as_str()])
-                    .inc();
+                let queuing_start = Instant::now(); // TODO: measure queuing time
+                record_request_latency(
+                    request.chain,
+                    SignRequestStep::Queuing,
+                    "ok",
+                    queuing_start,
+                );
 
-                self.spawn_task(indexed, participants.clone(), contract.clone(), cfg.clone());
+                self.spawn_task(request, participants.clone(), contract.clone(), cfg.clone());
             }
         }
 
