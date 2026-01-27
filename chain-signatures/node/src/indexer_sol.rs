@@ -228,7 +228,7 @@ impl SignatureEvent for SignatureRequestedEvent {
                 key_version: self.key_version,
             },
             chain: Chain::Solana,
-            timestamp_sign_queue: Instant::now(),
+            timestamp_indexed: Instant::now(),
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             total_timeout,
             sign_request_type: SignRequestType::Sign,
@@ -307,7 +307,7 @@ impl SignatureEvent for SignBidirectionalEvent {
                 key_version: self.key_version,
             },
             chain: Chain::Solana,
-            timestamp_sign_queue: Instant::now(),
+            timestamp_indexed: Instant::now(),
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             total_timeout,
             sign_request_type: SignRequestType::SignBidirectional(

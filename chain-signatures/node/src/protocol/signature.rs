@@ -49,10 +49,9 @@ pub struct IndexedSignRequest {
     /// Unix timestamp when the request was indexed by MPC node.
     /// Preserved across recoveries to maintain original request creation time.
     pub unix_timestamp_indexed: u64,
-    /// Monotonic system time when the request entered the signing queue.
-    /// Used for internal timeout enforcement and latency tracking.
-    /// Updated on recovery/requeue to current system time.
-    pub timestamp_sign_queue: Instant,
+    /// Monotonic system time when the request entered the system for processing.
+    /// Set during initial indexing or updated on recovery/requeue to current system time.
+    pub timestamp_indexed: Instant,
     pub total_timeout: Duration,
     pub sign_request_type: SignRequestType,
 }

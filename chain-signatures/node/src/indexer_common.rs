@@ -325,7 +325,7 @@ pub(crate) async fn recover_backlog(
             args: sign_tx_entry.args.clone(),
             chain: sign_tx_entry.source_chain,
             unix_timestamp_indexed: sign_tx_entry.unix_timestamp_indexed,
-            timestamp_sign_queue: Instant::now(),
+            timestamp_indexed: Instant::now(),
             total_timeout,
             sign_request_type: sign_type,
         };
