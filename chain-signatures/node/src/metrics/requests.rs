@@ -8,23 +8,25 @@ use crate::protocol::Chain;
 /// Steps and statuses of the sign request
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignRequestStep {
-    /// Time from block timestamp to first seen by indexer (status: ok)
+    /// Time from block timestamp to first seen by indexer (Status: ok)
     /// Measures: network propagation delay + indexer polling latency
     Indexing,
-    /// Time from indexed in our system to sent to sign queue (status: ok)
+    /// Time from indexed in our system to sent to sign queue (Status: ok)
     /// Measures: finality wait time if applicable
     Finalizing,
-    /// Time from queue entry to signature generation start (status: ok)
+    /// Time from queue entry to signature generation start (Status: ok)
     Queuing,
-    /// Time to generate the signature (status: ok, error)
+    /// Time to generate the signature (Status: ok, error)
     Generating,
-    /// Time to respond to the sign request (status: ok, error)
+    /// Time to respond to the sign request (Status: ok)
     Responding,
     /// Total time from indexing to responding
+    /// Status:
     ///     - in_time: request was delivered in time (expected finality delay + margin)
     ///     - expired: request was delivered after expiration (expected finality delay + margin)
     Total,
     /// Can be used to track latency for failures, e.g., time to error out
+    /// Status:
     ///     - delayed: request was delayed, no response yet
     Other,
 }

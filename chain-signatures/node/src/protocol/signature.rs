@@ -944,6 +944,13 @@ impl SignGenerator {
                         "completed signature generation"
                     );
 
+                    record_request_latency(
+                        self.indexed.chain,
+                        SignRequestStep::Generating,
+                        "ok",
+                        self.created,
+                    );
+
                     crate::metrics::protocols::SIGNATURE_ACCRUED_WAIT_DELAY
                         .observe(total_wait.as_millis() as f64);
                     crate::metrics::protocols::SIGNATURE_POKES_CNT.observe(total_pokes as f64);
