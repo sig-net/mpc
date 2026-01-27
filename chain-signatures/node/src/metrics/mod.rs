@@ -1,6 +1,6 @@
 use std::{
     sync::{Mutex, OnceLock},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime},
 };
 
 use near_account_id::AccountId;

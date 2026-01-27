@@ -1248,12 +1248,11 @@ impl SignatureSpawner {
                     return;
                 }
 
-                let queuing_start = Instant::now(); // TODO: measure queuing time
                 record_request_latency(
                     request.chain,
-                    SignRequestStep::Queuing,
+                    SignRequestStep::AwaitingGeneration,
                     "ok",
-                    queuing_start,
+                    request.unix_timestamp_indexed,
                 );
 
                 self.spawn_task(request, participants.clone(), contract.clone(), cfg.clone());

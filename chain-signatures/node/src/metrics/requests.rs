@@ -11,11 +11,8 @@ pub enum SignRequestStep {
     /// Time from block timestamp to first seen by indexer (Status: ok)
     /// Measures: network propagation delay + indexer polling latency
     Indexing,
-    /// Time from indexed in our system to sent to sign queue (Status: ok)
-    /// Measures: finality wait time if applicable
-    Finalizing,
-    /// Time from queue entry to signature generation start (Status: ok)
-    Queuing,
+    /// Time from indexing to signature generation start (Status: ok)
+    AwaitingGeneration,
     /// Time to generate the signature (Status: ok, error)
     Generating,
     /// Time to respond to the sign request (Status: ok)
@@ -35,8 +32,7 @@ impl SignRequestStep {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Indexing => "indexing",
-            Self::Finalizing => "finalizing",
-            Self::Queuing => "queuing",
+            Self::AwaitingGeneration => "awaiting_generation",
             Self::Generating => "generating",
             Self::Responding => "responding",
             Self::Total => "total",
