@@ -7,6 +7,7 @@ use crate::indexer_hydration::{
 };
 use crate::mesh::wait_threshold_active;
 use crate::mesh::MeshState;
+use crate::metrics::requests::{record_request_latency, SignRequestStep};
 
 use crate::node_client::NodeClient;
 use crate::protocol::Chain;
@@ -22,6 +23,7 @@ use k256::Scalar;
 use mpc_primitives::SignId;
 use mpc_primitives::Signature;
 use std::str::FromStr;
+use std::time::SystemTime;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
@@ -232,6 +234,15 @@ pub(crate) async fn process_sign_event(
     backlog: Backlog,
 ) -> anyhow::Result<()> {
     let sign_request = sign_event.generate_sign_request(entropy, total_timeout)?;
+
+    record_request_latency(
+        sign_event.source_chain(),
+        SignRequestStep::Indexing,
+        "ok",
+        // Note: we need to pass actual indexing time here,
+        // may not be supported for all chains
+        SystemTime::now(),
+    );
 
     // Insert the transaction into the backlog when we first see the sign request
     let sign_id = sign_request.id;
