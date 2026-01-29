@@ -1147,12 +1147,9 @@ impl SignatureSpawner {
                     expected_secs = expected_response_time_secs,
                     "signature request delayed beyond expected response time"
                 );
-                record_request_latency(
-                    chain,
-                    crate::metrics::requests::SignRequestStep::Other,
-                    "delayed",
-                    unix_timestamp_indexed,
-                );
+                crate::metrics::requests::SIGN_REQUEST_DELAYED
+                    .with_label_values(&[chain.as_str()])
+                    .inc();
             });
             self.delayed_watchers.insert(sign_id, watcher);
         }

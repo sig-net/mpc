@@ -1,8 +1,11 @@
 use std::sync::LazyLock;
 
-use prometheus::{exponential_buckets, HistogramVec, IntGauge};
+use prometheus::{CounterVec, HistogramVec, IntGauge, exponential_buckets};
 
-use crate::metrics::{try_create_histogram_vec_with_node_and_version, LatencyStart};
+use crate::metrics::{
+    try_create_counter_vec_with_node_and_version, try_create_histogram_vec_with_node_and_version,
+    LatencyStart,
+};
 use crate::protocol::Chain;
 
 /// Steps and statuses of the sign request
@@ -22,10 +25,6 @@ pub enum SignRequestStep {
     ///     - in_time: request was delivered in time (expected finality delay + margin)
     ///     - expired: request was delivered after expiration (expected finality delay + margin)
     Total,
-    /// Can be used to track latency for failures, e.g., time to error out
-    /// Status:
-    ///     - delayed: request was delayed, no response yet
-    Other,
 }
 
 impl SignRequestStep {
@@ -36,7 +35,6 @@ impl SignRequestStep {
             Self::Generating => "generating",
             Self::Responding => "responding",
             Self::Total => "total",
-            Self::Other => "other",
         }
     }
 }
@@ -72,6 +70,16 @@ pub fn record_indexing_step_reached(chain: Chain) {
         .with_label_values(&[chain.as_str(), SignRequestStep::Indexing.as_str(), "ok"])
         .observe(0.0);
 }
+
+// histogram with node_account_id and version
+pub(crate) static SIGN_REQUEST_DELAYED: LazyLock<CounterVec> = LazyLock::new(|| {
+    try_create_counter_vec_with_node_and_version(
+        "multichain_sign_request_delayed",
+        "Number of delayed requests by chain",
+        &["chain"],
+    )
+    .unwrap()
+});
 
 pub(crate) static SIGN_QUEUE_SIZE: LazyLock<IntGauge> = LazyLock::new(|| {
     super::try_create_int_gauge_vec_with_node_account_id(
