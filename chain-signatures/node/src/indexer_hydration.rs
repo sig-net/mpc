@@ -606,6 +606,10 @@ pub async fn run(
                 }
             }
         }
+
+        crate::metrics::indexers::LATEST_BLOCK_NUMBER
+            .with_label_values(&[crate::protocol::Chain::Hydration.as_str()])
+            .set(number as i64);
     }
 }
 
