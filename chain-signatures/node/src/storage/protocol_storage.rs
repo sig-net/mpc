@@ -171,7 +171,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             })
             .unwrap_or_default();
 
-        owned.union(&*self.reserved.read().await).copied().collect()
+        owned.into_iter().collect()
     }
 
     pub async fn reserve(&self, id: A::Id) -> Option<ArtifactSlot<A>> {
