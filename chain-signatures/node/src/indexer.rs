@@ -188,7 +188,7 @@ async fn poll_pending_requests(ctx: &mut Context) -> anyhow::Result<()> {
 
     // Update metrics
     crate::metrics::indexers::LATEST_BLOCK_NUMBER
-        .with_label_values(&[Chain::NEAR.as_str()])
+        .with_label_values(&[Chain::NEAR.as_str(), "indexed"])
         .set(latest_height as i64);
 
     // Send all new requests

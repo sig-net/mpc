@@ -871,7 +871,7 @@ impl EthereumIndexer {
                 }
             }
             crate::metrics::indexers::LATEST_BLOCK_NUMBER
-                .with_label_values(&[Chain::Ethereum.as_str()])
+                .with_label_values(&[Chain::Ethereum.as_str(), "indexed"])
                 .set(block_number as i64);
         }
     }

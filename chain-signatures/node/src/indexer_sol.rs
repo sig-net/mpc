@@ -695,7 +695,7 @@ where
 
         // Update block height metric
         crate::metrics::indexers::LATEST_BLOCK_NUMBER
-            .with_label_values(&[Chain::Solana.as_str()])
+            .with_label_values(&[Chain::Solana.as_str(), "indexed"])
             .set(response.context.slot as i64);
     }
 
