@@ -1459,12 +1459,7 @@ async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAc
                         action.indexed.unix_timestamp_indexed,
                     );
                 }
-                record_request_latency(
-                    chain,
-                    SignRequestStep::Responding,
-                    "ok",
-                    action.indexed.unix_timestamp_indexed,
-                );
+                record_request_latency(chain, SignRequestStep::Responding, "ok", action.timestamp);
             }
             actions.clear();
             break;

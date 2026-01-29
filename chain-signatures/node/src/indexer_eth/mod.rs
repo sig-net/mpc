@@ -394,7 +394,7 @@ fn sign_request_from_filtered_log(log: Log, total_timeout: Duration) -> Option<I
         },
         chain: Chain::Ethereum,
         unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-        timestamp_indexed: Instant::now(),
+        timestamp_created: Instant::now(),
         total_timeout,
         sign_request_type: SignRequestType::Sign,
     })

@@ -192,7 +192,7 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {
                 key_version: self.key_version,
             },
             chain: Chain::Hydration,
-            timestamp_indexed: Instant::now(),
+            timestamp_created: Instant::now(),
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             total_timeout,
             sign_request_type: SignRequestType::Sign,
@@ -290,7 +290,7 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
                 key_version: self.key_version,
             },
             chain: Chain::Hydration,
-            timestamp_indexed: Instant::now(),
+            timestamp_created: Instant::now(),
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             total_timeout,
             sign_request_type: SignRequestType::SignBidirectional(

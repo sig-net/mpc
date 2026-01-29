@@ -65,6 +65,13 @@ pub fn record_request_latency(
         .with_label_values(&[chain.as_str(), step.as_str(), status])
         .observe(duration);
 }
+/// Some chains do not provide information about the block time.
+/// For that reason we record indexing step reached with 0.0 latency.
+pub fn record_indexing_step_reached(chain: Chain) {
+    SIGN_REQUEST_LATENCY
+        .with_label_values(&[chain.as_str(), SignRequestStep::Indexing.as_str(), "ok"])
+        .observe(0.0);
+}
 
 pub(crate) static SIGN_QUEUE_SIZE: LazyLock<IntGauge> = LazyLock::new(|| {
     super::try_create_int_gauge_vec_with_node_account_id(
