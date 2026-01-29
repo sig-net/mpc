@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use prometheus::{CounterVec, HistogramVec, IntGauge, exponential_buckets};
+use prometheus::{exponential_buckets, CounterVec, HistogramVec, IntGauge};
 
 use crate::metrics::{
     try_create_counter_vec_with_node_and_version, try_create_histogram_vec_with_node_and_version,
