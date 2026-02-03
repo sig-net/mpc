@@ -451,10 +451,6 @@ impl Backlog {
             "backlog updated processed block height"
         );
 
-        crate::metrics::indexers::LATEST_BLOCK_NUMBER
-            .with_label_values(&[chain.as_str(), "processed"])
-            .set(height as i64);
-
         // create a checkpoint on interval
         if height.is_multiple_of(interval?) {
             let tx_count = pending.len();
