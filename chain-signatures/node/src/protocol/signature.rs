@@ -624,7 +624,8 @@ impl SignPositor {
 
                         // Start as soon as we have enough accepts
                         if counter.enough_accepts(ctx.threshold) {
-                            let participants = counter.accepts.into_iter().collect::<Vec<_>>();
+                            let mut participants = counter.accepts.into_iter().collect::<Vec<_>>();
+                            participants.sort();
                             tracing::info!(?sign_id, ?round, me = ?ctx.me, ?participants, "proposer broadcasting Start");
 
                             for &p in &participants {
