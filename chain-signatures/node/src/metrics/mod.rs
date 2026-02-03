@@ -1,4 +1,7 @@
-use std::sync::{Mutex, OnceLock};
+use std::{
+    sync::{Mutex, OnceLock},
+    time::{Instant, SystemTime},
+};
 
 use near_account_id::AccountId;
 use prometheus::{HistogramOpts, HistogramVec, Opts, Result};
@@ -100,6 +103,25 @@ pub fn try_create_histogram_vec_with_node_account_id(
     Ok(histogram)
 }
 
+pub fn try_create_histogram_vec_with_node_and_version(
+    name: &str,
+    help: &str,
+    labels: &[&str],
+    buckets: Option<Vec<f64>>,
+) -> Result<HistogramVec> {
+    check_metric_multichain_prefix(name)?;
+    let mut opts = HistogramOpts::new(name, help);
+    if let Some(buckets) = buckets {
+        opts = opts.buckets(buckets);
+    }
+    opts = opts
+        .const_label("node_account_id".to_string(), node_account_id().to_string())
+        .const_label("version".to_string(), version().to_string());
+    let histogram = HistogramVec::new(opts, labels)?;
+    prometheus::register(Box::new(histogram.clone()))?;
+    Ok(histogram)
+}
+
 fn check_metric_multichain_prefix(name: &str) -> Result<()> {
     if name.starts_with("multichain_") {
         Ok(())
@@ -152,5 +174,27 @@ impl Histogram {
 
     pub fn exact(&self) -> Vec<f64> {
         self.exact.lock().unwrap().clone()
+    }
+}
+
+pub trait LatencyStart {
+    fn elapsed_seconds(&self) -> f64;
+}
+
+impl LatencyStart for Instant {
+    fn elapsed_seconds(&self) -> f64 {
+        self.elapsed().as_secs_f64()
+    }
+}
+
+impl LatencyStart for u64 {
+    fn elapsed_seconds(&self) -> f64 {
+        crate::util::unix_elapsed(*self).as_secs_f64()
+    }
+}
+
+impl LatencyStart for SystemTime {
+    fn elapsed_seconds(&self) -> f64 {
+        self.elapsed().unwrap_or_default().as_secs_f64()
     }
 }

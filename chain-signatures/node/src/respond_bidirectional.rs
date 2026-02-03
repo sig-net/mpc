@@ -136,7 +136,7 @@ impl CompletedTx {
                 key_version: self.tx.key_version,
             },
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            timestamp_sign_queue: std::time::Instant::now(),
+            timestamp_created: std::time::Instant::now(),
             total_timeout: signature_generation_total_timeout,
             sign_request_type: crate::protocol::SignRequestType::RespondBidirectional(
                 RespondBidirectionalTx {

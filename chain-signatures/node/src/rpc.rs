@@ -2,6 +2,7 @@ use crate::backlog::Backlog;
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
+use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, SignRequestType};
@@ -976,23 +977,25 @@ async fn execute_publish(client: ChainClient, mut action: PublishAction, backlog
         }
     };
 
-    let chain_str = chain.as_str();
     if publish_result.is_ok() {
-        let elapsed = crate::util::duration_between_unix(
-            action.indexed.unix_timestamp_indexed,
-            crate::util::current_unix_timestamp(),
-        );
-        if elapsed.as_secs() <= chain.expected_response_time_secs() {
-            crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_IN_TIME
-                .with_label_values(&[chain_str])
-                .inc();
+        let elapsed_secs =
+            crate::util::unix_elapsed(action.indexed.unix_timestamp_indexed).as_secs();
+        if elapsed_secs <= chain.expected_response_time_secs() {
+            record_request_latency(
+                chain,
+                SignRequestStep::Total,
+                "in_time",
+                action.indexed.unix_timestamp_indexed,
+            );
+        } else {
+            record_request_latency(
+                chain,
+                SignRequestStep::Total,
+                "expired",
+                action.indexed.unix_timestamp_indexed,
+            );
         }
-        crate::metrics::requests::SIGN_TOTAL_LATENCY
-            .with_label_values(&[chain_str])
-            .observe(elapsed.as_secs_f64());
-        crate::metrics::requests::SIGN_RESPOND_LATENCY
-            .with_label_values(&[chain_str])
-            .observe(action.timestamp.elapsed().as_secs_f64());
+        record_request_latency(chain, SignRequestStep::Responding, "ok", action.timestamp);
     }
 
     // Mark completion in Backlog for SignBidirectional requests
@@ -1025,7 +1028,7 @@ async fn run_batch_respond(
                 num_requests = actions_batch.len(),
                 "publishing batch of signatures",
             );
-            execute_batch_publish(&client, &mut actions_batch, Instant::now()).await;
+            execute_batch_publish(&client, &mut actions_batch).await;
             start = Instant::now();
         }
         if let Ok(action) = actions_rx.try_recv() {
@@ -1392,11 +1395,7 @@ async fn try_batch_publish_eth(
     Ok(())
 }
 
-async fn execute_batch_publish(
-    client: &ChainClient,
-    actions: &mut Vec<PublishAction>,
-    start: Instant,
-) {
+async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAction>) {
     let mut signatures: HashMap<SignId, Signature> = HashMap::new();
 
     for action in actions.iter() {
@@ -1442,25 +1441,26 @@ async fn execute_batch_publish(
         };
         if publish.is_ok() {
             // Record metrics for successful batch publish
-            let current_timestamp = crate::util::current_unix_timestamp();
             for action in actions.iter() {
                 let chain = action.indexed.chain;
-                let elapsed = crate::util::duration_between_unix(
-                    action.indexed.unix_timestamp_indexed,
-                    current_timestamp,
-                );
+                let elapsed = crate::util::unix_elapsed(action.indexed.unix_timestamp_indexed);
                 if elapsed.as_secs() <= chain.expected_response_time_secs() {
-                    crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_IN_TIME
-                        .with_label_values(&[chain.as_str()])
-                        .inc();
+                    record_request_latency(
+                        chain,
+                        SignRequestStep::Total,
+                        "in_time",
+                        action.indexed.unix_timestamp_indexed,
+                    );
+                } else {
+                    record_request_latency(
+                        chain,
+                        SignRequestStep::Total,
+                        "expired",
+                        action.indexed.unix_timestamp_indexed,
+                    );
                 }
-                crate::metrics::requests::SIGN_TOTAL_LATENCY
-                    .with_label_values(&[chain.as_str()])
-                    .observe(elapsed.as_secs_f64());
+                record_request_latency(chain, SignRequestStep::Responding, "ok", action.timestamp);
             }
-            crate::metrics::requests::SIGN_RESPOND_LATENCY
-                .with_label_values(&[Chain::Ethereum.as_str()])
-                .observe(start.elapsed().as_secs_f64());
             actions.clear();
             break;
         }

@@ -192,7 +192,7 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {
                 key_version: self.key_version,
             },
             chain: Chain::Hydration,
-            timestamp_sign_queue: Instant::now(),
+            timestamp_created: Instant::now(),
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             total_timeout,
             sign_request_type: SignRequestType::Sign,
@@ -290,7 +290,7 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
                 key_version: self.key_version,
             },
             chain: Chain::Hydration,
-            timestamp_sign_queue: Instant::now(),
+            timestamp_created: Instant::now(),
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             total_timeout,
             sign_request_type: SignRequestType::SignBidirectional(
@@ -606,6 +606,10 @@ pub async fn run(
                 }
             }
         }
+
+        crate::metrics::indexers::LATEST_BLOCK_NUMBER
+            .with_label_values(&[crate::protocol::Chain::Hydration.as_str(), "indexed"])
+            .set(number as i64);
     }
 }
 

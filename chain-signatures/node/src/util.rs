@@ -83,15 +83,20 @@ pub fn is_elapsed_longer_than_timeout(timestamp_sec: u64, timeout: u64) -> bool 
     }
 }
 
-pub fn duration_between_unix(from_timestamp: u64, to_timestamp: u64) -> Duration {
-    Duration::from_secs(to_timestamp - from_timestamp)
-}
-
 pub fn current_unix_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_secs()
+}
+
+/// Calculate elapsed time from a unix timestamp to now
+pub fn unix_elapsed(unix_timestamp: u64) -> Duration {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Duration::from_secs(now.saturating_sub(unix_timestamp))
 }
 
 pub const fn first_8_bytes(input: [u8; 32]) -> [u8; 8] {

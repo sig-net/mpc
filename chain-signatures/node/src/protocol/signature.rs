@@ -3,6 +3,7 @@ use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
+use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{
     MessageChannel, PositMessage, PositProtocolId, SignatureMessage, Subscriber,
@@ -48,10 +49,9 @@ pub struct IndexedSignRequest {
     /// Unix timestamp when the request was indexed by MPC node.
     /// Preserved across recoveries to maintain original request creation time.
     pub unix_timestamp_indexed: u64,
-    /// Monotonic system time when the request entered the signing queue.
-    /// Used for internal timeout enforcement and latency tracking.
-    /// Updated on recovery/requeue to current system time.
-    pub timestamp_sign_queue: Instant,
+    /// Monotonic system time when the request entered the system for processing.
+    /// Set during initial indexing or updated on recovery/requeue to current system time.
+    pub timestamp_created: Instant,
     pub total_timeout: Duration,
     pub sign_request_type: SignRequestType,
 }
@@ -264,10 +264,6 @@ impl SignOrganizer {
                 stable_count = stable.len(),
                 "organized: selected proposer"
             );
-
-            if is_mine && state.round == 0 {
-                crate::metrics::requests::NUM_SIGN_REQUESTS_MINE.inc();
-            }
 
             (stable, proposer)
         };
@@ -947,6 +943,13 @@ impl SignGenerator {
                         "completed signature generation"
                     );
 
+                    record_request_latency(
+                        self.indexed.chain,
+                        SignRequestStep::Generating,
+                        "ok",
+                        self.created,
+                    );
+
                     crate::metrics::protocols::SIGNATURE_ACCRUED_WAIT_DELAY
                         .observe(total_wait.as_millis() as f64);
                     crate::metrics::protocols::SIGNATURE_POKES_CNT.observe(total_pokes as f64);
@@ -1129,19 +1132,14 @@ impl SignatureSpawner {
         let chain = indexed.chain;
         let unix_timestamp_indexed = indexed.unix_timestamp_indexed;
         let expected_response_time_secs = chain.expected_response_time_secs();
-        let current_timestamp = crate::util::current_unix_timestamp();
-        let already_elapsed =
-            crate::util::duration_between_unix(unix_timestamp_indexed, current_timestamp);
+        let already_elapsed = crate::util::unix_elapsed(unix_timestamp_indexed);
         let remaining_time =
             Duration::from_secs(expected_response_time_secs).saturating_sub(already_elapsed);
         // prevent incrementing delayed metric for already delayed requests
         if remaining_time > Duration::from_secs(0) {
             let watcher = tokio::spawn(async move {
                 tokio::time::sleep(remaining_time).await;
-                let elapsed = crate::util::duration_between_unix(
-                    unix_timestamp_indexed,
-                    crate::util::current_unix_timestamp(),
-                );
+                let elapsed = crate::util::unix_elapsed(unix_timestamp_indexed);
                 tracing::warn!(
                     ?sign_id,
                     ?chain,
@@ -1149,7 +1147,7 @@ impl SignatureSpawner {
                     expected_secs = expected_response_time_secs,
                     "signature request delayed beyond expected response time"
                 );
-                crate::metrics::requests::NUM_SIGN_REQUESTS_MINE_DELAYED
+                crate::metrics::requests::SIGN_REQUEST_DELAYED
                     .with_label_values(&[chain.as_str()])
                     .inc();
             });
@@ -1235,8 +1233,8 @@ impl SignatureSpawner {
             Sign::Completion(sign_id) => {
                 self.handle_completion(sign_id);
             }
-            Sign::Request(indexed) => {
-                let sign_id = indexed.id;
+            Sign::Request(request) => {
+                let sign_id = request.id;
 
                 // Skip if we already have a task handling this request.
                 // Use tasks instead of inbox map since it may already contain buffered messages
@@ -1247,11 +1245,14 @@ impl SignatureSpawner {
                     return;
                 }
 
-                crate::metrics::requests::NUM_UNIQUE_SIGN_REQUESTS
-                    .with_label_values(&[indexed.chain.as_str()])
-                    .inc();
+                record_request_latency(
+                    request.chain,
+                    SignRequestStep::AwaitingGeneration,
+                    "ok",
+                    request.unix_timestamp_indexed,
+                );
 
-                self.spawn_task(indexed, participants.clone(), contract.clone(), cfg.clone());
+                self.spawn_task(request, participants.clone(), contract.clone(), cfg.clone());
             }
         }
 

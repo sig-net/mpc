@@ -7,6 +7,7 @@ use crate::indexer_hydration::{
 };
 use crate::mesh::wait_threshold_active;
 use crate::mesh::MeshState;
+use crate::metrics::requests::record_indexing_step_reached;
 
 use crate::node_client::NodeClient;
 use crate::protocol::Chain;
@@ -233,6 +234,8 @@ pub(crate) async fn process_sign_event(
 ) -> anyhow::Result<()> {
     let sign_request = sign_event.generate_sign_request(entropy, total_timeout)?;
 
+    record_indexing_step_reached(sign_event.source_chain());
+
     // Insert the transaction into the backlog when we first see the sign request
     let sign_id = sign_request.id;
     let sign_request_type = sign_request.sign_request_type.clone();
@@ -273,10 +276,6 @@ pub(crate) async fn process_sign_event(
         // TODO: handle error to ensure 100% success rate
         let chain = sign_event.source_chain();
         tracing::error!(?err, chain = %chain, "Failed to send {} sign request into queue", chain.as_str());
-    } else {
-        crate::metrics::requests::NUM_SIGN_REQUESTS
-            .with_label_values(&[sign_event.source_chain().as_str()])
-            .inc();
     }
 
     Ok(())
@@ -329,7 +328,7 @@ pub(crate) async fn recover_backlog(
             args: sign_tx_entry.args.clone(),
             chain: sign_tx_entry.source_chain,
             unix_timestamp_indexed: sign_tx_entry.unix_timestamp_indexed,
-            timestamp_sign_queue: Instant::now(),
+            timestamp_created: Instant::now(),
             total_timeout,
             sign_request_type: sign_type,
         };

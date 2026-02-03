@@ -254,7 +254,6 @@ async fn metrics() -> (StatusCode, String) {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchMetrics {
     pub sig_gen: Vec<f64>,
-    pub sig_respond: Vec<f64>,
     pub presig_gen: Vec<f64>,
 }
 
@@ -262,7 +261,6 @@ pub struct BenchMetrics {
 async fn bench_metrics() -> Json<BenchMetrics> {
     Json(BenchMetrics {
         sig_gen: crate::metrics::protocols::SIGN_GENERATION_LATENCY.exact(),
-        sig_respond: crate::metrics::requests::SIGN_RESPOND_LATENCY.exact(),
         presig_gen: crate::metrics::protocols::PRESIGNATURE_LATENCY.exact(),
     })
 }
