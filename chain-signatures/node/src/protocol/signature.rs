@@ -20,7 +20,8 @@ use crate::protocol::SignRequestType;
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::PresignOutput;
 use chrono::Utc;
-use k256::Secp256k1;
+use k256::sha2::{Digest, Sha256};
+use k256::{AffinePoint, Scalar, Secp256k1};
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::{derive_key, PublicKey};
 use mpc_primitives::{SignArgs, SignId};
@@ -28,6 +29,7 @@ use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
@@ -69,6 +71,7 @@ struct SignState {
     round: usize,
     indexed: IndexedSignRequest,
     mesh_state: watch::Receiver<MeshState>,
+    started_at: Instant,
     /// Budget for the current organizing+posit attempt.
     budget: TimeoutBudget,
     /// The highest round sent by a peer
@@ -90,6 +93,7 @@ impl SignState {
             round: 0,
             indexed,
             mesh_state,
+            started_at: Instant::now(),
             budget: TimeoutBudget::new(ORGANIZE_POSIT_TIMEOUT),
             highest_seen_round: 0,
             buffered_messages: VecDeque::new(),
@@ -751,9 +755,79 @@ struct SignGenerator {
     timeout: Duration,
     inbox: mpsc::Receiver<SignatureMessage>,
     msg: MessageChannel, // Needed for Drop
+    debug: SignGeneratorDebugInfo,
 
     #[cfg(feature = "debug-page")]
     debug_view: crate::web::debug::DebugPageTaskHandle,
+}
+
+struct SignGeneratorDebugInfo {
+    presignature_id: PresignatureId,
+    proposer: Participant,
+    participants: Vec<Participant>,
+    entropy_hex: String,
+    epsilon_hex: String,
+    payload_hash: String,
+    path: String,
+    key_version: u32,
+    delta_hex: String,
+    presignature_big_r_b58: String,
+    scaled_big_r_b58: String,
+    presignature_k_hex: String,
+    presignature_sigma_hex: String,
+}
+
+impl SignGeneratorDebugInfo {
+    fn new(
+        presignature_id: PresignatureId,
+        proposer: Participant,
+        participants: Vec<Participant>,
+        args: &SignArgs,
+        delta: Scalar,
+        presignature_big_r: AffinePoint,
+        scaled_big_r: AffinePoint,
+        presignature_k: Scalar,
+        presignature_sigma: Scalar,
+    ) -> Self {
+        Self {
+            presignature_id,
+            proposer,
+            participants,
+            entropy_hex: hex::encode(args.entropy),
+            epsilon_hex: hex::encode(args.epsilon.to_bytes()),
+            payload_hash: hex::encode(Sha256::digest(args.payload.to_bytes())),
+            path: args.path.clone(),
+            key_version: args.key_version,
+            delta_hex: hex::encode(delta.to_bytes()),
+            presignature_big_r_b58: presignature_big_r.to_base58(),
+            scaled_big_r_b58: scaled_big_r.to_base58(),
+            presignature_k_hex: hex::encode(presignature_k.to_bytes()),
+            presignature_sigma_hex: hex::encode(presignature_sigma.to_bytes()),
+        }
+    }
+
+    fn log_poke_error(&self, sign_id: SignId, me: Participant, err: &impl fmt::Debug, elapsed: Duration) {
+        tracing::error!(
+            ?sign_id,
+            me = ?me,
+            presignature_id = self.presignature_id,
+            proposer = ?self.proposer,
+            participants = ?self.participants,
+            entropy_hex = %self.entropy_hex,
+            epsilon_hex = %self.epsilon_hex,
+            payload_hash = %self.payload_hash,
+            path = %self.path,
+            key_version = self.key_version,
+            delta_hex = %self.delta_hex,
+            presignature_big_r_b58 = %self.presignature_big_r_b58,
+            scaled_big_r_b58 = %self.scaled_big_r_b58,
+            presignature_k_hex = %self.presignature_k_hex,
+            presignature_sigma_hex = %self.presignature_sigma_hex,
+            elapsed_ms = elapsed.as_millis(),
+            ?err,
+            "signature generation failed on protocol advancement with context",
+        );
+    }
 }
 
 impl SignGenerator {
@@ -783,13 +857,21 @@ impl SignGenerator {
         );
 
         let (presignature, dropper) = taken.take();
-        let PresignOutput { big_r, k, sigma } = presignature.output;
-        let delta = derive_delta(indexed.id.request_id, indexed.args.entropy, big_r);
+        let PresignOutput {
+            big_r: presignature_big_r,
+            k: presignature_k,
+            sigma: presignature_sigma,
+        } = presignature.output;
+        let delta = derive_delta(indexed.id.request_id, indexed.args.entropy, presignature_big_r);
+        let delta_inv = delta.invert().unwrap();
+        let scaled_big_r = (presignature_big_r * delta).to_affine();
+        let scaled_k = presignature_k * delta_inv;
+        let scaled_sigma = (presignature_sigma + indexed.args.epsilon * presignature_k) * delta_inv;
         // TODO: Check whether it is okay to use invert_vartime instead
         let output: PresignOutput<Secp256k1> = PresignOutput {
-            big_r: (big_r * delta).to_affine(),
-            k: k * delta.invert().unwrap(),
-            sigma: (sigma + indexed.args.epsilon * k) * delta.invert().unwrap(),
+            big_r: scaled_big_r,
+            k: scaled_k,
+            sigma: scaled_sigma,
         };
         let protocol = Box::new(cait_sith::sign(
             &participants,
@@ -799,6 +881,17 @@ impl SignGenerator {
             indexed.args.payload,
         )?);
         let inbox = ctx.msg.subscribe_signature(sign_id, presignature_id).await;
+        let debug = SignGeneratorDebugInfo::new(
+            presignature_id,
+            proposer,
+            participants.clone(),
+            &indexed.args,
+            delta,
+            presignature_big_r,
+            scaled_big_r,
+            presignature_k,
+            presignature_sigma,
+        );
         Ok(Self {
             protocol,
             dropper,
@@ -809,6 +902,7 @@ impl SignGenerator {
             timeout: Duration::from_millis(ctx.cfg.signature.generation_timeout),
             inbox,
             msg: ctx.msg.clone(),
+            debug,
             #[cfg(feature = "debug-page")]
             debug_view: crate::web::debug::register_task(
                 ctx.my_account_id.to_string(),
@@ -882,11 +976,7 @@ impl SignGenerator {
                     if self.proposer == me {
                         signature_generator_failures_mine_metric.inc();
                     }
-                    tracing::error!(
-                        ?sign_id,
-                        ?err,
-                        "signature generation failed on protocol advancement",
-                    );
+                    self.debug.log_poke_error(sign_id, me, &err, self.created.elapsed());
                     break Err(SignError::Aborted);
                 }
             };
@@ -1084,6 +1174,16 @@ impl SignTask {
                     }
                     _ => {}
                 }
+            }
+
+            if state.started_at.elapsed() >= state.indexed.total_timeout {
+                tracing::warn!(
+                    ?sign_id,
+                    elapsed_ms = state.started_at.elapsed().as_millis(),
+                    total_timeout_ms = state.indexed.total_timeout.as_millis(),
+                    "signature task exceeded total timeout; aborting"
+                );
+                return Err(SignError::Aborted);
             }
 
             phase = match phase.advance(&self, &mut state, &mut task_rx).await {

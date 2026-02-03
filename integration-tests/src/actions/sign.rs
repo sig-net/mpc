@@ -36,7 +36,6 @@ use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature as SolSignature;
 use solana_sdk::signer::Signer as _;
 use tokio::sync::oneshot;
-use tokio::time::sleep;
 
 use crate::actions::{self, wait_for};
 use crate::cluster::Cluster;
@@ -507,7 +506,6 @@ impl<'a> SolSignAction<'a> {
             solana.rpc_address.clone(),
             solana.ws_address.clone(),
             program_id,
-            Duration::from_secs(90),
         ));
 
         let tx_signature = match self.call {
@@ -584,7 +582,6 @@ async fn wait_for_signature_responded_event(
     rpc_http_url: String,
     rpc_ws_url: String,
     program_id: Pubkey,
-    timeout: Duration,
 ) -> anyhow::Result<SolSignatureResponse> {
     let rpc_client = RpcClient::new(rpc_http_url);
     let pubsub_client = PubsubClient::new(rpc_ws_url.as_str()).await?;
@@ -598,72 +595,62 @@ async fn wait_for_signature_responded_event(
     let mut seen = HashSet::new();
     let program_invoke_prefix = format!("Program {} invoke [", program_id);
 
-    let deadline = sleep(timeout);
-    tokio::pin!(deadline);
-
     loop {
-        tokio::select! {
-            _ = &mut deadline => {
-                anyhow::bail!("timeout waiting for respond on sol");
-            }
-            maybe = stream.next() => {
-                let Some(response) = maybe else {
-                    anyhow::bail!("sol signature respond log stream closed unexpectedly");
-                };
+        let Some(response) = stream.next().await else {
+            anyhow::bail!("sol signature respond log stream closed unexpectedly");
+        };
 
-                if response.value.err.is_some() {
-                    continue;
-                }
+        if response.value.err.is_some() {
+            continue;
+        }
 
-                let logs = &response.value.logs;
-                if !logs.iter().any(|log| log.contains(RESPOND_EVENT_HINT)) {
-                    continue;
-                }
-                if !logs.iter().any(|log| log.starts_with(&program_invoke_prefix)) {
-                    continue;
-                }
+        let logs = &response.value.logs;
+        if !logs.iter().any(|log| log.contains(RESPOND_EVENT_HINT)) {
+            continue;
+        }
+        if !logs.iter().any(|log| log.starts_with(&program_invoke_prefix)) {
+            continue;
+        }
 
-                let sig_text = &response.value.signature;
-                let Ok(tx_signature) = solana_sdk::signature::Signature::from_str(sig_text) else {
-                    tracing::warn!(tx_signature = sig_text, "invalid solana signature string in respond logs");
-                    continue;
-                };
+        let sig_text = &response.value.signature;
+        let Ok(tx_signature) = solana_sdk::signature::Signature::from_str(sig_text) else {
+            tracing::warn!(tx_signature = sig_text, "invalid solana signature string in respond logs");
+            continue;
+        };
 
-                if !seen.insert(tx_signature) {
-                    continue;
-                }
+        if !seen.insert(tx_signature) {
+            continue;
+        }
 
-                match parse_signature_responded_events(&rpc_client, &tx_signature, &program_id).await {
-                    Ok(events) => {
-                        for event in events {
-                            tracing::info!(
-                                request_id = %hex::encode(event.request_id),
-                                tx_signature = %tx_signature,
-                                "received SignatureRespondedEvent via CPI logs",
-                            );
+        match parse_signature_responded_events(&rpc_client, &tx_signature, &program_id).await {
+            Ok(events) => {
+                for event in events {
+                    tracing::info!(
+                        request_id = %hex::encode(event.request_id),
+                        tx_signature = %tx_signature,
+                        "received SignatureRespondedEvent via CPI logs",
+                    );
 
-                            match parse_sol_signature(&event.signature) {
-                                Ok((signature, recovery_id)) => {
-                                    return Ok(SolSignatureResponse {
-                                        request_id: event.request_id,
-                                        signature,
-                                        recovery_id,
-                                    });
-                                }
-                                Err(err) => {
-                                    tracing::warn!(?err, "failed to parse sol signature from SignatureRespondedEvent");
-                                }
-                            }
+                    match parse_sol_signature(&event.signature) {
+                        Ok((signature, recovery_id)) => {
+                            return Ok(SolSignatureResponse {
+                                request_id: event.request_id,
+                                signature,
+                                recovery_id,
+                            });
+                        }
+                        Err(err) => {
+                            tracing::warn!(?err, "failed to parse sol signature from SignatureRespondedEvent");
                         }
                     }
-                    Err(err) => {
-                        tracing::warn!(
-                            ?err,
-                            tx_signature = %tx_signature,
-                            "failed to parse SignatureRespondedEvent from respond transaction",
-                        );
-                    }
                 }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    tx_signature = %tx_signature,
+                    "failed to parse SignatureRespondedEvent from respond transaction",
+                );
             }
         }
     }
