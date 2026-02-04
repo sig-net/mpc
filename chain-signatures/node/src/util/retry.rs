@@ -40,7 +40,7 @@ pub struct RetryConfig {
     pub max_attempts: usize,
     /// timeout applied per attempt.
     pub per_attempt_timeout: Duration,
-    /// Backoff strategy (default: exponential + jitter).
+    /// Backoff strategy (default: exponential + 0 jitter).
     pub backoff: Backoff,
 }
 
@@ -98,7 +98,11 @@ pub fn compute_backoff_with_jitter(
     let pow = (attempt.saturating_sub(1)).min(16) as u32;
     let exp_ms = base.as_millis().saturating_mul(1u128 << pow);
 
-    let mut delay = Duration::from_millis(exp_ms.min(cap.as_millis()) as u64);
+    let bounded_ms = exp_ms.min(cap.as_millis());
+    let mut delay = match u64::try_from(bounded_ms) {
+        Ok(ms) => Duration::from_millis(ms),
+        Err(_) => cap.min(Duration::from_millis(u64::MAX)),
+    };
 
     if jitter_max_ms > 0 {
         let jitter = rand::thread_rng().gen_range(0..=jitter_max_ms);

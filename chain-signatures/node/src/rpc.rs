@@ -965,12 +965,11 @@ async fn execute_publish(client: ChainClient, action: PublishAction, backlog: Ba
         },
         |_attempt, _reason| true,
         |attempt, reason, sleep| match reason {
-            RetryReason::Error(e) => {
+            RetryReason::Error(_) => {
                 tracing::warn!(
                     ?sign_id,
                     retry_count = attempt.saturating_sub(1),
                     elapsed = ?action.timestamp.elapsed(),
-                    error = ?e,
                     "failed to publish, retrying in {sleep:?}"
                 );
             }
