@@ -26,8 +26,8 @@ impl RpcEthereumClient {
     pub async fn get_block(
         &self,
         block_id: alloy::rpc::types::BlockId,
-    ) -> Option<alloy::rpc::types::Block> {
-        self.block(block_id).await.unwrap_or(None)
+    ) -> anyhow::Result<Option<alloy::rpc::types::Block>> {
+        self.block(block_id).await
     }
 
     pub async fn get_block_receipts(
@@ -60,10 +60,6 @@ impl RpcEthereumClient {
         tx_hash: alloy::primitives::B256,
     ) -> anyhow::Result<Option<alloy::rpc::types::Transaction>> {
         self.transaction_by_hash(tx_hash).await
-    }
-
-    pub async fn get_latest_block_number(&self) -> anyhow::Result<u64> {
-        self.block_number().await
     }
 
     pub async fn call(
@@ -116,11 +112,6 @@ impl RpcEthereumClient {
             .cloned()
             .unwrap_or(serde_json::Value::Null);
         Ok(serde_json::from_value(result)?)
-    }
-
-    async fn block_number(&self) -> anyhow::Result<u64> {
-        let hex: String = self.rpc_call("eth_blockNumber", Vec::new()).await?;
-        hex_to_u64(&hex)
     }
 
     async fn block(

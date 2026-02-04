@@ -7,6 +7,7 @@ use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
 
+use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_client::{Client, Cluster, Program};
@@ -19,7 +20,6 @@ use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use signet_program::{
@@ -40,7 +40,6 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
-use tokio::time::timeout;
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     Scalar::from_bytes(
@@ -328,33 +327,6 @@ impl SignatureEvent for SignBidirectionalEvent {
 }
 
 type Result<T> = anyhow::Result<T>;
-
-/// Configuration knobs for timeout + retry.
-#[derive(Debug, Clone)]
-struct TxFetchRetryConfig {
-    /// Timeout per attempt.
-    per_attempt_timeout: Duration,
-    /// Max number of attempts (including the first).
-    max_attempts: usize,
-    /// Base backoff delay after first failure.
-    backoff_base: Duration,
-    /// Maximum backoff delay cap.
-    backoff_max: Duration,
-    /// Random jitter range added to backoff (0..=jitter_max_ms).
-    jitter_max_ms: u64,
-}
-
-impl Default for TxFetchRetryConfig {
-    fn default() -> Self {
-        Self {
-            per_attempt_timeout: Duration::from_secs(3),
-            max_attempts: 5,
-            backoff_base: Duration::from_millis(300),
-            backoff_max: Duration::from_secs(5),
-            jitter_max_ms: 250,
-        }
-    }
-}
 
 pub async fn run(
     sol: Option<SolConfig>,
@@ -703,7 +675,7 @@ where
                             continue;
                         }
 
-                        let tx = match get_tx_with_timeout_retry(&rpc_client, &signature, TxFetchRetryConfig::default()).await {
+                        let tx = match get_tx(&rpc_client, &signature, RetryConfig::default()).await {
                             Ok(tx) => tx,
                             Err(e) => {
                                 tracing::warn!("Failed to fetch transaction {}: {}", signature, e);
@@ -924,7 +896,7 @@ async fn subscribe_to_program_respond_events(
                             continue;
                         }
 
-                        let tx = match get_tx_with_timeout_retry(&rpc_client, &signature, TxFetchRetryConfig::default()).await {
+                        let tx = match get_tx(&rpc_client, &signature, RetryConfig::default()).await {
                             Ok(tx) => tx,
                             Err(e) => {
                                 tracing::warn!("Failed to fetch transaction {}: {}", signature, e);
@@ -1013,87 +985,64 @@ pub fn to_mpc_signature(
 
 /// Fetch transaction with timeout + retry.
 /// Returns the same type as `RpcClient::get_transaction_with_config`.
-async fn get_tx_with_timeout_retry(
+async fn get_tx(
     rpc_client: &RpcClient,
     signature: &Signature,
-    cfg: TxFetchRetryConfig,
+    retry_cfg: RetryConfig,
 ) -> anyhow::Result<solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta> {
-    let mut last_err: Option<anyhow::Error> = None;
-    if cfg.max_attempts == 0 {
-        anyhow::bail!("max_attempts must be at least 1");
-    }
+    let max_attempts = retry_cfg.max_attempts;
 
-    for attempt in 1..=cfg.max_attempts {
-        let fut = rpc_client.get_transaction_with_config(
-            signature,
-            solana_client::rpc_config::RpcTransactionConfig {
-                encoding: Some(solana_transaction_status::UiTransactionEncoding::JsonParsed),
-                commitment: Some(CommitmentConfig::confirmed()),
-                max_supported_transaction_version: Some(0),
-            },
-        );
-        match timeout(cfg.per_attempt_timeout, fut).await {
-            Ok(Ok(tx)) => return Ok(tx),
-
-            Ok(Err(e)) => {
-                // On any RPC error, retry until max_attempts is reached.
-                let e_anyhow = anyhow::anyhow!(e).context(format!(
-                    "getTransaction failed (attempt {attempt}/{}) for {}",
-                    cfg.max_attempts, signature
-                ));
-
-                if attempt == cfg.max_attempts {
-                    return Err(e_anyhow);
-                }
-                last_err = Some(e_anyhow);
-            }
-
-            Err(_elapsed) => {
-                let e_anyhow = anyhow::anyhow!(
-                    "getTransaction timed out after {:?} (attempt {attempt}/{}) for {}",
-                    cfg.per_attempt_timeout,
-                    cfg.max_attempts,
+    let res = retry_async(
+        retry_cfg,
+        |attempt| async move {
+            rpc_client
+                .get_transaction_with_config(
+                    signature,
+                    solana_client::rpc_config::RpcTransactionConfig {
+                        encoding: Some(solana_transaction_status::UiTransactionEncoding::JsonParsed),
+                        commitment: Some(CommitmentConfig::confirmed()),
+                        max_supported_transaction_version: Some(0),
+                    },
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(e).context(format!(
+                        "getTransaction failed (attempt {attempt}/{}) for {}",
+                        max_attempts, signature
+                    ))
+                })
+        },
+        |_attempt, _reason| true,
+        |attempt, reason, sleep| match reason {
+            RetryReason::Error(e) => {
+                tracing::warn!(
+                    "getTransaction failed (attempt {attempt}/{}) for {}: {e:#}; retrying in {sleep:?}",
+                    max_attempts,
                     signature
                 );
-
-                if attempt == cfg.max_attempts {
-                    return Err(e_anyhow);
-                }
-                last_err = Some(e_anyhow);
             }
-        }
+            RetryReason::Timeout(t) => {
+                tracing::warn!(
+                    "getTransaction timed out after {t:?} (attempt {attempt}/{}) for {}; retrying in {sleep:?}",
+                    max_attempts,
+                    signature
+                );
+            }
+        },
+    )
+    .await;
 
-        // Backoff before next attempt (exponential + jitter).
-        let backoff = compute_backoff_with_jitter(
-            cfg.backoff_base,
-            cfg.backoff_max,
-            attempt,
-            cfg.jitter_max_ms,
-        );
-        tokio::time::sleep(backoff).await;
+    match res {
+        Ok(tx) => Ok(tx),
+        Err(RetryError::Exhausted { last_error, .. }) => Err(last_error),
+        Err(RetryError::TimeoutExhausted {
+            attempts,
+            last_timeout,
+        }) => Err(anyhow::anyhow!(
+            "getTransaction timed out after {:?} (attempt {attempts}/{}) for {}",
+            last_timeout,
+            max_attempts,
+            signature
+        )),
     }
-
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("getTransaction failed without error details")))
-}
-
-/// Exponential backoff with jitter.
-///
-/// attempt: 1-based attempt count (1,2,3,...)
-fn compute_backoff_with_jitter(
-    base: Duration,
-    cap: Duration,
-    attempt: usize,
-    jitter_max_ms: u64,
-) -> Duration {
-    // Exponential: base * 2^(attempt-1)
-    let pow = (attempt.saturating_sub(1)).min(16) as u32;
-    let exp_ms = base.as_millis().saturating_mul(1u128 << pow);
-
-    let mut delay = Duration::from_millis(exp_ms.min(cap.as_millis()) as u64);
-
-    if jitter_max_ms > 0 {
-        let jitter = rand::thread_rng().gen_range(0..=jitter_max_ms);
-        delay += Duration::from_millis(jitter);
-    }
-    delay
 }

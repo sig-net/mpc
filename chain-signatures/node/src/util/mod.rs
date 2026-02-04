@@ -10,6 +10,8 @@ use std::future::Future;
 use std::hash::Hash;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+pub mod retry;
+
 pub trait NearPublicKeyExt {
     fn into_affine_point(self) -> PublicKey;
 }

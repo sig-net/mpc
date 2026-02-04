@@ -7,28 +7,23 @@ use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClient
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::time::Duration;
 
 #[derive(Clone)]
 pub struct HeliosEthereumClient {
     client: Arc<EthereumClient>,
-    max_retries: u8,
-    base_delay: Duration,
 }
 
 impl HeliosEthereumClient {
-    fn new(client: EthereumClient, max_retries: u8, base_delay: Duration) -> Self {
+    fn new(client: EthereumClient) -> Self {
         Self {
             client: Arc::new(client),
-            max_retries,
-            base_delay,
         }
     }
 
     pub async fn get_block(
         &self,
         block_id: alloy::rpc::types::BlockId,
-    ) -> Option<alloy::rpc::types::Block> {
+    ) -> anyhow::Result<Option<alloy::rpc::types::Block>> {
         self.fetch_block(block_id).await
     }
 
@@ -103,43 +98,14 @@ impl HeliosEthereumClient {
             .map_err(|err| anyhow::anyhow!("Failed to call: {err:?}"))
     }
 
-    pub async fn get_latest_block_number(&self) -> anyhow::Result<u64> {
-        let Some(block) = self
-            .fetch_block(BlockId::Number(BlockNumberOrTag::Latest))
-            .await
-        else {
-            return Err(anyhow::anyhow!("Latest block not found"));
-        };
-        Ok(block.header.number)
-    }
-
     // retry getting block from helios with exponential backoff
-    async fn fetch_block(&self, block_id: BlockId) -> Option<alloy::rpc::types::Block> {
-        let mut retries = 0;
-        loop {
-            match self.client.get_block(block_id, false).await {
-                Ok(Some(block)) => return Some(block),
-                Ok(None) => {
-                    tracing::warn!("Block {block_id} not found from Helios client");
-                    return None;
-                }
-                Err(e) => {
-                    if retries < self.max_retries {
-                        retries += 1;
-                        let delay = self.base_delay * 2u32.pow((retries - 1) as u32);
-                        tracing::warn!(
-                        "Failed to fetch block number {block_id} from Helios client: {e:?}, retrying"
-                    );
-                        tokio::time::sleep(delay).await;
-                        continue;
-                    }
-                    tracing::warn!(
-                    "Failed to fetch block number {block_id} from Helios client: {e:?}, exceeded maximum retry"
-                );
-                    return None;
-                }
-            }
-        }
+    async fn fetch_block(
+        &self,
+        block_id: BlockId,
+    ) -> anyhow::Result<Option<alloy::rpc::types::Block>> {
+        self.client.get_block(block_id, false).await.map_err(|err| {
+            anyhow::anyhow!("Failed to fetch block for block id {block_id:?}: {:?}", err)
+        })
     }
 }
 
@@ -163,9 +129,5 @@ pub async fn build_client(eth: EthConfig) -> anyhow::Result<HeliosEthereumClient
         .await
         .map_err(|err| anyhow::anyhow!("Failed to wait for synced: {err:?}"))?;
 
-    Ok(HeliosEthereumClient::new(
-        client,
-        6,
-        Duration::from_millis(200),
-    ))
+    Ok(HeliosEthereumClient::new(client))
 }

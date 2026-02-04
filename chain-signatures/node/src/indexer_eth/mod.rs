@@ -11,6 +11,7 @@ use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::PendingRequestStatus;
 use crate::storage::app_data_storage::AppDataStorage;
+use alloy::eips::BlockId;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
@@ -603,13 +604,74 @@ impl EthereumClient {
         }
     }
 
+    fn client_name(&self) -> &str {
+        match self {
+            EthereumClient::Helios(_) => "Helios",
+            EthereumClient::DirectRpc(_) => "DirectRpc",
+        }
+    }
+
     async fn get_block(
         &self,
         block_id: alloy::rpc::types::BlockId,
     ) -> Option<alloy::rpc::types::Block> {
-        match self {
-            EthereumClient::Helios(client) => client.get_block(block_id).await,
-            EthereumClient::DirectRpc(client) => client.get_block(block_id).await,
+        // Configure retry behaviour and delegate to shared retry_async helper.
+        let retry_config = crate::util::retry::RetryConfig::default();
+        // the retry helper expects the operation closure to accept one argument (attempt/index)
+        let op = |_attempt: usize| async {
+            match self {
+                EthereumClient::Helios(client) => client.get_block(block_id).await,
+                EthereumClient::DirectRpc(client) => client.get_block(block_id).await,
+            }
+        };
+
+        let res = crate::util::retry::retry_async(
+            retry_config,
+            op,
+            |_attempt, _reason| true,
+            |attempt, reason, sleep_duration| match reason {
+                crate::util::retry::RetryReason::Error(e) => {
+                    tracing::warn!(
+                        client = self.client_name(),
+                        "get_block failed (attempt {attempt}) for {block_id:?}: {e:#}; retrying in {sleep_duration:?}"
+                    );
+                }
+                crate::util::retry::RetryReason::Timeout(t) => {
+                    tracing::warn!(
+                        client = self.client_name(),
+                        "get_block timed out after {t:?} (attempt {attempt}) for {block_id:?}; retrying in {sleep_duration:?}"
+                    );
+                }
+            },
+        )
+        .await;
+
+        match res {
+            Ok(Some(block)) => Some(block),
+            Ok(None) => {
+                tracing::warn!(client = self.client_name(), "Block {block_id:?} not found");
+                None
+            }
+            Err(crate::util::retry::RetryError::Exhausted {
+                attempts,
+                last_error,
+            }) => {
+                tracing::warn!(
+                    client = self.client_name(),
+                    "get_block failed for {block_id:?}: {last_error:#}; exhausted after {attempts} attempts"
+                );
+                None
+            }
+            Err(crate::util::retry::RetryError::TimeoutExhausted {
+                attempts,
+                last_timeout,
+            }) => {
+                tracing::warn!(
+                    client = self.client_name(),
+                    "get_block timed out for {block_id:?} (last timeout {last_timeout:?}); exhausted after {attempts} attempts"
+                );
+                None
+            }
         }
     }
 
@@ -657,11 +719,10 @@ impl EthereumClient {
         }
     }
 
-    async fn get_latest_block_number(&self) -> anyhow::Result<u64> {
-        match self {
-            EthereumClient::Helios(client) => client.get_latest_block_number().await,
-            EthereumClient::DirectRpc(client) => client.get_latest_block_number().await,
-        }
+    async fn get_latest_block_number(&self) -> Option<u64> {
+        self.get_block(BlockId::Number(BlockNumberOrTag::Latest))
+            .await
+            .map(|block| block.header.number)
     }
 }
 
@@ -804,7 +865,7 @@ impl EthereumIndexer {
         let blocks_to_process_send_clone = blocks_to_process_send.clone();
         if let Some(last_processed_block) = last_processed_block {
             match Self::catchup_end_block_number(Arc::clone(&client)).await {
-                Ok(end_block_number) => {
+                Some(end_block_number) => {
                     Self::add_catchup_blocks_to_process(
                         blocks_to_process_send_clone,
                         last_processed_block,
@@ -812,8 +873,8 @@ impl EthereumIndexer {
                     )
                     .await
                 }
-                Err(err) => {
-                    tracing::error!("Failed to get catchup end block number: {err:?}");
+                None => {
+                    tracing::error!("Failed to get catchup end block number");
                 }
             }
         }
@@ -903,7 +964,7 @@ impl EthereumIndexer {
             current_block = block_number;
         }
     }
-    async fn catchup_end_block_number(client: Arc<EthereumClient>) -> anyhow::Result<BlockNumber> {
+    async fn catchup_end_block_number(client: Arc<EthereumClient>) -> Option<BlockNumber> {
         client.get_latest_block_number().await
     }
 
