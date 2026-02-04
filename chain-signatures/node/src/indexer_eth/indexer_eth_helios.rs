@@ -98,7 +98,6 @@ impl HeliosEthereumClient {
             .map_err(|err| anyhow::anyhow!("Failed to call: {err:?}"))
     }
 
-    // retry getting block from helios with exponential backoff
     async fn fetch_block(
         &self,
         block_id: BlockId,

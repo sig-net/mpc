@@ -1105,9 +1105,9 @@ async fn wait_for_pending_tx(
 
     let cfg = RetryConfig {
         max_attempts,
-        per_attempt_timeout: Duration::from_secs(10), // 你原来 timeout 10s
+        per_attempt_timeout: Duration::from_secs(10),
         backoff: Backoff::ExponentialJitter {
-            base: Duration::from_secs(5), // 你原来 initial_delay 5s + exponential
+            base: Duration::from_secs(5),
             cap: Duration::from_secs(60),
             jitter_max_ms: 0,
         },
@@ -1324,7 +1324,7 @@ async fn send_eth_transaction(
                 .function("respond", params)
                 .unwrap()
                 .gas(gas)
-                .nonce(nonce) // 保持你原来的逻辑：手动 nonce
+                .nonce(nonce)
                 .send()
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
@@ -1529,7 +1529,6 @@ async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAc
         backoff: Backoff::Fixed(Duration::from_millis(100)),
     };
 
-    // 只借用 actions/signatures/client，避免 move
     let res: Result<(), RetryError<()>> = retry_async(
         cfg,
         |_attempt| async {

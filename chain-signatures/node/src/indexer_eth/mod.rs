@@ -11,7 +11,6 @@ use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::PendingRequestStatus;
 use crate::storage::app_data_storage::AppDataStorage;
-use alloy::eips::BlockId;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
@@ -720,9 +719,11 @@ impl EthereumClient {
     }
 
     async fn get_latest_block_number(&self) -> Option<u64> {
-        self.get_block(BlockId::Number(BlockNumberOrTag::Latest))
-            .await
-            .map(|block| block.header.number)
+        self.get_block(alloy::rpc::types::BlockId::Number(
+            alloy::rpc::types::BlockNumberOrTag::Latest,
+        ))
+        .await
+        .map(|block| block.header.number)
     }
 }
 
