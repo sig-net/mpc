@@ -9,7 +9,6 @@ use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
-use crate::storage::app_data_storage;
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::triple_storage::TriplePair;
 use crate::{indexer, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, storage, web};
@@ -220,7 +219,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
             let triple_storage = TriplePair::storage(&redis_pool, &account_id);
             let presignature_storage = Presignature::storage(&redis_pool, &account_id);
-            let app_data_storage = app_data_storage::init(&redis_pool, &account_id);
 
             let mut rpc_client = near_fetch::Client::new(&near_rpc);
             if let Some(referer_param) = client_header_referer {
@@ -353,7 +351,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             match indexer_eth::EthereumIndexer::new(
                 eth,
                 sign_tx.clone(),
-                app_data_storage.clone(),
                 backlog.clone(),
                 contract_watcher.clone(),
                 mesh_state.clone(),

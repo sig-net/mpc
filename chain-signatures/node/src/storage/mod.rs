@@ -1,4 +1,3 @@
-pub mod app_data_storage;
 pub mod checkpoint_storage;
 pub mod presignature_storage;
 pub mod protocol_storage;

@@ -10,7 +10,6 @@ use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::PendingRequestStatus;
-use crate::storage::app_data_storage::AppDataStorage;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
@@ -669,7 +668,6 @@ impl EthereumClient {
 pub struct EthereumIndexer {
     eth: EthConfig,
     sign_tx: mpsc::Sender<Sign>,
-    app_data_storage: AppDataStorage,
     backlog: Backlog,
     contract_watcher: ContractStateWatcher,
     mesh_state: watch::Receiver<MeshState>,
@@ -681,7 +679,6 @@ impl EthereumIndexer {
     pub async fn new(
         eth: Option<EthConfig>,
         sign_tx: mpsc::Sender<Sign>,
-        app_data_storage: AppDataStorage,
         backlog: Backlog,
         contract_watcher: ContractStateWatcher,
         mesh_state: watch::Receiver<MeshState>,
@@ -697,7 +694,6 @@ impl EthereumIndexer {
         Ok(Self {
             eth,
             sign_tx,
-            app_data_storage,
             backlog,
             contract_watcher,
             mesh_state,
@@ -711,7 +707,6 @@ impl EthereumIndexer {
         let mut contract_watcher = self.contract_watcher;
         let mut mesh_state = self.mesh_state;
         let node_client = self.node_client;
-        let app_data_storage = self.app_data_storage;
         let client = self.client;
         let eth = self.eth;
         let sign_tx = self.sign_tx;
@@ -728,8 +723,6 @@ impl EthereumIndexer {
             total_timeout,
         )
         .await;
-
-        let last_processed_block = Self::get_last_processed_block(&app_data_storage).await;
 
         let client = Arc::new(client);
 
@@ -777,7 +770,6 @@ impl EthereumIndexer {
                 requests_indexed_recv,
                 finalized_block_recv,
                 sign_tx_clone,
-                app_data_storage.clone(),
                 optimistic_requests,
                 backlog_clone,
             )
@@ -800,6 +792,8 @@ impl EthereumIndexer {
             )
             .await;
         });
+
+        let last_processed_block = backlog.processed_block(Chain::Ethereum).await;
 
         let blocks_to_process_send_clone = blocks_to_process_send.clone();
         if let Some(last_processed_block) = last_processed_block {
@@ -1189,18 +1183,10 @@ impl EthereumIndexer {
         mut requests_indexed: mpsc::Receiver<BlockAndRequests>,
         mut finalized_block_rx: mpsc::Receiver<BlockNumber>,
         sign_tx: mpsc::Sender<Sign>,
-        app_data_storage: AppDataStorage,
         optimistic_requests: bool,
         backlog: Backlog,
     ) {
         let mut finalized_block_number: Option<BlockNumber> = None;
-        let mut last_processed_block: Option<BlockNumber> = app_data_storage
-            .last_processed_block_eth()
-            .await
-            .unwrap_or_else(|err| {
-                tracing::warn!("Failed to fetch last processed block: {err:?}, setting to None");
-                None
-            });
 
         loop {
             let Some(BlockAndRequests {
@@ -1244,15 +1230,6 @@ impl EthereumIndexer {
 
                 if !respond_logs.is_empty() {
                     process_respond_events(&respond_logs, &backlog, sign_tx.clone()).await;
-                }
-                if last_processed_block.is_none_or(|n| n < block_number) {
-                    if let Err(err) = app_data_storage
-                        .set_last_processed_block_eth(block_number)
-                        .await
-                    {
-                        tracing::warn!("Failed to set last processed block: {err:?}");
-                    }
-                    last_processed_block.replace(block_number);
                 }
                 backlog
                     .set_processed_block(Chain::Ethereum, block_number)
@@ -1392,15 +1369,5 @@ impl EthereumIndexer {
                 tracing::warn!("Failed to send block to process: {err:?}");
             }
         }
-    }
-
-    async fn get_last_processed_block(app_data_storage: &AppDataStorage) -> Option<BlockNumber> {
-        app_data_storage
-            .last_processed_block_eth()
-            .await
-            .unwrap_or_else(|err| {
-                tracing::warn!("Failed to get last processed block: {err:?}");
-                None
-            })
     }
 }
