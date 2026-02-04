@@ -931,8 +931,8 @@ async fn execute_publish(client: ChainClient, action: PublishAction, backlog: Ba
 
     let retry_cfg = RetryConfig {
         max_attempts: MAX_PUBLISH_RETRY,
-        per_attempt_timeout: Duration::from_secs(30),
-        backoff: Backoff::Fixed(Duration::from_millis(100)),
+        per_attempt_timeout: Duration::from_secs(120),
+        backoff: Backoff::Fixed(Duration::from_secs(5)),
     };
 
     let publish_res: Result<(), RetryError<()>> = retry_async(
@@ -1104,10 +1104,10 @@ async fn wait_for_pending_tx(
 
     let cfg = RetryConfig {
         max_attempts,
-        per_attempt_timeout: Duration::from_secs(10),
+        per_attempt_timeout: Duration::from_secs(5),
         backoff: Backoff::ExponentialJitter {
-            base: Duration::from_secs(5),
-            cap: Duration::from_secs(60),
+            base: Duration::from_secs(1),
+            cap: Duration::from_secs(10),
             jitter_max_ms: 0,
         },
     };
@@ -1168,10 +1168,10 @@ async fn wait_for_transaction_receipt(
 
     let retry_config = RetryConfig {
         max_attempts,
-        per_attempt_timeout: Duration::from_secs(10),
+        per_attempt_timeout: Duration::from_secs(2),
         backoff: Backoff::ExponentialJitter {
-            base: Duration::from_secs(5),
-            cap: Duration::from_secs(60),
+            base: Duration::from_secs(1),
+            cap: Duration::from_secs(20),
             jitter_max_ms: 0,
         },
     };
@@ -1256,7 +1256,7 @@ async fn send_eth_transaction(
 ) -> Result<alloy::primitives::B256, ()> {
     let cfg_nonce = RetryConfig {
         max_attempts: 3,
-        per_attempt_timeout: Duration::from_secs(10),
+        per_attempt_timeout: Duration::from_secs(2),
         backoff: Backoff::ExponentialJitter {
             base: Duration::from_millis(500),
             cap: Duration::from_secs(5),
@@ -1308,7 +1308,7 @@ async fn send_eth_transaction(
 
     let cfg_send = RetryConfig {
         max_attempts: 3,
-        per_attempt_timeout: Duration::from_secs(30),
+        per_attempt_timeout: Duration::from_secs(5),
         backoff: Backoff::ExponentialJitter {
             base: Duration::from_millis(500),
             cap: Duration::from_secs(10),
@@ -1524,8 +1524,12 @@ async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAc
 
     let cfg = RetryConfig {
         max_attempts: MAX_PUBLISH_RETRY,
-        per_attempt_timeout: Duration::from_secs(5),
-        backoff: Backoff::Fixed(Duration::from_millis(100)),
+        per_attempt_timeout: Duration::from_secs(120),
+        backoff: Backoff::ExponentialJitter {
+            base: Duration::from_secs(1),
+            cap: Duration::from_secs(10),
+            jitter_max_ms: 0,
+        },
     };
 
     let res: Result<(), RetryError<()>> = retry_async(
