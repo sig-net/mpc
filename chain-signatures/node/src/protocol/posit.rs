@@ -345,8 +345,13 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
         timeout: Duration,
     ) -> Vec<(Id, PositInternalAction<S>)> {
         let mut expired = Vec::new();
-        for (id, (_, timestamp)) in &self.posits {
-            if timestamp.elapsed() > timeout {
+        for (id, (positor, timestamp)) in &self.posits {
+            // Deliberators need to wait longer than the proposer, otherwise
+            // they have a high chance of aborting just when the proposer
+            // decides to move forward.
+            if (positor.is_proposer() && timestamp.elapsed() > timeout)
+                || (timestamp.elapsed() > timeout * 2)
+            {
                 expired.push(*id);
             }
         }
