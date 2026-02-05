@@ -616,8 +616,7 @@ impl EthereumClient {
     ) -> Option<alloy::rpc::types::Block> {
         // Configure retry behaviour and delegate to shared retry_async helper.
         let retry_config = crate::util::retry::RetryConfig::default();
-        // the retry helper expects the operation closure to accept one argument (attempt/index)
-        let op = |_attempt: usize| async {
+        let get_block_op = |_attempt: usize| async {
             match self {
                 EthereumClient::Helios(client) => client.get_block(block_id).await,
                 EthereumClient::DirectRpc(client) => client.get_block(block_id).await,
@@ -626,7 +625,7 @@ impl EthereumClient {
 
         let res = crate::util::retry::retry_async(
             retry_config,
-            op,
+            get_block_op,
             |_attempt, _reason| true,
             |attempt, reason, sleep_duration| match reason {
                 crate::util::retry::RetryReason::Error(e) => {

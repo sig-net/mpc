@@ -16,7 +16,7 @@ use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
 use alloy::providers::{Provider, RootProvider, WalletProvider};
 use alloy::rpc::types::{Transaction, TransactionReceipt};
-use cait_sith::protocol::Participant;
+use cait_sith::protocol::{Action, Participant};
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
 use mpc_keys::hpke;
@@ -970,6 +970,7 @@ async fn execute_publish(client: ChainClient, action: PublishAction, backlog: Ba
                     ?sign_id,
                     retry_count = attempt.saturating_sub(1),
                     elapsed = ?action.timestamp.elapsed(),
+                    chain = ?action.indexed.chain,
                     "failed to publish, retrying in {sleep:?}"
                 );
             }
@@ -978,6 +979,7 @@ async fn execute_publish(client: ChainClient, action: PublishAction, backlog: Ba
                     ?sign_id,
                     retry_count = attempt.saturating_sub(1),
                     elapsed = ?action.timestamp.elapsed(),
+                    chain = ?action.indexed.chain,
                     "publish timed out after {t:?}, retrying in {sleep:?}"
                 );
             }
