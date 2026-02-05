@@ -606,7 +606,8 @@ mod tests {
             threshold,
             &PositAction::Propose,
         );
-        std::thread::sleep(Duration::from_millis(1100));
+        // need to wait for more than 2 * timeout because deliberators wait for double the timeout.
+        std::thread::sleep(Duration::from_millis(2100));
         let actions = posits1.expire_and_start(threshold, Duration::from_secs(1));
         assert_eq!(actions.len(), 0);
         assert_eq!(posits1.len(), 0);
