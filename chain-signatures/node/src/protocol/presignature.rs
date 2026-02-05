@@ -333,7 +333,7 @@ impl PresignatureSpawner {
         #[cfg(feature = "debug-page")]
         let posits_debug_view = crate::web::debug::register_task(
             node_account_id.clone(),
-            format!("Posits PresignatureSpawner"),
+            "Posits PresignatureSpawner".to_string(),
         );
         Self {
             triples: triples.clone(),

@@ -329,7 +329,7 @@ impl TripleSpawner {
         #[cfg(feature = "debug-page")]
         let posits_debug_view = crate::web::debug::register_task(
             node_account_id.clone(),
-            format!("Posits TripleSpawner"),
+            "Posits TripleSpawner".to_string(),
         );
         Self {
             me,
