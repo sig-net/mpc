@@ -1326,6 +1326,9 @@ impl EthereumIndexer {
                     continue;
                 }
                 final_block_number.replace(new_final_block_number);
+                crate::metrics::indexers::LATEST_BLOCK_NUMBER
+                    .with_label_values(&[Chain::Ethereum.as_str(), "finalized"])
+                    .set(new_final_block_number as i64);
                 continue;
             }
 
