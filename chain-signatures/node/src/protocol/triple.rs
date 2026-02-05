@@ -301,6 +301,9 @@ pub struct TripleSpawner {
     epoch: u64,
     msg: MessageChannel,
     node_account_id: String,
+
+    #[cfg(feature = "debug-page")]
+    posits_debug_view: crate::web::debug::DebugPageTaskHandle,
 }
 
 impl fmt::Debug for TripleSpawner {
@@ -323,6 +326,11 @@ impl TripleSpawner {
         msg: MessageChannel,
         node_account_id: String,
     ) -> Self {
+        #[cfg(feature = "debug-page")]
+        let posits_debug_view = crate::web::debug::register_task(
+            node_account_id.clone(),
+            format!("Posits TripleSpawner"),
+        );
         Self {
             me,
             threshold,
@@ -333,6 +341,8 @@ impl TripleSpawner {
             posits: Posits::new(me),
             msg,
             node_account_id,
+            #[cfg(feature = "debug-page")]
+            posits_debug_view,
         }
     }
 
@@ -385,7 +395,11 @@ impl TripleSpawner {
             tracing::warn!(id, ?from, ?action, "triple already generated");
             PositInternalAction::Reply(PositAction::Reject)
         } else {
-            self.posits.act(id, from, self.threshold, &action)
+            let internal_action = self.posits.act(id, from, self.threshold, &action);
+            #[cfg(feature = "debug-page")]
+            self.posits_debug_view
+                .send(self.posits.render_debug(self.threshold));
+            internal_action
         };
 
         match internal_action {

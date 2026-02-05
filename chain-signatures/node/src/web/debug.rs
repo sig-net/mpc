@@ -123,8 +123,9 @@ pub(super) async fn page(Extension(web): Extension<Arc<AxumState>>) -> Html<Stri
         h2 { "Registered Tasks (" (tasks.len())  ")"}
         style {
             ".tasks { display: flex; flex-wrap: wrap; }"
-            ".task { margin: 1rem; padding: 1rem; border: solid 1px; width: 15rem; }"
-            ".task-title { font-weight: bold; }"
+            ".task { margin: 1rem; padding: 1rem; border: solid 1px; }"
+            ".task-title { font-weight: bold; max-width: 15rem; }"
+            ".posits { display: grid; grid-template-columns: 1fr 1fr; }"
         }
 
         @for (task_group_name, task_group) in rendered_tasks.iter() {

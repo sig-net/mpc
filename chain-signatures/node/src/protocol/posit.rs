@@ -28,6 +28,24 @@ impl<T> Positor<T> {
     }
 }
 
+impl<S> Positor<PositCounter<S>> {
+    #[cfg(feature = "debug-page")]
+    pub fn render_debug(&self, threshold: usize) -> maud::Markup {
+        match self {
+            Positor::Proposer(_id, counter) => {
+                let display = format!(
+                    "Proposer accepted={}/{}, rejected={}",
+                    counter.accepts.len(),
+                    threshold,
+                    counter.rejects.len()
+                );
+                maud::html!((display))
+            }
+            Positor::Deliberator(_id) => maud::html!("Deliberator"),
+        }
+    }
+}
+
 /// All actions that can be taken when a new posit is introduced for a protocol.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum PositAction {
@@ -279,6 +297,27 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                     participants,
                     Positor::Proposer(self.me, counter.store),
                 )
+            }
+        }
+    }
+
+    #[cfg(feature = "debug-page")]
+    pub fn render_debug(&self, threshold: usize) -> maud::Markup {
+        let posits = self
+            .posits
+            .iter()
+            .map(|(id, (positor, _))| (format!("{id:?}"), positor.render_debug(threshold)));
+
+        maud::html! {
+            .posits {
+                @for (id, posit) in posits {
+                    .id {
+                        (id)
+                    }
+                    .posit {
+                        (posit)
+                    }
+                }
             }
         }
     }

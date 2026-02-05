@@ -312,6 +312,9 @@ pub struct PresignatureSpawner {
     public_key: PublicKey,
     msg: MessageChannel,
     node_account_id: String,
+
+    #[cfg(feature = "debug-page")]
+    posits_debug_view: crate::web::debug::DebugPageTaskHandle,
 }
 
 impl PresignatureSpawner {
@@ -327,6 +330,11 @@ impl PresignatureSpawner {
         msg: MessageChannel,
         node_account_id: String,
     ) -> Self {
+        #[cfg(feature = "debug-page")]
+        let posits_debug_view = crate::web::debug::register_task(
+            node_account_id.clone(),
+            format!("Posits PresignatureSpawner"),
+        );
         Self {
             triples: triples.clone(),
             presignatures: presignatures.clone(),
@@ -340,6 +348,8 @@ impl PresignatureSpawner {
             public_key: *public_key,
             msg,
             node_account_id,
+            #[cfg(feature = "debug-page")]
+            posits_debug_view,
         }
     }
 
@@ -424,7 +434,11 @@ impl PresignatureSpawner {
             );
             PositInternalAction::Reply(PositAction::Reject)
         } else {
-            self.posits.act(id, from, self.threshold, &action)
+            let internal_action = self.posits.act(id, from, self.threshold, &action);
+            #[cfg(feature = "debug-page")]
+            self.posits_debug_view
+                .send(self.posits.render_debug(self.threshold));
+            internal_action
         };
 
         match internal_action {
