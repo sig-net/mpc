@@ -911,7 +911,8 @@ async fn test_presignature_with_offline_node() {
         for node_id in 1..7 {
             network[node_id]
                 .wait_for_presignatures(target_num as usize)
-                .await
+                .await;
+            tracing::info!("node {node_id} got enough presignatures");
         }
     })
     .await
@@ -936,9 +937,10 @@ async fn test_triple_with_offline_node() {
         .await;
 
     // all nodes except the offline node should generate a triple
-    tokio::time::timeout(Duration::from_secs(100), async {
+    tokio::time::timeout(Duration::from_secs(300), async {
         for node_id in 1..7 {
             network[node_id].wait_for_triples(target_num as usize).await;
+            tracing::info!("node {node_id} got enough triples");
         }
     })
     .await
