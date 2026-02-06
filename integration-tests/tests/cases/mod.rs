@@ -18,6 +18,7 @@ use test_log::test;
 pub mod chains;
 pub mod compat;
 pub mod ethereum;
+pub mod indexer_completion;
 pub mod mpc;
 pub mod nightly;
 pub mod solana;
