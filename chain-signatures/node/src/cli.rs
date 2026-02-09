@@ -12,7 +12,8 @@ use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::triple_storage::TriplePair;
-use crate::{indexer, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, storage, web};
+use crate::{indexer, indexer_client, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, storage, web};
+use std::time::Duration;
 
 use clap::Parser;
 use deadpool_redis::Runtime;
@@ -369,14 +370,17 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 }
             };
 
-            tokio::spawn(indexer_sol::run(
-                sol,
-                sign_tx.clone(),
-                backlog.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                client.clone(),
-            ));
+            if let Some(sol_client) = indexer_sol::SolanaClient::new(sol.clone(), backlog.clone(), contract_watcher.clone(), mesh_state.clone(), client.clone()) {
+                tokio::spawn(indexer_client::run_indexer(
+                    sol_client,
+                    sign_tx.clone(),
+                    backlog.clone(),
+                    contract_watcher.clone(),
+                    mesh_state.clone(),
+                    client.clone(),
+                    Duration::from_secs(sol.unwrap().total_timeout),
+                ));
+            }
             tokio::spawn(indexer_hydration::run(
                 hydration,
                 sign_tx,

@@ -281,6 +281,46 @@ pub(crate) async fn process_sign_event(
     Ok(())
 }
 
+pub(crate) async fn process_sign_request(
+    sign_request: IndexedSignRequest,
+    sign_tx: mpsc::Sender<Sign>,
+    backlog: Backlog,
+) -> anyhow::Result<()> {
+    record_indexing_step_reached(sign_request.chain);
+
+    let sign_id = sign_request.id;
+    let sign_request_type = sign_request.sign_request_type.clone();
+
+    let backlog_tx = match &sign_request_type {
+        SignRequestType::Sign => BacklogTransaction::Sign(SignTx {
+            request_id: sign_id.request_id,
+            source_chain: sign_request.chain,
+            status: PendingRequestStatus::AwaitingResponse,
+            args: sign_request.args.clone(),
+            unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
+        }),
+        SignRequestType::SignBidirectional(_event) => BacklogTransaction::Sign(SignTx {
+            request_id: sign_id.request_id,
+            source_chain: sign_request.chain,
+            status: PendingRequestStatus::AwaitingResponse,
+            args: sign_request.args.clone(),
+            unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
+        }),
+        _ => anyhow::bail!("Unexpected sign request type"),
+    };
+
+    backlog
+        .insert(sign_request.chain, sign_id, backlog_tx, sign_request_type)
+        .await;
+
+    let chain = sign_request.chain;
+    if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
+        tracing::error!(?err, chain = %chain, "Failed to send {} sign request into queue", chain.as_str());
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn recover_backlog(
     backlog: &Backlog,
     contract_watcher: &mut ContractStateWatcher,
