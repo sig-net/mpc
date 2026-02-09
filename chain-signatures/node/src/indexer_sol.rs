@@ -1,4 +1,5 @@
 use crate::backlog::Backlog;
+use crate::indexer_client::ChainEvent;
 use crate::indexer_common::{SignatureEvent, SignatureEventBox};
 use crate::mesh::MeshState;
 
@@ -10,7 +11,7 @@ use crate::sign_bidirectional::hash_rlp_data;
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
-use anchor_client::{Client, Cluster};
+use anchor_client::{Client, Cluster, Program};
 use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
 use ethabi::{encode, Token};
@@ -34,7 +35,7 @@ use solana_sdk::signer::keypair::Keypair;
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
 use std::collections::HashMap;
 use std::fmt;
-
+use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -330,8 +331,7 @@ type Result<T> = anyhow::Result<T>;
 
 /// Solana client that implements the new ChainClient abstraction
 pub struct SolanaClient {
-    rx: tokio::sync::mpsc::Receiver<crate::indexer_client::ChainEvent>,
-    handles: Vec<tokio::task::JoinHandle<()>>,
+    rx: mpsc::Receiver<ChainEvent>,
 }
 
 impl SolanaClient {
@@ -339,7 +339,7 @@ impl SolanaClient {
         sol: Option<SolConfig>,
         backlog: Backlog,
         contract_watcher: ContractStateWatcher,
-        _mesh_state: watch::Receiver<MeshState>,
+        mesh_state: watch::Receiver<MeshState>,
         _node_client: NodeClient,
     ) -> Option<Self> {
         let Some(sol) = sol else {
@@ -355,172 +355,52 @@ impl SolanaClient {
         let total_timeout = Duration::from_secs(sol.total_timeout);
 
         // Create channel for events
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let (tx, rx) = mpsc::channel(64);
 
-        // Collect task handles so we can abort them on drop
-        let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        spawn_cpi_sign_events(
+            program_id,
+            sol.rpc_http_url.clone(),
+            sol.rpc_ws_url.clone(),
+            total_timeout,
+            backlog.clone(),
+            tx.clone(),
+        );
+        spawn_respond_events(
+            program_id,
+            sol.rpc_http_url.clone(),
+            sol.rpc_ws_url.clone(),
+            contract_watcher.clone(),
+            tx.clone(),
+        );
+        spawn_non_cpi_sign_events(
+            program_id,
+            sol.account_sk.clone(),
+            sol.rpc_http_url.clone(),
+            sol.rpc_ws_url.clone(),
+            total_timeout,
+            tx.clone(),
+        );
 
-        // Spawn subscriptions similar to the previous free-run, but now push ChainEvent into channel
-        // CPI sign events
-        let program_id_cpi = program_id;
-        let rpc_url_cpi = sol.rpc_http_url.clone();
-        let ws_url_cpi = sol.rpc_ws_url.clone();
-        let backlog_cpi = backlog.clone();
-        let tx_cpi = tx.clone();
-        let h = tokio::spawn(async move {
-            loop {
-                let tx_clone = tx_cpi.clone();
-                let backlog_clone = backlog_cpi.clone();
-                if let Err(err) = subscribe_to_program_cpi_events(
-                    program_id_cpi,
-                    &rpc_url_cpi,
-                    &ws_url_cpi,
-                    backlog_clone,
-                    move |event, signature: solana_sdk::signature::Signature, _slot| {
-                        let tx_sig: Vec<u8> = signature.as_ref().to_vec();
-
-                        let tx_inner = tx_clone.clone();
-
-                        tokio::spawn(async move {
-                            // derive entropy from signature
-                            let mut entropy = [0u8; 32];
-                            entropy.copy_from_slice(&tx_sig[..32]);
-                            match event.generate_sign_request(entropy, total_timeout) {
-                                Ok(req) => {
-                                    let _ = tx_inner
-                                        .send(crate::indexer_client::ChainEvent::SignRequest(req))
-                                        .await;
-                                }
-                                Err(err) => tracing::warn!(
-                                    ?err,
-                                    "failed to generate sign request from cpi event"
-                                ),
-                            }
-                        });
-                    },
-                )
-                .await
-                {
-                    tracing::warn!("Failed to subscribe to solana events (cpi): {:?}", err);
-                }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        });
-        handles.push(h);
-
-        // Respond events
-        let program_id_resp = program_id;
-        let rpc_url_resp = sol.rpc_http_url.clone();
-        let ws_url_resp = sol.rpc_ws_url.clone();
-        let tx_resp = tx.clone();
-        let h = tokio::spawn(async move {
-            loop {
-                if let Err(err) = subscribe_to_program_respond_events_client(
-                    program_id_resp,
-                    &rpc_url_resp,
-                    &ws_url_resp,
-                    tx_resp.clone(),
-                )
-                .await
-                {
-                    tracing::warn!("Failed to subscribe to solana respond events: {:?}", err);
-                }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        });
-        handles.push(h);
-
-        // Non-CPI sign events (anchor program.on)
-        // spawn a loop similar to the previous implementation
-        let rpc_http = sol.rpc_http_url.clone();
-        let ws_url = sol.rpc_ws_url.clone();
-        let total_timeout_clone = total_timeout;
-        let tx_non_cpi = tx.clone();
-        let h = tokio::spawn(async move {
-            loop {
-                // Attempt to connect program and subscribe; if it fails, retry after a delay
-                let cluster = Cluster::Custom(rpc_http.clone(), ws_url.clone());
-                let kp = Keypair::from_base58_string(&sol.account_sk);
-                let client =
-                    Client::new_with_options(cluster, Arc::new(kp), CommitmentConfig::confirmed());
-                let Ok(program) = client.program(program_id) else {
-                    tracing::error!("Failed to get program");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
-                };
-
-                let (sender, mut receiver) = mpsc::unbounded_channel();
-                let event_unsubscriber = match program
-                    .on(move |_ctx, event: SignatureRequestedEvent| {
-                        let tx_sig: Vec<u8> = _ctx.signature.as_ref().to_vec();
-                        if sender.send((event, tx_sig)).is_err() {
-                            tracing::error!("Error while transferring the event.");
-                        }
-                    })
-                    .await
-                {
-                    Ok(u) => u,
-                    Err(e) => {
-                        tracing::warn!("failed to subscribe non-cpi: {:?}", e);
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        continue;
-                    }
-                };
-
-                while let Some((event, tx_sig)) = receiver.recv().await {
-                    let tx_inner = tx_non_cpi.clone();
-                    let total_timeout_inner = total_timeout_clone;
-                    tokio::spawn(async move {
-                        let mut entropy = [0u8; 32];
-                        entropy.copy_from_slice(&tx_sig[..32]);
-                        match event.generate_sign_request(entropy, total_timeout_inner) {
-                            Ok(req) => {
-                                let _ = tx_inner
-                                    .send(crate::indexer_client::ChainEvent::SignRequest(req))
-                                    .await;
-                            }
-                            Err(err) => tracing::warn!(
-                                ?err,
-                                "failed to generate sign request from non-cpi event"
-                            ),
-                        }
-                    });
-                }
-
-                let _ = event_unsubscriber.unsubscribe().await;
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-        });
-        handles.push(h);
-
-        Some(SolanaClient { rx, handles })
+        Some(SolanaClient { rx })
     }
 }
 
 #[async_trait::async_trait]
 impl crate::indexer_client::ChainClient for SolanaClient {
     const CHAIN: Chain = Chain::Solana;
-    async fn next_event(&mut self) -> Option<crate::indexer_client::ChainEvent> {
+    async fn next_event(&mut self) -> Option<ChainEvent> {
         self.rx.recv().await
     }
 }
 
-impl Drop for SolanaClient {
-    fn drop(&mut self) {
-        for h in &self.handles {
-            h.abort();
-        }
-    }
-}
-
 // Version of respond subscription that pushes ChainEvent into a channel instead of calling processing directly
-async fn subscribe_to_program_respond_events_client(
+async fn subscribe_to_program_respond_events(
     program_id: Pubkey,
     rpc_url: &str,
     ws_url: &str,
-    tx: tokio::sync::mpsc::Sender<crate::indexer_client::ChainEvent>,
+    contract_watcher: ContractStateWatcher,
+    tx: mpsc::Sender<ChainEvent>,
 ) -> Result<()> {
-    // duplicate of previous subscribe_to_program_respond_events but pushes ChainEvent
     let rpc_client = RpcClient::new(rpc_url.to_string());
     let pubsub_client = PubsubClient::new(ws_url).await?;
 
@@ -611,7 +491,165 @@ async fn subscribe_to_program_respond_events_client(
     }
 }
 
+fn spawn_cpi_sign_events(
+    program_id: Pubkey,
+    rpc_url: String,
+    ws_url: String,
+    total_timeout: Duration,
+    backlog: Backlog,
+    tx: mpsc::Sender<ChainEvent>,
+) {
+    tokio::spawn(subscribe_and_process_sign_events(
+        program_id,
+        rpc_url.clone(),
+        ws_url.clone(),
+        tx.clone(),
+        total_timeout,
+        backlog.clone(),
+    ));
+}
+
+fn spawn_respond_events(
+    program_id: Pubkey,
+    rpc_url: String,
+    ws_url: String,
+    contract_watcher: ContractStateWatcher,
+    tx: mpsc::Sender<ChainEvent>,
+) {
+    tokio::spawn(async move {
+        loop {
+            if let Err(err) = subscribe_to_program_respond_events(
+                program_id,
+                &rpc_url,
+                &ws_url,
+                contract_watcher.clone(),
+                tx.clone(),
+            )
+            .await
+            {
+                tracing::warn!("Failed to subscribe to solana respond events: {:?}", err);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+}
+
+fn spawn_non_cpi_sign_events(
+    program_id: Pubkey,
+    account_sk: String,
+    rpc_url: String,
+    ws_url: String,
+    total_timeout: Duration,
+    tx: mpsc::Sender<ChainEvent>,
+) {
+    tokio::spawn(async move {
+        loop {
+            let cluster = Cluster::Custom(rpc_url.clone(), ws_url.clone());
+            let kp = Keypair::from_base58_string(&account_sk);
+            let client =
+                Client::new_with_options(cluster, Arc::new(kp), CommitmentConfig::confirmed());
+            let Ok(program) = client.program(program_id) else {
+                tracing::error!("Failed to get program");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            };
+
+            let unsub =
+                subscribe_to_program_non_cpi_events(&program, tx.clone(), total_timeout).await;
+
+            if let Err(err) = unsub {
+                tracing::warn!("Failed to subscribe to solana non-CPI events: {:?}", err);
+            } else {
+                let _ = unsub.unwrap().unsubscribe().await;
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+}
+
+async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>(
+    program: &Program<C>,
+    sign_tx: mpsc::Sender<ChainEvent>,
+    total_timeout: Duration,
+) -> anyhow::Result<anchor_client::EventUnsubscriber<'_>> {
+    tracing::info!("Subscribing to program events");
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    let event_unsubscriber = program
+        .on(move |ctx, event: SignatureRequestedEvent| {
+            let tx_sig: Vec<u8> = ctx.signature.as_ref().to_vec();
+            tracing::info!("Received event: {:?}", event);
+            if sender.send((event, tx_sig)).is_err() {
+                tracing::error!("Error while transferring the event.");
+            }
+        })
+        .await?;
+
+    tracing::info!("Subscribed to program events");
+    while let Some((event, tx_sig)) = receiver.recv().await {
+        match build_sign_request(Box::new(event), tx_sig, total_timeout) {
+            Ok(req) => {
+                let _ = sign_tx.send(ChainEvent::SignRequest(req)).await;
+            }
+            Err(err) => tracing::warn!("Failed to process event: {:?}", err),
+        }
+    }
+
+    Ok(event_unsubscriber)
+}
+
+fn build_sign_request(
+    sign_event: SignatureEventBox,
+    tx_sig: Vec<u8>,
+    total_timeout: Duration,
+) -> anyhow::Result<IndexedSignRequest> {
+    let mut entropy = [0u8; 32];
+    entropy.copy_from_slice(&tx_sig[..32]);
+    sign_event.generate_sign_request(entropy, total_timeout)
+}
+
 // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L31
+async fn subscribe_and_process_sign_events(
+    program_id: Pubkey,
+    rpc_url: String,
+    ws_url: String,
+    sign_tx: mpsc::Sender<ChainEvent>,
+    total_timeout: Duration,
+    backlog: Backlog,
+) {
+    loop {
+        let sign_tx_clone = sign_tx.clone();
+
+        let result = subscribe_to_program_cpi_events(
+            program_id,
+            &rpc_url,
+            &ws_url,
+            backlog.clone(),
+            move |event, signature: solana_sdk::signature::Signature, _slot| {
+                tracing::info!("got event: {:?}", event);
+                let tx_sig: Vec<u8> = signature.as_ref().to_vec();
+
+                let sign_tx_inner = sign_tx_clone.clone();
+
+                tokio::spawn(async move {
+                    match build_sign_request(event, tx_sig, total_timeout) {
+                        Ok(req) => {
+                            let _ = sign_tx_inner.send(ChainEvent::SignRequest(req)).await;
+                        }
+                        Err(err) => tracing::warn!("Failed to process event: {:?}", err),
+                    }
+                });
+            },
+        )
+        .await;
+
+        if let Err(err) = result {
+            tracing::warn!("Failed to subscribe to solana events: {:?}", err);
+        }
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
 
 fn parse_cpi_events(
     tx: solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta,
