@@ -332,6 +332,7 @@ type Result<T> = anyhow::Result<T>;
 /// Solana client that implements the new ChainClient abstraction
 pub struct SolanaClient {
     rx: mpsc::Receiver<ChainEvent>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl SolanaClient {
@@ -357,31 +358,32 @@ impl SolanaClient {
         // Create channel for events
         let (tx, rx) = mpsc::channel(64);
 
-        spawn_cpi_sign_events(
+        let mut tasks = Vec::new();
+        tasks.push(spawn_cpi_sign_events(
             program_id,
             sol.rpc_http_url.clone(),
             sol.rpc_ws_url.clone(),
             total_timeout,
             backlog.clone(),
             tx.clone(),
-        );
-        spawn_respond_events(
+        ));
+        tasks.push(spawn_respond_events(
             program_id,
             sol.rpc_http_url.clone(),
             sol.rpc_ws_url.clone(),
             contract_watcher.clone(),
             tx.clone(),
-        );
-        spawn_non_cpi_sign_events(
+        ));
+        tasks.push(spawn_non_cpi_sign_events(
             program_id,
             sol.account_sk.clone(),
             sol.rpc_http_url.clone(),
             sol.rpc_ws_url.clone(),
             total_timeout,
             tx.clone(),
-        );
+        ));
 
-        Some(SolanaClient { rx })
+        Some(SolanaClient { rx, tasks })
     }
 }
 
@@ -498,7 +500,7 @@ fn spawn_cpi_sign_events(
     total_timeout: Duration,
     backlog: Backlog,
     tx: mpsc::Sender<ChainEvent>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(subscribe_and_process_sign_events(
         program_id,
         rpc_url.clone(),
@@ -506,7 +508,7 @@ fn spawn_cpi_sign_events(
         tx.clone(),
         total_timeout,
         backlog.clone(),
-    ));
+    ))
 }
 
 fn spawn_respond_events(
@@ -515,7 +517,7 @@ fn spawn_respond_events(
     ws_url: String,
     contract_watcher: ContractStateWatcher,
     tx: mpsc::Sender<ChainEvent>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             if let Err(err) = subscribe_to_program_respond_events(
@@ -531,7 +533,7 @@ fn spawn_respond_events(
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-    });
+    })
 }
 
 fn spawn_non_cpi_sign_events(
@@ -541,7 +543,7 @@ fn spawn_non_cpi_sign_events(
     ws_url: String,
     total_timeout: Duration,
     tx: mpsc::Sender<ChainEvent>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let cluster = Cluster::Custom(rpc_url.clone(), ws_url.clone());
@@ -565,7 +567,7 @@ fn spawn_non_cpi_sign_events(
 
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-    });
+    })
 }
 
 async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>(

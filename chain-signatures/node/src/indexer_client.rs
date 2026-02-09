@@ -168,7 +168,7 @@ mod tests {
             },
         );
 
-        let mut client = MockClient {
+        let client = MockClient {
             events: vec![
                 Some(ChainEvent::SignRequest(indexed.clone())),
                 Some(ChainEvent::Respond(sig_responded)),
@@ -178,13 +178,13 @@ mod tests {
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
 
-        let (mut contract_watcher, _tx) = ContractStateWatcher::with_running(
+        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
             &"test.near".parse::<AccountId>().unwrap(),
             k256::ProjectivePoint::GENERATOR.to_affine(),
             0,
             Default::default(),
         );
-        let (mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
+        let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
         let node_client = NodeClient::new(&Default::default());
 
         // Run the indexer
