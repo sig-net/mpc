@@ -1,14 +1,12 @@
-use crate::backlog::Backlog;
 use crate::indexer_client::ChainEvent;
 use crate::indexer_common::{SignatureEvent, SignatureEventBox};
 use crate::mesh::MeshState;
-
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
-
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
+
 use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_client::{Client, Cluster, Program};
@@ -338,9 +336,8 @@ pub struct SolanaClient {
 impl SolanaClient {
     pub fn new(
         sol: Option<SolConfig>,
-        backlog: Backlog,
         contract_watcher: ContractStateWatcher,
-        mesh_state: watch::Receiver<MeshState>,
+        _mesh_state: watch::Receiver<MeshState>,
         _node_client: NodeClient,
     ) -> Option<Self> {
         let Some(sol) = sol else {
@@ -364,7 +361,6 @@ impl SolanaClient {
             sol.rpc_http_url.clone(),
             sol.rpc_ws_url.clone(),
             total_timeout,
-            backlog.clone(),
             tx.clone(),
         ));
         tasks.push(spawn_respond_events(
@@ -498,7 +494,6 @@ fn spawn_cpi_sign_events(
     rpc_url: String,
     ws_url: String,
     total_timeout: Duration,
-    backlog: Backlog,
     tx: mpsc::Sender<ChainEvent>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(subscribe_and_process_sign_events(
@@ -507,7 +502,6 @@ fn spawn_cpi_sign_events(
         ws_url.clone(),
         tx.clone(),
         total_timeout,
-        backlog.clone(),
     ))
 }
 
@@ -617,7 +611,6 @@ async fn subscribe_and_process_sign_events(
     ws_url: String,
     sign_tx: mpsc::Sender<ChainEvent>,
     total_timeout: Duration,
-    backlog: Backlog,
 ) {
     loop {
         let sign_tx_clone = sign_tx.clone();
@@ -626,7 +619,7 @@ async fn subscribe_and_process_sign_events(
             program_id,
             &rpc_url,
             &ws_url,
-            backlog.clone(),
+            sign_tx_clone.clone(),
             move |event, signature: solana_sdk::signature::Signature, _slot| {
                 tracing::info!("got event: {:?}", event);
                 let tx_sig: Vec<u8> = signature.as_ref().to_vec();
@@ -743,7 +736,7 @@ async fn subscribe_to_program_cpi_events<F>(
     program_id: Pubkey,
     rpc_url: &str,
     ws_url: &str,
-    backlog: Backlog,
+    tx: mpsc::Sender<ChainEvent>,
     mut event_handler: F,
 ) -> Result<()>
 where
@@ -798,7 +791,7 @@ where
                             continue;
                         }
 
-                        let tx = match get_tx(&rpc_client, &signature, RetryConfig::default()).await {
+                        let tx_req = match get_tx(&rpc_client, &signature, RetryConfig::default()).await {
                             Ok(tx) => tx,
                             Err(e) => {
                                 tracing::warn!("Failed to fetch transaction {}: {}", signature, e);
@@ -809,7 +802,7 @@ where
                         let now = Instant::now();
                         seen.insert(signature, now);
 
-                        match parse_cpi_events(tx, &program_id) {
+                        match parse_cpi_events(tx_req, &program_id) {
                             Ok(events) => {
                                 for ev in events {
                                     event_handler(ev, signature, response.context.slot);
@@ -821,16 +814,10 @@ where
                             }
                         }
 
-                        if let Some(checkpoint) = backlog
-                            .set_processed_block(Chain::Solana, response.context.slot)
-                            .await
-                        {
-                            tracing::info!(slot = response.context.slot, ?checkpoint, "created Solana checkpoint");
+                        // Emit periodic checkpoint event
+                        if let Err(err) = tx.send(ChainEvent::Checkpoint(response.context.slot)).await {
+                            tracing::warn!(?err, "failed to send checkpoint event");
                         }
-
-                        crate::metrics::indexers::LATEST_BLOCK_NUMBER
-                            .with_label_values(&[Chain::Solana.as_str(), "indexed"])
-                            .set(response.context.slot as i64);
                     }
                     None => {
                         // stream ended => force reconnect

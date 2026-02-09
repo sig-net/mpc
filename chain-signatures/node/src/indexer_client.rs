@@ -15,14 +15,18 @@ pub enum ChainEvent {
     SignRequest(IndexedSignRequest),
     Respond(crate::indexer_common::SignatureRespondedEvent),
     RespondBidirectional(crate::indexer_common::RespondBidirectionalEvent),
+    /// Periodic checkpoint indicating the client has observed/processed up to `u64` (slot/block)
+    Checkpoint(u64),
 }
 
+// TODO: need to add sign_id to each event for better logging.
 impl std::fmt::Debug for ChainEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ChainEvent::SignRequest(r) => f.debug_tuple("SignRequest").field(&r.id).finish(),
             ChainEvent::Respond(_) => write!(f, "Respond(...)"),
             ChainEvent::RespondBidirectional(_) => write!(f, "RespondBidirectional(...)"),
+            ChainEvent::Checkpoint(b) => write!(f, "Checkpoint({b})"),
         }
     }
 }
@@ -86,6 +90,15 @@ pub async fn run_indexer<C: ChainClient>(
                 {
                     tracing::error!(?err, chain = %chain, "failed to process respond bidirectional event");
                 }
+            }
+            ChainEvent::Checkpoint(block) => {
+                // central checkpointing for all chains
+                if let Some(checkpoint) = backlog.set_processed_block(C::CHAIN, block).await {
+                    tracing::info!(block, ?checkpoint, chain = %chain, "created checkpoint");
+                }
+                crate::metrics::indexers::LATEST_BLOCK_NUMBER
+                    .with_label_values(&[C::CHAIN.as_str(), "indexed"])
+                    .set(block as i64);
             }
         }
     }
