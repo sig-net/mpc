@@ -21,7 +21,6 @@ use crate::sign_bidirectional::BidirectionalTxId;
 use crate::sign_bidirectional::PendingRequestStatus;
 
 use anchor_lang::prelude::Pubkey;
-use k256::elliptic_curve::sec1::FromEncodedPoint as _;
 use k256::Scalar;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::SignId;
@@ -254,103 +253,38 @@ impl EthereumSignatureRespondedEvent {
     /// Attempt to build an `mpc_primitives::Signature` from (v, r, s) fields
     /// emitted in the Ethereum event.
     pub fn to_mpc_signature(&self) -> Option<Signature> {
-        use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
-        use num_bigint::BigUint;
-        use num_traits::One;
+        use k256::elliptic_curve::{
+            bigint::{Encoding, U256},
+            point::DecompressPoint,
+            subtle::Choice,
+        };
+        use k256::{AffinePoint, FieldBytes, Scalar};
 
-        // Curve constants for secp256k1
-        const P_HEX: &str = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F";
-        const N_HEX: &str = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141";
+        const P: U256 =
+            U256::from_be_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
+        const N: U256 =
+            U256::from_be_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
 
-        // Parse as BigUint
-        let p = BigUint::parse_bytes(P_HEX.as_bytes(), 16).unwrap();
-        let n = BigUint::parse_bytes(N_HEX.as_bytes(), 16).unwrap();
+        let y_is_odd = Choice::from(self.v & 1);
+        let s = Scalar::from_bytes(self.s.into())?;
 
-        let r_bytes = &self.r;
-        let s_bytes = &self.s;
-
-        let r_big = BigUint::from_bytes_be(r_bytes);
-
-        // Try x = r + k * n for k in {0,1}
-        for k in 0u8..=1u8 {
-            let k_big = BigUint::from(k as u8);
-            let x_big = &r_big + &(&n * &k_big);
-            if x_big >= p {
+        for k in 0..=1u8 {
+            let r = U256::from_be_slice(&self.r);
+            let x_u256 = if k == 1 { r.saturating_add(&N) } else { r };
+            if x_u256 >= P {
                 continue;
             }
 
-            // compute y^2 = x^3 + 7 (mod p)
-            let x3 = x_big.modpow(&BigUint::from(3u8), &p);
-            let y2 = (x3 + BigUint::from(7u8)) % &p;
+            let x_bytes = x_u256.to_be_bytes();
+            let x_bytes: FieldBytes = FieldBytes::from_slice(&x_bytes).clone();
 
-            // check quadratic residue via Euler criterion: y2^{(p-1)/2} mod p == 1
-            let exp_leg = (&p - BigUint::one()) >> 1;
-            let legendre = y2.modpow(&exp_leg, &p);
-            if legendre != BigUint::one() {
-                continue; // no sqrt
-            }
-
-            // since p % 4 == 3, sqrt = y2^{(p+1)/4} mod p
-            let exp = (&p + BigUint::one()) >> 2;
-            let y_big = y2.modpow(&exp, &p);
-
-            // choose the y candidate that matches parity bit encoded in v
-            let y_parity = (self.v & 1) != 0;
-            let y_bytes = {
-                let mut bytes = y_big.to_bytes_be();
-                if bytes.len() < 32 {
-                    let mut padded = vec![0u8; 32 - bytes.len()];
-                    padded.extend_from_slice(&bytes);
-                    bytes = padded;
-                }
-                bytes
-            };
-
-            // compute parity bit of y
-            let y_parity_actual = (y_bytes[31] & 1) != 0;
-            let chosen_y_bytes = if y_parity_actual == y_parity {
-                y_bytes
-            } else {
-                // use p - y
-                let y_neg = (&p - BigUint::from_bytes_be(&y_bytes)) % &p;
-                let mut bytes = y_neg.to_bytes_be();
-                if bytes.len() < 32 {
-                    let mut padded = vec![0u8; 32 - bytes.len()];
-                    padded.extend_from_slice(&bytes);
-                    bytes = padded;
-                }
-                bytes
-            };
-
-            // Build EncodedPoint and AffinePoint
-            let x_bytes_array = {
-                let mut b = x_big.to_bytes_be();
-                if b.len() < 32 {
-                    let mut padded = vec![0u8; 32 - b.len()];
-                    padded.extend_from_slice(&b);
-                    b = padded;
-                }
-                let fb: FieldBytes = fb_from_vec(b);
-                fb
-            };
-
-            let y_fieldbytes: FieldBytes = fb_from_vec(chosen_y_bytes);
-
-            let enc = EncodedPoint::from_affine_coordinates(&x_bytes_array, &y_fieldbytes, false);
-            if let Some(big_r_affine) = AffinePoint::from_encoded_point(&enc).into_option() {
-                // parse s
-                if let Some(s_scalar) = Scalar::from_bytes((*s_bytes).into()) {
-                    return Some(Signature::new(big_r_affine, s_scalar, self.v));
-                }
+            if let Some(big_r) = AffinePoint::decompress(&x_bytes, y_is_odd).into_option() {
+                return Some(Signature::new(big_r, s, self.v));
             }
         }
+
         None
     }
-}
-
-fn fb_from_vec(v: Vec<u8>) -> k256::FieldBytes {
-    use k256::FieldBytes;
-    FieldBytes::from_slice(&v).clone()
 }
 
 pub(crate) trait SignatureEvent: std::fmt::Debug {
@@ -777,7 +711,6 @@ mod tests {
     use k256::{ProjectivePoint, Scalar};
     use mpc_primitives::SignArgs;
     use near_primitives::types::AccountId;
-    use num_bigint::BigUint;
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
@@ -791,24 +724,9 @@ mod tests {
         let y_bytes = enc.y().unwrap().as_slice();
         let orig_r_affine = ProjectivePoint::GENERATOR.to_affine(); // keep value for later assertion
 
-        // curve order n
-        let n = BigUint::parse_bytes(
-            b"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141",
-            16,
-        )
-        .unwrap();
-
-        // r = x mod n
-        let x_big = BigUint::from_bytes_be(x_bytes);
-        let r_big = &x_big % &n;
-        let mut r_bytes = r_big.to_bytes_be();
-        if r_bytes.len() < 32 {
-            let mut padded = vec![0u8; 32 - r_bytes.len()];
-            padded.extend_from_slice(&r_bytes);
-            r_bytes = padded;
-        }
+        // r = x coordinate
         let mut r_arr = [0u8; 32];
-        r_arr.copy_from_slice(&r_bytes);
+        r_arr.copy_from_slice(x_bytes);
 
         // s = arbitrary small scalar
         let s_scalar = Scalar::from(5u64);
