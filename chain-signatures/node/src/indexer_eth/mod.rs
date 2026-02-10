@@ -478,6 +478,63 @@ fn parse_filtered_logs(logs: Vec<Log>, total_timeout: Duration) -> Vec<IndexedSi
     indexed_requests
 }
 
+async fn emit_respond_events(logs: &[Log], events_send: mpsc::Sender<ChainEvent>) {
+    for log in logs {
+        if let Some(sign_id) = sign_id_from_signature_responded_log(log) {
+            // Try to parse responder and signature fields from the data payload.
+            let mut responder_addr = Address::from_slice(&[0u8; 20]);
+            let mut v: u8 = 0;
+            let mut r_arr: [u8; 32] = [0u8; 32];
+            let mut s_arr: [u8; 32] = [0u8; 32];
+
+            let data = log.data().data.clone();
+            if data.len() >= 128 {
+                // responder: offset 0..32 (address right-padded)
+                responder_addr = Address::from_slice(&data[12..32]);
+
+                // signature struct: v (32 bytes) at 32..64, r at 64..96, s at 96..128
+                v = data[32 + 31];
+                r_arr.copy_from_slice(&data[64..96]);
+                s_arr.copy_from_slice(&data[96..128]);
+            } else {
+                tracing::warn!(?sign_id, data_len = data.len(), "signature event data too short to parse full signature, using partial defaults");
+            }
+
+            let eth_event = crate::indexer_common::EthereumSignatureRespondedEvent {
+                request_id: sign_id.request_id,
+                responder: responder_addr,
+                v,
+                r: r_arr,
+                s: s_arr,
+            };
+
+            let respond_event = crate::indexer_common::SignatureRespondedEvent::Ethereum(eth_event);
+
+            if let Err(err) = events_send.send(ChainEvent::Respond(respond_event)).await {
+                tracing::error!(?err, "failed to emit Respond event");
+            }
+        }
+    }
+}
+
+fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
+    if log
+        .topic0()
+        .is_none_or(|topic| *topic != SignatureResponded::SIGNATURE_HASH)
+    {
+        return None;
+    }
+
+    let request_topic = log.topics().get(1)?;
+    let request_id: [u8; 32] = (*request_topic).into();
+    Some(SignId { request_id })
+}
+
+// Legacy helper: process respond logs by mutating the backlog and sending
+// `Sign::Completion` into the sign queue. This is kept for the legacy indexer
+// path (non-`EthereumIndexerClient`) and should not be used by the new
+// client-based code paths. New clients should use `emit_respond_events` and
+// let `run_indexer()` call `process_respond_event()`.
 async fn process_respond_events(logs: &[Log], backlog: &Backlog, sign_tx: mpsc::Sender<Sign>) {
     for log in logs {
         if let Some(sign_id) = sign_id_from_signature_responded_log(log) {
@@ -524,19 +581,6 @@ async fn process_respond_events(logs: &[Log], backlog: &Backlog, sign_tx: mpsc::
             }
         }
     }
-}
-
-fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
-    if log
-        .topic0()
-        .is_none_or(|topic| *topic != SignatureResponded::SIGNATURE_HASH)
-    {
-        return None;
-    }
-
-    let request_topic = log.topics().get(1)?;
-    let request_id: [u8; 32] = (*request_topic).into();
-    Some(SignId { request_id })
 }
 
 fn send_indexed_requests_to_sign_queue(
@@ -1509,7 +1553,6 @@ impl EthereumIndexerClient {
             let events_send = events_send.clone();
             let app_data_storage = app_data_storage.clone();
             let optimistic_requests = eth.optimistic_requests;
-            let backlog_clone = backlog.clone();
             tokio::spawn(async move {
                 let mut finalized_block_number: Option<BlockNumber> = None;
                 let mut last_processed_block: Option<BlockNumber> = app_data_storage
@@ -1558,24 +1601,21 @@ impl EthereumIndexerClient {
 
                         // Emit sign requests as events for the shared indexer loop to process
                         for request in indexed_requests {
-                            if let Err(err) = events_send
-                                .send(ChainEvent::SignRequest(request))
-                                .await
+                            if let Err(err) =
+                                events_send.send(ChainEvent::SignRequest(request)).await
                             {
                                 tracing::error!(?err, "failed to emit SignRequest event");
                             }
                         }
 
-                        // Process respond logs using existing helper (this updates backlog and sends Sign::Completion into sign queue)
+                        // Emit respond events for the shared indexer loop to handle
                         if !respond_logs.is_empty() {
-                            process_respond_events(&respond_logs, &backlog_clone, sign_tx.clone())
-                                .await;
+                            emit_respond_events(&respond_logs, events_send.clone()).await;
                         }
 
                         // Emit checkpoint event for central checkpointing
-                        if let Err(err) = events_send
-                            .send(ChainEvent::Checkpoint(block_number))
-                            .await
+                        if let Err(err) =
+                            events_send.send(ChainEvent::Checkpoint(block_number)).await
                         {
                             tracing::error!(?err, "failed to emit Checkpoint event");
                         }
@@ -1628,14 +1668,12 @@ impl EthereumIndexerClient {
         ));
 
         // Spawn main processing loop (process blocks and send BlockAndRequests into indexed channel)
-        let events_send_clone_for_main = events_send.clone();
         let t_main: JoinHandle<()> = {
             let client = Arc::clone(&client);
             let requests_indexed_send = requests_indexed_send.clone();
             let backlog = backlog.clone();
             let contract_address = contract_address.clone();
             let total_timeout = Duration::from_secs(eth.total_timeout);
-            let events_send = events_send_clone_for_main;
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_millis(200));
                 loop {

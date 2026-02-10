@@ -219,7 +219,6 @@ mod tests {
                 },
             },
         );
-
         let client = MockClient {
             events: vec![
                 Some(ChainEvent::SignRequest(indexed.clone())),

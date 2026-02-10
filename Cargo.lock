@@ -7983,6 +7983,8 @@ dependencies = [
  "near-fetch",
  "near-primitives 0.26.0",
  "near-sdk",
+ "num-bigint 0.4.6",
+ "num-traits",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",

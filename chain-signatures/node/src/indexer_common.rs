@@ -21,7 +21,9 @@ use crate::sign_bidirectional::BidirectionalTxId;
 use crate::sign_bidirectional::PendingRequestStatus;
 
 use anchor_lang::prelude::Pubkey;
+use k256::elliptic_curve::sec1::FromEncodedPoint as _;
 use k256::Scalar;
+use mpc_crypto::ScalarExt as _;
 use mpc_primitives::SignId;
 use mpc_primitives::Signature;
 use std::str::FromStr;
@@ -184,9 +186,23 @@ impl RespondBidirectionalEvent {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct EthereumSignatureRespondedEvent {
+    pub request_id: [u8; 32],
+    pub responder: alloy::primitives::Address,
+    // Raw signature fields (v, r, s) if present in Ethereum logs. May be zero-filled when not parsed.
+    pub v: u8,
+    pub r: [u8; 32],
+    pub s: [u8; 32],
+}
+
+#[derive(Clone, Debug)]
 pub enum SignatureRespondedEvent {
     Solana(signet_program::SignatureRespondedEvent),
     Hydration(HydrationSignatureRespondedEvent),
+    /// Minimal Ethereum respond event representation (used to emit Respond events
+    /// from the Ethereum indexer without performing backlog mutations in the client).
+    Ethereum(EthereumSignatureRespondedEvent),
 }
 
 impl SignatureRespondedEvent {
@@ -194,6 +210,7 @@ impl SignatureRespondedEvent {
         match self {
             SignatureRespondedEvent::Solana(_) => Chain::Solana,
             SignatureRespondedEvent::Hydration(_) => Chain::Hydration,
+            SignatureRespondedEvent::Ethereum(_) => Chain::Ethereum,
         }
     }
 
@@ -201,17 +218,139 @@ impl SignatureRespondedEvent {
         match self {
             SignatureRespondedEvent::Solana(event) => event.request_id,
             SignatureRespondedEvent::Hydration(event) => event.request_id,
+            SignatureRespondedEvent::Ethereum(event) => event.request_id,
         }
     }
 
+    /// Convert the contained event into an `mpc_primitives::Signature`.
+    ///
+    /// For `Ethereum` variant we attempt to reconstruct the Affine `big_r`
+    /// from the provided `r` and `v` using field arithmetic (try x = r and
+    /// x = r + n) and take the solution whose y parity matches `v`.
     pub fn signature(&self) -> Signature {
         match self {
             SignatureRespondedEvent::Solana(event) => {
                 crate::indexer_sol::to_mpc_signature(event.signature.clone()).unwrap()
             }
             SignatureRespondedEvent::Hydration(event) => event.signature.clone(),
+            SignatureRespondedEvent::Ethereum(event) => {
+                // Try reconstructing a real signature; fall back to zeroed values
+                // (previous behavior) if reconstruction fails for any reason.
+                match event.to_mpc_signature() {
+                    Some(sig) => sig,
+                    None => {
+                        tracing::warn!(?event.request_id, "Failed to reconstruct ethereum Signature from logs, using fallback signature");
+                        let big_r = k256::ProjectivePoint::GENERATOR.to_affine();
+                        let s = k256::Scalar::from(0u64);
+                        mpc_primitives::Signature::new(big_r, s, event.v)
+                    }
+                }
+            }
         }
     }
+}
+
+impl EthereumSignatureRespondedEvent {
+    /// Attempt to build an `mpc_primitives::Signature` from (v, r, s) fields
+    /// emitted in the Ethereum event.
+    pub fn to_mpc_signature(&self) -> Option<Signature> {
+        use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
+        use num_bigint::BigUint;
+        use num_traits::One;
+
+        // Curve constants for secp256k1
+        const P_HEX: &str = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F";
+        const N_HEX: &str = "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141";
+
+        // Parse as BigUint
+        let p = BigUint::parse_bytes(P_HEX.as_bytes(), 16).unwrap();
+        let n = BigUint::parse_bytes(N_HEX.as_bytes(), 16).unwrap();
+
+        let r_bytes = &self.r;
+        let s_bytes = &self.s;
+
+        let r_big = BigUint::from_bytes_be(r_bytes);
+
+        // Try x = r + k * n for k in {0,1}
+        for k in 0u8..=1u8 {
+            let k_big = BigUint::from(k as u8);
+            let x_big = &r_big + &(&n * &k_big);
+            if x_big >= p {
+                continue;
+            }
+
+            // compute y^2 = x^3 + 7 (mod p)
+            let x3 = x_big.modpow(&BigUint::from(3u8), &p);
+            let y2 = (x3 + BigUint::from(7u8)) % &p;
+
+            // check quadratic residue via Euler criterion: y2^{(p-1)/2} mod p == 1
+            let exp_leg = (&p - BigUint::one()) >> 1;
+            let legendre = y2.modpow(&exp_leg, &p);
+            if legendre != BigUint::one() {
+                continue; // no sqrt
+            }
+
+            // since p % 4 == 3, sqrt = y2^{(p+1)/4} mod p
+            let exp = (&p + BigUint::one()) >> 2;
+            let y_big = y2.modpow(&exp, &p);
+
+            // choose the y candidate that matches parity bit encoded in v
+            let y_parity = (self.v & 1) != 0;
+            let y_bytes = {
+                let mut bytes = y_big.to_bytes_be();
+                if bytes.len() < 32 {
+                    let mut padded = vec![0u8; 32 - bytes.len()];
+                    padded.extend_from_slice(&bytes);
+                    bytes = padded;
+                }
+                bytes
+            };
+
+            // compute parity bit of y
+            let y_parity_actual = (y_bytes[31] & 1) != 0;
+            let chosen_y_bytes = if y_parity_actual == y_parity {
+                y_bytes
+            } else {
+                // use p - y
+                let y_neg = (&p - BigUint::from_bytes_be(&y_bytes)) % &p;
+                let mut bytes = y_neg.to_bytes_be();
+                if bytes.len() < 32 {
+                    let mut padded = vec![0u8; 32 - bytes.len()];
+                    padded.extend_from_slice(&bytes);
+                    bytes = padded;
+                }
+                bytes
+            };
+
+            // Build EncodedPoint and AffinePoint
+            let x_bytes_array = {
+                let mut b = x_big.to_bytes_be();
+                if b.len() < 32 {
+                    let mut padded = vec![0u8; 32 - b.len()];
+                    padded.extend_from_slice(&b);
+                    b = padded;
+                }
+                let fb: FieldBytes = fb_from_vec(b);
+                fb
+            };
+
+            let y_fieldbytes: FieldBytes = fb_from_vec(chosen_y_bytes);
+
+            let enc = EncodedPoint::from_affine_coordinates(&x_bytes_array, &y_fieldbytes, false);
+            if let Some(big_r_affine) = AffinePoint::from_encoded_point(&enc).into_option() {
+                // parse s
+                if let Some(s_scalar) = Scalar::from_bytes((*s_bytes).into()) {
+                    return Some(Signature::new(big_r_affine, s_scalar, self.v));
+                }
+            }
+        }
+        None
+    }
+}
+
+fn fb_from_vec(v: Vec<u8>) -> k256::FieldBytes {
+    use k256::FieldBytes;
+    FieldBytes::from_slice(&v).clone()
 }
 
 pub(crate) trait SignatureEvent: std::fmt::Debug {
@@ -635,12 +774,69 @@ mod tests {
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::util::current_unix_timestamp;
     use cait_sith::protocol::Participant;
-    use k256::ProjectivePoint;
+    use k256::{ProjectivePoint, Scalar};
     use mpc_primitives::SignArgs;
     use near_primitives::types::AccountId;
+    use num_bigint::BigUint;
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
+
+    #[test]
+    fn ethereum_signature_reconstruction_roundtrip() {
+        // Encode generator x,y bytes (avoid trait method ambiguity)
+        use k256::elliptic_curve::sec1::ToEncodedPoint;
+        let enc = ProjectivePoint::GENERATOR.to_encoded_point(false);
+        let x_bytes = enc.x().unwrap().as_slice();
+        let y_bytes = enc.y().unwrap().as_slice();
+        let orig_r_affine = ProjectivePoint::GENERATOR.to_affine(); // keep value for later assertion
+
+        // curve order n
+        let n = BigUint::parse_bytes(
+            b"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141",
+            16,
+        )
+        .unwrap();
+
+        // r = x mod n
+        let x_big = BigUint::from_bytes_be(x_bytes);
+        let r_big = &x_big % &n;
+        let mut r_bytes = r_big.to_bytes_be();
+        if r_bytes.len() < 32 {
+            let mut padded = vec![0u8; 32 - r_bytes.len()];
+            padded.extend_from_slice(&r_bytes);
+            r_bytes = padded;
+        }
+        let mut r_arr = [0u8; 32];
+        r_arr.copy_from_slice(&r_bytes);
+
+        // s = arbitrary small scalar
+        let s_scalar = Scalar::from(5u64);
+        let s_bytes = s_scalar.to_bytes();
+        let mut s_arr = [0u8; 32];
+        s_arr.copy_from_slice(&s_bytes);
+
+        let v = (y_bytes[31] & 1) as u8;
+
+        let eth_event = EthereumSignatureRespondedEvent {
+            request_id: [0u8; 32],
+            responder: alloy::primitives::Address::from_slice(&[0u8; 20]),
+            v,
+            r: r_arr,
+            s: s_arr,
+        };
+
+        let sig_opt = eth_event.to_mpc_signature();
+        assert!(sig_opt.is_some());
+        let sig = sig_opt.unwrap();
+
+        // check fields
+        assert_eq!(sig.recovery_id, v);
+        assert_eq!(sig.s, s_scalar);
+
+        // big_r should match orig_r_affine
+        assert_eq!(sig.big_r, orig_r_affine);
+    }
 
     #[tokio::test]
     async fn recover_backlog_requeues_pending_signs() {
