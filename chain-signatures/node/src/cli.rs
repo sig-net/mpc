@@ -1,6 +1,7 @@
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
+use crate::indexer_eth::EthereumIndexerClient;
 use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
@@ -355,16 +356,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let total_timeout =
                 Duration::from_secs(eth.as_ref().map(|e| e.total_timeout).unwrap_or(60));
-            match indexer_eth::EthereumIndexerClient::new(
-                eth,
-                app_data_storage.clone(),
-                backlog.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                client.clone(),
-            )
-            .await
-            {
+            match EthereumIndexerClient::new(eth, app_data_storage, backlog.clone()).await {
                 Ok(eth_client) => {
                     tokio::spawn(indexer_client::run_indexer(
                         eth_client,

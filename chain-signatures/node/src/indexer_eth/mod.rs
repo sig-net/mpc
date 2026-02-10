@@ -3,14 +3,11 @@ pub mod indexer_eth_helios;
 
 use crate::backlog::Backlog;
 use crate::indexer_common::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
-use crate::mesh::MeshState;
 
 use crate::indexer_client::{ChainClient, ChainEvent};
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
-use crate::node_client::NodeClient;
-use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
+use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
 use crate::respond_bidirectional::CompletedTx;
-use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::PendingRequestStatus;
 use crate::storage::app_data_storage::AppDataStorage;
 
@@ -29,7 +26,6 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Instant;
 use tokio::sync::mpsc;
-use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
@@ -480,38 +476,40 @@ fn parse_filtered_logs(logs: Vec<Log>, total_timeout: Duration) -> Vec<IndexedSi
     indexed_requests
 }
 
-async fn emit_respond_events(logs: &[Log], events_send: mpsc::Sender<ChainEvent>) {
+async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEvent>) {
     for log in logs {
-        if let Some(sign_id) = sign_id_from_signature_responded_log(log) {
-            let data = &log.data().data;
-            if data.len() < 128 {
-                tracing::warn!(
-                    ?sign_id,
-                    data_len = data.len(),
-                    "signature event data too short to parse full signature: skipping..."
-                );
-                continue;
-            }
+        let Some(sign_id) = sign_id_from_signature_responded_log(log) else {
+            continue;
+        };
 
-            // responder: offset 0..32 (address right-padded)
-            let responder_addr = Address::from_slice(&data[12..32]);
-            // signature struct: v (32 bytes) at 32..64, r at 64..96, s at 96..128
-            let v = data[32 + 31];
-            let r: [u8; 32] = data[64..96].try_into().unwrap();
-            let s: [u8; 32] = data[96..128].try_into().unwrap();
+        let data = &log.data().data;
+        if data.len() < 128 {
+            tracing::warn!(
+                ?sign_id,
+                data_len = data.len(),
+                "signature event data too short to parse full signature: skipping..."
+            );
+            continue;
+        }
 
-            let eth_event = EthereumSignatureRespondedEvent {
-                request_id: sign_id.request_id,
-                responder: responder_addr,
-                v,
-                r,
-                s,
-            };
+        // responder: offset 0..32 (address right-padded)
+        let responder_addr = Address::from_slice(&data[12..32]);
+        // signature struct: v (32 bytes) at 32..64, r at 64..96, s at 96..128
+        let v = data[32 + 31];
+        let r: [u8; 32] = data[64..96].try_into().unwrap();
+        let s: [u8; 32] = data[96..128].try_into().unwrap();
 
-            let respond_event = SignatureRespondedEvent::Ethereum(eth_event);
-            if let Err(err) = events_send.send(ChainEvent::Respond(respond_event)).await {
-                tracing::error!(?err, "failed to emit Respond event");
-            }
+        let eth_event = EthereumSignatureRespondedEvent {
+            request_id: sign_id.request_id,
+            responder: responder_addr,
+            v,
+            r,
+            s,
+        };
+
+        let respond_event = SignatureRespondedEvent::Ethereum(eth_event);
+        if let Err(err) = events_tx.send(ChainEvent::Respond(respond_event)).await {
+            tracing::error!(?err, "failed to emit Respond event");
         }
     }
 }
@@ -527,87 +525,6 @@ fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
     let request_topic = log.topics().get(1)?;
     let request_id: [u8; 32] = (*request_topic).into();
     Some(SignId { request_id })
-}
-
-// Legacy helper: process respond logs by mutating the backlog and sending
-// `Sign::Completion` into the sign queue. This is kept for the legacy indexer
-// path (non-`EthereumIndexerClient`) and should not be used by the new
-// client-based code paths. New clients should use `emit_respond_events` and
-// let `run_indexer()` call `process_respond_event()`.
-async fn process_respond_events(logs: &[Log], backlog: &Backlog, sign_tx: mpsc::Sender<Sign>) {
-    for log in logs {
-        if let Some(sign_id) = sign_id_from_signature_responded_log(log) {
-            if let Err(err) = sign_tx.send(Sign::Completion(sign_id)).await {
-                tracing::error!(
-                    ?sign_id,
-                    ?err,
-                    "failed to send completion for respond event"
-                );
-            }
-
-            // Check the sign request type to determine if it's a bidirectional request
-            if let Some(sign_type) = backlog.sign_type(Chain::Ethereum, &sign_id).await {
-                match sign_type {
-                    SignRequestType::SignBidirectional(_) => {
-                        // This is a bidirectional request, keep it in the backlog.
-                        // It will be removed when we receive the respond_bidirectional event.
-                        tracing::info!(
-                            ?sign_id,
-                            "observed SignatureResponded event for bidirectional request, keeping in backlog"
-                        );
-                    }
-                    SignRequestType::Sign => {
-                        tracing::info!(
-                            ?sign_id,
-                            "observed SignatureResponded event for regular sign request, removing from backlog"
-                        );
-                        backlog.remove(Chain::Ethereum, &sign_id).await;
-                    }
-                    SignRequestType::RespondBidirectional(_) => {
-                        tracing::warn!(
-                            ?sign_id,
-                            "observed SignatureResponded event for respond_bidirectional request, which should not happen"
-                        );
-                    }
-                }
-            } else {
-                // If we don't have the type tracked, just remove it (fallback behavior for backward compatibility)
-                tracing::debug!(
-                    ?sign_id,
-                    "sign request type not found, removing from backlog"
-                );
-                backlog.remove(Chain::Ethereum, &sign_id).await;
-            }
-        }
-    }
-}
-
-fn send_indexed_requests_to_sign_queue(
-    requests: Vec<IndexedSignRequest>,
-    sign_tx: Option<mpsc::Sender<Sign>>,
-    events_send: Option<mpsc::Sender<ChainEvent>>,
-) {
-    if let Some(events_send) = events_send {
-        for request in requests {
-            let events_send = events_send.clone();
-            tokio::spawn(async move {
-                if let Err(err) = events_send.send(ChainEvent::SignRequest(request)).await {
-                    tracing::error!(?err, "Failed to emit SignRequest event");
-                }
-            });
-        }
-    } else if let Some(sign_tx) = sign_tx {
-        for request in requests {
-            let sign_tx = sign_tx.clone();
-            tokio::spawn(async move {
-                if let Err(err) = sign_tx.send(Sign::Request(request)).await {
-                    tracing::error!(?err, "Failed to send ETH sign request into queue");
-                }
-            });
-        }
-    } else {
-        tracing::warn!("No sign queue nor event channel configured for indexed requests");
-    }
 }
 
 #[derive(Debug)]
@@ -789,45 +706,28 @@ impl EthereumClient {
 #[derive(Clone)]
 pub struct EthereumIndexer {
     eth: EthConfig,
-    sign_tx: Option<mpsc::Sender<Sign>>,
     app_data_storage: AppDataStorage,
     backlog: Backlog,
-    contract_watcher: ContractStateWatcher,
-    mesh_state: watch::Receiver<MeshState>,
-    node_client: NodeClient,
     client: EthereumClient,
 }
 
 impl EthereumIndexer {
     pub async fn new(
-        eth: Option<EthConfig>,
-        sign_tx: Option<mpsc::Sender<Sign>>,
+        eth: EthConfig,
         app_data_storage: AppDataStorage,
         backlog: Backlog,
-        contract_watcher: ContractStateWatcher,
-        mesh_state: watch::Receiver<MeshState>,
-        node_client: NodeClient,
     ) -> anyhow::Result<Self> {
-        let Some(eth) = eth else {
-            tracing::warn!("ethereum indexer is disabled");
-            return Err(anyhow::anyhow!("ethereum indexer is disabled"));
-        };
-
         let client = EthereumClient::new(eth.clone()).await?;
 
         Ok(Self {
             eth,
-            sign_tx,
             app_data_storage,
             backlog,
-            contract_watcher,
-            mesh_state,
-            node_client,
             client,
         })
     }
 
-    pub async fn run(self, events_send: mpsc::Sender<ChainEvent>) {
+    pub async fn run(self, events_tx: mpsc::Sender<ChainEvent>) {
         let backlog = self.backlog;
         let app_data_storage = self.app_data_storage;
         let client = self.client;
@@ -870,7 +770,7 @@ impl EthereumIndexer {
             client_clone,
             requests_indexed_recv,
             finalized_block_recv,
-            events_send.clone(),
+            events_tx.clone(),
             app_data_storage.clone(),
             optimistic_requests,
         ));
@@ -883,7 +783,7 @@ impl EthereumIndexer {
             requests_indexed_send.clone(),
             total_timeout,
             backlog.clone(),
-            events_send.clone(),
+            events_tx.clone(),
         ));
 
         let blocks_to_process_send_clone = blocks_to_process_send.clone();
@@ -939,7 +839,7 @@ impl EthereumIndexer {
                 requests_indexed_send_clone.clone(),
                 total_timeout,
                 backlog.clone(),
-                events_send.clone(),
+                events_tx.clone(),
             )
             .await
             {
@@ -1000,7 +900,7 @@ impl EthereumIndexer {
         requests_indexed: mpsc::Sender<BlockAndRequests>,
         total_timeout: Duration,
         backlog: Backlog,
-        events_send: mpsc::Sender<ChainEvent>,
+        events_tx: mpsc::Sender<ChainEvent>,
     ) -> anyhow::Result<()> {
         let block_number = block.header.number;
         let block_hash = block.header.hash;
@@ -1028,14 +928,14 @@ impl EthereumIndexer {
         let mut sign_requests = Vec::new();
 
         let relevant_logs: Vec<Log> = block_receipts
-            .clone()
-            .into_iter()
-            .filter_map(|receipt| receipt.as_ref().as_receipt().cloned())
+            .iter()
+            .filter_map(|receipt| receipt.as_ref().as_receipt())
             .flat_map(|receipt| {
                 receipt
                     .logs
-                    .into_iter()
+                    .iter()
                     .filter(|log| log.address() == contract_address)
+                    .cloned()
             })
             .collect();
 
@@ -1066,7 +966,7 @@ impl EthereumIndexer {
         )
         .await?;
         for ev in exec_events {
-            if let Err(err) = events_send.send(ev).await {
+            if let Err(err) = events_tx.send(ev).await {
                 tracing::error!(?err, "failed to emit ExecutionConfirmed event");
             }
         }
@@ -1237,7 +1137,7 @@ impl EthereumIndexer {
         client: Arc<EthereumClient>,
         mut requests_indexed: mpsc::Receiver<BlockAndRequests>,
         mut finalized_block_rx: mpsc::Receiver<BlockNumber>,
-        events_send: mpsc::Sender<ChainEvent>,
+        events_tx: mpsc::Sender<ChainEvent>,
         app_data_storage: AppDataStorage,
         optimistic_requests: bool,
     ) {
@@ -1290,17 +1190,17 @@ impl EthereumIndexer {
                 tracing::info!("Block {block_number} is finalized!");
 
                 for req in indexed_requests.clone() {
-                    if let Err(err) = events_send.send(ChainEvent::SignRequest(req)).await {
+                    if let Err(err) = events_tx.send(ChainEvent::SignRequest(req)).await {
                         tracing::error!(?err, "failed to emit SignRequest event");
                     }
                 }
 
                 if !respond_logs.is_empty() {
-                    emit_respond_events(&respond_logs, events_send.clone()).await;
+                    emit_respond_events(&respond_logs, events_tx.clone()).await;
                 }
 
                 // TODO: interval checkpoint
-                if let Err(err) = events_send.send(ChainEvent::Checkpoint(block_number)).await {
+                if let Err(err) = events_tx.send(ChainEvent::Checkpoint(block_number)).await {
                     tracing::error!(?err, "failed to emit checkpoint event");
                 }
 
@@ -1326,7 +1226,7 @@ impl EthereumIndexer {
         requests_indexed: mpsc::Sender<BlockAndRequests>,
         total_timeout: Duration,
         backlog: Backlog,
-        events_send: mpsc::Sender<ChainEvent>,
+        events_tx: mpsc::Sender<ChainEvent>,
     ) {
         loop {
             let Some(block) = blocks_failed_rx.recv().await else {
@@ -1341,7 +1241,7 @@ impl EthereumIndexer {
                 requests_indexed.clone(),
                 total_timeout,
                 backlog.clone(),
-                events_send.clone(),
+                events_tx.clone(),
             )
             .await
             {
@@ -1473,9 +1373,6 @@ impl EthereumIndexerClient {
         eth: Option<EthConfig>,
         app_data_storage: AppDataStorage,
         backlog: Backlog,
-        contract_watcher: ContractStateWatcher,
-        mesh_state: watch::Receiver<MeshState>,
-        node_client: NodeClient,
     ) -> anyhow::Result<Self> {
         let Some(eth) = eth else {
             tracing::warn!("ethereum indexer is disabled");
@@ -1483,16 +1380,7 @@ impl EthereumIndexerClient {
         };
 
         let (events_tx, events_rx) = mpsc::channel::<ChainEvent>(4096);
-        let indexer = EthereumIndexer::new(
-            Some(eth.clone()),
-            None,
-            app_data_storage.clone(),
-            backlog.clone(),
-            contract_watcher,
-            mesh_state,
-            node_client,
-        )
-        .await?;
+        let indexer = EthereumIndexer::new(eth, app_data_storage, backlog).await?;
 
         let t_indexer: JoinHandle<()> = tokio::spawn(async move {
             indexer.run(events_tx).await;
