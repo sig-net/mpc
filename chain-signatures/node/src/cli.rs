@@ -353,22 +353,31 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 backlog.clone(),
             ));
 
-            match indexer_eth::EthereumIndexer::new(
-                eth,
-                sign_tx.clone(),
+            match indexer_eth::EthereumIndexerClient::new(
+                eth.clone(),
                 app_data_storage.clone(),
                 backlog.clone(),
                 contract_watcher.clone(),
                 mesh_state.clone(),
                 client.clone(),
+                sign_tx.clone(),
             )
             .await
             {
-                Ok(eth_indexer) => {
-                    tokio::spawn(eth_indexer.run());
+                Ok(eth_client) => {
+                    let total_timeout = Duration::from_secs(eth.as_ref().map(|e| e.total_timeout).unwrap_or(60));
+                    tokio::spawn(indexer_client::run_indexer(
+                        eth_client,
+                        sign_tx.clone(),
+                        backlog.clone(),
+                        contract_watcher.clone(),
+                        mesh_state.clone(),
+                        client.clone(),
+                        total_timeout,
+                    ));
                 }
                 Err(err) => {
-                    tracing::error!(?err, "failed to create ethereum indexer");
+                    tracing::error!(?err, "failed to create ethereum indexer client");
                 }
             };
 

@@ -65,8 +65,13 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
     let user_address = actions::public_key_to_address(&user_secp_pk);
     let user_alloy_address = AlloyAddress::from_slice(user_address.as_bytes());
 
+    let client = Client::new();
+    // Use the live account nonce to avoid "nonce too low" errors if the address has prior sends
+    let user_hex = format_alloy_address(&user_alloy_address);
+    let sender_nonce = get_transaction_count(&client, &execution_rpc_http_url, &user_hex).await?;
+
     let legacy_tx = EthereumTransaction {
-        nonce: U256::from(0u8),
+        nonce: sender_nonce,
         gas_price: U256::from(1_500_000_000u64),
         gas_limit: U256::from(FUNDING_GAS_LIMIT),
         to: user_alloy_address,
@@ -74,7 +79,6 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
         data: Vec::new(),
     };
 
-    let client = Client::new();
     ensure_eth_signer_funded(
         &client,
         &execution_rpc_http_url,

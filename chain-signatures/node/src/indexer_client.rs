@@ -17,8 +17,24 @@ pub enum ChainEvent {
     RespondBidirectional(crate::indexer_common::RespondBidirectionalEvent),
     /// Periodic checkpoint indicating the client has observed/processed up to `u64` (slot/block)
     Checkpoint(u64),
+
+    /// A watched bidirectional execution has been observed on the target chain.
+    /// The client detected the execution, performed chain-specific extraction, and
+    /// carries either the serialized output (Success) or a failure indicator.
+    ExecutionConfirmed {
+        tx_id: crate::sign_bidirectional::BidirectionalTxId,
+        sign_id: mpc_primitives::SignId,
+        source_chain: Chain,
+        block_height: u64,
+        result: ExecutionResult,
+    },
 }
 
+#[derive(Debug, Clone)]
+pub enum ExecutionResult {
+    Success { output: Vec<u8> },
+    Failed,
+}
 // TODO: need to add sign_id to each event for better logging.
 impl std::fmt::Debug for ChainEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -27,6 +43,14 @@ impl std::fmt::Debug for ChainEvent {
             ChainEvent::Respond(_) => write!(f, "Respond(...)"),
             ChainEvent::RespondBidirectional(_) => write!(f, "RespondBidirectional(...)"),
             ChainEvent::Checkpoint(b) => write!(f, "Checkpoint({b})"),
+            ChainEvent::ExecutionConfirmed { tx_id, sign_id, source_chain, block_height, result } => f
+                .debug_struct("ExecutionConfirmed")
+                .field("tx_id", tx_id)
+                .field("sign_id", sign_id)
+                .field("source_chain", source_chain)
+                .field("block_height", block_height)
+                .field("result", result)
+                .finish(),
         }
     }
 }
@@ -99,6 +123,21 @@ pub async fn run_indexer<C: ChainClient>(
                 crate::metrics::indexers::LATEST_BLOCK_NUMBER
                     .with_label_values(&[C::CHAIN.as_str(), "indexed"])
                     .set(block as i64);
+            }
+            ChainEvent::ExecutionConfirmed { tx_id, sign_id, source_chain, block_height, result } => {
+                if let Err(err) = crate::indexer_common::process_execution_confirmed(
+                    tx_id,
+                    sign_id,
+                    source_chain,
+                    block_height,
+                    result,
+                    &backlog,
+                    sign_tx.clone(),
+                    total_timeout,
+                    C::CHAIN,
+                ).await {
+                    tracing::error!(?err, chain = %chain, "failed to process execution confirmation");
+                }
             }
         }
     }
