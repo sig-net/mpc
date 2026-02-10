@@ -359,6 +359,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 eth,
                 app_data_storage.clone(),
                 backlog.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                client.clone(),
             )
             .await
             {

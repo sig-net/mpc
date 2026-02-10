@@ -584,15 +584,29 @@ async fn process_respond_events(logs: &[Log], backlog: &Backlog, sign_tx: mpsc::
 
 fn send_indexed_requests_to_sign_queue(
     requests: Vec<IndexedSignRequest>,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: Option<mpsc::Sender<Sign>>,
+    events_send: Option<mpsc::Sender<ChainEvent>>,
 ) {
-    for request in requests {
-        let sign_tx = sign_tx.clone();
-        tokio::spawn(async move {
-            if let Err(err) = sign_tx.send(Sign::Request(request)).await {
-                tracing::error!(?err, "Failed to send ETH sign request into queue");
-            }
-        });
+    if let Some(events_send) = events_send {
+        for request in requests {
+            let events_send = events_send.clone();
+            tokio::spawn(async move {
+                if let Err(err) = events_send.send(ChainEvent::SignRequest(request)).await {
+                    tracing::error!(?err, "Failed to emit SignRequest event");
+                }
+            });
+        }
+    } else if let Some(sign_tx) = sign_tx {
+        for request in requests {
+            let sign_tx = sign_tx.clone();
+            tokio::spawn(async move {
+                if let Err(err) = sign_tx.send(Sign::Request(request)).await {
+                    tracing::error!(?err, "Failed to send ETH sign request into queue");
+                }
+            });
+        }
+    } else {
+        tracing::warn!("No sign queue nor event channel configured for indexed requests");
     }
 }
 
@@ -775,7 +789,7 @@ impl EthereumClient {
 #[derive(Clone)]
 pub struct EthereumIndexer {
     eth: EthConfig,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: Option<mpsc::Sender<Sign>>,
     app_data_storage: AppDataStorage,
     backlog: Backlog,
     contract_watcher: ContractStateWatcher,
@@ -787,7 +801,7 @@ pub struct EthereumIndexer {
 impl EthereumIndexer {
     pub async fn new(
         eth: Option<EthConfig>,
-        sign_tx: mpsc::Sender<Sign>,
+        sign_tx: Option<mpsc::Sender<Sign>>,
         app_data_storage: AppDataStorage,
         backlog: Backlog,
         contract_watcher: ContractStateWatcher,
@@ -813,44 +827,20 @@ impl EthereumIndexer {
         })
     }
 
-    pub async fn run(self) {
+    pub async fn run(self, events_send: mpsc::Sender<ChainEvent>) {
         let backlog = self.backlog;
-        let mut contract_watcher = self.contract_watcher;
-        let mut mesh_state = self.mesh_state;
-        let node_client = self.node_client;
         let app_data_storage = self.app_data_storage;
         let client = self.client;
         let eth = self.eth;
-        let sign_tx = self.sign_tx;
 
         let total_timeout = Duration::from_secs(eth.total_timeout);
-
-        crate::indexer_common::recover_backlog(
-            &backlog,
-            &mut contract_watcher,
-            &mut mesh_state,
-            &node_client,
-            Chain::Ethereum,
-            sign_tx.clone(),
-            total_timeout,
-        )
-        .await;
-
         let last_processed_block = Self::get_last_processed_block(&app_data_storage).await;
 
         let client = Arc::new(client);
 
         tracing::info!("running ethereum indexer");
-
-        let eth_config_clone = eth.clone();
-
-        let Ok(contract_address) =
-            Address::from_str(&format!("0x{}", eth_config_clone.contract_address))
-        else {
-            tracing::error!(
-                "Failed to parse contract address: {}",
-                eth_config_clone.contract_address
-            );
+        let Ok(contract_address) = Address::from_str(&format!("0x{}", eth.contract_address)) else {
+            tracing::error!("Failed to parse contract address: {}", eth.contract_address);
             return;
         };
         let (blocks_failed_send, blocks_failed_recv) = failed_blocks_channel();
@@ -874,40 +864,27 @@ impl EthereumIndexer {
             .await;
         });
 
-        let backlog_clone = backlog.clone();
         let client_clone = Arc::clone(&client);
         let optimistic_requests = eth.optimistic_requests;
-        let sign_tx_clone = sign_tx.clone();
-        tokio::spawn(async move {
-            Self::send_requests_when_final(
-                client_clone,
-                requests_indexed_recv,
-                finalized_block_recv,
-                sign_tx_clone,
-                app_data_storage.clone(),
-                optimistic_requests,
-                backlog_clone,
-            )
-            .await;
-        });
+        tokio::spawn(Self::send_requests_when_final(
+            client_clone,
+            requests_indexed_recv,
+            finalized_block_recv,
+            events_send.clone(),
+            app_data_storage.clone(),
+            optimistic_requests,
+        ));
 
-        let blocks_failed_send_clone = blocks_failed_send.clone();
-        let requests_indexed_send_clone = requests_indexed_send.clone();
-        let backlog_clone2 = backlog.clone();
-        let client_clone = Arc::clone(&client);
-        tokio::spawn(async move {
-            Self::retry_failed_blocks(
-                client_clone,
-                blocks_failed_recv,
-                blocks_failed_send_clone,
-                contract_address,
-                requests_indexed_send_clone,
-                total_timeout,
-                backlog_clone2,
-                None,
-            )
-            .await;
-        });
+        tokio::spawn(Self::retry_failed_blocks(
+            Arc::clone(&client),
+            blocks_failed_recv,
+            blocks_failed_send.clone(),
+            contract_address,
+            requests_indexed_send.clone(),
+            total_timeout,
+            backlog.clone(),
+            events_send.clone(),
+        ));
 
         let blocks_to_process_send_clone = blocks_to_process_send.clone();
         if let Some(last_processed_block) = last_processed_block {
@@ -962,7 +939,7 @@ impl EthereumIndexer {
                 requests_indexed_send_clone.clone(),
                 total_timeout,
                 backlog.clone(),
-                None,
+                events_send.clone(),
             )
             .await
             {
@@ -1023,7 +1000,7 @@ impl EthereumIndexer {
         requests_indexed: mpsc::Sender<BlockAndRequests>,
         total_timeout: Duration,
         backlog: Backlog,
-        events_send: Option<mpsc::Sender<ChainEvent>>,
+        events_send: mpsc::Sender<ChainEvent>,
     ) -> anyhow::Result<()> {
         let block_number = block.header.number;
         let block_hash = block.header.hash;
@@ -1088,11 +1065,9 @@ impl EthereumIndexer {
             block_receipts.clone(),
         )
         .await?;
-        if let Some(es) = events_send {
-            for ev in exec_events {
-                if let Err(err) = es.send(ev).await {
-                    tracing::error!(?err, "failed to emit ExecutionConfirmed event");
-                }
+        for ev in exec_events {
+            if let Err(err) = events_send.send(ev).await {
+                tracing::error!(?err, "failed to emit ExecutionConfirmed event");
             }
         }
 
@@ -1262,10 +1237,9 @@ impl EthereumIndexer {
         client: Arc<EthereumClient>,
         mut requests_indexed: mpsc::Receiver<BlockAndRequests>,
         mut finalized_block_rx: mpsc::Receiver<BlockNumber>,
-        sign_tx: mpsc::Sender<Sign>,
+        events_send: mpsc::Sender<ChainEvent>,
         app_data_storage: AppDataStorage,
         optimistic_requests: bool,
-        backlog: Backlog,
     ) {
         let mut finalized_block_number: Option<BlockNumber> = None;
         let mut last_processed_block: Option<BlockNumber> = app_data_storage
@@ -1314,30 +1288,32 @@ impl EthereumIndexer {
 
             if block.header.hash == block_hash {
                 tracing::info!("Block {block_number} is finalized!");
-                send_indexed_requests_to_sign_queue(indexed_requests, sign_tx.clone());
+
+                for req in indexed_requests.clone() {
+                    if let Err(err) = events_send.send(ChainEvent::SignRequest(req)).await {
+                        tracing::error!(?err, "failed to emit SignRequest event");
+                    }
+                }
 
                 if !respond_logs.is_empty() {
-                    process_respond_events(&respond_logs, &backlog, sign_tx.clone()).await;
+                    emit_respond_events(&respond_logs, events_send.clone()).await;
                 }
+
+                // TODO: interval checkpoint
+                if let Err(err) = events_send.send(ChainEvent::Checkpoint(block_number)).await {
+                    tracing::error!(?err, "failed to emit checkpoint event");
+                }
+
                 if last_processed_block.is_none_or(|n| n < block_number) {
-                    if let Err(err) = app_data_storage
-                        .set_last_processed_block_eth(block_number)
-                        .await
-                    {
-                        tracing::warn!("Failed to set last processed block: {err:?}");
-                    }
                     last_processed_block.replace(block_number);
                 }
-                backlog
-                    .set_processed_block(Chain::Ethereum, block_number)
-                    .await;
             } else {
                 // no special handling for chain reorg, just log the error
                 // This is because when such chain reorg happens, the new canonical chain will have already been emitted by helios's block header stream, and we can safely skip this block here.
                 tracing::error!(
-                "Block {block_number} hash mismatch: expected {block_hash:?}, got {:?}. Chain re-orged.",
-                block.header.hash
-            );
+                    "Block {block_number} hash mismatch: expected {block_hash:?}, got {:?}. Chain re-orged.",
+                    block.header.hash
+                );
             }
         }
     }
@@ -1350,7 +1326,7 @@ impl EthereumIndexer {
         requests_indexed: mpsc::Sender<BlockAndRequests>,
         total_timeout: Duration,
         backlog: Backlog,
-        events_send: Option<mpsc::Sender<ChainEvent>>,
+        events_send: mpsc::Sender<ChainEvent>,
     ) {
         loop {
             let Some(block) = blocks_failed_rx.recv().await else {
@@ -1497,6 +1473,9 @@ impl EthereumIndexerClient {
         eth: Option<EthConfig>,
         app_data_storage: AppDataStorage,
         backlog: Backlog,
+        contract_watcher: ContractStateWatcher,
+        mesh_state: watch::Receiver<MeshState>,
+        node_client: NodeClient,
     ) -> anyhow::Result<Self> {
         let Some(eth) = eth else {
             tracing::warn!("ethereum indexer is disabled");
@@ -1504,201 +1483,22 @@ impl EthereumIndexerClient {
         };
 
         let (events_tx, events_rx) = mpsc::channel::<ChainEvent>(4096);
-        let client = Arc::new(EthereumClient::new(eth.clone()).await?);
-        let Ok(contract_address) = Address::from_str(&format!("0x{}", eth.contract_address)) else {
-            tracing::error!("Failed to parse contract address");
-            return Err(anyhow::anyhow!("Failed to parse contract address"));
-        };
+        let indexer = EthereumIndexer::new(
+            Some(eth.clone()),
+            None,
+            app_data_storage.clone(),
+            backlog.clone(),
+            contract_watcher,
+            mesh_state,
+            node_client,
+        )
+        .await?;
 
-        let (blocks_failed_send, blocks_failed_recv) = failed_blocks_channel();
-        let (requests_indexed_send, mut requests_indexed_recv) = indexed_channel();
-        let (finalized_block_send, mut finalized_block_recv) = finalized_block_channel();
-        let (blocks_to_process_send, mut blocks_to_process_recv) = blocks_to_process_channel();
-
-        // Spawn task: refresh latest finalized block
-        let client_clone = Arc::clone(&client);
-        let finalized_block_send_clone = finalized_block_send.clone();
-        let refresh_interval = eth.refresh_finalized_interval;
-        let t_refresh: JoinHandle<()> = tokio::spawn(async move {
-            tracing::info!("Spawned task to refresh the latest finalized block");
-            EthereumIndexer::refresh_finalized_block(
-                client_clone,
-                finalized_block_send_clone,
-                refresh_interval,
-            )
-            .await;
+        let t_indexer: JoinHandle<()> = tokio::spawn(async move {
+            indexer.run(events_tx).await;
         });
 
-        // Spawn task: process indexed requests when finalized, but emit ChainEvent::SignRequest and ChainEvent::Checkpoint
-        let t_send_final: JoinHandle<()> = {
-            let client_clone = Arc::clone(&client);
-            let events_send = events_tx.clone();
-            let app_data_storage = app_data_storage.clone();
-            let optimistic_requests = eth.optimistic_requests;
-            tokio::spawn(async move {
-                let mut finalized_block_number: Option<BlockNumber> = None;
-                let mut last_processed_block: Option<BlockNumber> = app_data_storage
-                    .last_processed_block_eth()
-                    .await
-                    .unwrap_or_else(|err| {
-                        tracing::warn!(
-                            "Failed to fetch last processed block: {err:?}, setting to None"
-                        );
-                        None
-                    });
-
-                while let Some(BlockAndRequests {
-                    block_number,
-                    block_hash,
-                    indexed_requests,
-                    respond_logs,
-                }) = requests_indexed_recv.recv().await
-                {
-                    if !optimistic_requests {
-                        while finalized_block_number.is_none_or(|n| block_number > n) {
-                            let Some(new_finalized_block) = finalized_block_recv.recv().await
-                            else {
-                                tracing::error!("Failed to receive finalized blocks");
-                                return;
-                            };
-                            finalized_block_number.replace(new_finalized_block);
-                        }
-                    }
-
-                    // Verify block hash and send requests as ChainEvent
-                    let block = client_clone
-                        .as_ref()
-                        .get_block(alloy::rpc::types::BlockId::Number(
-                            BlockNumberOrTag::Number(block_number),
-                        ))
-                        .await;
-
-                    let Some(block) = block else {
-                        tracing::warn!("Block {block_number} not found from Ethereum client, skipping this block and its requests");
-                        continue;
-                    };
-
-                    if block.header.hash == block_hash {
-                        tracing::info!("Block {block_number} is finalized!");
-
-                        // Emit sign requests as events for the shared indexer loop to process
-                        for request in indexed_requests {
-                            if let Err(err) =
-                                events_send.send(ChainEvent::SignRequest(request)).await
-                            {
-                                tracing::error!(?err, "failed to emit SignRequest event");
-                            }
-                        }
-
-                        // Emit respond events for the shared indexer loop to handle
-                        if !respond_logs.is_empty() {
-                            emit_respond_events(&respond_logs, events_send.clone()).await;
-                        }
-
-                        // Emit checkpoint event for central checkpointing
-                        if let Err(err) =
-                            events_send.send(ChainEvent::Checkpoint(block_number)).await
-                        {
-                            tracing::error!(?err, "failed to emit Checkpoint event");
-                        }
-
-                        if last_processed_block.is_none_or(|n| n < block_number) {
-                            if let Err(err) = app_data_storage
-                                .set_last_processed_block_eth(block_number)
-                                .await
-                            {
-                                tracing::warn!("Failed to set last processed block: {err:?}");
-                            }
-                            last_processed_block.replace(block_number);
-                        }
-                    } else {
-                        tracing::error!("Block {block_number} hash mismatch: expected {block_hash:?}, got {:?}. Chain re-orged.", block.header.hash);
-                    }
-                }
-            })
-        };
-
-        // Spawn task: retry failed blocks
-        let t_retry: JoinHandle<()> = tokio::spawn(EthereumIndexer::retry_failed_blocks(
-            Arc::clone(&client),
-            blocks_failed_recv,
-            blocks_failed_send.clone(),
-            contract_address.clone(),
-            requests_indexed_send.clone(),
-            Duration::from_secs(eth.total_timeout),
-            backlog.clone(),
-            Some(events_tx.clone()),
-        ));
-
-        // Spawn add_new_block_to_process
-        let t_add_new_block = tokio::spawn(EthereumIndexer::add_new_block_to_process(
-            Arc::clone(&client),
-            blocks_to_process_send.clone(),
-        ));
-
-        // Spawn main processing loop (process blocks and send BlockAndRequests into indexed channel)
-        let t_main: JoinHandle<()> = {
-            let client = Arc::clone(&client);
-            let requests_indexed_send = requests_indexed_send.clone();
-            let backlog = backlog.clone();
-            let contract_address = contract_address.clone();
-            let total_timeout = Duration::from_secs(eth.total_timeout);
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_millis(200));
-                loop {
-                    let Some(block_to_process) = blocks_to_process_recv.recv().await else {
-                        interval.tick().await;
-                        continue;
-                    };
-                    let (block, is_catchup) = match block_to_process {
-                        BlockToProcess::Catchup(block_number) => {
-                            let block = client
-                                .get_block(alloy::rpc::types::BlockId::Number(
-                                    BlockNumberOrTag::Number(block_number),
-                                ))
-                                .await;
-                            if let Some(block) = block {
-                                (block, true)
-                            } else {
-                                tracing::warn!(
-                                    "Block {block_number} not found from Ethereum client"
-                                );
-                                continue;
-                            }
-                        }
-                        BlockToProcess::NewBlock(block) => ((*block).clone(), false),
-                    };
-                    let block_number = block.header.number;
-                    if let Err(err) = EthereumIndexer::process_block(
-                        client.clone(),
-                        block.clone(),
-                        contract_address,
-                        requests_indexed_send.clone(),
-                        total_timeout,
-                        backlog.clone(),
-                        Some(events_tx.clone()),
-                    )
-                    .await
-                    {
-                        tracing::warn!(?err, "Error processing block {block_number}");
-                        EthereumIndexer::add_failed_block(blocks_failed_send.clone(), block).await;
-                        continue;
-                    }
-                    if block_number % 10 == 0 {
-                        if is_catchup {
-                            tracing::info!("Processed catchup block number {block_number}");
-                        } else {
-                            tracing::info!("Processed block number {block_number}");
-                        }
-                    }
-                    crate::metrics::indexers::LATEST_BLOCK_NUMBER
-                        .with_label_values(&[Chain::Ethereum.as_str(), "indexed"])
-                        .set(block_number as i64);
-                }
-            })
-        };
-
-        let tasks = vec![t_refresh, t_send_final, t_retry, t_add_new_block, t_main];
+        let tasks = vec![t_indexer];
 
         Ok(Self { events_rx, tasks })
     }
