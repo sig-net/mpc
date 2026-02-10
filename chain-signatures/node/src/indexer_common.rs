@@ -1,34 +1,23 @@
-use crate::backlog::Backlog;
-use crate::backlog::BacklogTransaction;
-use crate::backlog::SignTx;
+use crate::backlog::{Backlog, BacklogTransaction, SignTx};
 use crate::indexer_hydration::{
     HydrationRespondBidirectionalEvent, HydrationSignBidirectionalRequestedEvent,
     HydrationSignatureRespondedEvent,
 };
-use crate::mesh::wait_threshold_active;
-use crate::mesh::MeshState;
+use crate::mesh::{wait_threshold_active, MeshState};
 use crate::metrics::requests::record_indexing_step_reached;
-
 use crate::node_client::NodeClient;
-use crate::protocol::Chain;
-use crate::protocol::IndexedSignRequest;
-use crate::protocol::Sign;
-use crate::protocol::SignRequestType;
+use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::ContractStateWatcher;
-use crate::sign_bidirectional::BidirectionalTx;
-use crate::sign_bidirectional::BidirectionalTxId;
-use crate::sign_bidirectional::PendingRequestStatus;
+use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PendingRequestStatus};
 
 use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
 use mpc_crypto::ScalarExt as _;
-use mpc_primitives::SignId;
-use mpc_primitives::Signature;
+use mpc_primitives::{SignId, Signature};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SignBidirectionalEvent {
@@ -725,14 +714,14 @@ mod tests {
         let orig_r_affine = ProjectivePoint::GENERATOR.to_affine(); // keep value for later assertion
 
         // r = x coordinate
-        let mut r_arr = [0u8; 32];
-        r_arr.copy_from_slice(x_bytes);
+        let mut r = [0u8; 32];
+        r.copy_from_slice(x_bytes);
 
         // s = arbitrary small scalar
         let s_scalar = Scalar::from(5u64);
         let s_bytes = s_scalar.to_bytes();
-        let mut s_arr = [0u8; 32];
-        s_arr.copy_from_slice(&s_bytes);
+        let mut s = [0u8; 32];
+        s.copy_from_slice(&s_bytes);
 
         let v = (y_bytes[31] & 1) as u8;
 
@@ -740,8 +729,8 @@ mod tests {
             request_id: [0u8; 32],
             responder: alloy::primitives::Address::from_slice(&[0u8; 20]),
             v,
-            r: r_arr,
-            s: s_arr,
+            r,
+            s,
         };
 
         let sig_opt = eth_event.to_mpc_signature();
