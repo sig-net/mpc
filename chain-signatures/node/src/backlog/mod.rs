@@ -7,7 +7,7 @@ use crate::protocol::{Chain, SignRequestType};
 use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PendingRequestStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use anyhow::Context;
-use mpc_primitives::{PendingTx, SignId};
+use mpc_primitives::{PendingTx, SignId, Signature};
 use std::collections::{hash_map, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -323,12 +323,70 @@ impl Backlog {
     /// Mark a request as published (success or failure)
     pub async fn mark_published(
         &self,
-        _chain: Chain,
-        _id: &SignId,
-        _success: bool,
+        chain: Chain,
+        id: &SignId,
+        success: bool,
     ) -> Result<(), BacklogError> {
-        // TODO: implement
+        let mut requests = self.requests.write().await;
+        let pending = requests.get_mut(&chain).ok_or(BacklogError::ChainNotFound)?;
+        let tx = pending
+            .requests
+            .get_mut(id)
+            .ok_or(BacklogError::NotFound { chain, id: *id })?;
+
+        if let BacklogTransaction::Sign(sign_tx) = tx {
+            if success {
+                sign_tx.awaiting_publish = None;
+                sign_tx.status = PendingRequestStatus::AwaitingResponse;
+            } else {
+                sign_tx.status = PendingRequestStatus::AwaitingPublish;
+            }
+        }
+
         Ok(())
+    }
+
+    /// Persist a publish payload so it can be retried after restart.
+    pub async fn enqueue_publish(
+        &self,
+        chain: Chain,
+        id: &SignId,
+        publish: AwaitingPublish,
+    ) -> Result<(), BacklogError> {
+        let mut requests = self.requests.write().await;
+        let pending = requests.get_mut(&chain).ok_or(BacklogError::ChainNotFound)?;
+        let tx = pending
+            .requests
+            .get_mut(id)
+            .ok_or(BacklogError::NotFound { chain, id: *id })?;
+
+        match tx {
+            BacklogTransaction::Sign(sign_tx) => {
+                sign_tx.status = PendingRequestStatus::AwaitingPublish;
+                sign_tx.awaiting_publish = Some(publish);
+                Ok(())
+            }
+            BacklogTransaction::Bidirectional(_) => Err(BacklogError::TransactionNotFound),
+        }
+    }
+
+    /// Return all publishes currently waiting to be sent.
+    pub async fn pending_publishes(&self) -> Vec<(Chain, SignId, AwaitingPublish)> {
+        self
+            .requests
+            .read()
+            .await
+            .iter()
+            .flat_map(|(chain, pending)| {
+                pending.requests.iter().filter_map(move |(sign_id, tx)| match tx {
+                    BacklogTransaction::Sign(sign_tx) => sign_tx
+                        .awaiting_publish
+                        .as_ref()
+                        .map(|publish| (*chain, *sign_id, publish.clone())),
+                    BacklogTransaction::Bidirectional(_) => None,
+                })
+            })
+            .collect()
     }
 
     /// Begin watching for execution of a bidirectional transaction on the destination chain.
@@ -639,6 +697,35 @@ pub enum BacklogError {
     TransactionNotFound,
 }
 
+/// Minimal type information required to replay a publish from persisted backlog state.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum PublishRequestType {
+    Sign,
+    SignBidirectional,
+    RespondBidirectional { serialized_output: Vec<u8> },
+}
+
+impl PublishRequestType {
+    pub fn from_sign_request_type(sign_request_type: &SignRequestType) -> Self {
+        match sign_request_type {
+            SignRequestType::Sign => Self::Sign,
+            SignRequestType::SignBidirectional(_) => Self::SignBidirectional,
+            SignRequestType::RespondBidirectional(tx) => Self::RespondBidirectional {
+                serialized_output: tx.output.clone(),
+            },
+        }
+    }
+}
+
+/// Persisted publish metadata so the node can retry after restart.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct AwaitingPublish {
+    pub signature: Signature,
+    pub request_type: PublishRequestType,
+    pub unix_timestamp_indexed: u64,
+    pub queued_at_unix: u64,
+}
+
 /// Sign request transaction metadata (non-bidirectional).
 #[derive(Debug, Clone, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SignTx {
@@ -646,6 +733,8 @@ pub struct SignTx {
     pub source_chain: Chain,
     pub key_version: u32,
     pub status: PendingRequestStatus,
+    #[serde(default)]
+    pub awaiting_publish: Option<AwaitingPublish>,
 }
 
 /// Pending transaction in the backlog - can be either a sign-only or bidirectional.
@@ -735,6 +824,7 @@ mod tests {
     };
     use alloy::primitives::{Address, B256};
     use anchor_lang::prelude::Pubkey;
+    use k256::{ProjectivePoint, Scalar};
     use mpc_primitives::SignId;
     use signet_program::SignBidirectionalEvent;
 
@@ -1258,5 +1348,63 @@ mod tests {
         );
         let merged = merge_checkpoints(local.clone(), remote.clone());
         assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 400);
+    }
+
+    #[tokio::test]
+    async fn test_awaiting_publish_persists_and_clears() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([42; 32]);
+        let sign_tx = SignTx {
+            request_id: sign_id.request_id,
+            source_chain: Chain::Solana,
+            key_version: 1,
+            status: PendingRequestStatus::AwaitingResponse,
+            awaiting_publish: None,
+        };
+
+        backlog
+            .insert(
+                Chain::Solana,
+                sign_id,
+                BacklogTransaction::Sign(sign_tx),
+                SignRequestType::Sign,
+            )
+            .await;
+
+        let sig = Signature::new(
+            ProjectivePoint::GENERATOR.to_affine(),
+            Scalar::ONE,
+            0,
+        );
+        let publish = AwaitingPublish {
+            signature: sig.clone(),
+            request_type: PublishRequestType::Sign,
+            unix_timestamp_indexed: 0,
+            queued_at_unix: 0,
+        };
+
+        backlog
+            .enqueue_publish(Chain::Solana, &sign_id, publish.clone())
+            .await
+            .expect("failed to enqueue publish");
+
+        let pending = backlog.pending_publishes().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1, sign_id);
+        assert_eq!(pending[0].2.signature, sig);
+
+        let checkpoint = backlog.checkpoint(Chain::Solana).await;
+        let recovered = Backlog::new();
+        recovered
+            .recover_by_checkpoint(checkpoint)
+            .await
+            .expect("recover failed");
+        assert_eq!(recovered.pending_publishes().await.len(), 1);
+
+        recovered
+            .mark_published(Chain::Solana, &sign_id, true)
+            .await
+            .expect("mark_published failed");
+        assert!(recovered.pending_publishes().await.is_empty());
     }
 }

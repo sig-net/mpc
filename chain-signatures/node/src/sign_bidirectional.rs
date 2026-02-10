@@ -36,6 +36,8 @@ pub enum PendingRequestStatus {
     /// Request has been received on the source chain and is waiting for a `respond`
     /// transaction to be observed.
     AwaitingResponse,
+    /// Signature is ready but not yet published to the source chain.
+    AwaitingPublish,
     /// Request has been responded to and the derived transaction is now waiting to
     /// execute on the destination chain.
     PendingExecution,

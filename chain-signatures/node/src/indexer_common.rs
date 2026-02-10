@@ -245,6 +245,7 @@ pub(crate) async fn process_sign_event(
             source_chain: sign_event.source_chain(),
             key_version: sign_request.args.key_version,
             status: PendingRequestStatus::AwaitingResponse,
+            awaiting_publish: None,
         }),
         SignRequestType::SignBidirectional(_event) => {
             // For bidirectional requests, start with a Sign transaction
@@ -254,6 +255,7 @@ pub(crate) async fn process_sign_event(
                 source_chain: sign_event.source_chain(),
                 key_version: sign_request.args.key_version,
                 status: PendingRequestStatus::AwaitingResponse,
+                awaiting_publish: None,
             })
         }
         _ => anyhow::bail!("Unexpected sign request type"),

@@ -1,7 +1,7 @@
 use super::MpcSignProtocol;
-use crate::backlog::Backlog;
+use crate::backlog::{AwaitingPublish, Backlog, PublishRequestType};
 use crate::config::Config;
-use crate::kdf::derive_delta;
+use crate::kdf::{derive_delta, into_eth_sig};
 use crate::mesh::MeshState;
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{
@@ -14,7 +14,7 @@ use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
-use crate::util::{AffinePointExt, JoinMap, TimeoutBudget};
+use crate::util::{current_unix_timestamp, AffinePointExt, JoinMap, TimeoutBudget};
 
 use crate::protocol::SignRequestType;
 use cait_sith::protocol::{Action, InitializationError, Participant};
@@ -829,6 +829,32 @@ struct SignGenerator {
     debug_view: crate::web::debug::DebugPageTaskHandle,
 }
 
+/// Build persisted publish metadata for backlog replay.
+fn build_publish_metadata(
+    public_key: &PublicKey,
+    indexed: &IndexedSignRequest,
+    output: &FullSignature<Secp256k1>,
+) -> Option<AwaitingPublish> {
+    let derived_key = derive_key(*public_key, indexed.args.epsilon);
+    let signature = into_eth_sig(
+        &derived_key,
+        &output.big_r,
+        &output.s,
+        indexed.args.payload,
+    )
+    .map_err(|err| {
+        tracing::warn!(?err, sign_id = ?indexed.id, "failed to convert signature for backlog publish persistence");
+    })
+    .ok()?;
+
+    Some(AwaitingPublish {
+        signature,
+        request_type: PublishRequestType::from_sign_request_type(&indexed.sign_request_type),
+        unix_timestamp_indexed: indexed.unix_timestamp_indexed,
+        queued_at_unix: current_unix_timestamp(),
+    })
+}
+
 impl SignGenerator {
     async fn new(
         ctx: &SignTask,
@@ -1043,6 +1069,25 @@ impl SignGenerator {
 
                     if self.proposer == me {
                         signature_generator_success_mine_metric.inc();
+
+                        if let Some(publish) = build_publish_metadata(
+                            &ctx.public_key,
+                            &self.indexed,
+                            &output,
+                        ) {
+                            if let Err(err) = ctx
+                                .backlog
+                                .enqueue_publish(self.indexed.chain, &self.indexed.id, publish)
+                                .await
+                            {
+                                tracing::warn!(
+                                    ?sign_id,
+                                    ?err,
+                                    "failed to persist publish intent before rpc dispatch",
+                                );
+                            }
+                        }
+
                         ctx.rpc.publish(
                             ctx.public_key,
                             self.indexed.clone(),
@@ -1460,5 +1505,101 @@ impl PendingPresignature {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backlog::{BacklogTransaction, SignTx};
+    use crate::sign_bidirectional::PendingRequestStatus;
+    use k256::{ProjectivePoint, Scalar};
+    use mpc_crypto::x_coordinate;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn publish_metadata_persists_through_restart_and_clears_on_publish() {
+        let chain = Chain::NEAR;
+        let sign_id = SignId::new([9u8; 32]);
+
+        // Deterministic signing inputs so `into_eth_sig` can recover the derived key.
+        let secret = Scalar::from(5u64);
+        let nonce = Scalar::from(7u64);
+        let payload = Scalar::from(11u64);
+
+        let derived_public_key = (ProjectivePoint::GENERATOR * secret).to_affine();
+        let r_point = (ProjectivePoint::GENERATOR * nonce).to_affine();
+        let r_scalar = x_coordinate(&r_point);
+        let s_scalar = nonce.invert().unwrap() * (payload + r_scalar * secret);
+
+        let output = FullSignature {
+            big_r: r_point,
+            s: s_scalar,
+        };
+
+        let indexed = IndexedSignRequest {
+            id: sign_id,
+            args: SignArgs {
+                entropy: [1u8; 32],
+                epsilon: Scalar::ZERO,
+                payload,
+                path: "test".to_string(),
+                key_version: 1,
+            },
+            chain,
+            unix_timestamp_indexed: 123,
+            timestamp_sign_queue: Instant::now(),
+            total_timeout: Duration::from_secs(5),
+            sign_request_type: SignRequestType::Sign,
+        };
+
+        let backlog = Backlog::new();
+        let sign_tx = SignTx {
+            request_id: sign_id.request_id,
+            source_chain: chain,
+            key_version: indexed.args.key_version,
+            status: PendingRequestStatus::AwaitingResponse,
+            awaiting_publish: None,
+        };
+
+        backlog
+            .insert(
+                chain,
+                sign_id,
+                BacklogTransaction::Sign(sign_tx),
+                indexed.sign_request_type.clone(),
+            )
+            .await;
+
+        let publish = build_publish_metadata(&derived_public_key, &indexed, &output)
+            .expect("failed to build publish metadata");
+        backlog
+            .enqueue_publish(chain, &sign_id, publish.clone())
+            .await
+            .unwrap();
+
+        let checkpoint = backlog.checkpoint(chain).await;
+        let recovered = Backlog::new();
+        recovered
+            .recover_by_checkpoint(checkpoint)
+            .await
+            .expect("recover failed");
+
+        let pending = recovered.pending_publishes().await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1, sign_id);
+        assert_eq!(pending[0].2.signature, publish.signature);
+
+        recovered
+            .mark_published(chain, &sign_id, true)
+            .await
+            .expect("mark_published failed");
+        assert!(recovered.pending_publishes().await.is_empty());
+
+        let status = match recovered.get(chain, &sign_id).await {
+            Some(BacklogTransaction::Sign(tx)) => tx.status,
+            other => panic!("unexpected backlog entry: {:?}", other),
+        };
+        assert_eq!(status, PendingRequestStatus::AwaitingResponse);
     }
 }
