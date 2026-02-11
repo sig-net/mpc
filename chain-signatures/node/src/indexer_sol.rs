@@ -511,13 +511,8 @@ fn spawn_respond_events(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            if let Err(err) = subscribe_to_program_respond_events(
-                program_id,
-                &rpc_url,
-                &ws_url,
-                tx.clone(),
-            )
-            .await
+            if let Err(err) =
+                subscribe_to_program_respond_events(program_id, &rpc_url, &ws_url, tx.clone()).await
             {
                 tracing::warn!("Failed to subscribe to solana respond events: {:?}", err);
             }
@@ -738,6 +733,7 @@ async fn subscribe_to_program_cpi_events<F>(
 where
     F: FnMut(SignatureEventBox, Signature, u64) + Send,
 {
+    let interval = Chain::Solana.checkpoint_interval().unwrap();
     let rpc_client = RpcClient::new(rpc_url.to_string());
     let pubsub_client = PubsubClient::new(ws_url).await?;
 
@@ -811,8 +807,10 @@ where
                         }
 
                         // Emit periodic checkpoint event
-                        if let Err(err) = tx.send(ChainEvent::Checkpoint(response.context.slot)).await {
-                            tracing::warn!(?err, "failed to send checkpoint event");
+                        if response.context.slot.is_multiple_of(interval) {
+                            if let Err(err) = tx.send(ChainEvent::Checkpoint(response.context.slot)).await {
+                                tracing::warn!(?err, "failed to send checkpoint event");
+                            }
                         }
                     }
                     None => {
