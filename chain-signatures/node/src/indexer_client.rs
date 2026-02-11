@@ -15,8 +15,8 @@ pub enum ChainEvent {
     SignRequest(IndexedSignRequest),
     Respond(crate::indexer_common::SignatureRespondedEvent),
     RespondBidirectional(crate::indexer_common::RespondBidirectionalEvent),
-    /// Periodic checkpoint indicating the client has observed/processed up to `u64` (slot/block)
-    Checkpoint(u64),
+    /// Block height indicating the client has observed/processed up to `u64` (slot/block)
+    Block(u64),
 
     /// A watched bidirectional execution has been observed on the target chain.
     /// The client detected the execution, performed chain-specific extraction, and
@@ -42,7 +42,7 @@ impl std::fmt::Debug for ChainEvent {
             ChainEvent::SignRequest(r) => f.debug_tuple("SignRequest").field(&r.id).finish(),
             ChainEvent::Respond(_) => write!(f, "Respond(...)"),
             ChainEvent::RespondBidirectional(_) => write!(f, "RespondBidirectional(...)"),
-            ChainEvent::Checkpoint(b) => write!(f, "Checkpoint({b})"),
+            ChainEvent::Block(b) => write!(f, "Block({b})"),
             ChainEvent::ExecutionConfirmed {
                 tx_id,
                 sign_id,
@@ -121,7 +121,7 @@ pub async fn run_indexer<C: ChainClient>(
                     tracing::error!(?err, chain = %chain, "failed to process respond bidirectional event");
                 }
             }
-            ChainEvent::Checkpoint(block) => {
+            ChainEvent::Block(block) => {
                 // central checkpointing for all chains
                 if let Some(checkpoint) = backlog.set_processed_block(C::CHAIN, block).await {
                     tracing::info!(block, ?checkpoint, chain = %chain, "created checkpoint");
@@ -459,10 +459,10 @@ mod tests {
             )
             .await;
 
-        // send a checkpoint event for this chain and ensure checkpoint is persisted
+        // send a block event for this chain and ensure checkpoint is persisted
         let block = Chain::Solana.checkpoint_interval().unwrap_or(1);
         events_tx
-            .send(Some(ChainEvent::Checkpoint(block)))
+            .send(Some(ChainEvent::Block(block)))
             .await
             .unwrap();
 

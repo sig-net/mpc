@@ -733,7 +733,6 @@ async fn subscribe_to_program_cpi_events<F>(
 where
     F: FnMut(SignatureEventBox, Signature, u64) + Send,
 {
-    let interval = Chain::Solana.checkpoint_interval().unwrap();
     let rpc_client = RpcClient::new(rpc_url.to_string());
     let pubsub_client = PubsubClient::new(ws_url).await?;
 
@@ -806,11 +805,9 @@ where
                             }
                         }
 
-                        // Emit periodic checkpoint event
-                        if response.context.slot.is_multiple_of(interval) {
-                            if let Err(err) = tx.send(ChainEvent::Checkpoint(response.context.slot)).await {
-                                tracing::warn!(?err, "failed to send checkpoint event");
-                            }
+                        // Emit block event for every observed slot
+                        if let Err(err) = tx.send(ChainEvent::Block(response.context.slot)).await {
+                            tracing::warn!(?err, "failed to send block event");
                         }
                     }
                     None => {

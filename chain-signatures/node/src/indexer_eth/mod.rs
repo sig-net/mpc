@@ -1189,9 +1189,8 @@ impl EthereumIndexer {
                     emit_respond_events(&respond_logs, events_tx.clone()).await;
                 }
 
-                // TODO: interval checkpoint
-                if let Err(err) = events_tx.send(ChainEvent::Checkpoint(block_number)).await {
-                    tracing::error!(?err, "failed to emit checkpoint event");
+                if let Err(err) = events_tx.send(ChainEvent::Block(block_number)).await {
+                    tracing::error!(?err, "failed to emit block event");
                 }
 
                 if last_processed_block.is_none_or(|n| n < block_number) {

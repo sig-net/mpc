@@ -76,7 +76,7 @@ async fn wait_for_sign_request(client: &mut SolanaClient) -> Result<IndexedSignR
     loop {
         match timeout(Duration::from_secs(10), client.next_event()).await {
             Ok(Some(ChainEvent::SignRequest(req))) => return Ok(req),
-            Ok(Some(ChainEvent::Checkpoint(_))) => continue,
+            Ok(Some(ChainEvent::Block(_))) => continue,
             Ok(Some(other)) => anyhow::bail!("Expected SignRequest, got {:?}", other),
             Ok(None) => anyhow::bail!("client returned None"),
             Err(_) => anyhow::bail!("timeout waiting for SignRequest event"),
@@ -119,7 +119,7 @@ async fn test_solana_client_parse_sign_event() -> Result<()> {
         .sign(payload, path, key_version, "secp256k1", "", "")
         .await?;
 
-    // Wait for SignRequest event (skip checkpoints)
+    // Wait for SignRequest event (skip block markers)
     let req = wait_for_sign_request(&mut client).await?;
 
     // Verify the request
@@ -131,9 +131,9 @@ async fn test_solana_client_parse_sign_event() -> Result<()> {
     Ok(())
 }
 
-/// Test that SolanaClient emits checkpoint events regularly
+/// Test that SolanaClient emits block events regularly
 #[tokio::test]
-async fn test_solana_client_emits_checkpoints() -> Result<()> {
+async fn test_solana_client_emits_blocks() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
     let solana = setup_solana_sandbox().await?;
@@ -152,18 +152,18 @@ async fn test_solana_client_emits_checkpoints() -> Result<()> {
         .sign(payload, "test", LATEST_MPC_KEY_VERSION, "secp256k1", "", "")
         .await?;
 
-    // Collect events and verify we get checkpoints
-    let mut found_checkpoint = false;
+    // Collect events and verify we get block markers
+    let mut found_block = false;
     for _ in 0..5 {
         if let Ok(Some(event)) = timeout(Duration::from_secs(5), client.next_event()).await {
-            if matches!(event, ChainEvent::Checkpoint(_)) {
-                found_checkpoint = true;
+            if matches!(event, ChainEvent::Block(_)) {
+                found_block = true;
                 break;
             }
         }
     }
 
-    assert!(found_checkpoint, "did not receive checkpoint event");
+    assert!(found_block, "did not receive block event");
     Ok(())
 }
 
@@ -198,14 +198,18 @@ async fn test_solana_client_catchup_linear() -> Result<()> {
 
     // Collect some events from first client
     let mut seen_by_client1 = 0;
+    let mut last_block_client1 = 0;
     for _ in 0..10 {
         if let Ok(Some(event)) = timeout(Duration::from_millis(500), client1.next_event()).await {
-            if let ChainEvent::SignRequest(_) = event {
-                seen_by_client1 += 1;
+            match event {
+                ChainEvent::SignRequest(_) => seen_by_client1 += 1,
+                ChainEvent::Block(block) => last_block_client1 = last_block_client1.max(block),
+                _ => {}
             }
         }
     }
     assert!(seen_by_client1 > 0, "first client saw no events");
+    assert!(last_block_client1 > 0, "first client saw no block events");
 
     // Drop first client
     drop(client1);
@@ -224,19 +228,29 @@ async fn test_solana_client_catchup_linear() -> Result<()> {
 
     // Client should process new events
     let mut sign_events = Vec::new();
-    for _ in 0..10 {
+    let mut caught_up = false;
+    for _ in 0..20 {
         if let Ok(Some(event)) = timeout(Duration::from_secs(2), client2.next_event()).await {
-            if let ChainEvent::SignRequest(req) = event {
-                sign_events.push(req);
+            match event {
+                ChainEvent::SignRequest(req) => {
+                    sign_events.push(req);
+                }
+                ChainEvent::Block(block) if block >= last_block_client1 => {
+                    caught_up = true;
+                }
+                _ => {}
+            }
+            if caught_up && !sign_events.is_empty() {
+                break;
             }
         }
     }
 
-    // Verify we got at least some of the new events
+    // Verify we caught up to the last block the first client observed and saw new events
+    assert!(caught_up, "second client did not catch up to prior block height");
     assert!(
-        sign_events.len() >= 1,
-        "second client did not process new events: only {} events",
-        sign_events.len()
+        !sign_events.is_empty(),
+        "second client did not process new events"
     );
     Ok(())
 }
@@ -365,7 +379,7 @@ async fn test_solana_client_checkpoint_persistence() -> Result<()> {
         node_client.clone(),
     )?;
 
-    // Submit request and wait for checkpoint
+    // Submit request and wait for a block marker
     solana
         .sign(
             [1u8; 32],
@@ -380,7 +394,7 @@ async fn test_solana_client_checkpoint_persistence() -> Result<()> {
     let mut checkpoint_block = None;
     for _ in 0..10 {
         if let Ok(Some(event)) = timeout(Duration::from_secs(2), client.next_event()).await {
-            if let ChainEvent::Checkpoint(block) = event {
+            if let ChainEvent::Block(block) = event {
                 checkpoint_block = Some(block);
                 // Set checkpoint in backlog
                 backlog.set_processed_block(Chain::Solana, block).await;
@@ -389,7 +403,7 @@ async fn test_solana_client_checkpoint_persistence() -> Result<()> {
         }
     }
 
-    assert!(checkpoint_block.is_some(), "did not receive checkpoint");
+    assert!(checkpoint_block.is_some(), "did not receive block event");
     drop(client);
 
     // Create new client with same backlog - should resume from checkpoint
@@ -414,13 +428,13 @@ async fn test_solana_client_checkpoint_persistence() -> Result<()> {
         .context("timeout waiting for event")?
         .context("client returned None")?;
 
-    // Should get sign request or checkpoint
+    // Should get sign request or block marker
     assert!(
         matches!(
             event,
-            ChainEvent::SignRequest(_) | ChainEvent::Checkpoint(_)
+            ChainEvent::SignRequest(_) | ChainEvent::Block(_)
         ),
-        "expected SignRequest or Checkpoint after restart"
+        "expected SignRequest or Block after restart"
     );
 
     Ok(())

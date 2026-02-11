@@ -160,7 +160,7 @@ async fn test_ethereum_client_parse_sign_event() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_ethereum_client_emits_checkpoints() -> Result<()> {
+async fn test_ethereum_client_emits_blocks() -> Result<()> {
     let ctx = EthereumTestEnvironment::new().await?;
     let app_data_storage = ctx.app_data_storage();
     let backlog = ctx.backlog();
@@ -169,18 +169,18 @@ async fn test_ethereum_client_emits_checkpoints() -> Result<()> {
 
     submit_sign_request(&ctx, [2u8; 32], "test-path").await?;
 
-    let mut saw_checkpoint = false;
+    let mut saw_block = false;
     for _ in 0..5 {
         match next_event_within(&mut client, Duration::from_secs(20)).await? {
-            ChainEvent::Checkpoint(_) => {
-                saw_checkpoint = true;
+            ChainEvent::Block(_) => {
+                saw_block = true;
                 break;
             }
             _ => continue,
         }
     }
 
-    assert!(saw_checkpoint, "expected checkpoint event");
+    assert!(saw_block, "expected block event");
     Ok(())
 }
 
@@ -275,7 +275,7 @@ async fn test_ethereum_client_concurrent_events() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_ethereum_client_checkpoint_persistence() -> Result<()> {
+async fn test_ethereum_client_block_persistence() -> Result<()> {
     let ctx = EthereumTestEnvironment::new().await?;
     let app_data_storage = ctx.app_data_storage();
     let backlog = ctx.backlog();
@@ -289,10 +289,10 @@ async fn test_ethereum_client_checkpoint_persistence() -> Result<()> {
 
     submit_sign_request(&ctx, [5u8; 32], "checkpoint-path").await?;
 
-    // Capture the first checkpoint height and persist it manually.
+    // Capture the first block height marker and persist it manually.
     let checkpoint_height = loop {
         match next_event_within(&mut client, Duration::from_secs(30)).await? {
-            ChainEvent::Checkpoint(height) => break height,
+            ChainEvent::Block(height) => break height,
             _ => continue,
         }
     };
@@ -311,7 +311,7 @@ async fn test_ethereum_client_checkpoint_persistence() -> Result<()> {
     let mut saw_new_event = false;
     for _ in 0..5 {
         match next_event_within(&mut client, Duration::from_secs(30)).await? {
-            ChainEvent::SignRequest(_) | ChainEvent::Checkpoint(_) => {
+            ChainEvent::SignRequest(_) | ChainEvent::Block(_) => {
                 saw_new_event = true;
                 break;
             }
