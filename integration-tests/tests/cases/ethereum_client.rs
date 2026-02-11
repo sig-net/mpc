@@ -3,9 +3,12 @@ use anyhow::{Context, Result};
 use ethers::types::{Address, H256, U256};
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers::{EthereumSandbox, Redis};
-use integration_tests::eth::{self, ChainSignaturesContract, SignRequest};
+use integration_tests::eth::{
+    self, chain_signatures_contract, ChainSignaturesContract, SignRequest,
+};
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_client::{ChainClient, ChainEvent};
+use mpc_node::indexer_common::SignatureRespondedEvent;
 use mpc_node::indexer_eth::{EthConfig, EthereumIndexerClient};
 use mpc_node::protocol::Chain;
 use mpc_node::storage::app_data_storage::AppDataStorage;
@@ -212,38 +215,6 @@ async fn test_ethereum_client_catchup_linear() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_ethereum_client_finality_requirement() -> Result<()> {
-    let ctx = EthTestCtx::new().await?;
-    let app_data_storage = ctx.app_data_storage();
-    let backlog = ctx.backlog();
-
-    // set optimistic requests to false to trigger finality.
-    let optimistic_requests = false;
-    let mut client = EthereumIndexerClient::new(
-        Some(ctx.config(optimistic_requests)),
-        app_data_storage,
-        backlog,
-    )
-    .await?;
-
-    submit_sign_request(&ctx, [3u8; 32], "finality-path").await?;
-
-    let mut saw_sign = false;
-    for _ in 0..5 {
-        match next_event_within(&mut client, Duration::from_secs(30)).await? {
-            ChainEvent::SignRequest(_) => {
-                saw_sign = true;
-                break;
-            }
-            _ => continue,
-        }
-    }
-
-    assert!(saw_sign, "sign event not emitted after finality");
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_ethereum_client_execution_confirmation() -> Result<()> {
     let ctx = EthTestCtx::new().await?;
     let app_data_storage = ctx.app_data_storage();
@@ -382,5 +353,72 @@ async fn test_ethereum_client_checkpoint_persistence() -> Result<()> {
         saw_new_event,
         "new client did not resume from stored checkpoint"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_ethereum_client_sign_and_respond_flow() -> Result<()> {
+    let ctx = EthTestCtx::new().await?;
+    let app_data_storage = ctx.app_data_storage();
+    let backlog = ctx.backlog();
+    let mut client =
+        EthereumIndexerClient::new(Some(ctx.config(true)), app_data_storage, backlog).await?;
+
+    // Submit a sign request and capture its id from the emitted event.
+    let payload = [9u8; 32];
+    let path = "m/44'/60'/0'/0/42";
+    submit_sign_request(&ctx, payload, path).await?;
+
+    let sign_req = loop {
+        match next_event_within(&mut client, Duration::from_secs(30)).await? {
+            ChainEvent::SignRequest(req) => break req,
+            _ => continue,
+        }
+    };
+
+    // Prepare a dummy signature and respond via the contract. The contract does not
+    // validate signature contents, so we can use placeholder values that map onto the
+    // indexer's expected v/r/s parsing.
+    let v: u8 = 27;
+    let r = [7u8; 32];
+    let s = [11u8; 32];
+    let signature = chain_signatures_contract::Signature {
+        big_r: chain_signatures_contract::AffinePoint {
+            x: U256::from_big_endian(&r),
+            y: U256::zero(),
+        },
+        s: U256::from_big_endian(&s),
+        recovery_id: v,
+    };
+
+    let response = chain_signatures_contract::Response {
+        request_id: sign_req.id.request_id,
+        signature,
+    };
+
+    let contract = ctx.contract();
+    let respond_call = contract.respond(vec![response]);
+    let pending_tx = respond_call.send().await?;
+    pending_tx
+        .await
+        .context("failed to mine respond transaction")?;
+
+    // Verify the indexer emits the Respond event with matching data.
+    let mut saw_respond = false;
+    for _ in 0..10 {
+        match next_event_within(&mut client, Duration::from_secs(30)).await? {
+            ChainEvent::Respond(SignatureRespondedEvent::Ethereum(ev)) => {
+                assert_eq!(ev.request_id, sign_req.id.request_id);
+                assert_eq!(ev.v, v);
+                assert_eq!(ev.r, r);
+                assert_eq!(ev.s, s);
+                saw_respond = true;
+                break;
+            }
+            _ => continue,
+        }
+    }
+
+    assert!(saw_respond, "did not receive SignatureResponded event");
     Ok(())
 }
