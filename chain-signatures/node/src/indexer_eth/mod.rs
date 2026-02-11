@@ -4,7 +4,7 @@ pub mod indexer_eth_helios;
 use crate::backlog::Backlog;
 use crate::indexer_common::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
 
-use crate::indexer_client::{ChainClient, ChainEvent};
+use crate::indexer_client::{ChainStream, ChainEvent};
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
 use crate::respond_bidirectional::CompletedTx;
@@ -1349,15 +1349,15 @@ impl EthereumIndexer {
     }
 }
 
-/// Ethereum indexer client implementing the `ChainClient` trait.
+/// Ethereum indexer stream implementing the `ChainStream` trait.
 /// It spawns the internal block pipeline and emits `ChainEvent`s through an
-/// internal channel consumed by the shared `run_indexer()` loop.
-pub struct EthereumIndexerClient {
+/// internal channel consumed by the shared `run_stream()` loop.
+pub struct EthereumStream {
     events_rx: mpsc::Receiver<ChainEvent>,
     tasks: Vec<JoinHandle<()>>,
 }
 
-impl EthereumIndexerClient {
+impl EthereumStream {
     pub async fn new(
         eth: Option<EthConfig>,
         app_data_storage: AppDataStorage,
@@ -1381,7 +1381,7 @@ impl EthereumIndexerClient {
     }
 }
 
-impl Drop for EthereumIndexerClient {
+impl Drop for EthereumStream {
     fn drop(&mut self) {
         for t in &self.tasks {
             t.abort();
@@ -1390,7 +1390,7 @@ impl Drop for EthereumIndexerClient {
 }
 
 #[async_trait::async_trait]
-impl ChainClient for EthereumIndexerClient {
+impl ChainStream for EthereumStream {
     const CHAIN: Chain = Chain::Ethereum;
 
     async fn next_event(&mut self) -> Option<ChainEvent> {

@@ -5,16 +5,19 @@ use crate::node_client::NodeClient;
 use crate::protocol::IndexedSignRequest;
 use crate::protocol::{Chain, Sign};
 use crate::rpc::ContractStateWatcher;
+use crate::sign_bidirectional::BidirectionalTxId;
+
 use async_trait::async_trait;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 
-/// Unified event produced by a chain client
+/// Unified event produced by a chain stream
 pub enum ChainEvent {
     SignRequest(IndexedSignRequest),
     Respond(crate::indexer_common::SignatureRespondedEvent),
     RespondBidirectional(crate::indexer_common::RespondBidirectionalEvent),
+
     /// Block height indicating the client has observed/processed up to `u64` (slot/block)
     Block(u64),
 
@@ -22,7 +25,7 @@ pub enum ChainEvent {
     /// The client detected the execution, performed chain-specific extraction, and
     /// carries either the serialized output (Success) or a failure indicator.
     ExecutionConfirmed {
-        tx_id: crate::sign_bidirectional::BidirectionalTxId,
+        tx_id: BidirectionalTxId,
         sign_id: mpc_primitives::SignId,
         source_chain: Chain,
         block_height: u64,
@@ -62,14 +65,14 @@ impl std::fmt::Debug for ChainEvent {
 }
 
 #[async_trait]
-pub trait ChainClient: Send + 'static {
+pub trait ChainStream: Send + 'static {
     const CHAIN: Chain;
     async fn next_event(&mut self) -> Option<ChainEvent>;
 }
 
-/// Shared indexer loop: recovers backlog then processes events from the client
-pub async fn run_indexer<C: ChainClient>(
-    mut client: C,
+/// Shared indexer loop: recovers backlog then processes events from the stream
+pub async fn run_stream<S: ChainStream>(
+    mut stream: S,
     sign_tx: mpsc::Sender<Sign>,
     backlog: Backlog,
     mut contract_watcher: ContractStateWatcher,
@@ -77,7 +80,7 @@ pub async fn run_indexer<C: ChainClient>(
     node_client: NodeClient,
     total_timeout: Duration,
 ) {
-    let chain = C::CHAIN;
+    let chain = S::CHAIN;
 
     tracing::info!(%chain, "starting indexer loop");
 
@@ -92,7 +95,7 @@ pub async fn run_indexer<C: ChainClient>(
     )
     .await;
 
-    while let Some(event) = client.next_event().await {
+    while let Some(event) = stream.next_event().await {
         match event {
             ChainEvent::SignRequest(req) => {
                 // process sign request (insert into backlog + send sign request)
@@ -123,11 +126,11 @@ pub async fn run_indexer<C: ChainClient>(
             }
             ChainEvent::Block(block) => {
                 // central checkpointing for all chains
-                if let Some(checkpoint) = backlog.set_processed_block(C::CHAIN, block).await {
+                if let Some(checkpoint) = backlog.set_processed_block(S::CHAIN, block).await {
                     tracing::info!(block, ?checkpoint, chain = %chain, "created checkpoint");
                 }
                 crate::metrics::indexers::LATEST_BLOCK_NUMBER
-                    .with_label_values(&[C::CHAIN.as_str(), "indexed"])
+                    .with_label_values(&[S::CHAIN.as_str(), "indexed"])
                     .set(block as i64);
             }
             ChainEvent::ExecutionConfirmed {
@@ -146,7 +149,7 @@ pub async fn run_indexer<C: ChainClient>(
                     &backlog,
                     sign_tx.clone(),
                     total_timeout,
-                    C::CHAIN,
+                    S::CHAIN,
                 )
                 .await
                 {
@@ -179,12 +182,12 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::timeout;
 
-    struct MockClient {
+    struct TestEventStream {
         events: Vec<Option<ChainEvent>>,
     }
 
     #[async_trait::async_trait]
-    impl ChainClient for MockClient {
+    impl ChainStream for TestEventStream {
         const CHAIN: Chain = Chain::Solana;
         async fn next_event(&mut self) -> Option<ChainEvent> {
             if self.events.is_empty() {
@@ -195,7 +198,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_indexer_handles_sign_and_respond() {
+    async fn run_stream_handles_sign_and_respond() {
         let backlog = Backlog::new();
         let sign_id = SignId::new([1u8; 32]);
 
@@ -233,7 +236,7 @@ mod tests {
                 },
             },
         );
-        let client = MockClient {
+        let client = TestEventStream {
             events: vec![
                 Some(ChainEvent::SignRequest(indexed.clone())),
                 Some(ChainEvent::Respond(sig_responded)),
@@ -253,7 +256,7 @@ mod tests {
         let node_client = NodeClient::new(&Default::default());
 
         // Run the indexer
-        run_indexer(
+        run_stream(
             client,
             sign_tx.clone(),
             backlog.clone(),
@@ -285,7 +288,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_indexer_handles_sign_bidirectional_checkpoint_and_recover() {
+    async fn run_stream_handles_sign_bidirectional_block_and_recover() {
         use crate::indexer_common::RespondBidirectionalEvent as RBE;
         use crate::indexer_common::SignBidirectionalEvent as SBE;
         use crate::indexer_common::SignatureRespondedEvent as SRE;
@@ -302,7 +305,7 @@ mod tests {
         }
 
         #[async_trait::async_trait]
-        impl ChainClient for ChannelClient {
+        impl ChainStream for ChannelClient {
             const CHAIN: Chain = Chain::Solana;
             async fn next_event(&mut self) -> Option<ChainEvent> {
                 match self.rx.recv().await {
@@ -329,7 +332,7 @@ mod tests {
         // Start indexer in background (clone backlog so the test retains ownership)
         let backlog_for_run = backlog.clone();
         let run_handle = tokio::spawn(async move {
-            run_indexer(
+            run_stream(
                 client,
                 sign_tx,
                 backlog_for_run,

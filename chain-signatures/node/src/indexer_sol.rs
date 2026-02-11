@@ -327,13 +327,13 @@ impl SignatureEvent for SignBidirectionalEvent {
 
 type Result<T> = anyhow::Result<T>;
 
-/// Solana client that implements the new ChainClient abstraction
-pub struct SolanaClient {
+/// Solana stream that implements the new ChainStream abstraction
+pub struct SolanaStream {
     rx: mpsc::Receiver<ChainEvent>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
-impl SolanaClient {
+impl SolanaStream {
     pub fn new(
         sol: Option<SolConfig>,
         contract_watcher: ContractStateWatcher,
@@ -378,12 +378,12 @@ impl SolanaClient {
             tx.clone(),
         ));
 
-        Some(SolanaClient { rx, tasks })
+        Some(SolanaStream { rx, tasks })
     }
 }
 
 #[async_trait::async_trait]
-impl crate::indexer_client::ChainClient for SolanaClient {
+impl crate::indexer_client::ChainStream for SolanaStream {
     const CHAIN: Chain = Chain::Solana;
     async fn next_event(&mut self) -> Option<ChainEvent> {
         self.rx.recv().await

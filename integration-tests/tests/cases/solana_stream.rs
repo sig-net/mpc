@@ -3,8 +3,8 @@ use integration_tests::containers::Solana;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_node::backlog::Backlog;
-use mpc_node::indexer_client::{ChainClient, ChainEvent};
-use mpc_node::indexer_sol::{SolConfig, SolanaClient};
+use mpc_node::indexer_client::{ChainEvent, ChainStream};
+use mpc_node::indexer_sol::{SolConfig, SolanaStream};
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest};
@@ -24,7 +24,7 @@ async fn setup_solana_sandbox() -> Result<Solana> {
     Ok(solana)
 }
 
-/// Helper to create minimal test dependencies for SolanaClient
+/// Helper to create minimal test dependencies for SolanaStream
 fn create_test_dependencies() -> (Backlog, watch::Receiver<MeshState>, NodeClient) {
     let backlog = Backlog::new();
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
@@ -32,15 +32,15 @@ fn create_test_dependencies() -> (Backlog, watch::Receiver<MeshState>, NodeClien
     (backlog, mesh_rx, node_client)
 }
 
-/// Creates a SolanaClient with the given config
-fn create_solana_client(
+/// Creates a SolanaStream with the given config
+fn create_solana_stream(
     config: SolConfig,
     contract_watcher: ContractStateWatcher,
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
-) -> Result<SolanaClient> {
-    SolanaClient::new(Some(config), contract_watcher, mesh_state, node_client)
-        .context("failed to create SolanaClient")
+) -> Result<SolanaStream> {
+    SolanaStream::new(Some(config), contract_watcher, mesh_state, node_client)
+        .context("failed to create SolanaStream")
 }
 
 /// Helper to setup NEAR sandbox and contract watcher (minimal version)
@@ -71,8 +71,8 @@ async fn setup_near_sandbox() -> Result<(Worker<Sandbox>, Account, Contract)> {
     Ok((worker, account, contract))
 }
 
-/// Helper to wait for a specific event type, skipping checkpoints
-async fn wait_for_sign_request(client: &mut SolanaClient) -> Result<IndexedSignRequest> {
+/// Helper to wait for a specific event type, skipping block markers
+async fn wait_for_sign_request(client: &mut SolanaStream) -> Result<IndexedSignRequest> {
     loop {
         match timeout(Duration::from_secs(10), client.next_event()).await {
             Ok(Some(ChainEvent::SignRequest(req))) => return Ok(req),
@@ -84,15 +84,15 @@ async fn wait_for_sign_request(client: &mut SolanaClient) -> Result<IndexedSignR
     }
 }
 
-/// Test that SolanaClient can parse basic Sign events
+/// Test that SolanaStream can parse basic Sign events
 ///
 /// This test:
 /// 1. Spins up Solana sandbox and deploys contract
-/// 2. Creates a SolanaClient with test configuration
+/// 2. Creates a SolanaStream with test configuration
 /// 3. Submits a Sign request directly to the contract
 /// 4. Verifies client.next_event() returns ChainEvent::SignRequest with correct data
 #[tokio::test]
-async fn test_solana_client_parse_sign_event() -> Result<()> {
+async fn test_solana_stream_parse_sign_event() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
     // Setup Solana sandbox
@@ -108,7 +108,7 @@ async fn test_solana_client_parse_sign_event() -> Result<()> {
 
     // Create client
     let config = solana.get_config(program_address);
-    let mut client = create_solana_client(config, contract_watcher, mesh_state, node_client)?;
+    let mut client = create_solana_stream(config, contract_watcher, mesh_state, node_client)?;
 
     // Submit sign request
     let payload = [1u8; 32];
@@ -131,9 +131,9 @@ async fn test_solana_client_parse_sign_event() -> Result<()> {
     Ok(())
 }
 
-/// Test that SolanaClient emits block events regularly
+/// Test that SolanaStream emits block events regularly
 #[tokio::test]
-async fn test_solana_client_emits_blocks() -> Result<()> {
+async fn test_solana_stream_emits_blocks() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
     let solana = setup_solana_sandbox().await?;
@@ -144,7 +144,7 @@ async fn test_solana_client_emits_blocks() -> Result<()> {
 
     let (_backlog, mesh_state, node_client) = create_test_dependencies();
     let config = solana.get_config(program_address);
-    let mut client = create_solana_client(config, contract_watcher, mesh_state, node_client)?;
+    let mut client = create_solana_stream(config, contract_watcher, mesh_state, node_client)?;
 
     // Submit a transaction to generate activity
     let payload = [2u8; 32];
@@ -167,9 +167,9 @@ async fn test_solana_client_emits_blocks() -> Result<()> {
     Ok(())
 }
 
-/// Test that SolanaClient can linearly catch up when starting behind
+/// Test that SolanaStream can linearly catch up when starting behind
 #[tokio::test]
-async fn test_solana_client_catchup_linear() -> Result<()> {
+async fn test_solana_stream_catchup_linear() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
     let solana = setup_solana_sandbox().await?;
@@ -181,7 +181,7 @@ async fn test_solana_client_catchup_linear() -> Result<()> {
     // Create first client and process some events
     let (_backlog, mesh_state, node_client) = create_test_dependencies();
     let config = solana.get_config(program_address.clone());
-    let mut client1 = create_solana_client(
+    let mut client1 = create_solana_stream(
         config.clone(),
         contract_watcher.clone(),
         mesh_state.clone(),
@@ -216,7 +216,7 @@ async fn test_solana_client_catchup_linear() -> Result<()> {
 
     // Create new client immediately (before more events) - should start processing from now
     let (_backlog2, mesh_state2, node_client2) = create_test_dependencies();
-    let mut client2 = create_solana_client(config, contract_watcher, mesh_state2, node_client2)?;
+    let mut client2 = create_solana_stream(config, contract_watcher, mesh_state2, node_client2)?;
 
     // Submit new requests while second client is running
     for i in 3..6 {
@@ -247,7 +247,10 @@ async fn test_solana_client_catchup_linear() -> Result<()> {
     }
 
     // Verify we caught up to the last block the first client observed and saw new events
-    assert!(caught_up, "second client did not catch up to prior block height");
+    assert!(
+        caught_up,
+        "second client did not catch up to prior block height"
+    );
     assert!(
         !sign_events.is_empty(),
         "second client did not process new events"
@@ -255,9 +258,9 @@ async fn test_solana_client_catchup_linear() -> Result<()> {
     Ok(())
 }
 
-/// Test that SolanaClient can parse SignBidirectional events
+/// Test that SolanaStream can parse SignBidirectional events
 #[tokio::test]
-async fn test_solana_client_parse_sign_bidirectional() -> Result<()> {
+async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
     let solana = setup_solana_sandbox().await?;
@@ -268,7 +271,7 @@ async fn test_solana_client_parse_sign_bidirectional() -> Result<()> {
 
     let (_backlog, mesh_state, node_client) = create_test_dependencies();
     let config = solana.get_config(program_address);
-    let mut client = create_solana_client(config, contract_watcher, mesh_state, node_client)?;
+    let mut client = create_solana_stream(config, contract_watcher, mesh_state, node_client)?;
 
     // Submit bidirectional sign request
     let serialized_tx = vec![1, 2, 3, 4];
@@ -302,9 +305,9 @@ async fn test_solana_client_parse_sign_bidirectional() -> Result<()> {
     Ok(())
 }
 
-/// Test that SolanaClient handles multiple concurrent submissions
+/// Test that SolanaStream handles multiple concurrent submissions
 #[tokio::test]
-async fn test_solana_client_concurrent_events() -> Result<()> {
+async fn test_solana_stream_concurrent_events() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
     let solana = setup_solana_sandbox().await?;
@@ -315,7 +318,7 @@ async fn test_solana_client_concurrent_events() -> Result<()> {
 
     let (_backlog, mesh_state, node_client) = create_test_dependencies();
     let config = solana.get_config(program_address);
-    let mut client = create_solana_client(config, contract_watcher, mesh_state, node_client)?;
+    let mut client = create_solana_stream(config, contract_watcher, mesh_state, node_client)?;
 
     // Submit multiple concurrent sign requests
     let num_requests = 5;
@@ -360,7 +363,7 @@ async fn test_solana_client_concurrent_events() -> Result<()> {
 
 /// Test that checkpoint persistence works across client restarts
 #[tokio::test]
-async fn test_solana_client_checkpoint_persistence() -> Result<()> {
+async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
     let solana = setup_solana_sandbox().await?;
@@ -372,7 +375,7 @@ async fn test_solana_client_checkpoint_persistence() -> Result<()> {
     // Create backlog that will persist checkpoints
     let (backlog, mesh_state, node_client) = create_test_dependencies();
     let config = solana.get_config(program_address.clone());
-    let mut client = create_solana_client(
+    let mut client = create_solana_stream(
         config.clone(),
         contract_watcher.clone(),
         mesh_state.clone(),
@@ -408,7 +411,7 @@ async fn test_solana_client_checkpoint_persistence() -> Result<()> {
 
     // Create new client with same backlog - should resume from checkpoint
     let (_backlog2, mesh_state2, node_client2) = create_test_dependencies();
-    let mut client2 = create_solana_client(config, contract_watcher, mesh_state2, node_client2)?;
+    let mut client2 = create_solana_stream(config, contract_watcher, mesh_state2, node_client2)?;
 
     // Submit new request
     solana
@@ -430,10 +433,7 @@ async fn test_solana_client_checkpoint_persistence() -> Result<()> {
 
     // Should get sign request or block marker
     assert!(
-        matches!(
-            event,
-            ChainEvent::SignRequest(_) | ChainEvent::Block(_)
-        ),
+        matches!(event, ChainEvent::SignRequest(_) | ChainEvent::Block(_)),
         "expected SignRequest or Block after restart"
     );
 

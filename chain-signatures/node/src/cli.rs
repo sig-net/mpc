@@ -1,7 +1,8 @@
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
-use crate::indexer_eth::EthereumIndexerClient;
+use crate::indexer_eth::EthereumStream;
+use crate::indexer_sol::SolanaStream;
 use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
@@ -356,10 +357,10 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let total_timeout =
                 Duration::from_secs(eth.as_ref().map(|e| e.total_timeout).unwrap_or(60));
-            match EthereumIndexerClient::new(eth, app_data_storage, backlog.clone()).await {
-                Ok(eth_client) => {
-                    tokio::spawn(indexer_client::run_indexer(
-                        eth_client,
+            match EthereumStream::new(eth, app_data_storage, backlog.clone()).await {
+                Ok(eth_stream) => {
+                    tokio::spawn(indexer_client::run_stream(
+                        eth_stream,
                         sign_tx.clone(),
                         backlog.clone(),
                         contract_watcher.clone(),
@@ -369,18 +370,18 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     ));
                 }
                 Err(err) => {
-                    tracing::error!(?err, "failed to create ethereum indexer client");
+                    tracing::error!(?err, "failed to create ethereum indexer stream");
                 }
             };
 
-            if let Some(sol_client) = indexer_sol::SolanaClient::new(
+            if let Some(sol_stream) = SolanaStream::new(
                 sol.clone(),
                 contract_watcher.clone(),
                 mesh_state.clone(),
                 client.clone(),
             ) {
-                tokio::spawn(indexer_client::run_indexer(
-                    sol_client,
+                tokio::spawn(indexer_client::run_stream(
+                    sol_stream,
                     sign_tx.clone(),
                     backlog.clone(),
                     contract_watcher.clone(),
