@@ -7,11 +7,11 @@ use integration_tests::eth::{
     self, chain_signatures_contract, ChainSignaturesContract, SignRequest,
 };
 use mpc_node::backlog::Backlog;
-use mpc_node::indexer_client::{ChainStream, ChainEvent};
 use mpc_node::indexer_common::SignatureRespondedEvent;
 use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::protocol::Chain;
 use mpc_node::storage::app_data_storage::AppDataStorage;
+use mpc_node::stream::{ChainEvent, ChainStream};
 use mpc_primitives::{SignId, LATEST_MPC_KEY_VERSION};
 use near_account_id::AccountId;
 use std::sync::Arc;
@@ -118,10 +118,7 @@ async fn submit_sign_request(
     Ok(receipt.transaction_hash)
 }
 
-async fn next_event_within(
-    client: &mut EthereumStream,
-    duration: Duration,
-) -> Result<ChainEvent> {
+async fn next_event_within(client: &mut EthereumStream, duration: Duration) -> Result<ChainEvent> {
     timeout(duration, async {
         loop {
             if let Some(event) = client.next_event().await {
@@ -133,21 +130,20 @@ async fn next_event_within(
     .context("timed out waiting for chain event")
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_ethereum_stream_parse_sign_event() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let ctx = EthereumTestEnvironment::new().await?;
     let app_data_storage = ctx.app_data_storage();
     let backlog = ctx.backlog();
-    let mut client =
-        EthereumStream::new(Some(ctx.config(true)), app_data_storage, backlog).await?;
+    let mut stream = EthereumStream::new(Some(ctx.config(true)), app_data_storage, backlog).await?;
 
     let payload = k256::Scalar::from(1u64).to_bytes().into();
     let path = "m/44'/60'/0'/0/0";
     submit_sign_request(&ctx, payload, path).await?;
 
     let req = loop {
-        match next_event_within(&mut client, Duration::from_secs(30)).await? {
+        match next_event_within(&mut stream, Duration::from_secs(30)).await? {
             ChainEvent::SignRequest(req) => break req,
             _ => continue,
         }
@@ -159,19 +155,18 @@ async fn test_ethereum_stream_parse_sign_event() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_ethereum_stream_emits_blocks() -> Result<()> {
     let ctx = EthereumTestEnvironment::new().await?;
     let app_data_storage = ctx.app_data_storage();
     let backlog = ctx.backlog();
-    let mut client =
-        EthereumStream::new(Some(ctx.config(true)), app_data_storage, backlog).await?;
+    let mut stream = EthereumStream::new(Some(ctx.config(true)), app_data_storage, backlog).await?;
 
     submit_sign_request(&ctx, [2u8; 32], "test-path").await?;
 
     let mut saw_block = false;
     for _ in 0..5 {
-        match next_event_within(&mut client, Duration::from_secs(20)).await? {
+        match next_event_within(&mut stream, Duration::from_secs(20)).await? {
             ChainEvent::Block(_) => {
                 saw_block = true;
                 break;
@@ -184,7 +179,7 @@ async fn test_ethereum_stream_emits_blocks() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
     let ctx = EthereumTestEnvironment::new().await?;
     let app_data_storage = ctx.app_data_storage();
@@ -216,16 +211,15 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
         .watch_execution(Chain::Ethereum, sign_id.clone(), tx)
         .await;
 
-    let mut client =
-        EthereumStream::new(Some(ctx.config(true)), app_data_storage, backlog.clone())
-            .await?;
+    let mut stream =
+        EthereumStream::new(Some(ctx.config(true)), app_data_storage, backlog.clone()).await?;
 
     // Send a transaction from the watched address to bump nonce and trigger the staleness check.
     submit_sign_request(&ctx, [4u8; 32], "execution-path").await?;
 
     let mut saw_execution = false;
     for _ in 0..10 {
-        match next_event_within(&mut client, Duration::from_secs(30)).await? {
+        match next_event_within(&mut stream, Duration::from_secs(30)).await? {
             ChainEvent::ExecutionConfirmed { sign_id: ev_id, .. } if ev_id == sign_id => {
                 saw_execution = true;
                 break;
@@ -238,13 +232,12 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_ethereum_stream_concurrent_events() -> Result<()> {
     let ctx = EthereumTestEnvironment::new().await?;
     let app_data_storage = ctx.app_data_storage();
     let backlog = ctx.backlog();
-    let mut client =
-        EthereumStream::new(Some(ctx.config(true)), app_data_storage, backlog).await?;
+    let mut stream = EthereumStream::new(Some(ctx.config(true)), app_data_storage, backlog).await?;
 
     let payloads: Vec<[u8; 32]> = (0u8..5)
         .map(|i| {
@@ -261,7 +254,7 @@ async fn test_ethereum_stream_concurrent_events() -> Result<()> {
     let mut received: Vec<[u8; 32]> = Vec::new();
     while received.len() < payloads.len() {
         if let ChainEvent::SignRequest(req) =
-            next_event_within(&mut client, Duration::from_secs(30)).await?
+            next_event_within(&mut stream, Duration::from_secs(30)).await?
         {
             let bytes: [u8; 32] = req.args.payload.to_bytes().into();
             received.push(bytes);
@@ -274,13 +267,13 @@ async fn test_ethereum_stream_concurrent_events() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_ethereum_stream_block_persistence() -> Result<()> {
     let ctx = EthereumTestEnvironment::new().await?;
     let app_data_storage = ctx.app_data_storage();
     let backlog = ctx.backlog();
 
-    let mut client = EthereumStream::new(
+    let mut stream = EthereumStream::new(
         Some(ctx.config(true)),
         app_data_storage.clone(),
         backlog.clone(),
@@ -291,7 +284,7 @@ async fn test_ethereum_stream_block_persistence() -> Result<()> {
 
     // Capture the first block height marker and persist it manually.
     let checkpoint_height = loop {
-        match next_event_within(&mut client, Duration::from_secs(30)).await? {
+        match next_event_within(&mut stream, Duration::from_secs(30)).await? {
             ChainEvent::Block(height) => break height,
             _ => continue,
         }
@@ -300,17 +293,16 @@ async fn test_ethereum_stream_block_persistence() -> Result<()> {
         .set_last_processed_block_eth(checkpoint_height)
         .await?;
 
-    drop(client);
+    drop(stream);
 
     // Start a fresh client with the same storage; it should resume and observe new events.
-    let mut client =
-        EthereumStream::new(Some(ctx.config(true)), app_data_storage, backlog).await?;
+    let mut stream = EthereumStream::new(Some(ctx.config(true)), app_data_storage, backlog).await?;
 
     submit_sign_request(&ctx, [6u8; 32], "checkpoint-path-new").await?;
 
     let mut saw_new_event = false;
     for _ in 0..5 {
-        match next_event_within(&mut client, Duration::from_secs(30)).await? {
+        match next_event_within(&mut stream, Duration::from_secs(30)).await? {
             ChainEvent::SignRequest(_) | ChainEvent::Block(_) => {
                 saw_new_event = true;
                 break;
@@ -326,13 +318,12 @@ async fn test_ethereum_stream_block_persistence() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     let ctx = EthereumTestEnvironment::new().await?;
     let app_data_storage = ctx.app_data_storage();
     let backlog = ctx.backlog();
-    let mut client =
-        EthereumStream::new(Some(ctx.config(true)), app_data_storage, backlog).await?;
+    let mut stream = EthereumStream::new(Some(ctx.config(true)), app_data_storage, backlog).await?;
     let _ = tracing_subscriber::fmt::try_init();
 
     // Submit a sign request and capture its id from the emitted event.
@@ -341,7 +332,7 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     submit_sign_request(&ctx, payload, path).await?;
 
     let sign_req = loop {
-        match next_event_within(&mut client, Duration::from_secs(30)).await? {
+        match next_event_within(&mut stream, Duration::from_secs(30)).await? {
             ChainEvent::SignRequest(req) => break req,
             _ => continue,
         }
@@ -386,7 +377,7 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     // Verify the indexer emits the Respond event with matching data.
     let mut saw_respond = false;
     for _ in 0..10 {
-        match next_event_within(&mut client, Duration::from_secs(30)).await? {
+        match next_event_within(&mut stream, Duration::from_secs(30)).await? {
             ChainEvent::Respond(SignatureRespondedEvent::Ethereum(ev)) => {
                 assert_eq!(ev.request_id, sign_req.id.request_id);
                 assert_eq!(ev.v, v);

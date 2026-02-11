@@ -3,11 +3,11 @@ use integration_tests::containers::Solana;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_node::backlog::Backlog;
-use mpc_node::indexer_client::{ChainEvent, ChainStream};
 use mpc_node::indexer_sol::{SolConfig, SolanaStream};
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest};
+use mpc_node::stream::{ChainEvent, ChainStream};
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use solana_sdk::signer::Signer;
 use tokio::sync::watch;
@@ -33,13 +33,13 @@ fn stream_solana(config: SolConfig) -> Result<SolanaStream> {
 }
 
 /// Helper to wait for a specific event type, skipping block events
-async fn wait_for_sign_request(client: &mut SolanaStream) -> Result<IndexedSignRequest> {
+async fn wait_for_sign_request(stream: &mut SolanaStream) -> Result<IndexedSignRequest> {
     loop {
-        match timeout(Duration::from_secs(10), client.next_event()).await {
+        match timeout(Duration::from_secs(10), stream.next_event()).await {
             Ok(Some(ChainEvent::SignRequest(req))) => return Ok(req),
             Ok(Some(ChainEvent::Block(_))) => continue,
             Ok(Some(other)) => anyhow::bail!("Expected SignRequest, got {:?}", other),
-            Ok(None) => anyhow::bail!("client returned None"),
+            Ok(None) => anyhow::bail!("stream returned None"),
             Err(_) => anyhow::bail!("timeout waiting for SignRequest event"),
         }
     }
@@ -51,14 +51,11 @@ async fn wait_for_sign_request(client: &mut SolanaStream) -> Result<IndexedSignR
 /// 1. Spins up Solana sandbox and deploys contract
 /// 2. Creates a SolanaStream with test configuration
 /// 3. Submits a Sign request directly to the contract
-/// 4. Verifies client.next_event() returns ChainEvent::SignRequest with correct data
-#[tokio::test]
+/// 4. Verifies stream.next_event() returns ChainEvent::SignRequest with correct data
+#[test_log::test(tokio::test)]
 async fn test_solana_stream_parse_sign_event() -> Result<()> {
-    let _ = tracing_subscriber::fmt::try_init();
     let solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
-
-    // Create client
     let config = solana.get_config(program_address);
     let mut stream = stream_solana(config)?;
 
@@ -66,12 +63,11 @@ async fn test_solana_stream_parse_sign_event() -> Result<()> {
     let payload = [1u8; 32];
     let path = "test";
     let key_version = LATEST_MPC_KEY_VERSION;
-
     solana
         .sign(payload, path, key_version, "secp256k1", "", "")
         .await?;
 
-    // Wait for SignRequest event (skip block markers)
+    // Wait for SignRequest event
     let req = wait_for_sign_request(&mut stream).await?;
 
     // Verify the request
@@ -84,9 +80,8 @@ async fn test_solana_stream_parse_sign_event() -> Result<()> {
 }
 
 /// Test that SolanaStream emits block events regularly
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_solana_stream_emits_blocks() -> Result<()> {
-    let _ = tracing_subscriber::fmt::try_init();
     let solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
 
@@ -115,16 +110,14 @@ async fn test_solana_stream_emits_blocks() -> Result<()> {
 }
 
 /// Test that SolanaStream can linearly catch up when starting behind
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_solana_stream_catchup_linear() -> Result<()> {
-    let _ = tracing_subscriber::fmt::try_init();
-
     let solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
 
     // Create first client and process some events
     let config = solana.get_config(program_address.clone());
-    let mut client1 = stream_solana(config.clone())?;
+    let mut stream1 = stream_solana(config.clone())?;
 
     // Submit requests while client is running
     for i in 0..3 {
@@ -138,7 +131,7 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     let mut seen_by_client1 = 0;
     let mut last_block_client1 = 0;
     for _ in 0..10 {
-        if let Ok(Some(event)) = timeout(Duration::from_millis(500), client1.next_event()).await {
+        if let Ok(Some(event)) = timeout(Duration::from_millis(500), stream1.next_event()).await {
             match event {
                 ChainEvent::SignRequest(_) => seen_by_client1 += 1,
                 ChainEvent::Block(block) => last_block_client1 = last_block_client1.max(block),
@@ -150,10 +143,10 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     assert!(last_block_client1 > 0, "first client saw no block events");
 
     // Drop first client
-    drop(client1);
+    drop(stream1);
 
     // Create new client immediately (before more events) - should start processing from now
-    let mut client2 = stream_solana(config)?;
+    let mut stream2 = stream_solana(config)?;
 
     // Submit new requests while second client is running
     for i in 3..6 {
@@ -167,7 +160,7 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     let mut sign_events = Vec::new();
     let mut caught_up = false;
     for _ in 0..20 {
-        if let Ok(Some(event)) = timeout(Duration::from_secs(2), client2.next_event()).await {
+        if let Ok(Some(event)) = timeout(Duration::from_secs(2), stream2.next_event()).await {
             match event {
                 ChainEvent::SignRequest(req) => {
                     sign_events.push(req);
@@ -196,13 +189,10 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
 }
 
 /// Test that SolanaStream can parse SignBidirectional events
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {
-    let _ = tracing_subscriber::fmt::try_init();
-
     let solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
-
     let config = solana.get_config(program_address);
     let mut stream = stream_solana(config)?;
 
@@ -225,7 +215,7 @@ async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {
         )
         .await?;
 
-    // Wait for SignRequest event (skip checkpoints)
+    // Wait for SignRequest event
     let req = wait_for_sign_request(&mut stream).await?;
 
     // Verify it's a bidirectional sign request
@@ -239,12 +229,10 @@ async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {
 }
 
 /// Test that SolanaStream handles multiple concurrent submissions
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_solana_stream_concurrent_events() -> Result<()> {
-    let _ = tracing_subscriber::fmt::try_init();
     let solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
-
     let config = solana.get_config(program_address);
     let mut stream = stream_solana(config)?;
 
@@ -290,13 +278,10 @@ async fn test_solana_stream_concurrent_events() -> Result<()> {
 }
 
 /// Test that checkpoint persistence works across client restarts
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
-    let _ = tracing_subscriber::fmt::try_init();
-
     let solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
-
     let (backlog, _, _) = test_dependencies();
     let config = solana.get_config(program_address.clone());
     let mut stream1 = stream_solana(config.clone())?;

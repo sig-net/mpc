@@ -1,7 +1,7 @@
-use crate::indexer_client::ChainEvent;
 use crate::indexer_common::{SignatureEvent, SignatureEventBox};
 use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
 use crate::sign_bidirectional::hash_rlp_data;
+use crate::stream::{ChainEvent, ChainStream};
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 
 use std::collections::HashMap;
@@ -352,9 +352,7 @@ impl SolanaStream {
         };
 
         let total_timeout = Duration::from_secs(sol.total_timeout);
-
-        // Create channel for events
-        let (tx, rx) = mpsc::channel(64);
+        let (tx, rx) = crate::stream::channel();
 
         let mut tasks = Vec::new();
         tasks.push(spawn_cpi_sign_events(
@@ -384,7 +382,7 @@ impl SolanaStream {
 }
 
 #[async_trait::async_trait]
-impl crate::indexer_client::ChainStream for SolanaStream {
+impl ChainStream for SolanaStream {
     const CHAIN: Chain = Chain::Solana;
     async fn next_event(&mut self) -> Option<ChainEvent> {
         self.rx.recv().await
@@ -396,7 +394,7 @@ async fn subscribe_to_program_respond_events(
     program_id: Pubkey,
     rpc_url: &str,
     ws_url: &str,
-    tx: mpsc::Sender<ChainEvent>,
+    events_tx: mpsc::Sender<ChainEvent>,
 ) -> Result<()> {
     let rpc_client = RpcClient::new(rpc_url.to_string());
     let pubsub_client = PubsubClient::new(ws_url).await?;
@@ -466,11 +464,11 @@ async fn subscribe_to_program_respond_events(
                         };
 
                         for ev in respond_bidirectional_events {
-                            let _ = tx.clone().send(crate::indexer_client::ChainEvent::RespondBidirectional(crate::indexer_common::RespondBidirectionalEvent::Solana(ev))).await;
+                            let _ = events_tx.send(ChainEvent::RespondBidirectional(crate::indexer_common::RespondBidirectionalEvent::Solana(ev))).await;
                         }
 
                         for ev in respond_events {
-                            let _ = tx.clone().send(crate::indexer_client::ChainEvent::Respond(crate::indexer_common::SignatureRespondedEvent::Solana(ev))).await;
+                            let _ = events_tx.send(ChainEvent::Respond(crate::indexer_common::SignatureRespondedEvent::Solana(ev))).await;
                         }
                     }
                     None => {
@@ -493,13 +491,13 @@ fn spawn_cpi_sign_events(
     rpc_url: String,
     ws_url: String,
     total_timeout: Duration,
-    tx: mpsc::Sender<ChainEvent>,
+    events_tx: mpsc::Sender<ChainEvent>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(subscribe_and_process_sign_events(
         program_id,
         rpc_url.clone(),
         ws_url.clone(),
-        tx.clone(),
+        events_tx.clone(),
         total_timeout,
     ))
 }
@@ -508,12 +506,17 @@ fn spawn_respond_events(
     program_id: Pubkey,
     rpc_url: String,
     ws_url: String,
-    tx: mpsc::Sender<ChainEvent>,
+    events_tx: mpsc::Sender<ChainEvent>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            if let Err(err) =
-                subscribe_to_program_respond_events(program_id, &rpc_url, &ws_url, tx.clone()).await
+            if let Err(err) = subscribe_to_program_respond_events(
+                program_id,
+                &rpc_url,
+                &ws_url,
+                events_tx.clone(),
+            )
+            .await
             {
                 tracing::warn!("Failed to subscribe to solana respond events: {:?}", err);
             }
@@ -528,7 +531,7 @@ fn spawn_non_cpi_sign_events(
     rpc_url: String,
     ws_url: String,
     total_timeout: Duration,
-    tx: mpsc::Sender<ChainEvent>,
+    events_tx: mpsc::Sender<ChainEvent>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -543,7 +546,8 @@ fn spawn_non_cpi_sign_events(
             };
 
             let unsub =
-                subscribe_to_program_non_cpi_events(&program, tx.clone(), total_timeout).await;
+                subscribe_to_program_non_cpi_events(&program, events_tx.clone(), total_timeout)
+                    .await;
 
             if let Err(err) = unsub {
                 tracing::warn!("Failed to subscribe to solana non-CPI events: {:?}", err);
@@ -558,7 +562,7 @@ fn spawn_non_cpi_sign_events(
 
 async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>(
     program: &Program<C>,
-    sign_tx: mpsc::Sender<ChainEvent>,
+    events_tx: mpsc::Sender<ChainEvent>,
     total_timeout: Duration,
 ) -> anyhow::Result<anchor_client::EventUnsubscriber<'_>> {
     tracing::info!("Subscribing to program events");
@@ -577,7 +581,7 @@ async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>
     while let Some((event, tx_sig)) = receiver.recv().await {
         match build_sign_request(Box::new(event), tx_sig, total_timeout) {
             Ok(req) => {
-                let _ = sign_tx.send(ChainEvent::SignRequest(req)).await;
+                let _ = events_tx.send(ChainEvent::SignRequest(req)).await;
             }
             Err(err) => tracing::warn!("Failed to process event: {:?}", err),
         }
@@ -601,27 +605,24 @@ async fn subscribe_and_process_sign_events(
     program_id: Pubkey,
     rpc_url: String,
     ws_url: String,
-    sign_tx: mpsc::Sender<ChainEvent>,
+    events_tx: mpsc::Sender<ChainEvent>,
     total_timeout: Duration,
 ) {
     loop {
-        let sign_tx_clone = sign_tx.clone();
-
+        let events_tx_clone = events_tx.clone();
         let result = subscribe_to_program_cpi_events(
             program_id,
             &rpc_url,
             &ws_url,
-            sign_tx_clone.clone(),
+            events_tx.clone(),
             move |event, signature: solana_sdk::signature::Signature, _slot| {
                 tracing::info!("got event: {:?}", event);
                 let tx_sig: Vec<u8> = signature.as_ref().to_vec();
-
-                let sign_tx_inner = sign_tx_clone.clone();
-
+                let events_tx = events_tx_clone.clone();
                 tokio::spawn(async move {
                     match build_sign_request(event, tx_sig, total_timeout) {
                         Ok(req) => {
-                            let _ = sign_tx_inner.send(ChainEvent::SignRequest(req)).await;
+                            let _ = events_tx.send(ChainEvent::SignRequest(req)).await;
                         }
                         Err(err) => tracing::warn!("Failed to process event: {:?}", err),
                     }
@@ -728,7 +729,7 @@ async fn subscribe_to_program_cpi_events<F>(
     program_id: Pubkey,
     rpc_url: &str,
     ws_url: &str,
-    tx: mpsc::Sender<ChainEvent>,
+    events_tx: mpsc::Sender<ChainEvent>,
     mut event_handler: F,
 ) -> Result<()>
 where
@@ -807,7 +808,7 @@ where
                         }
 
                         // Emit block event for every observed slot
-                        if let Err(err) = tx.send(ChainEvent::Block(response.context.slot)).await {
+                        if let Err(err) = events_tx.send(ChainEvent::Block(response.context.slot)).await {
                             tracing::warn!(?err, "failed to send block event");
                         }
                     }

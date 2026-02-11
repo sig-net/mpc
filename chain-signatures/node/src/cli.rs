@@ -14,9 +14,8 @@ use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::app_data_storage;
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::triple_storage::TriplePair;
-use crate::{
-    indexer, indexer_client, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, storage, web,
-};
+use crate::stream::run_stream;
+use crate::{indexer, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, storage, web};
 use std::time::Duration;
 
 use clap::Parser;
@@ -359,7 +358,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 Duration::from_secs(eth.as_ref().map(|e| e.total_timeout).unwrap_or(60));
             match EthereumStream::new(eth, app_data_storage, backlog.clone()).await {
                 Ok(eth_stream) => {
-                    tokio::spawn(indexer_client::run_stream(
+                    tokio::spawn(run_stream(
                         eth_stream,
                         sign_tx.clone(),
                         backlog.clone(),
@@ -375,7 +374,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             };
 
             if let Some(sol_stream) = SolanaStream::new(sol.clone()) {
-                tokio::spawn(indexer_client::run_stream(
+                tokio::spawn(run_stream(
                     sol_stream,
                     sign_tx.clone(),
                     backlog.clone(),

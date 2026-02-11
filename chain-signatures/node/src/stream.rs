@@ -1,5 +1,8 @@
 use crate::backlog::Backlog;
-use crate::indexer_common::{process_respond_bidirectional_event, process_respond_event};
+use crate::indexer_common::{
+    process_execution_confirmed, process_respond_bidirectional_event, process_respond_event,
+    process_sign_request, recover_backlog, RespondBidirectionalEvent, SignatureRespondedEvent,
+};
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::IndexedSignRequest;
@@ -12,11 +15,17 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 
+pub const CHAIN_EVENT_STREAM_SIZE: usize = 16384;
+
+pub fn channel() -> (mpsc::Sender<ChainEvent>, mpsc::Receiver<ChainEvent>) {
+    mpsc::channel(CHAIN_EVENT_STREAM_SIZE)
+}
+
 /// Unified event produced by a chain stream
 pub enum ChainEvent {
     SignRequest(IndexedSignRequest),
-    Respond(crate::indexer_common::SignatureRespondedEvent),
-    RespondBidirectional(crate::indexer_common::RespondBidirectionalEvent),
+    Respond(SignatureRespondedEvent),
+    RespondBidirectional(RespondBidirectionalEvent),
 
     /// Block height indicating the client has observed/processed up to `u64` (slot/block)
     Block(u64),
@@ -84,7 +93,7 @@ pub async fn run_stream<S: ChainStream>(
 
     tracing::info!(%chain, "starting indexer loop");
 
-    crate::indexer_common::recover_backlog(
+    recover_backlog(
         &backlog,
         &mut contract_watcher,
         &mut mesh_state,
@@ -99,12 +108,7 @@ pub async fn run_stream<S: ChainStream>(
         match event {
             ChainEvent::SignRequest(req) => {
                 // process sign request (insert into backlog + send sign request)
-                if let Err(err) = crate::indexer_common::process_sign_request(
-                    req,
-                    sign_tx.clone(),
-                    backlog.clone(),
-                )
-                .await
+                if let Err(err) = process_sign_request(req, sign_tx.clone(), backlog.clone()).await
                 {
                     tracing::error!(?err, chain = %chain, "failed to process sign request");
                 }
@@ -140,7 +144,7 @@ pub async fn run_stream<S: ChainStream>(
                 block_height,
                 result,
             } => {
-                if let Err(err) = crate::indexer_common::process_execution_confirmed(
+                if let Err(err) = process_execution_confirmed(
                     tx_id,
                     sign_id,
                     source_chain,
@@ -166,6 +170,7 @@ pub async fn run_stream<S: ChainStream>(
 mod tests {
     use super::*;
     use crate::backlog::Backlog;
+    use crate::indexer_common::SignatureRespondedEvent;
     use crate::mesh::MeshState;
     use crate::node_client::NodeClient;
     use crate::protocol::Chain;
@@ -222,8 +227,8 @@ mod tests {
         };
 
         // Prepare a respond event that matches the sign id
-        let sig_responded = crate::indexer_common::SignatureRespondedEvent::Solana(
-            signet_program::SignatureRespondedEvent {
+        let sig_responded =
+            SignatureRespondedEvent::Solana(signet_program::SignatureRespondedEvent {
                 request_id: sign_id.request_id,
                 responder: solana_sdk::pubkey::Pubkey::new_unique(),
                 signature: signet_program::Signature {
@@ -234,8 +239,7 @@ mod tests {
                     s: [0u8; 32],
                     recovery_id: 0,
                 },
-            },
-        );
+            });
         let client = TestEventStream {
             events: vec![
                 Some(ChainEvent::SignRequest(indexed.clone())),

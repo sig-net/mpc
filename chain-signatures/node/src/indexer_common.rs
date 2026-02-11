@@ -1,5 +1,4 @@
 use crate::backlog::{Backlog, BacklogTransaction, SignTx};
-use crate::indexer_client::ExecutionResult;
 use crate::indexer_hydration::{
     HydrationRespondBidirectionalEvent, HydrationSignBidirectionalRequestedEvent,
     HydrationSignatureRespondedEvent,
@@ -11,6 +10,7 @@ use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PendingRequestStatus};
+use crate::stream::ExecutionResult;
 
 use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
@@ -878,7 +878,7 @@ mod tests {
             sign_id,
             tx.source_chain,
             123u64,
-            crate::indexer_client::ExecutionResult::Success { output: vec![] },
+            ExecutionResult::Success { output: vec![] },
             &backlog,
             sign_tx,
             Duration::from_secs(30),
@@ -982,7 +982,7 @@ mod tests {
             sign_id,
             tx.source_chain,
             456u64,
-            crate::indexer_client::ExecutionResult::Failed,
+            ExecutionResult::Failed,
             &backlog,
             sign_tx,
             Duration::from_secs(30),

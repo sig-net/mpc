@@ -4,12 +4,12 @@ pub mod indexer_eth_helios;
 use crate::backlog::Backlog;
 use crate::indexer_common::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
 
-use crate::indexer_client::{ChainStream, ChainEvent};
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
 use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::PendingRequestStatus;
 use crate::storage::app_data_storage::AppDataStorage;
+use crate::stream::{ChainEvent, ChainStream, ExecutionResult};
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
@@ -1050,7 +1050,7 @@ impl EthereumIndexer {
                             ?sign_id,
                             "extracted transaction output for bidirectional tx"
                         );
-                        crate::indexer_client::ExecutionResult::Success {
+                        ExecutionResult::Success {
                             output: serialized_output,
                         }
                     }
@@ -1061,11 +1061,11 @@ impl EthereumIndexer {
                             ?err,
                             "Failed to extract transaction output for bidirectional tx, using empty output"
                         );
-                        crate::indexer_client::ExecutionResult::Success { output: vec![] }
+                        ExecutionResult::Success { output: vec![] }
                     }
                 }
             } else {
-                crate::indexer_client::ExecutionResult::Failed
+                ExecutionResult::Failed
             };
 
             events.push(ChainEvent::ExecutionConfirmed {
@@ -1114,7 +1114,7 @@ impl EthereumIndexer {
                     sign_id,
                     source_chain: tx.source_chain,
                     block_height: block_number,
-                    result: crate::indexer_client::ExecutionResult::Failed,
+                    result: ExecutionResult::Failed,
                 });
             }
         }
@@ -1368,7 +1368,7 @@ impl EthereumStream {
             return Err(anyhow::anyhow!("ethereum indexer is disabled"));
         };
 
-        let (events_tx, events_rx) = mpsc::channel::<ChainEvent>(4096);
+        let (events_tx, events_rx) = crate::stream::channel();
         let indexer = EthereumIndexer::new(eth, app_data_storage, backlog).await?;
 
         let t_indexer: JoinHandle<()> = tokio::spawn(async move {
