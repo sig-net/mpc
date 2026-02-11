@@ -331,9 +331,14 @@ sol! {
     );
 
     struct Signature {
-        uint8 v;
-        bytes32 r;
-        bytes32 s;
+        AffinePoint bigR;
+        uint256 s;
+        uint8 recoveryId;
+    }
+
+    struct AffinePoint {
+        uint256 x;
+        uint256 y;
     }
 
     event SignatureResponded(
