@@ -13,6 +13,7 @@ use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, Contract, Worker};
 use solana_sdk::signer::Signer;
+use std::path::Path;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::timeout;
@@ -33,14 +34,8 @@ fn create_test_dependencies() -> (Backlog, watch::Receiver<MeshState>, NodeClien
 }
 
 /// Creates a SolanaStream with the given config
-fn create_solana_stream(
-    config: SolConfig,
-    contract_watcher: ContractStateWatcher,
-    mesh_state: watch::Receiver<MeshState>,
-    node_client: NodeClient,
-) -> Result<SolanaStream> {
-    SolanaStream::new(Some(config), contract_watcher, mesh_state, node_client)
-        .context("failed to create SolanaStream")
+fn solana_stream(config: SolConfig) -> Result<SolanaStream> {
+    SolanaStream::new(Some(config)).context("failed to create SolanaStream")
 }
 
 /// Helper to setup NEAR sandbox and contract watcher (minimal version)
@@ -49,7 +44,7 @@ async fn setup_near_sandbox() -> Result<(Worker<Sandbox>, Account, Contract)> {
     let account = worker.dev_create_account().await?;
 
     // Deploy a minimal contract for contract watcher
-    let wasm_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    let wasm_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .join("chain-signatures/res/mpc_test_contract.wasm");
@@ -108,7 +103,7 @@ async fn test_solana_stream_parse_sign_event() -> Result<()> {
 
     // Create client
     let config = solana.get_config(program_address);
-    let mut client = create_solana_stream(config, contract_watcher, mesh_state, node_client)?;
+    let mut client = solana_stream(config)?;
 
     // Submit sign request
     let payload = [1u8; 32];
@@ -144,7 +139,7 @@ async fn test_solana_stream_emits_blocks() -> Result<()> {
 
     let (_backlog, mesh_state, node_client) = create_test_dependencies();
     let config = solana.get_config(program_address);
-    let mut client = create_solana_stream(config, contract_watcher, mesh_state, node_client)?;
+    let mut client = solana_stream(config)?;
 
     // Submit a transaction to generate activity
     let payload = [2u8; 32];
@@ -181,12 +176,7 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     // Create first client and process some events
     let (_backlog, mesh_state, node_client) = create_test_dependencies();
     let config = solana.get_config(program_address.clone());
-    let mut client1 = create_solana_stream(
-        config.clone(),
-        contract_watcher.clone(),
-        mesh_state.clone(),
-        node_client.clone(),
-    )?;
+    let mut client1 = solana_stream(config.clone())?;
 
     // Submit requests while client is running
     for i in 0..3 {
@@ -216,7 +206,7 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
 
     // Create new client immediately (before more events) - should start processing from now
     let (_backlog2, mesh_state2, node_client2) = create_test_dependencies();
-    let mut client2 = create_solana_stream(config, contract_watcher, mesh_state2, node_client2)?;
+    let mut client2 = solana_stream(config)?;
 
     // Submit new requests while second client is running
     for i in 3..6 {
@@ -271,7 +261,7 @@ async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {
 
     let (_backlog, mesh_state, node_client) = create_test_dependencies();
     let config = solana.get_config(program_address);
-    let mut client = create_solana_stream(config, contract_watcher, mesh_state, node_client)?;
+    let mut client = solana_stream(config)?;
 
     // Submit bidirectional sign request
     let serialized_tx = vec![1, 2, 3, 4];
@@ -318,7 +308,7 @@ async fn test_solana_stream_concurrent_events() -> Result<()> {
 
     let (_backlog, mesh_state, node_client) = create_test_dependencies();
     let config = solana.get_config(program_address);
-    let mut client = create_solana_stream(config, contract_watcher, mesh_state, node_client)?;
+    let mut client = solana_stream(config)?;
 
     // Submit multiple concurrent sign requests
     let num_requests = 5;
@@ -375,12 +365,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
     // Create backlog that will persist checkpoints
     let (backlog, mesh_state, node_client) = create_test_dependencies();
     let config = solana.get_config(program_address.clone());
-    let mut client = create_solana_stream(
-        config.clone(),
-        contract_watcher.clone(),
-        mesh_state.clone(),
-        node_client.clone(),
-    )?;
+    let mut client = solana_stream(config.clone())?;
 
     // Submit request and wait for a block marker
     solana
@@ -411,7 +396,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
 
     // Create new client with same backlog - should resume from checkpoint
     let (_backlog2, mesh_state2, node_client2) = create_test_dependencies();
-    let mut client2 = create_solana_stream(config, contract_watcher, mesh_state2, node_client2)?;
+    let mut client2 = solana_stream(config)?;
 
     // Submit new request
     solana

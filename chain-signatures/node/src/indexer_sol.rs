@@ -1,11 +1,16 @@
 use crate::indexer_client::ChainEvent;
 use crate::indexer_common::{SignatureEvent, SignatureEventBox};
-use crate::mesh::MeshState;
-use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
-use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
+
+use std::collections::HashMap;
+use std::fmt;
+use std::ops::Deref;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
 use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
@@ -31,14 +36,8 @@ use solana_client::{
 };
 use solana_sdk::signer::keypair::Keypair;
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
-use std::collections::HashMap;
-use std::fmt;
-use std::ops::Deref;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::LazyLock;
-use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
+
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     Scalar::from_bytes(
@@ -333,13 +332,16 @@ pub struct SolanaStream {
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
+impl Drop for SolanaStream {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
 impl SolanaStream {
-    pub fn new(
-        sol: Option<SolConfig>,
-        contract_watcher: ContractStateWatcher,
-        _mesh_state: watch::Receiver<MeshState>,
-        _node_client: NodeClient,
-    ) -> Option<Self> {
+    pub fn new(sol: Option<SolConfig>) -> Option<Self> {
         let Some(sol) = sol else {
             tracing::warn!("solana indexer is disabled");
             return None;

@@ -374,12 +374,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 }
             };
 
-            if let Some(sol_stream) = SolanaStream::new(
-                sol.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                client.clone(),
-            ) {
+            if let Some(sol_stream) = SolanaStream::new(sol.clone()) {
                 tokio::spawn(indexer_client::run_stream(
                     sol_stream,
                     sign_tx.clone(),
