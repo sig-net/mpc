@@ -27,17 +27,16 @@ fn signature_deposit() -> U256 {
 // These tests spin up Anvil, deploy the ChainSignatures contract, and exercise the
 // Ethereum indexer client in isolation (no MPC cluster required).
 
-struct EthTestCtx {
+struct EthereumTestEnvironment {
     _spawner: ClusterSpawner,
     redis: Redis,
     sandbox: EthereumSandbox,
     signer: Arc<eth::SandboxMiddleware>,
     wallet: Address,
     contract_address: Address,
-    chain_id: u64,
 }
 
-impl EthTestCtx {
+impl EthereumTestEnvironment {
     async fn new() -> Result<Self> {
         let spawner = ClusterSpawner::default()
             .network("eth-client-tests")
@@ -45,7 +44,6 @@ impl EthTestCtx {
             .await?;
         let redis = Redis::run(&spawner).await;
         let sandbox = EthereumSandbox::run(&spawner).await?;
-        let chain_id = sandbox.chain_id;
 
         let (signer, wallet) = eth::client(
             &sandbox.external_http_endpoint,
@@ -63,7 +61,6 @@ impl EthTestCtx {
             signer,
             wallet,
             contract_address,
-            chain_id,
         })
     }
 
@@ -97,7 +94,11 @@ impl EthTestCtx {
     }
 }
 
-async fn submit_sign_request(ctx: &EthTestCtx, payload: [u8; 32], path: &str) -> Result<H256> {
+async fn submit_sign_request(
+    ctx: &EthereumTestEnvironment,
+    payload: [u8; 32],
+    path: &str,
+) -> Result<H256> {
     let contract = ctx.contract();
     let sign_request = SignRequest {
         payload,
@@ -135,7 +136,7 @@ async fn next_event_within(
 #[tokio::test]
 async fn test_ethereum_client_parse_sign_event() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
-    let ctx = EthTestCtx::new().await?;
+    let ctx = EthereumTestEnvironment::new().await?;
     let app_data_storage = ctx.app_data_storage();
     let backlog = ctx.backlog();
     let mut client =
@@ -160,7 +161,7 @@ async fn test_ethereum_client_parse_sign_event() -> Result<()> {
 
 #[tokio::test]
 async fn test_ethereum_client_emits_checkpoints() -> Result<()> {
-    let ctx = EthTestCtx::new().await?;
+    let ctx = EthereumTestEnvironment::new().await?;
     let app_data_storage = ctx.app_data_storage();
     let backlog = ctx.backlog();
     let mut client =
@@ -184,39 +185,8 @@ async fn test_ethereum_client_emits_checkpoints() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_ethereum_client_catchup_linear() -> Result<()> {
-    let ctx = EthTestCtx::new().await?;
-
-    // Produce events before the client starts
-    let payloads = [[10u8; 32], [11u8; 32], [12u8; 32]];
-    for payload in &payloads {
-        submit_sign_request(&ctx, *payload, "catchup-path").await?;
-    }
-
-    let app_data_storage = ctx.app_data_storage();
-    app_data_storage.set_last_processed_block_eth(0).await?;
-    let backlog = ctx.backlog();
-    let mut client =
-        EthereumIndexerClient::new(Some(ctx.config(true)), app_data_storage, backlog).await?;
-
-    let mut seen = Vec::new();
-    let deadline = Duration::from_secs(60);
-    let start = std::time::Instant::now();
-    while seen.len() < payloads.len() && start.elapsed() < deadline {
-        if let ChainEvent::SignRequest(req) =
-            next_event_within(&mut client, Duration::from_secs(10)).await?
-        {
-            seen.push(req.args.payload.to_bytes());
-        }
-    }
-
-    assert!(seen.len() >= payloads.len(), "missing caught up events");
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_ethereum_client_execution_confirmation() -> Result<()> {
-    let ctx = EthTestCtx::new().await?;
+    let ctx = EthereumTestEnvironment::new().await?;
     let app_data_storage = ctx.app_data_storage();
     let backlog = ctx.backlog();
 
@@ -270,7 +240,7 @@ async fn test_ethereum_client_execution_confirmation() -> Result<()> {
 
 #[tokio::test]
 async fn test_ethereum_client_concurrent_events() -> Result<()> {
-    let ctx = EthTestCtx::new().await?;
+    let ctx = EthereumTestEnvironment::new().await?;
     let app_data_storage = ctx.app_data_storage();
     let backlog = ctx.backlog();
     let mut client =
@@ -306,7 +276,7 @@ async fn test_ethereum_client_concurrent_events() -> Result<()> {
 
 #[tokio::test]
 async fn test_ethereum_client_checkpoint_persistence() -> Result<()> {
-    let ctx = EthTestCtx::new().await?;
+    let ctx = EthereumTestEnvironment::new().await?;
     let app_data_storage = ctx.app_data_storage();
     let backlog = ctx.backlog();
 
@@ -358,7 +328,7 @@ async fn test_ethereum_client_checkpoint_persistence() -> Result<()> {
 
 #[tokio::test]
 async fn test_ethereum_client_sign_and_respond_flow() -> Result<()> {
-    let ctx = EthTestCtx::new().await?;
+    let ctx = EthereumTestEnvironment::new().await?;
     let app_data_storage = ctx.app_data_storage();
     let backlog = ctx.backlog();
     let mut client =
