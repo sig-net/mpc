@@ -18,9 +18,11 @@ use test_log::test;
 pub mod chains;
 pub mod compat;
 pub mod ethereum;
+pub mod ethereum_client;
 pub mod mpc;
 pub mod nightly;
 pub mod solana;
+pub mod solana_client;
 pub mod store;
 pub mod sync;
 

@@ -367,7 +367,6 @@ impl SolanaClient {
             program_id,
             sol.rpc_http_url.clone(),
             sol.rpc_ws_url.clone(),
-            contract_watcher.clone(),
             tx.clone(),
         ));
         tasks.push(spawn_non_cpi_sign_events(
@@ -396,7 +395,6 @@ async fn subscribe_to_program_respond_events(
     program_id: Pubkey,
     rpc_url: &str,
     ws_url: &str,
-    contract_watcher: ContractStateWatcher,
     tx: mpsc::Sender<ChainEvent>,
 ) -> Result<()> {
     let rpc_client = RpcClient::new(rpc_url.to_string());
@@ -509,7 +507,6 @@ fn spawn_respond_events(
     program_id: Pubkey,
     rpc_url: String,
     ws_url: String,
-    contract_watcher: ContractStateWatcher,
     tx: mpsc::Sender<ChainEvent>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -518,7 +515,6 @@ fn spawn_respond_events(
                 program_id,
                 &rpc_url,
                 &ws_url,
-                contract_watcher.clone(),
                 tx.clone(),
             )
             .await
