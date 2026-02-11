@@ -1038,8 +1038,7 @@ impl EthereumIndexer {
 
             let source_chain = pending_tx.source_chain;
 
-            // Phase 2: chain-specific output extraction for success
-            if status == PendingRequestStatus::Success {
+            let result = if status == PendingRequestStatus::Success {
                 let completed_tx = CompletedTx::new(pending_tx.clone(), block_number);
                 match completed_tx.extract_success_tx_output(client).await {
                     Ok(serialized_output) => {
@@ -1048,15 +1047,9 @@ impl EthereumIndexer {
                             ?sign_id,
                             "extracted transaction output for bidirectional tx"
                         );
-                        events.push(ChainEvent::ExecutionConfirmed {
-                            tx_id,
-                            sign_id,
-                            source_chain,
-                            block_height: block_number,
-                            result: crate::indexer_client::ExecutionResult::Success {
-                                output: serialized_output,
-                            },
-                        });
+                        crate::indexer_client::ExecutionResult::Success {
+                            output: serialized_output,
+                        }
                     }
                     Err(err) => {
                         tracing::warn!(
@@ -1065,26 +1058,20 @@ impl EthereumIndexer {
                             ?err,
                             "Failed to extract transaction output for bidirectional tx, using empty output"
                         );
-                        events.push(ChainEvent::ExecutionConfirmed {
-                            tx_id,
-                            sign_id,
-                            source_chain,
-                            block_height: block_number,
-                            result: crate::indexer_client::ExecutionResult::Success {
-                                output: vec![],
-                            },
-                        });
+                        crate::indexer_client::ExecutionResult::Success { output: vec![] }
                     }
                 }
             } else {
-                events.push(ChainEvent::ExecutionConfirmed {
-                    tx_id,
-                    sign_id,
-                    source_chain,
-                    block_height: block_number,
-                    result: crate::indexer_client::ExecutionResult::Failed,
-                });
-            }
+                crate::indexer_client::ExecutionResult::Failed
+            };
+
+            events.push(ChainEvent::ExecutionConfirmed {
+                tx_id,
+                sign_id,
+                source_chain,
+                block_height: block_number,
+                result,
+            });
         }
 
         // Staleness checks (nonce too low)

@@ -1,4 +1,5 @@
 use crate::backlog::{Backlog, BacklogTransaction, SignTx};
+use crate::indexer_client::ExecutionResult;
 use crate::indexer_hydration::{
     HydrationRespondBidirectionalEvent, HydrationSignBidirectionalRequestedEvent,
     HydrationSignatureRespondedEvent,
@@ -324,13 +325,6 @@ pub(crate) async fn process_sign_event(
                 unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
             })
         }
-        SignRequestType::RespondBidirectional(_) => BacklogTransaction::Sign(SignTx {
-            request_id: sign_id.request_id,
-            source_chain: sign_event.source_chain(),
-            status: PendingRequestStatus::AwaitingResponse,
-            args: sign_request.args.clone(),
-            unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
-        }),
         _ => anyhow::bail!("Unexpected sign request type"),
     };
 
@@ -346,7 +340,7 @@ pub(crate) async fn process_sign_event(
     if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
         // TODO: handle error to ensure 100% success rate
         let chain = sign_event.source_chain();
-        tracing::error!(?err, chain = %chain, "Failed to send {} sign request into queue", chain.as_str());
+        tracing::error!(?err, %chain, "failed to send sign request into queue");
     }
 
     Ok(())
@@ -360,9 +354,9 @@ pub(crate) async fn process_sign_request(
     record_indexing_step_reached(sign_request.chain);
 
     let sign_id = sign_request.id;
-    let sign_request_type = sign_request.sign_request_type.clone();
+    let sign_type = sign_request.sign_request_type.clone();
 
-    let backlog_tx = match &sign_request_type {
+    let backlog_tx = match &sign_type {
         SignRequestType::Sign => BacklogTransaction::Sign(SignTx {
             request_id: sign_id.request_id,
             source_chain: sign_request.chain,
@@ -377,23 +371,16 @@ pub(crate) async fn process_sign_request(
             args: sign_request.args.clone(),
             unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
         }),
-        SignRequestType::RespondBidirectional(_) => BacklogTransaction::Sign(SignTx {
-            request_id: sign_id.request_id,
-            source_chain: sign_request.chain,
-            status: PendingRequestStatus::AwaitingResponse,
-            args: sign_request.args.clone(),
-            unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
-        }),
         _ => anyhow::bail!("Unexpected sign request type"),
     };
 
     backlog
-        .insert(sign_request.chain, sign_id, backlog_tx, sign_request_type)
+        .insert(sign_request.chain, sign_id, backlog_tx, sign_type)
         .await;
 
     let chain = sign_request.chain;
     if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
-        tracing::error!(?err, chain = %chain, "Failed to send {} sign request into queue", chain.as_str());
+        tracing::error!(?err, %chain, "failed to send sign request into queue");
     }
 
     Ok(())
@@ -607,7 +594,7 @@ pub async fn process_execution_confirmed(
     sign_id: SignId,
     source_chain: Chain,
     block_height: u64,
-    result: crate::indexer_client::ExecutionResult,
+    result: ExecutionResult,
     backlog: &Backlog,
     sign_tx: mpsc::Sender<Sign>,
     signature_generation_total_timeout: Duration,
@@ -623,57 +610,58 @@ pub async fn process_execution_confirmed(
     );
 
     // Remove the watcher; if it's not found, it might have been processed already
-    let maybe_watcher = backlog.unwatch_execution(target_chain, &tx_id).await;
-    let (unwatched_sign_id, pending_tx) = match maybe_watcher {
-        Some((s, tx)) => (s, tx),
-        None => {
-            tracing::warn!(
-                ?tx_id,
-                "execution watcher not found (maybe already processed)"
-            );
-            return Ok(());
-        }
+    let Some((unwatched_sign_id, mut pending_tx)) =
+        backlog.unwatch_execution(target_chain, &tx_id).await
+    else {
+        tracing::warn!(
+            ?tx_id,
+            "execution watcher not found (maybe already processed)"
+        );
+        return Ok(());
     };
-
     if unwatched_sign_id != sign_id {
         tracing::warn!(?tx_id, expected = ?unwatched_sign_id, actual = ?sign_id, "sign_id mismatch between event and watcher");
     }
 
     // Update the status on the source chain
     let status = match result {
-        crate::indexer_client::ExecutionResult::Success { .. } => {
-            crate::sign_bidirectional::PendingRequestStatus::Success
-        }
-        crate::indexer_client::ExecutionResult::Failed => {
-            crate::sign_bidirectional::PendingRequestStatus::Failed
-        }
+        ExecutionResult::Success { .. } => PendingRequestStatus::Success,
+        ExecutionResult::Failed => PendingRequestStatus::Failed,
     };
 
-    backlog
+    let set_res = backlog
         .set_status(pending_tx.source_chain, &unwatched_sign_id, status)
         .await;
+    let updated_tx = match set_res {
+        Some(tx) => tx,
+        None => {
+            tracing::error!(?tx_id, ?unwatched_sign_id, source_chain = ?pending_tx.source_chain, "failed to set status on pending tx");
+            anyhow::bail!("failed to set status for sign id: {unwatched_sign_id:?}");
+        }
+    };
+    tracing::info!(?tx_id, ?unwatched_sign_id, updated_status = ?updated_tx.status(), "set_status returned transaction");
 
-    // Build CompletedTx and derive a sign request accordingly
-    let mut updated_tx = pending_tx.clone();
-    updated_tx.status = status;
-    let completed_tx = CompletedTx::new(updated_tx, block_height);
+    pending_tx.status = status;
+    let completed_tx = CompletedTx::new(pending_tx, block_height);
 
     let sign_request = match result {
-        crate::indexer_client::ExecutionResult::Success { output } => completed_tx
+        ExecutionResult::Success { output } => completed_tx
             .create_sign_request_from_serialized_output(
                 source_chain,
                 output,
                 signature_generation_total_timeout,
             )?,
-        crate::indexer_client::ExecutionResult::Failed => {
+        ExecutionResult::Failed => {
             completed_tx
                 .create_failed_sign_request(source_chain, signature_generation_total_timeout)
                 .await?
         }
     };
 
-    // Insert and send the respond-bidirectional sign request
-    process_sign_request(sign_request, sign_tx, backlog.clone()).await?;
+    let chain = sign_request.chain;
+    if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
+        tracing::error!(?err, %chain, "failed to send sign request into queue");
+    }
 
     Ok(())
 }
@@ -692,6 +680,7 @@ pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Re
 mod tests {
     use super::*;
     use crate::backlog::Backlog;
+    use crate::indexer_common::process_execution_confirmed;
     use crate::mesh::wait_threshold_active;
     use crate::node_client::NodeClient;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
@@ -885,7 +874,10 @@ mod tests {
 
         // Call the handler with a Success and empty output
         let tx_id = tx.id;
-        crate::indexer_common::process_execution_confirmed(
+        // ensure watcher exists before processing
+        let before_watchers = backlog.pending_execution(tx.target_chain).await;
+        assert!(before_watchers.contains_key(&tx.id));
+        process_execution_confirmed(
             tx_id,
             sign_id,
             tx.source_chain,
@@ -901,13 +893,17 @@ mod tests {
 
         // Watcher should be removed
         let watchers = backlog.pending_execution(tx.target_chain).await;
+        tracing::info!(?watchers, "watchers after execution confirmed");
         assert!(watchers.is_empty());
 
         // Source chain request should be marked Success
-        let successes = backlog
-            .get_by_status(tx.source_chain, PendingRequestStatus::Success)
-            .await;
-        assert!(successes.contains_key(&sign_id));
+        // inspect the transaction to provide more debugging info on failure
+        let maybe_tx = backlog.get(tx.source_chain, &sign_id).await;
+        assert!(maybe_tx.is_some(), "expected sign tx to still exist");
+        let tx_after = maybe_tx.unwrap();
+        if tx_after.status() != PendingRequestStatus::Success {
+            panic!("expected Success but found status: {:?}", tx_after.status());
+        }
 
         // A sign request should have been sent to the sign queue
         let msg = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -985,7 +981,7 @@ mod tests {
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
 
-        crate::indexer_common::process_execution_confirmed(
+        process_execution_confirmed(
             tx.id,
             sign_id,
             tx.source_chain,
