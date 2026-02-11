@@ -198,7 +198,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_stream_handles_sign_and_respond() {
+    async fn test_stream_handles_sign_and_respond() {
         let backlog = Backlog::new();
         let sign_id = SignId::new([1u8; 32]);
 
@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_stream_handles_sign_bidirectional_block_and_recover() {
+    async fn test_stream_handles_sign_bidirectional_block_and_recover() {
         use crate::indexer_common::RespondBidirectionalEvent as RBE;
         use crate::indexer_common::SignBidirectionalEvent as SBE;
         use crate::indexer_common::SignatureRespondedEvent as SRE;
@@ -300,23 +300,20 @@ mod tests {
         let backlog = Backlog::persisted(storage.clone());
 
         // client implemented with a channel so the test can control pacing
-        struct ChannelClient {
-            rx: mpsc::Receiver<Option<ChainEvent>>,
+        struct LocalStream {
+            rx: mpsc::Receiver<ChainEvent>,
         }
 
         #[async_trait::async_trait]
-        impl ChainStream for ChannelClient {
+        impl ChainStream for LocalStream {
             const CHAIN: Chain = Chain::Solana;
             async fn next_event(&mut self) -> Option<ChainEvent> {
-                match self.rx.recv().await {
-                    Some(ev_opt) => ev_opt,
-                    None => None,
-                }
+                self.rx.recv().await
             }
         }
 
         let (events_tx, rx) = mpsc::channel(8);
-        let client = ChannelClient { rx };
+        let client = LocalStream { rx };
 
         let (sign_tx, mut sign_rx) = mpsc::channel(8);
 
@@ -394,7 +391,7 @@ mod tests {
 
         // push SignRequest
         events_tx
-            .send(Some(ChainEvent::SignRequest(indexed.clone())))
+            .send(ChainEvent::SignRequest(indexed.clone()))
             .await
             .unwrap();
 
@@ -435,7 +432,7 @@ mod tests {
             },
         });
         events_tx
-            .send(Some(ChainEvent::Respond(sig_responded)))
+            .send(ChainEvent::Respond(sig_responded))
             .await
             .unwrap();
 
@@ -464,10 +461,7 @@ mod tests {
 
         // send a block event for this chain and ensure checkpoint is persisted
         let block = Chain::Solana.checkpoint_interval().unwrap_or(1);
-        events_tx
-            .send(Some(ChainEvent::Block(block)))
-            .await
-            .unwrap();
+        events_tx.send(ChainEvent::Block(block)).await.unwrap();
 
         // give the indexer a brief moment to persist the checkpoint
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -507,9 +501,7 @@ mod tests {
             },
         });
         events_tx
-            .send(Some(ChainEvent::RespondBidirectional(
-                respond_bidirectional,
-            )))
+            .send(ChainEvent::RespondBidirectional(respond_bidirectional))
             .await
             .unwrap();
 
@@ -527,7 +519,7 @@ mod tests {
         assert!(backlog.get(Chain::Solana, &sign_id).await.is_none());
 
         // stop the client and wait for the indexer to finish
-        events_tx.send(None).await.unwrap();
+        drop(events_tx);
         run_handle.await.unwrap();
     }
 }

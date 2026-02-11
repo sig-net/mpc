@@ -597,7 +597,7 @@ pub async fn process_execution_confirmed(
     result: ExecutionResult,
     backlog: &Backlog,
     sign_tx: mpsc::Sender<Sign>,
-    signature_generation_total_timeout: Duration,
+    total_timeout: Duration,
     target_chain: Chain,
 ) -> anyhow::Result<()> {
     tracing::info!(
@@ -646,14 +646,10 @@ pub async fn process_execution_confirmed(
 
     let sign_request = match result {
         ExecutionResult::Success { output } => completed_tx
-            .create_sign_request_from_serialized_output(
-                source_chain,
-                output,
-                signature_generation_total_timeout,
-            )?,
+            .create_sign_request_from_serialized_output(source_chain, output, total_timeout)?,
         ExecutionResult::Failed => {
             completed_tx
-                .create_failed_sign_request(source_chain, signature_generation_total_timeout)
+                .create_failed_sign_request(source_chain, total_timeout)
                 .await?
         }
     };
