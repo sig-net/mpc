@@ -363,6 +363,7 @@ async fn test_ethereum_client_sign_and_respond_flow() -> Result<()> {
     let backlog = ctx.backlog();
     let mut client =
         EthereumIndexerClient::new(Some(ctx.config(true)), app_data_storage, backlog).await?;
+    let _ = tracing_subscriber::fmt::try_init();
 
     // Submit a sign request and capture its id from the emitted event.
     let payload = [9u8; 32];
@@ -399,9 +400,18 @@ async fn test_ethereum_client_sign_and_respond_flow() -> Result<()> {
     let contract = ctx.contract();
     let respond_call = contract.respond(vec![response]);
     let pending_tx = respond_call.send().await?;
-    pending_tx
+    let receipt = pending_tx
         .await
-        .context("failed to mine respond transaction")?;
+        .context("respond transaction execution failed")?
+        .ok_or_else(|| anyhow::anyhow!("respond transaction dropped from mempool"))?;
+
+    // Sanity-check that the contract emitted the SignatureResponded log we're expecting.
+    let logs = receipt.logs.clone();
+    assert!(!logs.is_empty(), "respond transaction produced no logs");
+    let sig_topic = H256::from(ethers::utils::keccak256(
+        "SignatureResponded(bytes32,address,((uint256,uint256),uint256,uint8))",
+    ));
+    assert_eq!(logs[0].topics[0], sig_topic, "unexpected event emitted");
 
     // Verify the indexer emits the Respond event with matching data.
     let mut saw_respond = false;

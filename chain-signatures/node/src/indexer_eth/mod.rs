@@ -331,17 +331,18 @@ sol! {
         string params
     );
 
-    struct Signature {
-        uint8 v;
-        bytes32 r;
-        bytes32 s;
+    struct AffinePoint {
+        uint256 x;
+        uint256 y;
     }
 
-    event SignatureResponded(
-        bytes32 indexed requestId,
-        address responder,
-        Signature signature
-    );
+    struct Signature {
+        AffinePoint bigR;
+        uint256 s;
+        uint8 recoveryId;
+    }
+
+    event SignatureResponded(bytes32 indexed requestId, address responder, Signature signature);
 }
 
 fn sign_request_from_filtered_log(log: Log, total_timeout: Duration) -> Option<IndexedSignRequest> {
@@ -483,7 +484,7 @@ async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEvent>) 
         };
 
         let data = &log.data().data;
-        if data.len() < 128 {
+        if data.len() < 160 {
             tracing::warn!(
                 ?sign_id,
                 data_len = data.len(),
@@ -494,10 +495,11 @@ async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEvent>) 
 
         // responder: offset 0..32 (address right-padded)
         let responder_addr = Address::from_slice(&data[12..32]);
-        // signature struct: v (32 bytes) at 32..64, r at 64..96, s at 96..128
-        let v = data[32 + 31];
-        let r: [u8; 32] = data[64..96].try_into().unwrap();
+        // signature struct encoding layout:
+        // bigR.x at 32..64, bigR.y at 64..96, s at 96..128, recoveryId at 128..160
+        let r: [u8; 32] = data[32..64].try_into().unwrap();
         let s: [u8; 32] = data[96..128].try_into().unwrap();
+        let v = data[128 + 31];
 
         let eth_event = EthereumSignatureRespondedEvent {
             request_id: sign_id.request_id,
@@ -508,6 +510,7 @@ async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEvent>) 
         };
 
         let respond_event = SignatureRespondedEvent::Ethereum(eth_event);
+        tracing::info!(?sign_id, "emitting SignatureResponded event");
         if let Err(err) = events_tx.send(ChainEvent::Respond(respond_event)).await {
             tracing::error!(?err, "failed to emit Respond event");
         }
