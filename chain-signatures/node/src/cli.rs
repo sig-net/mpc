@@ -1,6 +1,8 @@
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
+use crate::indexer_eth::EthereumStream;
+use crate::indexer_sol::SolanaStream;
 use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
@@ -11,7 +13,9 @@ use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::triple_storage::TriplePair;
+use crate::stream::run_stream;
 use crate::{indexer, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, storage, web};
+use std::time::Duration;
 
 use clap::Parser;
 use deadpool_redis::Runtime;
@@ -348,32 +352,36 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 backlog.clone(),
             ));
 
-            match indexer_eth::EthereumIndexer::new(
-                eth,
-                sign_tx.clone(),
-                backlog.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                client.clone(),
-            )
-            .await
-            {
-                Ok(eth_indexer) => {
-                    tokio::spawn(eth_indexer.run());
+            let total_timeout =
+                Duration::from_secs(eth.as_ref().map(|e| e.total_timeout).unwrap_or(60));
+            match EthereumStream::new(eth, backlog.clone()).await {
+                Ok(eth_stream) => {
+                    tokio::spawn(run_stream(
+                        eth_stream,
+                        sign_tx.clone(),
+                        backlog.clone(),
+                        contract_watcher.clone(),
+                        mesh_state.clone(),
+                        client.clone(),
+                        total_timeout,
+                    ));
                 }
                 Err(err) => {
-                    tracing::error!(?err, "failed to create ethereum indexer");
+                    tracing::error!(?err, "failed to create ethereum indexer stream");
                 }
             };
 
-            tokio::spawn(indexer_sol::run(
-                sol,
-                sign_tx.clone(),
-                backlog.clone(),
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                client.clone(),
-            ));
+            if let Some(sol_stream) = SolanaStream::new(sol.clone()) {
+                tokio::spawn(run_stream(
+                    sol_stream,
+                    sign_tx.clone(),
+                    backlog.clone(),
+                    contract_watcher.clone(),
+                    mesh_state.clone(),
+                    client.clone(),
+                    Duration::from_secs(sol.unwrap().total_timeout),
+                ));
+            }
             tokio::spawn(indexer_hydration::run(
                 hydration,
                 sign_tx,

@@ -465,6 +465,8 @@ impl EthereumSandbox {
             chain_id_arg,
             "--mnemonic".to_string(),
             Self::DEFAULT_MNEMONIC.to_string(),
+            "--block-time".to_string(),
+            "1".to_string(),
         ];
 
         let request = if cfg!(feature = "docker-test") {
@@ -652,6 +654,8 @@ impl Solana {
             .arg("127.0.0.1")
             .arg("--reset")
             .arg("--quiet")
+            .stdout(async_process::Stdio::null())
+            .stderr(async_process::Stdio::null())
             .spawn()
             .expect("failed to start solana-test-validator");
 
