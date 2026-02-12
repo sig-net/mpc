@@ -127,6 +127,31 @@ impl NodeClient {
         }
     }
 
+    pub async fn post_cbor_response<T: Serialize + ?Sized, R: DeserializeOwned>(
+        &self,
+        url: &Url,
+        payload: &T,
+    ) -> Result<R, RequestError> {
+        let resp = self
+            .http
+            .post(url.clone())
+            .header("content-type", "application/cbor")
+            .body(cbor_to_bytes(payload).map_err(|err| RequestError::Conversion(err.to_string()))?)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if status.is_success() {
+            let body = resp.bytes().await.map_err(RequestError::MalformedBody)?;
+            ciborium::from_reader(body.as_ref())
+                .map_err(|err| RequestError::Conversion(err.to_string()))
+        } else {
+            let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
+            let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
+            Err(RequestError::Unsuccessful(status, resp.into()))
+        }
+    }
+
     async fn post_msg(&self, url: &Url, msg: &[&Ciphered]) -> Result<(), RequestError> {
         self.post_cbor(url, msg).await
     }
@@ -165,11 +190,14 @@ impl NodeClient {
         Ok(resp.json().await?)
     }
 
-    pub async fn sync(&self, base: impl IntoUrl, update: &SyncUpdate) -> Result<(), RequestError> {
+    pub async fn sync(
+        &self,
+        base: impl IntoUrl,
+        update: &SyncUpdate,
+    ) -> Result<SyncUpdate, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("sync");
-
-        self.post_cbor(&url, update).await
+        self.post_cbor_response(&url, update).await
     }
 
     pub async fn checkpoint(

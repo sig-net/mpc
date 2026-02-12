@@ -318,7 +318,13 @@ async fn broadcast_sync(
         .await
         .into_iter()
         .filter_map(|(p, view)| {
-            if let Some(Ok(())) = view {
+            if let Some(Ok(_response)) = view {
+                tracing::debug!(
+                    ?p,
+                    not_found_triples = _response.triples.len(),
+                    not_found_presignatures = _response.presignatures.len(),
+                    "received sync response"
+                );
                 Some(p)
             } else {
                 None
