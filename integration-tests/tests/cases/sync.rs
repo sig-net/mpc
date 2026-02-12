@@ -87,7 +87,7 @@ async fn test_state_sync_update() -> anyhow::Result<()> {
         triples: valid.clone(),
         presignatures: valid.clone(),
     };
-    sync_channel.request_update(update).await;
+    let _ = sync_channel.request_update(update).await;
     // Give it some time for sync to process the update
     tokio::time::sleep(Duration::from_secs(3)).await;
 
