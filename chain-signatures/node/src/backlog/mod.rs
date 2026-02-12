@@ -450,11 +450,21 @@ impl Backlog {
     /// Set the processed block height for a specific chain.
     /// Returns Some(Checkpoint) if a checkpoint should be created and submitted at this block height.
     pub async fn set_processed_block(&self, chain: Chain, height: u64) -> Option<Checkpoint> {
+        let interval = chain.checkpoint_interval()?;
+        self.set_processed_block_interval(chain, height, interval)
+            .await
+    }
+
+    pub async fn set_processed_block_interval(
+        &self,
+        chain: Chain,
+        height: u64,
+        interval: u64,
+    ) -> Option<Checkpoint> {
         let mut requests = self.requests.write().await;
         let pending = requests.entry(chain).or_default();
         pending.set_processed_block(height);
 
-        let interval = chain.checkpoint_interval();
         tracing::trace!(
             ?chain,
             height,
@@ -463,7 +473,7 @@ impl Backlog {
         );
 
         // create a checkpoint on interval
-        if height.is_multiple_of(interval?) {
+        if height.is_multiple_of(interval) {
             let tx_count = pending.len();
             drop(requests);
             let checkpoint = self.checkpoint(chain).await;

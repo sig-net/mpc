@@ -912,9 +912,15 @@ impl EthereumIndexer {
                 )
             })?;
 
-        let Some(block_receipts) = block_receipts else {
-            tracing::info!("no receipts for block number {block_number}");
-            return Ok(());
+        // Some clients return `None` for blocks with no transactions. We still want to
+        // emit a `ChainEvent::Block` for checkpointing and progress tracking, so treat
+        // it as an empty receipts list.
+        let block_receipts = match block_receipts {
+            Some(receipts) => receipts,
+            None => {
+                tracing::debug!(block_number, "no receipts for block; treating as empty");
+                Vec::new()
+            }
         };
 
         let mut sign_requests = Vec::new();
@@ -963,25 +969,26 @@ impl EthereumIndexer {
             }
         }
 
-        if !sign_requests.is_empty() || !respond_logs.is_empty() {
-            for _request in &sign_requests {
-                record_request_latency(
-                    Chain::Ethereum,
-                    SignRequestStep::Indexing,
-                    "ok",
-                    block_timestamp,
-                );
-            }
-            requests_indexed
-                .send(BlockAndRequests::new(
-                    block_number,
-                    block_hash,
-                    sign_requests.clone(),
-                    respond_logs,
-                ))
-                .await
-                .map_err(|err| anyhow::anyhow!("Failed to send indexed requests: {:?}", err))?;
+        for _request in &sign_requests {
+            record_request_latency(
+                Chain::Ethereum,
+                SignRequestStep::Indexing,
+                "ok",
+                block_timestamp,
+            );
         }
+
+        // Always forward the processed block to the "finalization" stage so it can emit
+        // `ChainEvent::Block` even when there are no relevant contract logs.
+        requests_indexed
+            .send(BlockAndRequests::new(
+                block_number,
+                block_hash,
+                sign_requests,
+                respond_logs,
+            ))
+            .await
+            .map_err(|err| anyhow::anyhow!("Failed to send indexed requests: {:?}", err))?;
 
         Ok(())
     }

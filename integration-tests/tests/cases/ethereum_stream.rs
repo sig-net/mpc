@@ -1,17 +1,22 @@
 use alloy::primitives::{Address as AlloyAddress, B256};
 use anyhow::{Context, Result};
+use ethers::middleware::{Middleware, SignerMiddleware};
+use ethers::providers::{Http, Provider};
+use ethers::signers::{LocalWallet, Signer};
+use ethers::types::TransactionRequest;
 use ethers::types::{Address, H256, U256};
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers::EthereumSandbox;
 use integration_tests::eth::{
     self, chain_signatures_contract, ChainSignaturesContract, SignRequest,
 };
-use mpc_node::backlog::Backlog;
+use mpc_node::backlog::{Backlog, BacklogTransaction, SignTx};
 use mpc_node::indexer_common::SignatureRespondedEvent;
 use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::protocol::Chain;
 use mpc_node::stream::{ChainEvent, ChainStream};
 use mpc_primitives::{SignId, LATEST_MPC_KEY_VERSION};
+use rand::thread_rng;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -31,6 +36,7 @@ struct EthereumTestEnvironment {
     signer: Arc<eth::SandboxMiddleware>,
     wallet: Address,
     contract_address: Address,
+    _block_pumper: tokio::task::JoinHandle<()>,
 }
 
 impl EthereumTestEnvironment {
@@ -47,6 +53,55 @@ impl EthereumTestEnvironment {
             sandbox.chain_id,
         )?;
 
+        // Spawn a background task to continuously produce blocks on Anvil.
+        //
+        // Important: this must NOT call our ChainSignatures contract, and it must
+        // avoid nonce contention with the main `signer` used by tests.
+        //
+        // We therefore:
+        // 1) Generate a fresh, independent funded account.
+        // 2) Fund it once from the sandbox deployer wallet.
+        // 3) Use it to send a simple empty ETH transfer once per second.
+        let pumper_wallet = LocalWallet::new(&mut thread_rng()).with_chain_id(sandbox.chain_id);
+        let pumper_address = pumper_wallet.address();
+        let pumper_provider = Provider::<Http>::try_from(sandbox.external_http_endpoint.as_str())?;
+        let pumper_client: Arc<SignerMiddleware<Provider<Http>, LocalWallet>> =
+            Arc::new(SignerMiddleware::new(pumper_provider, pumper_wallet));
+
+        // Fund the pumper account with a small amount of ETH for gas.
+        // (0.001 ETH is plenty for these tests.)
+        let fund_tx = TransactionRequest::new()
+            .to(pumper_address)
+            .value(U256::from(1_000_000_000_000_000u64));
+        let pending_fund = signer.send_transaction(fund_tx, None).await?;
+        let _ = pending_fund
+            .await
+            .context("failed to mine block pumper funding transaction")?
+            .context("block pumper funding transaction dropped from mempool")?;
+
+        let block_pumper = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+            loop {
+                interval.tick().await;
+                let tx = TransactionRequest::new().to(wallet).value(U256::zero());
+
+                match pumper_client.send_transaction(tx, None).await {
+                    Ok(pending) => {
+                        // Await mining so each tick reliably corresponds to a mined block.
+                        // If it takes too long, just continue; the next iteration will try again.
+                        let _ = tokio::time::timeout(Duration::from_secs(5), pending).await;
+                    }
+                    Err(err) => {
+                        tracing::debug!(?err, "block pumper failed to send tx");
+                        // Brief backoff in case the node is restarting.
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                }
+            }
+        });
+
         let contract_address =
             eth::deploy_chain_signatures(signer.clone(), wallet, signature_deposit()).await?;
 
@@ -56,6 +111,7 @@ impl EthereumTestEnvironment {
             signer,
             wallet,
             contract_address,
+            _block_pumper: block_pumper,
         })
     }
 
@@ -252,24 +308,59 @@ async fn test_ethereum_stream_concurrent_events() -> Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn test_ethereum_stream_block_persistence() -> Result<()> {
+async fn test_ethereum_stream_checkpointing() -> Result<()> {
+    const INTERVAL: u64 = 4;
+
     let ctx = EthereumTestEnvironment::new().await?;
     let backlog = ctx.backlog();
 
     let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
-    submit_sign_request(&ctx, [5u8; 32], "block-path").await?;
+    submit_sign_request(&ctx, [5u8; 32], "some-path").await?;
 
     let checkpoint = tokio::time::timeout(Duration::from_secs(60), async move {
+        let mut saw_sign_request = false;
         loop {
             let Some(event) = stream.next_event().await else {
                 break None;
             };
-            let ChainEvent::Block(height) = event else {
-                continue;
-            };
-            tracing::info!(height, "observed block event");
-            if let Some(checkpoint) = backlog.set_processed_block(Chain::Ethereum, height).await {
-                break Some(checkpoint);
+            match event {
+                ChainEvent::SignRequest(req) => {
+                    saw_sign_request = true;
+
+                    // The production indexer loop inserts sign requests into the backlog.
+                    // These integration tests consume `ChainEvent`s directly, so replicate
+                    // that behavior here so checkpoints capture pending requests.
+                    backlog
+                        .insert(
+                            req.chain,
+                            req.id,
+                            BacklogTransaction::Sign(SignTx {
+                                request_id: req.id.request_id,
+                                source_chain: req.chain,
+                                status: mpc_node::sign_bidirectional::PendingRequestStatus::AwaitingResponse,
+                                args: req.args.clone(),
+                                unix_timestamp_indexed: req.unix_timestamp_indexed,
+                            }),
+                            req.sign_request_type.clone(),
+                        )
+                        .await;
+                }
+                ChainEvent::Block(height) => {
+                    tracing::info!(height, "observed block event");
+                    if let Some(checkpoint) = backlog
+                        .set_processed_block_interval(Chain::Ethereum, height, INTERVAL)
+                        .await
+                    {
+                        // With block events now emitted even for empty blocks, it's possible to
+                        // hit a checkpoint boundary before any requests have been indexed.
+                        // Keep going until we've observed at least one sign request and the
+                        // checkpoint captures it.
+                        if saw_sign_request && !checkpoint.pending_requests.is_empty() {
+                            break Some(checkpoint);
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     })
@@ -285,20 +376,39 @@ async fn test_ethereum_stream_block_persistence() -> Result<()> {
     // Start a fresh client with the same storage; it should resume and observe new events.
     let backlog = ctx.backlog();
     let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
-    submit_sign_request(&ctx, [6u8; 32], "checkpoint-path-new").await?;
+    submit_sign_request(&ctx, [6u8; 32], "checkpoint-path").await?;
 
     let mut saw_new_event = false;
     let mut saw_new_checkpoint = false;
-    for _ in 0..5 {
+    for _ in 0..30 {
         match next_event_within(&mut stream, Duration::from_secs(30)).await? {
-            ChainEvent::SignRequest(_) => {
+            ChainEvent::SignRequest(req) => {
                 saw_new_event = true;
+
+                backlog
+                    .insert(
+                        req.chain,
+                        req.id,
+                        BacklogTransaction::Sign(SignTx {
+                            request_id: req.id.request_id,
+                            source_chain: req.chain,
+                            status: mpc_node::sign_bidirectional::PendingRequestStatus::AwaitingResponse,
+                            args: req.args.clone(),
+                            unix_timestamp_indexed: req.unix_timestamp_indexed,
+                        }),
+                        req.sign_request_type.clone(),
+                    )
+                    .await;
+
                 if saw_new_checkpoint {
                     break;
                 }
             }
             ChainEvent::Block(height) => {
-                if let Some(_) = backlog.set_processed_block(Chain::Ethereum, height).await {
+                if let Some(_) = backlog
+                    .set_processed_block_interval(Chain::Ethereum, height, INTERVAL)
+                    .await
+                {
                     saw_new_checkpoint = true;
                     if saw_new_event {
                         break;
