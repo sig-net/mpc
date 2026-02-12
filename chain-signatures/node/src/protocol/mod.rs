@@ -223,7 +223,7 @@ pub async fn spawn_system_metrics() -> tokio::task::JoinHandle<()> {
 #[allow(clippy::large_enum_variant)]
 pub enum SignRequestType {
     Sign,
-    SignBidirectional(crate::indexer_common::SignBidirectionalEvent),
+    SignBidirectional(crate::stream::ops::SignBidirectionalEvent),
     RespondBidirectional(RespondBidirectionalTx),
 }
 

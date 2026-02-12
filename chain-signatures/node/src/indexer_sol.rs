@@ -1,6 +1,6 @@
-use crate::indexer_common::{SignatureEvent, SignatureEventBox};
 use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
 use crate::sign_bidirectional::hash_rlp_data;
+use crate::stream::ops::{SignatureEvent, SignatureEventBox};
 use crate::stream::{ChainEvent, ChainStream};
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 
@@ -309,7 +309,7 @@ impl SignatureEvent for SignBidirectionalEvent {
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             total_timeout,
             sign_request_type: SignRequestType::SignBidirectional(
-                crate::indexer_common::SignBidirectionalEvent::Solana(self.clone()),
+                crate::stream::ops::SignBidirectionalEvent::Solana(self.clone()),
             ),
         })
     }
@@ -353,29 +353,29 @@ impl SolanaStream {
 
         let total_timeout = Duration::from_secs(sol.total_timeout);
         let (tx, rx) = crate::stream::channel();
-
-        let mut tasks = Vec::new();
-        tasks.push(spawn_cpi_sign_events(
-            program_id,
-            sol.rpc_http_url.clone(),
-            sol.rpc_ws_url.clone(),
-            total_timeout,
-            tx.clone(),
-        ));
-        tasks.push(spawn_respond_events(
-            program_id,
-            sol.rpc_http_url.clone(),
-            sol.rpc_ws_url.clone(),
-            tx.clone(),
-        ));
-        tasks.push(spawn_non_cpi_sign_events(
-            program_id,
-            sol.account_sk.clone(),
-            sol.rpc_http_url.clone(),
-            sol.rpc_ws_url.clone(),
-            total_timeout,
-            tx.clone(),
-        ));
+        let tasks = vec![
+            spawn_cpi_sign_events(
+                program_id,
+                sol.rpc_http_url.clone(),
+                sol.rpc_ws_url.clone(),
+                total_timeout,
+                tx.clone(),
+            ),
+            spawn_respond_events(
+                program_id,
+                sol.rpc_http_url.clone(),
+                sol.rpc_ws_url.clone(),
+                tx.clone(),
+            ),
+            spawn_non_cpi_sign_events(
+                program_id,
+                sol.account_sk.clone(),
+                sol.rpc_http_url.clone(),
+                sol.rpc_ws_url.clone(),
+                total_timeout,
+                tx.clone(),
+            ),
+        ];
 
         Some(SolanaStream { rx, tasks })
     }
@@ -463,11 +463,11 @@ async fn subscribe_to_program_respond_events(
                         };
 
                         for ev in respond_bidirectional_events {
-                            let _ = events_tx.send(ChainEvent::RespondBidirectional(crate::indexer_common::RespondBidirectionalEvent::Solana(ev))).await;
+                            let _ = events_tx.send(ChainEvent::RespondBidirectional(crate::stream::ops::RespondBidirectionalEvent::Solana(ev))).await;
                         }
 
                         for ev in respond_events {
-                            let _ = events_tx.send(ChainEvent::Respond(crate::indexer_common::SignatureRespondedEvent::Solana(ev))).await;
+                            let _ = events_tx.send(ChainEvent::Respond(crate::stream::ops::SignatureRespondedEvent::Solana(ev))).await;
                         }
                     }
                     None => {

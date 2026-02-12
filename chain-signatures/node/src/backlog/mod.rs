@@ -828,7 +828,7 @@ mod tests {
                 sign_id_eth,
                 BacklogTransaction::Bidirectional(tx_eth.clone()),
                 SignRequestType::SignBidirectional(
-                    crate::indexer_common::SignBidirectionalEvent::Solana(SignBidirectionalEvent {
+                    crate::stream::ops::SignBidirectionalEvent::Solana(SignBidirectionalEvent {
                         sender: Default::default(),
                         serialized_transaction: vec![],
                         dest: "ethereum".to_string(),
@@ -851,7 +851,7 @@ mod tests {
                 sign_id_sol,
                 BacklogTransaction::Bidirectional(tx_sol.clone()),
                 SignRequestType::SignBidirectional(
-                    crate::indexer_common::SignBidirectionalEvent::Solana(SignBidirectionalEvent {
+                    crate::stream::ops::SignBidirectionalEvent::Solana(SignBidirectionalEvent {
                         sender: Default::default(),
                         serialized_transaction: vec![],
                         dest: "solana".to_string(),
@@ -874,7 +874,7 @@ mod tests {
                 sign_id_near,
                 BacklogTransaction::Bidirectional(tx_near.clone()),
                 SignRequestType::SignBidirectional(
-                    crate::indexer_common::SignBidirectionalEvent::Solana(SignBidirectionalEvent {
+                    crate::stream::ops::SignBidirectionalEvent::Solana(SignBidirectionalEvent {
                         sender: Default::default(),
                         serialized_transaction: vec![],
                         dest: "near".to_string(),

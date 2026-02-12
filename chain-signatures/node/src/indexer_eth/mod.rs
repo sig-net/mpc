@@ -2,7 +2,7 @@ pub mod indexer_eth_direct_rpc;
 pub mod indexer_eth_helios;
 
 use crate::backlog::Backlog;
-use crate::indexer_common::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
+use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
 
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
@@ -1191,6 +1191,7 @@ impl EthereumIndexer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn retry_failed_blocks(
         client: Arc<EthereumClient>,
         mut blocks_failed_rx: mpsc::Receiver<alloy::rpc::types::Block>,

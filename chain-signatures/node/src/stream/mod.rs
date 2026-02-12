@@ -1,18 +1,20 @@
 use crate::backlog::Backlog;
-use crate::indexer_common::{
-    process_execution_confirmed, process_respond_bidirectional_event, process_respond_event,
-    process_sign_request, recover_backlog, RespondBidirectionalEvent, SignatureRespondedEvent,
-};
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::IndexedSignRequest;
 use crate::protocol::{Chain, Sign};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::BidirectionalTxId;
+use crate::stream::ops::{
+    process_execution_confirmed, process_respond_bidirectional_event, process_respond_event,
+    process_sign_request, recover_backlog, RespondBidirectionalEvent, SignatureRespondedEvent,
+};
 
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
+
+pub mod ops;
 
 pub const CHAIN_EVENT_STREAM_SIZE: usize = 16384;
 
@@ -21,6 +23,7 @@ pub fn channel() -> (mpsc::Sender<ChainEvent>, mpsc::Receiver<ChainEvent>) {
 }
 
 /// Unified event produced by a chain stream
+#[allow(clippy::large_enum_variant)]
 pub enum ChainEvent {
     SignRequest(IndexedSignRequest),
     Respond(SignatureRespondedEvent),
@@ -169,7 +172,6 @@ pub async fn run_stream<S: ChainStream>(
 mod tests {
     use super::*;
     use crate::backlog::Backlog;
-    use crate::indexer_common::SignatureRespondedEvent;
     use crate::mesh::MeshState;
     use crate::node_client::NodeClient;
     use crate::protocol::Chain;
@@ -177,6 +179,7 @@ mod tests {
     use crate::protocol::Sign;
     use crate::protocol::SignRequestType;
     use crate::rpc::ContractStateWatcher;
+    use crate::stream::ops::SignatureRespondedEvent;
     use crate::util::current_unix_timestamp;
     use k256::Scalar;
     use mpc_primitives::SignArgs;
@@ -291,10 +294,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_handles_sign_bidirectional_block_and_recover() {
-        use crate::indexer_common::RespondBidirectionalEvent as RBE;
-        use crate::indexer_common::SignBidirectionalEvent as SBE;
-        use crate::indexer_common::SignatureRespondedEvent as SRE;
         use crate::sign_bidirectional::PendingRequestStatus;
+        use crate::stream::ops::RespondBidirectionalEvent as RBE;
+        use crate::stream::ops::SignBidirectionalEvent as SBE;
+        use crate::stream::ops::SignatureRespondedEvent as SRE;
         use signet_program::SignBidirectionalEvent;
 
         // shared storage so checkpoint persistence is visible to recovered backlog

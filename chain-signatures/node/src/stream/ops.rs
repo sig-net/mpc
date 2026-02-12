@@ -35,7 +35,7 @@ impl SignBidirectionalEvent {
     }
 
     pub(crate) fn sender_string(&self) -> anyhow::Result<String> {
-        crate::indexer_common::sender_string(self.sender(), self.source_chain())
+        sender_string(self.sender(), self.source_chain())
     }
 
     pub(crate) fn source_chain(&self) -> Chain {
@@ -256,7 +256,7 @@ impl EthereumSignatureRespondedEvent {
             U256::from_be_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
 
         let y_is_odd = Choice::from(self.v & 1);
-        let s = Scalar::from_bytes(self.s.into())?;
+        let s = Scalar::from_bytes(self.s)?;
 
         for k in 0..=1u8 {
             let r = U256::from_be_slice(&self.r);
@@ -266,9 +266,9 @@ impl EthereumSignatureRespondedEvent {
             }
 
             let x_bytes = x_u256.to_be_bytes();
-            let x_bytes: FieldBytes = FieldBytes::from_slice(&x_bytes).clone();
+            let x_bytes = FieldBytes::from_slice(&x_bytes);
 
-            if let Some(big_r) = AffinePoint::decompress(&x_bytes, y_is_odd).into_option() {
+            if let Some(big_r) = AffinePoint::decompress(x_bytes, y_is_odd).into_option() {
                 return Some(Signature::new(big_r, s, self.v));
             }
         }
@@ -589,6 +589,7 @@ pub(crate) async fn process_respond_bidirectional_event(
 
 /// Process an execution confirmation emitted by a chain client (Phase 3 generic logic).
 /// The target chain is the chain where the execution was observed.
+#[allow(clippy::too_many_arguments)]
 pub async fn process_execution_confirmed(
     tx_id: crate::sign_bidirectional::BidirectionalTxId,
     sign_id: SignId,
@@ -676,10 +677,10 @@ pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Re
 mod tests {
     use super::*;
     use crate::backlog::Backlog;
-    use crate::indexer_common::process_execution_confirmed;
     use crate::mesh::wait_threshold_active;
     use crate::node_client::NodeClient;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
+    use crate::stream::ops::process_execution_confirmed;
     use crate::util::current_unix_timestamp;
     use cait_sith::protocol::Participant;
     use k256::{ProjectivePoint, Scalar};
@@ -708,7 +709,7 @@ mod tests {
         let mut s = [0u8; 32];
         s.copy_from_slice(&s_bytes);
 
-        let v = (y_bytes[31] & 1) as u8;
+        let v: u8 = y_bytes[31] & 1;
 
         let eth_event = EthereumSignatureRespondedEvent {
             request_id: [0u8; 32],

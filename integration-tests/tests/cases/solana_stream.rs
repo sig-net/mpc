@@ -35,7 +35,7 @@ fn stream_solana(config: SolConfig) -> Result<SolanaStream> {
 /// Helper to wait for a specific event type, skipping block events
 async fn wait_for_sign_request(stream: &mut SolanaStream) -> Result<IndexedSignRequest> {
     loop {
-        match timeout(Duration::from_secs(10), stream.next_event()).await {
+        match timeout(Duration::from_secs(6), stream.next_event()).await {
             Ok(Some(ChainEvent::SignRequest(req))) => return Ok(req),
             Ok(Some(ChainEvent::Block(_))) => continue,
             Ok(Some(other)) => anyhow::bail!("Expected SignRequest, got {:?}", other),
@@ -97,7 +97,7 @@ async fn test_solana_stream_emits_blocks() -> Result<()> {
     // Collect events and verify we get block markers
     let mut found_block = false;
     for _ in 0..5 {
-        if let Ok(Some(event)) = timeout(Duration::from_secs(5), stream.next_event()).await {
+        if let Ok(Some(event)) = timeout(Duration::from_secs(3), stream.next_event()).await {
             if matches!(event, ChainEvent::Block(_)) {
                 found_block = true;
                 break;
@@ -160,7 +160,7 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     let mut sign_events = Vec::new();
     let mut caught_up = false;
     for _ in 0..20 {
-        if let Ok(Some(event)) = timeout(Duration::from_secs(2), stream2.next_event()).await {
+        if let Ok(Some(event)) = timeout(Duration::from_secs(1), stream2.next_event()).await {
             match event {
                 ChainEvent::SignRequest(req) => {
                     sign_events.push(req);
@@ -248,12 +248,12 @@ async fn test_solana_stream_concurrent_events() -> Result<()> {
     // Collect all sign request events
     let mut sign_events = Vec::new();
     for _ in 0..num_requests * 2 {
-        if let Ok(Some(event)) = timeout(Duration::from_secs(10), stream.next_event()).await {
-            if let ChainEvent::SignRequest(req) = event {
-                sign_events.push(req);
-                if sign_events.len() == num_requests {
-                    break;
-                }
+        if let Ok(Some(ChainEvent::SignRequest(req))) =
+            timeout(Duration::from_secs(5), stream.next_event()).await
+        {
+            sign_events.push(req);
+            if sign_events.len() == num_requests {
+                break;
             }
         }
     }
@@ -300,13 +300,13 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
 
     let mut checkpoint_block = None;
     for _ in 0..10 {
-        if let Ok(Some(event)) = timeout(Duration::from_secs(2), stream1.next_event()).await {
-            if let ChainEvent::Block(block) = event {
-                checkpoint_block = Some(block);
-                // Set checkpoint in backlog
-                backlog.set_processed_block(Chain::Solana, block).await;
-                break;
-            }
+        if let Ok(Some(ChainEvent::Block(block))) =
+            timeout(Duration::from_secs(1), stream1.next_event()).await
+        {
+            checkpoint_block = Some(block);
+            // Set checkpoint in backlog
+            backlog.set_processed_block(Chain::Solana, block).await;
+            break;
         }
     }
 
@@ -329,7 +329,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
         .await?;
 
     // New client should pick up new events
-    let event = timeout(Duration::from_secs(10), stream2.next_event())
+    let event = timeout(Duration::from_secs(5), stream2.next_event())
         .await
         .context("timeout waiting for event")?
         .context("client returned None")?;
