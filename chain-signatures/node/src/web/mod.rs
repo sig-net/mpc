@@ -269,13 +269,13 @@ async fn bench_metrics() -> Json<BenchMetrics> {
 async fn sync(
     Extension(state): Extension<Arc<AxumState>>,
     WithRejection(Cbor(update), _): WithRejection<Cbor<SyncUpdate>, Error>,
-) -> Result<Json<()>> {
+) -> Result<Cbor<SyncUpdate>> {
     let start = Instant::now();
-    state.sync_channel.request_update(update).await;
+    let response = state.sync_channel.request_update(update).await?;
     WEB_ENDPOINT_LATENCY
         .with_label_values(&["sync"])
         .observe(start.elapsed().as_millis() as f64);
-    Ok(Json(()))
+    Ok(Cbor(response))
 }
 
 #[derive(Debug, Deserialize)]

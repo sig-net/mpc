@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use cait_sith::protocol::Participant;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::mesh::MeshState;
@@ -23,6 +23,17 @@ const MAX_SYNC_UPDATE_REQUESTS: usize = 1024;
 /// The interval which we will try to sync with other nodes to see if they have lost track
 /// of anything.
 pub const RECURRING_SYNC_INTERVAL: Duration = Duration::from_secs(3600 * 24);
+
+/// Timeout for waiting for a sync response from the sync task
+const SYNC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, thiserror::Error)]
+pub enum SyncError {
+    #[error("failed to queue sync request")]
+    QueueFailed,
+    #[error("failed to receive sync response")]
+    ResponseFailed,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
@@ -45,8 +56,46 @@ impl SyncUpdate {
     }
 }
 
+pub struct SyncRequest {
+    pub update: SyncUpdate,
+    pub response_tx: oneshot::Sender<SyncUpdate>,
+}
+
+impl SyncRequest {
+    async fn process(self, triples: TripleStorage, presignatures: PresignatureStorage) {
+        let start = Instant::now();
+
+        let outdated_triples = if !self.update.triples.is_empty() {
+            triples
+                .remove_outdated(self.update.from, &self.update.triples)
+                .await
+        } else {
+            Vec::new()
+        };
+        let outdated_presignatures = if !self.update.presignatures.is_empty() {
+            presignatures
+                .remove_outdated(self.update.from, &self.update.presignatures)
+                .await
+        } else {
+            Vec::new()
+        };
+
+        if !outdated_triples.is_empty() || !outdated_presignatures.is_empty() {
+            tracing::info!(
+                outdated_triples = outdated_triples.len(),
+                outdated_presignatures = outdated_presignatures.len(),
+                elapsed = ?start.elapsed(),
+                "removed outdated",
+            );
+        }
+
+        // TODO: Send back a response (currently echoing the update, but this need be chaned)
+        let _ = self.response_tx.send(self.update);
+    }
+}
+
 pub struct SyncRequestReceiver {
-    updates: mpsc::Receiver<SyncUpdate>,
+    updates: mpsc::Receiver<SyncRequest>,
 }
 
 pub struct SyncTask {
@@ -167,8 +216,8 @@ impl SyncTask {
                         tracing::debug!(elapsed = ?start.elapsed(), "processed broadcast");
                     }
                 }
-                Some(req) = self.requests.updates.recv() => {
-                    tokio::spawn(req.process(self.triples.clone(), self.presignatures.clone()));
+                Some(sync_req) = self.requests.updates.recv() => {
+                    tokio::spawn(sync_req.process(self.triples.clone(), self.presignatures.clone()));
                 }
             }
         }
@@ -258,37 +307,9 @@ async fn broadcast_sync(
     );
 }
 
-impl SyncUpdate {
-    async fn process(self, triples: TripleStorage, presignatures: PresignatureStorage) {
-        let start = Instant::now();
-
-        let outdated_triples = if !self.triples.is_empty() {
-            triples.remove_outdated(self.from, &self.triples).await
-        } else {
-            Vec::new()
-        };
-        let outdated_presignatures = if !self.presignatures.is_empty() {
-            presignatures
-                .remove_outdated(self.from, &self.presignatures)
-                .await
-        } else {
-            Vec::new()
-        };
-
-        if !outdated_triples.is_empty() || !outdated_presignatures.is_empty() {
-            tracing::info!(
-                outdated_triples = outdated_triples.len(),
-                outdated_presignatures = outdated_presignatures.len(),
-                elapsed = ?start.elapsed(),
-                "removed outdated",
-            );
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct SyncChannel {
-    request_update: mpsc::Sender<SyncUpdate>,
+    request_update: mpsc::Sender<SyncRequest>,
 }
 
 impl SyncChannel {
@@ -305,10 +326,28 @@ impl SyncChannel {
         (requests, channel)
     }
 
-    pub async fn request_update(&self, update: SyncUpdate) {
-        if let Err(err) = self.request_update.send(update).await {
-            tracing::warn!(?err, "failed to request update");
+    pub async fn request_update(&self, update: SyncUpdate) -> Result<SyncUpdate, SyncError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = SyncRequest {
+            update: update.clone(),
+            response_tx,
+        };
+
+        if let Err(err) = self.request_update.send(request).await {
+            tracing::error!(?err, "failed to queue sync request");
+            return Err(SyncError::QueueFailed);
         }
+
+        tokio::time::timeout(SYNC_RESPONSE_TIMEOUT, response_rx)
+            .await
+            .map_err(|err| {
+                tracing::error!(?err, "sync response timeout");
+                SyncError::ResponseFailed
+            })?
+            .map_err(|err| {
+                tracing::error!(?err, "failed to receive sync response");
+                SyncError::ResponseFailed
+            })
     }
 }
 
