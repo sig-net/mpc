@@ -587,7 +587,7 @@ pub(crate) async fn process_respond_bidirectional_event(
     Ok(())
 }
 
-/// Process an execution confirmation emitted by a chain client (Phase 3 generic logic).
+/// Process an execution confirmation emitted by a chain client.
 /// The target chain is the chain where the execution was observed.
 #[allow(clippy::too_many_arguments)]
 pub async fn process_execution_confirmed(

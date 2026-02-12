@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
-use ethers::types::{BlockNumber, U256};
+use ethers::providers::Middleware;
+use ethers::types::{Address, BlockNumber, TransactionRequest, U256};
 use integration_tests::cluster::Cluster;
 use integration_tests::{actions, cluster, eth};
 use k256::ecdsa::VerifyingKey;
@@ -135,6 +136,10 @@ async fn test_signature_ethereum() -> Result<()> {
 /// Test that checkpoints are properly cleaned up after responses are observed
 #[test(tokio::test)]
 async fn test_proper_indexer_checkpoint() -> Result<()> {
+    for (name, value) in Chain::checkpoint_env_vars() {
+        std::env::set_var(name, value);
+    }
+
     let cluster = cluster::spawn().disable_prestockpile().ethereum().await?;
     cluster.wait().signable().await?;
 
@@ -208,7 +213,13 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     let checkpoint = checkpoints
         .get(&Chain::Ethereum)
         .expect("checkpoint not found for eth");
+    let checkpoint_height_after_request = checkpoint.block_height;
+    let checkpoint_interval = Chain::Ethereum
+        .checkpoint_interval()
+        .expect("ethereum checkpoint interval should be configured");
     tracing::info!(
+        checkpoint_height_after_request,
+        checkpoint_interval,
         pending_count = checkpoint.pending_requests.len(),
         "pending transactions in checkpoint"
     );
@@ -235,17 +246,23 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
 
     tracing::info!("signature response observed on-chain");
 
-    // Wait for indexer to process the response event and remove from backlog
-    // The indexer polls every few seconds, so we give it time
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    // Checkpoints are emitted on interval boundaries. Produce enough non-contract
+    // empty transfers so Anvil mines blocks and the indexer can publish the next
+    // checkpoint after the response has been observed.
+    produce_empty_eth_blocks(&client, checkpoint_interval).await?;
 
-    // Check checkpoint again - request should be removed
-    let checkpoints = cluster.fetch_checkpoints(node_idx).await?;
-    tracing::info!(?checkpoints, "checkpoint after response observed");
+    let min_next_checkpoint_height =
+        ((checkpoint_height_after_request / checkpoint_interval) + 1) * checkpoint_interval;
+    let checkpoint = wait_node_checkpoint(
+        &cluster,
+        node_idx,
+        Chain::Ethereum,
+        min_next_checkpoint_height,
+        Duration::from_secs(60),
+    )
+    .await?;
 
-    let checkpoint = checkpoints
-        .get(&Chain::Ethereum)
-        .expect("checkpoint not found for eth");
+    tracing::info!(?checkpoint, "checkpoint after crossing checkpoint interval");
     tracing::info!(
         pending_count = checkpoint.pending_requests.len(),
         "pending transactions count after response"
@@ -396,6 +413,29 @@ async fn submit_eth_sign_request(
         .await?
         .await?
         .context("sign transaction failed")?;
+
+    Ok(())
+}
+
+async fn produce_empty_eth_blocks(
+    client: &std::sync::Arc<eth::SandboxMiddleware>,
+    block_count: u64,
+) -> anyhow::Result<()> {
+    // Use a non-contract sink address so these transactions only advance block height.
+    let sink = Address::from_low_u64_be(0xdead_beef);
+
+    for _ in 0..block_count {
+        let tx = TransactionRequest::new()
+            .to(sink)
+            .value(U256::zero())
+            .gas(U256::from(21_000_u64));
+
+        client
+            .send_transaction(tx, None)
+            .await?
+            .await?
+            .context("empty block-pumping transaction failed")?;
+    }
 
     Ok(())
 }
