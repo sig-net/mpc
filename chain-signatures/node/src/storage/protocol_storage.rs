@@ -11,6 +11,35 @@ use tracing;
 
 use super::{owner_key, STORAGE_VERSION};
 
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    #[error("failed to connect to redis")]
+    ConnectionFailed,
+    #[error("redis operation failed: {0}")]
+    RedisFailed(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoveOutdatedResult<Id> {
+    pub removed: Vec<Id>,
+    pub not_found: Vec<Id>,
+}
+
+impl<Id> RemoveOutdatedResult<Id> {
+    pub fn new(removed: Vec<Id>, not_found: Vec<Id>) -> Self {
+        Self { removed, not_found }
+    }
+}
+
+impl<Id> Default for RemoveOutdatedResult<Id> {
+    fn default() -> Self {
+        Self {
+            removed: Vec::new(),
+            not_found: Vec::new(),
+        }
+    }
+}
+
 /// Trait for protocol artifacts that can be stored in Redis.
 pub trait ProtocolArtifact:
     ToRedisArgs + FromRedisValue + fmt::Debug + Send + Sync + 'static
@@ -221,7 +250,11 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         self.reserved.write().await.remove(&id)
     }
 
-    pub async fn remove_outdated(&self, owner: Participant, owner_shares: &[A::Id]) -> Vec<A::Id> {
+    pub async fn remove_outdated(
+        &self,
+        owner: Participant,
+        owner_shares: &[A::Id],
+    ) -> Result<RemoveOutdatedResult<A::Id>, StorageError> {
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]
             local owner_key = KEYS[2]
@@ -256,14 +289,23 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 redis.call("HDEL", artifact_key, unpack(outdated))
             end
 
-            return outdated
+            -- find shares that were shared with us but not found in our storage
+            local not_found = {}
+            for _, id in ipairs(ARGV) do
+                if redis.call("HEXISTS", artifact_key, id) == 0 then
+                    table.insert(not_found, id)
+                end
+            end
+
+            -- return both outdated and not_found
+            return {outdated, not_found}
         "#;
 
         let start = Instant::now();
         let Some(mut conn) = self.connect().await else {
-            return Vec::new();
+            return Err(StorageError::ConnectionFailed);
         };
-        let result: Result<Vec<A::Id>, _> = redis::Script::new(SCRIPT)
+        let result: Result<(Vec<A::Id>, Vec<A::Id>), _> = redis::Script::new(SCRIPT)
             .key(&self.artifact_key)
             .key(owner_key(&self.owner_keys, owner))
             // NOTE: this encodes each entry of owner_shares as a separate ARGV[index] entry.
@@ -277,7 +319,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .observe(elapsed.as_millis() as f64);
 
         match result {
-            Ok(outdated) => {
+            Ok((outdated, not_found)) => {
                 if !outdated.is_empty() {
                     tracing::info!(?outdated, ?elapsed, "removed outdated artifacts");
                     // remove outdated entries from our in-memory reserved set
@@ -292,11 +334,11 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                         used.remove(id);
                     }
                 }
-                outdated
+                Ok(RemoveOutdatedResult::new(outdated, not_found))
             }
             Err(err) => {
-                tracing::warn!(?err, ?elapsed, "failed to remove outdated artifacts");
-                Vec::new()
+                tracing::error!(?err, ?elapsed, "failed to remove outdated artifacts");
+                Err(StorageError::RedisFailed(err.to_string()))
             }
         }
     }

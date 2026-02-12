@@ -9,7 +9,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::rpc::ContractStateWatcher;
-use crate::storage::{PresignatureStorage, TripleStorage};
+use crate::storage::{PresignatureStorage, StorageError, TripleStorage};
 
 use super::contract::primitives::ParticipantInfo;
 use super::presignature::PresignatureId;
@@ -58,39 +58,65 @@ impl SyncUpdate {
 
 pub struct SyncRequest {
     pub update: SyncUpdate,
-    pub response_tx: oneshot::Sender<SyncUpdate>,
+    pub response_tx: oneshot::Sender<Result<SyncUpdate, StorageError>>,
 }
 
 impl SyncRequest {
-    async fn process(self, triples: TripleStorage, presignatures: PresignatureStorage) {
+    async fn process(
+        self,
+        triples: TripleStorage,
+        presignatures: PresignatureStorage,
+        me: Participant,
+    ) {
         let start = Instant::now();
 
         let outdated_triples = if !self.update.triples.is_empty() {
-            triples
+            match triples
                 .remove_outdated(self.update.from, &self.update.triples)
                 .await
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    tracing::error!(?err, "failed to remove outdated triples");
+                    let _ = self.response_tx.send(Err(err));
+                    return;
+                }
+            }
         } else {
-            Vec::new()
+            Default::default()
         };
         let outdated_presignatures = if !self.update.presignatures.is_empty() {
-            presignatures
+            match presignatures
                 .remove_outdated(self.update.from, &self.update.presignatures)
                 .await
+            {
+                Ok(result) => result,
+                Err(err) => {
+                    tracing::error!(?err, "failed to remove outdated presignatures");
+                    let _ = self.response_tx.send(Err(err));
+                    return;
+                }
+            }
         } else {
-            Vec::new()
+            Default::default()
         };
 
-        if !outdated_triples.is_empty() || !outdated_presignatures.is_empty() {
-            tracing::info!(
-                outdated_triples = outdated_triples.len(),
-                outdated_presignatures = outdated_presignatures.len(),
-                elapsed = ?start.elapsed(),
-                "removed outdated",
-            );
-        }
+        tracing::info!(
+            removed_triples = outdated_triples.removed.len(),
+            removed_presignatures = outdated_presignatures.removed.len(),
+            not_found_triples = outdated_triples.not_found.len(),
+            not_found_presignatures = outdated_presignatures.not_found.len(),
+            elapsed = ?start.elapsed(),
+            "processed sync update",
+        );
 
-        // TODO: Send back a response (currently echoing the update, but this need be chaned)
-        let _ = self.response_tx.send(self.update);
+        let response = SyncUpdate {
+            from: me,
+            triples: outdated_triples.not_found,
+            presignatures: outdated_presignatures.not_found,
+        };
+
+        let _ = self.response_tx.send(Ok(response));
     }
 }
 
@@ -217,7 +243,7 @@ impl SyncTask {
                     }
                 }
                 Some(sync_req) = self.requests.updates.recv() => {
-                    tokio::spawn(sync_req.process(self.triples.clone(), self.presignatures.clone()));
+                    tokio::spawn(sync_req.process(self.triples.clone(), self.presignatures.clone(), me));
                 }
             }
         }
@@ -338,7 +364,7 @@ impl SyncChannel {
             return Err(SyncError::QueueFailed);
         }
 
-        tokio::time::timeout(SYNC_RESPONSE_TIMEOUT, response_rx)
+        let result = tokio::time::timeout(SYNC_RESPONSE_TIMEOUT, response_rx)
             .await
             .map_err(|err| {
                 tracing::error!(?err, "sync response timeout");
@@ -347,7 +373,12 @@ impl SyncChannel {
             .map_err(|err| {
                 tracing::error!(?err, "failed to receive sync response");
                 SyncError::ResponseFailed
-            })
+            })?;
+
+        result.map_err(|err| {
+            tracing::error!(?err, "sync processing failed");
+            SyncError::ResponseFailed
+        })
     }
 }
 

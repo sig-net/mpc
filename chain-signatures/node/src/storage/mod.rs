@@ -6,6 +6,7 @@ pub mod triple_storage;
 
 use cait_sith::protocol::Participant;
 pub use presignature_storage::PresignatureStorage;
+pub use protocol_storage::StorageError;
 pub use triple_storage::TripleStorage;
 
 // Can be used to "clear" redis storage in case of a breaking change
