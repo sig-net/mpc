@@ -1428,6 +1428,7 @@ mod tests {
     use crate::backlog::Backlog;
     use crate::mesh::MeshState;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
+    use crate::protocol::contract::{ProtocolState, ResharingContractState, RunningContractState};
     use crate::protocol::presignature::Presignature;
     use cait_sith::protocol::Participant;
     use deadpool_redis::Runtime;
@@ -1486,8 +1487,24 @@ mod tests {
             contract_participants.insert(p, ParticipantInfo::new(id));
         }
 
-        let (contract, _tx) =
-            ContractStateWatcher::with_running(&node_id, AffinePoint::GENERATOR, threshold, contract_participants);
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &node_id,
+            AffinePoint::GENERATOR,
+            threshold,
+            contract_participants,
+        );
+        mk_sign_task_with_contract(me, participants, threshold, cfg, contract, node_id)
+    }
+
+    fn mk_sign_task_with_contract(
+        me: Participant,
+        participants: &BTreeSet<Participant>,
+        threshold: usize,
+        cfg: ProtocolConfig,
+        contract: ContractStateWatcher,
+        node_id: AccountId,
+    ) -> SignTask {
+        let me_id: u32 = me.into();
         let (_inbox, _outbox, msg) = MessageChannel::new();
         let (rpc_tx, _rpc_rx) = mpsc::channel(32);
 
@@ -1508,13 +1525,21 @@ mod tests {
         }
     }
 
+    fn mk_contract_participants(participants: &BTreeSet<Participant>) -> Participants {
+        let mut out = Participants::default();
+        for p in participants {
+            let id: u32 = (*p).into();
+            out.insert(p, ParticipantInfo::new(id));
+        }
+        out
+    }
+
     #[tokio::test]
     async fn organizer_selects_same_proposer_for_non_proposer_nodes() {
         let participants = mk_participants(0..4);
         let threshold = 3;
         let participants_vec = participants.iter().copied().collect::<Vec<_>>();
-        let expected_proposer =
-            SignOrganizer::proposer_per_round(0, &participants_vec, &[7; 32]);
+        let expected_proposer = SignOrganizer::proposer_per_round(0, &participants_vec, &[7; 32]);
 
         for me in participants
             .iter()
@@ -1690,6 +1715,169 @@ mod tests {
 
         assert!(matches!(phase, SignPhase::Organizing(_)));
         assert_eq!(state.round, 11);
+    }
+
+    #[tokio::test]
+    async fn wait_propose_times_out_and_reorganizes() {
+        let me = Participant::from(1);
+        let proposer = Participant::from(0);
+        let participants = mk_participants(0..3);
+        let threshold = 2;
+        let cfg = test_protocol_config(100);
+        let ctx = mk_sign_task(me, &participants, threshold, cfg);
+
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+            stable: participants,
+            ..MeshState::default()
+        });
+        let mut state = SignState::new(test_indexed_request(21), mesh_rx);
+        state.round = 2;
+        state.budget.reset(Duration::from_millis(5));
+
+        let (_task_tx, mut task_rx) = mpsc::channel(1);
+        let result = SignPositor::wait_propose(&ctx, &mut state, &mut task_rx, proposer).await;
+
+        assert!(matches!(result, Err(SignPhase::Organizing(_))));
+        assert_eq!(state.round, 3);
+    }
+
+    #[tokio::test]
+    async fn wait_propose_rejects_non_proposer_then_times_out() {
+        let me = Participant::from(2);
+        let proposer = Participant::from(0);
+        let participants = mk_participants(0..4);
+        let threshold = 3;
+        let cfg = test_protocol_config(100);
+        let ctx = mk_sign_task(me, &participants, threshold, cfg);
+
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+            stable: participants,
+            ..MeshState::default()
+        });
+        let mut state = SignState::new(test_indexed_request(22), mesh_rx);
+        state.round = 5;
+        state.budget.reset(Duration::from_millis(10));
+
+        let (task_tx, mut task_rx) = mpsc::channel(4);
+        task_tx
+            .send(SignTaskMessage::PositMessage {
+                presignature_id: 7001,
+                round: 5,
+                from: Participant::from(3),
+                action: PositAction::Propose,
+            })
+            .await
+            .unwrap();
+        drop(task_tx);
+
+        let result = SignPositor::wait_propose(&ctx, &mut state, &mut task_rx, proposer).await;
+
+        assert!(matches!(result, Err(SignPhase::Organizing(_))));
+        assert_eq!(state.round, 6);
+    }
+
+    #[tokio::test]
+    async fn sign_state_buffering_keeps_only_highest_round_messages() {
+        let participants = mk_participants(0..3);
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+            stable: participants,
+            ..MeshState::default()
+        });
+        let mut state = SignState::new(test_indexed_request(23), mesh_rx);
+
+        state.store_future_posit_message(SignTaskMessage::PositMessage {
+            presignature_id: 1,
+            round: 8,
+            from: Participant::from(1),
+            action: PositAction::Accept,
+        });
+        state.store_future_posit_message(SignTaskMessage::PositMessage {
+            presignature_id: 2,
+            round: 8,
+            from: Participant::from(2),
+            action: PositAction::Reject,
+        });
+        state.store_future_posit_message(SignTaskMessage::PositMessage {
+            presignature_id: 3,
+            round: 9,
+            from: Participant::from(1),
+            action: PositAction::Accept,
+        });
+
+        assert_eq!(state.highest_seen_round, 9);
+        assert_eq!(state.buffered_messages.len(), 1);
+
+        // Not at highest round yet, nothing should be consumed.
+        state.round = 8;
+        assert!(state.take_buffered_posit_message().is_none());
+
+        state.round = 9;
+        let msg = state.take_buffered_posit_message();
+        assert!(msg.is_some());
+        assert!(state.take_buffered_posit_message().is_none());
+    }
+
+    #[tokio::test]
+    async fn sign_task_aborts_immediately_when_contract_is_resharing() {
+        let me = Participant::from(0);
+        let participants = mk_participants(0..3);
+        let threshold = 2;
+        let node_id: AccountId = "p-0".parse().unwrap();
+        let cfg = test_protocol_config(100);
+
+        let contract_participants = mk_contract_participants(&participants);
+        let resharing_state = ProtocolState::Resharing(ResharingContractState {
+            old_epoch: 0,
+            old_participants: contract_participants.clone(),
+            new_participants: contract_participants,
+            threshold,
+            public_key: AffinePoint::GENERATOR,
+            finished_votes: Default::default(),
+            cancel_votes: Default::default(),
+        });
+        let (contract, _tx) = ContractStateWatcher::with(&node_id, resharing_state);
+
+        let task = mk_sign_task_with_contract(me, &participants, threshold, cfg, contract, node_id);
+
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+            stable: participants,
+            ..MeshState::default()
+        });
+        let (_task_tx, task_rx) = mpsc::channel(1);
+
+        let result = task.run(test_indexed_request(24), mesh_rx, task_rx).await;
+        assert!(matches!(result, Err(SignError::Aborted)));
+    }
+
+    #[tokio::test]
+    async fn sign_task_aborts_when_epoch_changes() {
+        let me = Participant::from(1);
+        let participants = mk_participants(0..4);
+        let threshold = 3;
+        let node_id: AccountId = "p-1".parse().unwrap();
+        let cfg = test_protocol_config(100);
+
+        let running_state = ProtocolState::Running(RunningContractState {
+            epoch: 42,
+            participants: mk_contract_participants(&participants),
+            threshold,
+            public_key: AffinePoint::GENERATOR,
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+        });
+        let (contract, _tx) = ContractStateWatcher::with(&node_id, running_state);
+
+        let task = mk_sign_task_with_contract(me, &participants, threshold, cfg, contract, node_id);
+
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+            stable: participants,
+            ..MeshState::default()
+        });
+        let (_task_tx, task_rx) = mpsc::channel(1);
+
+        let result = task.run(test_indexed_request(25), mesh_rx, task_rx).await;
+        assert!(matches!(result, Err(SignError::Aborted)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
