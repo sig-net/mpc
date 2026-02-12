@@ -44,18 +44,24 @@ pub enum ChainEvent {
     },
 }
 
-#[derive(Debug, Clone)]
-pub enum ExecutionResult {
-    Success { output: Vec<u8> },
-    Failed,
-}
-// TODO: need to add sign_id to each event for better logging.
 impl std::fmt::Debug for ChainEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ChainEvent::SignRequest(r) => f.debug_tuple("SignRequest").field(&r.id).finish(),
-            ChainEvent::Respond(_) => write!(f, "Respond(...)"),
-            ChainEvent::RespondBidirectional(_) => write!(f, "RespondBidirectional(...)"),
+            ChainEvent::SignRequest(r) => f
+                .debug_tuple("SignRequest")
+                .field(&r.id)
+                .field(&r.chain.as_str())
+                .finish(),
+            ChainEvent::Respond(ev) => f
+                .debug_tuple("Respond")
+                .field(&ev.request_id())
+                .field(&ev.source_chain().as_str())
+                .finish(),
+            ChainEvent::RespondBidirectional(ev) => f
+                .debug_tuple("RespondBidirectional")
+                .field(&ev.request_id())
+                .field(&ev.source_chain().as_str())
+                .finish(),
             ChainEvent::Block(b) => write!(f, "Block({b})"),
             ChainEvent::ExecutionConfirmed {
                 tx_id,
@@ -73,6 +79,12 @@ impl std::fmt::Debug for ChainEvent {
                 .finish(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum ExecutionResult {
+    Success { output: Vec<u8> },
+    Failed,
 }
 
 #[allow(async_fn_in_trait)]

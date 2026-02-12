@@ -404,9 +404,8 @@ impl Backlog {
             );
             return None;
         };
-        tracing::info!(?chain, ?id, ?status, before = ?tx.status(), "set_status: updating status");
+        tracing::info!(?chain, ?id, before = ?tx.status(), after = ?status, "set_status: updating");
         tx.set_status(status);
-        tracing::info!(?chain, ?id, after = ?tx.status(), "set_status: updated status");
         Some(tx.clone())
     }
 
