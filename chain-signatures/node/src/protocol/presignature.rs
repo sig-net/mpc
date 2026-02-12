@@ -251,7 +251,7 @@ impl PresignatureGenerator {
                     crate::metrics::protocols::PRESIGNATURE_POKES_CNT.observe(total_pokes as f64);
 
                     tracing::info!(
-                        id = self.id,
+                        id = ?self.id,
                         ?me,
                         owner = ?self.owner,
                         big_r = ?output.big_r.to_base58(),
@@ -482,7 +482,7 @@ impl PresignatureSpawner {
         let participants = intersect_vec(&[active, &triples.artifact.triple0.public.participants]);
         if participants.len() < self.threshold {
             tracing::warn!(
-                pair_id,
+                ?pair_id,
                 ?active,
                 ?participants,
                 "intersection < threshold, trashing triple pair"
@@ -851,7 +851,7 @@ impl PendingTriples {
         match triples {
             Ok(triples) => Some(triples),
             Err(_) => {
-                tracing::warn!(pair_id, "timeout waiting for triple pair to be available");
+                tracing::warn!(?pair_id, "timeout waiting for triple pair to be available");
                 None
             }
         }

@@ -291,7 +291,7 @@ impl MessageInbox {
                     if self.signature.remove(&(sign_id, presignature_id)).is_none() {
                         tracing::warn!(
                             ?sign_id,
-                            presignature_id,
+                            ?presignature_id,
                             "trying to unsub from an unknown signature subscription"
                         );
                     }
@@ -577,7 +577,7 @@ impl MessageChannel {
         else {
             tracing::warn!(
                 ?sign_id,
-                presignature_id,
+                ?presignature_id,
                 "failed to subscribe for signature"
             );
             return mpsc::channel(1).1;
@@ -587,7 +587,7 @@ impl MessageChannel {
             _ => {
                 tracing::warn!(
                     ?sign_id,
-                    presignature_id,
+                    ?presignature_id,
                     "received unexpected subscribe response for signature"
                 );
                 mpsc::channel(1).1
@@ -607,7 +607,7 @@ impl MessageChannel {
         {
             tracing::warn!(
                 ?sign_id,
-                presignature_id,
+                ?presignature_id,
                 "unable to send unsubscribe request for signature"
             );
         };
