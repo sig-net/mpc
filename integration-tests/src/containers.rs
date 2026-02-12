@@ -654,8 +654,6 @@ impl Solana {
             .arg("127.0.0.1")
             .arg("--reset")
             .arg("--quiet")
-            .stdout(async_process::Stdio::null())
-            .stderr(async_process::Stdio::null())
             .spawn()
             .expect("failed to start solana-test-validator");
 

@@ -10,6 +10,7 @@ use integration_tests::containers::EthereumSandbox;
 use integration_tests::eth::{
     self, chain_signatures_contract, ChainSignaturesContract, SignRequest,
 };
+use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_node::backlog::{Backlog, BacklogTransaction, SignTx};
 use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::protocol::Chain;
@@ -445,19 +446,25 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
         }
     };
 
-    // Prepare a dummy signature and respond via the contract. The contract does not
-    // validate signature contents, so we can use placeholder values that map onto the
-    // indexer's expected v/r/s parsing.
-    let v: u8 = 27;
-    let r = [7u8; 32];
-    let s = [11u8; 32];
+    // Prepare a valid on-curve signature payload and respond via the contract.
+    let expected_big_r = k256::ProjectivePoint::GENERATOR.to_affine();
+    let expected_s = k256::Scalar::from(11u64);
+    let expected_recovery_id: u8 = 1;
+
+    let enc = k256::ProjectivePoint::GENERATOR.to_encoded_point(false);
+    let x = enc.x().expect("generator must have x coordinate");
+    let y = enc.y().expect("generator must have y coordinate");
+
+    let big_r = chain_signatures_contract::AffinePoint {
+        x: U256::from_big_endian(x),
+        y: U256::from_big_endian(y),
+    };
+    let expected_s_bytes = expected_s.to_bytes();
+    let s = U256::from_big_endian(expected_s_bytes.as_slice());
     let signature = chain_signatures_contract::Signature {
-        big_r: chain_signatures_contract::AffinePoint {
-            x: U256::from_big_endian(&r),
-            y: U256::zero(),
-        },
-        s: U256::from_big_endian(&s),
-        recovery_id: v,
+        big_r,
+        s,
+        recovery_id: expected_recovery_id,
     };
 
     let response = chain_signatures_contract::Response {
@@ -487,9 +494,9 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
         match next_event_within(&mut stream, Duration::from_secs(10)).await? {
             ChainEvent::Respond(SignatureRespondedEvent::Ethereum(ev)) => {
                 assert_eq!(ev.request_id, sign_req.id.request_id);
-                assert_eq!(ev.v, v);
-                assert_eq!(ev.r, r);
-                assert_eq!(ev.s, s);
+                assert_eq!(ev.signature.big_r, expected_big_r);
+                assert_eq!(ev.signature.s, expected_s);
+                assert_eq!(ev.signature.recovery_id, expected_recovery_id);
                 saw_respond = true;
                 break;
             }

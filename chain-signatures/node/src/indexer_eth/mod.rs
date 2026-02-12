@@ -15,9 +15,10 @@ use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::rpc::types::Log;
 use alloy::sol_types::{sol, SolEvent};
-use k256::Scalar;
+use k256::elliptic_curve::sec1::FromEncodedPoint;
+use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
-use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{SignArgs, SignId, Signature as MpcSignature, LATEST_MPC_KEY_VERSION};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -495,17 +496,31 @@ async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEvent>) 
         // responder: offset 0..32 (address right-padded)
         let responder_addr = Address::from_slice(&data[12..32]);
         // signature struct encoding layout:
-        // bigR.x at 32..64, bigR.y at 64..96, s at 96..128, recoveryId at 128..160
-        let r: [u8; 32] = data[32..64].try_into().unwrap();
-        let s: [u8; 32] = data[96..128].try_into().unwrap();
-        let v = data[128 + 31];
+        // bigR.x at 32..64, bigR.y at 64..96, s at 96..128, recoveryId at 159
+        let big_r_x = &data[32..64];
+        let big_r_y = &data[64..96];
+        let s_bytes: [u8; 32] = data[96..128].try_into().unwrap();
+        let recovery_id = data[159];
+
+        let x_field = FieldBytes::from_slice(big_r_x);
+        let y_field = FieldBytes::from_slice(big_r_y);
+        let encoded_r = EncodedPoint::from_affine_coordinates(x_field, y_field, false);
+        let Some(big_r) = K256AffinePoint::from_encoded_point(&encoded_r).into_option() else {
+            tracing::warn!(?sign_id, "ethereum respond event, invalid big_r point");
+            continue;
+        };
+
+        let Some(s) = Scalar::from_bytes(s_bytes) else {
+            tracing::warn!(?sign_id, "ethereum respond event, invalid s scalar");
+            continue;
+        };
+
+        let signature = MpcSignature::new(big_r, s, recovery_id);
 
         let eth_event = EthereumSignatureRespondedEvent {
             request_id: sign_id.request_id,
             responder: responder_addr,
-            v,
-            r,
-            s,
+            signature,
         };
 
         let respond_event = SignatureRespondedEvent::Ethereum(eth_event);

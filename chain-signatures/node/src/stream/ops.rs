@@ -14,7 +14,6 @@ use crate::stream::ExecutionResult;
 
 use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
-use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{SignId, Signature};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -179,10 +178,8 @@ impl RespondBidirectionalEvent {
 pub struct EthereumSignatureRespondedEvent {
     pub request_id: [u8; 32],
     pub responder: alloy::primitives::Address,
-    // Raw signature fields (v, r, s) if present in Ethereum logs. May be zero-filled when not parsed.
-    pub v: u8,
-    pub r: [u8; 32],
-    pub s: [u8; 32],
+    /// Parsed MPC signature from Ethereum logs.
+    pub signature: Signature,
 }
 
 #[derive(Clone, Debug)]
@@ -212,68 +209,14 @@ impl SignatureRespondedEvent {
     }
 
     /// Convert the contained event into an `mpc_primitives::Signature`.
-    ///
-    /// For `Ethereum` variant we attempt to reconstruct the Affine `big_r`
-    /// from the provided `r` and `v` using field arithmetic (try x = r and
-    /// x = r + n) and take the solution whose y parity matches `v`.
     pub fn signature(&self) -> Signature {
         match self {
             SignatureRespondedEvent::Solana(event) => {
                 crate::indexer_sol::to_mpc_signature(event.signature.clone()).unwrap()
             }
             SignatureRespondedEvent::Hydration(event) => event.signature.clone(),
-            SignatureRespondedEvent::Ethereum(event) => {
-                // Try reconstructing a real signature; fall back to zeroed values
-                // (previous behavior) if reconstruction fails for any reason.
-                match event.to_mpc_signature() {
-                    Some(sig) => sig,
-                    None => {
-                        tracing::warn!(?event.request_id, "Failed to reconstruct ethereum Signature from logs, using fallback signature");
-                        let big_r = k256::ProjectivePoint::GENERATOR.to_affine();
-                        let s = k256::Scalar::from(0u64);
-                        mpc_primitives::Signature::new(big_r, s, event.v)
-                    }
-                }
-            }
+            SignatureRespondedEvent::Ethereum(event) => event.signature.clone(),
         }
-    }
-}
-
-impl EthereumSignatureRespondedEvent {
-    /// Attempt to build an `mpc_primitives::Signature` from (v, r, s) fields
-    /// emitted in the Ethereum event.
-    pub fn to_mpc_signature(&self) -> Option<Signature> {
-        use k256::elliptic_curve::{
-            bigint::{Encoding, U256},
-            point::DecompressPoint,
-            subtle::Choice,
-        };
-        use k256::{AffinePoint, FieldBytes, Scalar};
-
-        const P: U256 =
-            U256::from_be_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
-        const N: U256 =
-            U256::from_be_hex("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
-
-        let y_is_odd = Choice::from(self.v & 1);
-        let s = Scalar::from_bytes(self.s)?;
-
-        for k in 0..=1u8 {
-            let r = U256::from_be_slice(&self.r);
-            let x_u256 = if k == 1 { r.saturating_add(&N) } else { r };
-            if x_u256 >= P {
-                continue;
-            }
-
-            let x_bytes = x_u256.to_be_bytes();
-            let x_bytes = FieldBytes::from_slice(&x_bytes);
-
-            if let Some(big_r) = AffinePoint::decompress(x_bytes, y_is_odd).into_option() {
-                return Some(Signature::new(big_r, s, self.v));
-            }
-        }
-
-        None
     }
 }
 
@@ -691,44 +634,22 @@ mod tests {
     use tokio::time::timeout;
 
     #[test]
-    fn ethereum_signature_reconstruction_roundtrip() {
-        // Encode generator x,y bytes (avoid trait method ambiguity)
-        use k256::elliptic_curve::sec1::ToEncodedPoint;
-        let enc = ProjectivePoint::GENERATOR.to_encoded_point(false);
-        let x_bytes = enc.x().unwrap().as_slice();
-        let y_bytes = enc.y().unwrap().as_slice();
-        let orig_r_affine = ProjectivePoint::GENERATOR.to_affine(); // keep value for later assertion
-
-        // r = x coordinate
-        let mut r = [0u8; 32];
-        r.copy_from_slice(x_bytes);
-
-        // s = arbitrary small scalar
+    fn ethereum_signature_respond_event_conversion() {
+        let big_r = ProjectivePoint::GENERATOR.to_affine();
         let s_scalar = Scalar::from(5u64);
-        let s_bytes = s_scalar.to_bytes();
-        let mut s = [0u8; 32];
-        s.copy_from_slice(&s_bytes);
-
-        let v: u8 = y_bytes[31] & 1;
+        let recovery_id: u8 = 1;
 
         let eth_event = EthereumSignatureRespondedEvent {
             request_id: [0u8; 32],
             responder: alloy::primitives::Address::from_slice(&[0u8; 20]),
-            v,
-            r,
-            s,
+            signature: Signature::new(big_r, s_scalar, recovery_id),
         };
 
-        let sig_opt = eth_event.to_mpc_signature();
-        assert!(sig_opt.is_some());
-        let sig = sig_opt.unwrap();
-
         // check fields
-        assert_eq!(sig.recovery_id, v);
+        let sig = eth_event.signature;
+        assert_eq!(sig.recovery_id, recovery_id);
         assert_eq!(sig.s, s_scalar);
-
-        // big_r should match orig_r_affine
-        assert_eq!(sig.big_r, orig_r_affine);
+        assert_eq!(sig.big_r, big_r);
     }
 
     #[tokio::test]
