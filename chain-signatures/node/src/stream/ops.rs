@@ -10,7 +10,7 @@ use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PendingRequestStatus};
-use crate::stream::ExecutionResult;
+use crate::stream::ExecutionOutcome;
 
 use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
@@ -538,7 +538,7 @@ pub async fn process_execution_confirmed(
     sign_id: SignId,
     source_chain: Chain,
     block_height: u64,
-    result: ExecutionResult,
+    result: ExecutionOutcome,
     backlog: &Backlog,
     sign_tx: mpsc::Sender<Sign>,
     total_timeout: Duration,
@@ -569,8 +569,8 @@ pub async fn process_execution_confirmed(
 
     // Update the status on the source chain
     let status = match result {
-        ExecutionResult::Success { .. } => PendingRequestStatus::Success,
-        ExecutionResult::Failed => PendingRequestStatus::Failed,
+        ExecutionOutcome::Success { .. } => PendingRequestStatus::Success,
+        ExecutionOutcome::Failed => PendingRequestStatus::Failed,
     };
 
     let set_res = backlog
@@ -589,9 +589,9 @@ pub async fn process_execution_confirmed(
     let completed_tx = CompletedTx::new(pending_tx, block_height);
 
     let sign_request = match result {
-        ExecutionResult::Success { output } => completed_tx
+        ExecutionOutcome::Success { output } => completed_tx
             .create_sign_request_from_serialized_output(source_chain, output, total_timeout)?,
-        ExecutionResult::Failed => {
+        ExecutionOutcome::Failed => {
             completed_tx
                 .create_failed_sign_request(source_chain, total_timeout)
                 .await?
@@ -800,7 +800,7 @@ mod tests {
             sign_id,
             tx.source_chain,
             123u64,
-            ExecutionResult::Success { output: vec![] },
+            ExecutionOutcome::Success { output: vec![] },
             &backlog,
             sign_tx,
             Duration::from_secs(30),
@@ -904,7 +904,7 @@ mod tests {
             sign_id,
             tx.source_chain,
             456u64,
-            ExecutionResult::Failed,
+            ExecutionOutcome::Failed,
             &backlog,
             sign_tx,
             Duration::from_secs(30),

@@ -8,7 +8,7 @@ use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
 use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::PendingRequestStatus;
-use crate::stream::{ChainEvent, ChainStream, ExecutionResult};
+use crate::stream::{ChainEvent, ChainStream, ExecutionOutcome};
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
@@ -1061,7 +1061,7 @@ impl EthereumIndexer {
                             ?sign_id,
                             "extracted transaction output for bidirectional tx"
                         );
-                        ExecutionResult::Success {
+                        ExecutionOutcome::Success {
                             output: serialized_output,
                         }
                     }
@@ -1072,11 +1072,11 @@ impl EthereumIndexer {
                             ?err,
                             "Failed to extract transaction output for bidirectional tx, using empty output"
                         );
-                        ExecutionResult::Success { output: vec![] }
+                        ExecutionOutcome::Success { output: vec![] }
                     }
                 }
             } else {
-                ExecutionResult::Failed
+                ExecutionOutcome::Failed
             };
 
             events.push(ChainEvent::ExecutionConfirmed {
@@ -1125,7 +1125,7 @@ impl EthereumIndexer {
                     sign_id,
                     source_chain: tx.source_chain,
                     block_height: block_number,
-                    result: ExecutionResult::Failed,
+                    result: ExecutionOutcome::Failed,
                 });
             }
         }

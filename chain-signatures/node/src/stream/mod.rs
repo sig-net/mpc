@@ -40,7 +40,7 @@ pub enum ChainEvent {
         sign_id: mpc_primitives::SignId,
         source_chain: Chain,
         block_height: u64,
-        result: ExecutionResult,
+        result: ExecutionOutcome,
     },
 }
 
@@ -82,7 +82,7 @@ impl std::fmt::Debug for ChainEvent {
 }
 
 #[derive(Debug, Clone)]
-pub enum ExecutionResult {
+pub enum ExecutionOutcome {
     Success { output: Vec<u8> },
     Failed,
 }
