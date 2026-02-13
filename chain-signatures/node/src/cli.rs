@@ -382,14 +382,24 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     Duration::from_secs(sol.unwrap().total_timeout),
                 ));
             }
-            tokio::spawn(indexer_hydration::run(
-                hydration,
-                sign_tx,
-                backlog,
-                contract_watcher,
-                mesh_state,
-                client,
-            ));
+            // Prefer unified ChainStream path for Hydration. Fall back to disabled/no-op when config is absent.
+            if let Some(h_cfg) = hydration.as_ref() {
+                if let Some(hyd_stream) = indexer_hydration::HydrationStream::new(hydration.clone())
+                {
+                    let timeout = Duration::from_secs(h_cfg.total_timeout);
+                    tokio::spawn(run_stream(
+                        hyd_stream,
+                        sign_tx.clone(),
+                        backlog.clone(),
+                        contract_watcher.clone(),
+                        mesh_state.clone(),
+                        client.clone(),
+                        timeout,
+                    ));
+                }
+            } else {
+                tracing::info!("hydration indexer not configured");
+            }
             tracing::info!("protocol http server spawned");
             protocol_handle.await?;
             web_handle.await?;
