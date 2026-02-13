@@ -1,11 +1,11 @@
 use crate::backlog::Backlog;
-use crate::indexer_common::SignatureEvent;
 use crate::indexer_sol::MAX_SECP256K1_SCALAR;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
+use crate::stream::ops::SignatureEvent;
 use alloy_sol_types::SolValue;
 use anyhow::{anyhow, Result};
 use ethabi::{encode, Token};
@@ -294,7 +294,7 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             total_timeout,
             sign_request_type: SignRequestType::SignBidirectional(
-                crate::indexer_common::SignBidirectionalEvent::Hydration(self.clone()),
+                crate::stream::ops::SignBidirectionalEvent::Hydration(self.clone()),
             ),
         })
     }
@@ -411,7 +411,7 @@ pub async fn run(
     let legacy_rpc = LegacyRpcMethods::<SubstrateConfig>::new(rpc_client);
 
     // Wait for threshold to be available
-    crate::indexer_common::recover_backlog(
+    crate::stream::ops::recover_backlog(
         &backlog,
         &mut contract_watcher,
         &mut mesh_state,
@@ -513,7 +513,7 @@ pub async fn run(
 
                 let entropy = sp_core::hashing::blake2_256(ev.bytes());
 
-                if let Err(e) = crate::indexer_common::process_sign_event(
+                if let Err(e) = crate::stream::ops::process_sign_event(
                     Box::new(event),
                     entropy,
                     sign_tx.clone(),
@@ -538,8 +538,8 @@ pub async fn run(
                     "Hydration::Signet::SignatureResponded in block #{number} ({hash:?}): {:?}",
                     event
                 );
-                if let Err(e) = crate::indexer_common::process_respond_event(
-                    crate::indexer_common::SignatureRespondedEvent::Hydration(event),
+                if let Err(e) = crate::stream::ops::process_respond_event(
+                    crate::stream::ops::SignatureRespondedEvent::Hydration(event),
                     sign_tx.clone(),
                     &mut contract_watcher,
                     &backlog,
@@ -568,7 +568,7 @@ pub async fn run(
 
                 let entropy = sp_core::hashing::blake2_256(ev.bytes());
 
-                if let Err(e) = crate::indexer_common::process_sign_event(
+                if let Err(e) = crate::stream::ops::process_sign_event(
                     Box::new(event),
                     entropy,
                     sign_tx.clone(),
@@ -595,8 +595,8 @@ pub async fn run(
                     "Hydration::Signet::RespondBidirectionalEvent in block #{number} ({hash:?}): {:?}",
                     event
                 );
-                if let Err(e) = crate::indexer_common::process_respond_bidirectional_event(
-                    crate::indexer_common::RespondBidirectionalEvent::Hydration(event),
+                if let Err(e) = crate::stream::ops::process_respond_bidirectional_event(
+                    crate::stream::ops::RespondBidirectionalEvent::Hydration(event),
                     sign_tx.clone(),
                     &backlog,
                 )

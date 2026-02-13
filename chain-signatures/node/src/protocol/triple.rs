@@ -231,7 +231,7 @@ impl TripleGenerator {
                     let pair_is_mine = triple_owner == self.me;
 
                     tracing::debug!(
-                        id = self.id,
+                        id = ?self.id,
                         me = ?self.me,
                         proposer = ?self.proposer,
                         ?triple_owner,
@@ -504,7 +504,7 @@ impl TripleSpawner {
             )));
         };
 
-        tracing::info!(id, "starting protocol to generate a new triple");
+        tracing::info!(?id, "starting protocol to generate a new triple");
         let generator = TripleGenerator::new(
             id,
             self.me,

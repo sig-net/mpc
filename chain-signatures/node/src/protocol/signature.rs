@@ -312,7 +312,7 @@ impl SignOrganizer {
 
             let presignature_id = taken.artifact.id;
 
-            tracing::info!(?sign_id, presignature_id, "proposer got presignature");
+            tracing::info!(?sign_id, ?presignature_id, "proposer got presignature");
 
             // broadcast to participants and let them reject if they don't have the presignature.
             for &p in &participants {
@@ -421,7 +421,7 @@ impl SignPositor {
                 if from == &proposer {
                     tracing::info!(
                         ?sign_id,
-                        presignature_id,
+                        ?presignature_id,
                         ?from,
                         "deliberator received Propose"
                     );
@@ -780,7 +780,7 @@ impl SignGenerator {
         tracing::info!(
             me = ?ctx.me,
             ?sign_id,
-            presignature_id,
+            ?presignature_id,
             "starting protocol to generate a new signature",
         );
 
@@ -831,11 +831,11 @@ impl SignGenerator {
         {
             Ok(Some(msg)) => Ok(msg),
             Ok(None) => {
-                tracing::warn!(?sign_id, presignature_id, "signature generation aborted");
+                tracing::warn!(?sign_id, ?presignature_id, "signature generation aborted");
                 Err(SignError::Aborted)
             }
             Err(_err) => {
-                tracing::warn!(?sign_id, presignature_id, "signature generation timeout");
+                tracing::warn!(?sign_id, ?presignature_id, "signature generation timeout");
                 Err(SignError::Aborted)
             }
         }
@@ -936,7 +936,7 @@ impl SignGenerator {
                     tracing::info!(
                         ?sign_id,
                         ?me,
-                        presignature_id,
+                        ?presignature_id,
                         big_r = ?big_r.to_base58(),
                         ?s,
                         elapsed = ?self.created.elapsed(),

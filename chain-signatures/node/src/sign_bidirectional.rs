@@ -67,7 +67,7 @@ pub struct BidirectionalTx {
 
 impl BidirectionalTx {
     pub(crate) fn sender_string(&self) -> anyhow::Result<String> {
-        crate::indexer_common::sender_string(self.sender, self.source_chain)
+        crate::stream::ops::sender_string(self.sender, self.source_chain)
     }
 
     pub(crate) fn epsilon(&self, path: &str) -> anyhow::Result<Scalar> {

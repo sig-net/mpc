@@ -465,6 +465,8 @@ impl EthereumSandbox {
             chain_id_arg,
             "--mnemonic".to_string(),
             Self::DEFAULT_MNEMONIC.to_string(),
+            "--block-time".to_string(),
+            "1".to_string(),
         ];
 
         let request = if cfg!(feature = "docker-test") {

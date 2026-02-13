@@ -5,7 +5,7 @@ pub mod cli;
 pub mod config;
 pub mod gcp;
 pub mod indexer;
-pub mod indexer_common;
+
 pub mod indexer_eth;
 pub mod indexer_hydration;
 pub mod indexer_sol;
@@ -19,6 +19,7 @@ pub mod respond_bidirectional;
 pub mod rpc;
 pub mod sign_bidirectional;
 pub mod storage;
+pub mod stream;
 pub mod types;
 pub mod util;
 pub mod web;

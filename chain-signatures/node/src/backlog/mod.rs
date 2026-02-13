@@ -221,11 +221,9 @@ impl Backlog {
         chain: Chain,
         id: SignId,
         tx: BacklogTransaction,
-        sign_request_type: SignRequestType,
+        sign_type: SignRequestType,
     ) -> Option<BacklogTransaction> {
-        // Also track the sign request type
-        self.set_sign_request_type(chain, id, sign_request_type)
-            .await;
+        self.set_sign_request_type(chain, id, sign_type).await;
 
         let (prev, len) = {
             let mut requests = self.requests.write().await;
@@ -393,8 +391,20 @@ impl Backlog {
         status: PendingRequestStatus,
     ) -> Option<BacklogTransaction> {
         let mut requests = self.requests.write().await;
-        let pending = requests.get_mut(&chain)?;
-        let tx = pending.requests.get_mut(id)?;
+        let Some(pending) = requests.get_mut(&chain) else {
+            tracing::warn!(?chain, ?id, ?status, "set_status: chain not found");
+            return None;
+        };
+        let Some(tx) = pending.requests.get_mut(id) else {
+            tracing::warn!(
+                ?chain,
+                ?id,
+                ?status,
+                "set_status: tx id not found in chain pending requests"
+            );
+            return None;
+        };
+        tracing::info!(?chain, ?id, before = ?tx.status(), after = ?status, "set_status: updating");
         tx.set_status(status);
         Some(tx.clone())
     }
@@ -439,11 +449,21 @@ impl Backlog {
     /// Set the processed block height for a specific chain.
     /// Returns Some(Checkpoint) if a checkpoint should be created and submitted at this block height.
     pub async fn set_processed_block(&self, chain: Chain, height: u64) -> Option<Checkpoint> {
+        let interval = chain.checkpoint_interval()?;
+        self.set_processed_block_interval(chain, height, interval)
+            .await
+    }
+
+    pub async fn set_processed_block_interval(
+        &self,
+        chain: Chain,
+        height: u64,
+        interval: u64,
+    ) -> Option<Checkpoint> {
         let mut requests = self.requests.write().await;
         let pending = requests.entry(chain).or_default();
         pending.set_processed_block(height);
 
-        let interval = chain.checkpoint_interval();
         tracing::trace!(
             ?chain,
             height,
@@ -452,7 +472,7 @@ impl Backlog {
         );
 
         // create a checkpoint on interval
-        if height.is_multiple_of(interval?) {
+        if height.is_multiple_of(interval) {
             let tx_count = pending.len();
             drop(requests);
             let checkpoint = self.checkpoint(chain).await;
@@ -807,7 +827,7 @@ mod tests {
                 sign_id_eth,
                 BacklogTransaction::Bidirectional(tx_eth.clone()),
                 SignRequestType::SignBidirectional(
-                    crate::indexer_common::SignBidirectionalEvent::Solana(SignBidirectionalEvent {
+                    crate::stream::ops::SignBidirectionalEvent::Solana(SignBidirectionalEvent {
                         sender: Default::default(),
                         serialized_transaction: vec![],
                         dest: "ethereum".to_string(),
@@ -830,7 +850,7 @@ mod tests {
                 sign_id_sol,
                 BacklogTransaction::Bidirectional(tx_sol.clone()),
                 SignRequestType::SignBidirectional(
-                    crate::indexer_common::SignBidirectionalEvent::Solana(SignBidirectionalEvent {
+                    crate::stream::ops::SignBidirectionalEvent::Solana(SignBidirectionalEvent {
                         sender: Default::default(),
                         serialized_transaction: vec![],
                         dest: "solana".to_string(),
@@ -853,7 +873,7 @@ mod tests {
                 sign_id_near,
                 BacklogTransaction::Bidirectional(tx_near.clone()),
                 SignRequestType::SignBidirectional(
-                    crate::indexer_common::SignBidirectionalEvent::Solana(SignBidirectionalEvent {
+                    crate::stream::ops::SignBidirectionalEvent::Solana(SignBidirectionalEvent {
                         sender: Default::default(),
                         serialized_transaction: vec![],
                         dest: "near".to_string(),
@@ -1155,6 +1175,59 @@ mod tests {
         let watchers = recovered.pending_execution(Chain::Ethereum).await;
         assert_eq!(watchers.len(), 1);
         assert!(watchers.contains_key(&tx.id));
+    }
+
+    #[tokio::test]
+    async fn test_watch_unwatch_and_set_status() {
+        use k256::Scalar;
+        let backlog = Backlog::new();
+        let tx = create_test_tx(7, PendingRequestStatus::PendingExecution);
+        let sign_id = SignId::new(tx.request_id);
+
+        // Insert a pending Sign request on the source chain
+        let args = SignArgs {
+            entropy: [1u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+        let unix_timestamp_indexed = 0;
+        backlog
+            .insert(
+                tx.source_chain,
+                sign_id,
+                BacklogTransaction::Sign(SignTx {
+                    request_id: sign_id.request_id,
+                    source_chain: tx.source_chain,
+                    status: PendingRequestStatus::AwaitingResponse,
+                    args: args.clone(),
+                    unix_timestamp_indexed,
+                }),
+                SignRequestType::Sign,
+            )
+            .await;
+
+        // Watch execution on the target chain
+        backlog
+            .watch_execution(tx.target_chain, sign_id, tx.clone())
+            .await;
+
+        // Unwatch should return the watcher
+        let maybe = backlog.unwatch_execution(tx.target_chain, &tx.id).await;
+        assert!(maybe.is_some());
+        let (s, watched_tx) = maybe.unwrap();
+        assert_eq!(s, sign_id);
+        assert_eq!(watched_tx.id, tx.id);
+
+        // set_status should update the sign request status
+        backlog
+            .set_status(tx.source_chain, &sign_id, PendingRequestStatus::Success)
+            .await;
+        let successes = backlog
+            .get_by_status(tx.source_chain, PendingRequestStatus::Success)
+            .await;
+        assert!(successes.contains_key(&sign_id));
     }
 
     #[tokio::test]
