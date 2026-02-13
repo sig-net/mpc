@@ -6,6 +6,7 @@ pub mod execute;
 pub mod local;
 pub mod mpc_fixture;
 pub mod utils;
+pub mod hydration;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

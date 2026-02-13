@@ -517,6 +517,63 @@ impl EthereumSandbox {
     }
 }
 
+// --- Hydration sandbox container -------------------------------------------------
+
+pub struct HydrationSandbox {
+    pub container: Container,
+    pub rpc_ws_endpoint: String,
+}
+
+impl HydrationSandbox {
+    const RPC_PORT: u16 = 9988; // hydradx fork exposes RPC on 9988 by convention
+
+    pub async fn run(spawner: &ClusterSpawner) -> anyhow::Result<Self> {
+        tracing::info!("Starting Hydration fork container (galacticcouncil/fork)");
+
+        let image = GenericImage::new("galacticcouncil/fork", "next")
+            .with_exposed_port(Self::RPC_PORT.tcp())
+            .with_network(&spawner.network);
+
+        let container = image.start().await?;
+
+        let network_ip = spawner
+            .docker
+            .get_network_ip_address(&container, &spawner.network)
+            .await?;
+
+        let external_port = container
+            .get_host_port_ipv4(Self::RPC_PORT)
+            .await
+            .context("hydration sandbox port mapping")?;
+
+        let rpc_ws_endpoint = format!("ws://127.0.0.1:{}", external_port);
+
+        // Wait for the RPC port to accept TCP, then verify a Subxt connection
+        let max_attempts = 120;
+        let mut ok = false;
+
+        for _ in 0..max_attempts {
+            if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", external_port)).await.is_ok() {
+                // Give the node an extra moment to finish startup after the TCP port is open.
+                tokio::time::sleep(Duration::from_millis(1200)).await;
+                ok = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        if !ok {
+            anyhow::bail!("hydration sandbox RPC did not become ready");
+        }
+
+        Ok(HydrationSandbox { container, rpc_ws_endpoint })
+    }
+
+    pub fn rpc_ws_url(&self) -> String {
+        self.rpc_ws_endpoint.clone()
+    }
+}
+
 async fn wait_for_rpc(endpoint: &str) -> anyhow::Result<()> {
     const MAX_ATTEMPTS: usize = 120;
     let client = Client::new();
@@ -602,6 +659,14 @@ impl Solana {
     pub const PROGRAM_ID: &str = "FR5pWwinRBn35GNhg7bsvw8Q13kRept2pm561DwZCQzT";
     /// Precompiled with https://github.com/sig-net/solana-signet-program @ 0.4.0
     pub const PROGRAM_PATH: &str = "chain-signatures/contract-sol/artifacts/chain_signatures.so";
+
+    // --- Hydration sandbox helper (minimal) ---
+    // The Hydration harness requires the test environment to provide either:
+    //  - HYDRATION_RPC_WS_URL pointing at a running node's websocket RPC, or
+    //  - HYDRATION_BINARY pointing to a local hydration node binary to start.
+    //
+    // Tests will skip when none of these are present. This keeps the harness
+    // non-opinionated while enabling CI that provides a node image.
 
     /// Fixed keypair for deterministic program address/id. This is embedded in the declare_id!
     /// macro of our Solana program/contract.

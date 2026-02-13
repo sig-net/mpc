@@ -23,6 +23,7 @@ pub mod mpc;
 pub mod nightly;
 pub mod solana;
 pub mod solana_stream;
+pub mod hydration_stream;
 pub mod store;
 pub mod sync;
 
