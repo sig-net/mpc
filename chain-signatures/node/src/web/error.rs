@@ -49,7 +49,7 @@ impl axum::response::IntoResponse for Error {
         // Log the error server-side for debugging
         tracing::error!(?self, "request error");
 
-        // Return generic error message to client
+        // Return generic error with request ID to the caller
         (status, "An error occurred").into_response()
     }
 }

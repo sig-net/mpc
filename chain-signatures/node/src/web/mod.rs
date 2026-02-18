@@ -17,8 +17,11 @@ use crate::web::cbor::Cbor;
 use crate::web::error::Result;
 
 use anyhow::Context;
+use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Query};
-use axum::http::StatusCode;
+use axum::http::{HeaderName, HeaderValue, Request, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use axum_extra::extract::WithRejection;
@@ -91,12 +94,35 @@ pub async fn run(
         router = router.route("/bench/metrics", get(bench_metrics));
     }
 
-    let app = router.layer(Extension(Arc::new(axum_state)));
+    let app = router
+        .layer(middleware::from_fn(request_id_middleware))
+        .layer(Extension(Arc::new(axum_state)));
 
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     tracing::info!(?addr, "starting http server");
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn request_id_middleware(mut req: Request<Body>, next: Next) -> Response {
+    let header_name = HeaderName::from_static("x-request-id");
+    let request_id = req
+        .headers()
+        .get(&header_name)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| hex::encode(rand::random::<u128>().to_be_bytes()));
+
+    req.extensions_mut().insert(request_id.clone());
+
+    let span = tracing::info_span!("request", %request_id);
+    let _guard = span.enter();
+
+    let mut response = next.run(req).await;
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert(header_name, value);
+    }
+    response
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
