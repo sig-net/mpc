@@ -77,7 +77,6 @@ impl SyncRequest {
             {
                 Ok(result) => result,
                 Err(err) => {
-                    tracing::error!(?err, "failed to remove outdated triples");
                     let _ = self.response_tx.send(Err(err));
                     return;
                 }
@@ -92,7 +91,6 @@ impl SyncRequest {
             {
                 Ok(result) => result,
                 Err(err) => {
-                    tracing::error!(?err, "failed to remove outdated presignatures");
                     let _ = self.response_tx.send(Err(err));
                     return;
                 }
@@ -365,24 +363,23 @@ impl SyncChannel {
             response_tx,
         };
 
-        if let Err(err) = self.request_update.send(request).await {
-            tracing::error!(?err, "failed to queue sync request");
+        if let Err(_err) = self.request_update.send(request).await {
             return Err(SyncError::QueueFailed);
         }
 
         let result = tokio::time::timeout(SYNC_RESPONSE_TIMEOUT, response_rx)
             .await
-            .map_err(|err| {
-                tracing::error!(?err, "sync response timeout");
+            .map_err(|_err| {
+                tracing::debug!("sync response timeout");
                 SyncError::ResponseFailed
             })?
-            .map_err(|err| {
-                tracing::error!(?err, "failed to receive sync response");
+            .map_err(|_err| {
+                tracing::debug!("failed to receive sync response from channel");
                 SyncError::ResponseFailed
             })?;
 
         result.map_err(|err| {
-            tracing::error!(?err, "sync processing failed");
+            tracing::debug!(?err, "sync processing failed in storage layer");
             SyncError::ResponseFailed
         })
     }
