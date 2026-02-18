@@ -305,7 +305,8 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         let Some(mut conn) = self.connect().await else {
             return Err(StorageError::ConnectionFailed);
         };
-        let result: Result<(Vec<A::Id>, Vec<A::Id>), _> = redis::Script::new(SCRIPT)
+        type RemoveOutdatedScriptResult<T> = Result<(Vec<T>, Vec<T>), redis::RedisError>;
+        let result: RemoveOutdatedScriptResult<A::Id> = redis::Script::new(SCRIPT)
             .key(&self.artifact_key)
             .key(owner_key(&self.owner_keys, owner))
             // NOTE: this encodes each entry of owner_shares as a separate ARGV[index] entry.
