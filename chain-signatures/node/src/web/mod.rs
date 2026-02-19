@@ -116,9 +116,7 @@ async fn request_id_middleware(mut req: Request<Body>, next: Next) -> Response {
     req.extensions_mut().insert(request_id.clone());
 
     let span = tracing::info_span!("request", %request_id);
-    let _guard = span.enter();
-
-    let mut response = next.run(req).await;
+    let mut response = next.run(req).instrument(span).await;
     if let Ok(value) = HeaderValue::from_str(&request_id) {
         response.headers_mut().insert(header_name, value);
     }
