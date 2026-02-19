@@ -152,7 +152,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
             .await;
     }
 
-    // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15
+    // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15.
+    // We also include ID 99 which doesn't exist to test the not_found tracking.
     let result = triple_storage
         .remove_outdated(node1, &[13, 14, 15, 99])
         .await
@@ -296,7 +297,8 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
             .await;
     }
 
-    // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15
+    // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15.
+    // We also include ID 99 which doesn't exist to test the not_found tracking.
     let result = presignature_storage
         .remove_outdated(node1, &[13, 14, 15, 99])
         .await
