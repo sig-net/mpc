@@ -50,7 +50,7 @@ impl Default for Options {
 #[derive(Debug, thiserror::Error)]
 pub enum RequestError {
     #[error("http request was unsuccessful: {0} => {1}")]
-    Unsuccessful(StatusCode, String),
+    Unsuccessful(StatusCode, String, Option<String>),
     #[error("http client error: {0}")]
     ReqwestClient(#[from] reqwest::Error),
     #[error("http response could not be parsed: {0}")]
@@ -78,6 +78,13 @@ impl NodeClient {
         }
     }
 
+    fn extract_request_id(resp: &reqwest::Response) -> Option<String> {
+        resp.headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_string())
+    }
+
     pub async fn post_json<T: Serialize + ?Sized, R: DeserializeOwned>(
         &self,
         url: &Url,
@@ -96,10 +103,14 @@ impl NodeClient {
             Ok(resp.json::<R>().await?)
         } else {
             // TODO: parse response body and convert to mpc_node::Error type.
+            let request_id = Self::extract_request_id(&resp);
             let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
             let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
-            tracing::warn!("failed to send a message to {url} with code {status}: {resp}");
-            Err(RequestError::Unsuccessful(status, resp.into()))
+            tracing::warn!(
+                request_id = ?request_id,
+                "failed to send a message to {url} with code {status}: {resp}"
+            );
+            Err(RequestError::Unsuccessful(status, resp.into(), request_id))
         }
     }
 
@@ -121,9 +132,10 @@ impl NodeClient {
             Ok(())
         } else {
             // TODO: parse response body and convert to mpc_node::Error type.
+            let request_id = Self::extract_request_id(&resp);
             let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
             let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
-            Err(RequestError::Unsuccessful(status, resp.into()))
+            Err(RequestError::Unsuccessful(status, resp.into(), request_id))
         }
     }
 
@@ -146,9 +158,14 @@ impl NodeClient {
             ciborium::from_reader(body.as_ref())
                 .map_err(|err| RequestError::Conversion(err.to_string()))
         } else {
+            let request_id = Self::extract_request_id(&resp);
             let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
             let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
-            Err(RequestError::Unsuccessful(status, resp.into()))
+            tracing::warn!(
+                request_id = ?request_id,
+                "failed to send a message to {url} with code {status}: {resp}"
+            );
+            Err(RequestError::Unsuccessful(status, resp.into(), request_id))
         }
     }
 
@@ -226,6 +243,7 @@ impl NodeClient {
             .await?;
 
         let status = resp.status();
+        let request_id = Self::extract_request_id(&resp);
         let body = resp.bytes().await.map_err(RequestError::MalformedBody)?;
 
         if status.is_success() {
@@ -233,7 +251,7 @@ impl NodeClient {
                 .map_err(|err| RequestError::Conversion(err.to_string()))
         } else {
             let resp = std::str::from_utf8(&body).map_err(RequestError::MalformedResponse)?;
-            Err(RequestError::Unsuccessful(status, resp.into()))
+            Err(RequestError::Unsuccessful(status, resp.into(), request_id))
         }
     }
 }
