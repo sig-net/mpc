@@ -141,7 +141,7 @@ impl SignState {
 
 struct SignPositor {
     proposer: Participant,
-    stable: BTreeSet<Participant>,
+    active: BTreeSet<Participant>,
     presignature_id: PresignatureId,
     presignature: Option<PresignatureTaken>,
 }
@@ -188,8 +188,8 @@ impl SignOrganizer {
         participants[index % participants.len()]
     }
 
-    /// Waits for threshold stable participants to be present.
-    async fn wait_stable(
+    /// Waits for threshold active participants to be present.
+    async fn wait_active(
         &self,
         ctx: &SignTask,
         state: &mut SignState,
@@ -199,20 +199,21 @@ impl SignOrganizer {
         let mut once = true;
 
         loop {
-            let stable_count = {
-                let stable = &state.mesh_state.borrow().stable;
-                if stable.len() >= threshold {
-                    return Some(stable.clone());
+            let active_count = {
+                let active: BTreeSet<_> =
+                    state.mesh_state.borrow().active().keys().copied().collect();
+                if active.len() >= threshold {
+                    return Some(active);
                 }
-                stable.len()
+                active.len()
             };
 
             if once {
                 tracing::info!(
                     ?sign_id,
-                    stable_count,
+                    active_count,
                     ?threshold,
-                    "waiting for enough stable participants"
+                    "waiting for enough active participants"
                 );
                 once = false;
             }
@@ -231,9 +232,9 @@ impl SignOrganizer {
         let participants = ctx.participants.iter().copied().collect::<Vec<_>>();
 
         tracing::info!(?sign_id, round = ?state.round, "entering organizing phase");
-        let (stable, proposer) = {
-            let Some(stable) = self.wait_stable(ctx, state, threshold).await else {
-                tracing::warn!(?sign_id, round = ?state.round, "no stable participants, reorganizing");
+        let (active, proposer) = {
+            let Some(active) = self.wait_active(ctx, state, threshold).await else {
+                tracing::warn!(?sign_id, round = ?state.round, "no active participants, reorganizing");
                 state.bump_round();
                 return SignPhase::Organizing(self);
             };
@@ -241,11 +242,11 @@ impl SignOrganizer {
             let max_rounds = state.round + ROUND_INTERVAL;
             let (selected_round, proposer) = (state.round..max_rounds)
                 .map(|r| (r, Self::proposer_per_round(r, &participants, &entropy)))
-                .find(|(_, potential_proposer)| stable.contains(potential_proposer))
+                .find(|(_, potential_proposer)| active.contains(potential_proposer))
                 .unwrap_or_else(|| {
                     (
                         max_rounds,
-                        *stable
+                        *active
                             .iter()
                             .choose(&mut StdRng::from_seed(entropy))
                             .unwrap(),
@@ -261,23 +262,23 @@ impl SignOrganizer {
                 ?proposer,
                 ?me,
                 is_mine,
-                stable_count = stable.len(),
+                active_count = active.len(),
                 "organized: selected proposer"
             );
 
-            (stable, proposer)
+            (active, proposer)
         };
 
         let is_proposer = proposer == ctx.me;
-        let (presignature_id, presignature, stable) = if is_proposer {
+        let (presignature_id, presignature, active) = if is_proposer {
             tracing::info!(?sign_id, round = ?state.round, "proposer waiting for presignature");
-            let stable = stable.iter().copied().collect::<Vec<_>>();
+            let active = active.iter().copied().collect::<Vec<_>>();
             let mut recycle = Vec::new();
             let remaining = state.budget.remaining();
             let fetch = tokio::time::timeout(remaining, async {
                 loop {
                     if let Some(taken) = ctx.presignatures.take_mine(ctx.me).await {
-                        let participants = intersect_vec(&[&taken.artifact.participants, &stable]);
+                        let participants = intersect_vec(&[&taken.artifact.participants, &active]);
                         if participants.len() < ctx.threshold {
                             recycle.push(taken);
                             continue;
@@ -332,16 +333,16 @@ impl SignOrganizer {
                     .await;
             }
 
-            // Update stable to only include participants that are in both the presignature and stable set
-            let stable = participants.into_iter().collect::<BTreeSet<_>>();
-            (presignature_id, Some(taken), stable)
+            // Update active to only include participants that are in both the presignature and active set
+            let active = participants.into_iter().collect::<BTreeSet<_>>();
+            (presignature_id, Some(taken), active)
         } else {
-            (PresignatureId::default(), None, stable)
+            (PresignatureId::default(), None, active)
         };
 
         SignPhase::Posit(SignPositor {
             proposer,
-            stable,
+            active,
             presignature_id,
             presignature,
         })
@@ -519,7 +520,7 @@ impl SignPositor {
     ) -> SignPhase {
         let SignPositor {
             proposer,
-            stable,
+            active,
             mut presignature_id,
             presignature,
         } = self;
@@ -552,7 +553,7 @@ impl SignPositor {
         }
 
         // GUARANTEE: at least threshold participants from organizing phase.
-        let posit_participants = stable.iter().copied().collect::<Vec<_>>();
+        let posit_participants = active.iter().copied().collect::<Vec<_>>();
         let mut counter = SinglePositCounter::new(ctx.me, &posit_participants);
 
         let remaining = state.budget.remaining();

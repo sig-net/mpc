@@ -36,13 +36,13 @@ pub async fn select_checkpoints(
         tracing::warn!("threshold must be greater than 0");
         return HashMap::new();
     }
-    if mesh_state.active.participants.is_empty() {
+    if mesh_state.active().participants.is_empty() {
         tracing::warn!("no active participants available for checkpoint recovery");
         return HashMap::new();
     }
 
     tracing::info!(
-        participant_count = mesh_state.active.participants.len(),
+        participant_count = mesh_state.active().participants.len(),
         ?chains,
         threshold,
         "starting checkpoint selection recovery"
@@ -84,7 +84,7 @@ async fn fetch_latest(
     let mut all_checkpoints = HashMap::new();
 
     let mut tasks = JoinSet::new();
-    for (participant_id, info) in &mesh_state.active.participants {
+    for (participant_id, info) in &mesh_state.active().participants {
         let client = node_client.clone();
         let participant = *participant_id;
         let node_url = info.url.clone();

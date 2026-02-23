@@ -29,7 +29,7 @@ pub enum NodeStatus {
     /// each node only tracks it one directional.
     ///
     /// Example: Node A only cares about IDs it owns. Hence, a peer node B is
-    /// considered stable after A sent SyncUpdate and B responded with a
+    /// considered active after A sent SyncUpdate and B responded with a
     /// SyncView. This is all node A needs to know to make decisions about
     /// protocols it initiates.
     ///

@@ -687,7 +687,7 @@ impl PresignatureSpawner {
         let mut posits = self.msg.subscribe_presignature_posit().await;
 
         let mut protocol = cfg.borrow().protocol.clone();
-        let mut active = mesh_state.borrow().active.keys_vec();
+        let mut active = mesh_state.borrow().active().keys_vec();
 
         loop {
             tokio::select! {
@@ -740,7 +740,7 @@ impl PresignatureSpawner {
                     protocol = cfg.borrow().protocol.clone();
                 }
                 Ok(()) = mesh_state.changed() => {
-                    active = mesh_state.borrow().active.keys_vec();
+                    active = mesh_state.borrow().active().keys_vec();
                 }
             }
         }
