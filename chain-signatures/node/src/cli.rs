@@ -297,6 +297,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 %account_id,
                 %my_address,
                 %cipher_pk_hex,
+                version = %crate::metrics::version(),
+                git_commit_hash = %crate::metrics::git_commit_hash(),
                 sign_pk = %network.sign_sk.public_key(),
                 near_rpc_url = %near_client.rpc_addr(),
                 eth_contract_address = %eth.as_ref().map(|eth| eth.contract_address.as_str()).unwrap_or("None"),
