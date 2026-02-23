@@ -308,7 +308,7 @@ mod tests {
             assert_eq!(state.active().len(), num_nodes - 1);
             assert!(!state.active().contains_key(&servers[1].id()));
             assert!(state.need_sync().contains_key(&servers[1].id()));
-            
+
             sync_tx.send(servers[1].id()).await.unwrap();
             tokio::time::sleep(PING_INTERVAL).await;
 
