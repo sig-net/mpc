@@ -303,8 +303,12 @@ mod tests {
             servers[1].make_online().await;
             tokio::time::sleep(PING_INTERVAL * 3).await;
 
+            // Node is now syncing: should be in need_sync but not in active yet.
             let state = mesh_state.borrow_and_update().clone();
             assert_eq!(state.active().len(), num_nodes - 1);
+            assert!(!state.active().contains_key(&servers[1].id()));
+            assert!(state.need_sync().contains_key(&servers[1].id()));
+            
             sync_tx.send(servers[1].id()).await.unwrap();
             tokio::time::sleep(PING_INTERVAL).await;
 
