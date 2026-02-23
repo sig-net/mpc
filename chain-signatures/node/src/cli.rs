@@ -195,7 +195,11 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
         } => {
             let _guard = logs::setup(&storage_options.env, account_id.as_str(), &log_options).await;
             let _span = tracing::trace_span!("cli").entered();
-            crate::metrics::init_metrics(&account_id, env!("CARGO_PKG_VERSION"));
+            crate::metrics::init_metrics(
+                &account_id,
+                env!("CARGO_PKG_VERSION"),
+                option_env!("GIT_COMMIT_HASH"),
+            );
 
             let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
 
