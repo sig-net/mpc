@@ -48,7 +48,7 @@ impl PendingRequests {
         &mut self,
         id: SignId,
         tx: BacklogTransaction,
-        sign_type: Option<SignRequestType>,
+        sign_type: SignRequestType,
     ) -> Option<BacklogTransaction> {
         self.requests
             .insert(id, BacklogEntry { tx, sign_type })
@@ -68,7 +68,7 @@ impl PendingRequests {
     }
 
     fn sign_type(&self, id: &SignId) -> Option<SignRequestType> {
-        self.requests.get(id).and_then(|entry| entry.sign_type.clone())
+        self.requests.get(id).map(|entry| entry.sign_type.clone())
     }
 
     /// Returns the number of pending requests
@@ -129,9 +129,7 @@ impl PendingRequests {
     }
 
     fn from_checkpoint(checkpoint: Checkpoint) -> anyhow::Result<Self> {
-        fn decode(
-            pending: mpc_primitives::PendingTx,
-        ) -> anyhow::Result<(SignId, BacklogEntry)> {
+        fn decode(pending: mpc_primitives::PendingTx) -> anyhow::Result<(SignId, BacklogEntry)> {
             let tx: BacklogTransaction = serde_json::from_slice(&pending.transaction)
                 .with_context(|| {
                     format!(
@@ -143,7 +141,7 @@ impl PendingRequests {
                 pending.sign_id,
                 BacklogEntry {
                     tx,
-                    sign_type: None,
+                    sign_type: SignRequestType::Sign,
                 },
             ))
         }
@@ -241,7 +239,7 @@ impl Backlog {
         let (prev, len) = {
             let mut requests = self.requests.write().await;
             let pending = requests.entry(chain).or_insert_with(PendingRequests::new);
-            let p = pending.insert(id, tx, Some(sign_type));
+            let p = pending.insert(id, tx, sign_type);
             (p, pending.len())
         };
 
@@ -422,7 +420,7 @@ impl Backlog {
                 sign_id,
                 BacklogEntry {
                     tx: BacklogTransaction::Bidirectional(bidirectional_tx.clone()),
-                    sign_type: None,
+                    sign_type: SignRequestType::Sign,
                 },
             );
         }
@@ -701,7 +699,7 @@ pub struct SignTx {
 #[derive(Debug, Clone)]
 pub struct BacklogEntry {
     pub tx: BacklogTransaction,
-    pub sign_type: Option<SignRequestType>,
+    pub sign_type: SignRequestType,
 }
 
 /// Pending transaction in the backlog - can be either a sign-only or bidirectional.
@@ -756,6 +754,13 @@ impl BacklogTransaction {
     /// Check if this is a bidirectional transaction
     pub fn is_bidirectional(&self) -> bool {
         matches!(self, Self::Bidirectional(_))
+    }
+
+    pub fn typename(&self) -> &'static str {
+        match self {
+            Self::Sign(_) => "Sign",
+            Self::Bidirectional(_) => "Bidirectional",
+        }
     }
 }
 
@@ -1095,12 +1100,12 @@ mod tests {
         pending1.insert(
             SignId::new(tx1.request_id),
             BacklogTransaction::Bidirectional(tx1.clone()),
-            Some(SignRequestType::Sign),
+            SignRequestType::Sign,
         );
         pending1.insert(
             SignId::new(tx2.request_id),
             BacklogTransaction::Bidirectional(tx2.clone()),
-            Some(SignRequestType::Sign),
+            SignRequestType::Sign,
         );
         pending1.set_processed_block(100);
 
@@ -1108,12 +1113,12 @@ mod tests {
         pending2.insert(
             SignId::new(tx1.request_id),
             BacklogTransaction::Bidirectional(tx1.clone()),
-            Some(SignRequestType::Sign),
+            SignRequestType::Sign,
         );
         pending2.insert(
             SignId::new(tx2.request_id),
             BacklogTransaction::Bidirectional(tx2.clone()),
-            Some(SignRequestType::Sign),
+            SignRequestType::Sign,
         );
         pending2.set_processed_block(100);
 
@@ -1136,7 +1141,7 @@ mod tests {
         pending.insert(
             SignId::new(tx1.request_id),
             BacklogTransaction::Bidirectional(tx1.clone()),
-            Some(SignRequestType::Sign),
+            SignRequestType::Sign,
         );
         pending.set_processed_block(100);
         let checkpoint = pending.checkpoint(Chain::Ethereum);

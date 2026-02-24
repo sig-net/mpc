@@ -399,48 +399,17 @@ pub(crate) async fn process_respond_event(
     backlog: &Backlog,
 ) -> anyhow::Result<()> {
     let sign_id = SignId::new(respond_event.request_id());
-
     let source_chain = respond_event.source_chain();
-
-    let existing_entry = backlog.get(source_chain, &sign_id).await;
-
-    let sign_type = match existing_entry
-        .as_ref()
-        .and_then(|entry| entry.sign_type.clone())
-    {
-        Some(sign_type) => sign_type,
-        None => match existing_entry.as_ref() {
-            None => {
-                tracing::info!(
-                    ?sign_id,
-                    ?source_chain,
-                    "ignoring duplicate respond event for already-completed request"
-                );
-                return Ok(());
-            }
-            // During checkpoint recovery we currently restore backlog transactions,
-            // but not their sign request type metadata. For Ethereum, requests are
-            // regular `Sign`, so we can safely continue.
-            Some(entry)
-                if source_chain == Chain::Ethereum
-                    && matches!(entry.tx, BacklogTransaction::Sign(_)) =>
-            {
-                tracing::warn!(
-                    ?sign_id,
-                    "sign type missing for ethereum respond event; defaulting to Sign"
-                );
-                SignRequestType::Sign
-            }
-            Some(entry) => {
-                anyhow::bail!(
-                    "sign type missing for respond event but tx still exists: sign_id={sign_id:?}, source_chain={source_chain:?}, tx_status={:?}",
-                    entry.tx.status()
-                );
-            }
-        },
+    let Some(entry) = backlog.get(source_chain, &sign_id).await else {
+        tracing::warn!(
+            ?sign_id,
+            ?source_chain,
+            "sign request not found for respond event (maybe already processed)"
+        );
+        return Ok(());
     };
 
-    let event = match sign_type {
+    let event = match entry.sign_type {
         SignRequestType::SignBidirectional(event) => event,
         SignRequestType::Sign => {
             tracing::info!(?sign_id, "sign request completed successfully");
@@ -463,11 +432,13 @@ pub(crate) async fn process_respond_event(
         Err(_) => Chain::Ethereum,
     };
 
-    let Some(existing_entry) = existing_entry.as_ref() else {
-        anyhow::bail!("bidirectional tx not found for advancement: {sign_id:?}");
-    };
-
-    if !matches!(existing_entry.tx, BacklogTransaction::Sign(_)) {
+    if !matches!(entry.tx, BacklogTransaction::Sign(_)) {
+        tracing::warn!(
+            ?sign_id,
+            ?source_chain,
+            typename = ?entry.tx.typename(),
+            "expected Sign transaction type for initial respond event, found different type"
+        );
         anyhow::bail!("bidirectional tx not found for advancement: {sign_id:?}");
     }
 
