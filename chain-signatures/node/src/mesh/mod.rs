@@ -140,6 +140,7 @@ impl Mesh {
                         });
                     } else {
                         tracing::warn!(?previous_me, ?contract, "we are no longer part of the MPC network");
+                        self.connections.disconnect_all();
                         self.state_tx.send_modify(|state| {
                             state.active.clear();
                             state.need_sync.clear();

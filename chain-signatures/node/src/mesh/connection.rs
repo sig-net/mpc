@@ -232,6 +232,10 @@ impl Pool {
         self.drop_connections(seen);
     }
 
+    pub fn disconnect_all(&mut self) {
+        self.drop_connections(HashSet::new());
+    }
+
     pub(crate) async fn connect_nodes(
         &mut self,
         participants: &Participants,
