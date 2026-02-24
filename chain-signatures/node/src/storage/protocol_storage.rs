@@ -433,6 +433,34 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         self.used.read().await.contains(&id)
     }
 
+    /// Fetch an artifact from storage without removing it.
+    pub async fn fetch(&self, id: A::Id) -> Option<A> {
+        let Some(mut conn) = self.connect().await else {
+            return None;
+        };
+        match conn.hget(&self.artifact_key, id).await {
+            Ok(artifact) => Some(artifact),
+            Err(err) => {
+                tracing::warn!(id, ?err, "failed to fetch artifact");
+                None
+            }
+        }
+    }
+
+    /// Update an artifact in storage (read-modify-write).
+    pub async fn update(&self, id: A::Id, artifact: A) -> bool {
+        let Some(mut conn) = self.connect().await else {
+            return false;
+        };
+        match conn.hset(&self.artifact_key, id, artifact).await {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!(id, ?err, "failed to update artifact");
+                false
+            }
+        }
+    }
+
     pub async fn take(&self, id: A::Id, owner: Participant) -> Option<ArtifactTaken<A>> {
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]

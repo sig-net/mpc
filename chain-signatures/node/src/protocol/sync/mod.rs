@@ -27,6 +27,9 @@ pub const RECURRING_SYNC_INTERVAL: Duration = Duration::from_secs(3600 * 24);
 /// Timeout for waiting for a sync response from the sync task
 const SYNC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Timeout for the entire broadcast operation (waiting for all peers to respond)
+const BROADCAST_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
     #[error("failed to queue sync request")]
@@ -70,33 +73,25 @@ impl SyncRequest {
     ) {
         let start = Instant::now();
 
-        let outdated_triples = if !self.update.triples.is_empty() {
-            match triples
-                .remove_outdated(self.update.from, &self.update.triples)
-                .await
-            {
-                Ok(result) => result,
-                Err(err) => {
-                    let _ = self.response_tx.send(Err(err));
-                    return;
-                }
+        let outdated_triples = match triples
+            .remove_outdated(self.update.from, &self.update.triples)
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                let _ = self.response_tx.send(Err(err));
+                return;
             }
-        } else {
-            Default::default()
         };
-        let outdated_presignatures = if !self.update.presignatures.is_empty() {
-            match presignatures
-                .remove_outdated(self.update.from, &self.update.presignatures)
-                .await
-            {
-                Ok(result) => result,
-                Err(err) => {
-                    let _ = self.response_tx.send(Err(err));
-                    return;
-                }
+        let outdated_presignatures = match presignatures
+            .remove_outdated(self.update.from, &self.update.presignatures)
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                let _ = self.response_tx.send(Err(err));
+                return;
             }
-        } else {
-            Default::default()
         };
 
         tracing::info!(
@@ -156,22 +151,25 @@ impl SyncTask {
     }
 
     pub async fn run(mut self) {
-        tracing::info!("task has been started");
-        let mut watcher_interval = tokio::time::interval(Duration::from_millis(500));
-        let mut sync_interval = tokio::time::interval(Duration::from_millis(200));
-        // Broadcast should generally not be necessary.
-        let mut broadcast_interval = tokio::time::interval(RECURRING_SYNC_INTERVAL);
-        let mut broadcast_check_interval = tokio::time::interval(Duration::from_millis(100));
-
-        // Do NOT start until we have our own participant info.
+        tracing::info!("sync task has been started");
+        // Poll for our participant info from contract state
         // TODO: constantly watch for changes on node state after this initial one so we can start/stop sync running.
-        let (_threshold, me) = loop {
+        let mut watcher_interval = tokio::time::interval(Duration::from_millis(500));
+        // Trigger sync broadcasts to peers in need_sync state
+        let mut sync_interval = tokio::time::interval(Duration::from_millis(200));
+        // Periodic full sync broadcast to all active peers (TODO: should not be necessary)
+        let mut broadcast_interval = tokio::time::interval(RECURRING_SYNC_INTERVAL);
+        // Poll whether any ongoing sync task has completed (from either sync_interval or broadcast_interval)
+        let mut sync_check_interval = tokio::time::interval(Duration::from_millis(100));
+
+        // Do NOT start until we have our own participant info
+        let (threshold, me) = loop {
             watcher_interval.tick().await;
             if let Some(info) = self.contract.info().await {
                 break info;
             }
         };
-        tracing::info!(?me, "mpc network ready, running...");
+        tracing::info!(?me, "starting sync loop...");
 
         let mut broadcast = Option::<(Instant, JoinHandle<_>)>::None;
         loop {
@@ -198,7 +196,6 @@ impl SyncTask {
                         self.client.clone(),
                         update,
                         receivers.into_iter(),
-                        self.synced_peer_tx.clone(),
                         me,
                     ));
                     broadcast = Some((start, task));
@@ -218,13 +215,12 @@ impl SyncTask {
                         self.client.clone(),
                         update,
                         active.into_iter(),
-                        self.synced_peer_tx.clone(),
                         me
                     ));
                     broadcast = Some((start, task));
                 }
                 // check that our broadcast has completed, and if so process the result.
-                _ = broadcast_check_interval.tick() => {
+                _ = sync_check_interval.tick() => {
                     let Some((start, handle)) = broadcast.take() else {
                         continue;
                     };
@@ -234,10 +230,15 @@ impl SyncTask {
                         continue;
                     }
 
-                    if let Err(err) = handle.await {
-                        tracing::warn!(?err, "broadcast task failed");
-                    } else {
-                        tracing::debug!(elapsed = ?start.elapsed(), "processed broadcast");
+                    match handle.await {
+                        Ok(responses) => {
+                            // Process sync responses: update artifact participants based on not_found data
+                            self.process_sync_responses(responses).await;
+                            tracing::debug!(elapsed = ?start.elapsed(), "processed broadcast");
+                        }
+                        Err(err) => {
+                            tracing::warn!(?err, "broadcast task failed");
+                        }
                     }
                 }
                 Some(sync_req) = self.requests.updates.recv() => {
@@ -259,6 +260,103 @@ impl SyncTask {
         }
     }
 
+    /// Process sync responses:
+    /// 1. Remove peers from artifact participants if they're missing data
+    /// 2. Send synced peer notifications to mesh (for status transitions)
+    async fn process_sync_responses(
+        &self,
+        responses: Vec<(Participant, Option<Result<SyncUpdate, String>>)>,
+    ) {
+        for (peer, result) in responses {
+            match result {
+                // No RPC was performed (self-peer), treat as successful
+                None => {
+                    if self.synced_peer_tx.send(peer).await.is_err() {
+                        tracing::error!("sync reporter is down: state sync will no longer work");
+                        return;
+                    }
+                }
+                // RPC succeeded, process the not_found data
+                Some(Ok(response)) => {
+                    tracing::debug!(
+                        ?peer,
+                        not_found_triples = response.triples.len(),
+                        not_found_presignatures = response.presignatures.len(),
+                        "received sync response"
+                    );
+
+                    // Update replica tracking: remove peer from artifacts they don't have
+                    for triple_id in response.triples {
+                        if let Some(mut pair) = self.triples.fetch(triple_id).await {
+                            let mut updated = false;
+
+                            // Remove peer from triple0 participants
+                            if let Some(pos) = pair
+                                .triple0
+                                .public
+                                .participants
+                                .iter()
+                                .position(|p| *p == peer)
+                            {
+                                pair.triple0.public.participants.remove(pos);
+                                updated = true;
+                            }
+
+                            // Remove peer from triple1 participants
+                            if let Some(pos) = pair
+                                .triple1
+                                .public
+                                .participants
+                                .iter()
+                                .position(|p| *p == peer)
+                            {
+                                pair.triple1.public.participants.remove(pos);
+                                updated = true;
+                            }
+
+                            if updated {
+                                self.triples.update(triple_id, pair).await;
+                                tracing::debug!(
+                                    ?triple_id,
+                                    ?peer,
+                                    "updated triple participants: removed peer"
+                                );
+                            }
+                        }
+                    }
+
+                    // Update presignatures: remove peer from participants if they don't have it
+                    for presig_id in response.presignatures {
+                        if let Some(mut presig) = self.presignatures.fetch(presig_id).await {
+                            if let Some(pos) = presig.participants.iter().position(|p| *p == peer) {
+                                presig.participants.remove(pos);
+                                self.presignatures.update(presig_id, presig).await;
+                                tracing::debug!(
+                                    ?presig_id,
+                                    ?peer,
+                                    "updated presignature participants: removed peer"
+                                );
+                            }
+                        }
+                    }
+
+                    // Notify mesh that peer is synced (after processing) - for Active state transition
+                    if self.synced_peer_tx.send(peer).await.is_err() {
+                        tracing::error!(
+                            ?peer,
+                            "sync reporter is down: state sync will no longer work"
+                        );
+                        return;
+                    }
+                }
+                // RPC failed, don't notify mesh (peer stays in Syncing state)
+                Some(Err(err)) => {
+                    tracing::warn!(?peer, ?err, "failed to sync peer");
+                }
+            }
+        }
+    }
+
     /// Channel for communicating back from the sync task which nodes are now updated.
     pub fn synced_nodes_channel() -> (mpsc::Sender<Participant>, mpsc::Receiver<Participant>) {
         mpsc::channel(MAX_SYNC_UPDATE_REQUESTS)
@@ -266,84 +364,64 @@ impl SyncTask {
 }
 
 /// Broadcast an update to all participants specified by `receivers`.
+/// Returns results for all peers that complete within BROADCAST_TIMEOUT.
+/// Peers that don't respond are not included in results and will be retried later.
 async fn broadcast_sync(
     client: NodeClient,
     update: SyncUpdate,
     receivers: impl Iterator<Item = (Participant, ParticipantInfo)>,
-    synced_peer_tx: mpsc::Sender<Participant>,
     me: Participant,
-) {
-    if update.is_empty() {
-        for (participant, _) in receivers {
-            if synced_peer_tx.send(participant).await.is_err() {
-                tracing::error!(
-                    ?participant,
-                    "sync reporter is down: state sync will no longer work"
-                );
-            }
-        }
-        return;
-    }
-
-    let start = Instant::now();
+) -> Vec<(Participant, Option<Result<SyncUpdate, String>>)> {
     let mut tasks = JoinSet::new();
     let update = Arc::new(update);
+
     for (p, info) in receivers {
         let client = client.clone();
         let update = update.clone();
         let url = info.url;
-        let sync_tx = synced_peer_tx.clone();
         tasks.spawn(async move {
-            // Only actually do the sync on other peers, not on self. (Hack) We
-            // still want to send the message to synced_peer_tx though, since
-            // the mesh does not currently understand which node is self, so it
-            // will trigger a sync to self.
-            let sync_view = if p != me {
-                let res = client.sync(&url, &update).await;
-                Some(res)
+            // Only actually do the sync on other peers, not on self.
+            let sync_result = if p != me {
+                Some(client.sync(&url, &update).await.map_err(|e| e.to_string()))
             } else {
+                // No RPC sync is attempted for self (`p == me`); return None to indicate no-op.
                 None
             };
-            let sync_succeeded = match &sync_view {
-                Some(Ok(_)) => true,
-                Some(Err(err)) => {
-                    tracing::warn!(?p, ?err, "failed to sync peer");
-                    false
-                }
-                // No RPC sync is attempted for self (`p == me`); treat as successful no-op.
-                None => true,
-            };
-            if sync_succeeded && sync_tx.send(p).await.is_err() {
-                tracing::error!("sync reporter is down: state sync will no longer work")
-            }
-            (p, sync_view)
+            (p, sync_result)
         });
     }
 
-    let resps = tasks
-        .join_all()
-        .await
-        .into_iter()
-        .filter_map(|(p, view)| {
-            if let Some(Ok(_response)) = view {
-                tracing::debug!(
-                    ?p,
-                    not_found_triples = _response.triples.len(),
-                    not_found_presignatures = _response.presignatures.len(),
-                    "received sync response"
-                );
-                Some(p)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
+    let deadline = Instant::now() + BROADCAST_TIMEOUT;
+    let mut results = Vec::new();
+    while !tasks.is_empty() {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
 
-    tracing::debug!(
-        elapsed = ?start.elapsed(),
-        responded = ?resps,
-        "broadcast completed",
-    );
+        tokio::select! {
+            res = tasks.join_next() => {
+                match res {
+                    Some(Ok((p, sync_result))) => {
+                        results.push((p, sync_result));
+                    }
+                    Some(Err(err)) => {
+                        tracing::warn!(?err, "sync task failed");
+                    }
+                    None => break,
+                }
+            }
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                break;
+            }
+        }
+    }
+
+    if !tasks.is_empty() {
+        tasks.abort_all();
+    }
+
+    results
 }
 
 #[derive(Clone)]
