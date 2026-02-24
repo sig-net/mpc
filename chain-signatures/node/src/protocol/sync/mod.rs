@@ -304,7 +304,16 @@ async fn broadcast_sync(
             } else {
                 None
             };
-            if sync_tx.send(p).await.is_err() {
+            let sync_succeeded = match &sync_view {
+                Some(Ok(_)) => true,
+                Some(Err(err)) => {
+                    tracing::warn!(?p, ?err, "failed to sync peer");
+                    false
+                }
+                // No RPC sync is attempted for self (`p == me`); treat as successful no-op.
+                None => true,
+            };
+            if sync_succeeded && sync_tx.send(p).await.is_err() {
                 tracing::error!("sync reporter is down: state sync will no longer work")
             }
             (p, sync_view)
@@ -417,6 +426,30 @@ mod tests {
 
         let expected: Vec<_> = participants.iter().map(|(p, _)| *p).collect();
         assert_eq!(received, expected);
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_sync_does_not_report_synced_on_failure() {
+        let client = NodeClient::new(&NodeClientOptions::default());
+        let update = SyncUpdate {
+            from: Participant::from(0u32),
+            triples: vec![TripleId::from(1u64)],
+            presignatures: vec![PresignatureId::from(1u64)],
+        };
+        let (tx, mut rx) = mpsc::channel(4);
+
+        let participants = vec![(Participant::from(1u32), ParticipantInfo::new(1))];
+
+        broadcast_sync(
+            client,
+            update,
+            participants.into_iter(),
+            tx,
+            Participant::from(0u32),
+        )
+        .await;
+
         assert!(rx.recv().await.is_none());
     }
 }
