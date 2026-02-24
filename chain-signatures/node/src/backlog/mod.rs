@@ -22,7 +22,7 @@ const RETENTION_DURATION: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone)]
 pub struct PendingRequests {
-    requests: HashMap<SignId, BacklogTransaction>,
+    requests: HashMap<SignId, BacklogEntry>,
     /// The highest block height that has been processed for this chain
     processed_block_height: Option<u64>,
 }
@@ -44,20 +44,31 @@ impl PendingRequests {
 
     /// Inserts a sign-respond transaction into the pending requests map
     /// Returns Some(old_value) if the key was already present
-    fn insert(&mut self, id: SignId, tx: BacklogTransaction) -> Option<BacklogTransaction> {
-        self.requests.insert(id, tx)
+    fn insert(
+        &mut self,
+        id: SignId,
+        tx: BacklogTransaction,
+        sign_type: Option<SignRequestType>,
+    ) -> Option<BacklogTransaction> {
+        self.requests
+            .insert(id, BacklogEntry { tx, sign_type })
+            .map(|entry| entry.tx)
     }
 
     /// Removes a sign-respond transaction from the pending requests map
     /// Returns Some(value) if the key was present
     fn remove(&mut self, id: &SignId) -> Option<BacklogTransaction> {
-        self.requests.remove(id)
+        self.requests.remove(id).map(|entry| entry.tx)
     }
 
-    /// Gets a clone of a sign-respond transaction from the pending requests map
+    /// Gets a clone of a backlog entry from the pending requests map
     /// Returns Some(value) if the key is present
-    fn get(&self, id: &SignId) -> Option<BacklogTransaction> {
+    fn get(&self, id: &SignId) -> Option<BacklogEntry> {
         self.requests.get(id).cloned()
+    }
+
+    fn sign_type(&self, id: &SignId) -> Option<SignRequestType> {
+        self.requests.get(id).and_then(|entry| entry.sign_type.clone())
     }
 
     /// Returns the number of pending requests
@@ -72,16 +83,16 @@ impl PendingRequests {
     ) -> HashMap<SignId, BacklogTransaction> {
         self.requests
             .iter()
-            .filter(|(_, tx)| tx.status() == status)
-            .map(|(id, tx)| (*id, tx.clone()))
+            .filter(|(_, entry)| entry.tx.status() == status)
+            .map(|(id, entry)| (*id, entry.tx.clone()))
             .collect()
     }
 
     fn pending_execution(&self) -> Vec<(SignId, BacklogTransaction)> {
         self.requests
             .iter()
-            .filter(|(_, tx)| tx.status() == PendingRequestStatus::PendingExecution)
-            .map(|(&id, tx)| (id, tx.clone()))
+            .filter(|(_, entry)| entry.tx.status() == PendingRequestStatus::PendingExecution)
+            .map(|(&id, entry)| (id, entry.tx.clone()))
             .collect()
     }
 
@@ -99,8 +110,8 @@ impl PendingRequests {
         let mut encoded = self
             .requests
             .iter()
-            .map(|(&sign_id, tx)| {
-                let transaction = serde_json::to_vec(&tx)
+            .map(|(&sign_id, entry)| {
+                let transaction = serde_json::to_vec(&entry.tx)
                     .expect("serialize bidirectional transaction for checkpoint");
                 PendingTx {
                     sign_id,
@@ -120,7 +131,7 @@ impl PendingRequests {
     fn from_checkpoint(checkpoint: Checkpoint) -> anyhow::Result<Self> {
         fn decode(
             pending: mpc_primitives::PendingTx,
-        ) -> anyhow::Result<(SignId, BacklogTransaction)> {
+        ) -> anyhow::Result<(SignId, BacklogEntry)> {
             let tx: BacklogTransaction = serde_json::from_slice(&pending.transaction)
                 .with_context(|| {
                     format!(
@@ -128,7 +139,13 @@ impl PendingRequests {
                         pending.sign_id
                     )
                 })?;
-            Ok((pending.sign_id, tx))
+            Ok((
+                pending.sign_id,
+                BacklogEntry {
+                    tx,
+                    sign_type: None,
+                },
+            ))
         }
 
         let mut requests = HashMap::new();
@@ -190,7 +207,6 @@ pub struct Backlog {
     storage: CheckpointStorage,
     requests: Arc<RwLock<HashMap<Chain, PendingRequests>>>,
     execution_watchers: Arc<RwLock<HashMap<Chain, ExecutionWatchers>>>,
-    sign_request_types: Arc<RwLock<HashMap<(Chain, SignId), SignRequestType>>>,
     /// Historical checkpoints kept for 30 minutes, indexed by chain
     historical_checkpoints: Arc<RwLock<HashMap<Chain, Vec<HistoricalCheckpoint>>>>,
 }
@@ -211,7 +227,6 @@ impl Backlog {
             storage,
             requests: Arc::new(RwLock::new(HashMap::new())),
             execution_watchers: Arc::new(RwLock::new(HashMap::new())),
-            sign_request_types: Arc::new(RwLock::new(HashMap::new())),
             historical_checkpoints: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -223,12 +238,10 @@ impl Backlog {
         tx: BacklogTransaction,
         sign_type: SignRequestType,
     ) -> Option<BacklogTransaction> {
-        self.set_sign_request_type(chain, id, sign_type).await;
-
         let (prev, len) = {
             let mut requests = self.requests.write().await;
             let pending = requests.entry(chain).or_insert_with(PendingRequests::new);
-            let p = pending.insert(id, tx);
+            let p = pending.insert(id, tx, Some(sign_type));
             (p, pending.len())
         };
 
@@ -237,9 +250,6 @@ impl Backlog {
     }
 
     pub async fn remove(&self, chain: Chain, id: &SignId) -> Option<BacklogTransaction> {
-        // Also remove the sign request type tracking
-        self.remove_sign_request_type(chain, id).await;
-
         let (removed, len) = {
             let mut requests = self.requests.write().await;
             let pending = requests.entry(chain).or_insert_with(PendingRequests::new);
@@ -251,7 +261,7 @@ impl Backlog {
         removed
     }
 
-    pub async fn get(&self, chain: Chain, id: &SignId) -> Option<BacklogTransaction> {
+    pub async fn get(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
         self.requests
             .read()
             .await
@@ -274,32 +284,13 @@ impl Backlog {
         self.requests.read().await.is_empty()
     }
 
-    /// Track the sign request type for a given sign ID
-    /// Store the sign request type for a given sign ID (internal only, set during insert)
-    async fn set_sign_request_type(
-        &self,
-        chain: Chain,
-        id: SignId,
-        sign_request_type: SignRequestType,
-    ) {
-        self.sign_request_types
-            .write()
-            .await
-            .insert((chain, id), sign_request_type);
-    }
-
     /// Get the sign request type for a given sign ID
     pub async fn sign_type(&self, chain: Chain, id: &SignId) -> Option<SignRequestType> {
-        self.sign_request_types
+        self.requests
             .read()
             .await
-            .get(&(chain, *id))
-            .cloned()
-    }
-
-    /// Remove the sign request type tracking for a given sign ID (internal only, removed during remove)
-    async fn remove_sign_request_type(&self, chain: Chain, id: &SignId) {
-        self.sign_request_types.write().await.remove(&(chain, *id));
+            .get(&chain)
+            .and_then(|pending_requests| pending_requests.sign_type(id))
     }
 
     fn observe_backlog_size(&self, chain: Chain, len: usize) {
@@ -404,9 +395,9 @@ impl Backlog {
             );
             return None;
         };
-        tracing::info!(?chain, ?id, before = ?tx.status(), after = ?status, "set_status: updating");
-        tx.set_status(status);
-        Some(tx.clone())
+        tracing::info!(?chain, ?id, before = ?tx.tx.status(), after = ?status, "set_status: updating");
+        tx.tx.set_status(status);
+        Some(tx.tx.clone())
     }
 
     /// Advances a `Sign` transaction to its execution phase and register execution watcher.
@@ -424,10 +415,17 @@ impl Backlog {
             .ok_or(BacklogError::ChainNotFound)?;
 
         // Replace the Sign transaction with the Bidirectional transaction
-        pending.requests.insert(
-            sign_id,
-            BacklogTransaction::Bidirectional(bidirectional_tx.clone()),
-        );
+        if let Some(entry) = pending.requests.get_mut(&sign_id) {
+            entry.tx = BacklogTransaction::Bidirectional(bidirectional_tx.clone());
+        } else {
+            pending.requests.insert(
+                sign_id,
+                BacklogEntry {
+                    tx: BacklogTransaction::Bidirectional(bidirectional_tx.clone()),
+                    sign_type: None,
+                },
+            );
+        }
 
         // Registration successful, now register the execution watcher on the target chain
         let target_chain = bidirectional_tx.target_chain;
@@ -662,7 +660,14 @@ impl Backlog {
         let mut recovered = HashMap::new();
         for &chain in chains {
             if let Some(pending) = requests.get(&chain) {
-                recovered.insert(chain, pending.requests.clone());
+                recovered.insert(
+                    chain,
+                    pending
+                        .requests
+                        .iter()
+                        .map(|(id, entry)| (*id, entry.tx.clone()))
+                        .collect(),
+                );
             }
         }
 
@@ -691,6 +696,12 @@ pub struct SignTx {
     pub status: PendingRequestStatus,
     pub args: SignArgs,
     pub unix_timestamp_indexed: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BacklogEntry {
+    pub tx: BacklogTransaction,
+    pub sign_type: Option<SignRequestType>,
 }
 
 /// Pending transaction in the backlog - can be either a sign-only or bidirectional.
@@ -1084,10 +1095,12 @@ mod tests {
         pending1.insert(
             SignId::new(tx1.request_id),
             BacklogTransaction::Bidirectional(tx1.clone()),
+            Some(SignRequestType::Sign),
         );
         pending1.insert(
             SignId::new(tx2.request_id),
             BacklogTransaction::Bidirectional(tx2.clone()),
+            Some(SignRequestType::Sign),
         );
         pending1.set_processed_block(100);
 
@@ -1095,10 +1108,12 @@ mod tests {
         pending2.insert(
             SignId::new(tx1.request_id),
             BacklogTransaction::Bidirectional(tx1.clone()),
+            Some(SignRequestType::Sign),
         );
         pending2.insert(
             SignId::new(tx2.request_id),
             BacklogTransaction::Bidirectional(tx2.clone()),
+            Some(SignRequestType::Sign),
         );
         pending2.set_processed_block(100);
 
@@ -1121,6 +1136,7 @@ mod tests {
         pending.insert(
             SignId::new(tx1.request_id),
             BacklogTransaction::Bidirectional(tx1.clone()),
+            Some(SignRequestType::Sign),
         );
         pending.set_processed_block(100);
         let checkpoint = pending.checkpoint(Chain::Ethereum);

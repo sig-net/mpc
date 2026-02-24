@@ -402,37 +402,42 @@ pub(crate) async fn process_respond_event(
 
     let source_chain = respond_event.source_chain();
 
-    let sign_type = match backlog.sign_type(source_chain, &sign_id).await {
+    let existing_entry = backlog.get(source_chain, &sign_id).await;
+
+    let sign_type = match existing_entry
+        .as_ref()
+        .and_then(|entry| entry.sign_type.clone())
+    {
         Some(sign_type) => sign_type,
-        None => {
-            let existing_tx = backlog.get(source_chain, &sign_id).await;
-            match existing_tx {
-                None => {
-                    tracing::info!(
-                        ?sign_id,
-                        ?source_chain,
-                        "ignoring duplicate respond event for already-completed request"
-                    );
-                    return Ok(());
-                }
-                // During checkpoint recovery we currently restore backlog transactions,
-                // but not their sign request type metadata. For Ethereum, requests are
-                // regular `Sign`, so we can safely continue.
-                Some(BacklogTransaction::Sign(_)) if source_chain == Chain::Ethereum => {
-                    tracing::warn!(
-                        ?sign_id,
-                        "sign type missing for ethereum respond event; defaulting to Sign"
-                    );
-                    SignRequestType::Sign
-                }
-                Some(tx) => {
-                    anyhow::bail!(
-                        "sign type missing for respond event but tx still exists: sign_id={sign_id:?}, source_chain={source_chain:?}, tx_status={:?}",
-                        tx.status()
-                    );
-                }
+        None => match existing_entry.as_ref() {
+            None => {
+                tracing::info!(
+                    ?sign_id,
+                    ?source_chain,
+                    "ignoring duplicate respond event for already-completed request"
+                );
+                return Ok(());
             }
-        }
+            // During checkpoint recovery we currently restore backlog transactions,
+            // but not their sign request type metadata. For Ethereum, requests are
+            // regular `Sign`, so we can safely continue.
+            Some(entry)
+                if source_chain == Chain::Ethereum
+                    && matches!(entry.tx, BacklogTransaction::Sign(_)) =>
+            {
+                tracing::warn!(
+                    ?sign_id,
+                    "sign type missing for ethereum respond event; defaulting to Sign"
+                );
+                SignRequestType::Sign
+            }
+            Some(entry) => {
+                anyhow::bail!(
+                    "sign type missing for respond event but tx still exists: sign_id={sign_id:?}, source_chain={source_chain:?}, tx_status={:?}",
+                    entry.tx.status()
+                );
+            }
+        },
     };
 
     let event = match sign_type {
@@ -458,9 +463,13 @@ pub(crate) async fn process_respond_event(
         Err(_) => Chain::Ethereum,
     };
 
-    let Some(BacklogTransaction::Sign(_)) = backlog.get(source_chain, &sign_id).await else {
+    let Some(existing_entry) = existing_entry.as_ref() else {
         anyhow::bail!("bidirectional tx not found for advancement: {sign_id:?}");
     };
+
+    if !matches!(existing_entry.tx, BacklogTransaction::Sign(_)) {
+        anyhow::bail!("bidirectional tx not found for advancement: {sign_id:?}");
+    }
 
     let mpc_sig = respond_event.signature();
 
@@ -845,7 +854,7 @@ mod tests {
         // inspect the transaction to provide more debugging info on failure
         let maybe_tx = backlog.get(tx.source_chain, &sign_id).await;
         assert!(maybe_tx.is_some(), "expected sign tx to still exist");
-        let tx_after = maybe_tx.unwrap();
+        let tx_after = maybe_tx.unwrap().tx;
         if tx_after.status() != PendingRequestStatus::Success {
             panic!("expected Success but found status: {:?}", tx_after.status());
         }
@@ -932,9 +941,14 @@ mod tests {
         // This mirrors production behavior where the same respond log can be
         // emitted repeatedly by the Ethereum indexer pipeline.
         for _ in 0..16 {
-            process_respond_event(event.clone(), sign_tx.clone(), &mut contract_watcher, &backlog)
-                .await
-                .expect("duplicate respond event should be idempotent");
+            process_respond_event(
+                event.clone(),
+                sign_tx.clone(),
+                &mut contract_watcher,
+                &backlog,
+            )
+            .await
+            .expect("duplicate respond event should be idempotent");
         }
 
         let no_extra = timeout(Duration::from_millis(100), sign_rx.recv()).await;
