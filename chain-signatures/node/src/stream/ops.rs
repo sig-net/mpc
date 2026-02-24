@@ -401,12 +401,9 @@ pub(crate) async fn process_respond_event(
     let sign_id = SignId::new(respond_event.request_id());
     let source_chain = respond_event.source_chain();
     let Some(entry) = backlog.get(source_chain, &sign_id).await else {
-        tracing::warn!(
-            ?sign_id,
-            ?source_chain,
-            "sign request not found for respond event (maybe already processed)"
+        anyhow::bail!(
+            "sign request not found for respond event: {sign_id:?} on chain {source_chain:?}"
         );
-        return Ok(());
     };
 
     let event = match entry.sign_type {
@@ -426,20 +423,12 @@ pub(crate) async fn process_respond_event(
 
     tracing::info!(?sign_id, "bidirectional processing initial respond event");
     let target_chain = Chain::from_str(&event.dest())
-        .map_err(|err| anyhow::anyhow!("unable to parse target chain from dest: {err:?}"));
-    let target_chain = match target_chain {
-        Ok(chain) => chain,
-        Err(_) => Chain::Ethereum,
-    };
-
+        .map_err(|err| anyhow::anyhow!("unable to parse target chain from dest: {err:?}"))?;
     if !matches!(entry.tx, BacklogTransaction::Sign(_)) {
-        tracing::warn!(
-            ?sign_id,
-            ?source_chain,
-            typename = ?entry.tx.typename(),
-            "expected Sign transaction type for initial respond event, found different type"
+        let entry_type = entry.tx.typename();
+        anyhow::bail!(
+            "expected Sign transaction type for respond event, found different type={entry_type}: {sign_id:?}, {source_chain:?}, {target_chain:?}"
         );
-        anyhow::bail!("bidirectional tx not found for advancement: {sign_id:?}");
     }
 
     let mpc_sig = respond_event.signature();
