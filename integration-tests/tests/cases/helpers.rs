@@ -111,7 +111,7 @@ pub(crate) async fn assert_triples_owned_state(
     }
 }
 
-pub(crate) async fn assert_presignatures_owned_state(
+pub(crate) async fn assert_presig_owned_state(
     presignatures: &PresignatureStorage,
     owner: Participant,
     expected_present: &[u64],
