@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -233,7 +234,9 @@ impl SyncTask {
                     match handle.await {
                         Ok(responses) => {
                             // Process sync responses: update artifact participants based on not_found data
-                            self.process_sync_responses(responses).await;
+                            if let Err(err) = self.process_sync_responses(responses, me, threshold).await {
+                                tracing::warn!(?err, "failed to process sync responses");
+                            }
                             tracing::debug!(elapsed = ?start.elapsed(), "processed broadcast");
                         }
                         Err(err) => {
@@ -266,14 +269,19 @@ impl SyncTask {
     async fn process_sync_responses(
         &self,
         responses: Vec<(Participant, Option<Result<SyncUpdate, String>>)>,
-    ) {
+        me: Participant,
+        threshold: usize,
+    ) -> Result<(), String> {
+        let mut triples_to_prune = HashSet::new();
+        let mut presignatures_to_prune = HashSet::new();
+
         for (peer, result) in responses {
             match result {
                 // No RPC was performed (self-peer), treat as successful
                 None => {
                     if self.synced_peer_tx.send(peer).await.is_err() {
                         tracing::error!("sync reporter is down: state sync will no longer work");
-                        return;
+                        return Err("sync reporter is down".to_string());
                     }
                 }
                 // RPC succeeded, process the not_found data
@@ -287,6 +295,13 @@ impl SyncTask {
 
                     // Update replica tracking: remove peer from artifacts they don't have
                     for triple_id in response.triples {
+                        let is_owned_by_me = self.triples.contains_by_owner(triple_id, me).await;
+                        if !is_owned_by_me {
+                            return Err(format!(
+                                "received non-owned triple in sync response: triple_id={triple_id:?}, peer={peer:?}, me={me:?}"
+                            ));
+                        }
+
                         if let Some(mut pair) = self.triples.fetch(triple_id).await {
                             let mut updated = false;
 
@@ -315,27 +330,64 @@ impl SyncTask {
                             }
 
                             if updated {
-                                self.triples.update(triple_id, pair).await;
-                                tracing::debug!(
-                                    ?triple_id,
-                                    ?peer,
-                                    "updated triple participants: removed peer"
-                                );
+                                let remaining_holders = pair
+                                    .triple0
+                                    .public
+                                    .participants
+                                    .len()
+                                    .min(pair.triple1.public.participants.len());
+
+                                if remaining_holders < threshold {
+                                    triples_to_prune.insert(triple_id);
+                                    tracing::info!(
+                                        ?triple_id,
+                                        ?peer,
+                                        remaining_holders,
+                                        threshold,
+                                        "triple dropped below threshold: scheduling owned artifact removal"
+                                    );
+                                } else {
+                                    self.triples.update(triple_id, pair).await;
+                                    tracing::debug!(
+                                        ?triple_id,
+                                        ?peer,
+                                        "updated triple participants: removed peer"
+                                    );
+                                }
                             }
                         }
                     }
 
                     // Update presignatures: remove peer from participants if they don't have it
                     for presig_id in response.presignatures {
+                        let is_owned_by_me = self.presignatures.contains_by_owner(presig_id, me).await;
+                        if !is_owned_by_me {
+                            return Err(format!(
+                                "received non-owned presignature in sync response: presig_id={presig_id:?}, peer={peer:?}, me={me:?}"
+                            ));
+                        }
+
                         if let Some(mut presig) = self.presignatures.fetch(presig_id).await {
                             if let Some(pos) = presig.participants.iter().position(|p| *p == peer) {
                                 presig.participants.remove(pos);
-                                self.presignatures.update(presig_id, presig).await;
-                                tracing::debug!(
-                                    ?presig_id,
-                                    ?peer,
-                                    "updated presignature participants: removed peer"
-                                );
+
+                                if presig.participants.len() < threshold {
+                                    presignatures_to_prune.insert(presig_id);
+                                    tracing::info!(
+                                        ?presig_id,
+                                        ?peer,
+                                        remaining_holders = presig.participants.len(),
+                                        threshold,
+                                        "presignature dropped below threshold: scheduling owned artifact removal"
+                                    );
+                                } else {
+                                    self.presignatures.update(presig_id, presig).await;
+                                    tracing::debug!(
+                                        ?presig_id,
+                                        ?peer,
+                                        "updated presignature participants: removed peer"
+                                    );
+                                }
                             }
                         }
                     }
@@ -346,13 +398,67 @@ impl SyncTask {
                             ?peer,
                             "sync reporter is down: state sync will no longer work"
                         );
-                        return;
+                        return Err("sync reporter is down".to_string());
                     }
                 }
                 // RPC failed, don't notify mesh (peer stays in Syncing state)
                 Some(Err(err)) => {
                     tracing::warn!(?peer, ?err, "failed to sync peer");
                 }
+            }
+        }
+
+        self.prune_owned_triples(me, &triples_to_prune).await;
+        self.prune_owned_presignatures(me, &presignatures_to_prune)
+            .await;
+
+        Ok(())
+    }
+
+    async fn prune_owned_triples(&self, me: Participant, to_prune: &HashSet<TripleId>) {
+        if to_prune.is_empty() {
+            return;
+        }
+
+        let mut keep = self.triples.fetch_owned(me).await;
+        keep.retain(|id| !to_prune.contains(id));
+
+        match self.triples.remove_outdated(me, &keep).await {
+            Ok(result) => {
+                tracing::info!(
+                    removed = result.removed.len(),
+                    not_found = result.not_found.len(),
+                    "removed owned triples that dropped below threshold"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(?err, "failed to remove owned triples below threshold");
+            }
+        }
+    }
+
+    async fn prune_owned_presignatures(
+        &self,
+        me: Participant,
+        to_prune: &HashSet<PresignatureId>,
+    ) {
+        if to_prune.is_empty() {
+            return;
+        }
+
+        let mut keep = self.presignatures.fetch_owned(me).await;
+        keep.retain(|id| !to_prune.contains(id));
+
+        match self.presignatures.remove_outdated(me, &keep).await {
+            Ok(result) => {
+                tracing::info!(
+                    removed = result.removed.len(),
+                    not_found = result.not_found.len(),
+                    "removed owned presignatures that dropped below threshold"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(?err, "failed to remove owned presignatures below threshold");
             }
         }
     }
