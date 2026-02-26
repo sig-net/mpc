@@ -360,7 +360,8 @@ impl SyncTask {
 
                     // Update presignatures: remove peer from participants if they don't have it
                     for presig_id in response.presignatures {
-                        let is_owned_by_me = self.presignatures.contains_by_owner(presig_id, me).await;
+                        let is_owned_by_me =
+                            self.presignatures.contains_by_owner(presig_id, me).await;
                         if !is_owned_by_me {
                             return Err(format!(
                                 "received non-owned presignature in sync response: presig_id={presig_id:?}, peer={peer:?}, me={me:?}"
@@ -437,11 +438,7 @@ impl SyncTask {
         }
     }
 
-    async fn prune_owned_presignatures(
-        &self,
-        me: Participant,
-        to_prune: &HashSet<PresignatureId>,
-    ) {
+    async fn prune_owned_presignatures(&self, me: Participant, to_prune: &HashSet<PresignatureId>) {
         if to_prune.is_empty() {
             return;
         }
