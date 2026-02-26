@@ -435,9 +435,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
     /// Fetch an artifact from storage without removing it.
     pub async fn fetch(&self, id: A::Id) -> Option<A> {
-        let Some(mut conn) = self.connect().await else {
-            return None;
-        };
+        let mut conn = self.connect().await?;
         match conn.hget(&self.artifact_key, id).await {
             Ok(artifact) => Some(artifact),
             Err(err) => {
