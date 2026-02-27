@@ -620,6 +620,7 @@ pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Re
 mod tests {
     use super::*;
     use crate::backlog::Backlog;
+    use crate::mesh::connection::NodeStatus;
     use crate::mesh::wait_threshold_active;
     use crate::node_client::NodeClient;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
@@ -686,10 +687,7 @@ mod tests {
         let threshold = 1;
         let mut mesh_state = MeshState::default();
         let participant = Participant::from(0u32);
-        mesh_state
-            .active
-            .insert(&participant, ParticipantInfo::new(0));
-        mesh_state.stable.insert(participant);
+        mesh_state.update(participant, NodeStatus::Active, ParticipantInfo::new(0));
         let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
         wait_threshold_active(&mut mesh_rx, threshold).await;
 

@@ -182,7 +182,7 @@ impl SyncTask {
                         continue;
                     }
 
-                    let need_sync = &self.mesh_state.borrow().need_sync.clone();
+                    let need_sync = self.mesh_state.borrow().need_sync().clone();
                     if need_sync.is_empty() {
                         continue;
                     }
@@ -209,7 +209,7 @@ impl SyncTask {
                     }
 
                     let update = self.new_update(me).await;
-                    let active = self.mesh_state.borrow().active.clone();
+                    let active = self.mesh_state.borrow().active().clone();
 
                     let start = Instant::now();
                     let task = tokio::spawn(broadcast_sync(

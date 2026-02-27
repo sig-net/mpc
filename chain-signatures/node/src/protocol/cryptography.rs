@@ -51,7 +51,7 @@ impl CryptographicProtocol for GeneratingState {
         let participants = self.participants.keys_vec();
         tracing::info!(
             ?participants,
-            active = ?mesh_state.active,
+            active = ?mesh_state.active(),
             "generating: progressing key generation",
         );
         loop {
@@ -174,7 +174,7 @@ impl CryptographicProtocol for WaitingForConsensusState {
 
 impl CryptographicProtocol for ResharingState {
     async fn progress(mut self, ctx: &mut MpcSignProtocol, mesh_state: MeshState) -> NodeState {
-        tracing::info!(active = ?mesh_state.active.keys_vec(), "progressing key reshare");
+        tracing::info!(active = ?mesh_state.active().keys_vec(), "progressing key reshare");
 
         let mut resharing = match self.phase {
             ResharingPhase::Resharing(resharing) => resharing,

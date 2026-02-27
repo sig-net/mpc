@@ -560,7 +560,7 @@ impl TripleSpawner {
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(60));
         let mut posits = self.msg.subscribe_triple_posit().await;
 
-        let mut active = mesh_state.borrow().active.keys_vec();
+        let mut active = mesh_state.borrow().active().keys_vec();
         let mut protocol = cfg.borrow().protocol.clone();
 
         loop {
@@ -611,7 +611,7 @@ impl TripleSpawner {
                     protocol = cfg.borrow().protocol.clone();
                 }
                 Ok(()) = mesh_state.changed() => {
-                    active = mesh_state.borrow().active.keys_vec();
+                    active = mesh_state.borrow().active().keys_vec();
                 }
             }
         }

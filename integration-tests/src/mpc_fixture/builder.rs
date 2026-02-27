@@ -16,6 +16,7 @@ use mpc_contract::primitives::{
 use mpc_keys::hpke::{self, Ciphered};
 use mpc_node::backlog::Backlog;
 use mpc_node::config::{Config, LocalConfig, NetworkConfig};
+use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes, Votes};
 use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
@@ -235,12 +236,12 @@ impl MpcFixtureBuilder {
     }
 
     fn build_mesh_state(&self) -> MeshState {
-        // mark all participant as already active and stable when the network starts
-        MeshState {
-            active: self.participants.clone(),
-            need_sync: Default::default(),
-            stable: self.participants.keys_vec().into_iter().collect(),
+        // mark all participants as already active when the network starts
+        let mut mesh_state = MeshState::default();
+        for (participant, info) in self.participants.iter() {
+            mesh_state.update(*participant, NodeStatus::Active, info.clone());
         }
+        mesh_state
     }
 
     pub fn with_preshared_key(mut self) -> Self {
