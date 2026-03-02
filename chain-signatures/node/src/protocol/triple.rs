@@ -566,7 +566,7 @@ impl TripleSpawner {
         loop {
             tokio::select! {
                 _ = expiration_interval.tick() => {
-                    for action in self.posits.expire_and_start(self.threshold, Duration::from_secs(10)) {
+                    for action in self.posits.expire_and_start(self.threshold, Duration::from_secs(10), Duration::from_secs(2)) {
                         let (id, PositInternalAction::StartProtocol(participants, positor)) = action else {
                             continue;
                         };
