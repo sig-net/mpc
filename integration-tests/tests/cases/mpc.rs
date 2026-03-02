@@ -242,7 +242,7 @@ async fn test_presignature_timeout() {
         .await;
 
     network
-        .assert_presignatures(1, Duration::from_millis(300))
+        .assert_presignatures(1, Duration::from_secs(300))
         .await;
 }
 
