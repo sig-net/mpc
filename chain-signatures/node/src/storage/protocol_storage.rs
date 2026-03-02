@@ -804,15 +804,15 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         let Some(mut conn) = self.connect().await else {
             return Err(StorageError::ConnectionFailed);
         };
-        let result: Result<(Vec<A::Id>, Vec<A::Id>), redis::RedisError> =
-            redis::Script::new(SCRIPT)
-                .key(&self.artifact_key)
-                .key(owner_key(&self.owner_keys, me))
-                .arg(Into::<u32>::into(peer))
-                .arg(threshold as i64)
-                .arg(ids)
-                .invoke_async(&mut conn)
-                .await;
+        type SyncResult<Id> = Result<(Vec<Id>, Vec<Id>), redis::RedisError>;
+        let result: SyncResult<A::Id> = redis::Script::new(SCRIPT)
+            .key(&self.artifact_key)
+            .key(owner_key(&self.owner_keys, me))
+            .arg(Into::<u32>::into(peer))
+            .arg(threshold as i64)
+            .arg(ids)
+            .invoke_async(&mut conn)
+            .await;
         match result {
             Ok((removed, updated)) => Ok((removed, updated)),
             Err(err) => Err(StorageError::RedisFailed(err.to_string())),

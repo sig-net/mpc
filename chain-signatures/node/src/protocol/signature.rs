@@ -693,7 +693,7 @@ impl SignGenerating {
         );
 
         let presignature_pending = if let Some(taken) = self.presignature.take() {
-            PendingPresignature::Available(taken)
+            PendingPresignature::Available(Box::new(taken))
         } else {
             PendingPresignature::InStorage(
                 self.presignature_id,
@@ -1387,7 +1387,7 @@ impl Drop for SignatureSpawnerTask {
 }
 
 enum PendingPresignature {
-    Available(PresignatureTaken),
+    Available(Box<PresignatureTaken>),
     InStorage(PresignatureId, Participant, PresignatureStorage),
 }
 
@@ -1401,7 +1401,7 @@ impl PendingPresignature {
 
     pub async fn fetch(self, timeout: Duration) -> Option<PresignatureTaken> {
         let (id, storage, owner) = match self {
-            PendingPresignature::Available(taken) => return Some(taken),
+            PendingPresignature::Available(taken) => return Some(*taken),
             PendingPresignature::InStorage(id, owner, storage) => (id, storage, owner),
         };
 
