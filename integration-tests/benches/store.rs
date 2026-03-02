@@ -223,6 +223,7 @@ fn dummy_presignature(id: u64) -> Presignature {
             sigma: <Secp256k1 as CurveArithmetic>::Scalar::ONE,
         },
         participants: vec![Participant::from(1), Participant::from(2)],
+        holders: None,
     }
 }
 
@@ -231,6 +232,7 @@ fn dummy_pair(id: u64) -> TriplePair {
         id,
         triple0: dummy_triple(),
         triple1: dummy_triple(),
+        holders: None,
     }
 }
 

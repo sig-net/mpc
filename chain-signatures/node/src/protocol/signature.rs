@@ -13,6 +13,7 @@ use crate::protocol::presignature::PresignatureId;
 use crate::protocol::Chain;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
+use crate::storage::protocol_storage::ProtocolArtifact;
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap, TimeoutBudget};
@@ -278,7 +279,14 @@ impl SignOrganizer {
             let fetch = tokio::time::timeout(remaining, async {
                 loop {
                     if let Some(taken) = ctx.presignatures.take_mine(ctx.me).await {
-                        let participants = intersect_vec(&[&taken.artifact.participants, &active]);
+                        let Some(holders) = taken.artifact.holders() else {
+                            tracing::error!(
+                                id = taken.artifact.id,
+                                "holders not set on taken presignature"
+                            );
+                            continue;
+                        };
+                        let participants = intersect_vec(&[holders, &active]);
                         if participants.len() < ctx.threshold {
                             recycle.push(taken);
                             continue;

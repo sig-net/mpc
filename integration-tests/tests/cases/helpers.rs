@@ -23,6 +23,7 @@ pub(crate) fn dummy_presignature_with_holders(
             k: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
             sigma: <Secp256k1 as CurveArithmetic>::Scalar::ONE,
         },
+        holders: None,
         participants,
     }
 }
@@ -36,6 +37,7 @@ pub(crate) fn dummy_pair_with_holders(id: u64, participants: Vec<Participant>) -
         id,
         triple0: dummy_triple_with_holders(participants.clone()),
         triple1: dummy_triple_with_holders(participants),
+        holders: None,
     }
 }
 

@@ -58,6 +58,14 @@ pub trait ProtocolArtifact:
         + 'static;
 
     fn id(&self) -> Self::Id;
+
+    /// Original protocol participants (immutable)
+    fn participants(&self) -> &[Participant];
+
+    /// Nodes that still hold their share of the artifact
+    fn holders(&self) -> Option<&[Participant]>;
+
+    fn set_holders(&mut self, holders: Vec<Participant>);
 }
 
 /// A pre-reserved slot for an artifact that will eventually be inserted.
@@ -278,6 +286,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 if #outdated >= 4096 then
                     redis.call("SREM", owner_key, unpack(outdated))
                     redis.call("HDEL", artifact_key, unpack(outdated))
+                    -- also delete holders sets for each outdated artifact
+                    for _, oid in ipairs(outdated) do
+                        redis.call("DEL", artifact_key .. ':holders:' .. oid)
+                    end
                     -- clear the outdated list for the next batch
                     outdated = {}
                 end
@@ -287,6 +299,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             if #outdated > 0 then
                 redis.call("SREM", owner_key, unpack(outdated))
                 redis.call("HDEL", artifact_key, unpack(outdated))
+                -- also delete holders sets for each outdated artifact
+                for _, oid in ipairs(outdated) do
+                    redis.call("DEL", artifact_key .. ':holders:' .. oid)
+                end
             end
 
             -- find shares that were shared with us but not found in our storage
@@ -344,8 +360,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         }
     }
 
-    /// Insert an artifact into the storage. If `mine` is true, the artifact will be
-    /// owned by the current node. If `back` is true, the artifact will be marked as unused.
+    /// Insert an artifact into storage under `owner`'s ownership set.
+    /// Holders must be set on the artifact before calling this; they are
+    /// persisted as a dedicated Redis set for later holder-tracking.
     pub async fn insert(&self, artifact: A, owner: Participant) -> bool {
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]
@@ -353,10 +370,18 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             local owner_key = KEYS[3]
             local artifact_id = ARGV[1]
             local artifact = ARGV[2]
+            local num_holders = tonumber(ARGV[3])
 
             redis.call("SADD", owner_key, artifact_id)
             redis.call("SADD", owner_keys, owner_key)
             redis.call("HSET", artifact_key, artifact_id, artifact)
+
+            -- Store holders in a dedicated Redis set
+            local holders_key = artifact_key .. ':holders:' .. artifact_id
+            redis.call("DEL", holders_key)
+            if num_holders > 0 then
+                redis.call("SADD", holders_key, unpack(ARGV, 4, 3 + num_holders))
+            end
         "#;
 
         let start = Instant::now();
@@ -367,6 +392,13 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             return false;
         }
 
+        let holders: Vec<u32> = artifact
+            .holders()
+            .expect("holders must be set before insert")
+            .iter()
+            .map(|p| Into::<u32>::into(*p))
+            .collect();
+
         let Some(mut conn) = self.connect().await else {
             tracing::warn!(id, "failed to insert artifact: connection failed");
             return false;
@@ -376,7 +408,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .key(&self.owner_keys)
             .key(owner_key(&self.owner_keys, owner))
             .arg(id)
-            .arg(artifact)
+            .arg(&artifact)
+            .arg(holders.len() as i64)
+            .arg(holders.as_slice())
             .invoke_async(&mut conn)
             .await;
         drop(used);
@@ -448,7 +482,13 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 return {err = "WARN artifact " .. artifact_id .. " not found"}
             end
             redis.call("HDEL", artifact_key, artifact_id)
-            return artifact
+
+            -- Read and delete the holders set
+            local holders_key = artifact_key .. ':holders:' .. artifact_id
+            local holders = redis.call("SMEMBERS", holders_key)
+            redis.call("DEL", holders_key)
+
+            return {artifact, holders}
         "#;
 
         let start = Instant::now();
@@ -462,7 +502,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             self.used.write().await.remove(&id);
             return None;
         };
-        let result: Result<A, _> = redis::Script::new(SCRIPT)
+        let result: Result<(A, Vec<u32>), _> = redis::Script::new(SCRIPT)
             .key(&self.artifact_key)
             .key(owner_key(&self.owner_keys, owner))
             .arg(id)
@@ -475,7 +515,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .observe(elapsed.as_millis() as f64);
 
         match result {
-            Ok(artifact) => {
+            Ok((mut artifact, holders)) => {
+                let holders = holders.into_iter().map(Participant::from).collect();
+                artifact.set_holders(holders);
                 tracing::info!(id, ?elapsed, "took artifact");
                 Some(ArtifactTaken::new(artifact, self.clone()))
             }
@@ -522,6 +564,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     /// Return true if successful, false otherwise.
     pub async fn clear(&self) -> bool {
         const SCRIPT: &str = r#"
+            local artifact_key = KEYS[2]
             local owner_keys = redis.call("SMEMBERS", KEYS[1])
             local del = {}
             for _, key in ipairs(KEYS) do
@@ -529,6 +572,12 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             end
             for _, key in ipairs(owner_keys) do
                 table.insert(del, key)
+            end
+
+            -- Also delete all holders sets for artifacts in the hash
+            local artifact_ids = redis.call("HKEYS", artifact_key)
+            for _, id in ipairs(artifact_ids) do
+                table.insert(del, artifact_key .. ':holders:' .. id)
             end
 
             redis.call("DEL", unpack(del))
@@ -585,13 +634,18 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             -- delete the artifact from our self owner set
             redis.call("SREM", mine_key, id)
 
-            -- Return the artifact as a response
-            return artifact
+            -- Read and delete the holders set
+            local holders_key = artifact_key .. ':holders:' .. id
+            local holders = redis.call("SMEMBERS", holders_key)
+            redis.call("DEL", holders_key)
+
+            -- Return the artifact and holders
+            return {artifact, holders}
         "#;
 
         let start = Instant::now();
         let mut conn = self.connect().await?;
-        let result: Result<Option<A>, _> = redis::Script::new(SCRIPT)
+        let result: Result<Option<(A, Vec<u32>)>, _> = redis::Script::new(SCRIPT)
             .key(&self.artifact_key)
             .key(owner_key(&self.owner_keys, me))
             .invoke_async(&mut conn)
@@ -603,7 +657,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .observe(elapsed.as_millis() as f64);
 
         match result {
-            Ok(Some(artifact)) => {
+            Ok(Some((mut artifact, holders))) => {
+                let holders = holders.into_iter().map(Participant::from).collect();
+                artifact.set_holders(holders);
                 // mark reserved and used in-memory so that it won't be reserved or reused locally
                 let id = artifact.id();
                 self.reserved.write().await.insert(id);
@@ -627,12 +683,20 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             local mine_key = KEYS[2]
             local artifact_id = ARGV[1]
             local artifact = ARGV[2]
+            local num_holders = tonumber(ARGV[3])
 
             -- Add back to artifact hash map
             redis.call("HSET", artifact_key, artifact_id, artifact)
 
             -- Add back to mine set
             redis.call("SADD", mine_key, artifact_id)
+
+            -- Restore holders set
+            local holders_key = artifact_key .. ':holders:' .. artifact_id
+            redis.call("DEL", holders_key)
+            if num_holders > 0 then
+                redis.call("SADD", holders_key, unpack(ARGV, 4, 3 + num_holders))
+            end
 
             return 1
         "#;
@@ -643,6 +707,13 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         dropper.dropper.take();
 
         let id = artifact.id();
+        let holders: Vec<u32> = artifact
+            .holders()
+            .expect("holders must be set before recycle")
+            .iter()
+            .map(|p| Into::<u32>::into(*p))
+            .collect();
+
         let Some(mut conn) = self.connect().await else {
             tracing::warn!(id, "failed to return artifact: connection failed");
             return false;
@@ -652,7 +723,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .key(&self.artifact_key)
             .key(owner_key(&self.owner_keys, me))
             .arg(id)
-            .arg(artifact)
+            .arg(&artifact)
+            .arg(holders.len() as i64)
+            .arg(holders.as_slice())
             .invoke_async(&mut conn)
             .await;
 
@@ -684,7 +757,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         &self.artifact_key
     }
 
-    /// Batch remove a peer from participants for a set of artifact IDs, and prune artifacts below threshold if owned by `me`.
+    /// Batch remove a peer from holders for a set of artifact IDs, and prune artifacts below threshold if owned by `me`.
     /// Returns (Vec<removed>, Vec<updated>)
     pub async fn remove_holder_and_prune(
         &self,
@@ -711,14 +784,14 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 if redis.call('SISMEMBER', owner_key, id) == 0 then
                     return redis.error_reply('OWNERSHIP_VIOLATION:' .. id)
                 end
-                -- Remove peer from participants (stored as a Redis set: artifact_key .. ':participants:' .. id)
-                local participants_key = artifact_key .. ':participants:' .. id
-                redis.call('SREM', participants_key, peer)
-                local count = redis.call('SCARD', participants_key)
+                -- Remove peer from holders set
+                local holders_key = artifact_key .. ':holders:' .. id
+                redis.call('SREM', holders_key, peer)
+                local count = redis.call('SCARD', holders_key)
                 if count < threshold then
-                    -- Prune: remove artifact and participants set, and from owner set
+                    -- Prune: remove artifact, holders set, and owner set entry
                     redis.call('HDEL', artifact_key, id)
-                    redis.call('DEL', participants_key)
+                    redis.call('DEL', holders_key)
                     redis.call('SREM', owner_key, id)
                     table.insert(removed, id)
                 else

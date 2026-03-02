@@ -536,8 +536,11 @@ impl MpcFixtureNodeBuilder {
             // removing here because we can't clone a triple
             let my_shares = fixture_config.input.triples.remove(&self.me).unwrap();
             for (owner, triple_shares) in my_shares {
-                for pair in triple_shares {
+                for mut pair in triple_shares {
                     let pair_id = pair.id;
+                    if pair.holders.is_none() {
+                        pair.holders = Some(pair.triple0.public.participants.clone());
+                    }
                     let mut slot = triple_storage.reserve(pair_id).await.unwrap();
                     slot.insert(pair, owner).await;
                 }
@@ -551,7 +554,10 @@ impl MpcFixtureNodeBuilder {
             // removing here because we can't clone a presignature
             let my_shares = fixture_config.input.presignatures.remove(&self.me).unwrap();
             for (owner, presignature_shares) in my_shares {
-                for presignature_share in presignature_shares {
+                for mut presignature_share in presignature_shares {
+                    if presignature_share.holders.is_none() {
+                        presignature_share.holders = Some(presignature_share.participants.clone());
+                    }
                     let mut slot = presignature_storage
                         .reserve(presignature_share.id)
                         .await
