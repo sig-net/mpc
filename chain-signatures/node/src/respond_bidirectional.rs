@@ -9,7 +9,6 @@ use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::{SignArgs, SignId};
 use std::sync::Arc;
-use tokio::time::Duration;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
@@ -46,30 +45,19 @@ impl CompletedTx {
     pub(crate) async fn create_failed_sign_request(
         &self,
         chain: Chain,
-        signature_generation_total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
-        self.process_failed_tx(chain, signature_generation_total_timeout)
-            .await
+        self.process_failed_tx(chain).await
     }
 
     pub(crate) fn create_sign_request_from_serialized_output(
         &self,
         chain: Chain,
         serialized_output: RespondBidirectionalSerializedOutput,
-        signature_generation_total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
-        self.create_respond_bidirectional_sign_request(
-            chain,
-            serialized_output,
-            signature_generation_total_timeout,
-        )
+        self.create_respond_bidirectional_sign_request(chain, serialized_output)
     }
 
-    async fn process_failed_tx(
-        &self,
-        chain: Chain,
-        total_timeout: Duration,
-    ) -> anyhow::Result<IndexedSignRequest> {
+    async fn process_failed_tx(&self, chain: Chain) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("Tx failed: {:?}", self.tx.id);
 
         let respond_serialization_format = RESPOND_SERIALIZATION_FORMAT;
@@ -90,11 +78,8 @@ impl CompletedTx {
                 Bytes::from(output).into()
             }
         };
-        let sign_request = self.create_respond_bidirectional_sign_request(
-            chain,
-            serialized_output,
-            total_timeout,
-        )?;
+        let sign_request =
+            self.create_respond_bidirectional_sign_request(chain, serialized_output)?;
         Ok(sign_request)
     }
 
@@ -102,7 +87,6 @@ impl CompletedTx {
         &self,
         chain: Chain,
         serialized_output: RespondBidirectionalSerializedOutput,
-        signature_generation_total_timeout: Duration,
     ) -> anyhow::Result<IndexedSignRequest> {
         let request_id_bytes = self.tx.request_id;
         tracing::info!(
@@ -137,7 +121,6 @@ impl CompletedTx {
             },
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
             timestamp_created: std::time::Instant::now(),
-            total_timeout: signature_generation_total_timeout,
             sign_request_type: crate::protocol::SignRequestType::RespondBidirectional(
                 RespondBidirectionalTx {
                     tx_id: self.tx.id,

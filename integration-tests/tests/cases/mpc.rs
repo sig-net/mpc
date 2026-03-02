@@ -197,7 +197,6 @@ fn sign_request(seed: u8) -> Sign {
         chain: Chain::NEAR,
         unix_timestamp_indexed: 0,
         timestamp_created: std::time::Instant::now(),
-        total_timeout: Duration::from_secs(45),
         sign_request_type: SignRequestType::Sign,
     })
 }
