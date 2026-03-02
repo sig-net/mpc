@@ -433,32 +433,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         self.used.read().await.contains(&id)
     }
 
-    /// Fetch an artifact from storage without removing it.
-    pub async fn fetch(&self, id: A::Id) -> Option<A> {
-        let mut conn = self.connect().await?;
-        match conn.hget(&self.artifact_key, id).await {
-            Ok(artifact) => Some(artifact),
-            Err(err) => {
-                tracing::warn!(id, ?err, "failed to fetch artifact");
-                None
-            }
-        }
-    }
-
-    /// Update an artifact in storage (read-modify-write).
-    pub async fn update(&self, id: A::Id, artifact: A) -> bool {
-        let Some(mut conn) = self.connect().await else {
-            return false;
-        };
-        match conn.hset(&self.artifact_key, id, artifact).await {
-            Ok(()) => true,
-            Err(err) => {
-                tracing::warn!(id, ?err, "failed to update artifact");
-                false
-            }
-        }
-    }
-
     pub async fn take(&self, id: A::Id, owner: Participant) -> Option<ArtifactTaken<A>> {
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]
@@ -708,5 +682,67 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
     pub fn artifact_key(&self) -> &str {
         &self.artifact_key
+    }
+
+    /// Batch remove a peer from participants for a set of artifact IDs, and prune artifacts below threshold if owned by `me`.
+    /// Returns (Vec<removed>, Vec<updated>)
+    pub async fn remove_holder_and_prune(
+        &self,
+        me: Participant,
+        peer: Participant,
+        threshold: usize,
+        ids: &[A::Id],
+    ) -> Result<(Vec<A::Id>, Vec<A::Id>), StorageError> {
+        if ids.is_empty() {
+            return Ok((vec![], vec![]));
+        }
+
+        // Lua script expects: KEYS[1]=artifact_key, KEYS[2]=owner_key, ARGV[1]=peer, ARGV[2]=threshold, ARGV[3...]=ids
+        const SCRIPT: &str = r#"
+            local artifact_key = KEYS[1]
+            local owner_key = KEYS[2]
+            local peer = ARGV[1]
+            local threshold = tonumber(ARGV[2])
+            local removed = {}
+            local updated = {}
+            for i = 3, #ARGV do
+                local id = ARGV[i]
+                -- Error if 'me' does not own this artifact
+                if redis.call('SISMEMBER', owner_key, id) == 0 then
+                    return redis.error_reply('OWNERSHIP_VIOLATION:' .. id)
+                end
+                -- Remove peer from participants (stored as a Redis set: artifact_key .. ':participants:' .. id)
+                local participants_key = artifact_key .. ':participants:' .. id
+                redis.call('SREM', participants_key, peer)
+                local count = redis.call('SCARD', participants_key)
+                if count < threshold then
+                    -- Prune: remove artifact and participants set, and from owner set
+                    redis.call('HDEL', artifact_key, id)
+                    redis.call('DEL', participants_key)
+                    redis.call('SREM', owner_key, id)
+                    table.insert(removed, id)
+                else
+                    table.insert(updated, id)
+                end
+            end
+            return {removed, updated}
+        "#;
+
+        let Some(mut conn) = self.connect().await else {
+            return Err(StorageError::ConnectionFailed);
+        };
+        let result: Result<(Vec<A::Id>, Vec<A::Id>), redis::RedisError> =
+            redis::Script::new(SCRIPT)
+                .key(&self.artifact_key)
+                .key(owner_key(&self.owner_keys, me))
+                .arg(Into::<u32>::into(peer))
+                .arg(threshold as i64)
+                .arg(ids)
+                .invoke_async(&mut conn)
+                .await;
+        match result {
+            Ok((removed, updated)) => Ok((removed, updated)),
+            Err(err) => Err(StorageError::RedisFailed(err.to_string())),
+        }
     }
 }

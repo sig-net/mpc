@@ -2,6 +2,7 @@
 .direnv
 .DS_Store
 .idea
+.vscode
 
 tmp
 *.log

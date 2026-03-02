@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -272,9 +271,6 @@ impl SyncTask {
         me: Participant,
         threshold: usize,
     ) -> Result<(), String> {
-        let mut triples_to_prune = HashSet::new();
-        let mut presignatures_to_prune = HashSet::new();
-
         for (peer, result) in responses {
             match result {
                 // No RPC was performed (self-peer), treat as successful
@@ -293,113 +289,45 @@ impl SyncTask {
                         "received sync response"
                     );
 
-                    // Update replica tracking: remove peer from artifacts they don't have
-                    for triple_id in response.triples {
-                        let is_owned_by_me = self.triples.contains_by_owner(triple_id, me).await;
-                        if !is_owned_by_me {
-                            return Err(format!(
-                                "received non-owned triple in sync response: triple_id={triple_id:?}, peer={peer:?}, me={me:?}"
-                            ));
-                        }
+                    // Batch remove peer from all triples and prune
+                    let triple_res = self
+                        .triples
+                        .remove_holder_and_prune(me, peer, threshold, &response.triples)
+                        .await;
 
-                        if let Some(mut pair) = self.triples.fetch(triple_id).await {
-                            let mut updated = false;
+                    // Batch remove peer from all presignatures and prune
+                    let presig_res = self
+                        .presignatures
+                        .remove_holder_and_prune(me, peer, threshold, &response.presignatures)
+                        .await;
 
-                            // Remove peer from triple0 participants
-                            if let Some(pos) = pair
-                                .triple0
-                                .public
-                                .participants
-                                .iter()
-                                .position(|p| *p == peer)
-                            {
-                                pair.triple0.public.participants.remove(pos);
-                                updated = true;
-                            }
-
-                            // Remove peer from triple1 participants
-                            if let Some(pos) = pair
-                                .triple1
-                                .public
-                                .participants
-                                .iter()
-                                .position(|p| *p == peer)
-                            {
-                                pair.triple1.public.participants.remove(pos);
-                                updated = true;
-                            }
-
-                            if updated {
-                                let remaining_holders = pair
-                                    .triple0
-                                    .public
-                                    .participants
-                                    .len()
-                                    .min(pair.triple1.public.participants.len());
-
-                                if remaining_holders < threshold {
-                                    triples_to_prune.insert(triple_id);
-                                    tracing::info!(
-                                        ?triple_id,
-                                        ?peer,
-                                        remaining_holders,
-                                        threshold,
-                                        "triple dropped below threshold: scheduling owned artifact removal"
-                                    );
-                                } else {
-                                    self.triples.update(triple_id, pair).await;
-                                    tracing::debug!(
-                                        ?triple_id,
-                                        ?peer,
-                                        "updated triple participants: removed peer"
-                                    );
-                                }
+                    match (triple_res, presig_res) {
+                        (Ok((t_removed, t_updated)), Ok((p_removed, p_updated))) => {
+                            tracing::info!(
+                                ?peer,
+                                removed_triples = t_removed.len(),
+                                updated_triples = t_updated.len(),
+                                removed_presignatures = p_removed.len(),
+                                updated_presignatures = p_updated.len(),
+                                "batch removed peer from artifacts and pruned"
+                            );
+                            // Only notify mesh if both succeeded
+                            if self.synced_peer_tx.send(peer).await.is_err() {
+                                tracing::error!(
+                                    ?peer,
+                                    "sync reporter is down: state sync will no longer work"
+                                );
+                                return Err("sync reporter is down".to_string());
                             }
                         }
-                    }
-
-                    // Update presignatures: remove peer from participants if they don't have it
-                    for presig_id in response.presignatures {
-                        let is_owned_by_me =
-                            self.presignatures.contains_by_owner(presig_id, me).await;
-                        if !is_owned_by_me {
-                            return Err(format!(
-                                "received non-owned presignature in sync response: presig_id={presig_id:?}, peer={peer:?}, me={me:?}"
-                            ));
+                        (triple_res, presig_res) => {
+                            tracing::warn!(
+                                ?peer,
+                                ?triple_res,
+                                ?presig_res,
+                                "sync batch failed, not notifying mesh"
+                            );
                         }
-
-                        if let Some(mut presig) = self.presignatures.fetch(presig_id).await {
-                            if let Some(pos) = presig.participants.iter().position(|p| *p == peer) {
-                                presig.participants.remove(pos);
-
-                                if presig.participants.len() < threshold {
-                                    presignatures_to_prune.insert(presig_id);
-                                    tracing::info!(
-                                        ?presig_id,
-                                        ?peer,
-                                        remaining_holders = presig.participants.len(),
-                                        threshold,
-                                        "presignature dropped below threshold: scheduling owned artifact removal"
-                                    );
-                                } else {
-                                    self.presignatures.update(presig_id, presig).await;
-                                    tracing::debug!(
-                                        ?presig_id,
-                                        ?peer,
-                                        "updated presignature participants: removed peer"
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    // Notify mesh that peer is synced (after processing) - for Active state transition
-                    if self.synced_peer_tx.send(peer).await.is_err() {
-                        tracing::error!(
-                            ?peer,
-                            "sync reporter is down: state sync will no longer work"
-                        );
-                        return Err("sync reporter is down".to_string());
                     }
                 }
                 // RPC failed, don't notify mesh (peer stays in Syncing state)
@@ -409,55 +337,7 @@ impl SyncTask {
             }
         }
 
-        self.prune_owned_triples(me, &triples_to_prune).await;
-        self.prune_owned_presignatures(me, &presignatures_to_prune)
-            .await;
-
         Ok(())
-    }
-
-    async fn prune_owned_triples(&self, me: Participant, to_prune: &HashSet<TripleId>) {
-        if to_prune.is_empty() {
-            return;
-        }
-
-        let mut keep = self.triples.fetch_owned(me).await;
-        keep.retain(|id| !to_prune.contains(id));
-
-        match self.triples.remove_outdated(me, &keep).await {
-            Ok(result) => {
-                tracing::info!(
-                    removed = result.removed.len(),
-                    not_found = result.not_found.len(),
-                    "removed owned triples that dropped below threshold"
-                );
-            }
-            Err(err) => {
-                tracing::warn!(?err, "failed to remove owned triples below threshold");
-            }
-        }
-    }
-
-    async fn prune_owned_presignatures(&self, me: Participant, to_prune: &HashSet<PresignatureId>) {
-        if to_prune.is_empty() {
-            return;
-        }
-
-        let mut keep = self.presignatures.fetch_owned(me).await;
-        keep.retain(|id| !to_prune.contains(id));
-
-        match self.presignatures.remove_outdated(me, &keep).await {
-            Ok(result) => {
-                tracing::info!(
-                    removed = result.removed.len(),
-                    not_found = result.not_found.len(),
-                    "removed owned presignatures that dropped below threshold"
-                );
-            }
-            Err(err) => {
-                tracing::warn!(?err, "failed to remove owned presignatures below threshold");
-            }
-        }
     }
 
     /// Channel for communicating back from the sync task which nodes are now updated.
