@@ -339,14 +339,28 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
 
     /// Expire and start protocols on enough accepted votes. Abort protocols action will be returned
     /// if the posit has expired.
+    ///
+    /// Note on `deliberator_extra_time`:
+    ///   Deliberators need to wait longer than the proposer, otherwise
+    ///   they have a high chance of aborting just when the proposer
+    ///   decides to move forward.
+    ///   Once Ts and Ps are generated with a single task, the same way
+    ///   signatures are handled, this should be replaced with a round-based
+    ///   message buffer.
     pub fn expire_and_start(
         &mut self,
         threshold: usize,
         timeout: Duration,
+        deliberator_extra_time: Duration,
     ) -> Vec<(Id, PositInternalAction<S>)> {
         let mut expired = Vec::new();
-        for (id, (_, timestamp)) in &self.posits {
-            if timestamp.elapsed() > timeout {
+        for (id, (positor, timestamp)) in &self.posits {
+            let final_timeout = if positor.is_proposer() {
+                timeout
+            } else {
+                timeout + deliberator_extra_time
+            };
+            if timestamp.elapsed() > final_timeout {
                 expired.push(*id);
             }
         }
@@ -575,11 +589,13 @@ mod tests {
         // have proposer accept, and everyone else not reply at all.
         let id202 = 202;
         posits0.propose(id202, (), &participants);
-        // expire the posit after 1 second. Only the posit for id101 should return to start the protocol.
-        std::thread::sleep(Duration::from_millis(1100));
+        // expire the posit. Only the posit for id101 should return to start the protocol.
+        let base_delay = Duration::from_secs(1);
+        let deliberator_extra_delay = Duration::from_millis(200);
+        std::thread::sleep(base_delay + deliberator_extra_delay + Duration::from_millis(100));
         // add a posit that will not expire yet
         posits0.propose(303, (), &participants);
-        let mut actions = posits0.expire_and_start(threshold, Duration::from_secs(1));
+        let mut actions = posits0.expire_and_start(threshold, base_delay, deliberator_extra_delay);
         actions.sort_by_key(|(id, _)| *id);
         assert_eq!(posits0.len(), 1);
         assert_eq!(actions.len(), 2);
@@ -601,8 +617,9 @@ mod tests {
             threshold,
             &PositAction::Propose,
         );
-        std::thread::sleep(Duration::from_millis(1100));
-        let actions = posits1.expire_and_start(threshold, Duration::from_secs(1));
+
+        std::thread::sleep(base_delay + deliberator_extra_delay + Duration::from_millis(100));
+        let actions = posits1.expire_and_start(threshold, base_delay, deliberator_extra_delay);
         assert_eq!(actions.len(), 0);
         assert_eq!(posits1.len(), 0);
     }

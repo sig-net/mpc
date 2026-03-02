@@ -557,7 +557,7 @@ impl TripleSpawner {
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
         let mut stockpile_interval = tokio::time::interval(Duration::from_millis(100));
-        let mut expiration_interval = tokio::time::interval(Duration::from_secs(60));
+        let mut expiration_interval = tokio::time::interval(Duration::from_secs(1));
         let mut posits = self.msg.subscribe_triple_posit().await;
 
         let mut active = mesh_state.borrow().active().keys_vec();
@@ -566,7 +566,7 @@ impl TripleSpawner {
         loop {
             tokio::select! {
                 _ = expiration_interval.tick() => {
-                    for action in self.posits.expire_and_start(self.threshold, Duration::from_secs(60)) {
+                    for action in self.posits.expire_and_start(self.threshold, Duration::from_secs(10), Duration::from_secs(2)) {
                         let (id, PositInternalAction::StartProtocol(participants, positor)) = action else {
                             continue;
                         };
