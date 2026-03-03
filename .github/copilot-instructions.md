@@ -26,7 +26,7 @@ infra/             # Infrastructure / deployment helpers
 
 - **Smart Contracts** (NEAR, Ethereum, Solana): accept `sign` requests from users and `respond` calls from MPC nodes. Also manage node membership via `vote_*` methods.
 - **MPC Nodes** (`chain-signatures/node`): index sign requests, coordinate triple generation and pre-signature generation, then collaboratively produce the final signature and submit it back to the contract.
-- **Cryptographic pipeline**: Triple Generation → Pre-Signature Generation → Signature. Beaver triples are stockpiled ahead of time to reduce latency.
+- **Cryptographic pipeline**: Triple Generation → Pre-Signature Generation → Signature. Beaver triples and pre-signatures are stockpiled ahead of time to reduce latency.
 - **Networking**: Nodes maintain a mesh, tracking each peer's connection status (`Active`, `Syncing`, `Inactive`, `Offline`) and a share-holder directory for participant selection.
 
 For a detailed description of the distributed state machines and protocol, see [`doc/mpc_node_specification.md`](../doc/mpc_node_specification.md) and [`doc/ARCHITECTURE.md`](../doc/ARCHITECTURE.md).
