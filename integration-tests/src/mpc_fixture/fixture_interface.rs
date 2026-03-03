@@ -74,6 +74,61 @@ impl MpcFixture {
             tokio::time::sleep(interval).await;
         }
     }
+
+    pub async fn assert_triples(&self, threshold_per_node: usize, timeout: Duration) {
+        let result = tokio::time::timeout(timeout, self.wait_for_triples(threshold_per_node)).await;
+        if result.is_err() {
+            self.print_triples().await;
+        }
+        result.expect("should have enough triples")
+    }
+
+    pub async fn assert_presignatures(&self, threshold_per_node: usize, timeout: Duration) {
+        let result =
+            tokio::time::timeout(timeout, self.wait_for_presignatures(threshold_per_node)).await;
+        if result.is_err() {
+            self.print_presignatures().await;
+        }
+        result.expect("should have enough presignatures")
+    }
+
+    pub async fn assert_actions(
+        &self,
+        threshold_per_node: usize,
+        timeout: Duration,
+    ) -> HashSet<String> {
+        let result = tokio::time::timeout(timeout, self.wait_for_actions(threshold_per_node)).await;
+        if result.is_err() {
+            self.print_actions().await;
+        }
+        result.expect("should produce enough signatures")
+    }
+
+    pub async fn print_triples(&self) {
+        for node in &self.nodes {
+            let id = node.me;
+            let num = node.triple_storage.len_by_owner(id).await;
+            tracing::info!("Node {id:?} has {num} Ts");
+        }
+    }
+
+    pub async fn print_presignatures(&self) {
+        for node in &self.nodes {
+            let id = node.me;
+            let num = node.presignature_storage.len_by_owner(id).await;
+            tracing::info!("Node {id:?} has {num} Ps");
+        }
+    }
+
+    pub async fn print_actions(&self) {
+        let actions: tokio::sync::MutexGuard<'_, HashSet<String>> =
+            self.output.rpc_actions.lock().await;
+
+        tracing::info!("All published RPC actions:");
+        for action in actions.iter() {
+            tracing::info!("{action}");
+        }
+    }
 }
 
 impl MpcFixtureNode {

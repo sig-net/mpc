@@ -16,7 +16,7 @@ use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
 use mpc_primitives::{SignId, Signature};
 use std::str::FromStr;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -222,11 +222,7 @@ impl SignatureRespondedEvent {
 
 pub(crate) trait SignatureEvent: std::fmt::Debug {
     fn generate_request_id(&self) -> [u8; 32];
-    fn generate_sign_request(
-        &self,
-        entropy: [u8; 32],
-        total_timeout: Duration,
-    ) -> anyhow::Result<IndexedSignRequest>;
+    fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest>;
     fn source_chain(&self) -> Chain;
     fn sender_string(&self) -> String;
 }
@@ -237,10 +233,9 @@ pub(crate) async fn process_sign_event(
     sign_event: SignatureEventBox,
     entropy: [u8; 32],
     sign_tx: mpsc::Sender<Sign>,
-    total_timeout: Duration,
     backlog: Backlog,
 ) -> anyhow::Result<()> {
-    let sign_request = sign_event.generate_sign_request(entropy, total_timeout)?;
+    let sign_request = sign_event.generate_sign_request(entropy)?;
 
     record_indexing_step_reached(sign_event.source_chain());
 
@@ -336,7 +331,6 @@ pub(crate) async fn recover_backlog(
     node_client: &NodeClient,
     source_chain: Chain,
     sign_tx: mpsc::Sender<Sign>,
-    total_timeout: Duration,
 ) {
     // Recover backlog before doing anything.
     // Wait for threshold to be available
@@ -377,7 +371,6 @@ pub(crate) async fn recover_backlog(
             chain: sign_tx_entry.source_chain,
             unix_timestamp_indexed: sign_tx_entry.unix_timestamp_indexed,
             timestamp_created: Instant::now(),
-            total_timeout,
             sign_request_type: sign_type,
         };
 
@@ -541,7 +534,6 @@ pub async fn process_execution_confirmed(
     result: ExecutionOutcome,
     backlog: &Backlog,
     sign_tx: mpsc::Sender<Sign>,
-    total_timeout: Duration,
     target_chain: Chain,
 ) -> anyhow::Result<()> {
     tracing::info!(
@@ -589,11 +581,12 @@ pub async fn process_execution_confirmed(
     let completed_tx = CompletedTx::new(pending_tx, block_height);
 
     let sign_request = match result {
-        ExecutionOutcome::Success { output } => completed_tx
-            .create_sign_request_from_serialized_output(source_chain, output, total_timeout)?,
+        ExecutionOutcome::Success { output } => {
+            completed_tx.create_sign_request_from_serialized_output(source_chain, output)?
+        }
         ExecutionOutcome::Failed => {
             completed_tx
-                .create_failed_sign_request(source_chain, total_timeout)
+                .create_failed_sign_request(source_chain)
                 .await?
         }
     };
@@ -707,7 +700,6 @@ mod tests {
             &node_client,
             Chain::Ethereum,
             sign_tx,
-            Duration::from_secs(5),
         )
         .await;
 
@@ -801,7 +793,6 @@ mod tests {
             ExecutionOutcome::Success { output: vec![] },
             &backlog,
             sign_tx,
-            Duration::from_secs(30),
             tx.target_chain,
         )
         .await
@@ -905,7 +896,6 @@ mod tests {
             ExecutionOutcome::Failed,
             &backlog,
             sign_tx,
-            Duration::from_secs(30),
             tx.target_chain,
         )
         .await
