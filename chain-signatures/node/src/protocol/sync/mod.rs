@@ -186,7 +186,9 @@ impl SyncTask {
                         continue;
                     }
 
-                    let update = self.new_update(me).await;
+                    let Some(update) = self.new_update(me).await else {
+                        continue;
+                    };
                     let start = Instant::now();
                     let receivers = need_sync
                         .iter()
@@ -207,7 +209,9 @@ impl SyncTask {
                         continue;
                     }
 
-                    let update = self.new_update(me).await;
+                    let Some(update) = self.new_update(me).await else {
+                        continue;
+                    };
                     let active = self.mesh_state.borrow().active().clone();
 
                     let start = Instant::now();
@@ -251,15 +255,33 @@ impl SyncTask {
     }
 
     // TODO: use reserved values instead. Note that we cannot fetch our own triples via reserved
-    async fn new_update(&self, me: Participant) -> SyncUpdate {
-        let triples = self.triples.fetch_owned(me).await;
-        let presignatures = self.presignatures.fetch_owned(me).await;
+    async fn new_update(&self, me: Participant) -> Option<SyncUpdate> {
+        let triples = match self.triples.fetch_owned(me).await {
+            Ok(ids) => ids,
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "failed to fetch owned triples, skipping sync broadcast"
+                );
+                return None;
+            }
+        };
+        let presignatures = match self.presignatures.fetch_owned(me).await {
+            Ok(ids) => ids,
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "failed to fetch owned presignatures, skipping sync broadcast"
+                );
+                return None;
+            }
+        };
 
-        SyncUpdate {
+        Some(SyncUpdate {
             from: me,
             triples,
             presignatures,
-        }
+        })
     }
 
     /// Process sync responses:

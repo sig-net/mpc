@@ -86,7 +86,7 @@ async fn test_basic_generate_triples() {
         for node in &network.nodes {
             let mut nodes_shares = BTreeMap::new();
             for peer in &network.nodes {
-                let triple_ids = node.triple_storage.fetch_owned(peer.me).await;
+                let triple_ids = node.triple_storage.fetch_owned(peer.me).await.unwrap();
                 let mut peer_triples = Vec::with_capacity(triple_ids.len());
                 for triple_id in triple_ids {
                     let pair = conn
@@ -127,7 +127,11 @@ async fn test_basic_generate_presignature() {
         for node in &network.nodes {
             let mut nodes_shares = BTreeMap::new();
             for peer in &network.nodes {
-                let presignature_ids = node.presignature_storage.fetch_owned(peer.me).await;
+                let presignature_ids = node
+                    .presignature_storage
+                    .fetch_owned(peer.me)
+                    .await
+                    .unwrap();
                 let mut peer_presignatures = Vec::with_capacity(presignature_ids.len());
                 for presignature_id in presignature_ids {
                     let t = conn
