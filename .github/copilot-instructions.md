@@ -78,7 +78,7 @@ cd chain-signatures/contract-eth && npx hardhat test
 - **Non-reuse invariant**: Triples and pre-signatures must never be used more than once. Code that selects or consumes these inputs must transition their state (`Available` → `Using` → done) atomically and persistently.
 - **Event-sourcing for recovery**: While a protocol is `Running`, all received messages are persisted before being applied so the in-memory state can be replayed after a crash.
 - **State sync**: Runs on every new peer connection. The owner sends its directory of held inputs; the peer responds with any that are missing so both sides can reconcile.
-- **Key derivation**: Account derivation for foreign chains follows NEAR's [chain-key derivation spec](doc/ACCOUNT_DERIVATION.md).
+- **Key derivation**: Account derivation for foreign chains follows NEAR's [chain-key derivation spec](../doc/ACCOUNT_DERIVATION.md).
 
 ## Important Files
 
