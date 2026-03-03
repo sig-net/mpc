@@ -62,7 +62,8 @@ cd chain-signatures/contract-eth && npx hardhat test
 
 ## Code Style and Conventions
 
-- Rust edition: **2024** (see `rustfmt.toml`).
+- Rust edition: **2021** for all crates (see `Cargo.toml` files).
+- rustfmt edition: **2024** (see `rustfmt.toml`).
 - All compiler warnings are treated as errors (`RUSTFLAGS=-D warnings`).
 - Format with `cargo fmt` before committing; CI enforces `cargo fmt -- --check`.
 - Lint with `cargo clippy --tests -- -Dclippy::all`.
