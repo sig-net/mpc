@@ -89,4 +89,4 @@ cd chain-signatures/contract-eth && npx hardhat test
 | `chain-signatures/contract/src/lib.rs` | NEAR contract entry points |
 | `chain-signatures/crypto/` | Cryptographic primitives (wrappers around cait-sith / k256) |
 | `integration-tests/src/` | Cluster setup helpers and test utilities |
-| `doc/mpc_node_specification.md` | Authoritative distributed-algorithm spec |
+| `../doc/mpc_node_specification.md` | Authoritative distributed-algorithm spec |
