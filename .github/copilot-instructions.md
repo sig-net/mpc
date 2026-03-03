@@ -4,7 +4,7 @@
 
 This repository implements **Sig.Network MPC**, a threshold Multi-Party Computation (MPC) service that enables signing arbitrary payloads via smart contracts. Nodes collaboratively produce ECDSA signatures using the [cait-sith](https://github.com/sig-net/cait-sith) library without any single party ever holding the full private key.
 
-Signatures can be used to derive and control accounts on foreign chains (Ethereum, Bitcoin, Solana, Cosmos, etc.). The project is part of the NEAR ecosystem but produces signatures that are valid across many blockchains.
+Signatures can be used to derive and control accounts on foreign chains (Ethereum, Bitcoin, Solana, Cosmos, etc.).
 
 ## Repository Layout
 
