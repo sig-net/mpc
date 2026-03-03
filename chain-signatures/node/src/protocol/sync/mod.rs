@@ -38,6 +38,16 @@ pub enum SyncError {
     ResponseFailed,
 }
 
+/// Result of a sync RPC to a single peer.
+pub enum SyncPeerResponse {
+    /// Self-peer: no RPC was performed.
+    SelfPeer,
+    /// Peer responded successfully with its view of not_found artifacts.
+    Success(SyncUpdate),
+    /// RPC to peer failed.
+    Failed(String),
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
     pub from: Participant,
@@ -289,21 +299,19 @@ impl SyncTask {
     /// 2. Send synced peer notifications to mesh (for status transitions)
     async fn process_sync_responses(
         &self,
-        responses: Vec<(Participant, Option<Result<SyncUpdate, String>>)>,
+        responses: Vec<(Participant, SyncPeerResponse)>,
         me: Participant,
         threshold: usize,
     ) -> Result<(), String> {
         for (peer, result) in responses {
             match result {
-                // No RPC was performed (self-peer), treat as successful
-                None => {
+                SyncPeerResponse::SelfPeer => {
                     if self.synced_peer_tx.send(peer).await.is_err() {
                         tracing::error!("sync reporter is down: state sync will no longer work");
                         return Err("sync reporter is down".to_string());
                     }
                 }
-                // RPC succeeded, process the not_found data
-                Some(Ok(response)) => {
+                SyncPeerResponse::Success(response) => {
                     tracing::debug!(
                         ?peer,
                         not_found_triples = response.triples.len(),
@@ -352,8 +360,7 @@ impl SyncTask {
                         }
                     }
                 }
-                // RPC failed, don't notify mesh (peer stays in Syncing state)
-                Some(Err(err)) => {
+                SyncPeerResponse::Failed(err) => {
                     tracing::warn!(?peer, ?err, "failed to sync peer");
                 }
             }
@@ -376,7 +383,7 @@ async fn broadcast_sync(
     update: SyncUpdate,
     receivers: impl Iterator<Item = (Participant, ParticipantInfo)>,
     me: Participant,
-) -> Vec<(Participant, Option<Result<SyncUpdate, String>>)> {
+) -> Vec<(Participant, SyncPeerResponse)> {
     let mut tasks = JoinSet::new();
     let update = Arc::new(update);
 
@@ -385,12 +392,13 @@ async fn broadcast_sync(
         let update = update.clone();
         let url = info.url;
         tasks.spawn(async move {
-            // Only actually do the sync on other peers, not on self.
             let sync_result = if p != me {
-                Some(client.sync(&url, &update).await.map_err(|e| e.to_string()))
+                match client.sync(&url, &update).await {
+                    Ok(response) => SyncPeerResponse::Success(response),
+                    Err(err) => SyncPeerResponse::Failed(err.to_string()),
+                }
             } else {
-                // No RPC sync is attempted for self (`p == me`); return None to indicate no-op.
-                None
+                SyncPeerResponse::SelfPeer
             };
             (p, sync_result)
         });
