@@ -85,6 +85,8 @@ variable "node_configs" {
     sol_rpc_http_url_secret_id = string
     sol_rpc_ws_url_secret_id = string
     sol_program_address = string
+    hydration_rpc_ws_url_secret_id = string
+    hydration_signer_uri_secret_id = string
   }))
 }
 

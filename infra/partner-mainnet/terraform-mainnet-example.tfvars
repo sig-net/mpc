@@ -24,5 +24,7 @@ node_configs = [
     sol_rpc_http_url_secret_id = "multichain-sol-rpc-http-url-mainnet"
     sol_rpc_ws_url_secret_id = "multichain-sol-rpc-ws-url-mainnet"
     sol_program_address = "SigMcRMjKfnC7RDG5q4yUMZM1s5KJ9oYTPP4NmJRDRw"
+    hydration_rpc_ws_url_secret_id = "multichain-hydration-rpc-ws-url-mainnet"
+    hydration_signer_uri_secret_id = "multichain-hydration-signer-uri-mainnet"
   },
 ]

@@ -75,3 +75,15 @@ data "google_secret_manager_secret_version" "sol_rpc_ws_url_secret_id" {
   secret  = var.node_configs[0].sol_rpc_ws_url_secret_id
   project = var.project_id
 }
+
+data "google_secret_manager_secret_version" "hydration_rpc_ws_url_secret_id" {
+  count   = length(var.node_configs)
+  secret  = var.node_configs[0].hydration_rpc_ws_url_secret_id
+  project = var.project_id
+}
+
+data "google_secret_manager_secret_version" "hydration_signer_uri_secret_id" {
+  count   = length(var.node_configs)
+  secret  = var.node_configs[0].hydration_signer_uri_secret_id
+  project = var.project_id
+}
