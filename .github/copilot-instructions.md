@@ -72,6 +72,18 @@ cd chain-signatures/contract-eth && npx hardhat test
 - Prefer `anyhow::Result` for application-level error propagation; use `thiserror` for library/crate-level error types.
 - Async runtime: **Tokio** (`features = ["full"]`).
 
+## Storage
+
+The node uses multiple storage backends depending on what is being stored:
+
+- **Redis** (`deadpool-redis`): Primary persistent store for triples (`ProtocolStorage<TriplePair>`) and pre-signatures (`ProtocolStorage<Presignature>`). Keys are namespaced as `{prefix}:{STORAGE_VERSION}:{account_id}`. The current `STORAGE_VERSION` constant (in `chain-signatures/node/src/storage/mod.rs`) is bumped whenever a breaking schema change is made to clear stale data.
+- **GCP Secret Manager**: Stores the node's secret key share (`PersistentNodeData`) in production via `SecretManagerNodeStorage`. Configured with `--sk-share-secret-id` / `MPC_SK_SHARE_SECRET_ID`.
+- **Disk**: Local file storage for the secret key share (`DiskNodeStorage`), used in development and integration tests. Configured with `--sk-share-local-path` / `MPC_SK_SHARE_LOCAL_PATH`.
+- **In-memory**: Fallback for both secret storage (`MemoryNodeStorage`) and indexer checkpoints (`CheckpointStorage::InMemory`). Used automatically in tests when no Redis URL or GCP config is provided.
+- **Checkpoints** (`CheckpointStorage`): Tracks the latest indexed block per chain (NEAR, Ethereum, Solana) so the indexer can resume after a restart. Backed by Redis in production and in-memory in tests.
+
+The `chain-signatures/node/src/storage/` directory contains all storage modules. `protocol_storage.rs` provides the generic `ProtocolStorage<A>` implementation used by both triples and pre-signatures.
+
 ## Key Patterns
 
 - **Protocol ownership**: Every protocol invocation (triple, pre-signature, signature) has exactly one `Owner` node. Other participants follow the owner's lead and must not make unilateral decisions about a non-owned invocation.
