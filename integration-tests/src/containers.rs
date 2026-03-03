@@ -424,7 +424,7 @@ impl Redis {
                         id: pair_id,
                         triple0,
                         triple1,
-                        holders: None,
+                        holders: Some(participant_ids.clone()),
                     };
                     storage
                         .get(me)
