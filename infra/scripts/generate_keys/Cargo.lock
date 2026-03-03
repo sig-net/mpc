@@ -1912,7 +1912,7 @@ version = "0.1.0"
 dependencies = [
  "ethers",
  "hex",
- "mpc-keys",
+ "hpke",
  "near-crypto",
  "rand",
  "sp-core",
@@ -1924,7 +1924,6 @@ version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
- "serde",
  "typenum",
  "version_check",
  "zeroize",
@@ -2147,7 +2146,6 @@ dependencies = [
  "hmac",
  "p256",
  "rand_core",
- "serde",
  "sha2 0.10.8",
  "subtle",
  "x25519-dalek",
@@ -2783,17 +2781,6 @@ dependencies = [
  "libc",
  "wasi 0.11.0+wasi-snapshot-preview1",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "mpc-keys"
-version = "1.11.0"
-dependencies = [
- "borsh",
- "hex",
- "hpke",
- "rand",
- "serde",
 ]
 
 [[package]]
