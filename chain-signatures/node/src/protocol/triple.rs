@@ -529,6 +529,11 @@ impl TripleSpawner {
     /// and the maximum number of all ongoing generation protocols is below the maximum.
     async fn stockpile(&mut self, participants: &[Participant], cfg: &ProtocolConfig) {
         if participants.len() < self.threshold {
+            tracing::warn!(
+                active = participants.len(),
+                threshold = self.threshold,
+                "not enough active participants to generate triples"
+            );
             return;
         }
 

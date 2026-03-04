@@ -109,7 +109,7 @@ pub struct ArtifactTaken<A: ProtocolArtifact> {
 
 pub struct ArtifactTakenDropper<A: ProtocolArtifact> {
     pub id: A::Id,
-    pub(crate) dropper: Option<ProtocolStorage<A>>,
+    dropper: Option<ProtocolStorage<A>>,
 }
 
 impl<A: ProtocolArtifact> Drop for ArtifactTakenDropper<A> {
@@ -672,78 +672,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             Err(err) => {
                 tracing::warn!(?err, ?elapsed, "failed to take mine artifact from storage");
                 None
-            }
-        }
-    }
-
-    /// Return a taken artifact back to the available pool.
-    pub async fn recycle_mine(&self, me: Participant, taken: ArtifactTaken<A>) -> bool {
-        const SCRIPT: &str = r#"
-            local artifact_key = KEYS[1]
-            local mine_key = KEYS[2]
-            local artifact_id = ARGV[1]
-            local artifact = ARGV[2]
-            local num_holders = tonumber(ARGV[3])
-
-            -- Add back to artifact hash map
-            redis.call("HSET", artifact_key, artifact_id, artifact)
-
-            -- Add back to mine set
-            redis.call("SADD", mine_key, artifact_id)
-
-            -- Restore holders set
-            local holders_key = artifact_key .. ':holders:' .. artifact_id
-            redis.call("DEL", holders_key)
-            if num_holders > 0 then
-                redis.call("SADD", holders_key, unpack(ARGV, 4, 3 + num_holders))
-            end
-
-            return 1
-        "#;
-
-        let start = Instant::now();
-        let (artifact, mut dropper) = taken.take();
-        // We manually handle the return, so we don't want the dropper to unreserve it.
-        dropper.dropper.take();
-
-        let id = artifact.id();
-        let holders: Vec<u32> = artifact
-            .holders()
-            .expect("holders must be set before recycle")
-            .iter()
-            .map(|p| Into::<u32>::into(*p))
-            .collect();
-
-        let Some(mut conn) = self.connect().await else {
-            tracing::warn!(id, "failed to return artifact: connection failed");
-            return false;
-        };
-
-        let result: Result<i32, _> = redis::Script::new(SCRIPT)
-            .key(&self.artifact_key)
-            .key(owner_key(&self.owner_keys, me))
-            .arg(id)
-            .arg(&artifact)
-            .arg(holders.len() as i64)
-            .arg(holders.as_slice())
-            .invoke_async(&mut conn)
-            .await;
-
-        let elapsed = start.elapsed();
-        crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "return_mine"])
-            .observe(elapsed.as_millis() as f64);
-
-        match result {
-            Ok(_) => {
-                self.reserved.write().await.remove(&id);
-                self.used.write().await.remove(&id);
-                tracing::info!(id, ?elapsed, "returned mine artifact");
-                true
-            }
-            Err(err) => {
-                tracing::warn!(id, ?err, ?elapsed, "failed to return mine artifact");
-                false
             }
         }
     }
