@@ -803,6 +803,7 @@ impl Solana {
                 payer_keypair_path.to_str().unwrap(),
                 "--url",
                 &self.rpc_address,
+                "--use-rpc",
                 "--program-id",
                 program_keypair_path.to_str().unwrap(),
                 "-v", // verbose output
