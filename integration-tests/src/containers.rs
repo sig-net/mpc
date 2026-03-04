@@ -690,7 +690,6 @@ impl Solana {
             rpc_http_url: self.rpc_address.clone(),
             rpc_ws_url: self.ws_address.clone(),
             program_address,
-            total_timeout: 60, // Default timeout in seconds
         }
     }
 

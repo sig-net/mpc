@@ -52,7 +52,6 @@ pub struct IndexedSignRequest {
     /// Monotonic system time when the request entered the system for processing.
     /// Set during initial indexing or updated on recovery/requeue to current system time.
     pub timestamp_created: Instant,
-    pub total_timeout: Duration,
     pub sign_request_type: SignRequestType,
 }
 

@@ -15,7 +15,6 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::triple_storage::TriplePair;
 use crate::stream::run_stream;
 use crate::{indexer, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, storage, web};
-use std::time::Duration;
 
 use clap::Parser;
 use deadpool_redis::Runtime;
@@ -358,8 +357,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 backlog.clone(),
             ));
 
-            let total_timeout =
-                Duration::from_secs(eth.as_ref().map(|e| e.total_timeout).unwrap_or(60));
             match EthereumStream::new(eth, backlog.clone()).await {
                 Ok(eth_stream) => {
                     tokio::spawn(run_stream(
@@ -369,7 +366,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                         contract_watcher.clone(),
                         mesh_state.clone(),
                         client.clone(),
-                        total_timeout,
                     ));
                 }
                 Err(err) => {
@@ -385,7 +381,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     contract_watcher.clone(),
                     mesh_state.clone(),
                     client.clone(),
-                    Duration::from_secs(sol.unwrap().total_timeout),
                 ));
             }
             tokio::spawn(indexer_hydration::run(

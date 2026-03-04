@@ -21,7 +21,7 @@ jobs:
         name: "Checkout mpc"
 
       - name: Login to GCP Artifact Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v3.7.0
         with:
           registry: europe-west1-docker.pkg.dev
           username: _json_key

@@ -10,7 +10,6 @@ use crate::stream::ops::{
     process_sign_request, recover_backlog, RespondBidirectionalEvent, SignatureRespondedEvent,
 };
 
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::watch;
 
@@ -101,7 +100,6 @@ pub async fn run_stream<S: ChainStream>(
     mut contract_watcher: ContractStateWatcher,
     mut mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
-    total_timeout: Duration,
 ) {
     let chain = S::CHAIN;
 
@@ -114,7 +112,6 @@ pub async fn run_stream<S: ChainStream>(
         &node_client,
         chain,
         sign_tx.clone(),
-        total_timeout,
     )
     .await;
 
@@ -166,7 +163,6 @@ pub async fn run_stream<S: ChainStream>(
                     result,
                     &backlog,
                     sign_tx.clone(),
-                    total_timeout,
                     S::CHAIN,
                 )
                 .await
@@ -235,7 +231,6 @@ mod tests {
             chain: Chain::Solana,
             timestamp_created: std::time::Instant::now(),
             unix_timestamp_indexed: current_unix_timestamp(),
-            total_timeout: Duration::from_secs(5),
             sign_request_type: SignRequestType::Sign,
         };
 
@@ -280,7 +275,6 @@ mod tests {
             contract_watcher,
             mesh_state_rx,
             node_client,
-            Duration::from_secs(5),
         )
         .await;
 
@@ -352,7 +346,6 @@ mod tests {
                 contract_watcher,
                 mesh_state_rx,
                 node_client,
-                Duration::from_secs(5),
             )
             .await;
         });
@@ -401,7 +394,6 @@ mod tests {
             chain: Chain::Solana,
             timestamp_created: std::time::Instant::now(),
             unix_timestamp_indexed: current_unix_timestamp(),
-            total_timeout: Duration::from_secs(5),
             sign_request_type: SignRequestType::SignBidirectional(SBE::Solana(sign_bidir.clone())),
         };
 

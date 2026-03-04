@@ -683,7 +683,7 @@ impl PresignatureSpawner {
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
         let mut stockpile_interval = time::interval(Duration::from_millis(100));
-        let mut expiration_interval = tokio::time::interval(Duration::from_secs(20));
+        let mut expiration_interval = tokio::time::interval(Duration::from_secs(1));
         let mut posits = self.msg.subscribe_presignature_posit().await;
 
         let mut protocol = cfg.borrow().protocol.clone();
@@ -692,7 +692,7 @@ impl PresignatureSpawner {
         loop {
             tokio::select! {
                 _ = expiration_interval.tick() => {
-                    for (id, action) in self.posits.expire_and_start(self.threshold, Duration::from_secs(60)) {
+                    for (id, action) in self.posits.expire_and_start(self.threshold, Duration::from_secs(10), Duration::from_secs(2)) {
                         let PositInternalAction::StartProtocol(participants, positor) = action else {
                             tracing::warn!(
                                 ?id,

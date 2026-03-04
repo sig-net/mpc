@@ -59,8 +59,6 @@ pub struct SolConfig {
     pub rpc_ws_url: String,
     /// The program address to watch
     pub program_address: String,
-    /// total timeout for a sign request starting from indexed time in seconds
-    pub total_timeout: u64,
 }
 
 impl fmt::Debug for SolConfig {
@@ -70,7 +68,6 @@ impl fmt::Debug for SolConfig {
             .field("rpc_http_url", &self.rpc_http_url)
             .field("rpc_ws_url", &self.rpc_ws_url)
             .field("program_address", &self.program_address)
-            .field("total_timeout", &self.total_timeout)
             .finish()
     }
 }
@@ -91,9 +88,6 @@ pub struct SolArgs {
     /// The program address to watch
     #[clap(long, env("MPC_SOL_PROGRAM_ADDRESS"), requires = "sol_account_sk")]
     pub sol_program_address: Option<String>,
-    /// total timeout for a sign request starting from indexed time in seconds
-    #[clap(long, env("MPC_SOL_TOTAL_TIMEOUT"), default_value = "200")]
-    pub sol_total_timeout: Option<u64>,
 }
 
 impl SolArgs {
@@ -111,12 +105,6 @@ impl SolArgs {
         if let Some(sol_program_address) = self.sol_program_address {
             args.extend(["--sol-program-address".to_string(), sol_program_address]);
         }
-        if let Some(sol_total_timeout) = self.sol_total_timeout {
-            args.extend([
-                "--sol-total-timeout".to_string(),
-                sol_total_timeout.to_string(),
-            ]);
-        }
         args
     }
 
@@ -126,7 +114,6 @@ impl SolArgs {
             rpc_http_url: self.sol_rpc_http_url?,
             rpc_ws_url: self.sol_rpc_ws_url?,
             program_address: self.sol_program_address?,
-            total_timeout: self.sol_total_timeout?,
         })
     }
 
@@ -137,14 +124,12 @@ impl SolArgs {
                 sol_rpc_http_url: Some(config.rpc_http_url),
                 sol_rpc_ws_url: Some(config.rpc_ws_url),
                 sol_program_address: Some(config.program_address),
-                sol_total_timeout: Some(config.total_timeout),
             },
             None => SolArgs {
                 sol_account_sk: None,
                 sol_rpc_http_url: None,
                 sol_rpc_ws_url: None,
                 sol_program_address: None,
-                sol_total_timeout: None,
             },
         }
     }
@@ -176,11 +161,7 @@ impl SignatureEvent for SignatureRequestedEvent {
         hasher.finalize().into()
     }
 
-    fn generate_sign_request(
-        &self,
-        entropy: [u8; 32],
-        total_timeout: Duration,
-    ) -> anyhow::Result<IndexedSignRequest> {
+    fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("found solana event: {:?}", self);
         if self.deposit == 0 {
             tracing::warn!("deposit is 0, skipping sign request");
@@ -224,7 +205,6 @@ impl SignatureEvent for SignatureRequestedEvent {
             chain: Chain::Solana,
             timestamp_created: Instant::now(),
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            total_timeout,
             sign_request_type: SignRequestType::Sign,
         })
     }
@@ -256,11 +236,7 @@ impl SignatureEvent for SignBidirectionalEvent {
         keccak::hash(&encoded).to_bytes()
     }
 
-    fn generate_sign_request(
-        &self,
-        entropy: [u8; 32],
-        total_timeout: Duration,
-    ) -> anyhow::Result<IndexedSignRequest> {
+    fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("found solana event: {:?}", self);
         if self.deposit == 0 {
             tracing::warn!("deposit is 0, skipping sign request");
@@ -303,7 +279,6 @@ impl SignatureEvent for SignBidirectionalEvent {
             chain: Chain::Solana,
             timestamp_created: Instant::now(),
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            total_timeout,
             sign_request_type: SignRequestType::SignBidirectional(
                 crate::stream::ops::SignBidirectionalEvent::Solana(self.clone()),
             ),
@@ -347,14 +322,12 @@ impl SolanaStream {
             return None;
         };
 
-        let total_timeout = Duration::from_secs(sol.total_timeout);
         let (tx, rx) = crate::stream::channel();
         let tasks = vec![
             spawn_cpi_sign_events(
                 program_id,
                 sol.rpc_http_url.clone(),
                 sol.rpc_ws_url.clone(),
-                total_timeout,
                 tx.clone(),
             ),
             spawn_respond_events(
@@ -477,7 +450,6 @@ fn spawn_cpi_sign_events(
     program_id: Pubkey,
     rpc_url: String,
     ws_url: String,
-    total_timeout: Duration,
     events_tx: mpsc::Sender<ChainEvent>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(subscribe_and_process_sign_events(
@@ -485,7 +457,6 @@ fn spawn_cpi_sign_events(
         rpc_url.clone(),
         ws_url.clone(),
         events_tx.clone(),
-        total_timeout,
     ))
 }
 
@@ -515,11 +486,10 @@ fn spawn_respond_events(
 fn build_sign_request(
     sign_event: SignatureEventBox,
     tx_sig: Vec<u8>,
-    total_timeout: Duration,
 ) -> anyhow::Result<IndexedSignRequest> {
     let mut entropy = [0u8; 32];
     entropy.copy_from_slice(&tx_sig[..32]);
-    sign_event.generate_sign_request(entropy, total_timeout)
+    sign_event.generate_sign_request(entropy)
 }
 
 // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L31
@@ -528,7 +498,6 @@ async fn subscribe_and_process_sign_events(
     rpc_url: String,
     ws_url: String,
     events_tx: mpsc::Sender<ChainEvent>,
-    total_timeout: Duration,
 ) {
     loop {
         let events_tx_clone = events_tx.clone();
@@ -542,7 +511,7 @@ async fn subscribe_and_process_sign_events(
                 let tx_sig: Vec<u8> = signature.as_ref().to_vec();
                 let events_tx = events_tx_clone.clone();
                 tokio::spawn(async move {
-                    match build_sign_request(event, tx_sig, total_timeout) {
+                    match build_sign_request(event, tx_sig) {
                         Ok(req) => {
                             let _ = events_tx.send(ChainEvent::SignRequest(req)).await;
                         }
