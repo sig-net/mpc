@@ -6,15 +6,12 @@ use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 
 use std::collections::HashMap;
 use std::fmt;
-use std::ops::Deref;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
-use anchor_client::{Client, Cluster, Program};
 use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
 use ethabi::{encode, Token};
@@ -34,7 +31,6 @@ use solana_client::{
     nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient},
     rpc_config::{RpcTransactionLogsConfig, RpcTransactionLogsFilter},
 };
-use solana_sdk::signer::keypair::Keypair;
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
 use tokio::sync::mpsc;
 
@@ -340,13 +336,6 @@ impl SolanaStream {
                 sol.rpc_ws_url.clone(),
                 tx.clone(),
             ),
-            spawn_non_cpi_sign_events(
-                program_id,
-                sol.account_sk.clone(),
-                sol.rpc_http_url.clone(),
-                sol.rpc_ws_url.clone(),
-                tx.clone(),
-            ),
         ];
 
         Some(SolanaStream { rx, tasks })
@@ -492,67 +481,6 @@ fn spawn_respond_events(
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     })
-}
-
-fn spawn_non_cpi_sign_events(
-    program_id: Pubkey,
-    account_sk: String,
-    rpc_url: String,
-    ws_url: String,
-    events_tx: mpsc::Sender<ChainEvent>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            let cluster = Cluster::Custom(rpc_url.clone(), ws_url.clone());
-            let kp = Keypair::from_base58_string(&account_sk);
-            let client =
-                Client::new_with_options(cluster, Arc::new(kp), CommitmentConfig::confirmed());
-            let Ok(program) = client.program(program_id) else {
-                tracing::error!("Failed to get program");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            };
-
-            let unsub = subscribe_to_program_non_cpi_events(&program, events_tx.clone()).await;
-
-            if let Err(err) = unsub {
-                tracing::warn!("Failed to subscribe to solana non-CPI events: {:?}", err);
-            } else {
-                let _ = unsub.unwrap().unsubscribe().await;
-            }
-
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    })
-}
-
-async fn subscribe_to_program_non_cpi_events<C: Deref<Target = Keypair> + Clone>(
-    program: &Program<C>,
-    events_tx: mpsc::Sender<ChainEvent>,
-) -> anyhow::Result<anchor_client::EventUnsubscriber<'_>> {
-    tracing::info!("Subscribing to program events");
-    let (sender, mut receiver) = mpsc::unbounded_channel();
-    let event_unsubscriber = program
-        .on(move |ctx, event: SignatureRequestedEvent| {
-            let tx_sig: Vec<u8> = ctx.signature.as_ref().to_vec();
-            tracing::info!("Received event: {:?}", event);
-            if sender.send((event, tx_sig)).is_err() {
-                tracing::error!("Error while transferring the event.");
-            }
-        })
-        .await?;
-
-    tracing::info!("Subscribed to program events");
-    while let Some((event, tx_sig)) = receiver.recv().await {
-        match build_sign_request(Box::new(event), tx_sig) {
-            Ok(req) => {
-                let _ = events_tx.send(ChainEvent::SignRequest(req)).await;
-            }
-            Err(err) => tracing::warn!("Failed to process event: {:?}", err),
-        }
-    }
-
-    Ok(event_unsubscriber)
 }
 
 fn build_sign_request(
