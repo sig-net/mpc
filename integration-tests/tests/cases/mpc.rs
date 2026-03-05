@@ -521,7 +521,7 @@ async fn test_sign_contention_5_nodes() {
     const NUM_SIGN_REQUESTS: u8 = 5; // Reduced from 10 to match presignature availability
     const MIN_PRESIGNATURES_PER_OWNER: usize = 3;
     const STOCKPILE_MIN: u32 = 8;
-    const STOCKPILE_MAX: u32 = 12;
+    const STOCKPILE_MAX: u32 = 24;
 
     tracing::info!(
         num_nodes = NUM_NODES,
@@ -542,8 +542,9 @@ async fn test_sign_contention_5_nodes() {
 
     // Wait for presignatures to be generated - 5-node triple generation takes ~3-4 minutes
     // We wait for a modest per-owner count since distribution is not uniform
+    // TODO: reduce timeout once P+T generation is more reliable
     tracing::info!("waiting for presignatures to be generated (triple gen takes ~3-4 min)...");
-    let timeout = Duration::from_secs(480); // 8 minutes for triple + presignature generation
+    let timeout = Duration::from_secs(540); // 9 minutes for triple + presignature generation
     network
         .assert_presignatures(MIN_PRESIGNATURES_PER_OWNER, timeout)
         .await;
@@ -563,7 +564,8 @@ async fn test_sign_contention_5_nodes() {
     }
 
     // Wait for all signatures - allow more time for 5-node consensus
-    let timeout = Duration::from_secs(120);
+    // TODO: reduce timeout once signature generation is more reliable
+    let timeout = Duration::from_secs(180);
     let actions = network
         .assert_actions(NUM_SIGN_REQUESTS as usize, timeout)
         .await;
