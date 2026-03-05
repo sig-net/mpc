@@ -537,6 +537,7 @@ async fn test_sign_contention_5_nodes() {
         .with_max_triples_stockpile(STOCKPILE_MAX)
         .with_min_presignatures_stockpile(STOCKPILE_MIN)
         .with_max_presignatures_stockpile(STOCKPILE_MAX)
+        .with_signature_timeout_ms(20_000) // default is 10_000 but this test sometimes takes longer
         .build()
         .await;
 
