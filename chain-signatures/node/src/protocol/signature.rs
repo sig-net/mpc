@@ -418,11 +418,21 @@ impl SignPositor {
                 // not immediately jump to that higher round. Otherwise, any peer
                 // could force themselves to be the proposer every time.
                 if state.round < *peer_round {
+                    tracing::info!(
+                        peer_round,
+                        my_round = state.round,
+                        "Storing message for future round, as deliberator",
+                    );
                     state.store_future_posit_message(task_msg);
                     continue;
                 }
 
                 if !matches!(action, PositAction::Propose) {
+                    tracing::warn!(
+                        round = peer_round,
+                        ?action,
+                        "Got unexpected posit message while waiting for propose"
+                    );
                     continue;
                 }
 
@@ -582,6 +592,11 @@ impl SignPositor {
                     // not immediately jump to that higher round. Otherwise, any peer
                     // could force themselves to be the proposer every time.
                     if state.round < peer_round {
+                        tracing::info!(
+                            peer_round,
+                            my_round = state.round,
+                            "Storing message for future round",
+                        );
                         state.store_future_posit_message(task_msg);
                         continue;
                     }
@@ -654,6 +669,7 @@ impl SignPositor {
                             ?sign_id,
                             accepts = counter.accepts.len(),
                             threshold = ctx.threshold,
+                            ?round,
                             "proposer posit deadline reached, expiring round"
                         );
                         if let Some(taken) = presignature {
@@ -661,7 +677,7 @@ impl SignPositor {
                             drop(taken);
                         }
                     } else {
-                        tracing::warn!(?sign_id, "deliberator posit timeout waiting for Start, reorganizing");
+                        tracing::warn!(?sign_id, me=?ctx.me, ?proposer, "deliberator posit timeout waiting for Start, reorganizing");
                     }
 
                     state.bump_round();

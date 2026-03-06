@@ -852,7 +852,10 @@ impl SignAction<'_> {
                 .await?;
             let err = wait_for::rogue_message_responded(rogue_status).await?;
 
-            assert!(err.contains(&errors::RespondError::InvalidSignature.to_string()));
+            assert!(
+                err.contains(&errors::RespondError::InvalidSignature.to_string()),
+                "Response instead was {err}"
+            );
             Some(rogue)
         } else {
             None
