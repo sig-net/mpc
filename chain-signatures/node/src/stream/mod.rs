@@ -198,6 +198,7 @@ mod tests {
     use mpc_primitives::SignId;
     use near_primitives::types::AccountId;
     use std::time::Duration;
+    use std::collections::HashSet;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
 
@@ -537,5 +538,98 @@ mod tests {
         // stop the client and wait for the indexer to finish
         drop(events_tx);
         run_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_stream_bulk_requests_complete_and_backlog_cleared() {
+        let backlog = Backlog::new();
+        const N: usize = 64;
+        let mut sign_ids = Vec::with_capacity(N);
+        let args = SignArgs {
+            entropy: [0u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "bulk".to_string(),
+            key_version: 1,
+        };
+        let mut events: Vec<Option<ChainEvent>> = Vec::with_capacity(N * 2 + 1);
+        for i in 0..N {
+            let mut id_bytes = [0u8; 32];
+            id_bytes[0] = i as u8;
+            let sign_id = SignId::new(id_bytes);
+            sign_ids.push(sign_id);
+            let indexed = IndexedSignRequest {
+                id: sign_id,
+                args: args.clone(),
+                chain: Chain::Solana,
+                timestamp_created: std::time::Instant::now(),
+                unix_timestamp_indexed: current_unix_timestamp(),
+                total_timeout: Duration::from_secs(5),
+                sign_request_type: SignRequestType::Sign,
+            };
+            events.push(Some(ChainEvent::SignRequest(indexed)));
+            // Respond with a permissive (zeroed) signature — accepted by stream ops in tests.
+            let sig_responded =
+                SignatureRespondedEvent::Solana(signet_program::SignatureRespondedEvent {
+                    request_id: sign_id.request_id,
+                    responder: solana_sdk::pubkey::Pubkey::new_unique(),
+                    signature: signet_program::Signature {
+                        big_r: signet_program::AffinePoint {
+                            x: [0u8; 32],
+                            y: [0u8; 32],
+                        },
+                        s: [0u8; 32],
+                        recovery_id: 0,
+                    },
+                });
+            events.push(Some(ChainEvent::Respond(sig_responded)));
+        }
+        events.push(None);
+        let client = TestEventStream { events };
+        let (sign_tx, mut sign_rx) = mpsc::channel(2 * N + 4);
+        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+            &"test.near".parse::<AccountId>().unwrap(),
+            k256::ProjectivePoint::GENERATOR.to_affine(),
+            0,
+            Default::default(),
+        );
+        let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
+        let node_client = NodeClient::new(&Default::default());
+        // run stream
+        run_stream(
+            client,
+            sign_tx.clone(),
+            backlog.clone(),
+            contract_watcher,
+            mesh_state_rx,
+            node_client,
+            Duration::from_secs(5),
+        )
+        .await;
+        // collect and verify messages
+        let mut seen_requests: HashSet<mpc_primitives::SignId> = HashSet::new();
+        let mut seen_completions: HashSet<mpc_primitives::SignId> = HashSet::new();
+        let collect_res = timeout(Duration::from_secs(5), async {
+            while seen_completions.len() < N || seen_requests.len() < N {
+                match sign_rx.recv().await {
+                    Some(Sign::Request(r)) => {
+                        seen_requests.insert(r.id);
+                    }
+                    Some(Sign::Completion(id)) => {
+                        seen_completions.insert(id);
+                    }
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+        })
+        .await;
+        assert!(collect_res.is_ok(), "did not receive all sign messages in time");
+        assert_eq!(seen_requests.len(), N);
+        assert_eq!(seen_completions.len(), N);
+        // backlog should not retain any of the completed requests
+        for id in sign_ids {
+            assert!(backlog.get(Chain::Solana, &id).await.is_none(), "backlog still contains {:?}", id);
+        }
     }
 }
