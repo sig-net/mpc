@@ -404,18 +404,13 @@ impl Backlog {
             .get_mut(&chain)
             .ok_or(BacklogError::ChainNotFound)?;
 
-        // Replace the Sign transaction with the Bidirectional transaction
-        if let Some(entry) = pending.requests.get_mut(&sign_id) {
-            entry.tx = BacklogTransaction::Bidirectional(bidirectional_tx.clone());
-        } else {
-            pending.requests.insert(
-                sign_id,
-                BacklogEntry {
-                    tx: BacklogTransaction::Bidirectional(bidirectional_tx.clone()),
-                    sign_type: SignRequestType::Sign,
-                },
-            );
-        }
+        // Replace the Sign transaction with the Bidirectional transaction while
+        // preserving the original sign_type metadata.
+        let entry = pending
+            .requests
+            .get_mut(&sign_id)
+            .ok_or(BacklogError::NotFound { chain, id: sign_id })?;
+        entry.tx = BacklogTransaction::Bidirectional(bidirectional_tx.clone());
 
         // Registration successful, now register the execution watcher on the target chain
         let target_chain = bidirectional_tx.target_chain;
