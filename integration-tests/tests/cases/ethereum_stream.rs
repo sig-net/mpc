@@ -125,7 +125,6 @@ impl EthereumTestEnvironment {
             network: "sepolia".to_string(),
             helios_data_path: "/tmp/helios".to_string(),
             refresh_finalized_interval: 500,
-            total_timeout: 120,
             optimistic_requests,
             light_client: false,
         }

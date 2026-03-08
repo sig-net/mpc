@@ -119,8 +119,6 @@ pub struct EthConfig {
     pub helios_data_path: String,
     /// refresh finalized block interval in milliseconds
     pub refresh_finalized_interval: u64,
-    /// total timeout for a sign request starting from indexed time in seconds
-    pub total_timeout: u64,
     /// Enable the indexer to just send requests optimistically instead waiting for final.
     pub optimistic_requests: bool,
     /// light client is true if using helios, false if using direct rpc
@@ -140,7 +138,6 @@ impl fmt::Debug for EthConfig {
                 "refresh_finalized_interval",
                 &self.refresh_finalized_interval,
             )
-            .field("total_timeout", &self.total_timeout)
             .field("optimistic_requests", &self.optimistic_requests)
             .field("light_client", &self.light_client)
             .finish()
@@ -195,9 +192,6 @@ pub struct EthArgs {
         default_value = "10000"
     )]
     pub eth_refresh_finalized_interval: Option<u64>,
-    /// total timeout for a sign request starting from indexed time in seconds
-    #[clap(long, env("MPC_ETH_TOTAL_TIMEOUT"), default_value = "1500")]
-    pub eth_total_timeout: Option<u64>,
     /// Enable the indexer to just send requests optimistically instead waiting for final.
     /// Useful for testing where we do not want to reach finality due to how long it takes.
     #[clap(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "false")]
@@ -240,12 +234,6 @@ impl EthArgs {
                 eth_refresh_finalized_interval.to_string(),
             ]);
         }
-        if let Some(eth_total_timeout) = self.eth_total_timeout {
-            args.extend([
-                "--eth-total-timeout".to_string(),
-                eth_total_timeout.to_string(),
-            ]);
-        }
         if self.eth_optimistic_requests {
             args.push("--eth-optimistic-requests".to_string());
         }
@@ -264,7 +252,6 @@ impl EthArgs {
             network: self.eth_network?,
             helios_data_path: self.eth_helios_data_path?,
             refresh_finalized_interval: self.eth_refresh_finalized_interval?,
-            total_timeout: self.eth_total_timeout?,
             optimistic_requests: self.eth_optimistic_requests,
             light_client: self.eth_light_client,
         })
@@ -280,7 +267,6 @@ impl EthArgs {
                 eth_network: Some(config.network),
                 eth_helios_data_path: Some(config.helios_data_path),
                 eth_refresh_finalized_interval: Some(config.refresh_finalized_interval),
-                eth_total_timeout: Some(config.total_timeout),
                 eth_optimistic_requests: config.optimistic_requests,
                 eth_light_client: config.light_client,
             },
@@ -292,7 +278,6 @@ impl EthArgs {
                 eth_network: None,
                 eth_helios_data_path: None,
                 eth_refresh_finalized_interval: None,
-                eth_total_timeout: None,
                 eth_optimistic_requests: false,
                 eth_light_client: false,
             },
@@ -345,7 +330,7 @@ sol! {
     event SignatureResponded(bytes32 indexed requestId, address responder, Signature signature);
 }
 
-fn sign_request_from_filtered_log(log: Log, total_timeout: Duration) -> Option<IndexedSignRequest> {
+fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
     let event = parse_event(&log);
     tracing::debug!("found eth event: {:?}", event);
     if event.deposit == U256::ZERO {
@@ -396,7 +381,6 @@ fn sign_request_from_filtered_log(log: Log, total_timeout: Duration) -> Option<I
         chain: Chain::Ethereum,
         unix_timestamp_indexed: crate::util::current_unix_timestamp(),
         timestamp_created: Instant::now(),
-        total_timeout,
         sign_request_type: SignRequestType::Sign,
     })
 }
@@ -462,11 +446,11 @@ fn parse_string_args(data: &Bytes, offset_start: usize) -> String {
     String::from_utf8(bytes.to_vec()).unwrap_or_default()
 }
 
-fn parse_filtered_logs(logs: Vec<Log>, total_timeout: Duration) -> Vec<IndexedSignRequest> {
+fn parse_filtered_logs(logs: Vec<Log>) -> Vec<IndexedSignRequest> {
     let mut indexed_requests = Vec::new();
     for log in logs {
         tracing::debug!("Parsing Ethereum log: {:?}", log);
-        match sign_request_from_filtered_log(log.clone(), total_timeout) {
+        match sign_request_from_filtered_log(log.clone()) {
             Some(request) => indexed_requests.push(request),
             None => tracing::warn!("Failed to parse Ethereum log: {:?}", log),
         }
@@ -741,7 +725,6 @@ impl EthereumIndexer {
     pub async fn run(self, events_tx: mpsc::Sender<ChainEvent>) {
         let backlog = self.backlog;
         let eth = self.eth;
-        let total_timeout = Duration::from_secs(eth.total_timeout);
         let client = Arc::new(self.client);
 
         tracing::info!("running ethereum indexer");
@@ -786,7 +769,6 @@ impl EthereumIndexer {
             blocks_failed_send.clone(),
             contract_address,
             requests_indexed_send.clone(),
-            total_timeout,
             backlog.clone(),
             events_tx.clone(),
         ));
@@ -844,7 +826,6 @@ impl EthereumIndexer {
                 block.clone(),
                 contract_address,
                 requests_indexed_send_clone.clone(),
-                total_timeout,
                 backlog.clone(),
                 events_tx.clone(),
             )
@@ -905,7 +886,6 @@ impl EthereumIndexer {
         block: alloy::rpc::types::Block,
         contract_address: Address,
         requests_indexed: mpsc::Sender<BlockAndRequests>,
-        total_timeout: Duration,
         backlog: Backlog,
         events_tx: mpsc::Sender<ChainEvent>,
     ) -> anyhow::Result<()> {
@@ -967,7 +947,7 @@ impl EthereumIndexer {
             .collect();
 
         if !request_logs.is_empty() {
-            sign_requests.extend(parse_filtered_logs(request_logs, total_timeout));
+            sign_requests.extend(parse_filtered_logs(request_logs));
         }
 
         // Collect execution confirmations (if any) and emit ExecutionConfirmed events
@@ -1213,7 +1193,6 @@ impl EthereumIndexer {
         blocks_failed_tx: mpsc::Sender<alloy::rpc::types::Block>,
         contract_address: Address,
         requests_indexed: mpsc::Sender<BlockAndRequests>,
-        total_timeout: Duration,
         backlog: Backlog,
         events_tx: mpsc::Sender<ChainEvent>,
     ) {
@@ -1228,7 +1207,6 @@ impl EthereumIndexer {
                 block.clone(),
                 contract_address,
                 requests_indexed.clone(),
-                total_timeout,
                 backlog.clone(),
                 events_tx.clone(),
             )

@@ -15,7 +15,6 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::triple_storage::TriplePair;
 use crate::stream::run_stream;
 use crate::{indexer, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, storage, web};
-use std::time::Duration;
 
 use clap::Parser;
 use deadpool_redis::Runtime;
@@ -195,7 +194,11 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
         } => {
             let _guard = logs::setup(&storage_options.env, account_id.as_str(), &log_options).await;
             let _span = tracing::trace_span!("cli").entered();
-            crate::metrics::init_metrics(&account_id, env!("CARGO_PKG_VERSION"));
+            crate::metrics::init_metrics(
+                &account_id,
+                env!("CARGO_PKG_VERSION"),
+                option_env!("GIT_COMMIT_HASH"),
+            );
 
             let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
 
@@ -293,6 +296,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 %account_id,
                 %my_address,
                 %cipher_pk_hex,
+                version = %crate::metrics::version(),
+                git_commit_hash = %crate::metrics::git_commit_hash(),
                 sign_pk = %network.sign_sk.public_key(),
                 near_rpc_url = %near_client.rpc_addr(),
                 eth_contract_address = %eth.as_ref().map(|eth| eth.contract_address.as_str()).unwrap_or("None"),
@@ -352,8 +357,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 backlog.clone(),
             ));
 
-            let total_timeout =
-                Duration::from_secs(eth.as_ref().map(|e| e.total_timeout).unwrap_or(60));
             match EthereumStream::new(eth, backlog.clone()).await {
                 Ok(eth_stream) => {
                     tokio::spawn(run_stream(
@@ -363,7 +366,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                         contract_watcher.clone(),
                         mesh_state.clone(),
                         client.clone(),
-                        total_timeout,
                     ));
                 }
                 Err(err) => {
@@ -379,7 +381,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     contract_watcher.clone(),
                     mesh_state.clone(),
                     client.clone(),
-                    Duration::from_secs(sol.unwrap().total_timeout),
                 ));
             }
             tokio::spawn(indexer_hydration::run(

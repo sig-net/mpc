@@ -22,7 +22,6 @@ use sp_state_machine::read_proof_check;
 use sp_trie::StorageProof;
 use std::convert::TryInto;
 use std::fmt;
-use std::time::Duration;
 use std::time::Instant;
 use subxt::backend::{legacy::LegacyRpcMethods, rpc::RpcClient};
 use subxt::config::HashFor;
@@ -42,12 +41,6 @@ pub struct HydrationArgs {
     /// Hydration signer URI
     #[clap(long = "hydration-signer-uri", env("MPC_HYDRATION_SIGNER_URI"))]
     pub signer_uri: Option<String>,
-    #[clap(
-        long = "hydration-total-timeout",
-        env("MPC_HYDRATION_TOTAL_TIMEOUT"),
-        default_value = "200"
-    )]
-    pub total_timeout: Option<u64>,
 }
 
 impl HydrationArgs {
@@ -59,12 +52,6 @@ impl HydrationArgs {
         if let Some(signer_uri) = self.signer_uri {
             args.extend(["--hydration-signer-uri".to_string(), signer_uri]);
         }
-        if let Some(total_timeout) = self.total_timeout {
-            args.extend([
-                "--hydration-total-timeout".to_string(),
-                total_timeout.to_string(),
-            ]);
-        }
         args
     }
 
@@ -72,7 +59,6 @@ impl HydrationArgs {
         Some(HydrationConfig {
             rpc_ws_url: self.rpc_ws_url?,
             signer_uri: self.signer_uri?,
-            total_timeout: self.total_timeout?,
         })
     }
 
@@ -81,12 +67,10 @@ impl HydrationArgs {
             Some(config) => HydrationArgs {
                 rpc_ws_url: Some(config.rpc_ws_url),
                 signer_uri: Some(config.signer_uri),
-                total_timeout: Some(config.total_timeout),
             },
             None => HydrationArgs {
                 rpc_ws_url: None,
                 signer_uri: None,
-                total_timeout: None,
             },
         }
     }
@@ -98,8 +82,6 @@ pub struct HydrationConfig {
     pub rpc_ws_url: String,
     /// Hydration signer URI
     pub signer_uri: String,
-    /// total timeout for a sign request starting from indexed time in seconds
-    pub total_timeout: u64,
 }
 
 impl fmt::Debug for HydrationConfig {
@@ -107,7 +89,6 @@ impl fmt::Debug for HydrationConfig {
         f.debug_struct("HydrationConfig")
             .field("rpc_ws_url", &self.rpc_ws_url)
             .field("signer_uri", &"<hidden>")
-            .field("total_timeout", &self.total_timeout)
             .finish()
     }
 }
@@ -144,11 +125,7 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {
         hasher.finalize().into()
     }
 
-    fn generate_sign_request(
-        &self,
-        entropy: [u8; 32],
-        total_timeout: Duration,
-    ) -> anyhow::Result<IndexedSignRequest> {
+    fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("found hydration event: {:?}", self);
         if self.deposit == 0 {
             tracing::warn!("deposit is 0, skipping sign request");
@@ -194,7 +171,6 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {
             chain: Chain::Hydration,
             timestamp_created: Instant::now(),
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            total_timeout,
             sign_request_type: SignRequestType::Sign,
         })
     }
@@ -241,11 +217,7 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
         alloy::primitives::keccak256(encoded).into()
     }
 
-    fn generate_sign_request(
-        &self,
-        entropy: [u8; 32],
-        total_timeout: Duration,
-    ) -> anyhow::Result<IndexedSignRequest> {
+    fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("found hydration event: {:?}", self);
         if self.deposit == 0 {
             tracing::warn!("deposit is 0, skipping sign request");
@@ -292,7 +264,6 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
             chain: Chain::Hydration,
             timestamp_created: Instant::now(),
             unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            total_timeout,
             sign_request_type: SignRequestType::SignBidirectional(
                 crate::stream::ops::SignBidirectionalEvent::Hydration(self.clone()),
             ),
@@ -384,7 +355,6 @@ pub async fn run(
         tracing::warn!("hydration indexer is disabled");
         return;
     };
-    let total_timeout = Duration::from_secs(hydration.total_timeout);
 
     let ws_url: &str = hydration.rpc_ws_url.as_str();
 
@@ -418,7 +388,6 @@ pub async fn run(
         &node_client,
         Chain::Hydration,
         sign_tx.clone(),
-        total_timeout,
     )
     .await;
 
@@ -517,7 +486,6 @@ pub async fn run(
                     Box::new(event),
                     entropy,
                     sign_tx.clone(),
-                    total_timeout,
                     backlog.clone(),
                 )
                 .await
@@ -572,7 +540,6 @@ pub async fn run(
                     Box::new(event),
                     entropy,
                     sign_tx.clone(),
-                    total_timeout,
                     backlog.clone(),
                 )
                 .await

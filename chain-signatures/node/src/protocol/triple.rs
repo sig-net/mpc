@@ -42,7 +42,9 @@ struct TripleGenerator {
     me: Participant,
     proposer: Participant,
     participants: Vec<Participant>,
-    protocol: TripleProtocol,
+    /// Option to temporarily move it to a blocking task. Must be Some in all
+    /// other circumstances.
+    protocol: Option<TripleProtocol>,
     timeout: Duration,
     slot: TriplePairSlot,
     created: Instant,
@@ -84,7 +86,7 @@ impl TripleGenerator {
             me,
             proposer,
             participants,
-            protocol: Box::new(protocol),
+            protocol: Some(Box::new(protocol)),
             timeout,
             slot,
             created: Instant::now(),
@@ -129,7 +131,31 @@ impl TripleGenerator {
 
         loop {
             let poke_start_time = Instant::now();
-            let action = match self.protocol.poke() {
+            // Temporarily move protocol into blocking task and restore it immediately after.
+            let mut protocol = self.protocol.take().expect("must be always be Some");
+
+            let poke_result =
+                match tokio::task::spawn_blocking(move || (protocol.poke(), protocol)).await {
+                    Ok((res, protocol)) => {
+                        self.protocol = Some(protocol);
+                        res
+                    }
+                    Err(err) => {
+                        crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
+                        if self.proposer == self.me {
+                            crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
+                        }
+                        tracing::warn!(
+                            id = self.id,
+                            ?err,
+                            elapsed = ?start_time.elapsed(),
+                            "triple generation failed in a spawned blocking task",
+                        );
+                        return;
+                    }
+                };
+
+            let action = match poke_result {
                 Ok(action) => action,
                 Err(err) => {
                     crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
@@ -164,7 +190,10 @@ impl TripleGenerator {
                         }
                         break;
                     };
-                    self.protocol.message(msg.from, msg.data);
+                    self.protocol
+                        .as_mut()
+                        .expect("must always be Some")
+                        .message(msg.from, msg.data);
                 }
                 Action::SendMany(data) => {
                     for to in &self.participants {
@@ -557,16 +586,16 @@ impl TripleSpawner {
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
         let mut stockpile_interval = tokio::time::interval(Duration::from_millis(100));
-        let mut expiration_interval = tokio::time::interval(Duration::from_secs(60));
+        let mut expiration_interval = tokio::time::interval(Duration::from_secs(1));
         let mut posits = self.msg.subscribe_triple_posit().await;
 
-        let mut active = mesh_state.borrow().active.keys_vec();
+        let mut active = mesh_state.borrow().active().keys_vec();
         let mut protocol = cfg.borrow().protocol.clone();
 
         loop {
             tokio::select! {
                 _ = expiration_interval.tick() => {
-                    for action in self.posits.expire_and_start(self.threshold, Duration::from_secs(60)) {
+                    for action in self.posits.expire_and_start(self.threshold, Duration::from_secs(10), Duration::from_secs(2)) {
                         let (id, PositInternalAction::StartProtocol(participants, positor)) = action else {
                             continue;
                         };
@@ -611,7 +640,7 @@ impl TripleSpawner {
                     protocol = cfg.borrow().protocol.clone();
                 }
                 Ok(()) = mesh_state.changed() => {
-                    active = mesh_state.borrow().active.keys_vec();
+                    active = mesh_state.borrow().active().keys_vec();
                 }
             }
         }

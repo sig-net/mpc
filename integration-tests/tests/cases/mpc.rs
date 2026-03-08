@@ -78,9 +78,7 @@ async fn test_basic_generate_triples() {
         .build()
         .await;
 
-    tokio::time::timeout(Duration::from_secs(180), network.wait_for_triples(1))
-        .await
-        .expect("should have enough triples eventually");
+    network.assert_triples(1, Duration::from_secs(180)).await;
 
     if WRITE_OUTPUT_TO_FILES {
         let mut conn = network.redis_container.pool().get().await.unwrap();
@@ -119,9 +117,9 @@ async fn test_basic_generate_presignature() {
         .build()
         .await;
 
-    tokio::time::timeout(Duration::from_secs(10), network.wait_for_presignatures(1))
-        .await
-        .expect("should have enough presignatures eventually");
+    network
+        .assert_presignatures(1, Duration::from_secs(10))
+        .await;
 
     if WRITE_OUTPUT_TO_FILES {
         let mut conn = network.redis_container.pool().get().await.unwrap();
@@ -163,12 +161,9 @@ async fn test_basic_sign() {
         .build()
         .await;
 
-    tokio::time::timeout(
-        Duration::from_millis(300),
-        network.wait_for_presignatures(2),
-    )
-    .await
-    .expect("should start with enough presignatures");
+    network
+        .assert_presignatures(2, Duration::from_millis(300))
+        .await;
 
     tracing::info!("sending requests now");
     let request = sign_request(0);
@@ -178,9 +173,7 @@ async fn test_basic_sign() {
 
     let timeout = Duration::from_secs(10);
 
-    let actions = tokio::time::timeout(timeout, network.wait_for_actions(1))
-        .await
-        .expect("should publish RPC action eventually");
+    let actions = network.assert_actions(1, timeout).await;
 
     assert_eq!(actions.len(), 1);
     let action_str = actions.iter().next().unwrap();
@@ -197,7 +190,6 @@ fn sign_request(seed: u8) -> Sign {
         chain: Chain::NEAR,
         unix_timestamp_indexed: 0,
         timestamp_created: std::time::Instant::now(),
-        total_timeout: Duration::from_secs(45),
         sign_request_type: SignRequestType::Sign,
     })
 }
@@ -248,9 +240,9 @@ async fn test_presignature_timeout() {
         .build()
         .await;
 
-    tokio::time::timeout(Duration::from_secs(300), network.wait_for_presignatures(1))
-        .await
-        .expect("should have enough presignatures eventually");
+    network
+        .assert_presignatures(1, Duration::from_secs(300))
+        .await;
 }
 
 /// Test that with adequate presignature stockpile, sign requests complete
@@ -270,12 +262,9 @@ async fn test_sign_adequate_stockpile() {
         .await;
 
     // Wait for presignatures to be loaded
-    tokio::time::timeout(
-        Duration::from_millis(500),
-        network.wait_for_presignatures(1),
-    )
-    .await
-    .expect("should start with enough presignatures");
+    network
+        .assert_presignatures(1, Duration::from_millis(500))
+        .await;
 
     // Count initial presignatures from first node (all nodes share same Redis)
     let initial_presignatures = network[0].presignature_storage.len_generated().await;
@@ -292,12 +281,9 @@ async fn test_sign_adequate_stockpile() {
 
     // Wait for all signatures to be produced
     let timeout = Duration::from_secs(60);
-    let actions = tokio::time::timeout(
-        timeout,
-        network.wait_for_actions(NUM_SIGN_REQUESTS as usize),
-    )
-    .await
-    .expect("should publish all RPC actions eventually");
+    let actions = network
+        .assert_actions(NUM_SIGN_REQUESTS as usize, timeout)
+        .await;
 
     assert_eq!(
         actions.len(),
@@ -350,12 +336,9 @@ async fn test_sign_limited_stockpile_contention() {
         .await;
 
     // Wait for presignatures to be loaded
-    tokio::time::timeout(
-        Duration::from_millis(500),
-        network.wait_for_presignatures(1),
-    )
-    .await
-    .expect("should start with presignatures");
+    network
+        .assert_presignatures(1, Duration::from_millis(500))
+        .await;
 
     // Get initial count from first node (all nodes share same Redis pool)
     let initial_presignatures = network[0].presignature_storage.len_generated().await;
@@ -381,9 +364,9 @@ async fn test_sign_limited_stockpile_contention() {
 
     // Use a generous timeout since contention may slow things down
     let timeout = Duration::from_secs(90);
-    let actions = tokio::time::timeout(timeout, network.wait_for_actions(min_expected_signatures))
-        .await
-        .expect("should produce signatures even under contention");
+    let actions = network
+        .assert_actions(min_expected_signatures, timeout)
+        .await;
 
     // Count final presignatures
     let final_presignatures = network[0].presignature_storage.len_generated().await;
@@ -448,12 +431,9 @@ async fn test_sign_requests_wait_for_presignatures() {
         .await;
 
     // Wait for initial presignatures to be loaded
-    tokio::time::timeout(
-        Duration::from_millis(500),
-        network.wait_for_presignatures(1),
-    )
-    .await
-    .expect("should start with presignatures");
+    network
+        .assert_presignatures(1, Duration::from_millis(500))
+        .await;
 
     let initial_presignatures = network[0].presignature_storage.len_generated().await;
     tracing::info!(
@@ -476,12 +456,9 @@ async fn test_sign_requests_wait_for_presignatures() {
     tracing::info!(first_batch_expected, "waiting for first batch");
 
     let first_batch_timeout = Duration::from_secs(30);
-    let first_actions = tokio::time::timeout(
-        first_batch_timeout,
-        network.wait_for_actions(first_batch_expected),
-    )
-    .await
-    .expect("first batch should complete with available presignatures");
+    let first_actions = network
+        .assert_actions(first_batch_expected, first_batch_timeout)
+        .await;
 
     tracing::info!(
         first_batch_completed = first_actions.len(),
@@ -499,12 +476,9 @@ async fn test_sign_requests_wait_for_presignatures() {
     // Now wait for more presignatures to be generated
     // The remaining sign requests should be waiting
     tracing::info!("waiting for presignature generation to catch up");
-    tokio::time::timeout(
-        Duration::from_secs(120),
-        network.wait_for_presignatures(3), // wait for at least 3 owned presignatures per node
-    )
-    .await
-    .expect("should generate more presignatures");
+    network
+        .assert_presignatures(3, Duration::from_secs(120))
+        .await;
 
     let after_generation = network[0].presignature_storage.len_generated().await;
     tracing::info!(after_generation, "presignatures after generation");
@@ -512,12 +486,9 @@ async fn test_sign_requests_wait_for_presignatures() {
     // Now wait for remaining signatures to complete
     tracing::info!("waiting for remaining signatures");
     let final_timeout = Duration::from_secs(60);
-    let final_actions = tokio::time::timeout(
-        final_timeout,
-        network.wait_for_actions(TOTAL_SIGN_REQUESTS as usize),
-    )
-    .await
-    .expect("all signatures should complete after presignature generation");
+    let final_actions = network
+        .assert_actions(TOTAL_SIGN_REQUESTS as usize, final_timeout)
+        .await;
 
     tracing::info!(
         total_signatures = final_actions.len(),
@@ -572,12 +543,10 @@ async fn test_sign_contention_5_nodes() {
     // Wait for presignatures to be generated - 5-node triple generation takes ~3-4 minutes
     // We wait for a modest per-owner count since distribution is not uniform
     tracing::info!("waiting for presignatures to be generated (triple gen takes ~3-4 min)...");
-    tokio::time::timeout(
-        Duration::from_secs(480), // 8 minutes for triple + presignature generation
-        network.wait_for_presignatures(MIN_PRESIGNATURES_PER_OWNER),
-    )
-    .await
-    .expect("should generate presignatures within 8 minutes");
+    let timeout = Duration::from_secs(480); // 8 minutes for triple + presignature generation
+    network
+        .assert_presignatures(MIN_PRESIGNATURES_PER_OWNER, timeout)
+        .await;
 
     let initial_presignatures = network[0].presignature_storage.len_generated().await;
     tracing::info!(
@@ -595,12 +564,9 @@ async fn test_sign_contention_5_nodes() {
 
     // Wait for all signatures - allow more time for 5-node consensus
     let timeout = Duration::from_secs(120);
-    let actions = tokio::time::timeout(
-        timeout,
-        network.wait_for_actions(NUM_SIGN_REQUESTS as usize),
-    )
-    .await
-    .expect("should produce all signatures");
+    let actions = network
+        .assert_actions(NUM_SIGN_REQUESTS as usize, timeout)
+        .await;
 
     let final_presignatures = network[0].presignature_storage.len_generated().await;
     let presignatures_consumed = initial_presignatures.saturating_sub(final_presignatures);
@@ -652,12 +618,9 @@ async fn test_sign_missing_presignature() {
         .build()
         .await;
 
-    tokio::time::timeout(
-        Duration::from_millis(300),
-        network.wait_for_presignatures(2),
-    )
-    .await
-    .expect("should start with enough presignatures");
+    network
+        .assert_presignatures(2, Duration::from_millis(300))
+        .await;
 
     // Now delete presignatures of one node
     let bad_node = 0;
@@ -678,9 +641,7 @@ async fn test_sign_missing_presignature() {
     // expectation: the node without the presignature will reject a posit, or if
     // they are proposer, a timeout will let the next proposer take over
     let timeout = Duration::from_secs(120);
-    let actions = tokio::time::timeout(timeout, network.wait_for_actions(1))
-        .await
-        .expect("should publish RPC action eventually");
+    let actions = network.assert_actions(1, timeout).await;
 
     let msg_log = network.output.msg_log.lock().await;
     msg_log.print_summary();
@@ -726,12 +687,9 @@ async fn test_sign_missing_presignature_after_posits() {
         .build()
         .await;
 
-    tokio::time::timeout(
-        Duration::from_millis(300),
-        network.wait_for_presignatures(2),
-    )
-    .await
-    .expect("should start with enough presignatures");
+    network
+        .assert_presignatures(2, Duration::from_millis(300))
+        .await;
 
     // Now we submit the request
     tracing::info!("sending requests now");
@@ -759,9 +717,7 @@ async fn test_sign_missing_presignature_after_posits() {
     // posit, or if they are proposer, a timeout will let the next
     // proposer take over.
     let timeout = Duration::from_secs(120);
-    let actions = tokio::time::timeout(timeout, network.wait_for_actions(1))
-        .await
-        .expect("should publish RPC action eventually");
+    let actions = network.assert_actions(1, timeout).await;
 
     let msg_log = network.output.msg_log.lock().await;
     msg_log.print_summary();
@@ -782,9 +738,7 @@ async fn test_triples_message_count() {
         .build()
         .await;
 
-    tokio::time::timeout(Duration::from_secs(120), network.wait_for_triples(1))
-        .await
-        .expect("should have enough triples eventually");
+    network.assert_triples(1, Duration::from_secs(120)).await;
 
     // This prints a summary of all sent message counts for debugging
     let msg_log = network.output.msg_log.lock().await;
@@ -823,9 +777,9 @@ async fn test_presignature_message_count() {
         .build()
         .await;
 
-    tokio::time::timeout(Duration::from_secs(10), network.wait_for_presignatures(1))
-        .await
-        .expect("should have enough presignatures eventually");
+    network
+        .assert_presignatures(1, Duration::from_secs(10))
+        .await;
 
     // This prints a summary of all sent message counts for debugging
     let msg_log = network.output.msg_log.lock().await;
@@ -852,12 +806,9 @@ async fn test_signature_message_count() {
         .build()
         .await;
 
-    tokio::time::timeout(
-        Duration::from_millis(300),
-        network.wait_for_presignatures(2),
-    )
-    .await
-    .expect("should start with enough presignatures");
+    network
+        .assert_presignatures(2, Duration::from_millis(300))
+        .await;
 
     tracing::info!("sending requests now");
     let request = sign_request(0);
@@ -865,11 +816,7 @@ async fn test_signature_message_count() {
     network[1].sign_tx.send(request.clone()).await.unwrap();
     network[2].sign_tx.send(request.clone()).await.unwrap();
 
-    let timeout = Duration::from_secs(10);
-
-    tokio::time::timeout(timeout, network.wait_for_actions(1))
-        .await
-        .expect("should publish RPC action eventually");
+    network.assert_actions(1, Duration::from_secs(10)).await;
 
     // This prints a summary of all sent message counts for debugging
     let msg_log = network.output.msg_log.lock().await;
