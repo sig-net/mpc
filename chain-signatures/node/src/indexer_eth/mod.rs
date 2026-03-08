@@ -9,6 +9,7 @@ use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
 use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::PendingRequestStatus;
 use crate::stream::{ChainEvent, ChainStream, ExecutionOutcome};
+use crate::stream::ChainBufferedStream;
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
@@ -741,7 +742,7 @@ impl EthereumIndexer {
     /// Return a clone of the internal Ethereum client for auxiliary operations
     /// (used by the `EthereumStream` buffered/catchup helpers).
     pub fn client(&self) -> std::sync::Arc<EthereumClient> {
-        std::sync::Arc::clone(&self.client)
+        std::sync::Arc::new(self.client.clone())
     }
 
     pub async fn run(self, events_tx: mpsc::Sender<ChainEvent>) {
@@ -1406,7 +1407,7 @@ impl EthereumStream {
         parallelism: usize,
         total_timeout: std::time::Duration,
     ) {
-        use futures::stream::{self, StreamExt};
+        use futures_util::stream::{self, StreamExt};
         let rng: Vec<u64> = (from_inclusive..=to_inclusive).collect();
 
         let client_clone = client.clone();

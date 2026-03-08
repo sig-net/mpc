@@ -331,6 +331,10 @@ pub struct SolanaStream {
     tasks: Vec<tokio::task::JoinHandle<()>>,
     // optional buffered tx for livestream()/drain
     buffered_tx: Option<mpsc::Sender<ChainEvent>>,
+    // rpc + program id kept so `catchup()` can perform historical scans
+    rpc_http_url: String,
+    program_id: Pubkey,
+    total_timeout: Duration,
 }
 
 impl Drop for SolanaStream {
@@ -379,7 +383,7 @@ impl SolanaStream {
             ),
         ];
 
-        Some(SolanaStream { rx, tasks })
+        Some(SolanaStream { rx, tasks, buffered_tx: None, rpc_http_url: sol.rpc_http_url, program_id, total_timeout })
     }
 }
 
@@ -405,6 +409,77 @@ impl ChainStream for SolanaStream {
         });
 
         Ok(Box::new(crate::stream::ops::BufferedReceiver::new(buffer_rx)))
+    }
+
+    async fn catchup(&mut self, from_inclusive: u64, to_inclusive: u64) -> anyhow::Result<()> {
+        // ensure buffer exists
+        let buffer = match &self.buffered_tx {
+            Some(tx) => tx.clone(),
+            None => anyhow::bail!("livestream must be started before catchup"),
+        };
+
+        let rpc_client = RpcClient::new(self.rpc_http_url.clone());
+        let program_id = self.program_id;
+        let total_timeout = self.total_timeout;
+
+        // parallel fetch blocks then apply in-order
+        use futures_util::stream::{self, StreamExt};
+        let slots: Vec<u64> = (from_inclusive..=to_inclusive).collect();
+        let client = std::sync::Arc::new(rpc_client);
+        let fetches = stream::iter(slots.into_iter().map(move |slot| {
+            let client = client.clone();
+            async move { (slot, client.get_block(slot).await) }
+        }))
+        .buffer_unordered(6)
+        .collect::<Vec<_>>()
+        .await;
+
+        let mut fetches = fetches;
+        fetches.sort_by_key(|(s, _)| *s);
+
+        for (slot, maybe_block) in fetches {
+            if let Ok(block) = maybe_block {
+                // each transaction in the block => parse CPI events
+                for tx_with_meta in block.transactions.into_iter() {
+                    // parse sign events
+                                    match parse_cpi_events(&tx_with_meta, &program_id) {
+                        Ok(events) => {
+                            // attempt to extract signature bytes for entropy
+                            let tx_sig_bytes = extract_first_signature_bytes(&tx_with_meta);
+                            for ev in events {
+                                match build_sign_request(ev, tx_sig_bytes.clone(), total_timeout) {
+                                    Ok(req) => {
+                                        let _ = buffer.send(ChainEvent::SignRequest(req)).await;
+                                    }
+                                    Err(err) => tracing::warn!(%slot, ?err, "solana catchup: failed to build sign request"),
+                                }
+                            }
+                        }
+                        Err(err) => tracing::warn!(%slot, ?err, "solana catchup: parse_cpi_events failed"),
+                    }
+
+                    // parse respond / respond_bidirectional events
+                    match parse_cpi_respond_events(&tx_with_meta, &program_id) {
+                        Ok((respond_bdx, respond_events)) => {
+                            for ev in respond_bdx {
+                                let _ = buffer.send(ChainEvent::RespondBidirectional(crate::stream::ops::RespondBidirectionalEvent::Solana(ev))).await;
+                            }
+                            for ev in respond_events {
+                                let _ = buffer.send(ChainEvent::Respond(crate::stream::ops::SignatureRespondedEvent::Solana(ev))).await;
+                            }
+                        }
+                        Err(err) => tracing::warn!(%slot, ?err, "solana catchup: parse_cpi_respond_events failed"),
+                    }
+                }
+
+                // emit block checkpoint event
+                let _ = buffer.send(ChainEvent::Block(slot)).await;
+            } else {
+                tracing::warn!(slot = slot, "solana catchup: block not found");
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -475,7 +550,7 @@ async fn subscribe_to_program_respond_events(
                         let now = Instant::now();
                         seen.insert(signature, now);
 
-                        let (respond_bidirectional_events, respond_events) = match parse_cpi_respond_events(tx_res, &program_id) {
+                        let (respond_bidirectional_events, respond_events) = match parse_cpi_respond_events_from_confirmed(&tx_res, &program_id) {
                             Ok(v) => v,
                             Err(err) => {
                                 tracing::warn!(?err, sig = %signature, "failed to parse respond events (will skip this signature)");
@@ -660,12 +735,27 @@ async fn subscribe_and_process_sign_events(
 }
 
 fn parse_cpi_events(
-    tx: solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta,
+    tx: &solana_transaction_status::EncodedTransactionWithStatusMeta,
+    target_program_id: &Pubkey,
+) -> Result<Vec<SignatureEventBox>> {
+    parse_cpi_events_impl(tx, target_program_id)
+}
+
+fn parse_cpi_events_from_confirmed(
+    tx: &solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta,
+    target_program_id: &Pubkey,
+) -> Result<Vec<SignatureEventBox>> {
+    parse_cpi_events(&tx.transaction, target_program_id)
+}
+
+// actual implementation
+fn parse_cpi_events_impl(
+    tx: &solana_transaction_status::EncodedTransactionWithStatusMeta,
     target_program_id: &Pubkey,
 ) -> Result<Vec<SignatureEventBox>> {
     use solana_transaction_status::{UiInstruction, UiParsedInstruction};
 
-    let Some(meta) = tx.transaction.meta else {
+    let Some(meta) = tx.meta.as_ref() else {
         return Ok(Vec::new());
     };
 
@@ -708,7 +798,7 @@ fn parse_cpi_events(
     };
 
     // Look into inner instructions for CPI calls
-    let inner_ixs = match meta.inner_instructions {
+    let inner_ixs = match &meta.inner_instructions {
         solana_transaction_status::option_serializer::OptionSerializer::Some(ixs) => ixs,
         _ => return Ok(Vec::new()),
     };
@@ -744,6 +834,31 @@ fn parse_cpi_events(
     Ok(out)
 }
 
+/// Extract the first transaction signature (as bytes) when possible. Falls back
+/// to `blake2_256` of the serialized transaction when not available.
+fn extract_first_signature_bytes(
+    tx: &solana_transaction_status::EncodedTransactionWithStatusMeta,
+) -> Vec<u8> {
+    // try to extract from JSON-parsed transaction
+    if let solana_transaction_status::EncodedTransaction::Json(ui_tx) = &tx.transaction {
+        if let Some(sig) = ui_tx.signatures.get(0) {
+            if let Ok(s) = solana_sdk::signature::Signature::from_str(sig) {
+                return s.as_ref().to_vec();
+            }
+        }
+    }
+
+    // fallback: hash the meta + inner_instructions bytes
+    let mut hasher = blake3::Hasher::new();
+    if let Ok(bytes) = serde_json::to_vec(&tx.transaction) {
+        hasher.update(&bytes);
+    }
+    let out = hasher.finalize();
+    let mut arr = vec![0u8; 32];
+    let bytes: &[u8] = out.as_ref();
+    arr.copy_from_slice(&bytes[..32]);
+    arr
+}
 // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L311
 async fn subscribe_to_program_cpi_events<F>(
     program_id: Pubkey,
@@ -815,7 +930,7 @@ where
                         let now = Instant::now();
                         seen.insert(signature, now);
 
-                        match parse_cpi_events(tx_req, &program_id) {
+                        match parse_cpi_events_from_confirmed(&tx_req, &program_id) {
                             Ok(events) => {
                                 for ev in events {
                                     event_handler(ev, signature, response.context.slot);
@@ -862,12 +977,26 @@ fn has_log_starts_with(logs: &[String], start_with: &str) -> bool {
 }
 
 fn parse_cpi_respond_events(
-    tx: solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta,
+    tx: &solana_transaction_status::EncodedTransactionWithStatusMeta,
+    target_program_id: &Pubkey,
+) -> Result<(Vec<RespondBidirectionalEvent>, Vec<SignatureRespondedEvent>)> {
+    parse_cpi_respond_events_impl(tx, target_program_id)
+}
+
+fn parse_cpi_respond_events_from_confirmed(
+    tx: &solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta,
+    target_program_id: &Pubkey,
+) -> Result<(Vec<RespondBidirectionalEvent>, Vec<SignatureRespondedEvent>)> {
+    parse_cpi_respond_events_impl(&tx.transaction, target_program_id)
+}
+
+fn parse_cpi_respond_events_impl(
+    tx: &solana_transaction_status::EncodedTransactionWithStatusMeta,
     target_program_id: &Pubkey,
 ) -> Result<(Vec<RespondBidirectionalEvent>, Vec<SignatureRespondedEvent>)> {
     use solana_transaction_status::{UiInstruction, UiParsedInstruction};
 
-    let Some(meta) = tx.transaction.meta else {
+    let Some(meta) = tx.meta.as_ref() else {
         return Ok((Vec::new(), Vec::new()));
     };
 
@@ -918,7 +1047,7 @@ fn parse_cpi_respond_events(
         };
 
     // Look into inner instructions for CPI calls
-    let inner_ixs = match meta.inner_instructions {
+    let inner_ixs = match &meta.inner_instructions {
         solana_transaction_status::option_serializer::OptionSerializer::Some(ixs) => ixs,
         _ => return Ok((Vec::new(), Vec::new())),
     };

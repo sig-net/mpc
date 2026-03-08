@@ -196,6 +196,7 @@ pub struct SignatureRespondedEvent {
 }
 
 #[event]
+#[derive(Clone)]
 pub struct RespondBidirectionalEvent {
     pub request_id: [u8; 32],
     pub responder: Pubkey,

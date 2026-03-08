@@ -188,6 +188,81 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     Ok(())
 }
 
+/// Verify the shared `run_stream` startup performs Solana catchup (anchor -> catchup -> drain -> live)
+#[test_log::test(tokio::test)]
+async fn test_solana_stream_catchup_via_run_stream() -> Result<()> {
+    // Start sandbox + stream; observe a current anchor slot
+    let solana = solana_sandbox().await?;
+    let program_address = solana.program_keypair.pubkey().to_string();
+    let config = solana.get_config(program_address.clone());
+
+    let mut stream = stream_solana(config.clone())?;
+
+    // wait for an initial block to determine anchor
+    let mut observed_anchor = None;
+    for _ in 0..10 {
+        if let Ok(Some(ChainEvent::Block(slot))) = timeout(Duration::from_secs(1), stream.next_event()).await {
+            observed_anchor = Some(slot);
+            break;
+        }
+    }
+    let anchor = observed_anchor.context("failed to observe initial anchor slot")?;
+
+    // Persist backlog to a height *behind* the observed anchor so catchup must run
+    let storage = mpc_node::storage::checkpoint_storage::CheckpointStorage::in_memory();
+    let backlog = Backlog::persisted(storage);
+    // set processed block to anchor - 1 so catchup range includes `anchor`
+    let from_inclusive = anchor.saturating_sub(1);
+    backlog.set_processed_block(Chain::Solana, from_inclusive).await;
+
+    // drop the ad-hoc stream and create a fresh one for run_stream to own
+    drop(stream);
+    let mut stream_for_run = stream_solana(config)?;
+
+    // spawn run_stream and observe backlog advancing to anchor (catchup drained)
+    let (sign_tx, _sign_rx) = tokio::sync::mpsc::channel(32);
+    let (contract_watcher, _tx) = mpc_node::rpc::ContractStateWatcher::with_running(
+        &"test.near".parse::<near_account_id::AccountId>().unwrap(),
+        k256::ProjectivePoint::GENERATOR.to_affine(),
+        0,
+        Default::default(),
+    );
+    let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+    let node_client = NodeClient::new(&Default::default());
+
+    let backlog_for_run = backlog.clone();
+    let run_handle = tokio::spawn(async move {
+        mpc_node::stream::run_stream(
+            stream_for_run,
+            sign_tx,
+            backlog_for_run,
+            contract_watcher,
+            mesh_rx,
+            node_client,
+            Duration::from_secs(10),
+        )
+        .await;
+    });
+
+    // wait for backlog to be advanced to at least `anchor`
+    let mut advanced = false;
+    for _ in 0..20 {
+        if let Some(processed) = backlog.processed_block(Chain::Solana).await {
+            if processed >= anchor {
+                advanced = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // shutdown
+    run_handle.abort();
+
+    assert!(advanced, "run_stream did not advance backlog to anchor via catchup");
+    Ok(())
+}
+
 /// Test that SolanaStream can parse SignBidirectional events
 #[test_log::test(tokio::test)]
 async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {

@@ -7949,6 +7949,7 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-extra",
+ "blake3",
  "borsh 0.10.4",
  "borsh 1.5.7",
  "cait-sith",

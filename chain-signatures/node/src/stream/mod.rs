@@ -24,6 +24,7 @@ pub fn channel() -> (mpsc::Sender<ChainEvent>, mpsc::Receiver<ChainEvent>) {
 
 /// Unified event produced by a chain stream
 #[allow(clippy::large_enum_variant)]
+#[derive(Clone)]
 pub enum ChainEvent {
     SignRequest(IndexedSignRequest),
     Respond(SignatureRespondedEvent),
@@ -108,7 +109,7 @@ pub trait ChainStream: Send + 'static {
 }
 
 /// Buffered live stream returned by `ChainStream::livestream()`.
-#[allow(async_fn_in_trait)]
+#[async_trait::async_trait]
 pub trait ChainBufferedStream: Send + 'static {
     /// Return the anchored block height observed from the live subscription. Callers
     /// will usually run catchup up to this height, then drain buffered events up to it.
@@ -558,128 +559,6 @@ mod tests {
             Sign::Request(req) => assert_eq!(req.id, sign_id),
             _ => panic!("expected sign request"),
         }
-    }
-
-    #[tokio::test]
-    async fn test_run_stream_buffered_catchup_drains_and_processes() {
-        use std::time::Duration;
-        use tokio::sync::mpsc;
-
-        // Prepare backlog with a persisted height of 10
-        let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
-        let backlog = Backlog::persisted(storage.clone());
-        backlog.set_processed_block(Chain::Solana, 10).await;
-
-        // Mock stream that supports livestream() and catchup()
-        struct MockStream {
-            rx: mpsc::Receiver<ChainEvent>,
-            buffer_tx: Option<mpsc::Sender<ChainEvent>>,
-            anchor: u64,
-        }
-
-        impl ChainStream for MockStream {
-            const CHAIN: Chain = Chain::Solana;
-
-            async fn next_event(&mut self) -> Option<ChainEvent> {
-                self.rx.recv().await
-            }
-
-            async fn livestream(&mut self) -> anyhow::Result<Box<dyn ChainBufferedStream + Send>> {
-                let (new_tx, new_rx) = crate::stream::channel();
-                let (buffer_tx, buffer_rx) = crate::stream::channel();
-
-                // swap receiver and forward
-                let mut original_rx = std::mem::replace(&mut self.rx, new_rx);
-                self.buffer_tx = Some(buffer_tx.clone());
-
-                // pre-seed buffer with anchor Block so initial_height() can return quickly
-                let anchor_block = ChainEvent::Block(self.anchor);
-                let _ = buffer_tx.try_send(anchor_block.clone());
-
-                tokio::spawn(async move {
-                    while let Some(ev) = original_rx.recv().await {
-                        let _ = new_tx.send(ev.clone()).await;
-                        let _ = buffer_tx.send(ev).await;
-                    }
-                });
-
-                Ok(Box::new(crate::stream::ops::BufferedReceiver::new(buffer_rx)))
-            }
-
-            async fn catchup(&mut self, from_inclusive: u64, to_inclusive: u64) -> anyhow::Result<()> {
-                // emit a SignRequest + Block for each height into the buffer
-                let tx = match &self.buffer_tx {
-                    Some(t) => t.clone(),
-                    None => anyhow::bail!("no buffer tx set"),
-                };
-
-                for h in from_inclusive..=to_inclusive {
-                    // construct a minimal IndexedSignRequest (only id & chain used by handler)
-                    let id = mpc_primitives::SignId::new([h as u8; 32]);
-                    let req = IndexedSignRequest {
-                        id,
-                        args: mpc_primitives::SignArgs {
-                            entropy: [0u8; 32],
-                            epsilon: k256::Scalar::from(1u64),
-                            payload: k256::Scalar::from(2u64),
-                            path: "test".to_string(),
-                            key_version: 0,
-                        },
-                        chain: Chain::Solana,
-                        timestamp_created: std::time::Instant::now(),
-                        unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-                        total_timeout: Duration::from_secs(60),
-                        sign_request_type: crate::protocol::SignRequestType::Sign,
-                    };
-                    let _ = tx.send(ChainEvent::SignRequest(req)).await;
-                    let _ = tx.send(ChainEvent::Block(h)).await;
-                }
-
-                Ok(())
-            }
-        }
-
-        // Create a stream whose steady-state `next_event` returns None (so run_stream exits after drain)
-        let (_steady_tx, steady_rx) = mpsc::channel(4);
-        let client = MockStream { rx: steady_rx, buffer_tx: None, anchor: 15 };
-
-        let (sign_tx, mut sign_rx) = mpsc::channel(16);
-
-        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
-            &"test.near".parse::<AccountId>().unwrap(),
-            k256::ProjectivePoint::GENERATOR.to_affine(),
-            0,
-            Default::default(),
-        );
-        let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
-        let node_client = NodeClient::new(&Default::default());
-
-        // run
-        run_stream(
-            client,
-            sign_tx.clone(),
-            backlog.clone(),
-            contract_watcher,
-            mesh_state_rx,
-            node_client,
-            Duration::from_secs(5),
-        )
-        .await;
-
-        // We expect sign requests for heights 10..=15 (from persisted 10 through anchor 15)
-        let mut seen = Vec::new();
-        for _ in 0..=5 {
-            let msg = timeout(Duration::from_secs(1), sign_rx.recv()).await.unwrap().unwrap();
-            match msg {
-                Sign::Request(r) => seen.push(r.id),
-                other => panic!("unexpected sign message: {:?}", other),
-            }
-        }
-        assert_eq!(seen.len(), 6);
-        // check first and last sign id correspond roughly to heights 10 and 15 (encoded in bytes)
-        assert_eq!(seen.first().unwrap().request_id[0], 10u8);
-        assert_eq!(seen.last().unwrap().request_id[0], 15u8);
-    }
 
         // Prepare a SignatureRespondedEvent that will advance to bidirectional and register watcher
         // Construct a valid signature (use generator point for big_r and small s)
@@ -798,4 +677,5 @@ mod tests {
         drop(events_tx);
         run_handle.await.unwrap();
     }
-}
+
+    }

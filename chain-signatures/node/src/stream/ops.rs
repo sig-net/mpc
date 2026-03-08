@@ -132,6 +132,7 @@ impl SignBidirectionalEvent {
     }
 }
 
+#[derive(Clone)]
 pub enum RespondBidirectionalEvent {
     Solana(signet_program::RespondBidirectionalEvent),
     Hydration(HydrationRespondBidirectionalEvent),
@@ -248,14 +249,14 @@ impl ChainBufferedStream for BufferedReceiver {
         // Consume from the receiver until we see a Block event. Store all events
         // in the pending queue so subsequent `next_buffered()` calls return them.
         while let Some(ev) = self.rx.recv().await {
-            match &ev {
+            match ev {
                 crate::stream::ChainEvent::Block(b) => {
-                    self.first_block = Some(*b);
-                    self.pending.push_back(ev);
-                    return Ok(*b);
+                    self.first_block = Some(b);
+                    self.pending.push_back(crate::stream::ChainEvent::Block(b));
+                    return Ok(b);
                 }
-                _ => {
-                    self.pending.push_back(ev);
+                other => {
+                    self.pending.push_back(other);
                 }
             }
         }
