@@ -10,7 +10,7 @@ use self::error::Error;
 use crate::backlog::{Backlog, Checkpoint};
 use crate::metrics::messaging::WEB_ENDPOINT_LATENCY;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus, ResharingStatus};
-use crate::protocol::sync::{SyncChannel, SyncUpdate};
+use crate::protocol::sync::{SyncChannel, SyncUpdate, ChunkedSyncUpdate, ChunkAssembler};
 use crate::protocol::{Chain, MessageChannel};
 use crate::storage::{PresignatureStorage, TripleStorage};
 use crate::web::cbor::Cbor;
@@ -40,6 +40,7 @@ struct AxumState {
     msg_channel: MessageChannel,
     my_account_id: AccountId,
     backlog: Backlog,
+    chunk_assembler: Arc<tokio::sync::Mutex<ChunkAssembler>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -62,11 +63,13 @@ pub async fn run(
         sync_channel,
         my_account_id,
         backlog,
+        chunk_assembler: Arc::new(tokio::sync::Mutex::new(ChunkAssembler::new())),
     };
 
     // Sync can be a large payload, so we set a higher limit for payload.
     let sync = Router::new()
         .route("/sync", post(sync))
+        .route("/sync_chunked", post(sync_chunked))
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024));
 
     let mut router = Router::new()
@@ -275,6 +278,38 @@ async fn sync(
     state.sync_channel.request_update(update).await;
     WEB_ENDPOINT_LATENCY
         .with_label_values(&["sync", state.my_account_id.as_str()])
+        .observe(start.elapsed().as_millis() as f64);
+    Ok(Json(()))
+}
+
+#[tracing::instrument(level = "debug", skip_all)]
+async fn sync_chunked(
+    Extension(state): Extension<Arc<AxumState>>,
+    WithRejection(Cbor(chunk), _): WithRejection<Cbor<ChunkedSyncUpdate>, Error>,
+) -> Result<Json<()>> {
+    let start = Instant::now();
+    
+    tracing::debug!(
+        session_id = chunk.chunk_info.session_id,
+        chunk_id = chunk.chunk_info.chunk_id,
+        total_chunks = chunk.chunk_info.total_chunks,
+        from = ?chunk.from,
+        "received chunked sync update"
+    );
+    
+    // Process the chunk through the assembler
+    let complete_update = {
+        let mut assembler = state.chunk_assembler.lock().await;
+        assembler.process_chunk(chunk)
+    };
+    
+    // If we've received all chunks, process the complete update
+    if let Some(complete_update) = complete_update {
+        state.sync_channel.request_update(complete_update).await;
+    }
+    
+    WEB_ENDPOINT_LATENCY
+        .with_label_values(&["sync_chunked", state.my_account_id.as_str()])
         .observe(start.elapsed().as_millis() as f64);
     Ok(Json(()))
 }

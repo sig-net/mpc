@@ -23,6 +23,7 @@ pub mod nightly;
 pub mod solana;
 pub mod store;
 pub mod sync;
+pub mod sync_large_payload;
 
 #[test(tokio::test)]
 async fn test_multichain_reshare() -> anyhow::Result<()> {

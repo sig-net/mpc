@@ -1,6 +1,6 @@
 use crate::backlog::Checkpoint;
 use crate::protocol::message::cbor_to_bytes;
-use crate::protocol::sync::SyncUpdate;
+use crate::protocol::sync::{SyncUpdate, ChunkedSyncUpdate};
 use crate::protocol::Chain;
 use crate::web::{StateView, StatusResponse};
 
@@ -170,6 +170,13 @@ impl NodeClient {
         url.set_path("sync");
 
         self.post_cbor(&url, update).await
+    }
+
+    pub async fn sync_chunked(&self, base: impl IntoUrl, chunk: &ChunkedSyncUpdate) -> Result<(), RequestError> {
+        let mut url = base.into_url()?;
+        url.set_path("sync_chunked");
+
+        self.post_cbor(&url, chunk).await
     }
 
     pub async fn checkpoint(

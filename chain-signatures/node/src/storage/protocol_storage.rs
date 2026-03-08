@@ -174,6 +174,40 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         owned.union(&*self.reserved.read().await).copied().collect()
     }
 
+    /// Fetch owned artifacts with pagination support
+    /// Returns (items, has_more, next_offset) 
+    pub async fn fetch_owned_paginated(&self, me: Participant, offset: usize, limit: usize) -> (Vec<A::Id>, bool, usize) {
+        let Some(mut conn) = self.connect().await else {
+            return (Vec::new(), false, offset);
+        };
+
+        // fetch all owned items first (this could be optimized further with Redis SCAN)
+        let owned: HashSet<A::Id> = conn
+            .smembers(owner_key(&self.owner_keys, me))
+            .await
+            .inspect_err(|err| {
+                tracing::warn!(?err, "failed to fetch my owned artifacts");
+            })
+            .unwrap_or_default();
+
+        // Add in-memory reservations
+        let all_owned: HashSet<A::Id> = owned.union(&*self.reserved.read().await).copied().collect();
+        
+        // Convert to sorted vector for consistent pagination
+        let mut all_items: Vec<A::Id> = all_owned.into_iter().collect();
+        all_items.sort_by_key(|id| format!("{}", id));
+        
+        // Apply pagination
+        let total_items = all_items.len();
+        let start = offset.min(total_items);
+        let end = (offset + limit).min(total_items);
+        let items = all_items[start..end].to_vec();
+        let has_more = end < total_items;
+        let next_offset = if has_more { end } else { total_items };
+
+        (items, has_more, next_offset)
+    }
+
     pub async fn reserve(&self, id: A::Id) -> Option<ArtifactSlot<A>> {
         let used = self.used.read().await;
         if used.contains(&id) {
