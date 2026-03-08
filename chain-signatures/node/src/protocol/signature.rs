@@ -33,6 +33,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
 use tokio::task::JoinHandle;
+use tracing::{info_span, Instrument};
 
 /// The round interval to search for a proposer in the organizing phase.
 const ROUND_INTERVAL: usize = 512;
@@ -189,6 +190,7 @@ impl SignOrganizer {
     }
 
     /// Waits for threshold stable participants to be present.
+    #[tracing::instrument(skip(self, ctx, state))]
     async fn wait_stable(
         &self,
         ctx: &SignTask,
@@ -209,7 +211,6 @@ impl SignOrganizer {
 
             if once {
                 tracing::info!(
-                    ?sign_id,
                     stable_count,
                     ?threshold,
                     "waiting for enough stable participants"
@@ -223,6 +224,7 @@ impl SignOrganizer {
         }
     }
 
+    #[tracing::instrument(skip(self, ctx, state))]
     async fn advance(self, ctx: &SignTask, state: &mut SignState) -> SignPhase {
         let sign_id = ctx.sign_id;
         let threshold = ctx.threshold;
@@ -230,10 +232,10 @@ impl SignOrganizer {
         let entropy = state.indexed.args.entropy;
         let participants = ctx.participants.iter().copied().collect::<Vec<_>>();
 
-        tracing::info!(?sign_id, round = ?state.round, "entering organizing phase");
+        tracing::info!(round = ?state.round, "entering organizing phase");
         let (stable, proposer) = {
             let Some(stable) = self.wait_stable(ctx, state, threshold).await else {
-                tracing::warn!(?sign_id, round = ?state.round, "no stable participants, reorganizing");
+                tracing::warn!(round = ?state.round, "no stable participants, reorganizing");
                 state.bump_round();
                 return SignPhase::Organizing(self);
             };
@@ -256,7 +258,6 @@ impl SignOrganizer {
             state.round = selected_round;
 
             tracing::info!(
-                ?sign_id,
                 round = selected_round,
                 ?proposer,
                 ?me,
@@ -270,7 +271,7 @@ impl SignOrganizer {
 
         let is_proposer = proposer == ctx.me;
         let (presignature_id, presignature, stable) = if is_proposer {
-            tracing::info!(?sign_id, round = ?state.round, "proposer waiting for presignature");
+            tracing::info!(round = ?state.round, "proposer waiting for presignature");
             let stable = stable.iter().copied().collect::<Vec<_>>();
             let mut recycle = Vec::new();
             let remaining = state.budget.remaining();
@@ -301,7 +302,6 @@ impl SignOrganizer {
                 Ok(value) => value,
                 Err(_) => {
                     tracing::warn!(
-                        ?sign_id,
                         round = ?state.round,
                         "proposer timeout waiting for presignature, reorganizing"
                     );
@@ -312,7 +312,7 @@ impl SignOrganizer {
 
             let presignature_id = taken.artifact.id;
 
-            tracing::info!(?sign_id, presignature_id, "proposer got presignature");
+            tracing::info!(presignature_id, "proposer got presignature");
 
             // broadcast to participants and let them reject if they don't have the presignature.
             for &p in &participants {
@@ -350,6 +350,7 @@ impl SignOrganizer {
 
 impl SignPositor {
     /// Deliberator waits for the proposer to send a Propose message with a presignature_id.
+    #[tracing::instrument(skip(ctx, state, task_rx))]
     async fn wait_propose(
         ctx: &SignTask,
         state: &mut SignState,
@@ -420,7 +421,6 @@ impl SignPositor {
 
                 if from == &proposer {
                     tracing::info!(
-                        ?sign_id,
                         presignature_id,
                         ?from,
                         "deliberator received Propose"
@@ -429,7 +429,6 @@ impl SignPositor {
                     // Check if we have access to this presignature (in storage or generating)
                     if !ctx.presignatures.contains(*presignature_id).await {
                         tracing::warn!(
-                            ?sign_id,
                             presignature_id,
                             "deliberator does not have access to proposed presignature, rejecting"
                         );
@@ -454,7 +453,6 @@ impl SignPositor {
                     break *presignature_id;
                 } else {
                     tracing::warn!(
-                        ?sign_id,
                         ?from,
                         ?proposer,
                         "received Propose from non-proposer, rejecting"
@@ -484,7 +482,6 @@ impl SignPositor {
             Ok(id) => id,
             Err(_) => {
                 tracing::warn!(
-                    ?sign_id,
                     ?round,
                     ?proposer,
                     me=?ctx.me,
@@ -511,6 +508,7 @@ impl SignPositor {
         Ok(presignature_id)
     }
 
+    #[tracing::instrument(skip(self, ctx, state, task_rx))]
     async fn advance(
         self,
         ctx: &SignTask,
@@ -530,7 +528,6 @@ impl SignPositor {
         let is_deliberator = !is_proposer;
 
         tracing::info!(
-            ?sign_id,
             ?presignature_id,
             ?round,
             is_proposer,
@@ -539,7 +536,6 @@ impl SignPositor {
 
         if is_deliberator {
             tracing::info!(
-                ?sign_id,
                 ?round,
                 ?proposer,
                 "deliberator waiting for Propose"
@@ -583,7 +579,7 @@ impl SignPositor {
                     if is_deliberator {
                         if let PositAction::Start(participants) = action {
                             if from != proposer {
-                                tracing::warn!(?sign_id, ?round, ?from, ?proposer, "received Start from non-proposer, ignoring");
+                                tracing::warn!(?round, ?from, ?proposer, "received Start from non-proposer, ignoring");
                                 continue;
                             }
 
@@ -597,7 +593,7 @@ impl SignPositor {
                                 return SignPhase::Organizing(SignOrganizer);
                             }
 
-                            tracing::info!(?sign_id, participant = ?ctx.me, ?participants, "deliberator received Start");
+                            tracing::info!(participant = ?ctx.me, ?participants, "deliberator received Start");
                             break participants;
                         }
                     } else {
@@ -606,9 +602,9 @@ impl SignPositor {
                         }
 
                         if counter.enough_rejects(ctx.threshold) {
-                            tracing::warn!(?sign_id, ?round, ?from, "received enough REJECTs, reorganizing");
+                            tracing::warn!(?round, ?from, "received enough REJECTs, reorganizing");
                             if let Some(taken) = presignature {
-                                tracing::warn!(?sign_id, "recycling presignature due to REJECTs");
+                                tracing::warn!("recycling presignature due to REJECTs");
                                 ctx.presignatures.recycle_mine(ctx.me, taken).await;
                             }
                             state.bump_round();
@@ -618,7 +614,7 @@ impl SignPositor {
                         // Start as soon as we have enough accepts
                         if counter.enough_accepts(ctx.threshold) {
                             let participants = counter.accepts.into_iter().collect::<Vec<_>>();
-                            tracing::info!(?sign_id, ?round, me = ?ctx.me, ?participants, "proposer broadcasting Start");
+                            tracing::info!(?round, me = ?ctx.me, ?participants, "proposer broadcasting Start");
 
                             for &p in &participants {
                                 if p == ctx.me {
@@ -643,17 +639,16 @@ impl SignPositor {
                 _ = &mut posit_deadline => {
                     if is_proposer {
                         tracing::warn!(
-                            ?sign_id,
                             accepts = counter.accepts.len(),
                             threshold = ctx.threshold,
                             "proposer posit deadline reached, expiring round"
                         );
                         if let Some(taken) = presignature {
-                            tracing::warn!(?sign_id, "recycling presignature due to proposer timeout");
+                            tracing::warn!("recycling presignature due to proposer timeout");
                             ctx.presignatures.recycle_mine(ctx.me, taken).await;
                         }
                     } else {
-                        tracing::warn!(?sign_id, "deliberator posit timeout waiting for Start, reorganizing");
+                        tracing::warn!("deliberator posit timeout waiting for Start, reorganizing");
                     }
 
                     state.bump_round();
@@ -672,6 +667,7 @@ impl SignPositor {
 }
 
 impl SignGenerating {
+    #[tracing::instrument(skip(self, ctx, state))]
     async fn advance(mut self, ctx: &SignTask, state: &mut SignState) -> SignPhase {
         let sign_id = ctx.sign_id;
         let round = state.round;
@@ -706,7 +702,6 @@ impl SignGenerating {
             Ok(gen) => gen,
             Err(err) => {
                 tracing::warn!(
-                    ?sign_id,
                     ?round,
                     ?err,
                     "failed to create generator, reorganizing"
@@ -723,7 +718,6 @@ impl SignGenerating {
             Ok(()) => SignPhase::Complete(Ok(())),
             Err(err) => {
                 tracing::warn!(
-                    ?sign_id,
                     ?round,
                     ?err,
                     me=?ctx.me,
@@ -753,6 +747,7 @@ struct SignGenerator {
 }
 
 impl SignGenerator {
+    #[tracing::instrument(skip(ctx, presignature))]
     async fn new(
         ctx: &SignTask,
         proposer: Participant,
@@ -779,7 +774,6 @@ impl SignGenerator {
         let sign_id = indexed.id;
         tracing::info!(
             me = ?ctx.me,
-            ?sign_id,
             presignature_id,
             "starting protocol to generate a new signature",
         );
@@ -831,16 +825,17 @@ impl SignGenerator {
         {
             Ok(Some(msg)) => Ok(msg),
             Ok(None) => {
-                tracing::warn!(?sign_id, presignature_id, "signature generation aborted");
+                tracing::warn!(presignature_id, "signature generation aborted");
                 Err(SignError::Aborted)
             }
             Err(_err) => {
-                tracing::warn!(?sign_id, presignature_id, "signature generation timeout");
+                tracing::warn!(presignature_id, "signature generation timeout");
                 Err(SignError::Aborted)
             }
         }
     }
 
+    #[tracing::instrument(skip(self, ctx))]
     async fn run(mut self, ctx: &SignTask) -> Result<(), SignError> {
         let me = ctx.me;
         let epoch = ctx.epoch;
@@ -864,7 +859,6 @@ impl SignGenerator {
                         crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_FAILURES.inc();
                     }
                     tracing::error!(
-                        ?sign_id,
                         ?err,
                         "signature generation failed on protocol advancement",
                     );
@@ -1036,50 +1030,50 @@ impl SignTask {
         mesh_state: watch::Receiver<MeshState>,
         mut task_rx: mpsc::Receiver<SignTaskMessage>,
     ) -> Result<(), SignError> {
-        let sign_id = self.sign_id;
-        let task_epoch = self.epoch;
-        tracing::info!(
-            ?sign_id,
-            me = ?self.me,
-            epoch = task_epoch,
-            "signature task starting with organizing loop"
-        );
+        let span = info_span!("sign_task", sign_id = ?self.sign_id, party_id = ?self.me);
+        async move {
+            let sign_id = self.sign_id;
+            let task_epoch = self.epoch;
+            tracing::info!(
+                me = ?self.me,
+                epoch = task_epoch,
+                "signature task starting with organizing loop"
+            );
 
-        let mut state = SignState::new(indexed, mesh_state);
-        let mut phase = SignPhase::Organizing(SignOrganizer);
+            let mut state = SignState::new(indexed, mesh_state);
+            let mut phase = SignPhase::Organizing(SignOrganizer);
 
-        loop {
-            // Check if we should abort due to resharing or epoch change
-            if let Some(contract_state) = self.contract.state() {
-                match contract_state {
-                    crate::protocol::ProtocolState::Resharing(_) => {
-                        tracing::info!(
-                            ?sign_id,
-                            epoch = task_epoch,
-                            "signature task interrupted: contract is resharing"
-                        );
-                        return Err(SignError::Aborted);
+            loop {
+                // Check if we should abort due to resharing or epoch change
+                if let Some(contract_state) = self.contract.state() {
+                    match contract_state {
+                        crate::protocol::ProtocolState::Resharing(_) => {
+                            tracing::info!(
+                                epoch = task_epoch,
+                                "signature task interrupted: contract is resharing"
+                            );
+                            return Err(SignError::Aborted);
+                        }
+                        crate::protocol::ProtocolState::Running(running)
+                            if running.epoch != task_epoch =>
+                        {
+                            tracing::info!(
+                                old_epoch = task_epoch,
+                                new_epoch = running.epoch,
+                                "signature task interrupted: epoch changed"
+                            );
+                            return Err(SignError::Aborted);
+                        }
+                        _ => {}
                     }
-                    crate::protocol::ProtocolState::Running(running)
-                        if running.epoch != task_epoch =>
-                    {
-                        tracing::info!(
-                            ?sign_id,
-                            old_epoch = task_epoch,
-                            new_epoch = running.epoch,
-                            "signature task interrupted: epoch changed"
-                        );
-                        return Err(SignError::Aborted);
-                    }
-                    _ => {}
+                }
+
+                phase = match phase.advance(&self, &mut state, &mut task_rx).await {
+                    SignPhase::Complete(result) => return result,
+                    other => other,
                 }
             }
-
-            phase = match phase.advance(&self, &mut state, &mut task_rx).await {
-                SignPhase::Complete(result) => return result,
-                other => other,
-            }
-        }
+        }.instrument(span).await
     }
 }
 
