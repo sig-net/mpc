@@ -1,0 +1,11 @@
+[project]
+name = "deadman-switch"
+version = "0.1.0"
+description = "Deadman switch service for integration tests"
+authors = [{name = "Your Name", email = "you@example.com"}]
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "psutil",
+]
+requires-python = ">=3.10"

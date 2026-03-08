@@ -6,7 +6,8 @@ members = [
     "chain-signatures/keys",
     "chain-signatures/node",
     "chain-signatures/primitives",
-    "integration-tests"
+    "integration-tests",
+    "integration-tests/deadman-switch-client"
 ]
 exclude = ["infra/scripts/generate_keys"]
 resolver = "2"

@@ -1,0 +1,13 @@
+[package]
+name = "deadman-switch-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+reqwest = { version = "0.11", features = ["json", "blocking"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"
+nix = { version = "0.27", features = ["signal"] }
+log = "0.4"
