@@ -127,8 +127,7 @@ impl PendingRequests {
 
     fn from_checkpoint(checkpoint: Checkpoint) -> anyhow::Result<Self> {
         fn decode(pending: mpc_primitives::PendingTx) -> anyhow::Result<(SignId, BacklogEntry)> {
-            let entry: BacklogEntry =
-                ciborium::de::from_reader(pending.transaction.as_slice())
+            let entry: BacklogEntry = ciborium::de::from_reader(pending.transaction.as_slice())
                 .with_context(|| {
                     format!(
                         "failed to deserialize pending backlog entry for sign_id {:?}",
