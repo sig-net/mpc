@@ -67,10 +67,6 @@ impl PendingRequests {
         self.requests.get(id).cloned()
     }
 
-    fn sign_type(&self, id: &SignId) -> Option<SignRequestType> {
-        self.requests.get(id).map(|entry| entry.sign_type.clone())
-    }
-
     /// Returns the number of pending requests
     fn len(&self) -> usize {
         self.requests.len()
@@ -111,8 +107,9 @@ impl PendingRequests {
             .requests
             .iter()
             .map(|(&sign_id, entry)| {
-                let transaction = serde_json::to_vec(&entry.tx)
-                    .expect("serialize bidirectional transaction for checkpoint");
+                let mut transaction = Vec::new();
+                ciborium::ser::into_writer(entry, &mut transaction)
+                    .expect("serialize backlog entry for checkpoint");
                 PendingTx {
                     sign_id,
                     transaction,
@@ -130,20 +127,15 @@ impl PendingRequests {
 
     fn from_checkpoint(checkpoint: Checkpoint) -> anyhow::Result<Self> {
         fn decode(pending: mpc_primitives::PendingTx) -> anyhow::Result<(SignId, BacklogEntry)> {
-            let tx: BacklogTransaction = serde_json::from_slice(&pending.transaction)
+            let entry: BacklogEntry =
+                ciborium::de::from_reader(pending.transaction.as_slice())
                 .with_context(|| {
                     format!(
-                        "failed to deserialize pending transaction for sign_id {:?}",
+                        "failed to deserialize pending backlog entry for sign_id {:?}",
                         pending.sign_id
                     )
                 })?;
-            Ok((
-                pending.sign_id,
-                BacklogEntry {
-                    tx,
-                    sign_type: SignRequestType::Sign,
-                },
-            ))
+            Ok((pending.sign_id, entry))
         }
 
         let mut requests = HashMap::new();
@@ -288,7 +280,8 @@ impl Backlog {
             .read()
             .await
             .get(&chain)
-            .and_then(|pending_requests| pending_requests.sign_type(id))
+            .and_then(|pending_requests| pending_requests.get(id))
+            .map(|entry| entry.sign_type)
     }
 
     fn observe_backlog_size(&self, chain: Chain, len: usize) {
@@ -696,10 +689,10 @@ pub struct SignTx {
     pub unix_timestamp_indexed: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BacklogEntry {
-    pub tx: BacklogTransaction,
     pub sign_type: SignRequestType,
+    pub tx: BacklogTransaction,
 }
 
 /// Pending transaction in the backlog - can be either a sign-only or bidirectional.
@@ -1152,21 +1145,22 @@ mod tests {
 
         assert_eq!(checkpoint, deserialized);
 
-        let (sign_id, restored_tx): (SignId, BidirectionalTx) = {
+        let (sign_id, restored_tx, restored_sign_type): (SignId, BidirectionalTx, SignRequestType) = {
             let pending = &checkpoint.pending_requests[0];
-            let backlog_tx: BacklogTransaction =
-                serde_json::from_slice(&pending.transaction).unwrap();
-            let tx = match backlog_tx {
+            let backlog_entry: BacklogEntry =
+                ciborium::de::from_reader(pending.transaction.as_slice()).unwrap();
+            let tx = match backlog_entry.tx {
                 BacklogTransaction::Bidirectional(tx) => tx,
                 BacklogTransaction::Sign(_) => panic!("Expected Bidirectional transaction"),
             };
-            (pending.sign_id, tx)
+            (pending.sign_id, tx, backlog_entry.sign_type)
         };
         assert_eq!(sign_id, SignId::new(tx1.request_id));
         assert_eq!(
             restored_tx.serialized_transaction,
             tx1.serialized_transaction
         );
+        assert_eq!(restored_sign_type, SignRequestType::Sign);
     }
 
     #[tokio::test]
@@ -1196,6 +1190,70 @@ mod tests {
         let watchers = recovered.pending_execution(Chain::Ethereum).await;
         assert_eq!(watchers.len(), 1);
         assert!(watchers.contains_key(&tx.id));
+    }
+
+    #[tokio::test]
+    async fn test_recover_preserves_sign_request_type() {
+        use crate::stream::ops::SignBidirectionalEvent as StreamSignBidirectionalEvent;
+
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([42u8; 32]);
+        let args = SignArgs {
+            entropy: [1u8; 32],
+            epsilon: k256::Scalar::from(1u64),
+            payload: k256::Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+
+        let program_id = Pubkey::new_unique();
+        let sign_type = SignRequestType::SignBidirectional(StreamSignBidirectionalEvent::Solana(
+            SignBidirectionalEvent {
+                sender: Default::default(),
+                serialized_transaction: vec![1, 2, 3],
+                dest: "ethereum".to_string(),
+                caip2_id: "eip155:1".to_string(),
+                key_version: 1,
+                deposit: 10,
+                path: "m/0".to_string(),
+                algo: "ECDSA".to_string(),
+                params: "{}".to_string(),
+                program_id,
+                output_deserialization_schema: vec![9],
+                respond_serialization_schema: vec![8],
+            },
+        ));
+
+        backlog
+            .insert(
+                Chain::Solana,
+                sign_id,
+                BacklogTransaction::Sign(SignTx {
+                    request_id: sign_id.request_id,
+                    source_chain: Chain::Solana,
+                    status: PendingRequestStatus::AwaitingResponse,
+                    args,
+                    unix_timestamp_indexed: 0,
+                }),
+                sign_type.clone(),
+            )
+            .await;
+        backlog.set_processed_block(Chain::Solana, 10).await;
+
+        let checkpoint = backlog.checkpoint(Chain::Solana).await;
+
+        let recovered = Backlog::new();
+        recovered
+            .recover_by_checkpoint(checkpoint)
+            .await
+            .expect("failed to recover");
+
+        let recovered_entry = recovered
+            .get(Chain::Solana, &sign_id)
+            .await
+            .expect("missing recovered entry");
+
+        assert_eq!(recovered_entry.sign_type, sign_type);
     }
 
     #[tokio::test]

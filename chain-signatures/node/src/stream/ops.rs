@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SignBidirectionalEvent {
     Solana(signet_program::SignBidirectionalEvent),
     Hydration(HydrationSignBidirectionalRequestedEvent),
@@ -401,9 +401,12 @@ pub(crate) async fn process_respond_event(
     let sign_id = SignId::new(respond_event.request_id());
     let source_chain = respond_event.source_chain();
     let Some(entry) = backlog.get(source_chain, &sign_id).await else {
-        anyhow::bail!(
-            "sign request not found for respond event: {sign_id:?} on chain {source_chain:?}"
+        tracing::info!(
+            ?sign_id,
+            ?source_chain,
+            "respond event is already finalized or pruned; skipping"
         );
+        return Ok(());
     };
 
     let event = match entry.sign_type {
