@@ -156,8 +156,6 @@ pub fn x_coordinate<C: cait_sith::CSCurve>(point: &C::AffinePoint) -> C::Scalar 
     <C::Scalar as k256::elliptic_curve::ops::Reduce<<C as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(&point.x())
 }
 
-
-
 pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> alloy::primitives::Address {
     let public_key = public_key.serialize_uncompressed();
 
@@ -312,7 +310,8 @@ mod tests {
         // Compute the address from the verifying key to compare
         let verifying_user_pk = ecdsa::VerifyingKey::from(&user_pk_k256);
         let verifying_bytes = verifying_user_pk.to_encoded_point(false);
-        let verifying_public = secp256k1::PublicKey::from_slice(verifying_bytes.as_bytes()).unwrap();
+        let verifying_public =
+            secp256k1::PublicKey::from_slice(verifying_bytes.as_bytes()).unwrap();
         let user_address_ethers = public_key_to_address(&verifying_public);
 
         assert_eq!(user_address_from_pk, user_address_ethers);

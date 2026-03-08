@@ -67,3 +67,11 @@ pub(crate) static SIGN_QUEUE_SIZE: LazyLock<prometheus::IntGaugeVec> = LazyLock:
     )
     .unwrap()
 });
+
+pub(crate) static RPC_SEMAPHORE_AVAILABLE: LazyLock<prometheus::IntGauge> = LazyLock::new(|| {
+    prometheus::register_int_gauge!(
+        "multichain_rpc_semaphore_available_permits",
+        "number of available permits in the RPC semaphore"
+    )
+    .unwrap()
+});

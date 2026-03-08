@@ -15,10 +15,10 @@ use std::time::Duration;
 use self::local::NodeEnvConfig;
 use crate::containers::DockerClient;
 
+use alloy::primitives::Address;
 use anyhow::Context as _;
 use cluster::spawner::ClusterSpawner;
 use deadpool_redis::Pool;
-use alloy::primitives::Address;
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
@@ -362,8 +362,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             sandbox.chain_id,
         )?;
         let deployer_address = client.address;
-        let contract_address =
-            eth::deploy_chain_signatures(&client, deployer_address, 0).await?;
+        let contract_address = eth::deploy_chain_signatures(&client, deployer_address, 0).await?;
 
         let rpc_endpoint = if cfg!(feature = "docker-test") {
             sandbox.internal_http_endpoint.clone()

@@ -1,6 +1,6 @@
-use anyhow::{anyhow, Result};
 use alloy::primitives::{keccak256, Address as AlloyAddress};
 use alloy_sol_types::SolValue;
+use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::fs::File;
 use std::io::Read;
@@ -21,13 +21,19 @@ pub struct SignRequest {
     pub params: String,
 }
 
-pub async fn deploy_chain_signatures(client: &EthClient, mpc_address: AlloyAddress, signature_deposit: u64) -> Result<AlloyAddress> {
+pub async fn deploy_chain_signatures(
+    client: &EthClient,
+    mpc_address: AlloyAddress,
+    signature_deposit: u64,
+) -> Result<AlloyAddress> {
     // Read artifact bytecode
     let mut file = File::open("../chain-signatures/contract-eth/artifacts/contracts/ChainSignatures.sol/ChainSignatures.json")?;
     let mut s = String::new();
     file.read_to_string(&mut s)?;
     let v: Value = serde_json::from_str(&s)?;
-    let bytecode_hex = v["bytecode"].as_str().ok_or_else(|| anyhow!("missing bytecode"))?;
+    let bytecode_hex = v["bytecode"]
+        .as_str()
+        .ok_or_else(|| anyhow!("missing bytecode"))?;
     let bytecode_bytes = hex::decode(bytecode_hex.trim_start_matches("0x"))?;
 
     // constructor args encoding: (address, uint256)
@@ -37,9 +43,15 @@ pub async fn deploy_chain_signatures(client: &EthClient, mpc_address: AlloyAddre
     concat.extend_from_slice(&encoded_args);
 
     let tx_hash = client.send_raw_tx(None, 0, concat).await?;
-    let receipt = client.wait_for_receipt(&tx_hash, std::time::Duration::from_secs(10)).await?;
-    let contract_addr = receipt.get("contractAddress").ok_or_else(|| anyhow!("missing contract address"))?;
-    let addr_str = contract_addr.as_str().ok_or_else(|| anyhow!("invalid contract address"))?;
+    let receipt = client
+        .wait_for_receipt(&tx_hash, std::time::Duration::from_secs(10))
+        .await?;
+    let contract_addr = receipt
+        .get("contractAddress")
+        .ok_or_else(|| anyhow!("missing contract address"))?;
+    let addr_str = contract_addr
+        .as_str()
+        .ok_or_else(|| anyhow!("invalid contract address"))?;
     let bytes = hex::decode(addr_str.trim_start_matches("0x"))?;
     if bytes.len() != 20 {
         anyhow::bail!("invalid contract address length: {}", bytes.len());
@@ -72,12 +84,17 @@ pub fn compute_request_id(
         dest.to_string(),
         params.to_string(),
     )
-    .abi_encode();
+        .abi_encode();
 
     *keccak256(&encoded)
 }
 
-pub async fn send_sign_request(client: &EthClient, contract: AlloyAddress, request: SignRequest, value: u64) -> Result<String> {
+pub async fn send_sign_request(
+    client: &EthClient,
+    contract: AlloyAddress,
+    request: SignRequest,
+    value: u64,
+) -> Result<String> {
     // selector: sign((bytes32,string,uint32,string,string,string))
     let sig = "sign((bytes32,string,uint32,string,string,string))";
     let selector = &keccak256(sig.as_bytes())[0..4];

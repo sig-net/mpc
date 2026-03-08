@@ -46,9 +46,14 @@ async fn test_signature_ethereum() -> Result<()> {
 
     // Send sign request via raw transaction
     let tx_hash = eth::send_sign_request(&client, contract_address, request.clone(), 1).await?;
-    let receipt = client.wait_for_receipt(&tx_hash, Duration::from_secs(10)).await?;
+    let receipt = client
+        .wait_for_receipt(&tx_hash, Duration::from_secs(10))
+        .await?;
     // Parse block number from receipt (hex string)
-    let block_hex = receipt.get("blockNumber").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("missing block number"))?;
+    let block_hex = receipt
+        .get("blockNumber")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("missing block number"))?;
     let from_block = u64::from_str_radix(block_hex.trim_start_matches("0x"), 16)?;
 
     let expected_request_id = eth::compute_request_id(
@@ -65,13 +70,21 @@ async fn test_signature_ethereum() -> Result<()> {
     // Poll logs for the expected request_id
     let mut matching_log = None;
     for _ in 0..30 {
-        let topics = vec![None, Some(format!("0x{}", hex::encode(expected_request_id)))];
-        let logs = client.get_logs(from_block, from_block + 20, Some(contract_address), topics).await?;
+        let topics = vec![
+            None,
+            Some(format!("0x{}", hex::encode(expected_request_id))),
+        ];
+        let logs = client
+            .get_logs(from_block, from_block + 20, Some(contract_address), topics)
+            .await?;
         if let Some(log) = logs.into_iter().find(|l| {
             // check topic[1] equals request id
             if let Some(topics) = l.get("topics").and_then(|t| t.as_array()) {
                 if topics.len() > 1 {
-                    return topics[1].as_str().map(|s| s == format!("0x{}", hex::encode(expected_request_id))).unwrap_or(false);
+                    return topics[1]
+                        .as_str()
+                        .map(|s| s == format!("0x{}", hex::encode(expected_request_id)))
+                        .unwrap_or(false);
                 }
             }
             false
@@ -82,10 +95,14 @@ async fn test_signature_ethereum() -> Result<()> {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
-    let log = matching_log.ok_or_else(|| anyhow!("did not observe signature response on ethereum"))?;
+    let log =
+        matching_log.ok_or_else(|| anyhow!("did not observe signature response on ethereum"))?;
 
     // Parse event data to extract signature
-    let data_hex = log.get("data").and_then(|d| d.as_str()).ok_or_else(|| anyhow!("missing data in log"))?;
+    let data_hex = log
+        .get("data")
+        .and_then(|d| d.as_str())
+        .ok_or_else(|| anyhow!("missing data in log"))?;
     let data_bytes = hex::decode(data_hex.trim_start_matches("0x"))?;
     if data_bytes.len() < 160 {
         anyhow::bail!("unexpected event data length: {}", data_bytes.len());
@@ -111,12 +128,14 @@ async fn test_signature_ethereum() -> Result<()> {
     signature_bytes[32..].copy_from_slice(s_bytes);
     let recovery_id = recovery_id_byte as i32;
 
-    let recovered_address = actions::recover_eth_address(&payload, &signature_bytes, recovery_id as u8);
+    let recovered_address =
+        actions::recover_eth_address(&payload, &signature_bytes, recovery_id as u8);
 
     let network_public_key = cluster.root_public_key().await?;
     let mut network_pk = vec![0x04];
     network_pk.extend_from_slice(&network_public_key.as_bytes()[1..]);
-    let encoded_network_pk = EncodedPoint::from_bytes(&network_pk).context("invalid network public key encoding")?;
+    let encoded_network_pk =
+        EncodedPoint::from_bytes(&network_pk).context("invalid network public key encoding")?;
     let network_affine = AffinePoint::from_encoded_point(&encoded_network_pk)
         .into_option()
         .ok_or_else(|| anyhow!("invalid network public key"))?;
@@ -184,8 +203,13 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     };
 
     let tx_hash = eth::send_sign_request(&client, contract_address, request.clone(), 1).await?;
-    let receipt = client.wait_for_receipt(&tx_hash, Duration::from_secs(10)).await?;
-    let block_hex = receipt.get("blockNumber").and_then(|v| v.as_str()).ok_or_else(|| anyhow!("missing block number"))?;
+    let receipt = client
+        .wait_for_receipt(&tx_hash, Duration::from_secs(10))
+        .await?;
+    let block_hex = receipt
+        .get("blockNumber")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("missing block number"))?;
     let from_block = u64::from_str_radix(block_hex.trim_start_matches("0x"), 16)?;
 
     let expected_request_id = eth::compute_request_id(
@@ -219,12 +243,20 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     // Poll logs for the expected request id
     let mut matching_log = None;
     for _ in 0..30 {
-        let topics = vec![None, Some(format!("0x{}", hex::encode(expected_request_id)))];
-        let logs = client.get_logs(from_block, from_block + 20, Some(contract_address), topics).await?;
+        let topics = vec![
+            None,
+            Some(format!("0x{}", hex::encode(expected_request_id))),
+        ];
+        let logs = client
+            .get_logs(from_block, from_block + 20, Some(contract_address), topics)
+            .await?;
         if let Some(log) = logs.into_iter().find(|l| {
             if let Some(topics) = l.get("topics").and_then(|t| t.as_array()) {
                 if topics.len() > 1 {
-                    return topics[1].as_str().map(|s| s == format!("0x{}", hex::encode(expected_request_id))).unwrap_or(false);
+                    return topics[1]
+                        .as_str()
+                        .map(|s| s == format!("0x{}", hex::encode(expected_request_id)))
+                        .unwrap_or(false);
                 }
             }
             false
@@ -235,7 +267,8 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
-    let _log = matching_log.ok_or_else(|| anyhow!("did not observe signature response on ethereum"))?;
+    let _log =
+        matching_log.ok_or_else(|| anyhow!("did not observe signature response on ethereum"))?;
 
     tracing::info!("signature response observed on-chain");
 

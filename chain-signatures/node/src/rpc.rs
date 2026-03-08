@@ -36,9 +36,9 @@ use near_fetch::result::ExecutionFinalResult;
 use serde_json::json;
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Semaphore};
 use url::Url;
 
 use crate::indexer_hydration::HydrationConfig;
@@ -55,6 +55,8 @@ use subxt_signer::{sr25519, SecretUri};
 const MAX_PUBLISH_RETRY: usize = 6;
 /// The maximum number of concurrent RPC requests the system can make
 const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
+/// The maximum number of concurrent external RPC requests
+const MAX_CONCURRENT_EXTERNAL_RPC: usize = 100;
 /// The update interval to fetch and update the contract state and config
 const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 /// The interval to batch send Ethereum responses
@@ -63,6 +65,10 @@ const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
 const ETH_RESPOND_BATCH_SIZE: usize = 10;
 /// The maximum number of attempts to fetch eth tx and its receipt
 const ETH_TX_RECEIPT_MAX_ATTEMPTS: usize = 6;
+
+/// Global semaphore to limit concurrent external RPC calls
+static RPC_SEMAPHORE: LazyLock<Semaphore> =
+    LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_EXTERNAL_RPC));
 
 type EthContractFillProvider = FillProvider<
     JoinFill<
@@ -373,6 +379,16 @@ impl RpcExecutor {
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
     ) {
+        // Spawn background task to track RPC semaphore metrics
+        tokio::spawn(async {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let available = RPC_SEMAPHORE.available_permits() as i64;
+                crate::metrics::requests::RPC_SEMAPHORE_AVAILABLE.set(available);
+            }
+        });
+
         // spin up update task for updating contract state and config
         let near = self.near.clone();
         tokio::spawn(async move {
@@ -504,6 +520,11 @@ impl NearClient {
     }
 
     pub async fn fetch_state(&self) -> anyhow::Result<ProtocolState> {
+        let _permit = RPC_SEMAPHORE
+            .acquire()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to acquire RPC semaphore: {}", e))?;
+
         let contract_state: mpc_contract::ProtocolContractState =
             self.client.view(&self.contract_id, "state").await?.json()?;
 
@@ -516,6 +537,8 @@ impl NearClient {
     }
 
     pub async fn fetch_config(&self) -> Option<ContractConfig> {
+        let _permit = RPC_SEMAPHORE.acquire().await.ok()?;
+
         self.client
             .view(&self.contract_id, "config")
             .await
@@ -1022,27 +1045,46 @@ async fn run_batch_respond(
 ) {
     let mut start = Instant::now();
     let mut actions_batch: Vec<PublishAction> = vec![];
-    let mut interval = tokio::time::interval(Duration::from_millis(100));
+
     loop {
-        interval.tick().await;
-        if (start.elapsed() > batch_interval || actions_batch.len() >= batch_size)
-            && !actions_batch.is_empty()
-        {
-            tracing::info!(
-                num_requests = actions_batch.len(),
-                "publishing batch of signatures",
-            );
-            execute_batch_publish(
-                &client,
-                &mut actions_batch,
-                &near_account_id,
-                Instant::now(),
-            )
-            .await;
-            start = Instant::now();
-        }
-        if let Ok(action) = actions_rx.try_recv() {
-            actions_batch.push(action);
+        tokio::select! {
+            // Flush batch on timeout
+            _ = tokio::time::sleep(batch_interval.saturating_sub(start.elapsed())) => {
+                if !actions_batch.is_empty() {
+                    tracing::info!(
+                        num_requests = actions_batch.len(),
+                        "publishing batch of signatures (timeout)",
+                    );
+                    execute_batch_publish(
+                        &client,
+                        &mut actions_batch,
+                        &near_account_id,
+                        Instant::now(),
+                    )
+                    .await;
+                    start = Instant::now();
+                }
+            }
+            // Receive new actions
+            Some(action) = actions_rx.recv() => {
+                actions_batch.push(action);
+
+                // Flush batch if it reaches the size limit
+                if actions_batch.len() >= batch_size {
+                    tracing::info!(
+                        num_requests = actions_batch.len(),
+                        "publishing batch of signatures (size limit)",
+                    );
+                    execute_batch_publish(
+                        &client,
+                        &mut actions_batch,
+                        &near_account_id,
+                        Instant::now(),
+                    )
+                    .await;
+                    start = Instant::now();
+                }
+            }
         }
     }
 }
@@ -1053,6 +1095,13 @@ async fn try_publish_near(
     timestamp: &Instant,
     signature: &Signature,
 ) -> Result<(), near_fetch::Error> {
+    // Acquire RPC semaphore permit to limit concurrent external calls
+    let _permit = RPC_SEMAPHORE
+        .acquire()
+        .await
+        .inspect_err(|e| tracing::error!(?e, "failed to acquire RPC semaphore"))
+        .ok();
+
     let chain = action.indexed.chain;
     let outcome = near
         .call_respond(&action.indexed.id, signature)
