@@ -329,6 +329,8 @@ type Result<T> = anyhow::Result<T>;
 pub struct SolanaStream {
     rx: mpsc::Receiver<ChainEvent>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    // optional buffered tx for livestream()/drain
+    buffered_tx: Option<mpsc::Sender<ChainEvent>>,
 }
 
 impl Drop for SolanaStream {
@@ -386,7 +388,26 @@ impl ChainStream for SolanaStream {
     async fn next_event(&mut self) -> Option<ChainEvent> {
         self.rx.recv().await
     }
+
+    async fn livestream(&mut self) -> anyhow::Result<Box<dyn crate::stream::ChainBufferedStream + Send>> {
+        let (new_tx, new_rx) = crate::stream::channel();
+        let (buffer_tx, buffer_rx) = crate::stream::channel();
+
+        // swap receiver and spawn forwarder
+        let mut original_rx = std::mem::replace(&mut self.rx, new_rx);
+        self.buffered_tx = Some(buffer_tx.clone());
+
+        tokio::spawn(async move {
+            while let Some(ev) = original_rx.recv().await {
+                let _ = new_tx.send(ev.clone()).await;
+                let _ = buffer_tx.send(ev).await;
+            }
+        });
+
+        Ok(Box::new(crate::stream::ops::BufferedReceiver::new(buffer_rx)))
+    }
 }
+
 
 // Version of respond subscription that pushes ChainEvent into a channel instead of calling processing directly
 async fn subscribe_to_program_respond_events(

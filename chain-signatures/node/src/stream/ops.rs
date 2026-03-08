@@ -18,6 +18,8 @@ use mpc_primitives::{SignId, Signature};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
+use crate::stream::ChainBufferedStream;
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SignBidirectionalEvent {
@@ -217,6 +219,55 @@ impl SignatureRespondedEvent {
             SignatureRespondedEvent::Hydration(event) => event.signature.clone(),
             SignatureRespondedEvent::Ethereum(event) => event.signature.clone(),
         }
+    }
+}
+
+/// Small helper: a buffered receiver adapter that implements `ChainBufferedStream`.
+/// It reads from an `mpsc::Receiver<ChainEvent>` and exposes `initial_height()`
+/// (first observed `Block`) and `next_buffered()` for draining.
+pub struct BufferedReceiver {
+    rx: mpsc::Receiver<crate::stream::ChainEvent>,
+    pending: VecDeque<crate::stream::ChainEvent>,
+    first_block: Option<u64>,
+}
+
+impl BufferedReceiver {
+    pub fn new(rx: mpsc::Receiver<crate::stream::ChainEvent>) -> Self {
+        Self { rx, pending: VecDeque::new(), first_block: None }
+    }
+}
+
+#[async_trait::async_trait]
+impl ChainBufferedStream for BufferedReceiver {
+    async fn initial_height(&mut self) -> anyhow::Result<u64> {
+        // If we already observed a block, return it.
+        if let Some(h) = self.first_block {
+            return Ok(h);
+        }
+
+        // Consume from the receiver until we see a Block event. Store all events
+        // in the pending queue so subsequent `next_buffered()` calls return them.
+        while let Some(ev) = self.rx.recv().await {
+            match &ev {
+                crate::stream::ChainEvent::Block(b) => {
+                    self.first_block = Some(*b);
+                    self.pending.push_back(ev);
+                    return Ok(*b);
+                }
+                _ => {
+                    self.pending.push_back(ev);
+                }
+            }
+        }
+
+        anyhow::bail!("buffered stream ended before producing initial block");
+    }
+
+    async fn next_buffered(&mut self) -> Option<crate::stream::ChainEvent> {
+        if let Some(ev) = self.pending.pop_front() {
+            return Some(ev);
+        }
+        self.rx.recv().await
     }
 }
 

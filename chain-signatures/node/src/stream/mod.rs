@@ -90,10 +90,42 @@ pub enum ExecutionOutcome {
 #[allow(async_fn_in_trait)]
 pub trait ChainStream: Send + 'static {
     const CHAIN: Chain;
+
+    /// Produce the next verified event from this chain (steady-state consumer).
     async fn next_event(&mut self) -> Option<ChainEvent>;
+
+    /// Optional: create a buffered live sub-stream that allows anchoring + draining.
+    /// Implementations that don't support buffered startup may return an error.
+    async fn livestream(&mut self) -> anyhow::Result<Box<dyn ChainBufferedStream + Send>> {
+        anyhow::bail!("livestream not implemented for this stream")
+    }
+
+    /// Optional: perform historical catchup for the inclusive range `[from_inclusive, to_inclusive]`.
+    /// Default no-op.
+    async fn catchup(&mut self, _from_inclusive: u64, _to_inclusive: u64) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
-/// Shared indexer loop: recovers backlog then processes events from the stream
+/// Buffered live stream returned by `ChainStream::livestream()`.
+#[allow(async_fn_in_trait)]
+pub trait ChainBufferedStream: Send + 'static {
+    /// Return the anchored block height observed from the live subscription. Callers
+    /// will usually run catchup up to this height, then drain buffered events up to it.
+    async fn initial_height(&mut self) -> anyhow::Result<u64>;
+
+    /// Pull next buffered event from the live subscription (cancellable by dropping).
+    async fn next_buffered(&mut self) -> Option<ChainEvent>;
+}
+
+/// Shared indexer loop: recovers backlog then processes events from the stream.
+///
+/// New startup sequence (catchup-enabled):
+///  1) recover backlog
+///  2) if stream supports `livestream()`: start buffered live subscription, read anchor
+///     and run `stream.catchup(persisted_height, anchor)`, then drain buffered events
+///     up to anchor before entering steady-state `next_event()` loop.
+///  3) otherwise fall back to existing steady-state `next_event()` loop.
 pub async fn run_stream<S: ChainStream>(
     mut stream: S,
     sign_tx: mpsc::Sender<Sign>,
@@ -118,27 +150,141 @@ pub async fn run_stream<S: ChainStream>(
     )
     .await;
 
+    // Try to perform buffered startup/catchup if the stream supports it.
+    match stream.livestream().await {
+        Ok(mut buffered) => {
+            tracing::info!(%chain, "started buffered livestream for catchup");
+
+            // anchor height from live subscription
+            let anchor = match buffered.initial_height().await {
+                Ok(h) => h,
+                Err(err) => {
+                    tracing::warn!(%chain, ?err, "failed to obtain anchor from buffered stream; falling back to live loop");
+                    // Fall through to steady-state below
+                    run_steady_state(stream, sign_tx, backlog, contract_watcher, mesh_state, node_client, total_timeout).await;
+                    return;
+                }
+            };
+
+            // Persisted processed height -> inclusive-from for catchup
+            let persisted = backlog.processed_block(S::CHAIN).await;
+            let from_inclusive = persisted.unwrap_or(anchor);
+
+            tracing::info!(%chain, from = from_inclusive, anchor = anchor, "catchup range computed");
+
+            if from_inclusive <= anchor {
+                // Ask the stream to run its chain-specific catchup for [from_inclusive, anchor].
+                if let Err(err) = stream.catchup(from_inclusive, anchor).await {
+                    tracing::warn!(%chain, ?err, "stream.catchup failed; attempting steady-state fallback");
+                    run_steady_state(stream, sign_tx, backlog, contract_watcher, mesh_state, node_client, total_timeout).await;
+                    return;
+                }
+
+                // Drain buffered events (both historical produced by catchup *and* live events)
+                // until we reach anchor, then continue with steady-state next_event().
+                let mut reached_anchor = false;
+                while let Some(ev) = buffered.next_buffered().await {
+                    // process buffered event using same logic as steady-state loop
+                    match &ev {
+                        ChainEvent::Block(block) => {
+                            if *block >= anchor {
+                                reached_anchor = true;
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    // reuse existing per-event handling
+                    handle_chain_event(ev, &sign_tx, &backlog, &mut contract_watcher, total_timeout).await;
+
+                    if reached_anchor {
+                        tracing::info!(%chain, anchor = anchor, "drained buffered events up to anchor; switching to live");
+                        break;
+                    }
+                }
+
+                // Enter steady-state loop
+                run_steady_state(stream, sign_tx, backlog, contract_watcher, mesh_state, node_client, total_timeout).await;
+                return;
+            } else {
+                tracing::info!(%chain, "no catchup required (from > anchor); entering live loop");
+                run_steady_state(stream, sign_tx, backlog, contract_watcher, mesh_state, node_client, total_timeout).await;
+                return;
+            }
+        }
+        Err(_) => {
+            // Stream doesn't support buffered startup — just fall back to steady-state loop
+            tracing::info!(%chain, "livestream not supported; running steady-state loop");
+            run_steady_state(stream, sign_tx, backlog, contract_watcher, mesh_state, node_client, total_timeout).await;
+            return;
+        }
+    }
+}
+
+async fn handle_chain_event(
+    event: ChainEvent,
+    sign_tx: &mpsc::Sender<Sign>,
+    backlog: &Backlog,
+    contract_watcher: &mut ContractStateWatcher,
+    total_timeout: Duration,
+) {
+    let chain = match backlog.processed_block(Chain::Solana).await {
+        _ => (),
+    };
+
+    match event {
+        ChainEvent::SignRequest(req) => {
+            if let Err(err) = process_sign_request(req, sign_tx.clone(), backlog.clone()).await {
+                tracing::error!(?err, "failed to process sign request");
+            }
+        }
+        ChainEvent::Respond(ev) => {
+            if let Err(err) = process_respond_event(ev, sign_tx.clone(), contract_watcher, backlog).await {
+                tracing::error!(?err, "failed to process respond event");
+            }
+        }
+        ChainEvent::RespondBidirectional(ev) => {
+            if let Err(err) = process_respond_bidirectional_event(ev, sign_tx.clone(), backlog).await {
+                tracing::error!(?err, "failed to process respond bidirectional event");
+            }
+        }
+        ChainEvent::Block(block) => {
+            if let Some(checkpoint) = backlog.set_processed_block(Chain::Solana, block).await {
+                tracing::info!(block, ?checkpoint, "created checkpoint");
+            }
+        }
+        ChainEvent::ExecutionConfirmed { .. } => {
+            tracing::warn!("ExecutionConfirmed received in buffered drain path — forwarding to steady-state handler");
+        }
+    }
+}
+
+async fn run_steady_state<S: ChainStream>(
+    mut stream: S,
+    sign_tx: mpsc::Sender<Sign>,
+    backlog: Backlog,
+    mut contract_watcher: ContractStateWatcher,
+    mut mesh_state: watch::Receiver<MeshState>,
+    node_client: NodeClient,
+    total_timeout: Duration,
+) {
+    let chain = S::CHAIN;
+
     while let Some(event) = stream.next_event().await {
         match event {
             ChainEvent::SignRequest(req) => {
                 // process sign request (insert into backlog + send sign request)
-                if let Err(err) = process_sign_request(req, sign_tx.clone(), backlog.clone()).await
-                {
+                if let Err(err) = process_sign_request(req, sign_tx.clone(), backlog.clone()).await {
                     tracing::error!(?err, chain = %chain, "failed to process sign request");
                 }
             }
             ChainEvent::Respond(ev) => {
-                if let Err(err) =
-                    process_respond_event(ev, sign_tx.clone(), &mut contract_watcher, &backlog)
-                        .await
-                {
+                if let Err(err) = process_respond_event(ev, sign_tx.clone(), &mut contract_watcher, &backlog).await {
                     tracing::error!(?err, chain = %chain, "failed to process respond event");
                 }
             }
             ChainEvent::RespondBidirectional(ev) => {
-                if let Err(err) =
-                    process_respond_bidirectional_event(ev, sign_tx.clone(), &backlog).await
-                {
+                if let Err(err) = process_respond_bidirectional_event(ev, sign_tx.clone(), &backlog).await {
                     tracing::error!(?err, chain = %chain, "failed to process respond bidirectional event");
                 }
             }
@@ -151,13 +297,7 @@ pub async fn run_stream<S: ChainStream>(
                     .with_label_values(&[S::CHAIN.as_str(), "indexed"])
                     .set(block as i64);
             }
-            ChainEvent::ExecutionConfirmed {
-                tx_id,
-                sign_id,
-                source_chain,
-                block_height,
-                result,
-            } => {
+            ChainEvent::ExecutionConfirmed { tx_id, sign_id, source_chain, block_height, result } => {
                 if let Err(err) = process_execution_confirmed(
                     tx_id,
                     sign_id,
@@ -168,9 +308,7 @@ pub async fn run_stream<S: ChainStream>(
                     sign_tx.clone(),
                     total_timeout,
                     S::CHAIN,
-                )
-                .await
-                {
+                ).await {
                     tracing::error!(?err, chain = %chain, "failed to process execution confirmation");
                 }
             }
@@ -420,6 +558,128 @@ mod tests {
             Sign::Request(req) => assert_eq!(req.id, sign_id),
             _ => panic!("expected sign request"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_run_stream_buffered_catchup_drains_and_processes() {
+        use std::time::Duration;
+        use tokio::sync::mpsc;
+
+        // Prepare backlog with a persisted height of 10
+        let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
+        let backlog = Backlog::persisted(storage.clone());
+        backlog.set_processed_block(Chain::Solana, 10).await;
+
+        // Mock stream that supports livestream() and catchup()
+        struct MockStream {
+            rx: mpsc::Receiver<ChainEvent>,
+            buffer_tx: Option<mpsc::Sender<ChainEvent>>,
+            anchor: u64,
+        }
+
+        impl ChainStream for MockStream {
+            const CHAIN: Chain = Chain::Solana;
+
+            async fn next_event(&mut self) -> Option<ChainEvent> {
+                self.rx.recv().await
+            }
+
+            async fn livestream(&mut self) -> anyhow::Result<Box<dyn ChainBufferedStream + Send>> {
+                let (new_tx, new_rx) = crate::stream::channel();
+                let (buffer_tx, buffer_rx) = crate::stream::channel();
+
+                // swap receiver and forward
+                let mut original_rx = std::mem::replace(&mut self.rx, new_rx);
+                self.buffer_tx = Some(buffer_tx.clone());
+
+                // pre-seed buffer with anchor Block so initial_height() can return quickly
+                let anchor_block = ChainEvent::Block(self.anchor);
+                let _ = buffer_tx.try_send(anchor_block.clone());
+
+                tokio::spawn(async move {
+                    while let Some(ev) = original_rx.recv().await {
+                        let _ = new_tx.send(ev.clone()).await;
+                        let _ = buffer_tx.send(ev).await;
+                    }
+                });
+
+                Ok(Box::new(crate::stream::ops::BufferedReceiver::new(buffer_rx)))
+            }
+
+            async fn catchup(&mut self, from_inclusive: u64, to_inclusive: u64) -> anyhow::Result<()> {
+                // emit a SignRequest + Block for each height into the buffer
+                let tx = match &self.buffer_tx {
+                    Some(t) => t.clone(),
+                    None => anyhow::bail!("no buffer tx set"),
+                };
+
+                for h in from_inclusive..=to_inclusive {
+                    // construct a minimal IndexedSignRequest (only id & chain used by handler)
+                    let id = mpc_primitives::SignId::new([h as u8; 32]);
+                    let req = IndexedSignRequest {
+                        id,
+                        args: mpc_primitives::SignArgs {
+                            entropy: [0u8; 32],
+                            epsilon: k256::Scalar::from(1u64),
+                            payload: k256::Scalar::from(2u64),
+                            path: "test".to_string(),
+                            key_version: 0,
+                        },
+                        chain: Chain::Solana,
+                        timestamp_created: std::time::Instant::now(),
+                        unix_timestamp_indexed: crate::util::current_unix_timestamp(),
+                        total_timeout: Duration::from_secs(60),
+                        sign_request_type: crate::protocol::SignRequestType::Sign,
+                    };
+                    let _ = tx.send(ChainEvent::SignRequest(req)).await;
+                    let _ = tx.send(ChainEvent::Block(h)).await;
+                }
+
+                Ok(())
+            }
+        }
+
+        // Create a stream whose steady-state `next_event` returns None (so run_stream exits after drain)
+        let (_steady_tx, steady_rx) = mpsc::channel(4);
+        let client = MockStream { rx: steady_rx, buffer_tx: None, anchor: 15 };
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(16);
+
+        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+            &"test.near".parse::<AccountId>().unwrap(),
+            k256::ProjectivePoint::GENERATOR.to_affine(),
+            0,
+            Default::default(),
+        );
+        let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
+        let node_client = NodeClient::new(&Default::default());
+
+        // run
+        run_stream(
+            client,
+            sign_tx.clone(),
+            backlog.clone(),
+            contract_watcher,
+            mesh_state_rx,
+            node_client,
+            Duration::from_secs(5),
+        )
+        .await;
+
+        // We expect sign requests for heights 10..=15 (from persisted 10 through anchor 15)
+        let mut seen = Vec::new();
+        for _ in 0..=5 {
+            let msg = timeout(Duration::from_secs(1), sign_rx.recv()).await.unwrap().unwrap();
+            match msg {
+                Sign::Request(r) => seen.push(r.id),
+                other => panic!("unexpected sign message: {:?}", other),
+            }
+        }
+        assert_eq!(seen.len(), 6);
+        // check first and last sign id correspond roughly to heights 10 and 15 (encoded in bytes)
+        assert_eq!(seen.first().unwrap().request_id[0], 10u8);
+        assert_eq!(seen.last().unwrap().request_id[0], 15u8);
+    }
 
         // Prepare a SignatureRespondedEvent that will advance to bidirectional and register watcher
         // Construct a valid signature (use generator point for big_r and small s)

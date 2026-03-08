@@ -738,6 +738,12 @@ impl EthereumIndexer {
         })
     }
 
+    /// Return a clone of the internal Ethereum client for auxiliary operations
+    /// (used by the `EthereumStream` buffered/catchup helpers).
+    pub fn client(&self) -> std::sync::Arc<EthereumClient> {
+        std::sync::Arc::clone(&self.client)
+    }
+
     pub async fn run(self, events_tx: mpsc::Sender<ChainEvent>) {
         let backlog = self.backlog;
         let eth = self.eth;
@@ -1345,6 +1351,13 @@ impl EthereumIndexer {
 pub struct EthereumStream {
     events_rx: mpsc::Receiver<ChainEvent>,
     tasks: Vec<JoinHandle<()>>,
+    // kept copies of internal resources to support buffered livestream + catchup
+    client: std::sync::Arc<EthereumClient>,
+    contract_address: alloy::primitives::Address,
+    backlog: Backlog,
+    total_timeout: std::time::Duration,
+    // optional buffered tx (set by livestream)
+    buffered_tx: Option<mpsc::Sender<ChainEvent>>,
 }
 
 impl EthereumStream {
@@ -1355,7 +1368,14 @@ impl EthereumStream {
         };
 
         let (events_tx, events_rx) = crate::stream::channel();
-        let indexer = EthereumIndexer::new(eth, backlog).await?;
+        let indexer = EthereumIndexer::new(eth.clone(), backlog.clone()).await?;
+
+        // retain client + contract address for catchup support
+        let client = indexer.client();
+        let Ok(contract_address) = alloy::primitives::Address::from_str(&format!("0x{}", eth.contract_address)) else {
+            return Err(anyhow::anyhow!("Failed to parse contract address"));
+        };
+        let total_timeout = std::time::Duration::from_secs(eth.total_timeout);
 
         let t_indexer: JoinHandle<()> = tokio::spawn(async move {
             indexer.run(events_tx).await;
@@ -1363,7 +1383,99 @@ impl EthereumStream {
 
         let tasks = vec![t_indexer];
 
-        Ok(Self { events_rx, tasks })
+        Ok(Self {
+            events_rx,
+            tasks,
+            client,
+            contract_address,
+            backlog,
+            total_timeout,
+            buffered_tx: None,
+        })
+    }
+
+    /// Expose a lightweight helper to run historical catchup for an inclusive range.
+    /// This utility parallel-fetches blocks, then applies them in-order and emits
+    /// `ChainEvent`s into the provided channel.
+    pub async fn catchup_range(
+        client: std::sync::Arc<EthereumClient>,
+        contract_address: alloy::primitives::Address,
+        events_tx: mpsc::Sender<ChainEvent>,
+        from_inclusive: u64,
+        to_inclusive: u64,
+        parallelism: usize,
+        total_timeout: std::time::Duration,
+    ) {
+        use futures::stream::{self, StreamExt};
+        let rng: Vec<u64> = (from_inclusive..=to_inclusive).collect();
+
+        let client_clone = client.clone();
+        let fetches = stream::iter(rng.into_iter().map(|n| {
+            let client = client_clone.clone();
+            async move { (n, client.get_block(alloy::rpc::types::BlockId::Number(alloy::rpc::types::BlockNumberOrTag::Number(n))).await) }
+        }))
+        .buffer_unordered(parallelism)
+        .collect::<Vec<_>>()
+        .await;
+
+        // sort by block number to ensure linear application
+        let mut fetches = fetches;
+        fetches.sort_by_key(|(n, _)| *n);
+
+        for (block_number, maybe_block) in fetches {
+            if let Some(block) = maybe_block {
+                // Reuse parsing helpers inside this module
+                let mut sign_requests = Vec::new();
+
+                let block_receipts = match client.get_block_receipts(block_number.into()).await {
+                    Ok(Some(r)) => r,
+                    _ => Vec::new(),
+                };
+
+                let relevant_logs: Vec<alloy::rpc::types::Log> = block_receipts
+                    .iter()
+                    .filter_map(|receipt| receipt.as_ref().as_receipt())
+                    .flat_map(|receipt| {
+                        receipt
+                            .logs
+                            .iter()
+                            .filter(|log| log.address() == contract_address)
+                            .cloned()
+                    })
+                    .collect();
+
+                let (respond_logs, potential_request_logs): (Vec<alloy::rpc::types::Log>, Vec<alloy::rpc::types::Log>) =
+                    relevant_logs.into_iter().partition(|log| {
+                        log.topic0()
+                            .is_some_and(|topic| *topic == SignatureResponded::SIGNATURE_HASH)
+                    });
+
+                let request_logs: Vec<alloy::rpc::types::Log> = potential_request_logs
+                    .into_iter()
+                    .filter(|log| {
+                        log.topic0()
+                            .is_some_and(|topic| *topic == SignatureRequested::SIGNATURE_HASH)
+                    })
+                    .collect();
+
+                if !request_logs.is_empty() {
+                    sign_requests.extend(parse_filtered_logs(request_logs, total_timeout));
+                }
+
+                // emit SignRequest events
+                for req in sign_requests {
+                    let _ = events_tx.send(ChainEvent::SignRequest(req)).await;
+                }
+
+                // emit Respond events
+                emit_respond_events(&respond_logs, events_tx.clone()).await;
+
+                // emit block checkpoint event
+                let _ = events_tx.send(ChainEvent::Block(block_number)).await;
+            } else {
+                tracing::warn!(block = block_number, "catchup: block not found from client");
+            }
+        }
     }
 }
 
@@ -1379,5 +1491,44 @@ impl ChainStream for EthereumStream {
     const CHAIN: Chain = Chain::Ethereum;
     async fn next_event(&mut self) -> Option<ChainEvent> {
         self.events_rx.recv().await
+    }
+
+    async fn livestream(&mut self) -> anyhow::Result<Box<dyn ChainBufferedStream + Send>> {
+        // create a forwarding layer: the original `events_rx` is consumed by a forwarder
+        // which duplicates events into `self.events_rx` (new) and `buffer_rx` (returned).
+        let (new_tx, new_rx) = crate::stream::channel();
+        let (buffer_tx, buffer_rx) = crate::stream::channel();
+
+        // swap the existing receiver into the forwarder task
+        let mut original_rx = std::mem::replace(&mut self.events_rx, new_rx);
+        // store buffer_tx so `catchup()` can push historical events into it
+        self.buffered_tx = Some(buffer_tx.clone());
+
+        // forwarder: read from original_rx and duplicate into new_tx and buffer_tx
+        tokio::spawn(async move {
+            while let Some(ev) = original_rx.recv().await {
+                let _ = new_tx.send(ev.clone()).await;
+                let _ = buffer_tx.send(ev).await;
+            }
+        });
+
+        // return a simple buffered-stream adapter that reads from buffer_rx
+        Ok(Box::new(crate::stream::ops::BufferedReceiver::new(buffer_rx)))
+    }
+
+    async fn catchup(&mut self, from_inclusive: u64, to_inclusive: u64) -> anyhow::Result<()> {
+        // ensure we have a buffered_tx to emit events into
+        let buffer = match &self.buffered_tx {
+            Some(tx) => tx.clone(),
+            None => anyhow::bail!("livestream must be started before catchup"),
+        };
+
+        // run parallel fetch + ordered apply, emitting into buffer
+        let parallelism = 8usize; // reasonable default; make configurable later
+        let client = self.client.clone();
+        let contract_address = self.contract_address;
+        let total_timeout = self.total_timeout;
+        let _ = Self::catchup_range(client, contract_address, buffer, from_inclusive, to_inclusive, parallelism, total_timeout).await;
+        Ok(())
     }
 }
