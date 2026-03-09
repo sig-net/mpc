@@ -421,10 +421,14 @@ pub(crate) async fn process_respond_event(
     let target_chain = Chain::from_str(&event.dest())
         .map_err(|err| anyhow::anyhow!("unable to parse target chain from dest: {err:?}"))?;
     if !matches!(entry.tx, BacklogTransaction::Sign(_)) {
-        let entry_type = entry.tx.typename();
-        anyhow::bail!(
-            "expected Sign transaction type for respond event, found different type={entry_type}: {sign_id:?}, {source_chain:?}, {target_chain:?}"
+        tracing::info!(
+            ?sign_id,
+            ?source_chain,
+            ?target_chain,
+            entry_type = %entry.tx.typename(),
+            "respond event backlog entry is already advanced; treating as processed"
         );
+        return Ok(());
     }
 
     let mpc_sig = respond_event.signature();

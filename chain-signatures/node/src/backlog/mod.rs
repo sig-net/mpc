@@ -61,10 +61,10 @@ impl PendingRequests {
         self.requests.remove(id).map(|entry| entry.tx)
     }
 
-    /// Gets a clone of a backlog entry from the pending requests map
+    /// Gets a ref of a backlog entry from the pending requests map
     /// Returns Some(value) if the key is present
-    fn get(&self, id: &SignId) -> Option<BacklogEntry> {
-        self.requests.get(id).cloned()
+    fn get(&self, id: &SignId) -> Option<&BacklogEntry> {
+        self.requests.get(id)
     }
 
     /// Returns the number of pending requests
@@ -255,7 +255,7 @@ impl Backlog {
             .read()
             .await
             .get(&chain)
-            .and_then(|pending_requests| pending_requests.get(id))
+            .and_then(|pending_requests| pending_requests.get(id).cloned())
     }
 
     /// Returns the number of pending requests in total
@@ -279,8 +279,7 @@ impl Backlog {
             .read()
             .await
             .get(&chain)
-            .and_then(|pending_requests| pending_requests.get(id))
-            .map(|entry| entry.sign_type)
+            .and_then(|pending| pending.get(id).map(|entry| entry.sign_type.clone()))
     }
 
     fn observe_backlog_size(&self, chain: Chain, len: usize) {
