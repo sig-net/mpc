@@ -199,7 +199,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             return Err(StorageError::ConnectionFailed);
         };
 
-        // fetch owner set from redis and union with in-memory reservations
         let owned: HashSet<A::Id> = conn
             .smembers(owner_key(&self.owner_keys, me))
             .await
@@ -208,7 +207,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 StorageError::RedisFailed(err.to_string())
             })?;
 
-        Ok(owned.union(&*self.reserved.read().await).copied().collect())
+        Ok(owned.into_iter().collect())
     }
 
     pub async fn reserve(&self, id: A::Id) -> Option<ArtifactSlot<A>> {
