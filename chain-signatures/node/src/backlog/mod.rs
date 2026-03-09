@@ -756,15 +756,12 @@ fn merge_checkpoints(
         remote
             .entry(chain)
             .and_modify(|remote_cp| {
-                if local_cp.block_height > remote_cp.block_height {
-                    tracing::info!(
-                        ?chain,
-                        local_height = local_cp.block_height,
-                        remote_height = remote_cp.block_height,
-                        "local checkpoint is newer than remote selection"
-                    );
-                    *remote_cp = local_cp.clone();
-                }
+                tracing::info!(
+                    ?chain,
+                    local_height = local_cp.block_height,
+                    remote_height = remote_cp.block_height,
+                    "keeping threshold-selected remote checkpoint over local checkpoint"
+                );
             })
             .or_insert(local_cp);
     }
@@ -1333,7 +1330,7 @@ mod tests {
         let merged = merge_checkpoints(local.clone(), remote.clone());
         assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 200);
 
-        // Case 3: Local higher
+        // Case 3: Local higher (still keep remote; it is threshold-selected)
         local.insert(
             Chain::Ethereum,
             Checkpoint {
@@ -1343,7 +1340,7 @@ mod tests {
             },
         );
         let merged = merge_checkpoints(local.clone(), remote.clone());
-        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 300);
+        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 200);
 
         // Case 4: Remote higher
         remote.insert(
@@ -1356,5 +1353,45 @@ mod tests {
         );
         let merged = merge_checkpoints(local.clone(), remote.clone());
         assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 400);
+    }
+
+    #[test]
+    fn test_merge_checkpoints_keeps_remote_pending_requests_even_if_local_newer() {
+        let mut local = HashMap::new();
+        let mut remote = HashMap::new();
+
+        // Local node progressed further but has no pending requests.
+        local.insert(
+            Chain::Ethereum,
+            Checkpoint {
+                chain: Chain::Ethereum,
+                block_height: 120,
+                pending_requests: vec![],
+            },
+        );
+
+        // Threshold-selected checkpoint from peers still carries pending requests.
+        remote.insert(
+            Chain::Ethereum,
+            Checkpoint {
+                chain: Chain::Ethereum,
+                block_height: 100,
+                pending_requests: vec![PendingTx {
+                    sign_id: SignId::new([42; 32]),
+                    transaction: vec![1, 2, 3],
+                }],
+            },
+        );
+
+        let merged = merge_checkpoints(local, remote);
+        let checkpoint = merged
+            .get(&Chain::Ethereum)
+            .expect("missing merged ethereum checkpoint");
+
+        // Regression guard: never override remote checkpoint with newer local one,
+        // otherwise nodes can drop pending requests and fail to reach signing quorum.
+        assert_eq!(checkpoint.block_height, 100);
+        assert_eq!(checkpoint.pending_requests.len(), 1);
+        assert_eq!(checkpoint.pending_requests[0].sign_id, SignId::new([42; 32]));
     }
 }
