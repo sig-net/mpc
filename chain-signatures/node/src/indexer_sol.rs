@@ -13,6 +13,7 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use alloy_sol_types::SolValue;
+use base64::Engine as _;
 use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_client::{Client, Cluster, Program};
 use anchor_lang::solana_program::keccak;
@@ -854,26 +855,20 @@ fn parse_cpi_respond_events(
     let mut respond_bidirectional_events = Vec::<RespondBidirectionalEvent>::new();
     let mut signature_responded_events = Vec::<SignatureRespondedEvent>::new();
 
-    // Helper closure to try decoding RespondBidirectionalEvent and SignatureRespondedEvent from raw data
-    let try_parse_respond_event =
-        |data: &str| -> Result<(Vec<RespondBidirectionalEvent>, Vec<SignatureRespondedEvent>)> {
-            let Ok(ix_data) = solana_sdk::bs58::decode(data).into_vec() else {
-                tracing::warn!("Failed to decode instruction data for target program");
-                return Ok((Vec::new(), Vec::new()));
-            };
-
-            // Ensure this is an Anchor event instruction
-            if !ix_data.starts_with(anchor_lang::event::EVENT_IX_TAG_LE) {
+    // Helper closure to decode event payload bytes where the first 8 bytes are
+    // the Anchor event discriminator.
+    let parse_event_payload =
+        |payload: &[u8]| -> Result<(Vec<RespondBidirectionalEvent>, Vec<SignatureRespondedEvent>)> {
+            if payload.len() < 8 {
                 return Ok((Vec::new(), Vec::new()));
             }
 
-            let event_discriminator = &ix_data[8..16];
-            let event_data = &ix_data[16..];
+            let event_discriminator = &payload[..8];
+            let event_data = &payload[8..];
 
             let mut respond_bdx = Vec::new();
             let mut sig_resp = Vec::new();
 
-            // Handle RespondBidirectionalEvent
             if event_discriminator == RespondBidirectionalEvent::DISCRIMINATOR {
                 match RespondBidirectionalEvent::deserialize(&mut &event_data[..]) {
                     Ok(ev) => respond_bdx.push(ev),
@@ -883,7 +878,6 @@ fn parse_cpi_respond_events(
                 }
             }
 
-            // Handle SignatureRespondedEvent
             if event_discriminator == SignatureRespondedEvent::DISCRIMINATOR {
                 match SignatureRespondedEvent::deserialize(&mut &event_data[..]) {
                     Ok(ev) => sig_resp.push(ev),
@@ -896,45 +890,98 @@ fn parse_cpi_respond_events(
             Ok((respond_bdx, sig_resp))
         };
 
-    // Look into inner instructions for CPI calls
-    let inner_ixs = match meta.inner_instructions {
-        solana_transaction_status::option_serializer::OptionSerializer::Some(ixs) => ixs,
-        _ => return Ok((Vec::new(), Vec::new())),
-    };
+    // Helper closure to try decoding RespondBidirectionalEvent and SignatureRespondedEvent from raw CPI instruction data
+    let try_parse_respond_event =
+        |data: &str| -> Result<(Vec<RespondBidirectionalEvent>, Vec<SignatureRespondedEvent>)> {
+            let Ok(ix_data) = solana_sdk::bs58::decode(data).into_vec() else {
+                tracing::warn!("Failed to decode instruction data for target program");
+                return Ok((Vec::new(), Vec::new()));
+            };
 
-    for (set_idx, inner_ix_set) in inner_ixs.iter().enumerate() {
-        for (ix_idx, instruction) in inner_ix_set.instructions.iter().enumerate() {
-            if let UiInstruction::Parsed(UiParsedInstruction::PartiallyDecoded(ui)) = instruction {
-                if ui.program_id == target_program_str {
-                    match try_parse_respond_event(&ui.data) {
-                        Ok((mut r_bdx, mut s_resp)) => {
-                            if !r_bdx.is_empty() {
-                                tracing::info!(
-                                    "parsed {} RespondBidirectionalEvent(s) from {}.{}",
-                                    r_bdx.len(),
-                                    set_idx,
-                                    ix_idx
-                                );
+            // Ensure this is an Anchor event instruction
+            if !ix_data.starts_with(anchor_lang::event::EVENT_IX_TAG_LE) {
+                return Ok((Vec::new(), Vec::new()));
+            }
+
+            parse_event_payload(&ix_data[8..])
+        };
+
+    // Look into inner instructions for CPI calls
+    if let solana_transaction_status::option_serializer::OptionSerializer::Some(inner_ixs) =
+        &meta.inner_instructions
+    {
+        for (set_idx, inner_ix_set) in inner_ixs.iter().enumerate() {
+            for (ix_idx, instruction) in inner_ix_set.instructions.iter().enumerate() {
+                if let UiInstruction::Parsed(UiParsedInstruction::PartiallyDecoded(ui)) = instruction {
+                    if ui.program_id == target_program_str {
+                        match try_parse_respond_event(&ui.data) {
+                            Ok((mut r_bdx, mut s_resp)) => {
+                                if !r_bdx.is_empty() {
+                                    tracing::info!(
+                                        "parsed {} RespondBidirectionalEvent(s) from {}.{}",
+                                        r_bdx.len(),
+                                        set_idx,
+                                        ix_idx
+                                    );
+                                }
+                                if !s_resp.is_empty() {
+                                    tracing::info!(
+                                        "parsed {} SignatureRespondedEvent(s) from {}.{}",
+                                        s_resp.len(),
+                                        set_idx,
+                                        ix_idx
+                                    );
+                                }
+                                respond_bidirectional_events.append(&mut r_bdx);
+                                signature_responded_events.append(&mut s_resp);
                             }
-                            if !s_resp.is_empty() {
-                                tracing::info!(
-                                    "parsed {} SignatureRespondedEvent(s) from {}.{}",
-                                    s_resp.len(),
-                                    set_idx,
-                                    ix_idx
-                                );
-                            }
-                            respond_bidirectional_events.append(&mut r_bdx);
-                            signature_responded_events.append(&mut s_resp);
+                            Err(e) => tracing::warn!(
+                                "Error processing inner instruction {}.{}: {}",
+                                set_idx,
+                                ix_idx,
+                                e
+                            ),
                         }
-                        Err(e) => tracing::warn!(
-                            "Error processing inner instruction {}.{}: {}",
-                            set_idx,
-                            ix_idx,
-                            e
-                        ),
                     }
                 }
+            }
+        }
+    }
+
+    // Also parse direct Anchor `emit!` logs (`Program data: <base64>`).
+    // This covers non-CPI respond flows where no inner event instruction exists.
+    if let solana_transaction_status::option_serializer::OptionSerializer::Some(logs) =
+        &meta.log_messages
+    {
+        for (idx, log) in logs.iter().enumerate() {
+            let Some(encoded) = log.strip_prefix("Program data: ") else {
+                continue;
+            };
+
+            let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+                continue;
+            };
+
+            match parse_event_payload(&raw) {
+                Ok((mut r_bdx, mut s_resp)) => {
+                    if !r_bdx.is_empty() {
+                        tracing::info!(
+                            "parsed {} RespondBidirectionalEvent(s) from log {}",
+                            r_bdx.len(),
+                            idx
+                        );
+                    }
+                    if !s_resp.is_empty() {
+                        tracing::info!(
+                            "parsed {} SignatureRespondedEvent(s) from log {}",
+                            s_resp.len(),
+                            idx
+                        );
+                    }
+                    respond_bidirectional_events.append(&mut r_bdx);
+                    signature_responded_events.append(&mut s_resp);
+                }
+                Err(e) => tracing::warn!("Error processing log {}: {}", idx, e),
             }
         }
     }

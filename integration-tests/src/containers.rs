@@ -1069,6 +1069,85 @@ impl Solana {
         Ok(signature)
     }
 
+    pub async fn respond(
+        &self,
+        request_ids: Vec<[u8; 32]>,
+        signatures: Vec<signet_program::Signature>,
+    ) -> anyhow::Result<SolanaSignature> {
+        if self.rpc_client.get_version().await.is_err() {
+            anyhow::bail!("solana container is not ready");
+        }
+
+        if request_ids.is_empty() {
+            anyhow::bail!("request_ids must not be empty");
+        }
+        if request_ids.len() != signatures.len() {
+            anyhow::bail!(
+                "request_ids and signatures length mismatch: {} != {}",
+                request_ids.len(),
+                signatures.len()
+            );
+        }
+
+        let program_id = self.program_keypair.pubkey();
+        let (event_authority_pda, _bump) =
+            SolanaPubkey::find_program_address(&[b"__event_authority"], &program_id);
+
+        let mut data = Vec::new();
+        let mut hasher = Sha256::new();
+        hasher.update(b"global:respond");
+        let discriminator = hasher.finalize();
+        data.extend_from_slice(&discriminator[..8]);
+
+        let signatures = signatures
+            .into_iter()
+            .map(|signature| RespondBidirectionalSignature {
+                big_r: RespondBidirectionalAffinePoint {
+                    x: signature.big_r.x,
+                    y: signature.big_r.y,
+                },
+                s: signature.s,
+                recovery_id: signature.recovery_id,
+            })
+            .collect();
+
+        let args = RespondArgs {
+            request_ids,
+            signatures,
+        };
+        args.serialize(&mut data)?;
+
+        let instruction = solana_sdk::instruction::Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new(self.payer_keypair.pubkey(), true),
+                AccountMeta::new_readonly(event_authority_pda, false),
+                AccountMeta::new_readonly(program_id, false),
+            ],
+            data,
+        };
+
+        let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
+        let mut transaction = solana_sdk::transaction::Transaction::new_with_payer(
+            &[instruction],
+            Some(&self.payer_keypair.pubkey()),
+        );
+        transaction.sign(&[&self.payer_keypair], recent_blockhash);
+
+        let signature = self
+            .rpc_client
+            .send_and_confirm_transaction(&transaction)
+            .await?;
+
+        tracing::info!(
+            ?signature,
+            responses = args.request_ids.len(),
+            "respond transaction successful",
+        );
+
+        Ok(signature)
+    }
+
     pub async fn respond_bidirectional(
         &self,
         request_id: [u8; 32],
@@ -1176,6 +1255,12 @@ struct RespondBidirectionalArgs {
     request_id: [u8; 32],
     serialized_output: Vec<u8>,
     signature: RespondBidirectionalSignature,
+}
+
+#[derive(BorshSerialize, BorshDeserialize)]
+struct RespondArgs {
+    request_ids: Vec<[u8; 32]>,
+    signatures: Vec<RespondBidirectionalSignature>,
 }
 
 #[derive(BorshSerialize, BorshDeserialize)]
