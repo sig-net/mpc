@@ -11,6 +11,7 @@ use crate::protocol::message::{
 use crate::protocol::posit::{PositAction, SinglePositCounter};
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::Chain;
+use crate::protocol::ProtocolState;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
@@ -28,7 +29,7 @@ use mpc_primitives::{SignArgs, SignId};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
@@ -1116,6 +1117,12 @@ pub struct SignatureSpawner {
     tasks: JoinMap<SignId, Result<(), SignError>>,
     /// Buffered inboxes for posit messages, allowing us to queue before tasks spawn
     inboxes: HashMap<SignId, Subscriber<SignTaskMessage>>,
+    /// Requests waiting for running phase before they can be executed.
+    pending_requests: HashMap<SignId, IndexedSignRequest>,
+    /// Requests currently assigned to active tasks.
+    active_requests: HashMap<SignId, IndexedSignRequest>,
+    /// Task aborts expected due to explicit pause/completion handling.
+    expected_abort: HashSet<SignId>,
     /// Tracks delay watcher tasks that will increment the delayed metric when response time exceeds expected
     delayed_watchers: HashMap<SignId, JoinHandle<()>>,
     mesh_state: watch::Receiver<MeshState>,
@@ -1128,6 +1135,7 @@ pub struct SignatureSpawner {
     rpc: RpcChannel,
     backlog: Backlog,
     node_account_id: String,
+    running_participants: BTreeSet<Participant>,
 }
 
 impl SignatureSpawner {
@@ -1136,6 +1144,7 @@ impl SignatureSpawner {
     fn spawn_task(
         &mut self,
         indexed: IndexedSignRequest,
+        epoch: u64,
         participants: BTreeSet<Participant>,
         contract: ContractStateWatcher,
         cfg: ProtocolConfig,
@@ -1178,7 +1187,7 @@ impl SignatureSpawner {
             sign_id,
             threshold: self.threshold,
             public_key: self.public_key,
-            epoch: self.epoch,
+            epoch,
             presignatures: self.presignatures.clone(),
             msg: self.msg.clone(),
             rpc: self.rpc.clone(),
@@ -1191,6 +1200,52 @@ impl SignatureSpawner {
         // Spawn the async task with organizing loop
         self.tasks
             .spawn(sign_id, task.run(indexed, self.mesh_state.clone(), rx));
+    }
+
+    fn pause_active_requests(&mut self) {
+        if self.active_requests.is_empty() {
+            return;
+        }
+
+        let active = std::mem::take(&mut self.active_requests);
+        for (sign_id, request) in active {
+            tracing::info!(?sign_id, "pausing signature request during non-running contract phase");
+            self.pending_requests.entry(sign_id).or_insert(request);
+            self.inboxes.remove(&sign_id);
+            self.abort_delayed_watcher(sign_id, "paused during resharing");
+            self.expected_abort.insert(sign_id);
+            let _ = self.tasks.abort(sign_id);
+        }
+    }
+
+    fn maybe_spawn_pending(&mut self, cfg: &ProtocolConfig, contract: &ContractStateWatcher) {
+        let Some(ProtocolState::Running(running)) = contract.state() else {
+            return;
+        };
+
+        self.threshold = running.threshold;
+        self.epoch = running.epoch;
+        self.running_participants = running.participants.keys().copied().collect();
+
+        if self.pending_requests.is_empty() {
+            return;
+        }
+
+        let pending = std::mem::take(&mut self.pending_requests);
+        for (sign_id, request) in pending {
+            if self.tasks.contains_key(&sign_id) || self.active_requests.contains_key(&sign_id) {
+                continue;
+            }
+
+            self.active_requests.insert(sign_id, request.clone());
+            self.spawn_task(
+                request,
+                running.epoch,
+                self.running_participants.clone(),
+                contract.clone(),
+                cfg.clone(),
+            );
+        }
     }
 
     /// Handle a posit message - routes to existing task or buffers if task not yet created
@@ -1220,8 +1275,12 @@ impl SignatureSpawner {
     }
 
     fn handle_completion(&mut self, sign_id: SignId) {
+        self.pending_requests.remove(&sign_id);
+        self.active_requests.remove(&sign_id);
+        self.expected_abort.remove(&sign_id);
         self.inboxes.remove(&sign_id);
         self.abort_delayed_watcher(sign_id, "completion");
+        self.expected_abort.insert(sign_id);
         if self.tasks.abort(sign_id) {
             tracing::info!(?sign_id, "aborting signature task due to completion event");
         } else {
@@ -1242,7 +1301,6 @@ impl SignatureSpawner {
         &mut self,
         sign: Sign,
         cfg: &ProtocolConfig,
-        participants: &BTreeSet<Participant>,
         contract: &ContractStateWatcher,
     ) {
         match sign {
@@ -1256,7 +1314,10 @@ impl SignatureSpawner {
                 // Use tasks instead of inbox map since it may already contain buffered messages
                 // (e.g. a Propose arriving before the indexer notifies us), so we must only look
                 // at the task map to decide whether the request is truly a duplicate.
-                if self.tasks.contains_key(&sign_id) {
+                if self.tasks.contains_key(&sign_id)
+                    || self.pending_requests.contains_key(&sign_id)
+                    || self.active_requests.contains_key(&sign_id)
+                {
                     tracing::info!(?sign_id, "skipping duplicate sign request");
                     return;
                 }
@@ -1268,12 +1329,14 @@ impl SignatureSpawner {
                     request.unix_timestamp_indexed,
                 );
 
-                self.spawn_task(request, participants.clone(), contract.clone(), cfg.clone());
+                self.pending_requests.insert(sign_id, request);
+                self.maybe_spawn_pending(cfg, contract);
             }
         }
 
         // Update metrics
-        crate::metrics::requests::SIGN_QUEUE_SIZE.set(self.tasks.len() as i64);
+        crate::metrics::requests::SIGN_QUEUE_SIZE
+            .set((self.tasks.len() + self.pending_requests.len()) as i64);
     }
 
     async fn run(
@@ -1283,10 +1346,8 @@ impl SignatureSpawner {
         mut cfg: watch::Receiver<Config>,
     ) {
         let mut posits = self.msg.subscribe_signature_posit().await;
-
-        let running = contract.wait_running().await;
-        let all_participants = running.participants.keys().copied().collect();
         let mut protocol = cfg.borrow().protocol.clone();
+        self.maybe_spawn_pending(&protocol, &contract);
 
         // we acquire the lock but since this is a tokio lock, aborting the task while holding
         // the lock is safe and will not deadlock other tasks trying to acquire the lock
@@ -1299,7 +1360,7 @@ impl SignatureSpawner {
                         tracing::warn!("signature spawner sign_rx closed, terminating");
                         break;
                     };
-                    self.handle_request(sign, &protocol, &all_participants, &contract);
+                    self.handle_request(sign, &protocol, &contract);
                 }
                 Some((sign_id, presignature_id, round, from, action)) = posits.recv() => {
                     self.handle_posit(sign_id, presignature_id, round, from, action).await;
@@ -1308,9 +1369,20 @@ impl SignatureSpawner {
                     let (sign_id, result) = match result {
                         Ok(outcome) => outcome,
                         Err(sign_id) => {
-                            tracing::warn!(?sign_id, "signature task interrupted");
                             self.inboxes.remove(&sign_id);
                             self.abort_delayed_watcher(sign_id, "interruption");
+
+                            if self.expected_abort.remove(&sign_id) {
+                                tracing::debug!(?sign_id, "signature task interrupted as expected");
+                                continue;
+                            }
+
+                            if let Some(request) = self.active_requests.remove(&sign_id) {
+                                tracing::warn!(?sign_id, "signature task interrupted, re-queueing request");
+                                self.pending_requests.insert(sign_id, request);
+                            } else {
+                                tracing::warn!(?sign_id, "signature task interrupted");
+                            }
                             continue;
                         }
                     };
@@ -1319,15 +1391,33 @@ impl SignatureSpawner {
                     self.abort_delayed_watcher(sign_id, "task completion");
                     match result {
                         Ok(()) => {
+                            self.active_requests.remove(&sign_id);
                             tracing::info!(?sign_id, "signature task completed successfully");
                         }
                         Err(SignError::Aborted) => {
-                            tracing::warn!(?sign_id, "signature task terminated");
+                            if let Some(request) = self.active_requests.remove(&sign_id) {
+                                tracing::warn!(?sign_id, "signature task terminated, re-queueing request");
+                                self.pending_requests.insert(sign_id, request);
+                            } else {
+                                tracing::warn!(?sign_id, "signature task terminated");
+                            }
                         }
                     }
+
+                    self.maybe_spawn_pending(&protocol, &contract);
                 }
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();
+                }
+                state = contract.next_state() => {
+                    match state {
+                        Some(ProtocolState::Running(_)) => {
+                            self.maybe_spawn_pending(&protocol, &contract);
+                        }
+                        Some(ProtocolState::Resharing(_)) | Some(ProtocolState::Initializing(_)) | None => {
+                            self.pause_active_requests();
+                        }
+                    }
                 }
             }
         }
@@ -1357,6 +1447,9 @@ impl SignatureSpawnerTask {
             me,
             tasks: JoinMap::new(),
             inboxes: HashMap::new(),
+            pending_requests: HashMap::new(),
+            active_requests: HashMap::new(),
+            expected_abort: HashSet::new(),
             delayed_watchers: HashMap::new(),
             threshold,
             public_key,
@@ -1367,6 +1460,7 @@ impl SignatureSpawnerTask {
             rpc: ctx.rpc_channel.clone(),
             backlog: ctx.backlog.clone(),
             node_account_id: ctx.my_account_id.to_string(),
+            running_participants: BTreeSet::new(),
         };
 
         Self {

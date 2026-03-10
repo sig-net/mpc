@@ -161,6 +161,7 @@ impl GeneratingState {
             threshold: self.threshold,
             private_share,
             public_key,
+            sign_task: None,
         })
     }
 }
@@ -218,7 +219,15 @@ impl CryptographicProtocol for ResharingState {
         };
 
         if let Some(sk_share) = resharing.failed_store.take() {
-            match Self::try_finalize(ctx, &mut resharing, sk_share, &self.contract).await {
+            match Self::try_finalize(
+                ctx,
+                &mut resharing,
+                sk_share,
+                &self.contract,
+                self.sign_task.take(),
+            )
+            .await
+            {
                 Ok(next_state) => return next_state,
                 Err(()) => {
                     self.phase = ResharingPhase::Resharing(resharing);
@@ -347,8 +356,14 @@ impl CryptographicProtocol for ResharingState {
                 Action::Return(private_share) => {
                     tracing::info!("resharing: successfully completed key reshare");
                     resharing.last_activity = Instant::now();
-                    match Self::try_finalize(ctx, &mut resharing, private_share, &self.contract)
-                        .await
+                    match Self::try_finalize(
+                        ctx,
+                        &mut resharing,
+                        private_share,
+                        &self.contract,
+                        self.sign_task.take(),
+                    )
+                    .await
                     {
                         Ok(next_state) => return next_state,
                         Err(()) => {
@@ -368,6 +383,7 @@ impl ResharingState {
         running_state: &mut ReshareRunning,
         private_share: SecretKeyShare,
         contract: &ResharingContractState,
+        sign_task: Option<crate::protocol::signature::SignatureSpawnerTask>,
     ) -> Result<NodeState, ()> {
         if let Err(err) = ctx
             .secret_storage
@@ -397,6 +413,7 @@ impl ResharingState {
             threshold: contract.threshold,
             private_share,
             public_key: contract.public_key,
+            sign_task,
         }))
     }
 }

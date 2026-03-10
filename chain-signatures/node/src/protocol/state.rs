@@ -55,6 +55,7 @@ pub struct WaitingForConsensusState {
     pub threshold: usize,
     pub private_share: SecretKeyShare,
     pub public_key: PublicKey,
+    pub sign_task: Option<SignatureSpawnerTask>,
 }
 
 impl fmt::Debug for WaitingForConsensusState {
@@ -86,6 +87,7 @@ pub struct ResharingState {
     pub local_private_share: Option<SecretKeyShare>,
     pub phase: ResharingPhase,
     pub ready_nonce: u64,
+    pub sign_task: Option<SignatureSpawnerTask>,
 }
 
 pub struct ReshareAwaiting {

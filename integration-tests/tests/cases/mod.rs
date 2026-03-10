@@ -230,6 +230,48 @@ async fn test_batch_duplicate_signature() -> anyhow::Result<()> {
 }
 
 #[test(tokio::test)]
+async fn test_resharing_pauses_and_resumes_pending_sign_requests() -> anyhow::Result<()> {
+    set_resharing_running_timeout(Duration::from_secs(20));
+
+    let mut nodes = cluster::spawn().disable_prestockpile().await?;
+    nodes.wait().running().await?;
+
+    let initial_state = nodes.expect_running().await?;
+    let initial_epoch = initial_state.epoch;
+
+    // Queue multiple sign requests first.
+    let (_, signer, status) = actions::request_batch_random_sign(&nodes).await?;
+
+    // Start resharing immediately while requests are still pending.
+    let new_account = nodes.start(None).await?;
+    let participant_accounts = nodes.participant_accounts().await?;
+    let voters = participant_accounts
+        .iter()
+        .take(nodes.cfg.threshold)
+        .cloned()
+        .collect::<Vec<_>>();
+    utils::vote_join(&voters, nodes.contract().id(), new_account.id()).await?;
+
+    nodes.wait().nodes_resharing().await?;
+
+    // Ensure we eventually return to running on the next epoch.
+    nodes.wait()
+        .running_on_epoch(initial_epoch + 1)
+        .nodes_running()
+        .await?;
+
+    // The in-flight requests should resume and complete after running resumes.
+    let signatures = actions::wait_for::batch_signature_responded(status).await?;
+    assert_eq!(signatures.len(), 3);
+
+    // Also verify new signatures continue to work after resharing.
+    nodes.wait().signable().await?;
+    let _ = nodes.sign().account(signer).await?;
+
+    Ok(())
+}
+
+#[test(tokio::test)]
 async fn test_resharing_offline_participant_recovers() -> anyhow::Result<()> {
     // have a short timeout for the resharing to complete in tests
     set_resharing_running_timeout(Duration::from_secs(20));

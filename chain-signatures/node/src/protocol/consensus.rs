@@ -168,7 +168,7 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                             tracing::info!(
                                 "started(resharing): contract state is resharing with us, joining as a participant"
                             );
-                            resharing(Some(private_share), ctx, contract_state).await
+                            resharing(Some(private_share), ctx, contract_state, None).await
                         }
                     }
                 }
@@ -408,13 +408,15 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                         &self.private_share,
                         &self.public_key,
                     );
-                    let sign_task = SignatureSpawnerTask::run(
-                        me,
-                        self.threshold,
-                        self.epoch,
-                        ctx,
-                        self.public_key,
-                    );
+                    let sign_task = self.sign_task.unwrap_or_else(|| {
+                        SignatureSpawnerTask::run(
+                            me,
+                            self.threshold,
+                            self.epoch,
+                            ctx,
+                            self.public_key,
+                        )
+                    });
 
                     NodeState::Running(RunningState {
                         epoch: self.epoch,
@@ -627,7 +629,13 @@ impl<G: Governance> ConsensusProtocol<G> for RunningState {
                                 public_key: contract_state.public_key,
                             });
                         }
-                        resharing(Some(self.private_share), ctx, contract_state).await
+                        resharing(
+                            Some(self.private_share),
+                            ctx,
+                            contract_state,
+                            Some(self.sign_task),
+                        )
+                        .await
                     }
                 }
             }
@@ -862,7 +870,7 @@ impl<G: Governance> ConsensusProtocol<G> for JoiningState {
                     .contains_account_id(&ctx.my_account_id)
                 {
                     tracing::info!("joining(resharing): joining as a new participant");
-                    resharing(None, ctx, contract_state).await
+                    resharing(None, ctx, contract_state, None).await
                 } else {
                     tracing::info!("joining(resharing): network is resharing without us, waiting for them to finish");
                     NodeState::Joining(self)
@@ -906,6 +914,7 @@ async fn resharing(
     private_share: Option<SecretKeyShare>,
     ctx: &MpcSignProtocol,
     contract_state: ResharingContractState,
+    sign_task: Option<SignatureSpawnerTask>,
 ) -> NodeState {
     let Some(&me) = contract_state
         .new_participants
@@ -922,5 +931,6 @@ async fn resharing(
         local_private_share: private_share,
         phase: ResharingPhase::awaiting(me),
         ready_nonce: random(),
+        sign_task,
     })
 }
