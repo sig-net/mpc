@@ -1435,6 +1435,7 @@ mod tests {
     use k256::{AffinePoint, Scalar};
     use mpc_primitives::{SignArgs, SignId};
     use near_account_id::AccountId;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_presignature_storage(account_id: &AccountId) -> PresignatureStorage {
         let cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:1");
@@ -1532,6 +1533,57 @@ mod tests {
             out.insert(p, ParticipantInfo::new(id));
         }
         out
+    }
+
+    fn unix_now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_secs()
+    }
+
+    fn mk_signature_spawner(
+        me: Participant,
+        participants: &BTreeSet<Participant>,
+        threshold: usize,
+        epoch: u64,
+    ) -> (SignatureSpawner, ContractStateWatcher, ProtocolConfig) {
+        let me_id: u32 = me.into();
+        let node_id: AccountId = format!("p-{me_id}").parse().unwrap();
+        let contract_participants = mk_contract_participants(participants);
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &node_id,
+            AffinePoint::GENERATOR,
+            threshold,
+            contract_participants,
+        );
+
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+            stable: participants.clone(),
+            ..MeshState::default()
+        });
+
+        let (_inbox, _outbox, msg) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(32);
+        let cfg = test_protocol_config(100);
+
+        let spawner = SignatureSpawner {
+            presignatures: test_presignature_storage(&node_id),
+            tasks: JoinMap::new(),
+            inboxes: HashMap::new(),
+            delayed_watchers: HashMap::new(),
+            mesh_state: mesh_rx,
+            me,
+            threshold,
+            public_key: AffinePoint::GENERATOR,
+            epoch,
+            msg,
+            rpc: RpcChannel { tx: rpc_tx },
+            backlog: Backlog::new(),
+            node_account_id: node_id.to_string(),
+        };
+
+        (spawner, contract, cfg)
     }
 
     #[tokio::test]
@@ -1777,6 +1829,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wait_propose_rejects_unknown_presignature_from_proposer_then_times_out() {
+        let me = Participant::from(1);
+        let proposer = Participant::from(0);
+        let participants = mk_participants(0..3);
+        let threshold = 2;
+        let cfg = test_protocol_config(100);
+        let ctx = mk_sign_task(me, &participants, threshold, cfg);
+
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+            stable: participants,
+            ..MeshState::default()
+        });
+        let mut state = SignState::new(test_indexed_request(26), mesh_rx);
+        state.round = 3;
+        state.budget.reset(Duration::from_millis(10));
+
+        let (task_tx, mut task_rx) = mpsc::channel(2);
+        task_tx
+            .send(SignTaskMessage::PositMessage {
+                presignature_id: 9911,
+                round: 3,
+                from: proposer,
+                action: PositAction::Propose,
+            })
+            .await
+            .unwrap();
+        drop(task_tx);
+
+        let result = SignPositor::wait_propose(&ctx, &mut state, &mut task_rx, proposer).await;
+        assert!(matches!(result, Err(SignPhase::Organizing(_))));
+        assert_eq!(state.round, 4);
+    }
+
+    #[tokio::test]
+    async fn positor_proposer_ignores_start_message_and_continues() {
+        let me = Participant::from(0);
+        let participants = mk_participants(0..3);
+        let threshold = 2;
+        let cfg = test_protocol_config(100);
+        let ctx = mk_sign_task(me, &participants, threshold, cfg);
+
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+            stable: participants.clone(),
+            ..MeshState::default()
+        });
+        let mut state = SignState::new(test_indexed_request(27), mesh_rx);
+        state.round = 1;
+
+        let (task_tx, mut task_rx) = mpsc::channel(8);
+        task_tx
+            .send(SignTaskMessage::PositMessage {
+                presignature_id: 501,
+                round: 1,
+                from: Participant::from(1),
+                action: PositAction::Start(vec![me, Participant::from(1)]),
+            })
+            .await
+            .unwrap();
+        task_tx
+            .send(SignTaskMessage::PositMessage {
+                presignature_id: 501,
+                round: 1,
+                from: Participant::from(1),
+                action: PositAction::Accept,
+            })
+            .await
+            .unwrap();
+
+        let phase = SignPositor {
+            proposer: me,
+            stable: participants,
+            presignature_id: 501,
+            presignature: None,
+        }
+        .advance(&ctx, &mut state, &mut task_rx)
+        .await;
+
+        assert!(matches!(phase, SignPhase::Generating(_)));
+    }
+
+    #[tokio::test]
     async fn sign_state_buffering_keeps_only_highest_round_messages() {
         let participants = mk_participants(0..3);
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
@@ -1878,6 +2011,187 @@ mod tests {
 
         let result = task.run(test_indexed_request(25), mesh_rx, task_rx).await;
         assert!(matches!(result, Err(SignError::Aborted)));
+    }
+
+    #[tokio::test]
+    async fn sign_task_aborts_when_epoch_changes_while_waiting_for_stable() {
+        let me = Participant::from(0);
+        let participants = mk_participants(0..3);
+        let threshold = 2;
+        let node_id: AccountId = "p-0".parse().unwrap();
+        let cfg = test_protocol_config(100);
+
+        let running_state = ProtocolState::Running(RunningContractState {
+            epoch: 0,
+            participants: mk_contract_participants(&participants),
+            threshold,
+            public_key: AffinePoint::GENERATOR,
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+        });
+        let (contract, contract_tx) = ContractStateWatcher::with(&node_id, running_state);
+
+        let task = mk_sign_task_with_contract(me, &participants, threshold, cfg, contract, node_id);
+
+        let (mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let (_task_tx, task_rx) = mpsc::channel(1);
+
+        let handle = tokio::spawn(async move { task.run(test_indexed_request(28), mesh_rx, task_rx).await });
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let _ = contract_tx.send(Some(ProtocolState::Running(RunningContractState {
+            epoch: 1,
+            participants: mk_contract_participants(&participants),
+            threshold,
+            public_key: AffinePoint::GENERATOR,
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+        })));
+        drop(mesh_tx);
+
+        let result = tokio::time::timeout(Duration::from_millis(200), handle)
+            .await
+            .expect("task should complete")
+            .unwrap();
+        assert!(matches!(result, Err(SignError::Aborted)));
+    }
+
+    #[tokio::test]
+    async fn sign_task_aborts_when_resharing_while_waiting_for_stable() {
+        let me = Participant::from(1);
+        let participants = mk_participants(0..4);
+        let threshold = 3;
+        let node_id: AccountId = "p-1".parse().unwrap();
+        let cfg = test_protocol_config(100);
+
+        let running_state = ProtocolState::Running(RunningContractState {
+            epoch: 0,
+            participants: mk_contract_participants(&participants),
+            threshold,
+            public_key: AffinePoint::GENERATOR,
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+        });
+        let (contract, contract_tx) = ContractStateWatcher::with(&node_id, running_state);
+
+        let task = mk_sign_task_with_contract(me, &participants, threshold, cfg, contract, node_id);
+
+        let (mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let (_task_tx, task_rx) = mpsc::channel(1);
+
+        let handle = tokio::spawn(async move { task.run(test_indexed_request(29), mesh_rx, task_rx).await });
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let base_participants = mk_contract_participants(&participants);
+        let _ = contract_tx.send(Some(ProtocolState::Resharing(ResharingContractState {
+            old_epoch: 0,
+            old_participants: base_participants.clone(),
+            new_participants: base_participants,
+            threshold,
+            public_key: AffinePoint::GENERATOR,
+            finished_votes: Default::default(),
+            cancel_votes: Default::default(),
+        })));
+        drop(mesh_tx);
+
+        let result = tokio::time::timeout(Duration::from_millis(200), handle)
+            .await
+            .expect("task should complete")
+            .unwrap();
+        assert!(matches!(result, Err(SignError::Aborted)));
+    }
+
+    #[tokio::test]
+    async fn spawner_skips_duplicate_request_for_same_sign_id() {
+        let me = Participant::from(0);
+        let participants = mk_participants(0..4);
+        let threshold = 3;
+        let (mut spawner, contract, protocol) = mk_signature_spawner(me, &participants, threshold, 0);
+
+        let mut request = test_indexed_request(30);
+        request.unix_timestamp_indexed = unix_now_secs();
+        let sign_id = request.id;
+
+        spawner.handle_request(
+            Sign::Request(request.clone()),
+            &protocol,
+            &participants,
+            &contract,
+        );
+        spawner.handle_request(Sign::Request(request), &protocol, &participants, &contract);
+
+        assert!(spawner.tasks.contains_key(&sign_id));
+        assert_eq!(spawner.tasks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn spawner_buffers_posit_before_request_then_spawns_task() {
+        let me = Participant::from(1);
+        let participants = mk_participants(0..5);
+        let threshold = 3;
+        let (mut spawner, contract, protocol) = mk_signature_spawner(me, &participants, threshold, 0);
+
+        let mut request = test_indexed_request(31);
+        request.unix_timestamp_indexed = unix_now_secs();
+        let sign_id = request.id;
+
+        spawner
+            .handle_posit(
+                sign_id,
+                444,
+                0,
+                Participant::from(0),
+                PositAction::Propose,
+            )
+            .await;
+
+        assert!(spawner.inboxes.contains_key(&sign_id));
+        assert!(!spawner.tasks.contains_key(&sign_id));
+
+        spawner.handle_request(Sign::Request(request), &protocol, &participants, &contract);
+
+        assert!(spawner.tasks.contains_key(&sign_id));
+    }
+
+    #[tokio::test]
+    async fn spawner_completion_cleans_up_task_inbox_and_watcher() {
+        let me = Participant::from(2);
+        let participants = mk_participants(0..5);
+        let threshold = 3;
+        let (mut spawner, contract, protocol) = mk_signature_spawner(me, &participants, threshold, 0);
+
+        let mut request = test_indexed_request(32);
+        request.unix_timestamp_indexed = unix_now_secs();
+        let sign_id = request.id;
+
+        spawner.handle_request(Sign::Request(request), &protocol, &participants, &contract);
+        assert!(spawner.tasks.contains_key(&sign_id));
+        assert!(spawner.inboxes.contains_key(&sign_id));
+
+        spawner.handle_completion(sign_id);
+
+        assert!(!spawner.tasks.contains_key(&sign_id));
+        assert!(!spawner.inboxes.contains_key(&sign_id));
+        assert!(!spawner.delayed_watchers.contains_key(&sign_id));
+    }
+
+    #[tokio::test]
+    async fn spawner_completion_is_idempotent_for_unknown_sign_id() {
+        let me = Participant::from(0);
+        let participants = mk_participants(0..3);
+        let threshold = 2;
+        let (mut spawner, _contract, _protocol) =
+            mk_signature_spawner(me, &participants, threshold, 0);
+
+        let sign_id = SignId::new([199; 32]);
+        spawner.handle_completion(sign_id);
+
+        assert!(!spawner.tasks.contains_key(&sign_id));
+        assert!(!spawner.inboxes.contains_key(&sign_id));
+        assert!(!spawner.delayed_watchers.contains_key(&sign_id));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
