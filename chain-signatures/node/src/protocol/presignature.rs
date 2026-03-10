@@ -692,7 +692,7 @@ impl PresignatureSpawner {
         loop {
             tokio::select! {
                 _ = expiration_interval.tick() => {
-                    for (id, action) in self.posits.expire_and_start(self.threshold, Duration::from_secs(10), Duration::from_secs(2)) {
+                    for (id, action) in self.posits.expire_and_start(self.threshold, Duration::from_secs(120), Duration::from_secs(30)) {
                         let PositInternalAction::StartProtocol(participants, positor) = action else {
                             tracing::warn!(
                                 ?id,

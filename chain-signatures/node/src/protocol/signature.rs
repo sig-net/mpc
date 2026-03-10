@@ -38,7 +38,7 @@ use tokio::task::JoinHandle;
 const ROUND_INTERVAL: usize = 512;
 
 /// The default timeout budget for organizing and posit phases.
-const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(20);
+const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// All relevant info pertaining to an Indexed sign request from an indexer.
 #[derive(Debug, Clone, PartialEq)]
