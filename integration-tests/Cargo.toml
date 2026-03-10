@@ -37,6 +37,13 @@ sha3.workspace = true
 sha2 = "0.10"
 rlp = "0.5"
 
+# Subxt (Hydration/Substrate) helpers
+subxt = "0.44"
+subxt-signer = "0.44"
+
+# SCALE encoding
+parity-scale-codec = { version = "3", features = ["derive"] }
+
 # solana dependencies
 anchor-client.workspace = true
 signet-program.workspace = true

@@ -548,16 +548,41 @@ impl HydrationSandbox {
 
         let rpc_ws_endpoint = format!("ws://127.0.0.1:{}", external_port);
 
-        // Wait for the RPC port to accept TCP, then verify a Subxt connection
-        let max_attempts = 120;
+        // Wait for the RPC port to accept TCP, then verify a Subxt WebSocket connection
+        // (container may open TCP quickly while the node itself is still finishing
+        // state-scrape / initialization; ensure the Substrate websocket is responsive
+        // before returning the sandbox handle).
+        // Increase attempts because the `galacticcouncil/fork` image may perform a
+        // multi-second state scrape before enabling Substrate WebSocket RPC.
+        // Previously 120 (≈60s); bump to 600 (≈5 minutes) to improve local/CI reliability.
+        let max_attempts = 600;
         let mut ok = false;
 
         for _ in 0..max_attempts {
-            if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", external_port)).await.is_ok() {
-                // Give the node an extra moment to finish startup after the TCP port is open.
+            if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", external_port))
+                .await
+                .is_ok()
+            {
+                // Give the node a short moment after TCP opens
                 tokio::time::sleep(Duration::from_millis(1200)).await;
-                ok = true;
-                break;
+
+                // Try to establish a Subxt WebSocket connection to ensure the node
+                // accepts Substrate RPC connections (used by the indexer).
+                match tokio::time::timeout(Duration::from_secs(2), async {
+                    use subxt::OnlineClient;
+                    use subxt::config::substrate::SubstrateConfig;
+                    OnlineClient::<SubstrateConfig>::from_url(&format!("ws://127.0.0.1:{}", external_port)).await
+                })
+                .await
+                {
+                    Ok(Ok(_)) => {
+                        ok = true;
+                        break;
+                    }
+                    _ => {
+                        // not ready yet; continue polling
+                    }
+                }
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -566,7 +591,10 @@ impl HydrationSandbox {
             anyhow::bail!("hydration sandbox RPC did not become ready");
         }
 
-        Ok(HydrationSandbox { container, rpc_ws_endpoint })
+        Ok(HydrationSandbox {
+            container,
+            rpc_ws_endpoint,
+        })
     }
 
     pub fn rpc_ws_url(&self) -> String {
