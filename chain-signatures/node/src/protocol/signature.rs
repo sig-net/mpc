@@ -29,6 +29,7 @@ use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
@@ -350,12 +351,17 @@ impl SignOrganizer {
 
 impl SignPositor {
     /// Deliberator waits for the proposer to send a Propose message with a presignature_id.
-    async fn wait_propose(
+    async fn wait_propose_with_contains<F, Fut>(
         ctx: &SignTask,
         state: &mut SignState,
         task_rx: &mut mpsc::Receiver<SignTaskMessage>,
         proposer: Participant,
-    ) -> Result<PresignatureId, SignPhase> {
+        mut contains: F,
+    ) -> Result<PresignatureId, SignPhase>
+    where
+        F: FnMut(PresignatureId) -> Fut,
+        Fut: Future<Output = bool>,
+    {
         let sign_id = ctx.sign_id;
         let round = state.round;
         let remaining = state.budget.remaining();
@@ -427,7 +433,7 @@ impl SignPositor {
                     );
 
                     // Check if we have access to this presignature (in storage or generating)
-                    if !ctx.presignatures.contains(*presignature_id).await {
+                    if !contains(*presignature_id).await {
                         tracing::warn!(
                             ?sign_id,
                             presignature_id,
@@ -511,12 +517,30 @@ impl SignPositor {
         Ok(presignature_id)
     }
 
-    async fn advance(
+    #[allow(dead_code)]
+    async fn wait_propose(
+        ctx: &SignTask,
+        state: &mut SignState,
+        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
+        proposer: Participant,
+    ) -> Result<PresignatureId, SignPhase> {
+        Self::wait_propose_with_contains(ctx, state, task_rx, proposer, |id| {
+            ctx.presignatures.contains(id)
+        })
+        .await
+    }
+
+    async fn advance_with_contains<F, Fut>(
         self,
         ctx: &SignTask,
         state: &mut SignState,
         task_rx: &mut mpsc::Receiver<SignTaskMessage>,
-    ) -> SignPhase {
+        contains: F,
+    ) -> SignPhase
+    where
+        F: FnMut(PresignatureId) -> Fut,
+        Fut: Future<Output = bool>,
+    {
         let SignPositor {
             proposer,
             stable,
@@ -545,7 +569,7 @@ impl SignPositor {
                 "deliberator waiting for Propose"
             );
 
-            presignature_id = match Self::wait_propose(ctx, state, task_rx, proposer).await {
+            presignature_id = match Self::wait_propose_with_contains(ctx, state, task_rx, proposer, contains).await {
                 Ok(id) => id,
                 Err(phase) => return phase,
             }
@@ -668,6 +692,17 @@ impl SignPositor {
             presignature,
             accepted_participants,
         })
+    }
+
+    async fn advance(
+        self,
+        ctx: &SignTask,
+        state: &mut SignState,
+        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
+    ) -> SignPhase {
+        self
+            .advance_with_contains(ctx, state, task_rx, |id| ctx.presignatures.contains(id))
+            .await
     }
 }
 
@@ -1435,7 +1470,27 @@ mod tests {
     use k256::{AffinePoint, Scalar};
     use mpc_primitives::{SignArgs, SignId};
     use near_account_id::AccountId;
+    use proptest::prelude::*;
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use std::collections::HashSet;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[derive(Clone, Debug)]
+    struct MockPresignatureAccess {
+        available: HashSet<PresignatureId>,
+    }
+
+    impl MockPresignatureAccess {
+        fn new(ids: &[PresignatureId]) -> Self {
+            Self {
+                available: ids.iter().copied().collect(),
+            }
+        }
+
+        fn contains(&self, id: PresignatureId) -> bool {
+            self.available.contains(&id)
+        }
+    }
 
     fn test_presignature_storage(account_id: &AccountId) -> PresignatureStorage {
         let cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:1");
@@ -1863,6 +1918,190 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wait_propose_accepts_known_presignature_from_expected_proposer() {
+        let me = Participant::from(2);
+        let proposer = Participant::from(0);
+        let participants = mk_participants(0..4);
+        let threshold = 3;
+        let cfg = test_protocol_config(100);
+        let ctx = mk_sign_task(me, &participants, threshold, cfg);
+
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+            stable: participants,
+            ..MeshState::default()
+        });
+        let mut state = SignState::new(test_indexed_request(33), mesh_rx);
+        state.round = 6;
+
+        let mock = MockPresignatureAccess::new(&[8181]);
+        let (task_tx, mut task_rx) = mpsc::channel(4);
+
+        // First an invalid proposer message, then a valid one.
+        task_tx
+            .send(SignTaskMessage::PositMessage {
+                presignature_id: 8181,
+                round: 6,
+                from: Participant::from(1),
+                action: PositAction::Propose,
+            })
+            .await
+            .unwrap();
+        task_tx
+            .send(SignTaskMessage::PositMessage {
+                presignature_id: 8181,
+                round: 6,
+                from: proposer,
+                action: PositAction::Propose,
+            })
+            .await
+            .unwrap();
+
+        let result = SignPositor::wait_propose_with_contains(
+            &ctx,
+            &mut state,
+            &mut task_rx,
+            proposer,
+            |id| {
+                let mock = mock.clone();
+                async move { mock.contains(id) }
+            },
+        )
+        .await;
+
+        match result {
+            Ok(id) => assert_eq!(id, 8181),
+            Err(_) => panic!("expected known propose to be accepted"),
+        }
+        assert_eq!(state.round, 6);
+    }
+
+    #[tokio::test]
+    async fn deliberator_start_from_non_proposer_is_ignored_then_valid_start_progresses() {
+        let me = Participant::from(2);
+        let proposer = Participant::from(0);
+        let participants = mk_participants(0..4);
+        let threshold = 2;
+        let cfg = test_protocol_config(100);
+        let ctx = mk_sign_task(me, &participants, threshold, cfg);
+
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+            stable: participants.clone(),
+            ..MeshState::default()
+        });
+        let mut state = SignState::new(test_indexed_request(34), mesh_rx);
+        state.round = 1;
+
+        let mock = MockPresignatureAccess::new(&[9191]);
+        let (task_tx, mut task_rx) = mpsc::channel(8);
+
+        task_tx
+            .send(SignTaskMessage::PositMessage {
+                presignature_id: 9191,
+                round: 1,
+                from: proposer,
+                action: PositAction::Propose,
+            })
+            .await
+            .unwrap();
+
+        task_tx
+            .send(SignTaskMessage::PositMessage {
+                presignature_id: 9191,
+                round: 1,
+                from: Participant::from(1),
+                action: PositAction::Start(vec![me, proposer]),
+            })
+            .await
+            .unwrap();
+
+        task_tx
+            .send(SignTaskMessage::PositMessage {
+                presignature_id: 9191,
+                round: 1,
+                from: proposer,
+                action: PositAction::Start(vec![me, proposer]),
+            })
+            .await
+            .unwrap();
+
+        let phase = SignPositor {
+            proposer,
+            stable: participants,
+            presignature_id: 0,
+            presignature: None,
+        }
+        .advance_with_contains(&ctx, &mut state, &mut task_rx, |id| {
+            let mock = mock.clone();
+            async move { mock.contains(id) }
+        })
+        .await;
+
+        match phase {
+            SignPhase::Generating(gen) => {
+                assert_eq!(gen.proposer, proposer);
+                assert_eq!(gen.presignature_id, 9191);
+                assert_eq!(gen.accepted_participants.len(), 2);
+            }
+            _ => panic!("expected generating phase"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deliberator_start_with_too_few_participants_reorganizes() {
+        let me = Participant::from(2);
+        let proposer = Participant::from(0);
+        let participants = mk_participants(0..4);
+        let threshold = 3;
+        let cfg = test_protocol_config(100);
+        let ctx = mk_sign_task(me, &participants, threshold, cfg);
+
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+            stable: participants.clone(),
+            ..MeshState::default()
+        });
+        let mut state = SignState::new(test_indexed_request(35), mesh_rx);
+        state.round = 4;
+
+        let mock = MockPresignatureAccess::new(&[9292]);
+        let (task_tx, mut task_rx) = mpsc::channel(8);
+
+        task_tx
+            .send(SignTaskMessage::PositMessage {
+                presignature_id: 9292,
+                round: 4,
+                from: proposer,
+                action: PositAction::Propose,
+            })
+            .await
+            .unwrap();
+
+        task_tx
+            .send(SignTaskMessage::PositMessage {
+                presignature_id: 9292,
+                round: 4,
+                from: proposer,
+                action: PositAction::Start(vec![me, proposer]),
+            })
+            .await
+            .unwrap();
+
+        let phase = SignPositor {
+            proposer,
+            stable: participants,
+            presignature_id: 0,
+            presignature: None,
+        }
+        .advance_with_contains(&ctx, &mut state, &mut task_rx, |id| {
+            let mock = mock.clone();
+            async move { mock.contains(id) }
+        })
+        .await;
+
+        assert!(matches!(phase, SignPhase::Organizing(_)));
+        assert_eq!(state.round, 5);
+    }
+
+    #[tokio::test]
     async fn positor_proposer_ignores_start_message_and_continues() {
         let me = Participant::from(0);
         let participants = mk_participants(0..3);
@@ -2194,6 +2433,156 @@ mod tests {
         assert!(!spawner.delayed_watchers.contains_key(&sign_id));
     }
 
+    #[tokio::test]
+    async fn proposer_posit_deadline_times_out_and_reorganizes() {
+        let me = Participant::from(0);
+        let participants = mk_participants(0..4);
+        let threshold = 3;
+        let cfg = test_protocol_config(100);
+        let ctx = mk_sign_task(me, &participants, threshold, cfg);
+
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+            stable: participants.clone(),
+            ..MeshState::default()
+        });
+        let mut state = SignState::new(test_indexed_request(36), mesh_rx);
+        state.round = 2;
+        state.budget.reset(Duration::from_millis(10));
+
+        let (_task_tx, mut task_rx) = mpsc::channel(1);
+        let phase = SignPositor {
+            proposer: me,
+            stable: participants,
+            presignature_id: 888,
+            presignature: None,
+        }
+        .advance(&ctx, &mut state, &mut task_rx)
+        .await;
+
+        assert!(matches!(phase, SignPhase::Organizing(_)));
+        assert_eq!(state.round, 3);
+    }
+
+    #[tokio::test]
+    async fn deliberator_posit_deadline_waiting_for_start_times_out_and_reorganizes() {
+        let me = Participant::from(2);
+        let proposer = Participant::from(0);
+        let participants = mk_participants(0..4);
+        let threshold = 3;
+        let cfg = test_protocol_config(100);
+        let ctx = mk_sign_task(me, &participants, threshold, cfg);
+        let mock = MockPresignatureAccess::new(&[7777]);
+
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+            stable: participants.clone(),
+            ..MeshState::default()
+        });
+        let mut state = SignState::new(test_indexed_request(37), mesh_rx);
+        state.round = 4;
+        state.budget.reset(Duration::from_millis(10));
+
+        let (task_tx, mut task_rx) = mpsc::channel(4);
+        task_tx
+            .send(SignTaskMessage::PositMessage {
+                presignature_id: 7777,
+                round: 4,
+                from: proposer,
+                action: PositAction::Propose,
+            })
+            .await
+            .unwrap();
+        drop(task_tx);
+
+        let phase = SignPositor {
+            proposer,
+            stable: participants,
+            presignature_id: 0,
+            presignature: None,
+        }
+        .advance_with_contains(&ctx, &mut state, &mut task_rx, |id| {
+            let mock = mock.clone();
+            async move { mock.contains(id) }
+        })
+        .await;
+
+        assert!(matches!(phase, SignPhase::Organizing(_)));
+        assert_eq!(state.round, 5);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn chaos_randomized_posit_message_storms_do_not_hang() {
+        let participants = mk_participants(0..5);
+        let threshold = 3;
+        let me = Participant::from(0);
+
+        let mut handles = Vec::new();
+        for seed in 0u64..64 {
+            let participants = participants.clone();
+            handles.push(tokio::spawn(async move {
+                let cfg = test_protocol_config(100);
+                let ctx = mk_sign_task(me, &participants, threshold, cfg);
+                let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+                    stable: participants.clone(),
+                    ..MeshState::default()
+                });
+                let mut state = SignState::new(test_indexed_request((seed % 250) as u8), mesh_rx);
+                state.round = (seed as usize) % 5;
+                state.budget.reset(Duration::from_millis(30));
+
+                let (task_tx, mut task_rx) = mpsc::channel(256);
+                let mut rng = StdRng::seed_from_u64(seed);
+                let peers = participants
+                    .iter()
+                    .copied()
+                    .filter(|p| *p != me)
+                    .collect::<Vec<_>>();
+
+                for _ in 0..80 {
+                    let from = peers[rng.gen_range(0..peers.len())];
+                    let round = match rng.gen_range(0..3) {
+                        0 => state.round.saturating_sub(1),
+                        1 => state.round,
+                        _ => state.round + 1,
+                    };
+                    let action = match rng.gen_range(0..4) {
+                        0 => PositAction::Accept,
+                        1 => PositAction::Reject,
+                        2 => PositAction::Start(vec![me, from]),
+                        _ => PositAction::Propose,
+                    };
+                    let _ = task_tx
+                        .send(SignTaskMessage::PositMessage {
+                            presignature_id: 5000 + seed,
+                            round,
+                            from,
+                            action,
+                        })
+                        .await;
+                }
+                drop(task_tx);
+
+                let phase = tokio::time::timeout(
+                    Duration::from_millis(250),
+                    SignPositor {
+                        proposer: me,
+                        stable: participants,
+                        presignature_id: 5000 + seed,
+                        presignature: None,
+                    }
+                    .advance(&ctx, &mut state, &mut task_rx),
+                )
+                .await
+                .expect("storm case should not hang");
+
+                matches!(phase, SignPhase::Generating(_) | SignPhase::Organizing(_))
+            }));
+        }
+
+        for h in handles {
+            assert!(h.await.unwrap());
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_multiple_nodes_and_requests_complete_posit_phase_quickly() {
         let participants = mk_participants(0..5);
@@ -2252,6 +2641,425 @@ mod tests {
             let timed = handle.await.unwrap();
             let phase = timed.expect("posit phase should complete promptly");
             assert!(matches!(phase, SignPhase::Generating(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn replayed_accept_messages_do_not_break_progress() {
+        let me = Participant::from(0);
+        let participants = mk_participants(0..4);
+        let threshold = 2;
+        let cfg = test_protocol_config(100);
+        let ctx = mk_sign_task(me, &participants, threshold, cfg);
+
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+            stable: participants.clone(),
+            ..MeshState::default()
+        });
+        let mut state = SignState::new(test_indexed_request(40), mesh_rx);
+        state.round = 3;
+
+        let (task_tx, mut task_rx) = mpsc::channel(32);
+        for _ in 0..20 {
+            task_tx
+                .send(SignTaskMessage::PositMessage {
+                    presignature_id: 1200,
+                    round: 3,
+                    from: Participant::from(1),
+                    action: PositAction::Accept,
+                })
+                .await
+                .unwrap();
+        }
+
+        let phase = SignPositor {
+            proposer: me,
+            stable: participants,
+            presignature_id: 1200,
+            presignature: None,
+        }
+        .advance(&ctx, &mut state, &mut task_rx)
+        .await;
+
+        assert!(matches!(phase, SignPhase::Generating(_)));
+    }
+
+    #[tokio::test]
+    async fn out_of_order_old_round_messages_are_ignored_after_round_bump() {
+        let me = Participant::from(0);
+        let participants = mk_participants(0..4);
+        let threshold = 3;
+        let cfg = test_protocol_config(100);
+        let ctx = mk_sign_task(me, &participants, threshold, cfg);
+
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+            stable: participants.clone(),
+            ..MeshState::default()
+        });
+        let mut state = SignState::new(test_indexed_request(41), mesh_rx);
+        state.round = 7;
+        state.budget.reset(Duration::from_millis(10));
+
+        let (task_tx, mut task_rx) = mpsc::channel(64);
+        for _ in 0..40 {
+            task_tx
+                .send(SignTaskMessage::PositMessage {
+                    presignature_id: 1300,
+                    round: 6,
+                    from: Participant::from(1),
+                    action: PositAction::Accept,
+                })
+                .await
+                .unwrap();
+        }
+        drop(task_tx);
+
+        let phase = SignPositor {
+            proposer: me,
+            stable: participants,
+            presignature_id: 1300,
+            presignature: None,
+        }
+        .advance(&ctx, &mut state, &mut task_rx)
+        .await;
+
+        assert!(matches!(phase, SignPhase::Organizing(_)));
+        assert_eq!(state.round, 8);
+    }
+
+    #[tokio::test]
+    async fn network_partition_then_recovery_progresses_after_reorganization() {
+        let me = Participant::from(0);
+        let participants = mk_participants(0..6);
+        let threshold = 4;
+        let cfg = test_protocol_config(100);
+        let ctx = mk_sign_task(me, &participants, threshold, cfg);
+
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+            stable: participants.clone(),
+            ..MeshState::default()
+        });
+        let mut state = SignState::new(test_indexed_request(42), mesh_rx);
+        state.round = 0;
+
+        // Partitioned attempt: not enough accepts before deadline.
+        state.budget.reset(Duration::from_millis(10));
+        let (tx1, mut rx1) = mpsc::channel(8);
+        tx1.send(SignTaskMessage::PositMessage {
+            presignature_id: 1400,
+            round: 0,
+            from: Participant::from(1),
+            action: PositAction::Accept,
+        })
+        .await
+        .unwrap();
+        drop(tx1);
+
+        let first = SignPositor {
+            proposer: me,
+            stable: participants.clone(),
+            presignature_id: 1400,
+            presignature: None,
+        }
+        .advance(&ctx, &mut state, &mut rx1)
+        .await;
+        assert!(matches!(first, SignPhase::Organizing(_)));
+        assert_eq!(state.round, 1);
+
+        // Recovered attempt: enough accepts to progress.
+        state.budget.reset(Duration::from_millis(100));
+        let (tx2, mut rx2) = mpsc::channel(16);
+        for p in [1u32, 2, 3] {
+            tx2.send(SignTaskMessage::PositMessage {
+                presignature_id: 1400,
+                round: 1,
+                from: Participant::from(p),
+                action: PositAction::Accept,
+            })
+            .await
+            .unwrap();
+        }
+
+        let second = SignPositor {
+            proposer: me,
+            stable: participants,
+            presignature_id: 1400,
+            presignature: None,
+        }
+        .advance(&ctx, &mut state, &mut rx2)
+        .await;
+        assert!(matches!(second, SignPhase::Generating(_)));
+    }
+
+    #[tokio::test]
+    async fn byzantine_conflicting_actions_from_same_peer_do_not_hang_or_violate_liveness() {
+        let me = Participant::from(0);
+        let participants = mk_participants(0..4);
+        let threshold = 3;
+        let cfg = test_protocol_config(100);
+        let ctx = mk_sign_task(me, &participants, threshold, cfg);
+
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+            stable: participants.clone(),
+            ..MeshState::default()
+        });
+        let mut state = SignState::new(test_indexed_request(43), mesh_rx);
+        state.round = 2;
+
+        let (task_tx, mut task_rx) = mpsc::channel(16);
+        // Byzantine peer sends conflicting actions.
+        task_tx
+            .send(SignTaskMessage::PositMessage {
+                presignature_id: 1500,
+                round: 2,
+                from: Participant::from(1),
+                action: PositAction::Accept,
+            })
+            .await
+            .unwrap();
+        task_tx
+            .send(SignTaskMessage::PositMessage {
+                presignature_id: 1500,
+                round: 2,
+                from: Participant::from(1),
+                action: PositAction::Reject,
+            })
+            .await
+            .unwrap();
+        // Non-protocol action for proposer path should be ignored.
+        task_tx
+            .send(SignTaskMessage::PositMessage {
+                presignature_id: 1500,
+                round: 2,
+                from: Participant::from(2),
+                action: PositAction::Start(vec![me, Participant::from(2)]),
+            })
+            .await
+            .unwrap();
+        task_tx
+            .send(SignTaskMessage::PositMessage {
+                presignature_id: 1500,
+                round: 2,
+                from: Participant::from(3),
+                action: PositAction::Accept,
+            })
+            .await
+            .unwrap();
+
+        let phase = SignPositor {
+            proposer: me,
+            stable: participants,
+            presignature_id: 1500,
+            presignature: None,
+        }
+        .advance(&ctx, &mut state, &mut task_rx)
+        .await;
+
+        assert!(matches!(phase, SignPhase::Generating(_)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn timeout_skew_across_many_tasks_keeps_system_responsive() {
+        let participants = mk_participants(0..5);
+        let threshold = 4;
+
+        let mut handles = Vec::new();
+        for i in 0usize..32 {
+            let participants = participants.clone();
+            handles.push(tokio::spawn(async move {
+                let me = Participant::from(0);
+                let cfg = test_protocol_config(100);
+                let ctx = mk_sign_task(me, &participants, threshold, cfg);
+                let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+                    stable: participants.clone(),
+                    ..MeshState::default()
+                });
+                let mut state = SignState::new(test_indexed_request((44 + (i % 50)) as u8), mesh_rx);
+                state.round = i % 4;
+                state.budget.reset(Duration::from_millis((i % 7 + 5) as u64));
+                let (_task_tx, mut task_rx) = mpsc::channel(1);
+
+                let out = tokio::time::timeout(
+                    Duration::from_millis(250),
+                    SignPositor {
+                        proposer: me,
+                        stable: participants,
+                        presignature_id: 1600 + i as u64,
+                        presignature: None,
+                    }
+                    .advance(&ctx, &mut state, &mut task_rx),
+                )
+                .await
+                .expect("skewed timeout task should not hang");
+
+                matches!(out, SignPhase::Organizing(_))
+            }));
+        }
+
+        for h in handles {
+            assert!(h.await.unwrap());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn completion_race_intent_is_idempotent_and_cleanup_safe() {
+        let me = Participant::from(0);
+        let participants = mk_participants(0..4);
+        let threshold = 3;
+        let (spawner, contract, protocol) = mk_signature_spawner(me, &participants, threshold, 0);
+        let spawner = std::sync::Arc::new(tokio::sync::Mutex::new(spawner));
+
+        let mut request = test_indexed_request(45);
+        request.unix_timestamp_indexed = unix_now_secs();
+        let sign_id = request.id;
+
+        {
+            let mut guard = spawner.lock().await;
+            guard.handle_request(Sign::Request(request), &protocol, &participants, &contract);
+            assert!(guard.tasks.contains_key(&sign_id));
+        }
+
+        let a = {
+            let spawner = spawner.clone();
+            tokio::spawn(async move {
+                let mut g = spawner.lock().await;
+                g.handle_completion(sign_id);
+            })
+        };
+        let b = {
+            let spawner = spawner.clone();
+            tokio::spawn(async move {
+                let mut g = spawner.lock().await;
+                g.handle_completion(sign_id);
+            })
+        };
+
+        a.await.unwrap();
+        b.await.unwrap();
+
+        let guard = spawner.lock().await;
+        assert!(!guard.tasks.contains_key(&sign_id));
+        assert!(!guard.inboxes.contains_key(&sign_id));
+        assert!(!guard.delayed_watchers.contains_key(&sign_id));
+    }
+
+    #[tokio::test]
+    async fn spawner_backpressure_flood_of_posits_does_not_hang_and_remains_consistent() {
+        let me = Participant::from(1);
+        let participants = mk_participants(0..5);
+        let threshold = 3;
+        let (mut spawner, contract, protocol) = mk_signature_spawner(me, &participants, threshold, 0);
+
+        let mut request = test_indexed_request(46);
+        request.unix_timestamp_indexed = unix_now_secs();
+        let sign_id = request.id;
+
+        let flood = tokio::time::timeout(Duration::from_millis(500), async {
+            for i in 0..512usize {
+                let from = Participant::from((i % 4) as u32);
+                spawner
+                    .handle_posit(sign_id, 1700, i % 3, from, PositAction::Propose)
+                    .await;
+            }
+        })
+        .await;
+        assert!(flood.is_ok());
+
+        assert!(spawner.inboxes.contains_key(&sign_id));
+        spawner.handle_request(Sign::Request(request), &protocol, &participants, &contract);
+        assert!(spawner.tasks.contains_key(&sign_id));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn soak_randomized_posit_runs_do_not_leak_or_hang() {
+        let participants = mk_participants(0..5);
+        let threshold = 2;
+
+        for seed in 0u64..200 {
+            let me = Participant::from(0);
+            let cfg = test_protocol_config(100);
+            let ctx = mk_sign_task(me, &participants, threshold, cfg);
+            let (_mesh_tx, mesh_rx) = watch::channel(MeshState {
+                stable: participants.clone(),
+                ..MeshState::default()
+            });
+
+            let mut state = SignState::new(test_indexed_request((47 + (seed % 100)) as u8), mesh_rx);
+            state.round = (seed as usize) % 4;
+            state.budget.reset(Duration::from_millis(20));
+
+            let (task_tx, mut task_rx) = mpsc::channel(128);
+            let mut rng = StdRng::seed_from_u64(seed ^ 0xA11CE_u64);
+            let peers = participants
+                .iter()
+                .copied()
+                .filter(|p| *p != me)
+                .collect::<Vec<_>>();
+
+            for _ in 0..60 {
+                let from = peers[rng.gen_range(0..peers.len())];
+                let round = state.round + rng.gen_range(0..2);
+                let action = if rng.gen_bool(0.8) {
+                    PositAction::Accept
+                } else {
+                    PositAction::Reject
+                };
+                let _ = task_tx
+                    .send(SignTaskMessage::PositMessage {
+                        presignature_id: 1800 + seed,
+                        round,
+                        from,
+                        action,
+                    })
+                    .await;
+            }
+            drop(task_tx);
+
+            let _ = tokio::time::timeout(
+                Duration::from_millis(250),
+                SignPositor {
+                    proposer: me,
+                    stable: participants.clone(),
+                    presignature_id: 1800 + seed,
+                    presignature: None,
+                }
+                .advance(&ctx, &mut state, &mut task_rx),
+            )
+            .await
+            .expect("soak case should not hang");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_sign_state_buffer_retains_only_highest_round(
+            rounds in prop::collection::vec(0usize..200usize, 1..128)
+        ) {
+            let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+            let mut state = SignState::new(test_indexed_request(99), mesh_rx);
+
+            for (idx, round) in rounds.iter().copied().enumerate() {
+                state.store_future_posit_message(SignTaskMessage::PositMessage {
+                    presignature_id: idx as u64,
+                    round,
+                    from: Participant::from(1),
+                    action: PositAction::Accept,
+                });
+            }
+
+            let expected_max = *rounds.iter().max().unwrap();
+            prop_assert_eq!(state.highest_seen_round, expected_max);
+            let all_max_round = state.buffered_messages.iter().all(|msg| {
+                let SignTaskMessage::PositMessage { round, .. } = msg;
+                *round == expected_max
+            });
+            prop_assert!(all_max_round);
+
+            state.round = expected_max;
+            while let Some(msg) = state.take_buffered_posit_message() {
+                let SignTaskMessage::PositMessage { round, .. } = msg;
+                prop_assert_eq!(round, expected_max);
+            }
         }
     }
 }

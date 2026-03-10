@@ -7989,6 +7989,7 @@ dependencies = [
  "opentelemetry_sdk",
  "parity-scale-codec",
  "prometheus 0.14.0",
+ "proptest",
  "rand 0.8.5",
  "redis",
  "reqwest 0.11.27",
