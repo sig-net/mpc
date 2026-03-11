@@ -992,7 +992,7 @@ impl SignGenerator {
                         tracing::info!(
                             ?sign_id,
                             source_chain = ?self.indexed.chain,
-                            target_chain = ?event.target_chain().unwrap(),
+                            target_chain = ?event.target_chain().ok(),
                             "generated signature for bidirectional request, awaiting indexer to process"
                         );
                     }
