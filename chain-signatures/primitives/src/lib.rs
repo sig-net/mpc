@@ -156,7 +156,7 @@ impl Chain {
             Chain::Ethereum => ("CHECKPOINT_INTERVAL_ETHEREUM", 20),
             Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 120),
             Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 240),
-            Chain::Bitcoin => ("CHECKPOINT_INTERVAL_BITCOIN", 600),
+            Chain::Bitcoin => return None,
         };
 
         let interval = std::env::var(key)
@@ -171,7 +171,6 @@ impl Chain {
             ("CHECKPOINT_INTERVAL_ETHEREUM", "2"),
             ("CHECKPOINT_INTERVAL_SOLANA", "5"),
             ("CHECKPOINT_INTERVAL_HYDRATION", "5"),
-            ("CHECKPOINT_INTERVAL_BITCOIN", "10"),
         ]
     }
 
@@ -181,7 +180,7 @@ impl Chain {
             Chain::Ethereum => 15 * 60,
             Chain::Solana => 3,
             Chain::Hydration => 12,
-            Chain::Bitcoin => 600,
+            Chain::Bitcoin => 60 * 60,
         }
     }
 
