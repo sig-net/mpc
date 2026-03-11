@@ -418,6 +418,9 @@ impl RpcExecutor {
                             tracing::error!(%err, "eth: failed to send publish action");
                         }
                     }
+                    Chain::Bitcoin => {
+                        tracing::error!("bitcoin is currently not supported");
+                    }
                 }
             });
         }
@@ -448,6 +451,7 @@ impl RpcExecutor {
                     ChainClient::Err("no hydration client available for node")
                 }
             }
+            Chain::Bitcoin => ChainClient::Err("bitcoin is currently not supported"),
         }
     }
 }

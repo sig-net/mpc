@@ -13,7 +13,7 @@ use sha3::{Digest, Keccak256, Sha3_256};
 const EPSILON_DERIVATION_PREFIX_V1: &str = "sig.network v1.0.0 epsilon derivation";
 const EPSILON_DERIVATION_PREFIX_V2: &str = "sig.network v2.0.0 epsilon derivation";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Chain {
     Near,
     Ethereum,
@@ -22,25 +22,64 @@ pub enum Chain {
     Hydration,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ChainMeta {
+    deprecated_chain_id: &'static str,
+    caip2_chain_id: &'static str,
+}
+
 impl Chain {
-    pub fn deprecated_chain_id(&self) -> &str {
+    const ALL: [Chain; 5] = [
+        Chain::Near,
+        Chain::Ethereum,
+        Chain::Solana,
+        Chain::Bitcoin,
+        Chain::Hydration,
+    ];
+
+    const fn meta(self) -> ChainMeta {
         match self {
-            Chain::Near => "0x18d",
-            Chain::Ethereum => "0x1",
-            Chain::Solana => "0x800001f5",
-            Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
-            Chain::Hydration => "polkadot:2034",
+            Chain::Near => ChainMeta {
+                deprecated_chain_id: "0x18d",
+                caip2_chain_id: "near:mainnet",
+            },
+            Chain::Ethereum => ChainMeta {
+                deprecated_chain_id: "0x1",
+                caip2_chain_id: "eip155:1",
+            },
+            Chain::Solana => ChainMeta {
+                deprecated_chain_id: "0x800001f5",
+                caip2_chain_id: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+            },
+            Chain::Bitcoin => ChainMeta {
+                deprecated_chain_id: "bip122:000000000019d6689c085ae165831e93",
+                caip2_chain_id: "bip122:000000000019d6689c085ae165831e93",
+            },
+            Chain::Hydration => ChainMeta {
+                deprecated_chain_id: "polkadot:2034",
+                caip2_chain_id: "polkadot:2034",
+            },
         }
     }
 
-    pub fn caip2_chain_id(&self) -> &str {
-        match self {
-            Chain::Near => "near:mainnet",
-            Chain::Ethereum => "eip155:1",
-            Chain::Solana => "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-            Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
-            Chain::Hydration => "polkadot:2034",
-        }
+    pub const fn deprecated_chain_id(self) -> &'static str {
+        self.meta().deprecated_chain_id
+    }
+
+    pub const fn caip2_chain_id(self) -> &'static str {
+        self.meta().caip2_chain_id
+    }
+
+    pub fn from_caip2_chain_id(chain_id: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|chain| chain.caip2_chain_id() == chain_id)
+    }
+
+    pub fn from_deprecated_chain_id(chain_id: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|chain| chain.deprecated_chain_id() == chain_id)
     }
 }
 

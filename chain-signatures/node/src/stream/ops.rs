@@ -15,7 +15,6 @@ use crate::stream::ExecutionOutcome;
 use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
 use mpc_primitives::{SignId, Signature};
-use std::str::FromStr;
 use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 
@@ -127,6 +126,15 @@ impl SignBidirectionalEvent {
                 &self.path(),
             )),
         }
+    }
+
+    pub fn target_chain(&self) -> anyhow::Result<Chain> {
+        let event_caip2_id = self.caip2_id();
+        Chain::from_caip2_chain_id(&event_caip2_id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unable to parse target chain from event caip2_id field: {event_caip2_id}"
+            )
+        })
     }
 }
 
@@ -417,12 +425,8 @@ pub(crate) async fn process_respond_event(
     };
 
     tracing::info!(?sign_id, "bidirectional processing initial respond event");
-    let target_chain = Chain::from_str(&event.dest())
-        .map_err(|err| anyhow::anyhow!("unable to parse target chain from dest: {err:?}"));
-    let target_chain = match target_chain {
-        Ok(chain) => chain,
-        Err(_) => Chain::Ethereum,
-    };
+
+    let target_chain = event.target_chain()?;
 
     let Some(BacklogTransaction::Sign(_)) = backlog.get(source_chain, &sign_id).await else {
         anyhow::bail!("bidirectional tx not found for advancement: {sign_id:?}");

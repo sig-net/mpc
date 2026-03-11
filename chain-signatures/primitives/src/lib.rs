@@ -126,6 +126,7 @@ pub enum Chain {
     Ethereum,
     Solana,
     Hydration,
+    Bitcoin,
 }
 
 impl Chain {
@@ -135,15 +136,17 @@ impl Chain {
             Chain::Ethereum => "Ethereum",
             Chain::Solana => "Solana",
             Chain::Hydration => "Hydration",
+            Chain::Bitcoin => "Bitcoin",
         }
     }
 
-    pub const fn iter() -> [Chain; 4] {
+    pub const fn iter() -> [Chain; 5] {
         [
             Chain::NEAR,
             Chain::Ethereum,
             Chain::Solana,
             Chain::Hydration,
+            Chain::Bitcoin,
         ]
     }
 
@@ -153,6 +156,7 @@ impl Chain {
             Chain::Ethereum => ("CHECKPOINT_INTERVAL_ETHEREUM", 20),
             Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 120),
             Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 240),
+            Chain::Bitcoin => ("CHECKPOINT_INTERVAL_BITCOIN", 600),
         };
 
         let interval = std::env::var(key)
@@ -167,6 +171,7 @@ impl Chain {
             ("CHECKPOINT_INTERVAL_ETHEREUM", "2"),
             ("CHECKPOINT_INTERVAL_SOLANA", "5"),
             ("CHECKPOINT_INTERVAL_HYDRATION", "5"),
+            ("CHECKPOINT_INTERVAL_BITCOIN", "10"),
         ]
     }
 
@@ -176,11 +181,30 @@ impl Chain {
             Chain::Ethereum => 15 * 60,
             Chain::Solana => 3,
             Chain::Hydration => 12,
+            Chain::Bitcoin => 600,
         }
     }
 
     pub fn expected_response_time_secs(&self) -> u64 {
         self.expected_finality_time_secs() + 60
+    }
+
+    pub fn from_caip2_chain_id(caip2_chain_id: &str) -> Option<Self> {
+        mpc_crypto::kdf::Chain::from_caip2_chain_id(caip2_chain_id).map(Self::from_chain_crypto)
+    }
+
+    pub fn from_deprecated_chain_id(chain_id: &str) -> Option<Self> {
+        mpc_crypto::kdf::Chain::from_deprecated_chain_id(chain_id).map(Self::from_chain_crypto)
+    }
+
+    fn from_chain_crypto(chain_crypto: mpc_crypto::kdf::Chain) -> Self {
+        match chain_crypto {
+            mpc_crypto::kdf::Chain::Near => Chain::NEAR,
+            mpc_crypto::kdf::Chain::Ethereum => Chain::Ethereum,
+            mpc_crypto::kdf::Chain::Solana => Chain::Solana,
+            mpc_crypto::kdf::Chain::Hydration => Chain::Hydration,
+            mpc_crypto::kdf::Chain::Bitcoin => Chain::Bitcoin,
+        }
     }
 }
 
@@ -199,6 +223,7 @@ impl FromStr for Chain {
             "ethereum" | "eth" => Ok(Chain::Ethereum),
             "solana" | "sol" => Ok(Chain::Solana),
             "hydration" | "hyd" => Ok(Chain::Hydration),
+            "bitcoin" | "btc" => Ok(Chain::Bitcoin),
             other => Err(format!("unknown or unsupported chain {other}")),
         }
     }
