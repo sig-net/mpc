@@ -1732,7 +1732,7 @@ async fn try_publish_hydration(
             hyd.call_respond(&action.indexed.id, signature)
                 .await
                 .map_err(|e| {
-                    tracing::error!(?sign_id, ?e, "Hydration: failed to publish signature");
+                    tracing::error!(?sign_id, error_dbg = ?e, error = %e, "Hydration: failed to publish signature");
                 })?;
             tracing::info!(
                 ?sign_id,
@@ -1754,7 +1754,8 @@ async fn try_publish_hydration(
                 .map_err(|e| {
                     tracing::error!(
                         ?sign_id,
-                        ?e,
+                        error_dbg = ?e,
+                        error = %e,
                         "Hydration: failed to publish respond bidirectional signature"
                     );
                 })?;
