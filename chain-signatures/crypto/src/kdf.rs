@@ -13,7 +13,7 @@ use sha3::{Digest, Keccak256, Sha3_256};
 const EPSILON_DERIVATION_PREFIX_V1: &str = "sig.network v1.0.0 epsilon derivation";
 const EPSILON_DERIVATION_PREFIX_V2: &str = "sig.network v2.0.0 epsilon derivation";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub enum Chain {
     Near,
     Ethereum,
@@ -22,7 +22,6 @@ pub enum Chain {
     Hydration,
 }
 
-#[derive(Debug, Clone, Copy)]
 struct ChainMeta {
     deprecated_chain_id: &'static str,
     caip2_chain_id: &'static str,
