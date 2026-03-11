@@ -260,7 +260,8 @@ pub(crate) async fn process_sign_event(
             args: sign_request.args.clone(),
             unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
         }),
-        SignRequestType::SignBidirectional(_event) => {
+        SignRequestType::SignBidirectional(event) => {
+            event.target_chain()?;
             // For bidirectional requests, start with a Sign transaction
             // The protocol will advance it to Bidirectional after generating the signature
             BacklogTransaction::Sign(SignTx {
@@ -310,13 +311,16 @@ pub(crate) async fn process_sign_request(
             args: sign_request.args.clone(),
             unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
         }),
-        SignRequestType::SignBidirectional(_event) => BacklogTransaction::Sign(SignTx {
-            request_id: sign_id.request_id,
-            source_chain: sign_request.chain,
-            status: PendingRequestStatus::AwaitingResponse,
-            args: sign_request.args.clone(),
-            unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
-        }),
+        SignRequestType::SignBidirectional(event) => {
+            event.target_chain()?;
+            BacklogTransaction::Sign(SignTx {
+                request_id: sign_id.request_id,
+                source_chain: sign_request.chain,
+                status: PendingRequestStatus::AwaitingResponse,
+                args: sign_request.args.clone(),
+                unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
+            })
+        }
         _ => anyhow::bail!("Unexpected sign request type"),
     };
 
