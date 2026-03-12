@@ -630,7 +630,7 @@ impl TripleSpawner {
                             .set(self.len_introduced() as i64);
                         crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL
                             .set(self.len_ongoing() as i64);
-                    } else if last_active_warn.map_or(true, |i: Instant| i.elapsed() > Duration::from_secs(60)) {
+                    } else if last_active_warn.is_none_or(|i: Instant| i.elapsed() > Duration::from_secs(60)) {
                         tracing::warn!(
                             ?active,
                             threshold = self.threshold,

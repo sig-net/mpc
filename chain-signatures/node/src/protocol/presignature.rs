@@ -733,7 +733,7 @@ impl PresignatureSpawner {
                             .set(self.len_generated().await as i64);
                         crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL
                             .set(self.len_potential().await as i64 - self.len_generated().await as i64);
-                    } else if last_active_warn.map_or(true, |i: Instant| i.elapsed() > Duration::from_secs(60)) {
+                    } else if last_active_warn.is_none_or(|i: Instant| i.elapsed() > Duration::from_secs(60)) {
                         tracing::warn!(
                             ?active,
                             threshold = self.threshold,
