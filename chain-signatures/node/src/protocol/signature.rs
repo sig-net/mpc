@@ -272,14 +272,16 @@ impl SignOrganizer {
         let (presignature_id, presignature, active) = if is_proposer {
             tracing::info!(?sign_id, round = ?state.round, "proposer waiting for presignature");
             let active = active.iter().copied().collect::<Vec<_>>();
-            let mut recycle = Vec::new();
             let remaining = state.budget.remaining();
             let fetch = tokio::time::timeout(remaining, async {
                 loop {
                     if let Some(taken) = ctx.presignatures.take_mine(ctx.me).await {
                         let participants = intersect_vec(&[&taken.artifact.participants, &active]);
                         if participants.len() < ctx.threshold {
-                            recycle.push(taken);
+                            tracing::warn!(
+                                ?sign_id,
+                                "discarding presignature due to inactive participants"
+                            );
                             continue;
                         }
 
@@ -289,13 +291,6 @@ impl SignOrganizer {
                 }
             })
             .await;
-
-            let presignatures = ctx.presignatures.clone();
-            tokio::spawn(async move {
-                for taken in recycle {
-                    presignatures.recycle_mine(me, taken).await;
-                }
-            });
 
             let (taken, participants) = match fetch {
                 Ok(value) => value,
@@ -622,9 +617,8 @@ impl SignPositor {
 
                         if counter.enough_rejects(ctx.threshold) {
                             tracing::warn!(?sign_id, ?round, ?from, "received enough REJECTs, reorganizing");
-                            if let Some(taken) = presignature {
-                                tracing::warn!(?sign_id, "recycling presignature due to REJECTs");
-                                ctx.presignatures.recycle_mine(ctx.me, taken).await;
+                            if let Some(_taken) = presignature {
+                                tracing::warn!(?sign_id, "discarding presignature due to REJECTs");
                             }
                             state.bump_round();
                             return SignPhase::Organizing(SignOrganizer);
@@ -664,9 +658,8 @@ impl SignPositor {
                             ?round,
                             "proposer posit deadline reached, expiring round"
                         );
-                        if let Some(taken) = presignature {
-                            tracing::warn!(?sign_id, "recycling presignature due to proposer timeout");
-                            ctx.presignatures.recycle_mine(ctx.me, taken).await;
+                        if let Some(_taken) = presignature {
+                            tracing::warn!(?sign_id, "discarding presignature due to proposer timeout");
                         }
                     } else {
                         tracing::warn!(?sign_id, me=?ctx.me, ?proposer, "deliberator posit timeout waiting for Start, reorganizing");

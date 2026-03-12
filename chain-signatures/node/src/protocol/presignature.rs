@@ -682,6 +682,7 @@ impl PresignatureSpawner {
         mut cfg: watch::Receiver<Config>,
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
+        let mut last_active_warn: Option<Instant> = None;
         let mut stockpile_interval = time::interval(Duration::from_millis(100));
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(1));
         let mut posits = self.msg.subscribe_presignature_posit().await;
@@ -720,21 +721,26 @@ impl PresignatureSpawner {
                     self.ongoing_owned.remove(&id);
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
                 }
-                _ = stockpile_interval.tick(), if active.len() >= self.threshold => {
-                    self.stockpile(&active, &protocol).await;
-                    let _ = ongoing_gen_tx.send(self.ongoing.len());
+                _ = stockpile_interval.tick() => {
+                    if active.len() >= self.threshold {
+                        last_active_warn = None;
+                        self.stockpile(&active, &protocol).await;
+                        let _ = ongoing_gen_tx.send(self.ongoing.len());
 
-                    crate::metrics::storage::NUM_PRESIGNATURES_MINE
-
-                        .set(self.len_mine().await as i64);
-                    crate::metrics::storage::NUM_PRESIGNATURES_TOTAL
-
-                        .set(self.len_generated().await as i64);
-                    crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL
-
-                        .set(
-                            self.len_potential().await as i64 - self.len_generated().await as i64,
+                        crate::metrics::storage::NUM_PRESIGNATURES_MINE
+                            .set(self.len_mine().await as i64);
+                        crate::metrics::storage::NUM_PRESIGNATURES_TOTAL
+                            .set(self.len_generated().await as i64);
+                        crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL
+                            .set(self.len_potential().await as i64 - self.len_generated().await as i64);
+                    } else if last_active_warn.map_or(true, |i: Instant| i.elapsed() > Duration::from_secs(60)) {
+                        tracing::warn!(
+                            ?active,
+                            threshold = self.threshold,
+                            "not enough active participants to generate presignatures"
                         );
+                        last_active_warn = Some(Instant::now());
+                    }
                 }
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();

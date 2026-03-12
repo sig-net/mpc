@@ -620,61 +620,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         }
     }
 
-    /// Return a taken artifact back to the available pool.
-    pub async fn recycle_mine(&self, me: Participant, taken: ArtifactTaken<A>) -> bool {
-        const SCRIPT: &str = r#"
-            local artifact_key = KEYS[1]
-            local mine_key = KEYS[2]
-            local artifact_id = ARGV[1]
-            local artifact = ARGV[2]
-
-            -- Add back to artifact hash map
-            redis.call("HSET", artifact_key, artifact_id, artifact)
-
-            -- Add back to mine set
-            redis.call("SADD", mine_key, artifact_id)
-
-            return 1
-        "#;
-
-        let start = Instant::now();
-        let (artifact, mut dropper) = taken.take();
-        // We manually handle the return, so we don't want the dropper to unreserve it.
-        dropper.dropper.take();
-
-        let id = artifact.id();
-        let Some(mut conn) = self.connect().await else {
-            tracing::warn!(id, "failed to return artifact: connection failed");
-            return false;
-        };
-
-        let result: Result<i32, _> = redis::Script::new(SCRIPT)
-            .key(&self.artifact_key)
-            .key(owner_key(&self.owner_keys, me))
-            .arg(id)
-            .arg(artifact)
-            .invoke_async(&mut conn)
-            .await;
-
-        let elapsed = start.elapsed();
-        crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "return_mine"])
-            .observe(elapsed.as_millis() as f64);
-
-        match result {
-            Ok(_) => {
-                self.reserved.write().await.remove(&id);
-                self.used.write().await.remove(&id);
-                tracing::info!(id, ?elapsed, "returned mine artifact");
-                true
-            }
-            Err(err) => {
-                tracing::warn!(id, ?err, ?elapsed, "failed to return mine artifact");
-                false
-            }
-        }
-    }
-
     /// Check if an artifact is reserved.
     pub async fn contains_reserved(&self, id: A::Id) -> bool {
         self.reserved.read().await.contains(&id)
