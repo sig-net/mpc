@@ -219,7 +219,7 @@ pub async fn spawn_system_metrics() -> tokio::task::JoinHandle<()> {
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum SignRequestType {
     Sign,
