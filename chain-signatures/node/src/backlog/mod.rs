@@ -4,7 +4,7 @@ use self::selection::select_checkpoints;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, SignKind};
-use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PendingRequestStatus};
+use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use anyhow::Context;
@@ -66,7 +66,7 @@ impl PendingRequests {
     }
 
     /// Returns all sign-respond transactions with a specific status
-    pub fn get_by_status(&self, status: PendingRequestStatus) -> HashMap<SignId, BacklogEntry> {
+    pub fn get_by_status(&self, status: SignStatus) -> HashMap<SignId, BacklogEntry> {
         self.requests
             .iter()
             .filter(|(_, entry)| entry.status() == status)
@@ -77,7 +77,7 @@ impl PendingRequests {
     fn pending_execution(&self) -> Vec<(SignId, BacklogEntry)> {
         self.requests
             .iter()
-            .filter(|(_, entry)| entry.status() == PendingRequestStatus::PendingExecution)
+            .filter(|(_, entry)| entry.status() == SignStatus::PendingExecution)
             .map(|(&id, entry)| (id, entry.clone()))
             .collect()
     }
@@ -270,7 +270,7 @@ impl Backlog {
     pub async fn get_by_status(
         &self,
         chain: Chain,
-        status: PendingRequestStatus,
+        status: SignStatus,
     ) -> HashMap<SignId, BacklogEntry> {
         self.requests
             .read()
@@ -346,7 +346,7 @@ impl Backlog {
         &self,
         chain: Chain,
         id: &SignId,
-        status: PendingRequestStatus,
+        status: SignStatus,
     ) -> Option<BacklogEntry> {
         let mut requests = self.requests.write().await;
         let Some(pending) = requests.get_mut(&chain) else {
@@ -648,44 +648,35 @@ pub enum BacklogError {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub enum BacklogStatus {
-    AwaitingResponse,
-    PendingExecution { tx: BidirectionalTx },
-    Success,
-    Failed,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BacklogEntry {
     pub request: IndexedSignRequest,
-    pub status: BacklogStatus,
-}
-
-impl BacklogStatus {
-    pub fn as_pending_request_status(&self) -> PendingRequestStatus {
-        match self {
-            Self::AwaitingResponse => PendingRequestStatus::AwaitingResponse,
-            Self::PendingExecution { .. } => PendingRequestStatus::PendingExecution,
-            Self::Success => PendingRequestStatus::Success,
-            Self::Failed => PendingRequestStatus::Failed,
-        }
-    }
+    pub status: SignStatus,
+    pub execution: Option<BidirectionalTx>,
 }
 
 impl BacklogEntry {
     pub fn new(request: IndexedSignRequest) -> Self {
         Self {
             request,
-            status: BacklogStatus::AwaitingResponse,
+            status: SignStatus::AwaitingResponse,
+            execution: None,
         }
     }
 
-    pub fn with_status(request: IndexedSignRequest, status: BacklogStatus) -> Self {
-        Self { request, status }
+    pub fn with_status(
+        request: IndexedSignRequest,
+        status: SignStatus,
+        execution: Option<BidirectionalTx>,
+    ) -> Self {
+        Self {
+            request,
+            status,
+            execution,
+        }
     }
 
     pub fn pending_execution(request: IndexedSignRequest, tx: BidirectionalTx) -> Self {
-        Self::with_status(request, BacklogStatus::PendingExecution { tx })
+        Self::with_status(request, SignStatus::PendingExecution, Some(tx))
     }
 
     pub fn sign_id(&self) -> SignId {
@@ -703,32 +694,23 @@ impl BacklogEntry {
     }
 
     /// Get the status of this transaction
-    pub fn status(&self) -> PendingRequestStatus {
-        self.status.as_pending_request_status()
+    pub fn status(&self) -> SignStatus {
+        self.status
     }
 
     /// Set the status of this transaction
-    pub fn set_status(&mut self, status: PendingRequestStatus) {
-        self.status = match status {
-            PendingRequestStatus::AwaitingResponse => BacklogStatus::AwaitingResponse,
-            PendingRequestStatus::PendingExecution => match self.status.clone() {
-                BacklogStatus::PendingExecution { tx } => BacklogStatus::PendingExecution { tx },
-                _ => BacklogStatus::AwaitingResponse,
-            },
-            PendingRequestStatus::Success => BacklogStatus::Success,
-            PendingRequestStatus::Failed => BacklogStatus::Failed,
-        };
+    pub fn set_status(&mut self, status: SignStatus) {
+        self.status = status;
     }
 
     pub fn advance_to_execution(
         &mut self,
         bidirectional_tx: BidirectionalTx,
     ) -> Result<(), BacklogError> {
-        match (&self.request.kind, &self.status) {
-            (SignKind::SignBidirectional(_), BacklogStatus::AwaitingResponse) => {
-                self.status = BacklogStatus::PendingExecution {
-                    tx: bidirectional_tx,
-                };
+        match (&self.request.kind, self.status) {
+            (SignKind::SignBidirectional(_), SignStatus::AwaitingResponse) => {
+                self.status = SignStatus::PendingExecution;
+                self.execution = Some(bidirectional_tx);
                 Ok(())
             }
             _ => Err(BacklogError::InvalidAdvanceTransition),
@@ -738,14 +720,14 @@ impl BacklogEntry {
     /// Get target chain if this is a bidirectional transaction
     // TODO: looks a bit weird having two different ways to get target_chain in the match
     pub fn target_chain(&self) -> Option<Chain> {
-        match &self.status {
-            BacklogStatus::PendingExecution { tx } => Some(tx.target_chain),
-            _ => match &self.request.kind {
+        self.execution
+            .as_ref()
+            .map(|tx| tx.target_chain)
+            .or_else(|| match &self.request.kind {
                 SignKind::Sign => None,
                 SignKind::SignBidirectional(event) => event.target_chain(),
                 SignKind::RespondBidirectional(_) => None,
-            },
-        }
+            })
     }
 
     /// Check if this is a bidirectional transaction
@@ -754,26 +736,18 @@ impl BacklogEntry {
     }
 
     pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
-        match &self.status {
-            BacklogStatus::PendingExecution { tx } => Some(tx),
-            _ => None,
-        }
+        self.execution.as_ref()
     }
 
     pub fn take_execution_tx(self) -> Option<BidirectionalTx> {
-        match self.status {
-            BacklogStatus::PendingExecution { tx } => Some(tx),
-            _ => None,
-        }
+        self.execution
     }
 
     pub fn typename(&self) -> &'static str {
-        match (&self.request.kind, &self.status) {
+        match (&self.request.kind, self.execution.is_some()) {
             (SignKind::Sign, _) => "Sign",
-            (SignKind::SignBidirectional(_), BacklogStatus::PendingExecution { .. }) => {
-                "BidirectionalExecution"
-            }
-            (SignKind::SignBidirectional(_), _) => "BidirectionalPending",
+            (SignKind::SignBidirectional(_), true) => "BidirectionalExecution",
+            (SignKind::SignBidirectional(_), false) => "BidirectionalPending",
             (SignKind::RespondBidirectional(_), _) => "RespondBidirectional",
         }
     }
@@ -807,14 +781,14 @@ mod tests {
     use super::*;
     use crate::{
         protocol::SignKind,
-        sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PendingRequestStatus},
+        sign_bidirectional::{BidirectionalTx, BidirectionalTxId, SignStatus},
     };
     use alloy::primitives::{Address, B256};
     use anchor_lang::prelude::Pubkey;
     use mpc_primitives::{SignArgs, SignId};
     use signet_program::SignBidirectionalEvent;
 
-    fn create_test_tx(id: u8, status: PendingRequestStatus) -> BidirectionalTx {
+    fn create_test_tx(id: u8, status: SignStatus) -> BidirectionalTx {
         BidirectionalTx {
             id: BidirectionalTxId(B256::from([id; 32])),
             sender: [0u8; 32],
@@ -889,7 +863,8 @@ mod tests {
         )
     }
 
-    fn create_execution_entry(tx: BidirectionalTx, chain: Chain, dest: &str) -> BacklogEntry {
+    fn create_execution_entry(mut tx: BidirectionalTx, chain: Chain, dest: &str) -> BacklogEntry {
+        tx.status = SignStatus::PendingExecution;
         BacklogEntry::pending_execution(
             create_bidirectional_request(SignId::new(tx.request_id), chain, dest, 0),
             tx,
@@ -908,11 +883,11 @@ mod tests {
             .await;
 
         match tx.status {
-            PendingRequestStatus::AwaitingResponse => {}
-            PendingRequestStatus::PendingExecution => {
+            SignStatus::AwaitingResponse => {}
+            SignStatus::PendingExecution => {
                 backlog.advance(chain, sign_id, tx).await.unwrap();
             }
-            PendingRequestStatus::Success | PendingRequestStatus::Failed => {
+            SignStatus::Success | SignStatus::Failed => {
                 let status = tx.status;
                 backlog.advance(chain, sign_id, tx).await.unwrap();
                 backlog.set_status(chain, &sign_id, status).await;
@@ -924,9 +899,9 @@ mod tests {
     async fn test_backlog_chain_isolation() {
         let backlog = Backlog::new();
 
-        let tx_eth = create_test_tx(1, PendingRequestStatus::AwaitingResponse);
-        let tx_sol = create_test_tx(2, PendingRequestStatus::AwaitingResponse);
-        let tx_near = create_test_tx(3, PendingRequestStatus::AwaitingResponse);
+        let tx_eth = create_test_tx(1, SignStatus::AwaitingResponse);
+        let tx_sol = create_test_tx(2, SignStatus::AwaitingResponse);
+        let tx_near = create_test_tx(3, SignStatus::AwaitingResponse);
 
         let sign_id_eth = SignId::new(tx_eth.request_id);
         let sign_id_sol = SignId::new(tx_sol.request_id);
@@ -952,44 +927,44 @@ mod tests {
         let backlog = Backlog::new();
 
         // Add transactions with different statuses to Ethereum
-        let tx1 = create_test_tx(1, PendingRequestStatus::AwaitingResponse);
-        let tx2 = create_test_tx(2, PendingRequestStatus::Success);
-        let tx3 = create_test_tx(3, PendingRequestStatus::PendingExecution);
+        let tx1 = create_test_tx(1, SignStatus::AwaitingResponse);
+        let tx2 = create_test_tx(2, SignStatus::Success);
+        let tx3 = create_test_tx(3, SignStatus::PendingExecution);
 
         insert_bidirectional_with_status(&backlog, Chain::Ethereum, tx1, "ethereum").await;
         insert_bidirectional_with_status(&backlog, Chain::Ethereum, tx2, "ethereum").await;
         insert_bidirectional_with_status(&backlog, Chain::Ethereum, tx3, "ethereum").await;
 
         // Add transactions to Solana
-        let tx4 = create_test_tx(4, PendingRequestStatus::PendingExecution);
+        let tx4 = create_test_tx(4, SignStatus::PendingExecution);
         insert_bidirectional_with_status(&backlog, Chain::Solana, tx4, "solana").await;
 
         // Filter Ethereum by Pending
         let eth_pending = backlog
-            .get_by_status(Chain::Ethereum, PendingRequestStatus::PendingExecution)
+            .get_by_status(Chain::Ethereum, SignStatus::PendingExecution)
             .await;
         assert_eq!(eth_pending.len(), 1);
 
         let eth_awaiting = backlog
-            .get_by_status(Chain::Ethereum, PendingRequestStatus::AwaitingResponse)
+            .get_by_status(Chain::Ethereum, SignStatus::AwaitingResponse)
             .await;
         assert_eq!(eth_awaiting.len(), 1);
 
         // Filter Ethereum by Success
         let eth_success = backlog
-            .get_by_status(Chain::Ethereum, PendingRequestStatus::Success)
+            .get_by_status(Chain::Ethereum, SignStatus::Success)
             .await;
         assert_eq!(eth_success.len(), 1);
 
         // Filter Solana by Pending
         let sol_pending = backlog
-            .get_by_status(Chain::Solana, PendingRequestStatus::PendingExecution)
+            .get_by_status(Chain::Solana, SignStatus::PendingExecution)
             .await;
         assert_eq!(sol_pending.len(), 1);
 
         // Filter non-existent chain returns empty
         let near_pending = backlog
-            .get_by_status(Chain::NEAR, PendingRequestStatus::PendingExecution)
+            .get_by_status(Chain::NEAR, SignStatus::PendingExecution)
             .await;
         assert_eq!(near_pending.len(), 0);
     }
@@ -1003,7 +978,7 @@ mod tests {
         for i in 0..5 {
             let backlog = backlog.clone();
             let handle = tokio::spawn(async move {
-                let tx = create_test_tx(i, PendingRequestStatus::AwaitingResponse);
+                let tx = create_test_tx(i, SignStatus::AwaitingResponse);
                 insert_bidirectional_with_status(&backlog, Chain::Ethereum, tx, "ethereum").await;
             });
             handles.push(handle);
@@ -1012,7 +987,7 @@ mod tests {
         for i in 5..10 {
             let backlog = backlog.clone();
             let handle = tokio::spawn(async move {
-                let tx = create_test_tx(i, PendingRequestStatus::AwaitingResponse);
+                let tx = create_test_tx(i, SignStatus::AwaitingResponse);
                 insert_bidirectional_with_status(&backlog, Chain::Solana, tx, "solana").await;
             });
             handles.push(handle);
@@ -1052,8 +1027,8 @@ mod tests {
         let backlog = Backlog::new();
 
         // Add some transactions
-        let tx1 = create_test_tx(1, PendingRequestStatus::PendingExecution);
-        let tx2 = create_test_tx(2, PendingRequestStatus::Success);
+        let tx1 = create_test_tx(1, SignStatus::PendingExecution);
+        let tx2 = create_test_tx(2, SignStatus::Success);
         backlog.set_processed_block(Chain::Ethereum, 100).await;
 
         insert_bidirectional_with_status(&backlog, Chain::Ethereum, tx1.clone(), "ethereum").await;
@@ -1067,8 +1042,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_equality() {
-        let tx1 = create_test_tx(1, PendingRequestStatus::AwaitingResponse);
-        let tx2 = create_test_tx(2, PendingRequestStatus::AwaitingResponse);
+        let tx1 = create_test_tx(1, SignStatus::AwaitingResponse);
+        let tx2 = create_test_tx(2, SignStatus::AwaitingResponse);
         let mut pending1 = PendingRequests::new();
         pending1.insert(
             SignId::new(tx1.request_id),
@@ -1104,7 +1079,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoint_serialization() {
-        let tx1 = create_test_tx(1, PendingRequestStatus::AwaitingResponse);
+        let tx1 = create_test_tx(1, SignStatus::AwaitingResponse);
 
         let mut pending = PendingRequests::new();
         pending.insert(
@@ -1140,7 +1115,7 @@ mod tests {
     #[tokio::test]
     async fn test_recover_restores_execution_watchers() {
         let backlog = Backlog::new();
-        let tx = create_test_tx(6, PendingRequestStatus::PendingExecution);
+        let tx = create_test_tx(6, SignStatus::PendingExecution);
 
         insert_bidirectional_with_status(&backlog, Chain::Solana, tx.clone(), "ethereum").await;
         backlog.set_processed_block(Chain::Solana, 10).await;
@@ -1224,7 +1199,7 @@ mod tests {
     async fn test_watch_unwatch_and_set_status() {
         use k256::Scalar;
         let backlog = Backlog::new();
-        let tx = create_test_tx(7, PendingRequestStatus::PendingExecution);
+        let tx = create_test_tx(7, SignStatus::PendingExecution);
         let sign_id = SignId::new(tx.request_id);
 
         // Insert a pending Sign request on the source chain
@@ -1260,10 +1235,10 @@ mod tests {
 
         // set_status should update the sign request status
         backlog
-            .set_status(tx.source_chain, &sign_id, PendingRequestStatus::Success)
+            .set_status(tx.source_chain, &sign_id, SignStatus::Success)
             .await;
         let successes = backlog
-            .get_by_status(tx.source_chain, PendingRequestStatus::Success)
+            .get_by_status(tx.source_chain, SignStatus::Success)
             .await;
         assert!(successes.contains_key(&sign_id));
     }
@@ -1273,7 +1248,7 @@ mod tests {
         let backlog = Backlog::new();
 
         // Add some transactions
-        let tx1 = create_test_tx(1, PendingRequestStatus::PendingExecution);
+        let tx1 = create_test_tx(1, SignStatus::PendingExecution);
         insert_bidirectional_with_status(&backlog, Chain::Ethereum, tx1.clone(), "ethereum").await;
 
         let interval = Chain::Ethereum.checkpoint_interval().unwrap();
@@ -1311,7 +1286,7 @@ mod tests {
         let interval = Chain::Solana.checkpoint_interval().unwrap();
 
         // Add transaction
-        let tx1 = create_test_tx(1, PendingRequestStatus::PendingExecution);
+        let tx1 = create_test_tx(1, SignStatus::PendingExecution);
         insert_bidirectional_with_status(&backlog, Chain::Solana, tx1.clone(), "solana").await;
 
         // Solana interval is 10 blocks
@@ -1331,7 +1306,7 @@ mod tests {
     #[tokio::test]
     async fn test_advance_rejects_plain_sign_entries() {
         let backlog = Backlog::new();
-        let tx = create_test_tx(8, PendingRequestStatus::PendingExecution);
+        let tx = create_test_tx(8, SignStatus::PendingExecution);
         let sign_id = SignId::new(tx.request_id);
 
         let args = SignArgs {

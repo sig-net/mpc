@@ -297,7 +297,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_handles_sign_bidirectional_block_and_recover() {
-        use crate::sign_bidirectional::PendingRequestStatus;
+        use crate::sign_bidirectional::SignStatus;
         use crate::stream::ops::RespondBidirectionalEvent as RBE;
         use crate::stream::ops::SignBidirectionalEvent as SBE;
         use crate::stream::ops::SignatureRespondedEvent as SRE;
@@ -459,7 +459,7 @@ mod tests {
             .set_status(
                 Chain::Solana,
                 &sign_id,
-                PendingRequestStatus::PendingExecution,
+                SignStatus::PendingExecution,
             )
             .await;
 

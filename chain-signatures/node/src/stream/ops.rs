@@ -9,7 +9,7 @@ use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignKind};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::ContractStateWatcher;
-use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PendingRequestStatus};
+use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, SignStatus};
 use crate::stream::ExecutionOutcome;
 
 use anchor_lang::prelude::Pubkey;
@@ -307,7 +307,7 @@ pub(crate) async fn recover_backlog(
 
     for (sign_id, entry) in pending
         .into_iter()
-        .filter(|(_, entry)| matches!(entry.status(), PendingRequestStatus::AwaitingResponse))
+        .filter(|(_, entry)| matches!(entry.status(), SignStatus::AwaitingResponse))
     {
         let sign_request = entry.request;
 
@@ -402,7 +402,7 @@ pub(crate) async fn process_respond_event(
         request_id: respond_event.request_id(),
         from_address,
         nonce,
-        status: PendingRequestStatus::AwaitingResponse,
+        status: SignStatus::AwaitingResponse,
     };
 
     tracing::info!(
@@ -502,8 +502,8 @@ pub async fn process_execution_confirmed(
 
     // Update the status on the source chain
     let status = match result {
-        ExecutionOutcome::Success { .. } => PendingRequestStatus::Success,
-        ExecutionOutcome::Failed => PendingRequestStatus::Failed,
+        ExecutionOutcome::Success { .. } => SignStatus::Success,
+        ExecutionOutcome::Failed => SignStatus::Failed,
     };
 
     let set_res = backlog
@@ -693,7 +693,7 @@ mod tests {
             request_id: [1u8; 32],
             from_address: Address::ZERO,
             nonce: 0,
-            status: PendingRequestStatus::PendingExecution,
+            status: SignStatus::PendingExecution,
         };
         let sign_id = SignId::new(tx.request_id);
 
@@ -750,7 +750,7 @@ mod tests {
         let maybe_tx = backlog.get(tx.source_chain, &sign_id).await;
         assert!(maybe_tx.is_some(), "expected sign tx to still exist");
         let tx_after = maybe_tx.unwrap();
-        if tx_after.status() != PendingRequestStatus::Success {
+        if tx_after.status() != SignStatus::Success {
             panic!("expected Success but found status: {:?}", tx_after.status());
         }
 
@@ -869,7 +869,7 @@ mod tests {
             request_id: [2u8; 32],
             from_address: Address::ZERO,
             nonce: 0,
-            status: PendingRequestStatus::PendingExecution,
+            status: SignStatus::PendingExecution,
         };
         let sign_id = SignId::new(tx.request_id);
 
@@ -917,7 +917,7 @@ mod tests {
 
         // Source chain should be marked Failed
         let failed = backlog
-            .get_by_status(tx.source_chain, PendingRequestStatus::Failed)
+            .get_by_status(tx.source_chain, SignStatus::Failed)
             .await;
         assert!(failed.contains_key(&sign_id));
 
