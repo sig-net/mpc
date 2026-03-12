@@ -5,7 +5,7 @@ use crate::indexer_sol::SolConfig;
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
-use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, SignRequestType};
+use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, SignKind};
 use crate::util::AffinePointExt as _;
 
 use solana_sdk::commitment_config::CommitmentConfig;
@@ -1016,10 +1016,7 @@ async fn execute_publish(client: ChainClient, action: PublishAction, backlog: Ba
         );
     }
 
-    if matches!(
-        action.indexed.sign_request_type,
-        SignRequestType::SignBidirectional(_)
-    ) {
+    if matches!(action.indexed.kind, SignKind::SignBidirectional(_)) {
         if let Err(err) = backlog.mark_published(chain, &sign_id, publish_ok).await {
             tracing::warn!(?sign_id, ?err, "failed to mark publish status in backlog");
         }
@@ -1631,12 +1628,12 @@ async fn try_publish_sol(
 
     tracing::debug!(
         ?sign_id,
-        request_type = ?action.indexed.sign_request_type,
+        request_type = ?action.indexed.kind,
         "try_publish_sol: dispatching request"
     );
 
-    match &action.indexed.sign_request_type {
-        SignRequestType::Sign | SignRequestType::SignBidirectional(_) => {
+    match &action.indexed.kind {
+        SignKind::Sign | SignKind::SignBidirectional(_) => {
             let (event_authority, _) =
                 Pubkey::find_program_address(&[b"__event_authority"], &sol.program_id);
             let tx = program
@@ -1668,7 +1665,7 @@ async fn try_publish_sol(
                 "published solana signature successfully"
             );
         }
-        SignRequestType::RespondBidirectional(respond_bidirectional_tx) => {
+        SignKind::RespondBidirectional(respond_bidirectional_tx) => {
             tracing::debug!(
                 ?sign_id,
                 request_id = ?request_ids[0],
@@ -1727,8 +1724,8 @@ async fn try_publish_hydration(
         "Hydration: publishing signature"
     );
 
-    match &action.indexed.sign_request_type {
-        SignRequestType::Sign | SignRequestType::SignBidirectional(_) => {
+    match &action.indexed.kind {
+        SignKind::Sign | SignKind::SignBidirectional(_) => {
             hyd.call_respond(&action.indexed.id, signature)
                 .await
                 .map_err(|e| {
@@ -1740,7 +1737,7 @@ async fn try_publish_hydration(
                 "published hydration signature successfully"
             );
         }
-        SignRequestType::RespondBidirectional(respond_bidirectional_tx) => {
+        SignKind::RespondBidirectional(respond_bidirectional_tx) => {
             let serialized_output = respond_bidirectional_tx.output.clone();
             tracing::debug!(
                 ?sign_id,

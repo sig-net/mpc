@@ -185,7 +185,6 @@ mod tests {
     use crate::protocol::Chain;
     use crate::protocol::IndexedSignRequest;
     use crate::protocol::Sign;
-    use crate::protocol::SignRequestType;
     use crate::rpc::ContractStateWatcher;
     use crate::stream::ops::SignatureRespondedEvent;
     use crate::util::current_unix_timestamp;
@@ -225,14 +224,12 @@ mod tests {
             key_version: 1,
         };
 
-        let indexed = IndexedSignRequest {
-            id: sign_id,
-            args: args.clone(),
-            chain: Chain::Solana,
-            timestamp_created: std::time::Instant::now(),
-            unix_timestamp_indexed: current_unix_timestamp(),
-            sign_request_type: SignRequestType::Sign,
-        };
+        let indexed = IndexedSignRequest::sign(
+            sign_id,
+            args.clone(),
+            Chain::Solana,
+            current_unix_timestamp(),
+        );
 
         // Prepare a respond event that matches the sign id
         let sig_responded =
@@ -388,14 +385,13 @@ mod tests {
             respond_serialization_schema: vec![],
         };
 
-        let indexed = IndexedSignRequest {
-            id: sign_id,
-            args: args.clone(),
-            chain: Chain::Solana,
-            timestamp_created: std::time::Instant::now(),
-            unix_timestamp_indexed: current_unix_timestamp(),
-            sign_request_type: SignRequestType::SignBidirectional(SBE::Solana(sign_bidir.clone())),
-        };
+        let indexed = IndexedSignRequest::sign_bidirectional(
+            sign_id,
+            args.clone(),
+            Chain::Solana,
+            current_unix_timestamp(),
+            SBE::Solana(sign_bidir.clone()),
+        );
 
         // push SignRequest
         events_tx

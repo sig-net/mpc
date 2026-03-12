@@ -5,7 +5,7 @@ use crate::backlog::Backlog;
 use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
 
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
-use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+use crate::protocol::{Chain, IndexedSignRequest};
 use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::PendingRequestStatus;
 use crate::stream::{ChainEvent, ChainStream, ExecutionOutcome};
@@ -24,7 +24,6 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::LazyLock;
-use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
@@ -369,20 +368,18 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
     let sign_id = SignId::new(event.generate_request_id());
     tracing::info!(?sign_id, "eth signature requested");
 
-    Some(IndexedSignRequest {
-        id: sign_id,
-        args: SignArgs {
+    Some(IndexedSignRequest::sign(
+        sign_id,
+        SignArgs {
             entropy: entropy.into(),
             epsilon,
             payload,
             path: event.path,
             key_version: event.key_version,
         },
-        chain: Chain::Ethereum,
-        unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-        timestamp_created: Instant::now(),
-        sign_request_type: SignRequestType::Sign,
-    })
+        Chain::Ethereum,
+        crate::util::current_unix_timestamp(),
+    ))
 }
 
 // Helper function to parse event logs

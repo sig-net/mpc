@@ -3,7 +3,6 @@ use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
 use integration_tests::mpc_fixture::message_collector::MessageCounter;
 use integration_tests::mpc_fixture::MpcFixtureBuilder;
 use mpc_node::protocol::presignature::Presignature;
-use mpc_node::protocol::SignRequestType;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState, Sign};
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
@@ -184,14 +183,12 @@ async fn test_basic_sign() {
 }
 
 fn sign_request(seed: u8) -> Sign {
-    Sign::Request(IndexedSignRequest {
-        id: SignId::new([seed; 32]),
-        args: sign_arg(seed),
-        chain: Chain::NEAR,
-        unix_timestamp_indexed: 0,
-        timestamp_created: std::time::Instant::now(),
-        sign_request_type: SignRequestType::Sign,
-    })
+    Sign::Request(IndexedSignRequest::sign(
+        SignId::new([seed; 32]),
+        sign_arg(seed),
+        Chain::NEAR,
+        0,
+    ))
 }
 
 fn sign_arg(seed: u8) -> SignArgs {

@@ -1,4 +1,4 @@
-use crate::backlog::{Backlog, BacklogEntry, SignTx};
+use crate::backlog::Backlog;
 use crate::indexer_hydration::{
     HydrationRespondBidirectionalEvent, HydrationSignBidirectionalRequestedEvent,
     HydrationSignatureRespondedEvent,
@@ -6,7 +6,7 @@ use crate::indexer_hydration::{
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::metrics::requests::record_indexing_step_reached;
 use crate::node_client::NodeClient;
-use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
+use crate::protocol::{Chain, IndexedSignRequest, Sign, SignKind};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PendingRequestStatus};
@@ -16,7 +16,6 @@ use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
 use mpc_primitives::{SignId, Signature};
 use std::str::FromStr;
-use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -245,41 +244,15 @@ pub(crate) async fn process_sign_event(
     let sign_request = sign_event.generate_sign_request(entropy)?;
     record_indexing_step_reached(sign_event.source_chain());
 
-    // Insert the transaction into the backlog when we first see the sign request
-    let sign_id = sign_request.id;
-    let sign_request_type = sign_request.sign_request_type.clone();
+    if matches!(sign_request.kind, SignKind::RespondBidirectional(_)) {
+        anyhow::bail!(
+            "unexpected sign kind: RespondBidirectional should not be generated from a sign event"
+        );
+    }
 
-    // Both Sign and SignBidirectional requests start as Sign in backlog and
-    // SignBidirectional is later advanced via Backlog::advance.
-    let backlog_entry = match &sign_request_type {
-        SignRequestType::Sign => BacklogEntry::Sign(SignTx {
-            request_id: sign_id.request_id,
-            source_chain: sign_event.source_chain(),
-            status: PendingRequestStatus::AwaitingResponse,
-            args: sign_request.args.clone(),
-            unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
-        }),
-        SignRequestType::SignBidirectional(event) => BacklogEntry::SignBidirectionalPending {
-            tx: SignTx {
-                request_id: sign_id.request_id,
-                source_chain: sign_event.source_chain(),
-                status: PendingRequestStatus::AwaitingResponse,
-                args: sign_request.args.clone(),
-                unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
-            },
-            event: event.clone(),
-        },
-        SignRequestType::RespondBidirectional(_) => {
-            anyhow::bail!("unexpected sign type: RespondBidirectional should not be generated from a sign event");
-        }
-    };
-
-    backlog
-        .insert(sign_event.source_chain(), sign_id, backlog_entry)
-        .await;
+    backlog.insert(sign_request.clone()).await;
 
     if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
-        // TODO: handle error to ensure 100% success rate
         let chain = sign_event.source_chain();
         tracing::error!(?err, %chain, "failed to send sign request into queue");
     }
@@ -294,37 +267,11 @@ pub(crate) async fn process_sign_request(
 ) -> anyhow::Result<()> {
     record_indexing_step_reached(sign_request.chain);
 
-    let sign_id = sign_request.id;
-    let sign_type = sign_request.sign_request_type.clone();
-
-    if matches!(sign_type, SignRequestType::RespondBidirectional(_)) {
-        anyhow::bail!("Unexpected sign request type");
+    if matches!(sign_request.kind, SignKind::RespondBidirectional(_)) {
+        anyhow::bail!("Unexpected sign request kind");
     }
 
-    let backlog_entry = match &sign_type {
-        SignRequestType::Sign => BacklogEntry::Sign(SignTx {
-            request_id: sign_id.request_id,
-            source_chain: sign_request.chain,
-            status: PendingRequestStatus::AwaitingResponse,
-            args: sign_request.args.clone(),
-            unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
-        }),
-        SignRequestType::SignBidirectional(event) => BacklogEntry::SignBidirectionalPending {
-            tx: SignTx {
-                request_id: sign_id.request_id,
-                source_chain: sign_request.chain,
-                status: PendingRequestStatus::AwaitingResponse,
-                args: sign_request.args.clone(),
-                unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
-            },
-            event: event.clone(),
-        },
-        SignRequestType::RespondBidirectional(_) => unreachable!("checked above"),
-    };
-
-    backlog
-        .insert(sign_request.chain, sign_id, backlog_entry)
-        .await;
+    backlog.insert(sign_request.clone()).await;
 
     let chain = sign_request.chain;
     if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
@@ -362,22 +309,7 @@ pub(crate) async fn recover_backlog(
         .into_iter()
         .filter(|(_, entry)| matches!(entry.status(), PendingRequestStatus::AwaitingResponse))
     {
-        let (sign_tx_entry, sign_type) = match entry {
-            BacklogEntry::Sign(sign_tx_entry) => (sign_tx_entry, SignRequestType::Sign),
-            BacklogEntry::SignBidirectionalPending { tx: sign_tx, event } => {
-                (sign_tx, SignRequestType::SignBidirectional(event))
-            }
-            BacklogEntry::SignBidirectionalExecution { .. } => continue,
-        };
-
-        let sign_request = IndexedSignRequest {
-            id: sign_id,
-            args: sign_tx_entry.args.clone(),
-            chain: sign_tx_entry.source_chain,
-            unix_timestamp_indexed: sign_tx_entry.unix_timestamp_indexed,
-            timestamp_created: Instant::now(),
-            sign_request_type: sign_type,
-        };
+        let sign_request = entry.request;
 
         if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
             tracing::error!(
@@ -407,8 +339,8 @@ pub(crate) async fn process_respond_event(
         return Ok(());
     };
 
-    let event = match &entry {
-        BacklogEntry::Sign(_) => {
+    let event = match &entry.request.kind {
+        SignKind::Sign => {
             tracing::info!(?sign_id, "sign request completed successfully");
             backlog.remove(source_chain, &sign_id).await;
             if let Err(err) = sign_tx.send(Sign::Completion(sign_id)).await {
@@ -416,11 +348,13 @@ pub(crate) async fn process_respond_event(
             }
             return Ok(());
         }
-        BacklogEntry::SignBidirectionalPending { event, .. }
-        | BacklogEntry::SignBidirectionalExecution { event, .. } => event,
+        SignKind::SignBidirectional(event) => event,
+        SignKind::RespondBidirectional(_) => {
+            anyhow::bail!("unexpected sign type: RespondBidirectional should not be generated from a sign event");
+        }
     };
 
-    if matches!(&entry, BacklogEntry::SignBidirectionalExecution { .. }) {
+    if entry.execution_tx().is_some() {
         tracing::info!(
             ?sign_id,
             ?source_chain,
@@ -431,8 +365,9 @@ pub(crate) async fn process_respond_event(
     }
 
     tracing::info!(?sign_id, "bidirectional processing initial respond event");
-    let target_chain = Chain::from_str(&event.dest())
-        .map_err(|err| anyhow::anyhow!("unable to parse target chain from dest: {err:?}"))?;
+    let target_chain = event.target_chain().ok_or_else(|| {
+        anyhow::anyhow!("unable to parse target chain from dest: {}", event.dest())
+    })?;
 
     let mpc_sig = respond_event.signature();
 
@@ -623,6 +558,7 @@ mod tests {
     use crate::mesh::wait_threshold_active;
     use crate::node_client::NodeClient;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
+    use crate::protocol::SignKind;
     use crate::stream::ops::process_execution_confirmed;
     use crate::util::current_unix_timestamp;
     use cait_sith::protocol::Participant;
@@ -632,6 +568,16 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
+
+    fn test_indexed_request(
+        sign_id: SignId,
+        chain: Chain,
+        args: SignArgs,
+        unix_timestamp_indexed: u64,
+        kind: SignKind,
+    ) -> IndexedSignRequest {
+        IndexedSignRequest::new(sign_id, args, chain, unix_timestamp_indexed, kind)
+    }
 
     #[test]
     fn ethereum_signature_respond_event_conversion() {
@@ -668,17 +614,13 @@ mod tests {
         // Add a request and persist a checkpoint so recover() can load it
         let unix_timestamp_indexed = current_unix_timestamp();
         backlog
-            .insert(
-                Chain::Ethereum,
+            .insert(test_indexed_request(
                 sign_id,
-                BacklogEntry::Sign(SignTx {
-                    request_id: sign_id.request_id,
-                    source_chain: Chain::Ethereum,
-                    status: PendingRequestStatus::AwaitingResponse,
-                    args: args.clone(),
-                    unix_timestamp_indexed,
-                }),
-            )
+                Chain::Ethereum,
+                args.clone(),
+                unix_timestamp_indexed,
+                SignKind::Sign,
+            ))
             .await;
         backlog.checkpoint(Chain::Ethereum).await;
 
@@ -718,7 +660,7 @@ mod tests {
                 assert_eq!(req.id, sign_id);
                 assert_eq!(req.args, args);
                 assert_eq!(req.chain, Chain::Ethereum);
-                assert_eq!(req.sign_request_type, SignRequestType::Sign);
+                assert_eq!(req.kind, SignKind::Sign);
                 // Verify that the unix_timestamp_indexed is preserved from the original entry
                 assert_eq!(req.unix_timestamp_indexed, unix_timestamp_indexed);
                 assert!(req.unix_timestamp_indexed <= current_unix_timestamp());
@@ -765,17 +707,13 @@ mod tests {
         };
         let unix_timestamp_indexed = current_unix_timestamp();
         backlog
-            .insert(
-                tx.source_chain,
+            .insert(test_indexed_request(
                 sign_id,
-                BacklogEntry::Sign(SignTx {
-                    request_id: sign_id.request_id,
-                    source_chain: tx.source_chain,
-                    status: PendingRequestStatus::AwaitingResponse,
-                    args: args.clone(),
-                    unix_timestamp_indexed,
-                }),
-            )
+                tx.source_chain,
+                args.clone(),
+                unix_timestamp_indexed,
+                SignKind::Sign,
+            ))
             .await;
 
         backlog
@@ -823,9 +761,7 @@ mod tests {
             .unwrap();
         match msg {
             Sign::Request(req) => {
-                if let crate::protocol::SignRequestType::RespondBidirectional(res) =
-                    req.sign_request_type
-                {
+                if let crate::protocol::SignKind::RespondBidirectional(res) = req.kind {
                     assert_eq!(res.tx_id, tx.id);
                 } else {
                     panic!("Expected RespondBidirectional request");
@@ -848,17 +784,13 @@ mod tests {
         };
 
         backlog
-            .insert(
-                Chain::Ethereum,
+            .insert(test_indexed_request(
                 sign_id,
-                BacklogEntry::Sign(SignTx {
-                    request_id: sign_id.request_id,
-                    source_chain: Chain::Ethereum,
-                    status: PendingRequestStatus::AwaitingResponse,
-                    args,
-                    unix_timestamp_indexed: current_unix_timestamp(),
-                }),
-            )
+                Chain::Ethereum,
+                args,
+                current_unix_timestamp(),
+                SignKind::Sign,
+            ))
             .await;
 
         let event = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
@@ -951,17 +883,13 @@ mod tests {
         };
         let unix_timestamp_indexed = current_unix_timestamp();
         backlog
-            .insert(
-                tx.source_chain,
+            .insert(test_indexed_request(
                 sign_id,
-                BacklogEntry::Sign(SignTx {
-                    request_id: sign_id.request_id,
-                    source_chain: tx.source_chain,
-                    status: PendingRequestStatus::AwaitingResponse,
-                    args: args.clone(),
-                    unix_timestamp_indexed,
-                }),
-            )
+                tx.source_chain,
+                args.clone(),
+                unix_timestamp_indexed,
+                SignKind::Sign,
+            ))
             .await;
 
         backlog
@@ -1000,9 +928,7 @@ mod tests {
             .unwrap();
         match msg {
             Sign::Request(req) => {
-                if let crate::protocol::SignRequestType::RespondBidirectional(res) =
-                    req.sign_request_type
-                {
+                if let crate::protocol::SignKind::RespondBidirectional(res) = req.kind {
                     assert_eq!(res.tx_id, tx.id);
                     // Expect the serialized output to begin with MAGIC_ERROR_PREFIX
                     assert!(res.output.starts_with(&[0xde, 0xad, 0xbe, 0xef]));
