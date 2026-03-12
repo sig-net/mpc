@@ -376,7 +376,7 @@ mod tests {
         let sign_bidir = SignBidirectionalEvent {
             sender: Default::default(),
             serialized_transaction: unsigned_rlp,
-            dest: "eip155:1".to_string(),
+            dest: Chain::Ethereum.to_string(),
             caip2_id: "eip155:1".to_string(),
             key_version: 0,
             deposit: 0,
