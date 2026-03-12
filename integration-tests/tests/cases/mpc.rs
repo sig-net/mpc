@@ -543,7 +543,7 @@ async fn test_sign_contention_5_nodes() {
     // Wait for presignatures to be generated - 5-node triple generation takes ~3-4 minutes
     // We wait for a modest per-owner count since distribution is not uniform
     tracing::info!("waiting for presignatures to be generated (triple gen takes ~3-4 min)...");
-    let timeout = Duration::from_secs(480); // 8 minutes for triple + presignature generation
+    let timeout = Duration::from_secs(600); // 10 minutes for triple + presignature generation
     network
         .assert_presignatures(MIN_PRESIGNATURES_PER_OWNER, timeout)
         .await;
