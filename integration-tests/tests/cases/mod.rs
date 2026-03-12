@@ -19,6 +19,7 @@ pub mod chains;
 pub mod compat;
 pub mod ethereum;
 pub mod ethereum_stream;
+pub mod helpers;
 pub mod mpc;
 pub mod nightly;
 pub mod solana;
