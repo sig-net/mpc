@@ -223,7 +223,12 @@ impl NodeClient {
     ) -> Result<SyncUpdate, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("sync");
-        self.post_cbor_response(&url, update, Duration::from_millis(self.options.sync_timeout)).await
+        self.post_cbor_response(
+            &url,
+            update,
+            Duration::from_millis(self.options.sync_timeout),
+        )
+        .await
     }
 
     pub async fn checkpoint(
