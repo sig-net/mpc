@@ -3,9 +3,10 @@ pub mod selection;
 use self::selection::select_checkpoints;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::{Chain, SignRequestType};
+use crate::protocol::Chain;
 use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PendingRequestStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+use crate::stream::ops::SignBidirectionalEvent;
 
 use anyhow::Context;
 use mpc_primitives::{PendingTx, SignArgs, SignId};
@@ -44,21 +45,14 @@ impl PendingRequests {
 
     /// Inserts a sign-respond transaction into the pending requests map
     /// Returns Some(old_value) if the key was already present
-    fn insert(
-        &mut self,
-        id: SignId,
-        tx: BacklogTransaction,
-        sign_type: SignRequestType,
-    ) -> Option<BacklogTransaction> {
-        self.requests
-            .insert(id, BacklogEntry { tx, sign_type })
-            .map(|entry| entry.tx)
+    fn insert(&mut self, id: SignId, entry: BacklogEntry) -> Option<BacklogEntry> {
+        self.requests.insert(id, entry)
     }
 
     /// Removes a sign-respond transaction from the pending requests map
     /// Returns Some(value) if the key was present
-    fn remove(&mut self, id: &SignId) -> Option<BacklogTransaction> {
-        self.requests.remove(id).map(|entry| entry.tx)
+    fn remove(&mut self, id: &SignId) -> Option<BacklogEntry> {
+        self.requests.remove(id)
     }
 
     /// Gets a ref of a backlog entry from the pending requests map
@@ -73,22 +67,19 @@ impl PendingRequests {
     }
 
     /// Returns all sign-respond transactions with a specific status
-    pub fn get_by_status(
-        &self,
-        status: PendingRequestStatus,
-    ) -> HashMap<SignId, BacklogTransaction> {
+    pub fn get_by_status(&self, status: PendingRequestStatus) -> HashMap<SignId, BacklogEntry> {
         self.requests
             .iter()
-            .filter(|(_, entry)| entry.tx.status() == status)
-            .map(|(id, entry)| (*id, entry.tx.clone()))
+            .filter(|(_, entry)| entry.status() == status)
+            .map(|(id, entry)| (*id, entry.clone()))
             .collect()
     }
 
-    fn pending_execution(&self) -> Vec<(SignId, BacklogTransaction)> {
+    fn pending_execution(&self) -> Vec<(SignId, BacklogEntry)> {
         self.requests
             .iter()
-            .filter(|(_, entry)| entry.tx.status() == PendingRequestStatus::PendingExecution)
-            .map(|(&id, entry)| (id, entry.tx.clone()))
+            .filter(|(_, entry)| entry.status() == PendingRequestStatus::PendingExecution)
+            .map(|(&id, entry)| (id, entry.clone()))
             .collect()
     }
 
@@ -224,13 +215,12 @@ impl Backlog {
         &self,
         chain: Chain,
         id: SignId,
-        tx: BacklogTransaction,
-        sign_type: SignRequestType,
-    ) -> Option<BacklogTransaction> {
+        entry: BacklogEntry,
+    ) -> Option<BacklogEntry> {
         let (prev, len) = {
             let mut requests = self.requests.write().await;
             let pending = requests.entry(chain).or_insert_with(PendingRequests::new);
-            let p = pending.insert(id, tx, sign_type);
+            let p = pending.insert(id, entry);
             (p, pending.len())
         };
 
@@ -238,7 +228,7 @@ impl Backlog {
         prev
     }
 
-    pub async fn remove(&self, chain: Chain, id: &SignId) -> Option<BacklogTransaction> {
+    pub async fn remove(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
         let (removed, len) = {
             let mut requests = self.requests.write().await;
             let pending = requests.entry(chain).or_insert_with(PendingRequests::new);
@@ -273,15 +263,6 @@ impl Backlog {
         self.requests.read().await.is_empty()
     }
 
-    /// Get the sign request type for a given sign ID
-    pub async fn sign_type(&self, chain: Chain, id: &SignId) -> Option<SignRequestType> {
-        self.requests
-            .read()
-            .await
-            .get(&chain)
-            .and_then(|pending| pending.get(id).map(|entry| entry.sign_type.clone()))
-    }
-
     fn observe_backlog_size(&self, chain: Chain, len: usize) {
         crate::metrics::requests::BACKLOG_SIZE
             .with_label_values(&[chain.as_str()])
@@ -293,7 +274,7 @@ impl Backlog {
         &self,
         chain: Chain,
         status: PendingRequestStatus,
-    ) -> HashMap<SignId, BacklogTransaction> {
+    ) -> HashMap<SignId, BacklogEntry> {
         self.requests
             .read()
             .await
@@ -369,13 +350,13 @@ impl Backlog {
         chain: Chain,
         id: &SignId,
         status: PendingRequestStatus,
-    ) -> Option<BacklogTransaction> {
+    ) -> Option<BacklogEntry> {
         let mut requests = self.requests.write().await;
         let Some(pending) = requests.get_mut(&chain) else {
             tracing::warn!(?chain, ?id, ?status, "set_status: chain not found");
             return None;
         };
-        let Some(tx) = pending.requests.get_mut(id) else {
+        let Some(entry) = pending.requests.get_mut(id) else {
             tracing::warn!(
                 ?chain,
                 ?id,
@@ -384,9 +365,9 @@ impl Backlog {
             );
             return None;
         };
-        tracing::info!(?chain, ?id, before = ?tx.tx.status(), after = ?status, "set_status: updating");
-        tx.tx.set_status(status);
-        Some(tx.tx.clone())
+        tracing::info!(?chain, ?id, before = ?entry.status(), after = ?status, "set_status: updating");
+        entry.set_status(status);
+        Some(entry.clone())
     }
 
     /// Advances a `Sign` transaction to its execution phase and register execution watcher.
@@ -403,13 +384,20 @@ impl Backlog {
             .get_mut(&chain)
             .ok_or(BacklogError::ChainNotFound)?;
 
-        // Replace the Sign transaction with the Bidirectional transaction while
-        // preserving the original sign_type metadata.
         let entry = pending
             .requests
             .get_mut(&sign_id)
             .ok_or(BacklogError::NotFound { chain, id: sign_id })?;
-        entry.tx = BacklogTransaction::Bidirectional(bidirectional_tx.clone());
+
+        *entry = match entry {
+            BacklogEntry::SignBidirectionalPending { event, .. } => {
+                BacklogEntry::SignBidirectionalExecution {
+                    tx: bidirectional_tx.clone(),
+                    event: event.clone(),
+                }
+            }
+            _ => return Err(BacklogError::InvalidAdvanceTransition),
+        };
 
         // Registration successful, now register the execution watcher on the target chain
         let target_chain = bidirectional_tx.target_chain;
@@ -567,12 +555,8 @@ impl Backlog {
         // now repopulate our execution watchers
         for (sign_id, tx) in execution_to_watch {
             // Only restore execution watchers for bidirectional transactions
-            if let Some(target_chain) = tx.target_chain() {
-                // Extract the BidirectionalTx from the BacklogTransaction
-                if let BacklogTransaction::Bidirectional(bidirectional_tx) = tx {
-                    self.watch_execution(target_chain, sign_id, bidirectional_tx)
-                        .await;
-                }
+            if let BacklogEntry::SignBidirectionalExecution { tx, .. } = tx {
+                self.watch_execution(tx.target_chain, sign_id, tx).await;
             }
         }
 
@@ -585,7 +569,7 @@ impl Backlog {
         node_client: &NodeClient,
         threshold: usize,
         chains: &[Chain],
-    ) -> HashMap<Chain, HashMap<SignId, BacklogTransaction>> {
+    ) -> HashMap<Chain, HashMap<SignId, BacklogEntry>> {
         tracing::info!("attempting to recover from latest checkpoints via node selection");
 
         // Load local checkpoints first
@@ -649,7 +633,7 @@ impl Backlog {
                     pending
                         .requests
                         .iter()
-                        .map(|(id, entry)| (*id, entry.tx.clone()))
+                        .map(|(id, entry)| (*id, entry.clone()))
                         .collect(),
                 );
             }
@@ -670,6 +654,10 @@ pub enum BacklogError {
     ChainNotFound,
     #[error("transaction not found")]
     TransactionNotFound,
+    #[error("invalid backlog entry state")]
+    InvalidEntryState,
+    #[error("cannot advance non-bidirectional or already-advanced backlog entry")]
+    InvalidAdvanceTransition,
 }
 
 /// Sign request transaction metadata (non-bidirectional).
@@ -683,25 +671,26 @@ pub struct SignTx {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BacklogEntry {
-    pub sign_type: SignRequestType,
-    pub tx: BacklogTransaction,
-}
-
-/// Pending transaction in the backlog - can be either a sign-only or bidirectional.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
-pub enum BacklogTransaction {
+pub enum BacklogEntry {
     Sign(SignTx),
-    Bidirectional(BidirectionalTx),
+    SignBidirectionalPending {
+        tx: SignTx,
+        event: SignBidirectionalEvent,
+    },
+    SignBidirectionalExecution {
+        tx: BidirectionalTx,
+        event: SignBidirectionalEvent,
+    },
 }
 
-impl BacklogTransaction {
+impl BacklogEntry {
     /// Get the request ID for this transaction
     pub fn request_id(&self) -> [u8; 32] {
         match self {
             Self::Sign(tx) => tx.request_id,
-            Self::Bidirectional(tx) => tx.request_id,
+            Self::SignBidirectionalPending { tx, .. } => tx.request_id,
+            Self::SignBidirectionalExecution { tx, .. } => tx.request_id,
         }
     }
 
@@ -709,7 +698,8 @@ impl BacklogTransaction {
     pub fn source_chain(&self) -> Chain {
         match self {
             Self::Sign(tx) => tx.source_chain,
-            Self::Bidirectional(tx) => tx.source_chain,
+            Self::SignBidirectionalPending { tx, .. } => tx.source_chain,
+            Self::SignBidirectionalExecution { tx, .. } => tx.source_chain,
         }
     }
 
@@ -717,7 +707,8 @@ impl BacklogTransaction {
     pub fn status(&self) -> PendingRequestStatus {
         match self {
             Self::Sign(tx) => tx.status,
-            Self::Bidirectional(tx) => tx.status,
+            Self::SignBidirectionalPending { tx, .. } => tx.status,
+            Self::SignBidirectionalExecution { tx, .. } => tx.status,
         }
     }
 
@@ -725,7 +716,8 @@ impl BacklogTransaction {
     pub fn set_status(&mut self, status: PendingRequestStatus) {
         match self {
             Self::Sign(tx) => tx.status = status,
-            Self::Bidirectional(tx) => tx.status = status,
+            Self::SignBidirectionalPending { tx, .. } => tx.status = status,
+            Self::SignBidirectionalExecution { tx, .. } => tx.status = status,
         }
     }
 
@@ -733,19 +725,24 @@ impl BacklogTransaction {
     pub fn target_chain(&self) -> Option<Chain> {
         match self {
             Self::Sign(_) => None,
-            Self::Bidirectional(tx) => Some(tx.target_chain),
+            Self::SignBidirectionalPending { event, .. } => event.target_chain(),
+            Self::SignBidirectionalExecution { tx, .. } => Some(tx.target_chain),
         }
     }
 
     /// Check if this is a bidirectional transaction
     pub fn is_bidirectional(&self) -> bool {
-        matches!(self, Self::Bidirectional(_))
+        matches!(
+            self,
+            Self::SignBidirectionalPending { .. } | Self::SignBidirectionalExecution { .. }
+        )
     }
 
     pub fn typename(&self) -> &'static str {
         match self {
             Self::Sign(_) => "Sign",
-            Self::Bidirectional(_) => "Bidirectional",
+            Self::SignBidirectionalPending { .. } => "BidirectionalPending",
+            Self::SignBidirectionalExecution { .. } => "BidirectionalExecution",
         }
     }
 }
@@ -808,6 +805,23 @@ mod tests {
         }
     }
 
+    fn create_test_event(dest: &str) -> crate::stream::ops::SignBidirectionalEvent {
+        crate::stream::ops::SignBidirectionalEvent::Solana(SignBidirectionalEvent {
+            sender: Default::default(),
+            serialized_transaction: vec![],
+            dest: dest.to_string(),
+            caip2_id: format!("{dest}:test"),
+            key_version: 0,
+            deposit: 0,
+            path: "".to_string(),
+            algo: "".to_string(),
+            params: "".to_string(),
+            program_id: Pubkey::new_unique(),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+        })
+    }
+
     #[tokio::test]
     async fn test_backlog_chain_isolation() {
         let backlog = Backlog::new();
@@ -820,76 +834,35 @@ mod tests {
         let sign_id_sol = SignId::new(tx_sol.request_id);
         let sign_id_near = SignId::new(tx_near.request_id);
 
-        let program_id = Pubkey::new_unique();
-
         // Insert into different chains
         backlog
             .insert(
                 Chain::Ethereum,
                 sign_id_eth,
-                BacklogTransaction::Bidirectional(tx_eth.clone()),
-                SignRequestType::SignBidirectional(
-                    crate::stream::ops::SignBidirectionalEvent::Solana(SignBidirectionalEvent {
-                        sender: Default::default(),
-                        serialized_transaction: vec![],
-                        dest: "ethereum".to_string(),
-                        caip2_id: "eip155:1".to_string(),
-                        key_version: 0,
-                        deposit: 0,
-                        path: "".to_string(),
-                        algo: "".to_string(),
-                        params: "".to_string(),
-                        program_id,
-                        output_deserialization_schema: vec![],
-                        respond_serialization_schema: vec![],
-                    }),
-                ),
+                BacklogEntry::SignBidirectionalExecution {
+                    tx: tx_eth.clone(),
+                    event: create_test_event("ethereum"),
+                },
             )
             .await;
         backlog
             .insert(
                 Chain::Solana,
                 sign_id_sol,
-                BacklogTransaction::Bidirectional(tx_sol.clone()),
-                SignRequestType::SignBidirectional(
-                    crate::stream::ops::SignBidirectionalEvent::Solana(SignBidirectionalEvent {
-                        sender: Default::default(),
-                        serialized_transaction: vec![],
-                        dest: "solana".to_string(),
-                        caip2_id: "solana:5eykt4UsFY6PZFX8nTM1".to_string(),
-                        key_version: 0,
-                        deposit: 0,
-                        path: "".to_string(),
-                        algo: "".to_string(),
-                        params: "".to_string(),
-                        program_id,
-                        output_deserialization_schema: vec![],
-                        respond_serialization_schema: vec![],
-                    }),
-                ),
+                BacklogEntry::SignBidirectionalExecution {
+                    tx: tx_sol.clone(),
+                    event: create_test_event("solana"),
+                },
             )
             .await;
         backlog
             .insert(
                 Chain::NEAR,
                 sign_id_near,
-                BacklogTransaction::Bidirectional(tx_near.clone()),
-                SignRequestType::SignBidirectional(
-                    crate::stream::ops::SignBidirectionalEvent::Solana(SignBidirectionalEvent {
-                        sender: Default::default(),
-                        serialized_transaction: vec![],
-                        dest: "near".to_string(),
-                        caip2_id: "near:mainnet".to_string(),
-                        key_version: 0,
-                        deposit: 0,
-                        path: "".to_string(),
-                        algo: "".to_string(),
-                        params: "".to_string(),
-                        program_id,
-                        output_deserialization_schema: vec![],
-                        respond_serialization_schema: vec![],
-                    }),
-                ),
+                BacklogEntry::SignBidirectionalExecution {
+                    tx: tx_near.clone(),
+                    event: create_test_event("near"),
+                },
             )
             .await;
 
@@ -915,24 +888,30 @@ mod tests {
             .insert(
                 Chain::Ethereum,
                 SignId::new(tx1.request_id),
-                BacklogTransaction::Bidirectional(tx1),
-                SignRequestType::Sign,
+                BacklogEntry::SignBidirectionalExecution {
+                    tx: tx1,
+                    event: create_test_event("ethereum"),
+                },
             )
             .await;
         backlog
             .insert(
                 Chain::Ethereum,
                 SignId::new(tx2.request_id),
-                BacklogTransaction::Bidirectional(tx2),
-                SignRequestType::Sign,
+                BacklogEntry::SignBidirectionalExecution {
+                    tx: tx2,
+                    event: create_test_event("ethereum"),
+                },
             )
             .await;
         backlog
             .insert(
                 Chain::Ethereum,
                 SignId::new(tx3.request_id),
-                BacklogTransaction::Bidirectional(tx3),
-                SignRequestType::Sign,
+                BacklogEntry::SignBidirectionalExecution {
+                    tx: tx3,
+                    event: create_test_event("ethereum"),
+                },
             )
             .await;
 
@@ -942,8 +921,10 @@ mod tests {
             .insert(
                 Chain::Solana,
                 SignId::new(tx4.request_id),
-                BacklogTransaction::Bidirectional(tx4),
-                SignRequestType::Sign,
+                BacklogEntry::SignBidirectionalExecution {
+                    tx: tx4,
+                    event: create_test_event("solana"),
+                },
             )
             .await;
 
@@ -992,8 +973,10 @@ mod tests {
                     .insert(
                         Chain::Ethereum,
                         sign_id,
-                        BacklogTransaction::Bidirectional(tx),
-                        SignRequestType::Sign,
+                        BacklogEntry::SignBidirectionalExecution {
+                            tx,
+                            event: create_test_event("ethereum"),
+                        },
                     )
                     .await;
             });
@@ -1009,8 +992,10 @@ mod tests {
                     .insert(
                         Chain::Solana,
                         sign_id,
-                        BacklogTransaction::Bidirectional(tx),
-                        SignRequestType::Sign,
+                        BacklogEntry::SignBidirectionalExecution {
+                            tx,
+                            event: create_test_event("solana"),
+                        },
                     )
                     .await;
             });
@@ -1059,16 +1044,20 @@ mod tests {
             .insert(
                 Chain::Ethereum,
                 SignId::new(tx1.request_id),
-                BacklogTransaction::Bidirectional(tx1.clone()),
-                SignRequestType::Sign,
+                BacklogEntry::SignBidirectionalExecution {
+                    tx: tx1.clone(),
+                    event: create_test_event("ethereum"),
+                },
             )
             .await;
         backlog
             .insert(
                 Chain::Ethereum,
                 SignId::new(tx2.request_id),
-                BacklogTransaction::Bidirectional(tx2.clone()),
-                SignRequestType::Sign,
+                BacklogEntry::SignBidirectionalExecution {
+                    tx: tx2.clone(),
+                    event: create_test_event("ethereum"),
+                },
             )
             .await;
 
@@ -1085,26 +1074,34 @@ mod tests {
         let mut pending1 = PendingRequests::new();
         pending1.insert(
             SignId::new(tx1.request_id),
-            BacklogTransaction::Bidirectional(tx1.clone()),
-            SignRequestType::Sign,
+            BacklogEntry::SignBidirectionalExecution {
+                tx: tx1.clone(),
+                event: create_test_event("ethereum"),
+            },
         );
         pending1.insert(
             SignId::new(tx2.request_id),
-            BacklogTransaction::Bidirectional(tx2.clone()),
-            SignRequestType::Sign,
+            BacklogEntry::SignBidirectionalExecution {
+                tx: tx2.clone(),
+                event: create_test_event("ethereum"),
+            },
         );
         pending1.set_processed_block(100);
 
         let mut pending2 = PendingRequests::new();
         pending2.insert(
             SignId::new(tx1.request_id),
-            BacklogTransaction::Bidirectional(tx1.clone()),
-            SignRequestType::Sign,
+            BacklogEntry::SignBidirectionalExecution {
+                tx: tx1.clone(),
+                event: create_test_event("ethereum"),
+            },
         );
         pending2.insert(
             SignId::new(tx2.request_id),
-            BacklogTransaction::Bidirectional(tx2.clone()),
-            SignRequestType::Sign,
+            BacklogEntry::SignBidirectionalExecution {
+                tx: tx2.clone(),
+                event: create_test_event("ethereum"),
+            },
         );
         pending2.set_processed_block(100);
 
@@ -1126,8 +1123,10 @@ mod tests {
         let mut pending = PendingRequests::new();
         pending.insert(
             SignId::new(tx1.request_id),
-            BacklogTransaction::Bidirectional(tx1.clone()),
-            SignRequestType::Sign,
+            BacklogEntry::SignBidirectionalExecution {
+                tx: tx1.clone(),
+                event: create_test_event("ethereum"),
+            },
         );
         pending.set_processed_block(100);
         let checkpoint = pending.checkpoint(Chain::Ethereum);
@@ -1138,22 +1137,21 @@ mod tests {
 
         assert_eq!(checkpoint, deserialized);
 
-        let (sign_id, restored_tx, restored_sign_type): (SignId, BidirectionalTx, SignRequestType) = {
+        let (sign_id, restored_tx): (SignId, BidirectionalTx) = {
             let pending = &checkpoint.pending_requests[0];
             let backlog_entry: BacklogEntry =
                 ciborium::de::from_reader(pending.transaction.as_slice()).unwrap();
-            let tx = match backlog_entry.tx {
-                BacklogTransaction::Bidirectional(tx) => tx,
-                BacklogTransaction::Sign(_) => panic!("Expected Bidirectional transaction"),
+            let tx = match backlog_entry {
+                BacklogEntry::SignBidirectionalExecution { tx, .. } => tx,
+                _ => panic!("Expected SignBidirectionalExecution entry"),
             };
-            (pending.sign_id, tx, backlog_entry.sign_type)
+            (pending.sign_id, tx)
         };
         assert_eq!(sign_id, SignId::new(tx1.request_id));
         assert_eq!(
             restored_tx.serialized_transaction,
             tx1.serialized_transaction
         );
-        assert_eq!(restored_sign_type, SignRequestType::Sign);
     }
 
     #[tokio::test]
@@ -1166,8 +1164,10 @@ mod tests {
             .insert(
                 Chain::Solana,
                 sign_id,
-                BacklogTransaction::Bidirectional(tx.clone()),
-                SignRequestType::Sign,
+                BacklogEntry::SignBidirectionalExecution {
+                    tx: tx.clone(),
+                    event: create_test_event("ethereum"),
+                },
             )
             .await;
         backlog.set_processed_block(Chain::Solana, 10).await;
@@ -1221,14 +1221,19 @@ mod tests {
             .insert(
                 Chain::Solana,
                 sign_id,
-                BacklogTransaction::Sign(SignTx {
-                    request_id: sign_id.request_id,
-                    source_chain: Chain::Solana,
-                    status: PendingRequestStatus::AwaitingResponse,
-                    args,
-                    unix_timestamp_indexed: 0,
-                }),
-                sign_type.clone(),
+                BacklogEntry::SignBidirectionalPending {
+                    tx: SignTx {
+                        request_id: sign_id.request_id,
+                        source_chain: Chain::Solana,
+                        status: PendingRequestStatus::AwaitingResponse,
+                        args,
+                        unix_timestamp_indexed: 0,
+                    },
+                    event: match sign_type.clone() {
+                        SignRequestType::SignBidirectional(event) => event,
+                        _ => panic!("expected SignBidirectional type"),
+                    },
+                },
             )
             .await;
         backlog.set_processed_block(Chain::Solana, 10).await;
@@ -1246,7 +1251,10 @@ mod tests {
             .await
             .expect("missing recovered entry");
 
-        assert_eq!(recovered_entry.sign_type, sign_type);
+        assert!(matches!(
+            recovered_entry,
+            BacklogEntry::SignBidirectionalPending { .. }
+        ));
     }
 
     #[tokio::test]
@@ -1269,14 +1277,13 @@ mod tests {
             .insert(
                 tx.source_chain,
                 sign_id,
-                BacklogTransaction::Sign(SignTx {
+                BacklogEntry::Sign(SignTx {
                     request_id: sign_id.request_id,
                     source_chain: tx.source_chain,
                     status: PendingRequestStatus::AwaitingResponse,
                     args: args.clone(),
                     unix_timestamp_indexed,
                 }),
-                SignRequestType::Sign,
             )
             .await;
 
@@ -1312,8 +1319,10 @@ mod tests {
             .insert(
                 Chain::Ethereum,
                 SignId::new(tx1.request_id),
-                BacklogTransaction::Bidirectional(tx1.clone()),
-                SignRequestType::Sign,
+                BacklogEntry::SignBidirectionalExecution {
+                    tx: tx1.clone(),
+                    event: create_test_event("ethereum"),
+                },
             )
             .await;
 
@@ -1357,8 +1366,10 @@ mod tests {
             .insert(
                 Chain::Solana,
                 SignId::new(tx1.request_id),
-                BacklogTransaction::Bidirectional(tx1.clone()),
-                SignRequestType::Sign,
+                BacklogEntry::SignBidirectionalExecution {
+                    tx: tx1.clone(),
+                    event: create_test_event("solana"),
+                },
             )
             .await;
 
@@ -1375,6 +1386,43 @@ mod tests {
         assert_eq!(checkpoint.block_height, interval);
         assert_eq!(checkpoint.chain, Chain::Solana);
     }
+
+    #[tokio::test]
+    async fn test_advance_rejects_plain_sign_entries() {
+        let backlog = Backlog::new();
+        let tx = create_test_tx(8, PendingRequestStatus::PendingExecution);
+        let sign_id = SignId::new(tx.request_id);
+
+        let args = SignArgs {
+            entropy: [1u8; 32],
+            epsilon: k256::Scalar::from(1u64),
+            payload: k256::Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+
+        backlog
+            .insert(
+                tx.source_chain,
+                sign_id,
+                BacklogEntry::Sign(SignTx {
+                    request_id: sign_id.request_id,
+                    source_chain: tx.source_chain,
+                    status: PendingRequestStatus::AwaitingResponse,
+                    args,
+                    unix_timestamp_indexed: 0,
+                }),
+            )
+            .await;
+
+        let err = backlog
+            .advance(tx.source_chain, sign_id, tx)
+            .await
+            .expect_err("advance should fail for plain Sign requests");
+
+        assert!(matches!(err, BacklogError::InvalidAdvanceTransition));
+    }
+
     #[test]
     fn test_merge_checkpoints() {
         let mut local = HashMap::new();
