@@ -1,17 +1,14 @@
 use cait_sith::protocol::Participant;
-use cait_sith::triples::{TriplePub, TripleShare};
-use cait_sith::PresignOutput;
-use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
-use k256::Secp256k1;
 use mpc_crypto::PublicKey;
-use mpc_node::protocol::presignature::{Presignature, PresignatureSpawner};
-use mpc_node::protocol::triple::{Triple, TripleSpawner};
+use mpc_node::protocol::presignature::PresignatureSpawner;
+use mpc_node::protocol::triple::TripleSpawner;
 use mpc_node::protocol::MessageChannel;
-use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::types::SecretKeyShare;
 use test_log::test;
+
+use super::helpers::{dummy_pair, dummy_presignature};
 
 #[test(tokio::test)]
 async fn test_triple_persistence() -> anyhow::Result<()> {
@@ -313,41 +310,4 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_spawner.len_potential().await, 8);
 
     Ok(())
-}
-
-fn dummy_presignature(id: u64) -> Presignature {
-    Presignature {
-        id,
-        output: PresignOutput {
-            big_r: <Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            k: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-            sigma: <Secp256k1 as CurveArithmetic>::Scalar::ONE,
-        },
-        participants: vec![Participant::from(1), Participant::from(2)],
-    }
-}
-
-fn dummy_pair(id: u64) -> TriplePair {
-    TriplePair {
-        id,
-        triple0: dummy_triple(),
-        triple1: dummy_triple(),
-    }
-}
-
-fn dummy_triple() -> Triple {
-    Triple {
-        share: TripleShare {
-            a: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-            b: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-            c: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-        },
-        public: TriplePub {
-            big_a: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            big_b: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            big_c: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            participants: vec![Participant::from(1), Participant::from(2)],
-            threshold: 5,
-        },
-    }
 }

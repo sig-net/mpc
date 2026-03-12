@@ -279,6 +279,7 @@ impl TripleGenerator {
                         id: self.id,
                         triple0: first,
                         triple1: second,
+                        holders: Some(self.participants.clone()),
                     };
                     self.slot.insert(pair, triple_owner).await;
                     break;
