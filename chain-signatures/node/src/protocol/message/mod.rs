@@ -101,7 +101,7 @@ impl MessageInbox {
         }
     }
 
-    async fn send(&mut self, message: Message) {
+    fn send(&mut self, message: Message) {
         match message {
             Message::Posit(message) => match message.id {
                 PositProtocolId::Triple(id) => {
@@ -128,13 +128,13 @@ impl MessageInbox {
                 }
             },
             Message::Generating(message) => {
-                let _ = self.generating.send(message).await;
+                let _ = self.generating.try_send_lossy(message, "generating");
             }
             Message::Resharing(message) => {
-                let _ = self.resharing.send(message).await;
+                let _ = self.resharing.try_send_lossy(message, "resharing");
             }
             Message::Ready(message) => {
-                let _ = self.ready.send(message).await;
+                let _ = self.ready.try_send_lossy(message, "ready");
             }
             Message::Triple(message) => {
                 // NOTE: not logging the error because this is simply just channel closure.
@@ -143,24 +143,21 @@ impl MessageInbox {
                     .triple
                     .entry(message.id)
                     .or_default()
-                    .send(message)
-                    .await;
+                    .try_send_lossy(message, "triple");
             }
             Message::Presignature(message) => {
                 let _ = self
                     .presignature
                     .entry(message.id)
                     .or_default()
-                    .send(message)
-                    .await;
+                    .try_send_lossy(message, "presignature");
             }
             Message::Signature(message) => {
                 let _ = self
                     .signature
                     .entry((message.id, message.presignature_id))
                     .or_default()
-                    .send(message)
-                    .await;
+                    .try_send_lossy(message, "signature");
             }
             Message::Unknown(entries) => {
                 tracing::warn!(
@@ -223,9 +220,9 @@ impl MessageInbox {
     }
 
     /// Publish messages to subscribers
-    async fn publish(&mut self, messages: Vec<Message>) {
+    fn publish(&mut self, messages: Vec<Message>) {
         for message in messages {
-            self.send(message).await;
+            self.send(message);
         }
     }
 
@@ -362,7 +359,7 @@ impl MessageInbox {
 
                     let messages = self.filter(messages);
                     let messages_len = messages.len();
-                    self.publish(messages).await;
+                    self.publish(messages);
 
                     crate::metrics::messaging::NUM_RECEIVED_ENCRYPTED_TOTAL
                         .inc_by(messages_len as f64);
@@ -1030,12 +1027,17 @@ mod tests {
     use mpc_keys::hpke::{self, Ciphered};
     use mpc_primitives::SignId;
     use serde::{de::DeserializeOwned, Deserialize, Serialize};
+    use tokio::sync::mpsc;
 
     use crate::{
         config::{Config, LocalConfig, NetworkConfig, OverrideConfig},
         protocol::{
             contract::primitives::{ParticipantMap, Participants},
-            message::{GeneratingMessage, Message, SignatureMessage, SignedMessage, TripleMessage},
+            message::{
+                sub, GeneratingMessage, Message, MessageInbox, PositMessage, PositProtocolId,
+                ReadyMessage, SignatureMessage, SignedMessage, TripleMessage,
+            },
+            posit::PositAction,
             ParticipantInfo,
         },
         rpc::ContractStateWatcher,
@@ -1516,14 +1518,7 @@ mod tests {
             token: 1,
         }));
 
-        let publish_result =
-            tokio::time::timeout(Duration::from_millis(100), inbox.publish(messages)).await;
-
-        assert!(
-            publish_result.is_ok(),
-            "signature posit backpressure should not stall unrelated inbox messages"
-        );
-
+        inbox.publish(messages);
         let ready_message = tokio::time::timeout(Duration::from_millis(100), ready_rx.recv())
             .await
             .expect("ready message should not be blocked by signature posit backlog")
