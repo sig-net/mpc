@@ -456,11 +456,7 @@ mod tests {
 
         // mark status as PendingExecution so it will be included in checkpoints
         backlog
-            .set_status(
-                Chain::Solana,
-                &sign_id,
-                SignStatus::PendingExecution,
-            )
+            .set_status(Chain::Solana, &sign_id, SignStatus::PendingExecution)
             .await;
 
         // send a block event for this chain and ensure checkpoint is persisted

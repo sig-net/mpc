@@ -782,11 +782,11 @@ mod tests {
     use crate::{
         protocol::SignKind,
         sign_bidirectional::{BidirectionalTx, BidirectionalTxId, SignStatus},
+        stream::ops::SignBidirectionalEvent,
     };
     use alloy::primitives::{Address, B256};
     use anchor_lang::prelude::Pubkey;
     use mpc_primitives::{SignArgs, SignId};
-    use signet_program::SignBidirectionalEvent;
 
     fn create_test_tx(id: u8, status: SignStatus) -> BidirectionalTx {
         BidirectionalTx {
@@ -811,8 +811,12 @@ mod tests {
         }
     }
 
-    fn create_test_event(dest: &str) -> crate::stream::ops::SignBidirectionalEvent {
-        crate::stream::ops::SignBidirectionalEvent::Solana(SignBidirectionalEvent {
+    fn create_test_event(dest: &str) -> SignBidirectionalEvent {
+        let mut program_id = [0u8; 32];
+        let prefix_len = dest.len().min(program_id.len());
+        program_id[..prefix_len].copy_from_slice(&dest.as_bytes()[..prefix_len]);
+
+        SignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
             sender: Default::default(),
             serialized_transaction: vec![],
             dest: dest.to_string(),
@@ -822,7 +826,7 @@ mod tests {
             path: "".to_string(),
             algo: "".to_string(),
             params: "".to_string(),
-            program_id: Pubkey::new_unique(),
+            program_id: Pubkey::new_from_array(program_id),
             output_deserialization_schema: vec![],
             respond_serialization_schema: vec![],
         })
@@ -1135,8 +1139,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_recover_preserves_sign_kind() {
-        use crate::stream::ops::SignBidirectionalEvent as StreamSignBidirectionalEvent;
-
         let backlog = Backlog::new();
         let sign_id = SignId::new([42u8; 32]);
         let args = SignArgs {
@@ -1148,8 +1150,8 @@ mod tests {
         };
 
         let program_id = Pubkey::new_unique();
-        let sign_kind = SignKind::SignBidirectional(StreamSignBidirectionalEvent::Solana(
-            SignBidirectionalEvent {
+        let sign_kind = SignKind::SignBidirectional(SignBidirectionalEvent::Solana(
+            signet_program::SignBidirectionalEvent {
                 sender: Default::default(),
                 serialized_transaction: vec![1, 2, 3],
                 dest: "ethereum".to_string(),
