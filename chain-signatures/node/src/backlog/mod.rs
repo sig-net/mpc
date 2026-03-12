@@ -1099,13 +1099,12 @@ mod tests {
 
         assert_eq!(checkpoint, deserialized);
 
-        let (sign_id, restored_tx): (SignId, BidirectionalTx) = {
+        let (sign_id, restored_tx) = {
             let pending = &checkpoint.pending_requests[0];
             let backlog_entry: BacklogEntry =
                 ciborium::de::from_reader(pending.transaction.as_slice()).unwrap();
             let tx = backlog_entry
-                .execution_tx()
-                .cloned()
+                .take_execution_tx()
                 .expect("Expected pending execution entry");
             (pending.sign_id, tx)
         };
