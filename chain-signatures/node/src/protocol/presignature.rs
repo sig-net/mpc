@@ -525,15 +525,6 @@ impl PresignatureSpawner {
     }
 
     async fn stockpile(&mut self, active: &[Participant], cfg: &ProtocolConfig) {
-        if active.len() < self.threshold {
-            tracing::warn!(
-                active = active.len(),
-                threshold = self.threshold,
-                "not enough active participants to generate presignatures"
-            );
-            return;
-        }
-
         let not_enough_presignatures = {
             // Stopgap to prevent too many presignatures in the system. This should be around min_presig*nodes*2
             // for good measure so that we have enough presignatures to do sig generation while also maintain
