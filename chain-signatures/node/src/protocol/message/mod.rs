@@ -2,7 +2,7 @@ mod filter;
 mod sub;
 mod types;
 
-pub use sub::Subscriber;
+pub use sub::{Subscriber, MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE};
 
 use crate::protocol::message::sub::{
     SubscribeId, SubscribeRequest, SubscribeRequestAction, SubscribeResponse,
@@ -87,11 +87,17 @@ impl MessageInbox {
             resharing: Subscriber::unsubscribed(),
             ready: Subscriber::unsubscribed(),
             triple: HashMap::new(),
-            triple_init: Subscriber::unsubscribed(),
+            triple_init: Subscriber::unsubscribed_with_capacity(
+                sub::MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE,
+            ),
             presignature: HashMap::new(),
-            presignature_init: Subscriber::unsubscribed(),
+            presignature_init: Subscriber::unsubscribed_with_capacity(
+                sub::MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE,
+            ),
             signature: HashMap::new(),
-            signature_init: Subscriber::unsubscribed(),
+            signature_init: Subscriber::unsubscribed_with_capacity(
+                sub::MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE,
+            ),
         }
     }
 
@@ -101,26 +107,24 @@ impl MessageInbox {
                 PositProtocolId::Triple(id) => {
                     let _ = self
                         .triple_init
-                        .send((id, message.from, message.action))
-                        .await;
+                        .try_send_lossy((id, message.from, message.action), "triple_init");
                 }
                 PositProtocolId::Presignature(id) => {
                     let _ = self
                         .presignature_init
-                        .send((id, message.from, message.action))
-                        .await;
+                        .try_send_lossy((id, message.from, message.action), "presignature_init");
                 }
                 PositProtocolId::Signature(sign_id, presignature_id, round) => {
-                    let _ = self
-                        .signature_init
-                        .send((
+                    let _ = self.signature_init.try_send_lossy(
+                        (
                             sign_id,
                             presignature_id,
                             round,
                             message.from,
                             message.action,
-                        ))
-                        .await;
+                        ),
+                        "signature_init",
+                    );
                 }
             },
             Message::Generating(message) => {
@@ -1469,5 +1473,67 @@ mod tests {
         }
 
         inbox.abort();
+    }
+
+    #[tokio::test]
+    async fn test_signature_posit_backpressure_does_not_block_ready_messages() {
+        let (_inbox_tx, inbox_rx) = mpsc::channel(1);
+        let (_filter_tx, filter_rx) = mpsc::channel(1);
+        let (_subscribe_tx, subscribe_rx) = mpsc::channel(1);
+        let mut inbox = MessageInbox::new(inbox_rx, filter_rx, subscribe_rx);
+
+        inbox.signature_init = sub::Subscriber::unsubscribed_with_capacity(1);
+
+        let (signature_req, signature_resp) =
+            sub::SubscribeRequest::subscribe(sub::SubscribeId::Signatures);
+        inbox.process_subscribe(signature_req);
+        let mut signature_posit_rx = match signature_resp.await.unwrap() {
+            sub::SubscribeResponse::SignaturePosit(rx) => rx,
+            _ => panic!("expected signature posit subscription"),
+        };
+
+        let (ready_req, ready_resp) = sub::SubscribeRequest::subscribe(sub::SubscribeId::Ready);
+        inbox.process_subscribe(ready_req);
+        let mut ready_rx = match ready_resp.await.unwrap() {
+            sub::SubscribeResponse::Ready(rx) => rx,
+            _ => panic!("expected ready subscription"),
+        };
+
+        let sign_id = SignId::new([9; 32]);
+        let from = Participant::from(0);
+        let mut messages = Vec::with_capacity(sub::MAX_MESSAGE_SUB_CHANNEL_SIZE + 2);
+        for round in 0..=sub::MAX_MESSAGE_SUB_CHANNEL_SIZE {
+            messages.push(Message::Posit(PositMessage {
+                id: PositProtocolId::Signature(sign_id, 77, round),
+                from,
+                action: PositAction::Accept,
+            }));
+        }
+        messages.push(Message::Ready(ReadyMessage {
+            epoch: 1,
+            from,
+            nonce: 1,
+            token: 1,
+        }));
+
+        let publish_result =
+            tokio::time::timeout(Duration::from_millis(100), inbox.publish(messages)).await;
+
+        assert!(
+            publish_result.is_ok(),
+            "signature posit backpressure should not stall unrelated inbox messages"
+        );
+
+        let ready_message = tokio::time::timeout(Duration::from_millis(100), ready_rx.recv())
+            .await
+            .expect("ready message should not be blocked by signature posit backlog")
+            .expect("ready subscription unexpectedly closed");
+        assert_eq!(ready_message.epoch, 1);
+
+        let first_signature_posit = signature_posit_rx
+            .recv()
+            .await
+            .expect("signature posit subscription unexpectedly closed");
+        assert_eq!(first_signature_posit.0, sign_id);
     }
 }

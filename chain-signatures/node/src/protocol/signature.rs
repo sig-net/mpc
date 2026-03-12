@@ -1206,17 +1206,17 @@ impl SignatureSpawner {
         if from == self.me {
             return;
         }
-        let _ = self
-            .inboxes
-            .entry(sign_id)
-            .or_default()
-            .send(SignTaskMessage::PositMessage {
+        if let Err(err) = self.inboxes.entry(sign_id).or_default().try_send_lossy(
+            SignTaskMessage::PositMessage {
                 presignature_id,
                 round,
                 from,
                 action,
-            })
-            .await;
+            },
+            "sign_task_posit",
+        ) {
+            tracing::error!(?err, ?sign_id, "failed to send posit message");
+        }
     }
 
     fn handle_completion(&mut self, sign_id: SignId) {
