@@ -3,6 +3,7 @@ use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::BidirectionalTx;
 use crate::sign_bidirectional::BidirectionalTxId;
 use crate::sign_bidirectional::TransactionOutput;
+use crate::stream::ExecutionOutcome;
 use alloy::consensus::Transaction;
 use alloy::primitives::Bytes;
 use k256::Scalar;
@@ -42,19 +43,17 @@ impl CompletedTx {
         Self { tx, block_number }
     }
 
-    pub(crate) async fn create_failed_sign_request(
+    pub(crate) async fn create_follow_up_sign_request(
         &self,
         chain: Chain,
+        result: ExecutionOutcome,
     ) -> anyhow::Result<IndexedSignRequest> {
-        self.process_failed_tx(chain).await
-    }
-
-    pub(crate) fn create_sign_request_from_serialized_output(
-        &self,
-        chain: Chain,
-        serialized_output: RespondBidirectionalSerializedOutput,
-    ) -> anyhow::Result<IndexedSignRequest> {
-        self.create_respond_bidirectional_sign_request(chain, serialized_output)
+        match result {
+            ExecutionOutcome::Success { output } => {
+                self.create_respond_bidirectional_sign_request(chain, output)
+            }
+            ExecutionOutcome::Failed => self.process_failed_tx(chain).await,
+        }
     }
 
     async fn process_failed_tx(&self, chain: Chain) -> anyhow::Result<IndexedSignRequest> {

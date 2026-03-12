@@ -521,16 +521,9 @@ pub async fn process_execution_confirmed(
     pending_tx.status = status;
     let completed_tx = CompletedTx::new(pending_tx, block_height);
 
-    let sign_request = match result {
-        ExecutionOutcome::Success { output } => {
-            completed_tx.create_sign_request_from_serialized_output(source_chain, output)?
-        }
-        ExecutionOutcome::Failed => {
-            completed_tx
-                .create_failed_sign_request(source_chain)
-                .await?
-        }
-    };
+    let sign_request = completed_tx
+        .create_follow_up_sign_request(source_chain, result)
+        .await?;
 
     let chain = sign_request.chain;
     if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
