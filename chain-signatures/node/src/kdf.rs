@@ -31,7 +31,7 @@ pub fn derive_delta(
 const DELTA_DERIVATION_PREFIX: &str = "near-mpc-recovery v0.1.0 delta derivation:";
 
 // try to get the correct recovery id for this signature by brute force.
-pub fn into_eth_sig(
+pub fn into_signature(
     public_key: &k256::AffinePoint,
     big_r: &k256::AffinePoint,
     s: &k256::Scalar,
