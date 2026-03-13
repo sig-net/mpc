@@ -18,14 +18,13 @@ use elliptic_curve::sec1::FromEncodedPoint;
 use futures::StreamExt;
 use generic_array::GenericArray;
 use k256::Secp256k1;
-use mpc_contract::errors;
 use mpc_contract::primitives::SignRequest;
 use mpc_crypto::ScalarExt as _;
-use mpc_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_workspaces::types::{Gas, NearToken};
-use near_workspaces::{Account, AccountId};
+use near_workspaces::Account;
 use rand::Rng;
 use solana_client::nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient};
 use solana_client::rpc_config::{
@@ -110,10 +109,6 @@ pub struct SignOutcome {
     /// The account that signed the payload.
     pub account: Account,
 
-    /// Underlying rogue account that responded to the signature request if we wanted
-    /// to test the rogue behavior.
-    pub rogue: Option<Account>,
-
     pub payload: [u8; 32],
     pub payload_hash: [u8; 32],
     pub signature: FullSignature<Secp256k1>,
@@ -123,7 +118,6 @@ impl fmt::Debug for SignOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SignOutcome")
             .field("account", &self.account)
-            .field("rogue", &self.rogue)
             .field("payload", &self.payload)
             .field("payload_hash", &self.payload_hash)
             .field("signature_big_r", &self.signature.big_r)
@@ -151,7 +145,6 @@ pub struct SignAction<'a> {
     key_version: u32,
     gas: Gas,
     deposit: NearToken,
-    execute_rogue: bool,
     algo: String,
     dest: String,
     params: String,
@@ -169,7 +162,6 @@ impl<'a> SignAction<'a> {
             key_version: LATEST_MPC_KEY_VERSION,
             gas: SIGN_GAS,
             deposit: SIGN_DEPOSIT,
-            execute_rogue: false,
             algo: "secp256k1".into(),
             dest: "integration_test".into(),
             params: "{}".into(),
@@ -243,11 +235,6 @@ impl<'a> SignAction<'a> {
     /// Set the additional parameter metadata used by downstream chains.
     pub fn parameters(mut self, params: &str) -> Self {
         self.params = params.into();
-        self
-    }
-
-    pub fn rogue_responder(mut self) -> Self {
-        self.execute_rogue = true;
         self
     }
 
@@ -844,23 +831,6 @@ impl SignAction<'_> {
         let payload_hash = self.compute_payload_hash();
         let status = self.transact_sign(&account, payload_hash).await?;
 
-        // We have to use seperate transactions because one could fail.
-        // This leads to a potential race condition where this transaction could get sent after the signature completes, but I think that's unlikely
-        let rogue = if self.execute_rogue {
-            let (rogue, rogue_status) = self
-                .transact_rogue_respond(payload_hash, account.id())
-                .await?;
-            let err = wait_for::rogue_message_responded(rogue_status).await?;
-
-            assert!(
-                err.contains(&errors::RespondError::InvalidSignature.to_string()),
-                "Response instead was {err}"
-            );
-            Some(rogue)
-        } else {
-            None
-        };
-
         let signature = wait_for::signature_responded(status).await?;
         let mut mpc_pk_bytes = vec![0x04];
         mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
@@ -878,14 +848,13 @@ impl SignAction<'_> {
 
         Ok(SignOutcome {
             account,
-            rogue,
             signature,
             payload,
             payload_hash,
         })
     }
 
-    async fn account_or_new(&self) -> Account {
+    pub async fn account_or_new(&self) -> Account {
         if let Some(account) = &self.account {
             account.clone()
         } else {
@@ -893,13 +862,13 @@ impl SignAction<'_> {
         }
     }
 
-    fn payload_or_random(&mut self) -> [u8; 32] {
+    pub fn payload_or_random(&mut self) -> [u8; 32] {
         let payload = self.payload.unwrap_or_else(|| rand::thread_rng().gen());
         self.payload = Some(payload);
         payload
     }
 
-    fn compute_payload_hash(&mut self) -> [u8; 32] {
+    pub fn compute_payload_hash(&mut self) -> [u8; 32] {
         if let Some(override_hash) = self.payload_hash_override {
             // Ensure payload is initialised so callers can still inspect it.
             let _ = self.payload_or_random();
@@ -909,7 +878,7 @@ impl SignAction<'_> {
         }
     }
 
-    async fn transact_sign(
+    pub async fn transact_sign(
         &self,
         account: &Account,
         payload_hashed: [u8; 32],
@@ -936,47 +905,6 @@ impl SignAction<'_> {
             .transact_async()
             .await?;
         Ok(status)
-    }
-
-    async fn transact_rogue_respond(
-        &self,
-        payload_hash: [u8; 32],
-        predecessor: &AccountId,
-    ) -> anyhow::Result<(Account, AsyncTransactionStatus)> {
-        let rogue = self.nodes.worker().dev_create_account().await?;
-        let signer = InMemorySigner {
-            account_id: rogue.id().clone(),
-            public_key: rogue.secret_key().public_key().to_string().parse()?,
-            secret_key: rogue.secret_key().to_string().parse()?,
-        };
-
-        let big_r = serde_json::from_value(
-            "02EC7FA686BB430A4B700BDA07F2E07D6333D9E33AEEF270334EB2D00D0A6FEC6C".into(),
-        )?; // Fake BigR
-        let s = serde_json::from_value(
-            "20F90C540EE00133C911EA2A9ADE2ABBCC7AD820687F75E011DFEEC94DB10CD6".into(),
-        )?; // Fake S
-
-        let signature = Signature {
-            big_r,
-            s,
-            recovery_id: 0,
-        };
-
-        let sign_id = SignId::from_parts(predecessor, &payload_hash, &self.path, self.key_version);
-        let status = self
-            .nodes
-            .rpc_client
-            .call(&signer, self.nodes.contract().id(), "respond")
-            .args_json(serde_json::json!({
-                "sign_id": sign_id,
-                "signature": signature,
-            }))
-            .max_gas()
-            .transact_async()
-            .await?;
-
-        Ok((rogue, status))
     }
 }
 
