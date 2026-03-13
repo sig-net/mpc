@@ -27,7 +27,7 @@ pub struct Options {
     pub state_timeout: u64,
 
     /// Timeout used for sync requests to other nodes.
-    #[clap(long, env("MPC_NODE_SYNC_TIMEOUT"), default_value = "10000")]
+    #[clap(long, env("MPC_NODE_SYNC_TIMEOUT"), default_value = "60000")]
     pub sync_timeout: u64,
 }
 
@@ -49,7 +49,7 @@ impl Default for Options {
         Self {
             timeout: 1000,
             state_timeout: 1000,
-            sync_timeout: 10000,
+            sync_timeout: 60000,
         }
     }
 }
