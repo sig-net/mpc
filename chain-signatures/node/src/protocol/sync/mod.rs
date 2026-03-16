@@ -20,10 +20,6 @@ use super::triple::TripleId;
 /// our issue will more than likely not be the channel size.
 const MAX_SYNC_UPDATE_REQUESTS: usize = 1024;
 
-/// The interval which we will try to sync with other nodes to see if they have lost track
-/// of anything.
-pub const RECURRING_SYNC_INTERVAL: Duration = Duration::from_secs(3600 * 24);
-
 /// Timeout for waiting for a sync response from the sync task
 const SYNC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -162,14 +158,11 @@ impl SyncTask {
 
     pub async fn run(mut self) {
         tracing::info!("sync task has been started");
-        // Poll for our participant info from contract state
-        // TODO: constantly watch for changes on node state after this initial one so we can start/stop sync running.
+        // Polling loop for participant info from contract state
         let mut watcher_interval = tokio::time::interval(Duration::from_millis(500));
         // Trigger sync broadcasts to peers in need_sync state
         let mut sync_interval = tokio::time::interval(Duration::from_millis(200));
-        // Periodic full sync broadcast to all active peers (TODO: should not be necessary)
-        let mut broadcast_interval = tokio::time::interval(RECURRING_SYNC_INTERVAL);
-        // Poll whether any ongoing sync task has completed (from either sync_interval or broadcast_interval)
+        // Poll whether any ongoing sync task has completed
         let mut sync_check_interval = tokio::time::interval(Duration::from_millis(100));
 
         // Do NOT start until we have our own participant info
@@ -209,27 +202,6 @@ impl SyncTask {
                         update,
                         receivers.into_iter(),
                         me,
-                    ));
-                    broadcast = Some((start, task));
-                }
-                // do a new broadcast if there is no ongoing broadcast.
-                _ = broadcast_interval.tick() => {
-                    if broadcast.is_some() {
-                        // task is still ongoing, skip.
-                        continue;
-                    }
-
-                    let Some(update) = self.new_update(me).await else {
-                        continue;
-                    };
-                    let active = self.mesh_state.borrow().active().clone();
-
-                    let start = Instant::now();
-                    let task = tokio::spawn(broadcast_sync(
-                        self.client.clone(),
-                        update,
-                        active.into_iter(),
-                        me
                     ));
                     broadcast = Some((start, task));
                 }
