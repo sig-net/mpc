@@ -29,7 +29,7 @@ pub struct CompletedTx {
     block_number: u64,
 }
 
-#[derive(Hash, PartialEq, Eq, Clone, Debug)]
+#[derive(Hash, PartialEq, Eq, Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RespondBidirectionalTx {
     pub tx_id: BidirectionalTxId,
     pub output: RespondBidirectionalSerializedOutput,

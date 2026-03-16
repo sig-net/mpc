@@ -567,7 +567,7 @@ fn parse_cpi_events(
                 Err(e) => tracing::warn!("Failed to deserialize SignatureRequestedEvent: {e}"),
             }
         } else if event_discriminator == SignBidirectionalEvent::DISCRIMINATOR {
-            match SignBidirectionalEvent::deserialize(&mut &event_data[..]) {
+            match <SignBidirectionalEvent as AnchorDeserialize>::deserialize(&mut &event_data[..]) {
                 Ok(ev) => acc.push(Box::new(ev) as SignatureEventBox),
                 Err(e) => {
                     tracing::warn!("Failed to deserialize SignBidirectionalEvent: {e}")

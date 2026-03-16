@@ -219,7 +219,7 @@ pub struct SignatureRequestedEvent {
 }
 
 #[event]
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SignBidirectionalEvent {
     pub sender: Pubkey,
     pub serialized_transaction: Vec<u8>,

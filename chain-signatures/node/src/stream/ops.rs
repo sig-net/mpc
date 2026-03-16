@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SignBidirectionalEvent {
     Solana(signet_program::SignBidirectionalEvent),
     Hydration(HydrationSignBidirectionalRequestedEvent),
@@ -392,16 +392,17 @@ pub(crate) async fn process_respond_event(
     backlog: &Backlog,
 ) -> anyhow::Result<()> {
     let sign_id = SignId::new(respond_event.request_id());
-
     let source_chain = respond_event.source_chain();
-
-    let Some(sign_type) = backlog.sign_type(source_chain, &sign_id).await else {
-        anyhow::bail!(
-            "sign type not found for respond event (may have already been processed): {sign_id:?}"
-        )
+    let Some(entry) = backlog.get(source_chain, &sign_id).await else {
+        tracing::info!(
+            ?sign_id,
+            ?source_chain,
+            "respond event is already finalized or pruned; skipping"
+        );
+        return Ok(());
     };
 
-    let event = match sign_type {
+    let event = match entry.sign_type {
         SignRequestType::SignBidirectional(event) => event,
         SignRequestType::Sign => {
             tracing::info!(?sign_id, "sign request completed successfully");
@@ -418,15 +419,17 @@ pub(crate) async fn process_respond_event(
 
     tracing::info!(?sign_id, "bidirectional processing initial respond event");
     let target_chain = Chain::from_str(&event.dest())
-        .map_err(|err| anyhow::anyhow!("unable to parse target chain from dest: {err:?}"));
-    let target_chain = match target_chain {
-        Ok(chain) => chain,
-        Err(_) => Chain::Ethereum,
-    };
-
-    let Some(BacklogTransaction::Sign(_)) = backlog.get(source_chain, &sign_id).await else {
-        anyhow::bail!("bidirectional tx not found for advancement: {sign_id:?}");
-    };
+        .map_err(|err| anyhow::anyhow!("unable to parse target chain from dest: {err:?}"))?;
+    if !matches!(entry.tx, BacklogTransaction::Sign(_)) {
+        tracing::info!(
+            ?sign_id,
+            ?source_chain,
+            ?target_chain,
+            entry_type = %entry.tx.typename(),
+            "respond event backlog entry is already advanced; treating as processed"
+        );
+        return Ok(());
+    }
 
     let mpc_sig = respond_event.signature();
 
@@ -807,7 +810,7 @@ mod tests {
         // inspect the transaction to provide more debugging info on failure
         let maybe_tx = backlog.get(tx.source_chain, &sign_id).await;
         assert!(maybe_tx.is_some(), "expected sign tx to still exist");
-        let tx_after = maybe_tx.unwrap();
+        let tx_after = maybe_tx.unwrap().tx;
         if tx_after.status() != PendingRequestStatus::Success {
             panic!("expected Success but found status: {:?}", tx_after.status());
         }
@@ -829,6 +832,86 @@ mod tests {
             }
             _ => panic!("Expected Sign::Request"),
         }
+    }
+
+    #[tokio::test]
+    async fn process_respond_event_duplicate_ethereum_is_idempotent() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([3u8; 32]);
+        let args = SignArgs {
+            entropy: [1u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+
+        backlog
+            .insert(
+                Chain::Ethereum,
+                sign_id,
+                BacklogTransaction::Sign(SignTx {
+                    request_id: sign_id.request_id,
+                    source_chain: Chain::Ethereum,
+                    status: PendingRequestStatus::AwaitingResponse,
+                    args,
+                    unix_timestamp_indexed: current_unix_timestamp(),
+                }),
+                SignRequestType::Sign,
+            )
+            .await;
+
+        let event = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
+            request_id: sign_id.request_id,
+            responder: alloy::primitives::Address::from_slice(&[0u8; 20]),
+            signature: Signature::new(ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
+        });
+
+        let account_id: AccountId = "test.near".parse().unwrap();
+        let public_key = ProjectivePoint::GENERATOR.to_affine();
+        let (mut contract_watcher, _tx) =
+            ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+
+        // First event should complete the request.
+        process_respond_event(
+            event.clone(),
+            sign_tx.clone(),
+            &mut contract_watcher,
+            &backlog,
+        )
+        .await
+        .expect("first respond event should succeed");
+
+        let msg = timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match msg {
+            Sign::Completion(id) => assert_eq!(id, sign_id),
+            _ => panic!("expected completion"),
+        }
+
+        // Duplicate events should be ignored, not treated as an error.
+        // This mirrors production behavior where the same respond log can be
+        // emitted repeatedly by the Ethereum indexer pipeline.
+        for _ in 0..16 {
+            process_respond_event(
+                event.clone(),
+                sign_tx.clone(),
+                &mut contract_watcher,
+                &backlog,
+            )
+            .await
+            .expect("duplicate respond event should be idempotent");
+        }
+
+        let no_extra = timeout(Duration::from_millis(100), sign_rx.recv()).await;
+        assert!(
+            matches!(no_extra, Err(_) | Ok(None)),
+            "expected no additional completion message, got: {no_extra:?}"
+        );
     }
 
     #[tokio::test]
