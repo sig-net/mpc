@@ -232,9 +232,8 @@ async fn test_presignature_timeout() {
     let network = MpcFixtureBuilder::default()
         // configure network ready to generate presignatures immediately
         .only_generate_presignatures()
-        // set exact presignature count target
-        .with_min_presignatures_stockpile(5)
-        .with_max_presignatures_stockpile(5)
+        // set presignature generation target (each node generates at least 5)
+        .with_node_min_presignatures(5)
         // apply message filter to all nodes
         .with_outgoing_message_filter(0, create_filter())
         .with_outgoing_message_filter(1, create_filter())
@@ -426,11 +425,9 @@ async fn test_sign_requests_wait_for_presignatures() {
         .with_preshared_triples()
         .with_presignature_stockpile()
         // Disable triple generation since we're using preshared triples
-        .with_min_triples_stockpile(0)
-        .with_max_triples_stockpile(0)
+        .with_node_min_triples(0)
         // Enable presignature generation for second batch
-        .with_min_presignatures_stockpile(5)
-        .with_max_presignatures_stockpile(20)
+        .with_node_min_presignatures(5)
         .build()
         .await;
 
@@ -524,8 +521,7 @@ async fn test_sign_contention_5_nodes() {
     const THRESHOLD: usize = 4;
     const NUM_SIGN_REQUESTS: u8 = 5; // Reduced from 10 to match presignature availability
     const MIN_PRESIGNATURES_PER_OWNER: usize = 3;
-    const STOCKPILE_MIN: u32 = 8;
-    const STOCKPILE_MAX: u32 = 12;
+    const NODE_MIN_ARTIFACTS: u32 = 8;
 
     tracing::info!(
         num_nodes = NUM_NODES,
@@ -537,10 +533,8 @@ async fn test_sign_contention_5_nodes() {
     // Build network with pre-shared keys, generate triples/presignatures on the fly
     let network = MpcFixtureBuilder::new(NUM_NODES, THRESHOLD)
         .with_preshared_key()
-        .with_min_triples_stockpile(STOCKPILE_MIN)
-        .with_max_triples_stockpile(STOCKPILE_MAX)
-        .with_min_presignatures_stockpile(STOCKPILE_MIN)
-        .with_max_presignatures_stockpile(STOCKPILE_MAX)
+        .with_node_min_triples(NODE_MIN_ARTIFACTS)
+        .with_node_min_presignatures(NODE_MIN_ARTIFACTS)
         .build()
         .await;
 

@@ -296,3 +296,56 @@ async fn test_contract_initialization() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_contract_respond_rogue_signature() -> anyhow::Result<()> {
+    let (_, contract, _, sk) = init_env().await;
+    let predecessor_id = contract.id();
+    let path = "test";
+    let msg = "hello world";
+
+    let (payload_hash, sign_id, _valid_resp) =
+        create_response(predecessor_id, msg, path, &sk).await;
+    let request = SignRequest {
+        payload: payload_hash,
+        path: path.into(),
+        key_version: LATEST_MPC_KEY_VERSION,
+    };
+
+    // Submit a sign request
+    let _ = contract
+        .call("sign")
+        .args_json(serde_json::json!({ "request": request }))
+        .deposit(NearToken::from_yoctonear(1))
+        .max_gas()
+        .transact_async()
+        .await?;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // Respond with a bogus signature (zeroed big_r and s)
+    let rogue_signature = Signature {
+        big_r: k256::AffinePoint::IDENTITY,
+        s: k256::Scalar::ZERO,
+        recovery_id: 0,
+    };
+    let respond = contract
+        .call("respond")
+        .args_json(serde_json::json!({
+            "sign_id": sign_id,
+            "signature": rogue_signature,
+        }))
+        .max_gas()
+        .transact()
+        .await?;
+    let failure = respond
+        .into_result()
+        .expect_err("rogue signature should be rejected");
+    assert!(
+        failure
+            .to_string()
+            .contains(&errors::RespondError::InvalidSignature.to_string()),
+        "expected InvalidSignature error, got: {failure}",
+    );
+
+    Ok(())
+}

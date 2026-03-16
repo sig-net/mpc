@@ -73,15 +73,6 @@ async fn test_signature_basic() -> anyhow::Result<()> {
 }
 
 #[test(tokio::test)]
-async fn test_signature_rogue() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().await?;
-    nodes.wait().signable().await?;
-    nodes.sign().rogue_responder().await?;
-
-    Ok(())
-}
-
-#[test(tokio::test)]
 async fn test_signature_many() -> anyhow::Result<()> {
     let nodes = cluster::spawn()
         .disable_prestockpile()
