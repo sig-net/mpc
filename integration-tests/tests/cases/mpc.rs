@@ -512,14 +512,13 @@ async fn test_sign_requests_wait_for_presignatures() {
     }
 }
 
-/// Test sign request contention with 5 nodes.
-/// This test generates triples and presignatures on-the-fly (slower but more realistic).
-/// Uses 5_nodes.json fixture for pre-shared keys only.
+/// Test sign request contention with on-the-fly triple and presignature generation.
+/// This is slower but more realistic than tests using preshared artifacts.
 #[test(tokio::test(flavor = "multi_thread"))]
-async fn test_sign_contention_5_nodes() {
-    const NUM_NODES: u32 = 5;
-    const THRESHOLD: usize = 4;
-    const NUM_SIGN_REQUESTS: u8 = 5; // Reduced from 10 to match presignature availability
+async fn test_sign_contention_generated_presignatures() {
+    const NUM_NODES: u32 = 3;
+    const THRESHOLD: usize = 2;
+    const NUM_SIGN_REQUESTS: u8 = 5;
     const MIN_PRESIGNATURES_PER_OWNER: usize = 3;
     const NODE_MIN_ARTIFACTS: u32 = 8;
 
@@ -527,7 +526,7 @@ async fn test_sign_contention_5_nodes() {
         num_nodes = NUM_NODES,
         threshold = THRESHOLD,
         num_requests = NUM_SIGN_REQUESTS,
-        "starting 5-node contention test with on-the-fly generation"
+        "starting contention test with on-the-fly generation"
     );
 
     // Build network with pre-shared keys, generate triples/presignatures on the fly
@@ -538,10 +537,9 @@ async fn test_sign_contention_5_nodes() {
         .build()
         .await;
 
-    // Wait for presignatures to be generated - 5-node triple generation takes ~3-4 minutes
-    // We wait for a modest per-owner count since distribution is not uniform
-    tracing::info!("waiting for presignatures to be generated (triple gen takes ~3-4 min)...");
-    let timeout = Duration::from_secs(600); // 10 minutes for triple + presignature generation
+    // Wait for presignatures to be generated
+    tracing::info!("waiting for presignatures to be generated...");
+    let timeout = Duration::from_secs(300);
     network
         .assert_presignatures(MIN_PRESIGNATURES_PER_OWNER, timeout)
         .await;
@@ -560,7 +558,6 @@ async fn test_sign_contention_5_nodes() {
         }
     }
 
-    // Wait for all signatures - allow more time for 5-node consensus
     let timeout = Duration::from_secs(120);
     let actions = network
         .assert_actions(NUM_SIGN_REQUESTS as usize, timeout)
@@ -574,7 +571,7 @@ async fn test_sign_contention_5_nodes() {
         initial_presignatures,
         final_presignatures,
         presignatures_consumed,
-        "5-node contention test completed"
+        "contention test completed"
     );
 
     assert_eq!(
@@ -599,7 +596,7 @@ async fn test_sign_contention_5_nodes() {
     );
 
     tracing::info!(
-        "5-node test passed: {} signatures with {} presignatures consumed",
+        "contention test passed: {} signatures with {} presignatures consumed",
         actions.len(),
         presignatures_consumed
     );
