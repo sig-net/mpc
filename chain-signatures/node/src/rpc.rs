@@ -1833,7 +1833,7 @@ mod tests {
         let payload = scalar(&[42u8; 32]);
 
         let mut output = make_signature(&sk, epsilon, payload);
-        output.s = output.s + k256::Scalar::ONE;
+        output.s += k256::Scalar::ONE;
         let indexed = make_indexed(epsilon, payload);
 
         assert!(PublishAction::new(pk, indexed, output, vec![]).is_none());
