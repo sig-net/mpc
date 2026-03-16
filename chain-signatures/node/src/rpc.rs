@@ -419,7 +419,10 @@ impl RpcExecutor {
                         }
                     }
                     Chain::Bitcoin => {
-                        tracing::warn!(?chain, "publish not supported for Bitcoin yet, dropping action");
+                        tracing::warn!(
+                            ?chain,
+                            "publish not supported for Bitcoin yet, dropping action"
+                        );
                     }
                 }
             });
