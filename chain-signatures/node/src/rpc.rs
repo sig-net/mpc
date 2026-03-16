@@ -410,13 +410,16 @@ impl RpcExecutor {
 
             tokio::spawn(async move {
                 match chain {
-                    Chain::NEAR | Chain::Solana | Chain::Hydration | Chain::Bitcoin => {
+                    Chain::NEAR | Chain::Solana | Chain::Hydration => {
                         execute_publish(client, action, backlog).await;
                     }
                     Chain::Ethereum => {
                         if let Err(err) = eth_rpc_tx.send(action).await {
                             tracing::error!(%err, "eth: failed to send publish action");
                         }
+                    }
+                    Chain::Bitcoin => {
+                        tracing::warn!(?chain, "publish not supported for Bitcoin yet, dropping action");
                     }
                 }
             });
