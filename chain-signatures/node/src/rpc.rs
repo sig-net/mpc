@@ -410,7 +410,7 @@ impl RpcExecutor {
 
             tokio::spawn(async move {
                 match chain {
-                    Chain::NEAR | Chain::Solana | Chain::Hydration => {
+                    Chain::NEAR | Chain::Solana | Chain::Hydration | Chain::Bitcoin => {
                         execute_publish(client, action, backlog).await;
                     }
                     Chain::Ethereum => {
@@ -448,6 +448,7 @@ impl RpcExecutor {
                     ChainClient::Err("no hydration client available for node")
                 }
             }
+            Chain::Bitcoin => ChainClient::Err("no bitcoin client available for node"),
         }
     }
 }

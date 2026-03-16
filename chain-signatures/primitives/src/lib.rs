@@ -1,6 +1,7 @@
 pub mod bytes;
 
-use k256::{AffinePoint, Scalar};
+use k256::elliptic_curve::{bigint::ArrayEncoding, CurveArithmetic, PrimeField};
+use k256::{AffinePoint, Scalar, Secp256k1, U256};
 use near_account_id::AccountId;
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
@@ -8,6 +9,31 @@ use sha3::Digest;
 use std::{fmt, str::FromStr};
 
 use crate::bytes::cbor_scalar;
+
+pub type PublicKey = <Secp256k1 as CurveArithmetic>::AffinePoint;
+
+pub trait ScalarExt: Sized {
+    fn from_bytes(bytes: [u8; 32]) -> Option<Self>;
+    fn from_non_biased(bytes: [u8; 32]) -> Self;
+}
+
+impl ScalarExt for Scalar {
+    /// Returns nothing if the bytes are greater than the field size of Secp256k1.
+    /// This will be very rare with random bytes as the field size is 2^256 - 2^32 - 2^9 - 2^8 - 2^7 - 2^6 - 2^4 - 1
+    fn from_bytes(bytes: [u8; 32]) -> Option<Self> {
+        let bytes = U256::from_be_slice(bytes.as_slice());
+        Scalar::from_repr(bytes.to_be_byte_array()).into_option()
+    }
+
+    /// When the user can't directly select the value, this will always work
+    /// Use cases are things that we know have been hashed
+    fn from_non_biased(hash: [u8; 32]) -> Self {
+        // This should never happen.
+        // The space of inputs is 2^256, the space of the field is ~2^256 - 2^129.
+        // This mean that you'd have to run 2^127 hashes to find a value that causes this to fail.
+        Scalar::from_bytes(hash).expect("Derived epsilon value falls outside of the field")
+    }
+}
 
 pub const LATEST_MPC_KEY_VERSION: u32 = 1;
 pub const LEGACY_MPC_KEY_VERSION_0: u32 = 0;
@@ -125,6 +151,7 @@ pub enum Chain {
     NEAR,
     Ethereum,
     Solana,
+    Bitcoin,
     Hydration,
 }
 
@@ -134,22 +161,44 @@ impl Chain {
             Chain::NEAR => "NEAR",
             Chain::Ethereum => "Ethereum",
             Chain::Solana => "Solana",
+            Chain::Bitcoin => "Bitcoin",
             Chain::Hydration => "Hydration",
         }
     }
 
-    pub const fn iter() -> [Chain; 4] {
+    pub const fn iter() -> [Chain; 5] {
         [
             Chain::NEAR,
             Chain::Ethereum,
             Chain::Solana,
+            Chain::Bitcoin,
             Chain::Hydration,
         ]
     }
 
+    pub fn deprecated_chain_id(&self) -> &'static str {
+        match self {
+            Chain::NEAR => "0x18d",
+            Chain::Ethereum => "0x1",
+            Chain::Solana => "0x800001f5",
+            Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
+            Chain::Hydration => "polkadot:2034",
+        }
+    }
+
+    pub fn caip2_chain_id(&self) -> &'static str {
+        match self {
+            Chain::NEAR => "near:mainnet",
+            Chain::Ethereum => "eip155:1",
+            Chain::Solana => "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+            Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
+            Chain::Hydration => "polkadot:2034",
+        }
+    }
+
     pub fn checkpoint_interval(&self) -> Option<u64> {
         let (key, default) = match self {
-            Chain::NEAR => return None,
+            Chain::NEAR | Chain::Bitcoin => return None,
             Chain::Ethereum => ("CHECKPOINT_INTERVAL_ETHEREUM", 20),
             Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 120),
             Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 240),
@@ -175,6 +224,7 @@ impl Chain {
             Chain::NEAR => 3,
             Chain::Ethereum => 15 * 60,
             Chain::Solana => 3,
+            Chain::Bitcoin => 60 * 60 + 20 * 60, // 6 confirmations at 10 minutes each, plus some buffer
             Chain::Hydration => 12,
         }
     }
@@ -198,6 +248,7 @@ impl FromStr for Chain {
             "near" => Ok(Chain::NEAR),
             "ethereum" | "eth" => Ok(Chain::Ethereum),
             "solana" | "sol" => Ok(Chain::Solana),
+            "bitcoin" | "btc" => Ok(Chain::Bitcoin),
             "hydration" | "hyd" => Ok(Chain::Hydration),
             other => Err(format!("unknown or unsupported chain {other}")),
         }
