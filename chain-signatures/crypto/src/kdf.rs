@@ -1,4 +1,4 @@
-use crate::types::{PublicKey, ScalarExt};
+use crate::{PublicKey, ScalarExt};
 use anyhow::Context;
 use k256::{
     ecdsa::{RecoveryId, Signature, VerifyingKey},
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_derive_epsilon_stays_the_same() {
-        use crate::types::ScalarExt;
+        use crate::ScalarExt;
 
         // Expected scalar values for Ethereum epsilon derivation
         let expected_eth_v0 = Scalar::from_bytes([
