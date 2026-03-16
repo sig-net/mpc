@@ -7,6 +7,7 @@ use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::posit::PositInternalAction;
 use crate::protocol::MpcSignProtocol;
 use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage};
+use crate::storage::protocol_storage::ProtocolArtifact;
 use crate::storage::triple_storage::{TriplesTaken, TriplesTakenDropper};
 use crate::storage::TripleStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
@@ -56,7 +57,10 @@ impl FullPresignatureId {
 pub struct Presignature {
     pub id: PresignatureId,
     pub output: PresignOutput<Secp256k1>,
+    /// Original protocol participants
     pub participants: Vec<Participant>,
+    /// Nodes still holding their share of the artifact
+    pub holders: Option<Vec<Participant>>,
 }
 
 impl fmt::Debug for Presignature {
@@ -64,6 +68,7 @@ impl fmt::Debug for Presignature {
         f.debug_struct("Presignature")
             .field("id", &self.id)
             .field("participants", &self.participants)
+            .field("holders", &self.holders)
             .finish()
     }
 }
@@ -106,6 +111,7 @@ impl<'de> Deserialize<'de> for Presignature {
                 k: fields.output_k,
                 sigma: fields.output_sigma,
             },
+            holders: None,
             participants: fields.participants,
         })
     }
@@ -262,6 +268,7 @@ impl PresignatureGenerator {
                         id: self.id,
                         output,
                         participants: self.participants.clone(),
+                        holders: Some(self.participants.clone()),
                     };
                     if self.owner == me {
                         tracing::info!(id = self.id, "assigning presignature to myself");
@@ -478,8 +485,12 @@ impl PresignatureSpawner {
         };
 
         let pair_id = triples.artifact.id;
-        // note: only one of the pair's participants is needed since they are the same.
-        let participants = intersect_vec(&[active, &triples.artifact.triple0.public.participants]);
+        // use holders (not original participants) since some nodes may have lost the artifact.
+        let Some(holders) = triples.artifact.holders() else {
+            tracing::error!(?pair_id, "holders not set on taken triple pair");
+            return;
+        };
+        let participants = intersect_vec(&[active, holders]);
         if participants.len() < self.threshold {
             tracing::warn!(
                 ?pair_id,
@@ -875,6 +886,7 @@ mod tests {
                 sigma: <Secp256k1 as CurveArithmetic>::Scalar::ONE,
             },
             participants: vec![Participant::from(1), Participant::from(2)],
+            holders: None,
         };
 
         // Serialize Presignature to JSON

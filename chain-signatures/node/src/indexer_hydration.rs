@@ -184,7 +184,7 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct HydrationSignBidirectionalRequestedEvent {
     pub sender: [u8; 32],
     pub serialized_transaction: Vec<u8>,
