@@ -524,15 +524,16 @@ impl PresignatureSpawner {
         }
     }
 
+    /// Generate new presignatures if this node owns fewer than the per-node minimum
+    /// (`min_presignatures`) and the network-wide total hasn't reached the cap
+    /// (`max_presignatures`).
     async fn stockpile(&mut self, active: &[Participant], cfg: &ProtocolConfig) {
         let not_enough_presignatures = {
-            // Stopgap to prevent too many presignatures in the system. This should be around min_presig*nodes*2
-            // for good measure so that we have enough presignatures to do sig generation while also maintain
-            // the minimum number of presignature where a single node can't flood the system.
+            // Network-wide cap: stop generating once total potential presignatures reach max.
             if self.len_potential().await >= cfg.presignature.max_presignatures as usize {
                 false
             } else {
-                // We will always try to generate a new triple if we have less than the minimum
+                // Per-node floor: generate if this node owns fewer than min_presignatures.
                 self.len_mine().await < cfg.presignature.min_presignatures as usize
                     && self.len_introduced() < cfg.max_concurrent_introduction as usize
                     && self.ongoing.len() < cfg.max_concurrent_generation as usize
