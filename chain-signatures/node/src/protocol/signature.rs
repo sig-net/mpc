@@ -288,6 +288,9 @@ impl SignOrganizer {
                         if participants.len() < ctx.threshold {
                             tracing::warn!(
                                 ?sign_id,
+                                id = taken.artifact.id,
+                                ?holders,
+                                ?active,
                                 "discarding presignature due to inactive participants"
                             );
                             continue;
