@@ -1,10 +1,11 @@
-use crate::types::{PublicKey, ScalarExt};
+use crate::{PublicKey, ScalarExt};
 use anyhow::Context;
 use k256::{
     ecdsa::{RecoveryId, Signature, VerifyingKey},
     elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint, CurveArithmetic},
     Scalar, Secp256k1, SecretKey,
 };
+use mpc_primitives::Chain;
 use near_account_id::AccountId;
 use sha3::{Digest, Keccak256, Sha3_256};
 
@@ -12,75 +13,6 @@ use sha3::{Digest, Keccak256, Sha3_256};
 // Sig.Network with key derivation protocol vX.Y.Z.
 const EPSILON_DERIVATION_PREFIX_V1: &str = "sig.network v1.0.0 epsilon derivation";
 const EPSILON_DERIVATION_PREFIX_V2: &str = "sig.network v2.0.0 epsilon derivation";
-
-#[derive(Debug, Clone, Copy)]
-pub enum Chain {
-    Near,
-    Ethereum,
-    Solana,
-    Bitcoin,
-    Hydration,
-}
-
-struct ChainMeta {
-    deprecated_chain_id: &'static str,
-    caip2_chain_id: &'static str,
-}
-
-impl Chain {
-    const ALL: [Chain; 5] = [
-        Chain::Near,
-        Chain::Ethereum,
-        Chain::Solana,
-        Chain::Bitcoin,
-        Chain::Hydration,
-    ];
-
-    const fn meta(self) -> ChainMeta {
-        match self {
-            Chain::Near => ChainMeta {
-                deprecated_chain_id: "0x18d",
-                caip2_chain_id: "near:mainnet",
-            },
-            Chain::Ethereum => ChainMeta {
-                deprecated_chain_id: "0x1",
-                caip2_chain_id: "eip155:1",
-            },
-            Chain::Solana => ChainMeta {
-                deprecated_chain_id: "0x800001f5",
-                caip2_chain_id: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-            },
-            Chain::Bitcoin => ChainMeta {
-                deprecated_chain_id: "bip122:000000000019d6689c085ae165831e93",
-                caip2_chain_id: "bip122:000000000019d6689c085ae165831e93",
-            },
-            Chain::Hydration => ChainMeta {
-                deprecated_chain_id: "polkadot:2034",
-                caip2_chain_id: "polkadot:2034",
-            },
-        }
-    }
-
-    pub const fn deprecated_chain_id(self) -> &'static str {
-        self.meta().deprecated_chain_id
-    }
-
-    pub const fn caip2_chain_id(self) -> &'static str {
-        self.meta().caip2_chain_id
-    }
-
-    pub fn from_caip2_chain_id(chain_id: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|chain| chain.caip2_chain_id() == chain_id)
-    }
-
-    pub fn from_deprecated_chain_id(chain_id: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|chain| chain.deprecated_chain_id() == chain_id)
-    }
-}
 
 /// Creates a derivation path string using the legacy format
 fn deprecated_derivation_path(chain: Chain, sender: &str, path: &str) -> String {
@@ -117,7 +49,7 @@ fn keccak(derivation_path: impl AsRef<[u8]>) -> Scalar {
 }
 
 pub fn derive_epsilon_near(key_version: u32, predecessor_id: &AccountId, path: &str) -> Scalar {
-    let derivation_path = derivation_path(key_version, Chain::Near, predecessor_id.as_str(), path);
+    let derivation_path = derivation_path(key_version, Chain::NEAR, predecessor_id.as_str(), path);
     sha3(derivation_path)
 }
 
@@ -232,12 +164,12 @@ mod tests {
         );
 
         assert_eq!(
-            derivation_path(0, Chain::Near, "sender", "path"),
+            derivation_path(0, Chain::NEAR, "sender", "path"),
             "sig.network v1.0.0 epsilon derivation,0x18d,sender,path"
         );
 
         assert_eq!(
-            derivation_path(1, Chain::Near, "sender", "path"),
+            derivation_path(1, Chain::NEAR, "sender", "path"),
             "sig.network v2.0.0 epsilon derivation:near:mainnet:sender:path"
         );
 
@@ -253,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_derive_epsilon_stays_the_same() {
-        use crate::types::ScalarExt;
+        use crate::ScalarExt;
 
         // Expected scalar values for Ethereum epsilon derivation
         let expected_eth_v0 = Scalar::from_bytes([

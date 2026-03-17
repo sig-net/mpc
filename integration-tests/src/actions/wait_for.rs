@@ -1,18 +1,15 @@
 use std::task::Poll;
 use std::time::Duration;
 
-use anyhow::Context;
 use backon::ConstantBuilder;
 use backon::Retryable;
 use cait_sith::FullSignature;
 use k256::Secp256k1;
 use mpc_primitives::Signature;
 use near_fetch::ops::AsyncTransactionStatus;
-use near_primitives::errors::ActionErrorKind;
 use near_primitives::hash::CryptoHash;
 use near_primitives::views::ExecutionOutcomeWithIdView;
 use near_primitives::views::ExecutionStatusView;
-use near_primitives::views::FinalExecutionStatus;
 use std::collections::HashMap;
 
 #[derive(Debug, thiserror::Error)]
@@ -77,61 +74,6 @@ pub async fn signature_responded(
             "Should not return more than one signature".to_string(),
         ))),
     }
-}
-
-// Check that the rogue message failed
-pub async fn rogue_message_responded(status: AsyncTransactionStatus) -> anyhow::Result<String> {
-    let is_tx_ready = || async {
-        let Poll::Ready(outcome) = status
-            .status()
-            .await
-            .map_err(|err| WaitForError::JsonRpc(format!("{err:?}")))?
-        else {
-            return Err(WaitForError::Signature(SignatureError::NotYetAvailable));
-        };
-
-        let FinalExecutionStatus::Failure(failure) = outcome.status() else {
-            return Err(WaitForError::JsonRpc(format!(
-                "rogue: unexpected success {:?}",
-                outcome.status()
-            )));
-        };
-
-        use near_primitives::errors::TxExecutionError;
-        let TxExecutionError::ActionError(action_err) = failure else {
-            return Err(WaitForError::JsonRpc(format!(
-                "rogue: invalid transaction {:?}",
-                outcome.status(),
-            )));
-        };
-
-        let ActionErrorKind::FunctionCallError(ref err) = action_err.kind else {
-            return Err(WaitForError::JsonRpc(format!(
-                "rogue: not a function call error {:?}",
-                outcome.status(),
-            )));
-        };
-        use near_primitives::errors::FunctionCallError;
-        let FunctionCallError::ExecutionError(err_msg) = err else {
-            return Err(WaitForError::JsonRpc(format!(
-                "rogue: wrong execution error {:?}",
-                outcome.status(),
-            )));
-        };
-        Ok(err_msg.clone())
-    };
-
-    // Poll every 1 second to detect completion faster
-    let strategy = ConstantBuilder::default()
-        .with_delay(Duration::from_secs(1))
-        .with_max_times(30); // 30 seconds max total wait time
-
-    let signature = is_tx_ready
-        .retry(&strategy)
-        .await
-        .with_context(|| "failed to wait for rogue message response")?;
-
-    Ok(signature.clone())
 }
 
 pub async fn batch_signature_responded(

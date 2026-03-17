@@ -59,14 +59,15 @@ struct MpcFixtureNodeBuilder {
 /// This struct is used to change settings before building the final network.
 struct FixtureConfig {
     input: FixtureInput,
+    num_nodes: u32,
 
     use_preshared_triples: bool,
     presignature_stockpile: bool,
 
-    min_triples: u32,
-    max_triples: u32,
-    min_presignatures: u32,
-    max_presignatures: u32,
+    node_min_triples: u32,
+    network_max_triples: u32,
+    node_min_presignatures: u32,
+    network_max_presignatures: u32,
 
     signature_timeout_ms: u64,
     presignature_timeout_ms: u64,
@@ -108,12 +109,13 @@ impl FixtureConfig {
     fn new(num_nodes: u32) -> Self {
         Self {
             input: FixtureInput::load(num_nodes),
+            num_nodes,
             use_preshared_triples: false,
             presignature_stockpile: false,
-            min_triples: 10,
-            max_triples: 30,
-            min_presignatures: 10,
-            max_presignatures: 30,
+            node_min_triples: 10,
+            network_max_triples: 10 * num_nodes * 4,
+            node_min_presignatures: 10,
+            network_max_presignatures: 10 * num_nodes * 4,
             signature_timeout_ms: 10_000,
             presignature_timeout_ms: 10_000,
             triple_timeout_ms: min_to_ms(10),
@@ -209,11 +211,11 @@ impl MpcFixtureBuilder {
     fn build_protocol_config(&self) -> ProtocolConfig {
         let mut config = ProtocolConfig::default();
         config.signature.generation_timeout = self.fixture_config.signature_timeout_ms;
-        config.presignature.max_presignatures = self.fixture_config.max_presignatures;
-        config.presignature.min_presignatures = self.fixture_config.min_presignatures;
+        config.presignature.max_presignatures = self.fixture_config.network_max_presignatures;
+        config.presignature.min_presignatures = self.fixture_config.node_min_presignatures;
         config.presignature.generation_timeout = self.fixture_config.presignature_timeout_ms;
-        config.triple.max_triples = self.fixture_config.max_triples;
-        config.triple.min_triples = self.fixture_config.min_triples;
+        config.triple.max_triples = self.fixture_config.network_max_triples;
+        config.triple.min_triples = self.fixture_config.node_min_triples;
         config.triple.generation_timeout = self.fixture_config.triple_timeout_ms;
         config
     }
@@ -278,27 +280,21 @@ impl MpcFixtureBuilder {
         self
     }
 
-    /// Set protocol config
-    pub fn with_min_triples_stockpile(mut self, value: u32) -> Self {
-        self.fixture_config.min_triples = value;
+    /// Set the per-node minimum number of triples to maintain.
+    /// Each node will keep generating triples until it owns at least this many.
+    /// Also updates the network-wide max to `value * num_nodes * 4`.
+    pub fn with_node_min_triples(mut self, value: u32) -> Self {
+        self.fixture_config.node_min_triples = value;
+        self.fixture_config.network_max_triples = value * self.fixture_config.num_nodes * 4;
         self
     }
 
-    /// Set protocol config
-    pub fn with_max_triples_stockpile(mut self, value: u32) -> Self {
-        self.fixture_config.max_triples = value;
-        self
-    }
-
-    /// Set protocol config
-    pub fn with_min_presignatures_stockpile(mut self, value: u32) -> Self {
-        self.fixture_config.min_presignatures = value;
-        self
-    }
-
-    /// Set protocol config
-    pub fn with_max_presignatures_stockpile(mut self, value: u32) -> Self {
-        self.fixture_config.max_presignatures = value;
+    /// Set the per-node minimum number of presignatures to maintain.
+    /// Each node will keep generating presignatures until it owns at least this many.
+    /// Also updates the network-wide max to `value * num_nodes * 4`.
+    pub fn with_node_min_presignatures(mut self, value: u32) -> Self {
+        self.fixture_config.node_min_presignatures = value;
+        self.fixture_config.network_max_presignatures = value * self.fixture_config.num_nodes * 4;
         self
     }
 
@@ -339,9 +335,7 @@ impl MpcFixtureBuilder {
     ///
     /// This setup will not attempt to stockpile presignatures.
     pub fn only_generate_triples(self) -> Self {
-        self.with_preshared_key()
-            .with_min_presignatures_stockpile(0)
-            .with_max_presignatures_stockpile(0)
+        self.with_preshared_key().with_node_min_presignatures(0)
     }
 
     /// Short-hand for creating an MPC setup that's prepared to produce presignatures.
@@ -350,8 +344,7 @@ impl MpcFixtureBuilder {
     pub fn only_generate_presignatures(self) -> Self {
         self.with_preshared_key()
             .with_preshared_triples()
-            .with_min_triples_stockpile(0)
-            .with_max_triples_stockpile(0)
+            .with_node_min_triples(0)
     }
 
     /// Short-hand for creating an MPC setup that's prepared to produce signatures.
@@ -360,10 +353,8 @@ impl MpcFixtureBuilder {
     pub fn only_generate_signatures(self) -> Self {
         self.with_preshared_key()
             .with_presignature_stockpile()
-            .with_min_triples_stockpile(0)
-            .with_max_triples_stockpile(0)
-            .with_min_presignatures_stockpile(0)
-            .with_max_presignatures_stockpile(0)
+            .with_node_min_triples(0)
+            .with_node_min_presignatures(0)
     }
 }
 

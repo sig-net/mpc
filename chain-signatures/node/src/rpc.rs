@@ -419,7 +419,10 @@ impl RpcExecutor {
                         }
                     }
                     Chain::Bitcoin => {
-                        tracing::error!("bitcoin is currently not supported");
+                        tracing::warn!(
+                            ?chain,
+                            "publish not supported for Bitcoin yet, dropping action"
+                        );
                     }
                 }
             });
@@ -451,7 +454,7 @@ impl RpcExecutor {
                     ChainClient::Err("no hydration client available for node")
                 }
             }
-            Chain::Bitcoin => ChainClient::Err("bitcoin is currently not supported"),
+            Chain::Bitcoin => ChainClient::Err("no bitcoin client available for node"),
         }
     }
 }
