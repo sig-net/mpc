@@ -155,6 +155,14 @@ pub enum Chain {
     Hydration,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
+pub enum ChainFromError {
+    #[error("unknown CAIP-2 chain ID: {0}")]
+    UnknownCaip2Id(String),
+    #[error("unknown deprecated chain ID: {0}")]
+    UnknownDeprecatedId(String),
+}
+
 impl Chain {
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -233,16 +241,18 @@ impl Chain {
         self.expected_finality_time_secs() + 60
     }
 
-    pub fn from_caip2_chain_id(chain_id: &str) -> Option<Self> {
+    pub fn from_caip2_chain_id(chain_id: &str) -> Result<Self, ChainFromError> {
         Self::iter()
             .into_iter()
             .find(|chain| chain.caip2_chain_id() == chain_id)
+            .ok_or_else(|| ChainFromError::UnknownCaip2Id(chain_id.to_string()))
     }
 
-    pub fn from_deprecated_chain_id(chain_id: &str) -> Option<Self> {
+    pub fn from_deprecated_chain_id(chain_id: &str) -> Result<Self, ChainFromError> {
         Self::iter()
             .into_iter()
             .find(|chain| chain.deprecated_chain_id() == chain_id)
+            .ok_or_else(|| ChainFromError::UnknownDeprecatedId(chain_id.to_string()))
     }
 }
 

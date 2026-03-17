@@ -128,13 +128,9 @@ impl SignBidirectionalEvent {
         }
     }
 
-    pub fn target_chain(&self) -> anyhow::Result<Chain> {
-        let event_caip2_id = self.caip2_id();
-        Chain::from_caip2_chain_id(&event_caip2_id).ok_or_else(|| {
-            anyhow::anyhow!(
-                "unable to parse target chain from event caip2_id field: {event_caip2_id}"
-            )
-        })
+    pub fn target_chain(&self) -> Chain {
+        // we can directly unwrap because we've checked that the chain id is valid during event deserialization in the indexer
+        Chain::from_caip2_chain_id(&self.caip2_id()).unwrap()
     }
 }
 
@@ -260,8 +256,7 @@ pub(crate) async fn process_sign_event(
             args: sign_request.args.clone(),
             unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
         }),
-        SignRequestType::SignBidirectional(event) => {
-            event.target_chain()?;
+        SignRequestType::SignBidirectional(_) => {
             // For bidirectional requests, start with a Sign transaction
             // The protocol will advance it to Bidirectional after generating the signature
             BacklogTransaction::Sign(SignTx {
@@ -311,16 +306,13 @@ pub(crate) async fn process_sign_request(
             args: sign_request.args.clone(),
             unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
         }),
-        SignRequestType::SignBidirectional(event) => {
-            event.target_chain()?;
-            BacklogTransaction::Sign(SignTx {
-                request_id: sign_id.request_id,
-                source_chain: sign_request.chain,
-                status: PendingRequestStatus::AwaitingResponse,
-                args: sign_request.args.clone(),
-                unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
-            })
-        }
+        SignRequestType::SignBidirectional(_) => BacklogTransaction::Sign(SignTx {
+            request_id: sign_id.request_id,
+            source_chain: sign_request.chain,
+            status: PendingRequestStatus::AwaitingResponse,
+            args: sign_request.args.clone(),
+            unix_timestamp_indexed: sign_request.unix_timestamp_indexed,
+        }),
         _ => anyhow::bail!("Unexpected sign request type"),
     };
 
@@ -431,7 +423,7 @@ pub(crate) async fn process_respond_event(
 
     tracing::info!(?sign_id, "bidirectional processing initial respond event");
 
-    let target_chain = event.target_chain()?;
+    let target_chain = event.target_chain();
 
     if !matches!(entry.tx, BacklogTransaction::Sign(_)) {
         tracing::info!(

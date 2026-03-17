@@ -8055,6 +8055,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha3",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
