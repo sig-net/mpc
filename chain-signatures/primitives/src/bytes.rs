@@ -33,8 +33,8 @@ pub mod cbor_scalar {
 }
 
 pub mod borsh_scalar {
+    use crate::ScalarExt as _;
     use k256::Scalar;
-    use mpc_crypto::ScalarExt as _;
     use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
     use std::io;
 
@@ -73,9 +73,9 @@ pub mod borsh_affine_point {
 
 #[cfg(test)]
 mod tests {
+    use crate::ScalarExt as _;
     use borsh::{BorshDeserialize, BorshSerialize};
     use k256::{elliptic_curve::PrimeField, Scalar};
-    use mpc_crypto::ScalarExt as _;
     use serde::{Deserialize, Serialize};
 
     #[test]
