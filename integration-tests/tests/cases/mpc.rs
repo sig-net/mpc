@@ -1108,7 +1108,7 @@ fn test_filter_artifacts_on_all_nodes() {
     let filtered = filter_artifacts_on_all_nodes(data);
 
     // Only artifact 1 should survive
-    for (_, owners) in &filtered {
+    for owners in filtered.values() {
         let ids: Vec<_> = owners.values().flatten().map(|a| a.id).collect();
         assert_eq!(ids, vec![1]);
     }
