@@ -19,6 +19,10 @@ impl FixtureInput {
         let data = match num_nodes {
             3 => include_str!("./3_nodes.json"),
             5 => include_str!("./5_nodes.json"),
+            7 => include_str!("./7_nodes.json"),
+            // To add a new file, copy "./empty_template.json" first and add
+            // data after running the tests. Incrementally add key shares,
+            // triples, and finally presignatures in separate steps.
             other => panic!("No fixture input for {other} nodes available"),
         };
 
