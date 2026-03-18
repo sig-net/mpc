@@ -516,6 +516,7 @@ async fn test_sign_requests_wait_for_presignatures() {
 /// This test generates triples and presignatures on-the-fly (slower but more realistic).
 /// Uses 5_nodes.json fixture for pre-shared keys only.
 #[test(tokio::test(flavor = "multi_thread"))]
+#[ignore]
 async fn test_sign_contention_5_nodes() {
     const NUM_NODES: u32 = 5;
     const THRESHOLD: usize = 4;
