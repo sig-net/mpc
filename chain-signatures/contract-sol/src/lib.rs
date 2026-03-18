@@ -260,19 +260,14 @@ pub struct SignBidirectionalEvent {
 
     /// The program ID of the Solana program that emitted this event.
     ///
-    /// Used by off-chain services (e.g., relayers, indexers) to filter and
-    /// verify events from the correct program.
+    /// Used by MPC service to filter and verify events from the correct program.
     ///
-    /// MUST be provided and MUST match the deployed program ID.
+    /// MUST match the deployed program ID.
     pub program_id: Pubkey,
 
     /// Schema used to deserialize the output of the signed transaction.
-    ///
-    /// MUST be provided.
     pub output_deserialization_schema: Vec<u8>,
 
     /// Schema used to serialize the `respond_bidirectional` payload.
-    ///
-    /// MUST be provided.
     pub respond_serialization_schema: Vec<u8>,
 }

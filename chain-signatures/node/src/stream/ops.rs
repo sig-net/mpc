@@ -128,9 +128,9 @@ impl SignBidirectionalEvent {
         }
     }
 
-    pub fn target_chain(&self) -> Chain {
+    pub fn target_chain(&self) -> Result<Chain, mpc_primitives::ChainFromError> {
         // we can directly unwrap because we've checked that the chain id is valid during event deserialization in the indexer
-        Chain::from_caip2_chain_id(&self.caip2_id()).unwrap()
+        Chain::from_caip2_chain_id(&self.caip2_id())
     }
 }
 
@@ -423,7 +423,9 @@ pub(crate) async fn process_respond_event(
 
     tracing::info!(?sign_id, "bidirectional processing initial respond event");
 
-    let target_chain = event.target_chain();
+    let target_chain = event.target_chain().map_err(|err| {
+        anyhow::anyhow!("failed to process respond event: {err:?} for sign id: {sign_id:?}")
+    })?;
 
     if !matches!(entry.tx, BacklogTransaction::Sign(_)) {
         tracing::info!(
