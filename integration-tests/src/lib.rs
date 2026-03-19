@@ -406,6 +406,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     let message_options = node_client::Options {
         timeout: 1000,
         state_timeout: 1000,
+        sync_timeout: 60000,
     };
 
     // If using pregenerated keys, inject them into storage before nodes start
