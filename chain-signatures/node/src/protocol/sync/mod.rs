@@ -21,10 +21,10 @@ use super::triple::TripleId;
 const MAX_SYNC_UPDATE_REQUESTS: usize = 1024;
 
 /// Timeout for waiting for a sync response from the sync task
-const SYNC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+const SYNC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Timeout for the entire broadcast operation (waiting for all peers to respond)
-const BROADCAST_TIMEOUT: Duration = Duration::from_secs(10);
+const BROADCAST_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
