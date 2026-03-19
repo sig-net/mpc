@@ -92,9 +92,34 @@ type EthContractInstance = ContractInstance<EthContractFillProvider>;
 pub struct PublishAction {
     pub public_key: mpc_crypto::PublicKey,
     pub indexed: IndexedSignRequest,
-    output: FullSignature<Secp256k1>,
+    pub signature: Signature,
     pub participants: Vec<Participant>,
-    timestamp: Instant,
+    pub timestamp: Instant,
+}
+
+impl PublishAction {
+    pub fn new(
+        public_key: mpc_crypto::PublicKey,
+        indexed: IndexedSignRequest,
+        output: FullSignature<Secp256k1>,
+        participants: Vec<Participant>,
+    ) -> Option<Self> {
+        let expected_public_key = mpc_crypto::derive_key(public_key, indexed.args.epsilon);
+        let signature = crate::kdf::into_signature(
+            &expected_public_key,
+            &output.big_r,
+            &output.s,
+            indexed.args.payload,
+        )
+        .ok()?;
+        Some(Self {
+            public_key,
+            indexed,
+            signature,
+            participants,
+            timestamp: Instant::now(),
+        })
+    }
 }
 
 pub enum RpcAction {
@@ -114,19 +139,17 @@ impl RpcChannel {
         output: FullSignature<Secp256k1>,
         participants: Vec<Participant>,
     ) {
+        let sign_id = indexed.id;
+        let Some(action) = PublishAction::new(public_key, indexed, output, participants) else {
+            tracing::error!(
+                ?sign_id,
+                "failed to validate signature; trashing publish request",
+            );
+            return;
+        };
         let rpc = self.clone();
         tokio::spawn(async move {
-            if let Err(err) = rpc
-                .tx
-                .send(RpcAction::Publish(PublishAction {
-                    public_key,
-                    indexed,
-                    output,
-                    participants,
-                    timestamp: Instant::now(),
-                }))
-                .await
-            {
+            if let Err(err) = rpc.tx.send(RpcAction::Publish(action)).await {
                 tracing::error!(%err, "failed to send publish action");
             }
         });
@@ -920,22 +943,6 @@ async fn execute_publish(client: ChainClient, action: PublishAction, backlog: Ba
         "trying to publish signature",
     );
 
-    let expected_public_key =
-        mpc_crypto::derive_key(action.public_key, action.indexed.args.epsilon);
-
-    let Ok(signature) = crate::kdf::into_eth_sig(
-        &expected_public_key,
-        &action.output.big_r,
-        &action.output.s,
-        action.indexed.args.payload,
-    ) else {
-        tracing::error!(
-            ?sign_id,
-            "failed to generate a recovery id; trashing publish request",
-        );
-        return;
-    };
-
     let retry_cfg = RetryConfig {
         max_attempts: MAX_PUBLISH_RETRY,
         per_attempt_timeout: Duration::from_secs(120),
@@ -947,20 +954,20 @@ async fn execute_publish(client: ChainClient, action: PublishAction, backlog: Ba
         |_attempt| async {
             match &client {
                 ChainClient::Near(near) => {
-                    try_publish_near(near, &action, &action.timestamp, &signature)
+                    try_publish_near(near, &action, &action.timestamp, &action.signature)
                         .await
                         .map_err(|_| ())
                 }
                 ChainClient::Ethereum(eth) => {
-                    try_publish_eth(eth, &action, &action.timestamp, &signature).await
+                    try_publish_eth(eth, &action, &action.timestamp, &action.signature).await
                 }
                 ChainClient::Solana(sol) => {
-                    try_publish_sol(sol, &action, &action.timestamp, &signature)
+                    try_publish_sol(sol, &action, &action.timestamp, &action.signature)
                         .await
                         .map_err(|_| ())
                 }
                 ChainClient::Hydration(hyd) => {
-                    try_publish_hydration(hyd, &action, &action.timestamp, &signature)
+                    try_publish_hydration(hyd, &action, &action.timestamp, &action.signature)
                         .await
                         .map_err(|_| ())
                 }
@@ -1509,27 +1516,10 @@ async fn try_batch_publish_eth(
 }
 
 async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAction>) {
-    let mut signatures: HashMap<SignId, Signature> = HashMap::new();
-
-    for action in actions.iter() {
-        let expected_public_key =
-            mpc_crypto::derive_key(action.public_key, action.indexed.args.epsilon);
-
-        let sign_id = action.indexed.id;
-        let Ok(signature) = crate::kdf::into_eth_sig(
-            &expected_public_key,
-            &action.output.big_r,
-            &action.output.s,
-            action.indexed.args.payload,
-        ) else {
-            tracing::error!(
-                ?sign_id,
-                "failed to generate a recovery id; trashing publish request",
-            );
-            return;
-        };
-        signatures.insert(sign_id, signature);
-    }
+    let signatures: HashMap<SignId, Signature> = actions
+        .iter()
+        .map(|action| (action.indexed.id, action.signature))
+        .collect();
 
     let cfg = RetryConfig {
         max_attempts: MAX_PUBLISH_RETRY,
@@ -1775,4 +1765,84 @@ async fn try_publish_hydration(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k256::elliptic_curve::ops::Reduce;
+    use k256::elliptic_curve::point::DecompressPoint;
+    use mpc_crypto::kdf::derive_secret_key;
+
+    fn scalar(bytes: &[u8; 32]) -> k256::Scalar {
+        <k256::Scalar as Reduce<<Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(
+            bytes.into(),
+        )
+    }
+
+    fn make_signature(
+        sk: &k256::SecretKey,
+        epsilon: k256::Scalar,
+        payload: k256::Scalar,
+    ) -> FullSignature<Secp256k1> {
+        let signing_key = k256::ecdsa::SigningKey::from(&derive_secret_key(sk, epsilon));
+        let (ecdsa_sig, _): (k256::ecdsa::Signature, _) =
+            <k256::ecdsa::SigningKey as k256::ecdsa::signature::hazmat::PrehashSigner<_>>::sign_prehash(
+                &signing_key,
+                &payload.to_bytes(),
+            )
+            .expect("signing should succeed");
+        let (r_bytes, _) = ecdsa_sig.split_bytes();
+        let big_r =
+            AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
+                .unwrap();
+        FullSignature {
+            big_r,
+            s: *ecdsa_sig.s().as_ref(),
+        }
+    }
+
+    fn make_indexed(epsilon: k256::Scalar, payload: k256::Scalar) -> IndexedSignRequest {
+        IndexedSignRequest {
+            id: SignId::new([0u8; 32]),
+            args: mpc_primitives::SignArgs {
+                entropy: [0u8; 32],
+                epsilon,
+                payload,
+                path: "test".into(),
+                key_version: 0,
+            },
+            chain: Chain::NEAR,
+            unix_timestamp_indexed: 0,
+            timestamp_created: Instant::now(),
+            sign_request_type: SignRequestType::Sign,
+        }
+    }
+
+    #[test]
+    fn publish_action_accepts_valid_signature() {
+        let sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let pk: AffinePoint = sk.public_key().into();
+        let epsilon = scalar(&[1u8; 32]);
+        let payload = scalar(&[42u8; 32]);
+
+        let output = make_signature(&sk, epsilon, payload);
+        let indexed = make_indexed(epsilon, payload);
+
+        assert!(PublishAction::new(pk, indexed, output, vec![]).is_some());
+    }
+
+    #[test]
+    fn publish_action_rejects_invalid_signature() {
+        let sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let pk: AffinePoint = sk.public_key().into();
+        let epsilon = scalar(&[1u8; 32]);
+        let payload = scalar(&[42u8; 32]);
+
+        let mut output = make_signature(&sk, epsilon, payload);
+        output.s += k256::Scalar::ONE;
+        let indexed = make_indexed(epsilon, payload);
+
+        assert!(PublishAction::new(pk, indexed, output, vec![]).is_none());
+    }
 }
