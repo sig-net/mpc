@@ -56,16 +56,16 @@ fn participants(len: usize) -> Participants {
 }
 
 struct SyncEnv {
-    threshold: usize,
-    node_id: AccountId,
+    _threshold: usize,
+    _node_id: AccountId,
     me: Participant,
-    participants: Participants,
-    mesh_state: watch::Receiver<MeshState>,
-    client: NodeClient,
-    redis: Redis,
+    _participants: Participants,
+    _mesh_state: watch::Receiver<MeshState>,
+    _client: NodeClient,
+    _redis: Redis,
     triples: TripleStorage,
     presignatures: PresignatureStorage,
-    sync_channel: SyncChannel,
+    _sync_channel: SyncChannel,
 }
 
 fn env() -> (Runtime, SyncEnv) {
@@ -131,16 +131,16 @@ fn env() -> (Runtime, SyncEnv) {
         );
 
         SyncEnv {
-            threshold,
-            node_id,
+            _threshold: threshold,
+            _node_id: node_id,
             me,
-            participants,
-            mesh_state: mesh.watch(),
-            client,
-            redis,
+            _participants: participants,
+            _mesh_state: mesh.watch(),
+            _client: client,
+            _redis: redis,
             triples,
             presignatures,
-            sync_channel,
+            _sync_channel: sync_channel,
         }
     });
 
