@@ -25,6 +25,10 @@ pub struct Options {
     /// Timeout used for fetching the state of a node.
     #[clap(long, env("MPC_NODE_STATE_TIMEOUT"), default_value = "1000")]
     pub state_timeout: u64,
+
+    /// Timeout used for sync requests to other nodes.
+    #[clap(long, env("MPC_NODE_SYNC_TIMEOUT"), default_value = "60000")]
+    pub sync_timeout: u64,
 }
 
 impl Options {
@@ -34,6 +38,8 @@ impl Options {
             self.timeout.to_string(),
             "--state-timeout".to_string(),
             self.state_timeout.to_string(),
+            "--sync-timeout".to_string(),
+            self.sync_timeout.to_string(),
         ]
     }
 }
@@ -43,6 +49,7 @@ impl Default for Options {
         Self {
             timeout: 1000,
             state_timeout: 1000,
+            sync_timeout: 60000,
         }
     }
 }
@@ -143,12 +150,14 @@ impl NodeClient {
         &self,
         url: &Url,
         payload: &T,
+        timeout: Duration,
     ) -> Result<R, RequestError> {
         let resp = self
             .http
             .post(url.clone())
             .header("content-type", "application/cbor")
             .body(cbor_to_bytes(payload).map_err(|err| RequestError::Conversion(err.to_string()))?)
+            .timeout(timeout)
             .send()
             .await?;
 
@@ -214,7 +223,12 @@ impl NodeClient {
     ) -> Result<SyncUpdate, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("sync");
-        self.post_cbor_response(&url, update).await
+        self.post_cbor_response(
+            &url,
+            update,
+            Duration::from_millis(self.options.sync_timeout),
+        )
+        .await
     }
 
     pub async fn checkpoint(
