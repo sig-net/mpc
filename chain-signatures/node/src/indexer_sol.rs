@@ -191,7 +191,6 @@ impl SignatureEvent for SignatureRequestedEvent {
         let epsilon = derive_epsilon_sol(self.key_version, &self.sender_string(), &self.path);
 
         let sign_id = SignId::new(self.generate_request_id());
-        tracing::info!(?sign_id, "solana signature requested");
 
         Ok(IndexedSignRequest {
             id: sign_id,
@@ -256,7 +255,6 @@ impl SignatureEvent for SignBidirectionalEvent {
         let epsilon = derive_epsilon_sol(self.key_version, &self.sender_string(), &self.path);
 
         let sign_id = SignId::new(request_id);
-        tracing::info!(?sign_id, "solana signature requested");
         let unsigned_tx_hash = hash_rlp_data(rlp_encoded_tx);
         let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
             anyhow::bail!("Failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
@@ -507,7 +505,6 @@ async fn subscribe_and_process_sign_events(
             &ws_url,
             events_tx.clone(),
             move |event, signature: solana_sdk::signature::Signature, _slot| {
-                tracing::info!("got event: {:?}", event);
                 let tx_sig: Vec<u8> = signature.as_ref().to_vec();
                 let events_tx = events_tx_clone.clone();
                 tokio::spawn(async move {
@@ -590,14 +587,6 @@ fn parse_cpi_events(
                 if ui.program_id == target_program_str {
                     match try_parse_events(&ui.data) {
                         Ok(mut v) => {
-                            if !v.is_empty() {
-                                tracing::info!(
-                                    "parsed {} event(s) from {}.{}",
-                                    v.len(),
-                                    set_idx,
-                                    ix_idx
-                                );
-                            }
                             out.append(&mut v);
                         }
                         Err(e) => tracing::warn!(
