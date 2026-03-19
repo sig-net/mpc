@@ -6,8 +6,13 @@ use near_workspaces::{
     Account, AccountId, Worker,
 };
 use rand::Rng;
-use std::sync::Once;
+use std::collections::HashSet;
+use std::sync::{Mutex, Once};
 use tracing_subscriber::EnvFilter;
+
+/// Tracks ports already handed out by `pick_unused_port` within this process
+/// to prevent the OS from recycling the same ephemeral port for multiple nodes.
+static ALLOCATED_PORTS: Mutex<Option<HashSet<u16>>> = Mutex::new(None);
 
 static INIT: Once = Once::new();
 
@@ -143,15 +148,22 @@ pub async fn is_port_available(port: u16) -> bool {
     tokio::net::TcpListener::bind(addr).await.is_ok()
 }
 
-/// Request an unused port from the OS.
+/// Request an unused port from the OS, guaranteed unique within this process.
 pub async fn pick_unused_port() -> anyhow::Result<u16> {
     // Port 0 means the OS gives us an unused port
     // Important to use localhost as using 0.0.0.0 leads to users getting brief firewall popups to
     // allow inbound connections on macOS
     let addr = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    let port = listener.local_addr()?.port();
-    Ok(port)
+    loop {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let port = listener.local_addr()?.port();
+        let mut guard = ALLOCATED_PORTS.lock().unwrap();
+        let set = guard.get_or_insert_with(HashSet::new);
+        if set.insert(port) {
+            return Ok(port);
+        }
+        // Port was already handed out; drop this listener and retry.
+    }
 }
 
 pub async fn pick_preferred_or_unused_port(preferred: u16) -> u16 {
