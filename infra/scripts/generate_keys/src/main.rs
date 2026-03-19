@@ -2,7 +2,7 @@ use ethers::signers::LocalWallet;
 use ethers::signers::Signer;
 use hpke::kem::X25519HkdfSha256;
 use hpke::{Kem as KemTrait, Serializable};
-use sp_core::crypto::{Ss58AddressFormatRegistry, Ss58Codec};
+use sp_core::crypto::{Ss58AddressFormat, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{sr25519, Pair};
 use std::env;
 
@@ -11,12 +11,17 @@ fn main() {
 
     let (hydration_pair, hydration_phrase, _seed) = sr25519::Pair::generate_with_phrase(None);
 
-    let hydration_account_id = hydration_pair
+    let polkadot_ss58 = hydration_pair
         .public()
         .to_ss58check_with_version(Ss58AddressFormatRegistry::PolkadotAccount.into());
 
+    let hydration_ss58 = hydration_pair
+        .public()
+        .to_ss58check_with_version(Ss58AddressFormat::custom(63));
+
     println!("Hydrationsigner_uri (secret phrase): {hydration_phrase}");
-    println!("Hydration ss58 address: {hydration_account_id}");
+    println!("Polkadot ss58 address: {polkadot_ss58}");
+    println!("Hydration ss58 address: {hydration_ss58}");
 
     let solana_sk = near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519);
     let solana_pk = solana_sk.public_key();
