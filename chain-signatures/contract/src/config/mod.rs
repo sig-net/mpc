@@ -112,8 +112,8 @@ mod tests {
                 "max_concurrent_introduction": 10,
                 "max_concurrent_generation": 10,
                 "triple": {
-                    "min_triple_pairs": 10,
-                    "max_triple_pairs": 100,
+                    "min_triple_pairs_per_node": 10,
+                    "max_triple_pairs_per_network": 100,
                     "generation_timeout": 10000
                 },
                 "presignature": {
