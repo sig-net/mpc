@@ -74,13 +74,13 @@ impl Default for NodeConfig {
                 max_concurrent_generation: 16,
                 max_concurrent_introduction: 2,
                 triple: TripleConfig {
-                    min_triples: 16,
-                    max_triples: 320,
+                    min_triples: 1,
+                    max_triples: 1 * 3 * 4, // min per node * num nodes * 4 (safety factor)
                     ..Default::default()
                 },
                 presignature: PresignatureConfig {
                     min_presignatures: 16,
-                    max_presignatures: 320,
+                    max_presignatures: 16 * 3 * 4, // min per node * num nodes * 4 (safety factor)
                     ..Default::default()
                 },
                 ..Default::default()
