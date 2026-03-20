@@ -9,7 +9,9 @@ use crate::mpc_fixture::message_collector::CollectMessages;
 use crate::mpc_fixture::mock_governance::MockGovernance;
 use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
 use cait_sith::protocol::Participant;
-use mpc_contract::config::{min_to_ms, ProtocolConfig};
+use mpc_contract::config::{
+    min_to_ms, PresignatureConfig, ProtocolConfig, SignatureConfig, TripleConfig,
+};
 use mpc_contract::primitives::{
     CandidateInfo, Candidates as CandidatesById, ParticipantInfo, Participants as ParticipantsById,
 };
@@ -215,17 +217,27 @@ impl MpcFixtureBuilder {
     }
 
     fn build_protocol_config(&self) -> ProtocolConfig {
-        let mut config = ProtocolConfig::default();
-        config.max_concurrent_introduction = self.fixture_config.max_concurrent_introduction;
-        config.max_concurrent_generation = self.fixture_config.max_concurrent_generation;
-        config.signature.generation_timeout = self.fixture_config.signature_timeout_ms;
-        config.presignature.max_presignatures = self.fixture_config.network_max_presignatures;
-        config.presignature.min_presignatures = self.fixture_config.node_min_presignatures;
-        config.presignature.generation_timeout = self.fixture_config.presignature_timeout_ms;
-        config.triple.max_triples = self.fixture_config.network_max_triples;
-        config.triple.min_triples = self.fixture_config.node_min_triples;
-        config.triple.generation_timeout = self.fixture_config.triple_timeout_ms;
-        config
+        ProtocolConfig {
+            max_concurrent_introduction: self.fixture_config.max_concurrent_introduction,
+            max_concurrent_generation: self.fixture_config.max_concurrent_generation,
+            signature: SignatureConfig {
+                generation_timeout: self.fixture_config.signature_timeout_ms,
+                ..Default::default()
+            },
+            presignature: PresignatureConfig {
+                max_presignatures: self.fixture_config.network_max_presignatures,
+                min_presignatures: self.fixture_config.node_min_presignatures,
+                generation_timeout: self.fixture_config.presignature_timeout_ms,
+                ..Default::default()
+            },
+            triple: TripleConfig {
+                max_triples: self.fixture_config.network_max_triples,
+                min_triples: self.fixture_config.node_min_triples,
+                generation_timeout: self.fixture_config.triple_timeout_ms,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
     }
 
     /// Build a routing table: Participant -> msg_tx
