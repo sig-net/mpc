@@ -160,9 +160,9 @@ impl std::ops::IndexMut<usize> for MockServers {
 fn default_state_body() -> Vec<u8> {
     serde_json::to_vec(&StateView::Running {
         participants: vec![Participant::from(0)],
-        triple_count: 0,
-        triple_mine_count: 0,
-        triple_potential_count: 0,
+        triple_pair_count: 0,
+        triple_pair_mine_count: 0,
+        triple_pair_potential_count: 0,
         presignature_count: 0,
         presignature_mine_count: 0,
         presignature_potential_count: 0,

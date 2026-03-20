@@ -329,7 +329,7 @@ impl Cluster {
         self.nodes
             .ctx()
             .redis
-            .stockpile_triples(&self.cfg, &participants, prestockpile.multiplier)
+            .stockpile_triple_pairs(&self.cfg, &participants, prestockpile.multiplier)
             .await;
 
         self.wait()

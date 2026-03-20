@@ -43,8 +43,8 @@ impl Default for ProtocolConfig {
 impl Default for TripleConfig {
     fn default() -> Self {
         Self {
-            min_triples: 1024,
-            max_triples: 1024 * MAX_EXPECTED_PARTICIPANTS * NETWORK_MULTIPLIER,
+            min_triple_pairs_per_node: 1024,
+            max_triple_pairs_per_network: 1024 * MAX_EXPECTED_PARTICIPANTS * NETWORK_MULTIPLIER,
             generation_timeout: min_to_ms(10),
 
             other: Default::default(),

@@ -78,8 +78,8 @@ fn env() -> (Runtime, SyncEnv) {
     let env = rt.block_on(async move {
         let spawner = ClusterSpawner::default()
             .with_config(|cfg| {
-                cfg.protocol.triple.min_triples = 3 * 1024;
-                cfg.protocol.triple.max_triples = 1000000;
+                cfg.protocol.triple.min_triple_pairs_per_node = 3 * 1024;
+                cfg.protocol.triple.max_triple_pairs_per_network = 1000000;
             })
             .network("bench-protocol-sync")
             .init_network()
@@ -92,7 +92,7 @@ fn env() -> (Runtime, SyncEnv) {
         {
             let participants = into_contract_participants(&participants);
             redis
-                .stockpile_triples(&spawner.cfg, &participants, 1)
+                .stockpile_triple_pairs(&spawner.cfg, &participants, 1)
                 .await;
         }
         let client = NodeClient::new(&node_client::Options::default());

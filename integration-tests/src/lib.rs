@@ -74,8 +74,8 @@ impl Default for NodeConfig {
                 max_concurrent_generation: 16,
                 max_concurrent_introduction: 2,
                 triple: TripleConfig {
-                    min_triples: 16,
-                    max_triples: 320,
+                    min_triple_pairs_per_node: 16,
+                    max_triple_pairs_per_network: 320,
                     ..Default::default()
                 },
                 presignature: PresignatureConfig {

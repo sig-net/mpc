@@ -150,9 +150,12 @@ async fn msg(
 pub enum StateView {
     Running {
         participants: Vec<Participant>,
-        triple_count: usize,
-        triple_mine_count: usize,
-        triple_potential_count: usize,
+        #[serde(alias = "triple_count")]
+        triple_pair_count: usize,
+        #[serde(alias = "triple_mine_count")]
+        triple_pair_mine_count: usize,
+        #[serde(alias = "triple_potential_count")]
+        triple_pair_potential_count: usize,
         presignature_count: usize,
         presignature_mine_count: usize,
         presignature_potential_count: usize,
@@ -188,18 +191,18 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
             ongoing_triple_gen,
             ongoing_presignature_gen,
         } => {
-            let triple_count = web.triple_storage.len_generated().await;
-            let triple_mine_count = web.triple_storage.len_by_owner(me).await;
-            let triple_potential_count = triple_count + ongoing_triple_gen;
+            let triple_pair_count = web.triple_storage.len_generated().await;
+            let triple_pair_mine_count = web.triple_storage.len_by_owner(me).await;
+            let triple_pair_potential_count = triple_pair_count + ongoing_triple_gen;
             let presignature_count = web.presignature_storage.len_generated().await;
             let presignature_mine_count = web.presignature_storage.len_by_owner(me).await;
             let presignature_potential_count = presignature_count + ongoing_presignature_gen;
 
             Ok(Json(StateView::Running {
                 participants: participants.clone(),
-                triple_count,
-                triple_mine_count,
-                triple_potential_count,
+                triple_pair_count,
+                triple_pair_mine_count,
+                triple_pair_potential_count,
                 presignature_count,
                 presignature_mine_count,
                 presignature_potential_count,

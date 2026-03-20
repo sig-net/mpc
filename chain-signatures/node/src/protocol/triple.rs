@@ -250,7 +250,7 @@ impl TripleGenerator {
                         public: second.1.clone(),
                     };
 
-                    // For simplicity, assign both triples to the same owner based on the first triple
+                    // For simplicity, assign both triples in the pair to the same owner based on the first triple
                     let triple_owner = {
                         let big_c = first.public.big_c;
                         let entropy = HighwayHasher::default().hash64(&big_c.to_bytes()) as usize;
@@ -554,20 +554,20 @@ impl TripleSpawner {
         Ok(())
     }
 
-    /// Generate new triples if this node owns fewer than the per-node minimum
-    /// (`min_triples`) and the network-wide total hasn't reached the cap (`max_triples`).
+    /// Generate new triple pairs if this node owns fewer than the per-node minimum
+    /// (`min_triple_pairs_per_node`) and the network-wide total hasn't reached the cap (`max_triple_pairs_per_network`).
     async fn stockpile(&mut self, participants: &[Participant], cfg: &ProtocolConfig) {
         if participants.len() < self.threshold {
             return;
         }
 
         let not_enough_triples = {
-            // Network-wide cap: stop generating once total potential triples reach max_triples.
-            if self.len_potential().await >= cfg.triple.max_triples as usize {
+            // Network-wide cap: stop generating once total potential triple pairs reach max_triple_pairs_per_network.
+            if self.len_potential().await >= cfg.triple.max_triple_pairs_per_network as usize {
                 false
             } else {
-                // Per-node floor: generate if this node owns fewer than min_triples.
-                self.len_mine().await < cfg.triple.min_triples as usize
+                // Per-node floor: generate if this node owns fewer than min_triple_pairs_per_node.
+                self.len_mine().await < cfg.triple.min_triple_pairs_per_node as usize
                     && self.len_introduced() < cfg.max_concurrent_introduction as usize
                     && self.ongoing.len() < cfg.max_concurrent_generation as usize
             }
@@ -622,10 +622,10 @@ impl TripleSpawner {
                     self.stockpile(&active, &protocol).await;
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
 
-                    crate::metrics::storage::NUM_TRIPLES_MINE
+                    crate::metrics::storage::NUM_TRIPLE_PAIRS_MINE
 
                         .set(self.len_mine().await as i64);
-                    crate::metrics::storage::NUM_TRIPLES_TOTAL
+                    crate::metrics::storage::NUM_TRIPLE_PAIRS_TOTAL
 
                         .set(self.triple_storage.len_generated().await as i64);
                     crate::metrics::protocols::NUM_TRIPLE_GENERATORS_INTRODUCED

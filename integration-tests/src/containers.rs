@@ -382,7 +382,12 @@ impl Redis {
         Presignature::storage(&self.pool(), id)
     }
 
-    pub async fn stockpile_triples(&self, cfg: &NodeConfig, participants: &Participants, mul: u32) {
+    pub async fn stockpile_triple_pairs(
+        &self,
+        cfg: &NodeConfig,
+        participants: &Participants,
+        mul: u32,
+    ) {
         let pool = self.pool();
         let storage = participants
             .participants
@@ -408,11 +413,11 @@ impl Redis {
         let (public, shares): (TriplePub<Secp256k1>, Vec<TripleShare<Secp256k1>>) =
             cait_sith::triples::deal(&mut OsRng, &participant_ids, cfg.threshold);
 
-        // - first/second loop add at least min_triples per node
+        // - first/second loop add at least min_triple_pairs_per_node
         // - third loop: for each pair, store the shares as pairs per node
         let mut num_pairs = 0;
         for owner in &participant_ids {
-            for _ in 0..(cfg.protocol.triple.min_triples * mul / 2) {
+            for _ in 0..(cfg.protocol.triple.min_triple_pairs_per_node * mul / 2) {
                 num_pairs += 1;
                 let pair_id = rand::random();
                 for ((me, triple0), triple1) in participant_ids

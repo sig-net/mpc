@@ -9,7 +9,7 @@ pub struct FixtureInput {
     /// Output of test_basic_generate_keys
     pub keys: BTreeMap<Participant, NodeKeyInfo>,
     /// Output of test_basic_generate_triples
-    pub triples: BTreeMap<Participant, BTreeMap<Participant, Vec<TriplePair>>>,
+    pub triple_pairs: BTreeMap<Participant, BTreeMap<Participant, Vec<TriplePair>>>,
     /// Output of test_basic_generate_presignature
     pub presignatures: BTreeMap<Participant, BTreeMap<Participant, Vec<Presignature>>>,
 }

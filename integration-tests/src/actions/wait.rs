@@ -29,7 +29,7 @@ enum NodeState {
 
 enum WaitActions {
     Running(Epoch),
-    MinTriples(usize, bool),
+    MinTriplePairs(usize, bool),
     MinPresignatures(usize, bool),
     Signable(usize),
     NodeState(NodeState, usize),
@@ -67,13 +67,13 @@ impl<'a, R> WaitAction<'a, R> {
         }
     }
 
-    pub fn min_triples(mut self, min: usize) -> Self {
-        self.actions.push(WaitActions::MinTriples(min, false));
+    pub fn min_triple_pairs(mut self, min: usize) -> Self {
+        self.actions.push(WaitActions::MinTriplePairs(min, false));
         self
     }
 
-    pub fn min_mine_triples(mut self, min: usize) -> Self {
-        self.actions.push(WaitActions::MinTriples(min, true));
+    pub fn min_mine_triple_pairs(mut self, min: usize) -> Self {
+        self.actions.push(WaitActions::MinTriplePairs(min, true));
         self
     }
 
@@ -188,8 +188,8 @@ impl<'a, R> WaitAction<'a, R> {
                 WaitActions::Running(epoch) => {
                     running_mpc(self.nodes, if epoch > 0 { Some(epoch) } else { None }).await?;
                 }
-                WaitActions::MinTriples(expected, mine) => {
-                    require_triples(self.nodes, expected, mine).await?;
+                WaitActions::MinTriplePairs(expected, mine) => {
+                    require_triple_pairs(self.nodes, expected, mine).await?;
                 }
                 WaitActions::MinPresignatures(expected, mine) => {
                     require_presignatures(self.nodes, expected, mine).await?;
@@ -378,7 +378,7 @@ pub async fn require_presignatures(
     Ok(state_views)
 }
 
-pub async fn require_triples(
+pub async fn require_triple_pairs(
     nodes: &Cluster,
     expected: usize,
     mine: bool,
@@ -389,18 +389,18 @@ pub async fn require_triples(
             .iter()
             .filter(|state| match state {
                 StateView::Running {
-                    triple_mine_count,
-                    triple_count,
+                    triple_pair_mine_count,
+                    triple_pair_count,
                     ..
                 } => {
                     if mine {
-                        *triple_mine_count >= expected
+                        *triple_pair_mine_count >= expected
                     } else {
-                        *triple_count >= expected
+                        *triple_pair_count >= expected
                     }
                 }
                 _ => {
-                    tracing::warn!("state=NotRunning while checking triples");
+                    tracing::warn!("state=NotRunning while checking triple pairs");
                     false
                 }
             })
@@ -408,7 +408,7 @@ pub async fn require_triples(
         if enough >= nodes.len() {
             Ok(state_views)
         } else {
-            anyhow::bail!("not enough nodes with triples")
+            anyhow::bail!("not enough nodes with triple pairs")
         }
     };
 
@@ -417,7 +417,7 @@ pub async fn require_triples(
         .with_max_times(expected * 100);
 
     let state_views = is_enough.retry(&strategy).await.with_context(|| {
-        format!("mpc nodes failed to generate {expected} triples before deadline")
+        format!("mpc nodes failed to generate {expected} triple pairs before deadline")
     })?;
 
     Ok(state_views)

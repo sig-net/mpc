@@ -13,8 +13,8 @@ use super::protocol_storage::{
 
 pub type TripleStorage = ProtocolStorage<TriplePair>;
 pub type TriplePairSlot = ArtifactSlot<TriplePair>;
-pub type TriplesTaken = ArtifactTaken<TriplePair>;
-pub type TriplesTakenDropper = ArtifactTakenDropper<TriplePair>;
+pub type TriplePairTaken = ArtifactTaken<TriplePair>;
+pub type TriplePairTakenDropper = ArtifactTakenDropper<TriplePair>;
 
 /// A pair of completed triples.
 #[derive(Debug, Serialize, Deserialize)]
@@ -29,12 +29,12 @@ pub struct TriplePair {
 
 impl TriplePair {
     pub fn storage(pool: &Pool, account_id: &AccountId) -> TripleStorage {
-        ProtocolStorage::new(pool, account_id, "triples")
+        ProtocolStorage::new(pool, account_id, "triple_pairs")
     }
 }
 
 impl ProtocolArtifact for TriplePair {
-    const METRIC_LABEL: &'static str = "triple";
+    const METRIC_LABEL: &'static str = "triple_pair";
     type Id = TripleId;
 
     fn id(&self) -> Self::Id {
@@ -85,7 +85,7 @@ impl FromRedisValue for TriplePair {
 
 #[cfg(feature = "test-feature")]
 impl ProtocolStorage<TriplePair> {
-    pub fn triple_key(&self) -> &str {
+    pub fn triple_pair_key(&self) -> &str {
         self.artifact_key()
     }
 }

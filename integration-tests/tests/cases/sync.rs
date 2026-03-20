@@ -4,8 +4,8 @@ use cait_sith::protocol::Participant;
 use integration_tests::cluster;
 
 use super::helpers::{
-    assert_presig_owned_state, assert_triples_owned_state, insert_presignatures_for_owner,
-    insert_triples_for_owner,
+    assert_presig_owned_state, assert_triple_pairs_owned_state, insert_presignatures_for_owner,
+    insert_triple_pairs_for_owner,
 };
 
 #[test_log::test(tokio::test)]
@@ -33,8 +33,8 @@ async fn test_state_sync_e2e_large_outdated_stockpile() {
 
     // insert triples that will be invalidated after a sync, since nobody else has them.
     // node0 is saying that they have 0 to 5, but node1 will sync and say they have 4 and 5 only.
-    insert_triples_for_owner(&node0_triples, node1, &holders, 0..=10000).await;
-    insert_triples_for_owner(&node1_triples, node1, &holders, 0..=5).await;
+    insert_triple_pairs_for_owner(&node0_triples, node1, &holders, 0..=10000).await;
+    insert_triple_pairs_for_owner(&node1_triples, node1, &holders, 0..=5).await;
     insert_presignatures_for_owner(&node0_presignatures, node1, &holders, 0..=10000).await;
     insert_presignatures_for_owner(&node1_presignatures, node1, &holders, 0..=5).await;
 
@@ -42,8 +42,8 @@ async fn test_state_sync_e2e_large_outdated_stockpile() {
         .disable_prestockpile()
         .with_config(|cfg| {
             // Need these to be set otherwise we will be constantly taking our mock triples:
-            cfg.protocol.triple.min_triples = 1;
-            cfg.protocol.triple.max_triples = 1;
+            cfg.protocol.triple.min_triple_pairs_per_node = 1;
+            cfg.protocol.triple.max_triple_pairs_per_network = 1;
             cfg.protocol.presignature.min_presignatures = 1;
             cfg.protocol.presignature.max_presignatures = 1;
         })
@@ -53,14 +53,14 @@ async fn test_state_sync_e2e_large_outdated_stockpile() {
     // Give some time for the first sync broadcast to finish.
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    assert_triples_owned_state(
+    assert_triple_pairs_owned_state(
         &node0_triples,
         node1,
         &[0, 1, 2, 3, 4, 5],
         &[6, 100, 500, 2030, 1337, 10000],
     )
     .await;
-    assert_triples_owned_state(
+    assert_triple_pairs_owned_state(
         &node1_triples,
         node1,
         &[0, 1, 2, 3, 4, 5],
@@ -119,9 +119,9 @@ async fn test_state_sync_e2e() {
 
     // Populate 3 triples and 3 presignatures: each node owns 1, all nodes hold shares.
     for storage in [&node0_triples, &node1_triples, &node2_triples] {
-        insert_triples_for_owner(storage, node0, &holders, 0..=0).await;
-        insert_triples_for_owner(storage, node1, &holders, 1..=1).await;
-        insert_triples_for_owner(storage, node2, &holders, 2..=2).await;
+        insert_triple_pairs_for_owner(storage, node0, &holders, 0..=0).await;
+        insert_triple_pairs_for_owner(storage, node1, &holders, 1..=1).await;
+        insert_triple_pairs_for_owner(storage, node2, &holders, 2..=2).await;
     }
     for storage in [
         &node0_presignatures,
@@ -136,14 +136,14 @@ async fn test_state_sync_e2e() {
     // Add 1 extra T and P owned by node0, only on node0's storage.
     // After sync, node0 will learn that node1 and node2 don't have id=99,
     // dropping it below threshold (T=2), so it should be pruned.
-    insert_triples_for_owner(&node0_triples, node0, &holders, 99..=99).await;
+    insert_triple_pairs_for_owner(&node0_triples, node0, &holders, 99..=99).await;
     insert_presignatures_for_owner(&node0_presignatures, node0, &holders, 99..=99).await;
 
     // Add 1 extra T and P owned by node1, on node0 and node1 only (not node2).
     // After sync, node1 learns node2 doesn't have id=88, removing node2 from participants.
     // But node0 still has it, so 2 holders remain (= threshold), and it should survive.
     for storage in [&node0_triples, &node1_triples] {
-        insert_triples_for_owner(storage, node1, &holders, 88..=88).await;
+        insert_triple_pairs_for_owner(storage, node1, &holders, 88..=88).await;
     }
     for storage in [&node0_presignatures, &node1_presignatures] {
         insert_presignatures_for_owner(storage, node1, &holders, 88..=88).await;
@@ -153,7 +153,7 @@ async fn test_state_sync_e2e() {
     // When node0 broadcasts its owned IDs, id=77 won't be included (node0 doesn't have it),
     // so node1 and node2 will remove it via remove_outdated.
     for storage in [&node1_triples, &node2_triples] {
-        insert_triples_for_owner(storage, node0, &holders, 77..=77).await;
+        insert_triple_pairs_for_owner(storage, node0, &holders, 77..=77).await;
     }
     for storage in [&node1_presignatures, &node2_presignatures] {
         insert_presignatures_for_owner(storage, node0, &holders, 77..=77).await;
@@ -162,8 +162,8 @@ async fn test_state_sync_e2e() {
     let _cluster = spawner
         .disable_prestockpile()
         .with_config(|cfg| {
-            cfg.protocol.triple.min_triples = 1;
-            cfg.protocol.triple.max_triples = 1;
+            cfg.protocol.triple.min_triple_pairs_per_node = 1;
+            cfg.protocol.triple.max_triple_pairs_per_network = 1;
             cfg.protocol.presignature.min_presignatures = 1;
             cfg.protocol.presignature.max_presignatures = 1;
         })
@@ -178,13 +178,13 @@ async fn test_state_sync_e2e() {
     // id=88 (on node0 and node1) should survive (exactly at threshold=2).
     // id=77 (owned by node0, only on node1/node2) should be removed via remove_outdated.
     for triples in [&node0_triples, &node1_triples] {
-        assert_triples_owned_state(triples, node0, &[0], &[1, 2, 77, 99]).await;
-        assert_triples_owned_state(triples, node1, &[1, 88], &[0, 2]).await;
-        assert_triples_owned_state(triples, node2, &[2], &[0, 1]).await;
+        assert_triple_pairs_owned_state(triples, node0, &[0], &[1, 2, 77, 99]).await;
+        assert_triple_pairs_owned_state(triples, node1, &[1, 88], &[0, 2]).await;
+        assert_triple_pairs_owned_state(triples, node2, &[2], &[0, 1]).await;
     }
-    assert_triples_owned_state(&node2_triples, node0, &[0], &[1, 2, 77, 99]).await;
-    assert_triples_owned_state(&node2_triples, node1, &[1], &[0, 2, 88]).await;
-    assert_triples_owned_state(&node2_triples, node2, &[2], &[0, 1]).await;
+    assert_triple_pairs_owned_state(&node2_triples, node0, &[0], &[1, 2, 77, 99]).await;
+    assert_triple_pairs_owned_state(&node2_triples, node1, &[1], &[0, 2, 88]).await;
+    assert_triple_pairs_owned_state(&node2_triples, node2, &[2], &[0, 1]).await;
 
     for presignatures in [&node0_presignatures, &node1_presignatures] {
         assert_presig_owned_state(presignatures, node0, &[0], &[1, 2, 77, 99]).await;

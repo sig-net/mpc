@@ -53,11 +53,13 @@ pub struct ProtocolConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
 pub struct TripleConfig {
-    /// Per-node minimum: each node generates triples until it owns at least this many.
-    pub min_triples: u32,
-    /// Network-wide cap: no new triples are generated once the total potential
+    /// Per-node minimum: each node generates triple pairs until it owns at least this many.
+    #[serde(alias = "min_triples")]
+    pub min_triple_pairs_per_node: u32,
+    /// Network-wide cap: no new triple pairs are generated once the total potential
     /// count across all nodes reaches this limit.
-    pub max_triples: u32,
+    #[serde(alias = "max_triples")]
+    pub max_triple_pairs_per_network: u32,
     /// Timeout for triple generation in milliseconds.
     pub generation_timeout: u64,
 
@@ -110,8 +112,8 @@ mod tests {
                 "max_concurrent_introduction": 10,
                 "max_concurrent_generation": 10,
                 "triple": {
-                    "min_triples": 10,
-                    "max_triples": 100,
+                    "min_triple_pairs": 10,
+                    "max_triple_pairs": 100,
                     "generation_timeout": 10000
                 },
                 "presignature": {

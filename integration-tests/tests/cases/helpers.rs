@@ -58,7 +58,7 @@ pub(crate) fn dummy_triple_with_holders(participants: Vec<Participant>) -> Tripl
     }
 }
 
-pub(crate) async fn insert_triples_for_owner(
+pub(crate) async fn insert_triple_pairs_for_owner(
     triples: &TripleStorage,
     owner: Participant,
     holders: &[Participant],
@@ -92,7 +92,7 @@ pub(crate) async fn insert_presignatures_for_owner(
     }
 }
 
-pub(crate) async fn assert_triples_owned_state(
+pub(crate) async fn assert_triple_pairs_owned_state(
     triples: &TripleStorage,
     owner: Participant,
     expected_present: &[u64],
@@ -101,14 +101,14 @@ pub(crate) async fn assert_triples_owned_state(
     for id in expected_present {
         assert!(
             triples.contains_by_owner(*id, owner).await,
-            "triple={id} should be present for owner={owner:?}"
+            "triple pair={id} should be present for owner={owner:?}"
         );
     }
 
     for id in expected_absent {
         assert!(
             !triples.contains_by_owner(*id, owner).await,
-            "triple={id} should be absent for owner={owner:?}"
+            "triple pair={id} should be absent for owner={owner:?}"
         );
     }
 }

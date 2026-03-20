@@ -48,9 +48,9 @@ pub struct SharedOutput {
 }
 
 impl MpcFixture {
-    pub async fn wait_for_triples(&self, threshold_per_node: usize) {
+    pub async fn wait_for_triple_pairs(&self, threshold_per_node: usize) {
         for node in &self.nodes {
-            node.wait_for_triples(threshold_per_node).await;
+            node.wait_for_triple_pairs(threshold_per_node).await;
         }
     }
 
@@ -75,12 +75,13 @@ impl MpcFixture {
         }
     }
 
-    pub async fn assert_triples(&self, threshold_per_node: usize, timeout: Duration) {
-        let result = tokio::time::timeout(timeout, self.wait_for_triples(threshold_per_node)).await;
+    pub async fn assert_triple_pairs(&self, threshold_per_node: usize, timeout: Duration) {
+        let result =
+            tokio::time::timeout(timeout, self.wait_for_triple_pairs(threshold_per_node)).await;
         if result.is_err() {
-            self.print_triples().await;
+            self.print_triple_pairs().await;
         }
-        result.expect("should have enough triples")
+        result.expect("should have enough triple pairs")
     }
 
     pub async fn assert_presignatures(&self, threshold_per_node: usize, timeout: Duration) {
@@ -104,11 +105,11 @@ impl MpcFixture {
         result.expect("should produce enough signatures")
     }
 
-    pub async fn print_triples(&self) {
+    pub async fn print_triple_pairs(&self) {
         for node in &self.nodes {
             let id = node.me;
             let num = node.triple_storage.len_by_owner(id).await;
-            tracing::info!("Node {id:?} has {num} Ts");
+            tracing::info!("Node {id:?} has {num} triple pairs");
         }
     }
 
@@ -132,7 +133,7 @@ impl MpcFixture {
 }
 
 impl MpcFixtureNode {
-    pub async fn wait_for_triples(&self, threshold_per_node: usize) {
+    pub async fn wait_for_triple_pairs(&self, threshold_per_node: usize) {
         loop {
             let count = self.triple_storage.len_by_owner(self.me).await;
             if count >= threshold_per_node {

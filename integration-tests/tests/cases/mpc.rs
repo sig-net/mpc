@@ -83,13 +83,13 @@ async fn test_basic_generate_triples() {
         1
     };
     let network = MpcFixtureBuilder::default()
-        .only_generate_triples()
-        .with_node_min_triples(N)
+        .only_generate_triple_pairs()
+        .with_node_min_triple_pairs(N)
         .build()
         .await;
 
     network
-        .assert_triples(N as usize, Duration::from_secs(180)) // adjust timeout based on N of Ts
+        .assert_triple_pairs(N as usize, Duration::from_secs(180)) // adjust timeout based on N of Ts
         .await;
 
     if WRITE_OUTPUT_TO_FILES {
@@ -99,18 +99,21 @@ async fn test_basic_generate_triples() {
             let mut nodes_shares = BTreeMap::new();
             for peer in &network.nodes {
                 let triple_ids = node.triple_storage.fetch_owned(peer.me).await.unwrap();
-                let mut peer_triples = Vec::with_capacity(triple_ids.len());
+                let mut peer_triple_pairs = Vec::with_capacity(triple_ids.len());
                 for triple_id in triple_ids {
                     let pair = conn
-                        .hget::<&str, u64, TriplePair>(node.triple_storage.triple_key(), triple_id)
+                        .hget::<&str, u64, TriplePair>(
+                            node.triple_storage.triple_pair_key(),
+                            triple_id,
+                        )
                         .await;
                     if let Ok(pair) = pair {
-                        peer_triples.push(pair);
+                        peer_triple_pairs.push(pair);
                     } else {
                         tracing::error!("missing triple pair in redis {triple_id}");
                     }
                 }
-                nodes_shares.insert(peer.me, peer_triples);
+                nodes_shares.insert(peer.me, peer_triple_pairs);
             }
             data.insert(node.me, nodes_shares);
         }
@@ -453,7 +456,7 @@ async fn test_sign_requests_wait_for_presignatures() {
         .with_preshared_triples()
         .with_presignature_stockpile()
         // Disable triple generation since we're using preshared triples
-        .with_node_min_triples(0)
+        .with_node_min_triple_pairs(0)
         // Enable presignature generation for second batch
         .with_node_min_presignatures(5)
         .build()
@@ -562,7 +565,7 @@ async fn test_sign_contention_5_nodes() {
     // Build network with pre-shared keys, generate triples/presignatures on the fly
     let network = MpcFixtureBuilder::new(NUM_NODES, THRESHOLD)
         .with_preshared_key()
-        .with_node_min_triples(NODE_MIN_ARTIFACTS)
+        .with_node_min_triple_pairs(NODE_MIN_ARTIFACTS)
         .with_node_min_presignatures(NODE_MIN_ARTIFACTS)
         .build()
         .await;
@@ -985,12 +988,14 @@ async fn test_sign_missing_presignature_after_posits() {
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_triples_message_count() {
     let network = MpcFixtureBuilder::default()
-        .only_generate_triples()
+        .only_generate_triple_pairs()
         .with_message_collector(Arc::new(Mutex::new(MessageCounter::default())))
         .build()
         .await;
 
-    network.assert_triples(1, Duration::from_secs(120)).await;
+    network
+        .assert_triple_pairs(1, Duration::from_secs(120))
+        .await;
 
     // This prints a summary of all sent message counts for debugging
     let msg_log = network.output.msg_log.lock().await;

@@ -8,15 +8,15 @@ async fn test_nightly_signature_production() -> anyhow::Result<()> {
     const SIGNATURE_AMOUNT: usize = 1000;
     const NODES: usize = 8;
     const THRESHOLD: usize = 4;
-    const MIN_TRIPLES: u32 = 10;
-    const MAX_TRIPLES: u32 = 2 * NODES as u32 * MIN_TRIPLES;
+    const MIN_T_PAIRS_PER_NODE: u32 = 10;
+    const MAX_T_PAIRS_PER_NETWORK: u32 = 2 * NODES as u32 * MIN_T_PAIRS_PER_NODE;
 
     let nodes = cluster::spawn()
         .with_config(|config| {
             config.nodes = NODES;
             config.threshold = THRESHOLD;
-            config.protocol.triple.min_triples = MIN_TRIPLES;
-            config.protocol.triple.max_triples = MAX_TRIPLES;
+            config.protocol.triple.min_triple_pairs_per_node = MIN_T_PAIRS_PER_NODE;
+            config.protocol.triple.max_triple_pairs_per_network = MAX_T_PAIRS_PER_NETWORK;
         })
         .await?;
 

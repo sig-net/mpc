@@ -16,20 +16,20 @@ pub(crate) static REDIS_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
     .unwrap()
 });
 
-pub(crate) static NUM_TRIPLES_MINE: LazyLock<IntGauge> = LazyLock::new(|| {
+pub(crate) static NUM_TRIPLE_PAIRS_MINE: LazyLock<IntGauge> = LazyLock::new(|| {
     try_create_int_gauge_vec_with_node_account_id(
         "multichain_num_triples_mine",
-        "number of triples of the node's own",
+        "number of triple pairs owned by this node",
         &[],
     )
     .unwrap()
     .with_label_values(&[] as &[&str])
 });
 
-pub(crate) static NUM_TRIPLES_TOTAL: LazyLock<IntGauge> = LazyLock::new(|| {
+pub(crate) static NUM_TRIPLE_PAIRS_TOTAL: LazyLock<IntGauge> = LazyLock::new(|| {
     try_create_int_gauge_vec_with_node_account_id(
         "multichain_num_triples_total",
-        "number of total triples",
+        "number of total triple pairs",
         &[],
     )
     .unwrap()

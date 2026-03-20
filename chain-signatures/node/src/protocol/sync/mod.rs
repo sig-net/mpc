@@ -47,7 +47,8 @@ pub enum SyncPeerResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncUpdate {
     pub from: Participant,
-    pub triples: Vec<TripleId>,
+    #[serde(alias = "triples")]
+    pub triple_pairs: Vec<TripleId>,
     pub presignatures: Vec<PresignatureId>,
 }
 
@@ -55,13 +56,13 @@ impl SyncUpdate {
     pub fn empty() -> Self {
         Self {
             from: Participant::from(u32::MAX),
-            triples: Vec::new(),
+            triple_pairs: Vec::new(),
             presignatures: Vec::new(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.triples.is_empty() && self.presignatures.is_empty()
+        self.triple_pairs.is_empty() && self.presignatures.is_empty()
     }
 }
 
@@ -80,7 +81,7 @@ impl SyncRequest {
         let start = Instant::now();
 
         let outdated_triples = match triples
-            .remove_outdated(self.update.from, &self.update.triples)
+            .remove_outdated(self.update.from, &self.update.triple_pairs)
             .await
         {
             Ok(result) => result,
@@ -101,9 +102,9 @@ impl SyncRequest {
         };
 
         tracing::info!(
-            removed_triples = outdated_triples.removed.len(),
+            removed_triple_pairs = outdated_triples.removed.len(),
             removed_presignatures = outdated_presignatures.removed.len(),
-            not_found_triples = outdated_triples.not_found.len(),
+            not_found_triple_pairs = outdated_triples.not_found.len(),
             not_found_presignatures = outdated_presignatures.not_found.len(),
             elapsed = ?start.elapsed(),
             "processed sync update",
@@ -111,7 +112,7 @@ impl SyncRequest {
 
         let response = SyncUpdate {
             from: me,
-            triples: outdated_triples.not_found,
+            triple_pairs: outdated_triples.not_found,
             presignatures: outdated_presignatures.not_found,
         };
 
@@ -238,12 +239,12 @@ impl SyncTask {
 
     // TODO: use reserved values instead. Note that we cannot fetch our own triples via reserved
     async fn new_update(&self, me: Participant) -> Option<SyncUpdate> {
-        let triples = match self.triples.fetch_owned(me).await {
+        let triple_pairs = match self.triples.fetch_owned(me).await {
             Ok(ids) => ids,
             Err(err) => {
                 tracing::warn!(
                     ?err,
-                    "failed to fetch owned triples, skipping sync broadcast"
+                    "failed to fetch owned triple pairs, skipping sync broadcast"
                 );
                 return None;
             }
@@ -261,7 +262,7 @@ impl SyncTask {
 
         Some(SyncUpdate {
             from: me,
-            triples,
+            triple_pairs,
             presignatures,
         })
     }
@@ -286,15 +287,15 @@ impl SyncTask {
                 SyncPeerResponse::Success(response) => {
                     tracing::debug!(
                         ?peer,
-                        not_found_triples = response.triples.len(),
+                        not_found_triple_pairs = response.triple_pairs.len(),
                         not_found_presignatures = response.presignatures.len(),
                         "received sync response"
                     );
 
-                    // Batch remove peer from all triples and prune
+                    // Batch remove peer from all triple pairs and prune
                     let triple_res = self
                         .triples
-                        .remove_holder_and_prune(me, peer, threshold, &response.triples)
+                        .remove_holder_and_prune(me, peer, threshold, &response.triple_pairs)
                         .await;
 
                     // Batch remove peer from all presignatures and prune
@@ -307,8 +308,8 @@ impl SyncTask {
                         (Ok((t_removed, t_updated)), Ok((p_removed, p_updated))) => {
                             tracing::info!(
                                 ?peer,
-                                removed_triples = t_removed.len(),
-                                updated_triples = t_updated.len(),
+                                removed_triple_pairs = t_removed.len(),
+                                updated_triple_pairs = t_updated.len(),
                                 removed_presignatures = p_removed.len(),
                                 updated_presignatures = p_updated.len(),
                                 "batch removed peer from artifacts and pruned"

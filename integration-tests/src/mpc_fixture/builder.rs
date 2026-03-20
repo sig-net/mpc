@@ -64,8 +64,8 @@ struct FixtureConfig {
     use_preshared_triples: bool,
     presignature_stockpile: bool,
 
-    node_min_triples: u32,
-    network_max_triples: u32,
+    node_min_triple_pairs: u32,
+    network_max_triple_pairs: u32,
     node_min_presignatures: u32,
     network_max_presignatures: u32,
 
@@ -112,8 +112,8 @@ impl FixtureConfig {
             num_nodes,
             use_preshared_triples: false,
             presignature_stockpile: false,
-            node_min_triples: 10,
-            network_max_triples: 10 * num_nodes * 4,
+            node_min_triple_pairs: 10,
+            network_max_triple_pairs: 10 * num_nodes * 4,
             node_min_presignatures: 10,
             network_max_presignatures: 10 * num_nodes * 4,
             signature_timeout_ms: 10_000,
@@ -214,8 +214,8 @@ impl MpcFixtureBuilder {
         config.presignature.max_presignatures = self.fixture_config.network_max_presignatures;
         config.presignature.min_presignatures = self.fixture_config.node_min_presignatures;
         config.presignature.generation_timeout = self.fixture_config.presignature_timeout_ms;
-        config.triple.max_triples = self.fixture_config.network_max_triples;
-        config.triple.min_triples = self.fixture_config.node_min_triples;
+        config.triple.max_triple_pairs_per_network = self.fixture_config.network_max_triple_pairs;
+        config.triple.min_triple_pairs_per_node = self.fixture_config.node_min_triple_pairs;
         config.triple.generation_timeout = self.fixture_config.triple_timeout_ms;
         config
     }
@@ -280,12 +280,12 @@ impl MpcFixtureBuilder {
         self
     }
 
-    /// Set the per-node minimum number of triples to maintain.
-    /// Each node will keep generating triples until it owns at least this many.
+    /// Set the per-node minimum number of triple pairs to maintain.
+    /// Each node will keep generating triple pairs until it owns at least this many.
     /// Also updates the network-wide max to `value * num_nodes * 4`.
-    pub fn with_node_min_triples(mut self, value: u32) -> Self {
-        self.fixture_config.node_min_triples = value;
-        self.fixture_config.network_max_triples = value * self.fixture_config.num_nodes * 4;
+    pub fn with_node_min_triple_pairs(mut self, value: u32) -> Self {
+        self.fixture_config.node_min_triple_pairs = value;
+        self.fixture_config.network_max_triple_pairs = value * self.fixture_config.num_nodes * 4;
         self
     }
 
@@ -331,29 +331,29 @@ impl MpcFixtureBuilder {
         self
     }
 
-    /// Short-hand for creating an MPC setup that's prepared to produce triples.
+    /// Short-hand for creating an MPC setup that's prepared to produce triple pairs.
     ///
     /// This setup will not attempt to stockpile presignatures.
-    pub fn only_generate_triples(self) -> Self {
+    pub fn only_generate_triple_pairs(self) -> Self {
         self.with_preshared_key().with_node_min_presignatures(0)
     }
 
     /// Short-hand for creating an MPC setup that's prepared to produce presignatures.
     ///
-    /// This setup will not attempt to stockpile triples.
+    /// This setup will not attempt to stockpile triple pairs.
     pub fn only_generate_presignatures(self) -> Self {
         self.with_preshared_key()
             .with_preshared_triples()
-            .with_node_min_triples(0)
+            .with_node_min_triple_pairs(0)
     }
 
     /// Short-hand for creating an MPC setup that's prepared to produce signatures.
     ///
-    /// This setup will not attempt to stockpile triples or presignatures.
+    /// This setup will not attempt to stockpile triple pairs or presignatures.
     pub fn only_generate_signatures(self) -> Self {
         self.with_preshared_key()
             .with_presignature_stockpile()
-            .with_node_min_triples(0)
+            .with_node_min_triple_pairs(0)
             .with_node_min_presignatures(0)
     }
 }
@@ -524,8 +524,8 @@ impl MpcFixtureNodeBuilder {
             TriplePair::storage(&context.redis_pool, &self.participant_info.account_id);
 
         if fixture_config.use_preshared_triples {
-            // removing here because we can't clone a triple
-            let my_shares = fixture_config.input.triples.remove(&self.me).unwrap();
+            // removing here because we can't clone a triple pair
+            let my_shares = fixture_config.input.triple_pairs.remove(&self.me).unwrap();
             for (owner, triple_shares) in my_shares {
                 for mut pair in triple_shares {
                     let pair_id = pair.id;
