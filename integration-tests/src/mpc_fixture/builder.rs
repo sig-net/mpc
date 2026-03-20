@@ -113,7 +113,7 @@ impl FixtureConfig {
             use_preshared_triples: false,
             presignature_stockpile: false,
             node_min_triples: 1,
-            network_max_triples: 1 * num_nodes * 4,
+            network_max_triples: num_nodes * 4,
             node_min_presignatures: 10,
             network_max_presignatures: 10 * num_nodes * 4,
             signature_timeout_ms: 10_000,
