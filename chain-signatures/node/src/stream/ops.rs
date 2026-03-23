@@ -1,4 +1,4 @@
-use crate::backlog::{Backlog, BacklogTransaction, SignTx};
+use crate::backlog::{Backlog, BacklogTransaction, RecoveredChainRequests, RecoveryRequeueMode, SignTx};
 use crate::indexer_hydration::{
     HydrationRespondBidirectionalEvent, HydrationSignBidirectionalRequestedEvent,
     HydrationSignatureRespondedEvent,
@@ -331,37 +331,45 @@ pub(crate) async fn recover_backlog(
     node_client: &NodeClient,
     source_chain: Chain,
     sign_tx: mpsc::Sender<Sign>,
-) {
+) -> RecoveredChainRequests {
     // Recover backlog before doing anything.
     // Wait for threshold to be available
     let threshold = contract_watcher.wait_threshold().await;
     if threshold == 0 {
-        return;
+        return RecoveredChainRequests::default();
     }
     wait_threshold_active(mesh_state, threshold).await;
 
     let mesh_state = mesh_state.borrow().clone();
-    let mut pending = backlog
+    let mut recovered = backlog
         .recover(&mesh_state, node_client, threshold, &[source_chain])
         .await;
 
-    // Re-enqueue any pending sign requests so the node processes them after recovery
-    let pending = pending.remove(&source_chain).unwrap_or_default();
+    let recovered = recovered.remove(&source_chain).unwrap_or_default();
 
-    for (sign_id, tx) in pending
-        .into_iter()
-        .filter(|(_, tx)| matches!(tx.status(), PendingRequestStatus::AwaitingResponse))
-    {
-        let BacklogTransaction::Sign(sign_tx_entry) = tx else {
+    if recovered.requeue_mode == RecoveryRequeueMode::Immediate {
+        requeue_recovered_sign_requests(backlog, source_chain, sign_tx, &recovered.pending).await;
+    }
+
+    recovered
+}
+
+pub(crate) async fn requeue_recovered_sign_requests(
+    backlog: &Backlog,
+    source_chain: Chain,
+    sign_tx: mpsc::Sender<Sign>,
+    pending: &std::collections::HashMap<SignId, BacklogTransaction>,
+) {
+    for &sign_id in pending.keys() {
+        let Some(entry) = backlog.get(source_chain, &sign_id).await else {
             continue;
         };
 
-        let Some(sign_type) = backlog.sign_type(source_chain, &sign_id).await else {
-            tracing::warn!(
-                ?sign_id,
-                ?source_chain,
-                "sign type missing during backlog recovery"
-            );
+        if entry.tx.status() != PendingRequestStatus::AwaitingResponse {
+            continue;
+        }
+
+        let BacklogTransaction::Sign(sign_tx_entry) = entry.tx else {
             continue;
         };
 
@@ -371,7 +379,7 @@ pub(crate) async fn recover_backlog(
             chain: sign_tx_entry.source_chain,
             unix_timestamp_indexed: sign_tx_entry.unix_timestamp_indexed,
             timestamp_created: Instant::now(),
-            sign_request_type: sign_type,
+            sign_request_type: entry.sign_type,
         };
 
         if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {

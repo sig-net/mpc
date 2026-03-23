@@ -200,6 +200,19 @@ pub struct Backlog {
     historical_checkpoints: Arc<RwLock<HashMap<Chain, Vec<HistoricalCheckpoint>>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecoveryRequeueMode {
+    #[default]
+    Immediate,
+    AfterCatchup,
+}
+
+#[derive(Debug, Default)]
+pub struct RecoveredChainRequests {
+    pub pending: HashMap<SignId, BacklogTransaction>,
+    pub requeue_mode: RecoveryRequeueMode,
+}
+
 impl Default for Backlog {
     fn default() -> Self {
         Self::new()
@@ -585,7 +598,7 @@ impl Backlog {
         node_client: &NodeClient,
         threshold: usize,
         chains: &[Chain],
-    ) -> HashMap<Chain, HashMap<SignId, BacklogTransaction>> {
+    ) -> HashMap<Chain, RecoveredChainRequests> {
         tracing::info!("attempting to recover from latest checkpoints via node selection");
 
         // Load local checkpoints first
@@ -613,33 +626,37 @@ impl Backlog {
         // Fetches all checkpoints from active participants and creates a selected checkpoint:
         // - sorts all checkpoints by block height
         // - selects threshold lowest block height checkpoint
-        let remote_checkpoints =
+        let mut remote_checkpoints =
             select_checkpoints(mesh_state, node_client, threshold, chains).await;
 
-        // Merge local and remote checkpoints, preferring the one with higher block height
-        let checkpoints = merge_checkpoints(local_checkpoints, remote_checkpoints);
-
-        if checkpoints.is_empty() {
+        if local_checkpoints.is_empty() && remote_checkpoints.is_empty() {
             tracing::info!("no selected checkpoints found, starting with empty state");
             return HashMap::new();
         }
 
-        for (chain, checkpoint) in checkpoints {
-            if !self::selection::checkpoint_has_quorum(mesh_state, node_client, threshold, &checkpoint)
+        let mut recovered_modes = HashMap::new();
+        for &chain in chains {
+            let local_checkpoint = local_checkpoints.remove(&chain);
+            let remote_checkpoint = remote_checkpoints.remove(&chain);
+
+            let Some((checkpoint, requeue_mode)) =
+                select_recovery_checkpoint(
+                    mesh_state,
+                    node_client,
+                    threshold,
+                    chain,
+                    local_checkpoint,
+                    remote_checkpoint,
+                )
                 .await
-            {
-                tracing::warn!(
-                    ?chain,
-                    block_height = checkpoint.block_height,
-                    checkpoint_hash = self::selection::checkpoint_hash(&checkpoint),
-                    "skipping checkpoint recovery without threshold quorum"
-                );
+            else {
                 continue;
-            }
+            };
 
             tracing::info!(
                 ?chain,
                 block_height = checkpoint.block_height,
+                ?requeue_mode,
                 "found selected checkpoint, attempting recovery"
             );
             if let Err(err) = self.recover_by_checkpoint(checkpoint).await {
@@ -648,7 +665,10 @@ impl Backlog {
                     %err,
                     "failed to recover from selected checkpoint, continuing with empty state"
                 );
+                continue;
             }
+
+            recovered_modes.insert(chain, requeue_mode);
         }
 
         // Snapshot pending requests for the requested chains
@@ -656,13 +676,17 @@ impl Backlog {
         let mut recovered = HashMap::new();
         for &chain in chains {
             if let Some(pending) = requests.get(&chain) {
+                let requeue_mode = recovered_modes.get(&chain).copied().unwrap_or_default();
                 recovered.insert(
                     chain,
-                    pending
-                        .requests
-                        .iter()
-                        .map(|(id, entry)| (*id, entry.tx.clone()))
-                        .collect(),
+                    RecoveredChainRequests {
+                        pending: pending
+                            .requests
+                            .iter()
+                            .map(|(id, entry)| (*id, entry.tx.clone()))
+                            .collect(),
+                        requeue_mode,
+                    },
                 );
             }
         }
@@ -762,6 +786,7 @@ impl BacklogTransaction {
     }
 }
 
+#[cfg(test)]
 fn merge_checkpoints(
     local: HashMap<Chain, Checkpoint>,
     mut remote: HashMap<Chain, Checkpoint>,
@@ -783,6 +808,63 @@ fn merge_checkpoints(
             .or_insert(local_cp);
     }
     remote
+}
+
+fn chain_supports_deferred_local_recovery(chain: Chain) -> bool {
+    matches!(chain, Chain::Ethereum)
+}
+
+async fn select_recovery_checkpoint(
+    mesh_state: &MeshState,
+    node_client: &NodeClient,
+    threshold: usize,
+    chain: Chain,
+    local_checkpoint: Option<Checkpoint>,
+    remote_checkpoint: Option<Checkpoint>,
+) -> Option<(Checkpoint, RecoveryRequeueMode)> {
+    let Some(best_available) = (match (local_checkpoint.as_ref(), remote_checkpoint.as_ref()) {
+        (Some(local), Some(remote)) if local.block_height > remote.block_height => {
+            Some(local.clone())
+        }
+        (Some(_), Some(remote)) => Some(remote.clone()),
+        (Some(local), None) => Some(local.clone()),
+        (None, Some(remote)) => Some(remote.clone()),
+        (None, None) => None,
+    }) else {
+        tracing::info!(?chain, "no checkpoint available for recovery");
+        return None;
+    };
+
+    if self::selection::checkpoint_has_quorum(mesh_state, node_client, threshold, &best_available)
+        .await
+    {
+        return Some((best_available, RecoveryRequeueMode::Immediate));
+    }
+
+    if let Some(local_checkpoint) = local_checkpoint {
+        if chain_supports_deferred_local_recovery(chain) {
+            tracing::warn!(
+                ?chain,
+                block_height = local_checkpoint.block_height,
+                checkpoint_hash = self::selection::checkpoint_hash(&local_checkpoint),
+                "recovering from local checkpoint without quorum; requeue deferred until catchup"
+            );
+            return Some((local_checkpoint, RecoveryRequeueMode::AfterCatchup));
+        }
+    }
+
+    if let Some(remote_checkpoint) = remote_checkpoint {
+        tracing::warn!(
+            ?chain,
+            block_height = remote_checkpoint.block_height,
+            checkpoint_hash = self::selection::checkpoint_hash(&remote_checkpoint),
+            "using quorum-backed remote checkpoint because local checkpoint lacks quorum"
+        );
+        return Some((remote_checkpoint, RecoveryRequeueMode::Immediate));
+    }
+
+    tracing::warn!(?chain, "skipping checkpoint recovery without threshold quorum");
+    None
 }
 
 #[cfg(test)]
@@ -1511,7 +1593,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_recover_skips_local_checkpoint_without_quorum() {
+    async fn test_recover_uses_local_checkpoint_without_quorum_and_defers_requeue() {
         let storage = CheckpointStorage::in_memory();
         let stale_backlog = Backlog::persisted(storage.clone());
         let stale_checkpoint = create_test_sign_checkpoint(Chain::Ethereum, 7, 100).await;
@@ -1576,8 +1658,10 @@ mod tests {
             .recover(&mesh_state, &client, 3, &[Chain::Ethereum])
             .await;
 
-        assert!(pending.get(&Chain::Ethereum).is_none());
-        assert!(recovered.get(Chain::Ethereum, &SignId::new([7u8; 32])).await.is_none());
+        let pending = pending.get(&Chain::Ethereum).expect("recovered ethereum state");
+        assert_eq!(pending.pending.len(), 1);
+        assert_eq!(pending.requeue_mode, RecoveryRequeueMode::AfterCatchup);
+        assert!(recovered.get(Chain::Ethereum, &SignId::new([7u8; 32])).await.is_some());
     }
 
     #[tokio::test]
@@ -1638,7 +1722,9 @@ mod tests {
             .recover(&mesh_state, &client, 3, &[Chain::Ethereum])
             .await;
 
-        assert_eq!(pending.get(&Chain::Ethereum).map(HashMap::len), Some(1));
+        let pending = pending.get(&Chain::Ethereum).expect("recovered ethereum state");
+        assert_eq!(pending.pending.len(), 1);
+        assert_eq!(pending.requeue_mode, RecoveryRequeueMode::Immediate);
         assert!(recovered.get(Chain::Ethereum, &SignId::new([9u8; 32])).await.is_some());
     }
 }
