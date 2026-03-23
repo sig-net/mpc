@@ -218,15 +218,15 @@ mod tests {
     use crate::protocol::Sign;
     use crate::protocol::SignRequestType;
     use crate::rpc::ContractStateWatcher;
-    use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
     use crate::storage::checkpoint_storage::CheckpointStorage;
+    use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
     use crate::util::current_unix_timestamp;
     use alloy::primitives::Address;
-    use mockito::Server;
-    use mpc_primitives::Signature;
     use k256::Scalar;
+    use mockito::Server;
     use mpc_primitives::SignArgs;
     use mpc_primitives::SignId;
+    use mpc_primitives::Signature;
     use near_primitives::types::AccountId;
     use std::time::Duration;
     use tokio::sync::mpsc;
@@ -669,7 +669,9 @@ mod tests {
                 SignRequestType::Sign,
             )
             .await;
-        seeded_backlog.set_processed_block(Chain::Ethereum, 100).await;
+        seeded_backlog
+            .set_processed_block(Chain::Ethereum, 100)
+            .await;
         seeded_backlog.checkpoint(Chain::Ethereum).await;
 
         struct EthereumLocalStream {
@@ -715,7 +717,11 @@ mod tests {
         for _ in 0..2 {
             let mut server = Server::new_async().await;
             let mut body = Vec::new();
-            ciborium::ser::into_writer(&std::collections::HashMap::<Chain, crate::backlog::Checkpoint>::new(), &mut body).unwrap();
+            ciborium::ser::into_writer(
+                &std::collections::HashMap::<Chain, crate::backlog::Checkpoint>::new(),
+                &mut body,
+            )
+            .unwrap();
             server
                 .mock("GET", "/checkpoint")
                 .with_status(200)
@@ -729,7 +735,11 @@ mod tests {
         for (index, server) in servers.iter().enumerate() {
             let mut info = ParticipantInfo::new(index as u32);
             info.url = server.url();
-            mesh_state.update(cait_sith::protocol::Participant::from(index as u32), NodeStatus::Active, info);
+            mesh_state.update(
+                cait_sith::protocol::Participant::from(index as u32),
+                NodeStatus::Active,
+                info,
+            );
         }
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(mesh_state);
         let node_client = NodeClient::new(&Default::default());

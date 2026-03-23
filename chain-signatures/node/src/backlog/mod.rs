@@ -639,16 +639,15 @@ impl Backlog {
             let local_checkpoint = local_checkpoints.remove(&chain);
             let remote_checkpoint = remote_checkpoints.remove(&chain);
 
-            let Some((checkpoint, requeue_mode)) =
-                select_recovery_checkpoint(
-                    mesh_state,
-                    node_client,
-                    threshold,
-                    chain,
-                    local_checkpoint,
-                    remote_checkpoint,
-                )
-                .await
+            let Some((checkpoint, requeue_mode)) = select_recovery_checkpoint(
+                mesh_state,
+                node_client,
+                threshold,
+                chain,
+                local_checkpoint,
+                remote_checkpoint,
+            )
+            .await
             else {
                 continue;
             };
@@ -786,30 +785,6 @@ impl BacklogTransaction {
     }
 }
 
-#[cfg(test)]
-fn merge_checkpoints(
-    local: HashMap<Chain, Checkpoint>,
-    mut remote: HashMap<Chain, Checkpoint>,
-) -> HashMap<Chain, Checkpoint> {
-    for (chain, local_cp) in local {
-        remote
-            .entry(chain)
-            .and_modify(|remote_cp| {
-                if local_cp.block_height > remote_cp.block_height {
-                    tracing::info!(
-                        ?chain,
-                        local_height = local_cp.block_height,
-                        remote_height = remote_cp.block_height,
-                        "local checkpoint is newer than remote selection"
-                    );
-                    *remote_cp = local_cp.clone();
-                }
-            })
-            .or_insert(local_cp);
-    }
-    remote
-}
-
 fn chain_supports_deferred_local_recovery(chain: Chain) -> bool {
     matches!(chain, Chain::Ethereum)
 }
@@ -863,7 +838,10 @@ async fn select_recovery_checkpoint(
         return Some((remote_checkpoint, RecoveryRequeueMode::Immediate));
     }
 
-    tracing::warn!(?chain, "skipping checkpoint recovery without threshold quorum");
+    tracing::warn!(
+        ?chain,
+        "skipping checkpoint recovery without threshold quorum"
+    );
     None
 }
 
@@ -873,8 +851,8 @@ mod tests {
     use crate::{
         mesh::{connection::NodeStatus, MeshState},
         node_client::NodeClient,
-        protocol::SignRequestType,
         protocol::ParticipantInfo,
+        protocol::SignRequestType,
         sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PendingRequestStatus},
         storage::checkpoint_storage::CheckpointStorage,
     };
@@ -955,7 +933,11 @@ mod tests {
     fn checkpoint_hash_path(chain: Chain, checkpoint: &Checkpoint) -> Matcher {
         Matcher::UrlEncoded(
             "query".into(),
-            format!("{}:{}", chain.as_str(), self::selection::checkpoint_hash(checkpoint)),
+            format!(
+                "{}:{}",
+                chain.as_str(),
+                self::selection::checkpoint_hash(checkpoint)
+            ),
         )
     }
 
@@ -1537,61 +1519,6 @@ mod tests {
         assert_eq!(checkpoint.block_height, interval);
         assert_eq!(checkpoint.chain, Chain::Solana);
     }
-    #[test]
-    fn test_merge_checkpoints() {
-        let mut local = HashMap::new();
-        let mut remote = HashMap::new();
-
-        // Case 1: Only local
-        local.insert(
-            Chain::Ethereum,
-            Checkpoint {
-                chain: Chain::Ethereum,
-                block_height: 100,
-                pending_requests: vec![],
-            },
-        );
-        let merged = merge_checkpoints(local.clone(), remote.clone());
-        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 100);
-
-        // Case 2: Only remote
-        local.clear();
-        remote.insert(
-            Chain::Ethereum,
-            Checkpoint {
-                chain: Chain::Ethereum,
-                block_height: 200,
-                pending_requests: vec![],
-            },
-        );
-        let merged = merge_checkpoints(local.clone(), remote.clone());
-        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 200);
-
-        // Case 3: Local higher
-        local.insert(
-            Chain::Ethereum,
-            Checkpoint {
-                chain: Chain::Ethereum,
-                block_height: 300,
-                pending_requests: vec![],
-            },
-        );
-        let merged = merge_checkpoints(local.clone(), remote.clone());
-        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 300);
-
-        // Case 4: Remote higher
-        remote.insert(
-            Chain::Ethereum,
-            Checkpoint {
-                chain: Chain::Ethereum,
-                block_height: 400,
-                pending_requests: vec![],
-            },
-        );
-        let merged = merge_checkpoints(local.clone(), remote.clone());
-        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 400);
-    }
-
     #[tokio::test]
     async fn test_recover_uses_local_checkpoint_without_quorum_and_defers_requeue() {
         let storage = CheckpointStorage::in_memory();
@@ -1649,7 +1576,10 @@ mod tests {
                 .await;
         }
 
-        let urls = servers.iter().map(|server| server.url()).collect::<Vec<_>>();
+        let urls = servers
+            .iter()
+            .map(|server| server.url())
+            .collect::<Vec<_>>();
         let mesh_state = active_mesh_state(&urls);
         let recovered = Backlog::persisted(storage);
         let client = NodeClient::new(&crate::node_client::Options::default());
@@ -1658,10 +1588,15 @@ mod tests {
             .recover(&mesh_state, &client, 3, &[Chain::Ethereum])
             .await;
 
-        let pending = pending.get(&Chain::Ethereum).expect("recovered ethereum state");
+        let pending = pending
+            .get(&Chain::Ethereum)
+            .expect("recovered ethereum state");
         assert_eq!(pending.pending.len(), 1);
         assert_eq!(pending.requeue_mode, RecoveryRequeueMode::AfterCatchup);
-        assert!(recovered.get(Chain::Ethereum, &SignId::new([7u8; 32])).await.is_some());
+        assert!(recovered
+            .get(Chain::Ethereum, &SignId::new([7u8; 32]))
+            .await
+            .is_some());
     }
 
     #[tokio::test]
@@ -1713,7 +1648,10 @@ mod tests {
             .create_async()
             .await;
 
-        let urls = servers.iter().map(|server| server.url()).collect::<Vec<_>>();
+        let urls = servers
+            .iter()
+            .map(|server| server.url())
+            .collect::<Vec<_>>();
         let mesh_state = active_mesh_state(&urls);
         let recovered = Backlog::persisted(storage);
         let client = NodeClient::new(&crate::node_client::Options::default());
@@ -1722,9 +1660,14 @@ mod tests {
             .recover(&mesh_state, &client, 3, &[Chain::Ethereum])
             .await;
 
-        let pending = pending.get(&Chain::Ethereum).expect("recovered ethereum state");
+        let pending = pending
+            .get(&Chain::Ethereum)
+            .expect("recovered ethereum state");
         assert_eq!(pending.pending.len(), 1);
         assert_eq!(pending.requeue_mode, RecoveryRequeueMode::Immediate);
-        assert!(recovered.get(Chain::Ethereum, &SignId::new([9u8; 32])).await.is_some());
+        assert!(recovered
+            .get(Chain::Ethereum, &SignId::new([9u8; 32]))
+            .await
+            .is_some());
     }
 }

@@ -1,4 +1,6 @@
-use crate::backlog::{Backlog, BacklogTransaction, RecoveredChainRequests, RecoveryRequeueMode, SignTx};
+use crate::backlog::{
+    Backlog, BacklogTransaction, RecoveredChainRequests, RecoveryRequeueMode, SignTx,
+};
 use crate::indexer_hydration::{
     HydrationRespondBidirectionalEvent, HydrationSignBidirectionalRequestedEvent,
     HydrationSignatureRespondedEvent,
