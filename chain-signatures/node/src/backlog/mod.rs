@@ -625,6 +625,18 @@ impl Backlog {
         }
 
         for (chain, checkpoint) in checkpoints {
+            if !self::selection::checkpoint_has_quorum(mesh_state, node_client, threshold, &checkpoint)
+                .await
+            {
+                tracing::warn!(
+                    ?chain,
+                    block_height = checkpoint.block_height,
+                    checkpoint_hash = self::selection::checkpoint_hash(&checkpoint),
+                    "skipping checkpoint recovery without threshold quorum"
+                );
+                continue;
+            }
+
             tracing::info!(
                 ?chain,
                 block_height = checkpoint.block_height,
@@ -777,11 +789,16 @@ fn merge_checkpoints(
 mod tests {
     use super::*;
     use crate::{
+        mesh::{connection::NodeStatus, MeshState},
+        node_client::NodeClient,
         protocol::SignRequestType,
+        protocol::ParticipantInfo,
         sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PendingRequestStatus},
+        storage::checkpoint_storage::CheckpointStorage,
     };
     use alloy::primitives::{Address, B256};
     use anchor_lang::prelude::Pubkey;
+    use mockito::{Matcher, Server};
     use mpc_primitives::SignId;
     use signet_program::SignBidirectionalEvent;
 
@@ -806,6 +823,69 @@ mod tests {
             nonce: 0,
             status,
         }
+    }
+
+    async fn create_test_sign_checkpoint(
+        chain: Chain,
+        request_id: u8,
+        block_height: u64,
+    ) -> Checkpoint {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([request_id; 32]);
+        let args = SignArgs {
+            entropy: [1u8; 32],
+            epsilon: k256::Scalar::from(1u64),
+            payload: k256::Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+
+        backlog
+            .insert(
+                chain,
+                sign_id,
+                BacklogTransaction::Sign(SignTx {
+                    request_id: sign_id.request_id,
+                    source_chain: chain,
+                    status: PendingRequestStatus::AwaitingResponse,
+                    args,
+                    unix_timestamp_indexed: 0,
+                }),
+                SignRequestType::Sign,
+            )
+            .await;
+        backlog.set_processed_block(chain, block_height).await;
+        backlog.checkpoint(chain).await
+    }
+
+    fn checkpoint_body(chain: Chain, checkpoint: &Checkpoint) -> Vec<u8> {
+        let mut payload = HashMap::new();
+        payload.insert(chain, checkpoint.clone());
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&payload, &mut bytes).unwrap();
+        bytes
+    }
+
+    fn checkpoint_path(chain: Chain) -> Matcher {
+        Matcher::UrlEncoded("query".into(), chain.as_str().to_string())
+    }
+
+    fn checkpoint_hash_path(chain: Chain, checkpoint: &Checkpoint) -> Matcher {
+        Matcher::UrlEncoded(
+            "query".into(),
+            format!("{}:{}", chain.as_str(), self::selection::checkpoint_hash(checkpoint)),
+        )
+    }
+
+    fn active_mesh_state(urls: &[String]) -> MeshState {
+        let mut mesh_state = MeshState::default();
+        for (index, url) in urls.iter().enumerate() {
+            let participant = cait_sith::protocol::Participant::from(index as u32);
+            let mut info = ParticipantInfo::new(index as u32);
+            info.url = url.clone();
+            mesh_state.update(participant, NodeStatus::Active, info);
+        }
+        mesh_state
     }
 
     #[tokio::test]
@@ -1428,5 +1508,137 @@ mod tests {
         );
         let merged = merge_checkpoints(local.clone(), remote.clone());
         assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 400);
+    }
+
+    #[tokio::test]
+    async fn test_recover_skips_local_checkpoint_without_quorum() {
+        let storage = CheckpointStorage::in_memory();
+        let stale_backlog = Backlog::persisted(storage.clone());
+        let stale_checkpoint = create_test_sign_checkpoint(Chain::Ethereum, 7, 100).await;
+
+        stale_backlog
+            .recover_by_checkpoint(stale_checkpoint.clone())
+            .await
+            .expect("seed stale checkpoint");
+        stale_backlog.checkpoint(Chain::Ethereum).await;
+
+        let newer_checkpoint = Checkpoint {
+            chain: Chain::Ethereum,
+            block_height: 101,
+            pending_requests: vec![],
+        };
+
+        let mut servers = Vec::new();
+        for _ in 0..4 {
+            servers.push(Server::new_async().await);
+        }
+
+        for server in &mut servers[0..2] {
+            server
+                .mock("GET", "/checkpoint")
+                .match_query(checkpoint_path(Chain::Ethereum))
+                .with_status(200)
+                .with_body(checkpoint_body(Chain::Ethereum, &stale_checkpoint))
+                .create_async()
+                .await;
+            server
+                .mock("GET", "/checkpoint")
+                .match_query(checkpoint_hash_path(Chain::Ethereum, &stale_checkpoint))
+                .with_status(200)
+                .with_body(checkpoint_body(Chain::Ethereum, &stale_checkpoint))
+                .create_async()
+                .await;
+        }
+
+        for server in &mut servers[2..4] {
+            server
+                .mock("GET", "/checkpoint")
+                .match_query(checkpoint_path(Chain::Ethereum))
+                .with_status(200)
+                .with_body(checkpoint_body(Chain::Ethereum, &newer_checkpoint))
+                .create_async()
+                .await;
+            server
+                .mock("GET", "/checkpoint")
+                .match_query(checkpoint_hash_path(Chain::Ethereum, &newer_checkpoint))
+                .with_status(200)
+                .with_body(checkpoint_body(Chain::Ethereum, &newer_checkpoint))
+                .create_async()
+                .await;
+        }
+
+        let urls = servers.iter().map(|server| server.url()).collect::<Vec<_>>();
+        let mesh_state = active_mesh_state(&urls);
+        let recovered = Backlog::persisted(storage);
+        let client = NodeClient::new(&crate::node_client::Options::default());
+
+        let pending = recovered
+            .recover(&mesh_state, &client, 3, &[Chain::Ethereum])
+            .await;
+
+        assert!(pending.get(&Chain::Ethereum).is_none());
+        assert!(recovered.get(Chain::Ethereum, &SignId::new([7u8; 32])).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_recover_accepts_checkpoint_with_quorum() {
+        let storage = CheckpointStorage::in_memory();
+        let source = Backlog::persisted(storage.clone());
+        let checkpoint = create_test_sign_checkpoint(Chain::Ethereum, 9, 120).await;
+
+        source
+            .recover_by_checkpoint(checkpoint.clone())
+            .await
+            .expect("seed checkpoint");
+        source.checkpoint(Chain::Ethereum).await;
+
+        let mut servers = Vec::new();
+        for _ in 0..4 {
+            servers.push(Server::new_async().await);
+        }
+
+        for server in &mut servers[0..3] {
+            server
+                .mock("GET", "/checkpoint")
+                .match_query(checkpoint_path(Chain::Ethereum))
+                .with_status(200)
+                .with_body(checkpoint_body(Chain::Ethereum, &checkpoint))
+                .create_async()
+                .await;
+            server
+                .mock("GET", "/checkpoint")
+                .match_query(checkpoint_hash_path(Chain::Ethereum, &checkpoint))
+                .with_status(200)
+                .with_body(checkpoint_body(Chain::Ethereum, &checkpoint))
+                .create_async()
+                .await;
+        }
+
+        servers[3]
+            .mock("GET", "/checkpoint")
+            .match_query(checkpoint_path(Chain::Ethereum))
+            .with_status(200)
+            .with_body(checkpoint_body(
+                Chain::Ethereum,
+                &Checkpoint {
+                    chain: Chain::Ethereum,
+                    block_height: 121,
+                    pending_requests: vec![],
+                },
+            ))
+            .create_async()
+            .await;
+
+        let urls = servers.iter().map(|server| server.url()).collect::<Vec<_>>();
+        let mesh_state = active_mesh_state(&urls);
+        let recovered = Backlog::persisted(storage);
+        let client = NodeClient::new(&crate::node_client::Options::default());
+
+        let pending = recovered
+            .recover(&mesh_state, &client, 3, &[Chain::Ethereum])
+            .await;
+
+        assert_eq!(pending.get(&Chain::Ethereum).map(HashMap::len), Some(1));
+        assert!(recovered.get(Chain::Ethereum, &SignId::new([9u8; 32])).await.is_some());
     }
 }

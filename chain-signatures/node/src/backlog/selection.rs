@@ -10,7 +10,8 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::Chain;
 use cait_sith::protocol::Participant;
-use std::collections::HashMap;
+use std::collections::{hash_map::DefaultHasher, HashMap};
+use std::hash::{Hash, Hasher};
 use tokio::task::JoinSet;
 
 /// Queries all participants for their checkpoints and returns a selected checkpoint
@@ -61,6 +62,16 @@ pub async fn select_checkpoints(
             continue;
         };
 
+        if !checkpoint_has_quorum(mesh_state, node_client, threshold, checkpoint).await {
+            tracing::warn!(
+                ?chain,
+                block_height = checkpoint.block_height,
+                checkpoint_hash = checkpoint_hash(checkpoint),
+                "selected checkpoint does not have threshold quorum support"
+            );
+            continue;
+        }
+
         tracing::info!(
             ?chain,
             block_height = checkpoint.block_height,
@@ -69,10 +80,65 @@ pub async fn select_checkpoints(
         selections.insert(chain, checkpoint.clone());
     }
 
-    // TODO: make sure that the selected checkpoint is present on all nodes via
-    // all_checkpoints or by calling /checkpoint for each.
-
     selections
+}
+
+pub(crate) fn checkpoint_hash(checkpoint: &Checkpoint) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    checkpoint.hash(&mut hasher);
+    hasher.finish()
+}
+
+pub(crate) async fn checkpoint_has_quorum(
+    mesh_state: &MeshState,
+    node_client: &NodeClient,
+    threshold: usize,
+    checkpoint: &Checkpoint,
+) -> bool {
+    if threshold <= 1 {
+        return true;
+    }
+
+    let hash = checkpoint_hash(checkpoint);
+    let chain = checkpoint.chain;
+    let mut tasks = JoinSet::new();
+    for info in mesh_state.active().participants.values() {
+        let client = node_client.clone();
+        let node_url = info.url.clone();
+        tasks.spawn(async move { client.checkpoint_by_hash(&node_url, chain, hash).await });
+    }
+
+    let mut supporters = 0usize;
+    while let Some(join_result) = tasks.join_next().await {
+        let Ok(result) = join_result.inspect_err(|err| {
+            tracing::warn!(%err, ?chain, hash, "checkpoint quorum query interrupted");
+        }) else {
+            continue;
+        };
+
+        match result {
+            Ok(Some(found)) if checkpoint_hash(&found) == hash => {
+                supporters += 1;
+                if supporters >= threshold {
+                    return true;
+                }
+            }
+            Ok(Some(found)) => {
+                tracing::warn!(
+                    ?chain,
+                    expected_hash = hash,
+                    received_hash = checkpoint_hash(&found),
+                    "checkpoint hash mismatch while verifying quorum"
+                );
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(?chain, hash, %err, "checkpoint quorum query failed");
+            }
+        }
+    }
+
+    false
 }
 
 /// Query all active participants for their latest checkpoints for each chain specified.

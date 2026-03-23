@@ -217,23 +217,16 @@ impl NodeClient {
         self.post_cbor_response(&url, update).await
     }
 
-    pub async fn checkpoint(
+    async fn query_checkpoint(
         &self,
         base: impl IntoUrl,
-        chains: &[Chain],
+        query: Option<String>,
     ) -> Result<HashMap<Chain, Checkpoint>, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("checkpoint");
-        if !chains.is_empty() {
-            url.set_query(Some(&format!(
-                "query={}",
-                chains
-                    .iter()
-                    .map(|c| c.as_str())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )));
-        };
+        if let Some(query) = query.filter(|query| !query.is_empty()) {
+            url.set_query(Some(&format!("query={query}")));
+        }
 
         let resp = self
             .http
@@ -253,5 +246,31 @@ impl NodeClient {
             let resp = std::str::from_utf8(&body).map_err(RequestError::MalformedResponse)?;
             Err(RequestError::Unsuccessful(status, resp.into(), request_id))
         }
+    }
+
+    pub async fn checkpoint(
+        &self,
+        base: impl IntoUrl,
+        chains: &[Chain],
+    ) -> Result<HashMap<Chain, Checkpoint>, RequestError> {
+        let query = (!chains.is_empty()).then(|| {
+            chains
+                .iter()
+                .map(|c| c.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+        self.query_checkpoint(base, query).await
+    }
+
+    pub async fn checkpoint_by_hash(
+        &self,
+        base: impl IntoUrl,
+        chain: Chain,
+        hash: u64,
+    ) -> Result<Option<Checkpoint>, RequestError> {
+        let query = Some(format!("{}:{hash}", chain.as_str()));
+        let mut checkpoints = self.query_checkpoint(base, query).await?;
+        Ok(checkpoints.remove(&chain))
     }
 }
