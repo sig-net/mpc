@@ -1,4 +1,4 @@
-use crate::backlog::Backlog;
+use crate::backlog::{Backlog, BacklogEntry, RecoveredChainRequests, RecoveryRequeueMode};
 use crate::indexer_hydration::{
     HydrationRespondBidirectionalEvent, HydrationSignBidirectionalRequestedEvent,
     HydrationSignatureRespondedEvent,
@@ -288,27 +288,48 @@ pub(crate) async fn recover_backlog(
     node_client: &NodeClient,
     source_chain: Chain,
     sign_tx: mpsc::Sender<Sign>,
-) {
+) -> RecoveredChainRequests {
     // Recover backlog before doing anything.
     // Wait for threshold to be available
     let threshold = contract_watcher.wait_threshold().await;
     if threshold == 0 {
-        return;
+        return RecoveredChainRequests::default();
     }
     wait_threshold_active(mesh_state, threshold).await;
 
     let mesh_state = mesh_state.borrow().clone();
-    let mut pending = backlog
+    let mut recovered = backlog
         .recover(&mesh_state, node_client, threshold, &[source_chain])
         .await;
 
-    // Re-enqueue any pending sign requests so the node processes them after recovery
-    let pending = pending.remove(&source_chain).unwrap_or_default();
+    let recovered = recovered.remove(&source_chain).unwrap_or_default();
 
-    for (sign_id, entry) in pending
-        .into_iter()
-        .filter(|(_, entry)| matches!(entry.status(), SignStatus::AwaitingResponse))
-    {
+    if recovered.requeue_mode == RecoveryRequeueMode::Immediate {
+        requeue_recovered_sign_requests(backlog, source_chain, sign_tx, &recovered.pending).await;
+    }
+
+    recovered
+}
+
+pub(crate) async fn requeue_recovered_sign_requests(
+    backlog: &Backlog,
+    source_chain: Chain,
+    sign_tx: mpsc::Sender<Sign>,
+    pending: &std::collections::HashMap<SignId, BacklogEntry>,
+) {
+    for &sign_id in pending.keys() {
+        let Some(entry) = backlog.get(source_chain, &sign_id).await else {
+            continue;
+        };
+
+        if entry.status() != SignStatus::AwaitingResponse {
+            continue;
+        }
+
+        if entry.execution_tx().is_some() {
+            continue;
+        }
+
         let sign_request = entry.request;
 
         if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {

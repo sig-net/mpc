@@ -294,7 +294,15 @@ type Result<T> = anyhow::Result<T>;
 /// Solana stream that implements the new ChainStream abstraction
 pub struct SolanaStream {
     rx: mpsc::Receiver<ChainEvent>,
+    start_state: Option<SolanaStreamStartState>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+struct SolanaStreamStartState {
+    program_id: Pubkey,
+    rpc_http_url: String,
+    rpc_ws_url: String,
+    tx: mpsc::Sender<ChainEvent>,
 }
 
 impl Drop for SolanaStream {
@@ -318,27 +326,42 @@ impl SolanaStream {
         };
 
         let (tx, rx) = crate::stream::channel();
-        let tasks = vec![
-            spawn_cpi_sign_events(
-                program_id,
-                sol.rpc_http_url.clone(),
-                sol.rpc_ws_url.clone(),
-                tx.clone(),
-            ),
-            spawn_respond_events(
-                program_id,
-                sol.rpc_http_url.clone(),
-                sol.rpc_ws_url.clone(),
-                tx.clone(),
-            ),
-        ];
 
-        Some(SolanaStream { rx, tasks })
+        Some(SolanaStream {
+            rx,
+            start_state: Some(SolanaStreamStartState {
+                program_id,
+                rpc_http_url: sol.rpc_http_url.clone(),
+                rpc_ws_url: sol.rpc_ws_url.clone(),
+                tx,
+            }),
+            tasks: Vec::new(),
+        })
     }
 }
 
 impl ChainStream for SolanaStream {
     const CHAIN: Chain = Chain::Solana;
+
+    async fn start(&mut self) {
+        let Some(start_state) = self.start_state.take() else {
+            return;
+        };
+
+        self.tasks.push(spawn_cpi_sign_events(
+            start_state.program_id,
+            start_state.rpc_http_url.clone(),
+            start_state.rpc_ws_url.clone(),
+            start_state.tx.clone(),
+        ));
+        self.tasks.push(spawn_respond_events(
+            start_state.program_id,
+            start_state.rpc_http_url,
+            start_state.rpc_ws_url,
+            start_state.tx,
+        ));
+    }
+
     async fn next_event(&mut self) -> Option<ChainEvent> {
         self.rx.recv().await
     }

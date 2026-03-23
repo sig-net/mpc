@@ -190,6 +190,19 @@ pub struct Backlog {
     historical_checkpoints: Arc<RwLock<HashMap<Chain, Vec<HistoricalCheckpoint>>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecoveryRequeueMode {
+    #[default]
+    Immediate,
+    AfterCatchup,
+}
+
+#[derive(Debug, Default)]
+pub struct RecoveredChainRequests {
+    pub pending: HashMap<SignId, BacklogEntry>,
+    pub requeue_mode: RecoveryRequeueMode,
+}
+
 impl Default for Backlog {
     fn default() -> Self {
         Self::new()
@@ -558,7 +571,7 @@ impl Backlog {
         node_client: &NodeClient,
         threshold: usize,
         chains: &[Chain],
-    ) -> HashMap<Chain, HashMap<SignId, BacklogEntry>> {
+    ) -> HashMap<Chain, RecoveredChainRequests> {
         tracing::info!("attempting to recover from latest checkpoints via node selection");
 
         // Load local checkpoints first
@@ -586,21 +599,31 @@ impl Backlog {
         // Fetches all checkpoints from active participants and creates a selected checkpoint:
         // - sorts all checkpoints by block height
         // - selects threshold lowest block height checkpoint
-        let remote_checkpoints =
+        let mut remote_checkpoints =
             select_checkpoints(mesh_state, node_client, threshold, chains).await;
 
-        // Merge local and remote checkpoints, preferring the one with higher block height
-        let checkpoints = merge_checkpoints(local_checkpoints, remote_checkpoints);
-
-        if checkpoints.is_empty() {
+        if local_checkpoints.is_empty() && remote_checkpoints.is_empty() {
             tracing::info!("no selected checkpoints found, starting with empty state");
             return HashMap::new();
         }
 
-        for (chain, checkpoint) in checkpoints {
+        let mut recovered_modes = HashMap::new();
+        for &chain in chains {
+            let local_checkpoint = local_checkpoints.remove(&chain);
+            let remote_checkpoint = remote_checkpoints.remove(&chain);
+
+            let Some((checkpoint, requeue_mode)) = select_recovery_checkpoint(
+                chain,
+                local_checkpoint,
+                remote_checkpoint,
+            )
+            else {
+                continue;
+            };
             tracing::info!(
                 ?chain,
                 block_height = checkpoint.block_height,
+                ?requeue_mode,
                 "found selected checkpoint, attempting recovery"
             );
             if let Err(err) = self.recover_by_checkpoint(checkpoint).await {
@@ -609,7 +632,10 @@ impl Backlog {
                     %err,
                     "failed to recover from selected checkpoint, continuing with empty state"
                 );
+                continue;
             }
+
+            recovered_modes.insert(chain, requeue_mode);
         }
 
         // Snapshot pending requests for the requested chains
@@ -617,13 +643,17 @@ impl Backlog {
         let mut recovered = HashMap::new();
         for &chain in chains {
             if let Some(pending) = requests.get(&chain) {
+                let requeue_mode = recovered_modes.get(&chain).copied().unwrap_or_default();
                 recovered.insert(
                     chain,
-                    pending
-                        .requests
-                        .iter()
-                        .map(|(id, entry)| (*id, entry.clone()))
-                        .collect(),
+                    RecoveredChainRequests {
+                        pending: pending
+                            .requests
+                            .iter()
+                            .map(|(id, entry)| (*id, entry.clone()))
+                            .collect(),
+                        requeue_mode,
+                    },
                 );
             }
         }
@@ -774,6 +804,52 @@ fn merge_checkpoints(
             .or_insert(local_cp);
     }
     remote
+}
+
+fn chain_supports_deferred_local_recovery(chain: Chain) -> bool {
+    matches!(chain, Chain::Ethereum)
+}
+
+async fn select_recovery_checkpoint(
+    chain: Chain,
+    local_checkpoint: Option<Checkpoint>,
+    remote_checkpoint: Option<Checkpoint>,
+) -> Option<(Checkpoint, RecoveryRequeueMode)> {
+    match (local_checkpoint, remote_checkpoint) {
+        (Some(local), Some(remote)) if local.block_height > remote.block_height => {
+            let requeue_mode = if chain_supports_deferred_local_recovery(chain) {
+                tracing::warn!(
+                    ?chain,
+                    block_height = local.block_height,
+                    remote_block_height = remote.block_height,
+                    "recovering from newer local checkpoint; requeue deferred until catchup"
+                );
+                RecoveryRequeueMode::AfterCatchup
+            } else {
+                RecoveryRequeueMode::Immediate
+            };
+            Some((local, requeue_mode))
+        }
+        (Some(_), Some(remote)) => Some((remote, RecoveryRequeueMode::Immediate)),
+        (Some(local), None) => {
+            let requeue_mode = if chain_supports_deferred_local_recovery(chain) {
+                tracing::warn!(
+                    ?chain,
+                    block_height = local.block_height,
+                    "recovering from local checkpoint; requeue deferred until catchup"
+                );
+                RecoveryRequeueMode::AfterCatchup
+            } else {
+                RecoveryRequeueMode::Immediate
+            };
+            Some((local, requeue_mode))
+        }
+        (None, Some(remote)) => Some((remote, RecoveryRequeueMode::Immediate)),
+        (None, None) => {
+            tracing::info!(?chain, "no checkpoint available for recovery");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
