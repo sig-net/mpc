@@ -56,6 +56,43 @@ pub struct IndexedSignRequest {
     pub sign_request_type: SignRequestType,
 }
 
+impl IndexedSignRequest {
+    pub fn new(
+        id: SignId,
+        args: SignArgs,
+        chain: Chain,
+        sign_request_type: SignRequestType,
+    ) -> Self {
+        Self {
+            id,
+            args,
+            chain,
+            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
+            timestamp_created: Instant::now(),
+            sign_request_type,
+        }
+    }
+
+    /// Reconstruct a sign request during backlog recovery.
+    /// Preserves the original `unix_timestamp_indexed` but refreshes `timestamp_created`.
+    pub fn recover(
+        id: SignId,
+        args: SignArgs,
+        chain: Chain,
+        unix_timestamp_indexed: u64,
+        sign_request_type: SignRequestType,
+    ) -> Self {
+        Self {
+            id,
+            args,
+            chain,
+            unix_timestamp_indexed,
+            timestamp_created: Instant::now(),
+            sign_request_type,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Sign {

@@ -216,26 +216,24 @@ async fn test_basic_sign() {
 }
 
 fn sign_request(seed: u8) -> Sign {
-    Sign::Request(IndexedSignRequest {
-        id: SignId::new([seed; 32]),
-        args: sign_arg(seed),
-        chain: Chain::NEAR,
-        unix_timestamp_indexed: 0,
-        timestamp_created: std::time::Instant::now(),
-        sign_request_type: SignRequestType::Sign,
-    })
+    Sign::Request(IndexedSignRequest::new(
+        SignId::new([seed; 32]),
+        sign_arg(seed),
+        Chain::NEAR,
+        SignRequestType::Sign,
+    ))
 }
 
 fn sign_arg(seed: u8) -> SignArgs {
     let mut entropy = [1; 32];
     entropy[0] = seed;
-    SignArgs {
+    SignArgs::new(
         entropy,
-        epsilon: k256::Scalar::default(),
-        payload: k256::Scalar::default(),
-        path: "test".to_owned(),
-        key_version: LATEST_MPC_KEY_VERSION,
-    }
+        k256::Scalar::default(),
+        k256::Scalar::default(),
+        "test".to_owned(),
+        LATEST_MPC_KEY_VERSION,
+    )
 }
 
 /// drop the first 20 presignature messages on each node and see if the system

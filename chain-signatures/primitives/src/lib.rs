@@ -93,6 +93,24 @@ pub struct SignArgs {
     pub key_version: u32,
 }
 
+impl SignArgs {
+    pub fn new(
+        entropy: [u8; 32],
+        epsilon: Scalar,
+        payload: Scalar,
+        path: String,
+        key_version: u32,
+    ) -> Self {
+        Self {
+            entropy,
+            epsilon,
+            payload,
+            path,
+            key_version,
+        }
+    }
+}
+
 impl std::fmt::Debug for SignArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SignArgs")

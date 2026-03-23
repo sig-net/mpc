@@ -193,20 +193,18 @@ impl SignatureEvent for SignatureRequestedEvent {
         let sign_id = SignId::new(self.generate_request_id());
         tracing::info!(?sign_id, "solana signature requested");
 
-        Ok(IndexedSignRequest {
-            id: sign_id,
-            args: SignArgs {
+        Ok(IndexedSignRequest::new(
+            sign_id,
+            SignArgs::new(
                 entropy,
                 epsilon,
                 payload,
-                path: self.path.clone(),
-                key_version: self.key_version,
-            },
-            chain: Chain::Solana,
-            timestamp_created: Instant::now(),
-            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            sign_request_type: SignRequestType::Sign,
-        })
+                self.path.clone(),
+                self.key_version,
+            ),
+            Chain::Solana,
+            SignRequestType::Sign,
+        ))
     }
 
     fn source_chain(&self) -> Chain {
@@ -267,22 +265,20 @@ impl SignatureEvent for SignBidirectionalEvent {
             anyhow::bail!("payload exceeds secp256k1 curve order");
         }
 
-        Ok(IndexedSignRequest {
-            id: sign_id,
-            args: SignArgs {
+        Ok(IndexedSignRequest::new(
+            sign_id,
+            SignArgs::new(
                 entropy,
                 epsilon,
                 payload,
-                path: self.path.clone(),
-                key_version: self.key_version,
-            },
-            chain: Chain::Solana,
-            timestamp_created: Instant::now(),
-            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            sign_request_type: SignRequestType::SignBidirectional(
-                crate::stream::ops::SignBidirectionalEvent::Solana(self.clone()),
+                self.path.clone(),
+                self.key_version,
             ),
-        })
+            Chain::Solana,
+            SignRequestType::SignBidirectional(crate::stream::ops::SignBidirectionalEvent::Solana(
+                self.clone(),
+            )),
+        ))
     }
 
     fn source_chain(&self) -> Chain {

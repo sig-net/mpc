@@ -24,7 +24,6 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::LazyLock;
-use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
@@ -369,20 +368,18 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
     let sign_id = SignId::new(event.generate_request_id());
     tracing::info!(?sign_id, "eth signature requested");
 
-    Some(IndexedSignRequest {
-        id: sign_id,
-        args: SignArgs {
-            entropy: entropy.into(),
+    Some(IndexedSignRequest::new(
+        sign_id,
+        SignArgs::new(
+            entropy.into(),
             epsilon,
             payload,
-            path: event.path,
-            key_version: event.key_version,
-        },
-        chain: Chain::Ethereum,
-        unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-        timestamp_created: Instant::now(),
-        sign_request_type: SignRequestType::Sign,
-    })
+            event.path,
+            event.key_version,
+        ),
+        Chain::Ethereum,
+        SignRequestType::Sign,
+    ))
 }
 
 // Helper function to parse event logs
