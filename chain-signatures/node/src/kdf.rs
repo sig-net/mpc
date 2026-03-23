@@ -6,9 +6,11 @@ use mpc_primitives::Signature;
 use near_primitives::hash::CryptoHash;
 use sha3::Sha3_256;
 
-// In case there are multiple requests in the same block (hence same entropy), we need to ensure
-// that we generate different random scalars as delta tweaks.
-// Receipt ID should be unique inside of a block, so it serves us as the request identifier.
+/// # Parameters
+/// - `request_id`: unique identifier of the sign request (hash of the event fields).
+/// - `entropy`: chain-specific, unique per-request data
+/// - `presignature_big_r`: the R point from the presignature, mixed into the
+///   derivation so delta is also bound to the specific presignature used.
 pub fn derive_delta(
     request_id: [u8; 32],
     entropy: [u8; 32],

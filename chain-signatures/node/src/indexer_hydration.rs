@@ -480,7 +480,7 @@ pub async fn run(
                     event
                 );
 
-                let entropy = sp_core::hashing::blake2_256(ev.bytes());
+                let entropy = entropy_hydration(&ev);
 
                 if let Err(e) = crate::stream::ops::process_sign_event(
                     Box::new(event),
@@ -533,8 +533,7 @@ pub async fn run(
                     "Hydration::Signet::SignBidirectionalRequested in block #{number} ({hash:?}): {:?}",
                 event
                 );
-
-                let entropy = sp_core::hashing::blake2_256(ev.bytes());
+                let entropy = entropy_hydration(&ev);
 
                 if let Err(e) = crate::stream::ops::process_sign_event(
                     Box::new(event),
@@ -593,6 +592,11 @@ pub fn spawn_runtime_updater(api: OnlineClient<SubstrateConfig>) {
             tracing::error!("runtime updater stopped: {e}");
         }
     });
+}
+
+/// Blake2-256 hash of the raw Substrate event bytes.
+fn entropy_hydration(ev: &EventDetails<SubstrateConfig>) -> [u8; 32] {
+    sp_core::hashing::blake2_256(ev.bytes())
 }
 
 fn decode_signature_requested(

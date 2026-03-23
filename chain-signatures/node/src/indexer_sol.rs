@@ -487,6 +487,8 @@ fn build_sign_request(
     sign_event: SignatureEventBox,
     tx_sig: Vec<u8>,
 ) -> anyhow::Result<IndexedSignRequest> {
+    // First 32 bytes of the Solana transaction signature,
+    // which serves as Solana's unique transaction identifier.
     let mut entropy = [0u8; 32];
     entropy.copy_from_slice(&tx_sig[..32]);
     sign_event.generate_sign_request(entropy)
