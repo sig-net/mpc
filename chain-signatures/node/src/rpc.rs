@@ -1811,8 +1811,7 @@ mod tests {
             },
             chain: Chain::NEAR,
             unix_timestamp_indexed: 0,
-            timestamp_created: Instant::now(),
-            sign_request_type: SignRequestType::Sign,
+            kind: SignKind::Sign,
         }
     }
 
