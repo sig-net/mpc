@@ -28,8 +28,10 @@ fn test_dependencies() -> (Backlog, watch::Receiver<MeshState>, NodeClient) {
     (backlog, mesh_rx, node_client)
 }
 
-fn stream_solana(config: SolConfig) -> Result<SolanaStream> {
-    SolanaStream::new(Some(config)).context("failed to create SolanaStream")
+async fn stream_solana(config: SolConfig) -> Result<SolanaStream> {
+    let mut stream = SolanaStream::new(Some(config)).context("failed to create SolanaStream")?;
+    ChainStream::start(&mut stream).await;
+    Ok(stream)
 }
 
 /// Helper to wait for a specific event type, skipping block events
@@ -57,7 +59,7 @@ async fn test_solana_stream_parse_sign_event() -> Result<()> {
     let solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
     let config = solana.get_config(program_address);
-    let mut stream = stream_solana(config)?;
+    let mut stream = stream_solana(config).await?;
 
     // Submit sign request
     let payload = [1u8; 32];
@@ -86,7 +88,7 @@ async fn test_solana_stream_emits_blocks() -> Result<()> {
     let program_address = solana.program_keypair.pubkey().to_string();
 
     let config = solana.get_config(program_address);
-    let mut stream = stream_solana(config)?;
+    let mut stream = stream_solana(config).await?;
 
     // Submit a transaction to generate activity
     let payload = [2u8; 32];
@@ -117,7 +119,7 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
 
     // Create first client and process some events
     let config = solana.get_config(program_address.clone());
-    let mut stream1 = stream_solana(config.clone())?;
+    let mut stream1 = stream_solana(config.clone()).await?;
 
     // Submit requests while client is running
     for i in 0..3 {
@@ -146,7 +148,7 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     drop(stream1);
 
     // Create new client immediately (before more events) - should start processing from now
-    let mut stream2 = stream_solana(config)?;
+    let mut stream2 = stream_solana(config).await?;
 
     // Submit new requests while second client is running
     for i in 3..6 {
@@ -194,7 +196,7 @@ async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {
     let solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
     let config = solana.get_config(program_address);
-    let mut stream = stream_solana(config)?;
+    let mut stream = stream_solana(config).await?;
 
     // Submit bidirectional sign request
     let serialized_tx = vec![1, 2, 3, 4];
@@ -234,7 +236,7 @@ async fn test_solana_stream_concurrent_events() -> Result<()> {
     let solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
     let config = solana.get_config(program_address);
-    let mut stream = stream_solana(config)?;
+    let mut stream = stream_solana(config).await?;
 
     // Submit multiple concurrent sign requests
     let num_requests = 5;
@@ -284,7 +286,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
     let program_address = solana.program_keypair.pubkey().to_string();
     let (backlog, _, _) = test_dependencies();
     let config = solana.get_config(program_address.clone());
-    let mut stream1 = stream_solana(config.clone())?;
+    let mut stream1 = stream_solana(config.clone()).await?;
 
     // Submit request and wait for a block marker
     solana
@@ -314,7 +316,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
     drop(stream1);
 
     // Create new client with same backlog - should resume from checkpoint
-    let mut stream2 = stream_solana(config)?;
+    let mut stream2 = stream_solana(config).await?;
 
     // Submit new request
     solana
