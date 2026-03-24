@@ -271,6 +271,24 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let mesh_state = mesh.watch();
             let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(&account_id);
 
+            let eth_account_address = eth.eth_account_sk.as_ref().map(|sk| {
+                let signer: alloy_signer_local::PrivateKeySigner =
+                    sk.parse().expect("cannot parse Eth account sk");
+                format!("{}", signer.address())
+            });
+            let sol_payer_address = sol.sol_account_sk.as_ref().map(|sk| {
+                use solana_sdk::signer::Signer;
+                solana_sdk::signer::keypair::Keypair::from_base58_string(sk)
+                    .pubkey()
+                    .to_string()
+            });
+            let hydration_signer_address = hydration.signer_uri.as_ref().and_then(|uri| {
+                use std::str::FromStr;
+                use subxt_signer::{sr25519, SecretUri};
+                let uri = SecretUri::from_str(uri).ok()?;
+                let kp = sr25519::Keypair::from_uri(&uri).ok()?;
+                Some(kp.public_key().to_account_id().to_string())
+            });
             let eth = eth.into_config();
             let sol = sol.into_config();
             let hydration = hydration.into_config();
@@ -301,6 +319,12 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sign_pk = %network.sign_sk.public_key(),
                 near_rpc_url = %near_client.rpc_addr(),
                 eth_contract_address = %eth.as_ref().map(|eth| eth.contract_address.as_str()).unwrap_or("None"),
+                eth_signer_address = %eth_account_address.as_deref().unwrap_or("None"),
+                sol_program_address = %sol.as_ref().map(|sol| sol.program_address.as_str()).unwrap_or("None"),
+                sol_rpc_url = %sol.as_ref().map(|sol| sol.rpc_http_url.as_str()).unwrap_or("None"),
+                sol_signer_address = %sol_payer_address.as_deref().unwrap_or("None"),
+                hydration_rpc_url = %hydration.as_ref().map(|h| h.rpc_ws_url.as_str()).unwrap_or("None"),
+                hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
                 "starting node",
             );
 

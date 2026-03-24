@@ -3,6 +3,8 @@ use near_sdk::AccountId;
 use redis::{FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 use serde::{Deserialize, Serialize};
 
+use cait_sith::protocol::Participant;
+
 use crate::protocol::triple::{Triple, TripleId};
 
 use super::protocol_storage::{
@@ -20,6 +22,9 @@ pub struct TriplePair {
     pub id: TripleId,
     pub triple0: Triple,
     pub triple1: Triple,
+    /// Nodes still holding this artifact
+    #[serde(skip, default)]
+    pub holders: Option<Vec<Participant>>,
 }
 
 impl TriplePair {
@@ -34,6 +39,18 @@ impl ProtocolArtifact for TriplePair {
 
     fn id(&self) -> Self::Id {
         self.id
+    }
+
+    fn participants(&self) -> &[Participant] {
+        &self.triple0.public.participants
+    }
+
+    fn holders(&self) -> Option<&[Participant]> {
+        self.holders.as_deref()
+    }
+
+    fn set_holders(&mut self, holders: Vec<Participant>) {
+        self.holders = Some(holders);
     }
 }
 

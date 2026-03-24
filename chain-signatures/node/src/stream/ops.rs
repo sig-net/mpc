@@ -168,7 +168,7 @@ impl RespondBidirectionalEvent {
             RespondBidirectionalEvent::Solana(event) => {
                 crate::indexer_sol::to_mpc_signature(event.signature.clone()).unwrap()
             }
-            RespondBidirectionalEvent::Hydration(event) => event.signature.clone(),
+            RespondBidirectionalEvent::Hydration(event) => event.signature,
         }
     }
 
@@ -220,8 +220,8 @@ impl SignatureRespondedEvent {
             SignatureRespondedEvent::Solana(event) => {
                 crate::indexer_sol::to_mpc_signature(event.signature.clone()).unwrap()
             }
-            SignatureRespondedEvent::Hydration(event) => event.signature.clone(),
-            SignatureRespondedEvent::Ethereum(event) => event.signature.clone(),
+            SignatureRespondedEvent::Hydration(event) => event.signature,
+            SignatureRespondedEvent::Ethereum(event) => event.signature,
         }
     }
 }

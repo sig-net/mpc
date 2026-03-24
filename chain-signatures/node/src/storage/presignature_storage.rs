@@ -2,6 +2,8 @@ use deadpool_redis::Pool;
 use near_sdk::AccountId;
 use redis::{FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 
+use cait_sith::protocol::Participant;
+
 use super::protocol_storage::{ArtifactSlot, ArtifactTaken, ArtifactTakenDropper, ProtocolStorage};
 use crate::protocol::presignature::{Presignature, PresignatureId};
 use crate::storage::protocol_storage::ProtocolArtifact;
@@ -22,6 +24,18 @@ impl ProtocolArtifact for Presignature {
 
     fn id(&self) -> Self::Id {
         self.id
+    }
+
+    fn participants(&self) -> &[Participant] {
+        &self.participants
+    }
+
+    fn holders(&self) -> Option<&[Participant]> {
+        self.holders.as_deref()
+    }
+
+    fn set_holders(&mut self, holders: Vec<Participant>) {
+        self.holders = Some(holders);
     }
 
     const METRIC_LABEL: &'static str = "presignature";
