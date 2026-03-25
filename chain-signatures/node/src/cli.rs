@@ -381,8 +381,13 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 backlog.clone(),
             ));
 
+            tracing::info!(
+                eth_configured = eth.is_some(),
+                "initializing ethereum indexer stream"
+            );
             match EthereumStream::new(eth, backlog.clone()).await {
                 Ok(eth_stream) => {
+                    tracing::info!("ethereum indexer stream created successfully");
                     tokio::spawn(run_stream(
                         eth_stream,
                         sign_tx.clone(),

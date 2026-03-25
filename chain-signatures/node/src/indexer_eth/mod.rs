@@ -243,14 +243,54 @@ impl EthArgs {
     }
 
     pub fn into_config(self) -> Option<EthConfig> {
+        // If no account secret key was provided, ETH is intentionally unconfigured.
+        if self.eth_account_sk.is_none() {
+            return None;
+        }
+
+        // Fields required by both Helios and Direct-RPC modes.
+        let mut missing: Vec<&str> = Vec::new();
+        if self.eth_execution_rpc_http_url.is_none() {
+            missing.push("eth_execution_rpc_http_url");
+        }
+        if self.eth_contract_address.is_none() {
+            missing.push("eth_contract_address");
+        }
+        if self.eth_refresh_finalized_interval.is_none() {
+            missing.push("eth_refresh_finalized_interval");
+        }
+
+        // Additional fields required only in Helios (light-client) mode.
+        if self.eth_light_client {
+            if self.eth_consensus_rpc_http_url.is_none() {
+                missing.push("eth_consensus_rpc_http_url");
+            }
+            if self.eth_network.is_none() {
+                missing.push("eth_network");
+            }
+            if self.eth_helios_data_path.is_none() {
+                missing.push("eth_helios_data_path");
+            }
+        }
+
+        if !missing.is_empty() {
+            tracing::error!(
+                ?missing,
+                light_client = self.eth_light_client,
+                "eth_account_sk is set but required ETH fields are missing; \
+                 ethereum indexer will be DISABLED"
+            );
+            return None;
+        }
+
         Some(EthConfig {
-            account_sk: self.eth_account_sk?,
-            consensus_rpc_http_url: self.eth_consensus_rpc_http_url?,
-            execution_rpc_http_url: self.eth_execution_rpc_http_url?,
-            contract_address: self.eth_contract_address?,
-            network: self.eth_network?,
-            helios_data_path: self.eth_helios_data_path?,
-            refresh_finalized_interval: self.eth_refresh_finalized_interval?,
+            account_sk: self.eth_account_sk.unwrap(),
+            consensus_rpc_http_url: self.eth_consensus_rpc_http_url.unwrap_or_default(),
+            execution_rpc_http_url: self.eth_execution_rpc_http_url.unwrap(),
+            contract_address: self.eth_contract_address.unwrap(),
+            network: self.eth_network.unwrap_or_default(),
+            helios_data_path: self.eth_helios_data_path.unwrap_or_default(),
+            refresh_finalized_interval: self.eth_refresh_finalized_interval.unwrap(),
             optimistic_requests: self.eth_optimistic_requests,
             light_client: self.eth_light_client,
         })
@@ -1325,9 +1365,18 @@ pub struct EthereumStream {
 impl EthereumStream {
     pub async fn new(eth: Option<EthConfig>, backlog: Backlog) -> anyhow::Result<Self> {
         let Some(eth) = eth else {
-            tracing::warn!("ethereum indexer is disabled");
-            return Err(anyhow::anyhow!("ethereum indexer is disabled"));
+            tracing::warn!(
+                "ethereum indexer is disabled: no EthConfig provided \
+                 (check that all --eth-* CLI flags were supplied)"
+            );
+            return Err(anyhow::anyhow!(
+                "ethereum indexer is disabled: no EthConfig provided"
+            ));
         };
+        tracing::info!(
+            eth_config = ?eth,
+            "creating ethereum indexer stream"
+        );
 
         let (events_tx, events_rx) = crate::stream::channel();
         let indexer = EthereumIndexer::new(eth, backlog).await?;
