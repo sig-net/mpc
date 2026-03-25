@@ -244,9 +244,7 @@ impl EthArgs {
 
     pub fn into_config(self) -> Option<EthConfig> {
         // If no account secret key was provided, ETH is intentionally unconfigured.
-        if self.eth_account_sk.is_none() {
-            return None;
-        }
+        self.eth_account_sk.as_ref()?;
 
         // Fields required by both Helios and Direct-RPC modes.
         let mut missing: Vec<&str> = Vec::new();
