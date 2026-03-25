@@ -111,11 +111,11 @@ impl NearIndexer {
         let path = "integration-tests".to_string();
         let key_version = 0u32;
 
-        IndexedSignRequest::new(
+        IndexedSignRequest::sign(
             sign_id,
             SignArgs::new(entropy, epsilon, payload, path, key_version),
             Chain::NEAR,
-            crate::protocol::SignRequestType::Sign,
+            crate::util::current_unix_timestamp(),
         )
     }
 

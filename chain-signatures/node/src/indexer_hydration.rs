@@ -2,7 +2,7 @@ use crate::backlog::Backlog;
 use crate::indexer_sol::MAX_SECP256K1_SCALAR;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
+use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::ops::SignatureEvent;
@@ -158,7 +158,7 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {
         let sign_id = SignId::new(self.generate_request_id());
         tracing::info!(?sign_id, "hydration signature requested");
 
-        Ok(IndexedSignRequest::new(
+        Ok(IndexedSignRequest::sign(
             sign_id,
             SignArgs::new(
                 entropy,
@@ -168,7 +168,7 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {
                 self.key_version,
             ),
             Chain::Hydration,
-            SignRequestType::Sign,
+            crate::util::current_unix_timestamp(),
         ))
     }
 
@@ -249,7 +249,7 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
             anyhow::bail!("payload exceeds secp256k1 curve order");
         }
 
-        Ok(IndexedSignRequest::new(
+        Ok(IndexedSignRequest::sign_bidirectional(
             sign_id,
             SignArgs::new(
                 entropy,
@@ -259,9 +259,8 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
                 self.key_version,
             ),
             Chain::Hydration,
-            SignRequestType::SignBidirectional(
-                crate::stream::ops::SignBidirectionalEvent::Hydration(self.clone()),
-            ),
+            crate::util::current_unix_timestamp(),
+            crate::stream::ops::SignBidirectionalEvent::Hydration(self.clone()),
         ))
     }
 

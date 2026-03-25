@@ -109,14 +109,15 @@ impl CompletedTx {
         };
         let epsilon = self.tx.epsilon(&path)?;
         let entropy = self.tx.id.0;
-        Ok(IndexedSignRequest::new(
+        Ok(IndexedSignRequest::respond_bidirectional(
             SignId::new(request_id_bytes),
             SignArgs::new(entropy.into(), epsilon, payload, path, self.tx.key_version),
             chain,
-            crate::protocol::SignRequestType::RespondBidirectional(RespondBidirectionalTx {
+            crate::util::current_unix_timestamp(),
+            RespondBidirectionalTx {
                 tx_id: self.tx.id,
                 output: serialized_output,
-            }),
+            },
         ))
     }
 

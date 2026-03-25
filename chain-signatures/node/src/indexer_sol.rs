@@ -1,4 +1,4 @@
-use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::ops::{SignatureEvent, SignatureEventBox};
 use crate::stream::{ChainEvent, ChainStream};
@@ -193,7 +193,7 @@ impl SignatureEvent for SignatureRequestedEvent {
         let sign_id = SignId::new(self.generate_request_id());
         tracing::info!(?sign_id, "solana signature requested");
 
-        Ok(IndexedSignRequest::new(
+        Ok(IndexedSignRequest::sign(
             sign_id,
             SignArgs::new(
                 entropy,
@@ -203,7 +203,7 @@ impl SignatureEvent for SignatureRequestedEvent {
                 self.key_version,
             ),
             Chain::Solana,
-            SignRequestType::Sign,
+            crate::util::current_unix_timestamp(),
         ))
     }
 
@@ -265,7 +265,7 @@ impl SignatureEvent for SignBidirectionalEvent {
             anyhow::bail!("payload exceeds secp256k1 curve order");
         }
 
-        Ok(IndexedSignRequest::new(
+        Ok(IndexedSignRequest::sign_bidirectional(
             sign_id,
             SignArgs::new(
                 entropy,
@@ -275,9 +275,8 @@ impl SignatureEvent for SignBidirectionalEvent {
                 self.key_version,
             ),
             Chain::Solana,
-            SignRequestType::SignBidirectional(crate::stream::ops::SignBidirectionalEvent::Solana(
-                self.clone(),
-            )),
+            crate::util::current_unix_timestamp(),
+            crate::stream::ops::SignBidirectionalEvent::Solana(self.clone()),
         ))
     }
 

@@ -15,10 +15,11 @@ use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::protocol_storage::ProtocolArtifact;
 use crate::storage::PresignatureStorage;
+use crate::stream::ops::SignBidirectionalEvent;
 use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap, TimeoutBudget};
 
-use crate::protocol::SignRequestType;
+use crate::protocol::SignKind;
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::PresignOutput;
 use chrono::Utc;
@@ -41,8 +42,8 @@ const ROUND_INTERVAL: usize = 512;
 /// The default timeout budget for organizing and posit phases.
 const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// All relevant info pertaining to an Indexed sign request from an indexer.
-#[derive(Debug, Clone, PartialEq)]
+/// All relevant info pertaining to an indexed sign request.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IndexedSignRequest {
     pub id: SignId,
     pub args: SignArgs,
@@ -50,10 +51,7 @@ pub struct IndexedSignRequest {
     /// Unix timestamp when the request was indexed by MPC node.
     /// Preserved across recoveries to maintain original request creation time.
     pub unix_timestamp_indexed: u64,
-    /// Monotonic system time when the request entered the system for processing.
-    /// Set during initial indexing or updated on recovery/requeue to current system time.
-    pub timestamp_created: Instant,
-    pub sign_request_type: SignRequestType,
+    pub kind: SignKind,
 }
 
 impl IndexedSignRequest {
@@ -61,35 +59,52 @@ impl IndexedSignRequest {
         id: SignId,
         args: SignArgs,
         chain: Chain,
-        sign_request_type: SignRequestType,
-    ) -> Self {
-        Self {
-            id,
-            args,
-            chain,
-            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            timestamp_created: Instant::now(),
-            sign_request_type,
-        }
-    }
-
-    /// Reconstruct a sign request during backlog recovery.
-    /// Preserves the original `unix_timestamp_indexed` but refreshes `timestamp_created`.
-    pub fn recover(
-        id: SignId,
-        args: SignArgs,
-        chain: Chain,
         unix_timestamp_indexed: u64,
-        sign_request_type: SignRequestType,
+        kind: SignKind,
     ) -> Self {
         Self {
             id,
             args,
             chain,
             unix_timestamp_indexed,
-            timestamp_created: Instant::now(),
-            sign_request_type,
+            kind,
         }
+    }
+
+    pub fn sign(id: SignId, args: SignArgs, chain: Chain, unix_timestamp_indexed: u64) -> Self {
+        Self::new(id, args, chain, unix_timestamp_indexed, SignKind::Sign)
+    }
+
+    pub fn sign_bidirectional(
+        id: SignId,
+        args: SignArgs,
+        chain: Chain,
+        unix_timestamp_indexed: u64,
+        event: SignBidirectionalEvent,
+    ) -> Self {
+        Self::new(
+            id,
+            args,
+            chain,
+            unix_timestamp_indexed,
+            SignKind::SignBidirectional(event),
+        )
+    }
+
+    pub fn respond_bidirectional(
+        id: SignId,
+        args: SignArgs,
+        chain: Chain,
+        unix_timestamp_indexed: u64,
+        tx: crate::protocol::RespondBidirectionalTx,
+    ) -> Self {
+        Self::new(
+            id,
+            args,
+            chain,
+            unix_timestamp_indexed,
+            SignKind::RespondBidirectional(tx),
+        )
     }
 }
 
@@ -1028,9 +1043,7 @@ impl SignGenerator {
                         );
                     }
 
-                    if let SignRequestType::SignBidirectional(event) =
-                        &self.indexed.sign_request_type
-                    {
+                    if let SignKind::SignBidirectional(event) = &self.indexed.kind {
                         // Note: The promotion to Bidirectional will happen when we receive the
                         // SignatureRespondedEvent in the Solana indexer, which has the signature data.
                         // For now, we just complete the signature generation. The indexer will handle the promotion.

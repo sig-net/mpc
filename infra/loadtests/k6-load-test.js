@@ -8,8 +8,8 @@ const strategies = {
     scenarios: {
       smoke: {
         executor: 'constant-arrival-rate',
-        rate: 0.1,
-        timeUnit: '1s',
+        rate: 1,
+        timeUnit: '10s',
         preAllocatedVUs: 2,
         maxVUs: 10,
       },

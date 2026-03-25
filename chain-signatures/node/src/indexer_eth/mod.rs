@@ -5,9 +5,9 @@ use crate::backlog::Backlog;
 use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
 
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
-use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+use crate::protocol::{Chain, IndexedSignRequest};
 use crate::respond_bidirectional::CompletedTx;
-use crate::sign_bidirectional::PendingRequestStatus;
+use crate::sign_bidirectional::SignStatus;
 use crate::stream::{ChainEvent, ChainStream, ExecutionOutcome};
 
 use alloy::eips::BlockNumberOrTag;
@@ -368,7 +368,7 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
     let sign_id = SignId::new(event.generate_request_id());
     tracing::info!(?sign_id, "eth signature requested");
 
-    Some(IndexedSignRequest::new(
+    Some(IndexedSignRequest::sign(
         sign_id,
         SignArgs::new(
             entropy.into(),
@@ -378,7 +378,7 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
             event.key_version,
         ),
         Chain::Ethereum,
-        SignRequestType::Sign,
+        crate::util::current_unix_timestamp(),
     ))
 }
 
@@ -1015,9 +1015,9 @@ impl EthereumIndexer {
             };
 
             let status = if receipt.status() {
-                PendingRequestStatus::Success
+                SignStatus::Success
             } else {
-                PendingRequestStatus::Failed
+                SignStatus::Failed
             };
 
             tracing::info!(
@@ -1029,7 +1029,7 @@ impl EthereumIndexer {
 
             let source_chain = pending_tx.source_chain;
 
-            let result = if status == PendingRequestStatus::Success {
+            let result = if status == SignStatus::Success {
                 let completed_tx = CompletedTx::new(pending_tx.clone(), block_number);
                 match completed_tx.extract_success_tx_output(client).await {
                     Ok(serialized_output) => {
