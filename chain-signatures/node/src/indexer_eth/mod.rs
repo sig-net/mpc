@@ -679,6 +679,16 @@ impl EthereumClient {
         }
     }
 
+    pub async fn get_transaction_receipt(
+        &self,
+        tx_hash: alloy::primitives::B256,
+    ) -> anyhow::Result<Option<alloy::rpc::types::TransactionReceipt>> {
+        match self {
+            EthereumClient::Helios(client) => client.get_transaction_receipt(tx_hash).await,
+            EthereumClient::DirectRpc(client) => client.get_transaction_receipt(tx_hash).await,
+        }
+    }
+
     pub async fn call(
         &self,
         from: Address,
@@ -948,13 +958,8 @@ impl EthereumIndexer {
         }
 
         // Collect execution confirmations (if any) and emit ExecutionConfirmed events
-        let exec_events = Self::collect_execution_confirmations(
-            &client,
-            block_number,
-            &backlog,
-            block_receipts.clone(),
-        )
-        .await?;
+        let exec_events =
+            Self::collect_execution_confirmations(&client, block_number, &backlog).await?;
         for ev in exec_events {
             if let Err(err) = events_tx.send(ev).await {
                 tracing::error!(?err, "failed to emit ExecutionConfirmed event");
@@ -989,16 +994,7 @@ impl EthereumIndexer {
         client: &Arc<EthereumClient>,
         block_number: u64,
         backlog: &Backlog,
-        block_receipts: Vec<alloy::rpc::types::TransactionReceipt>,
     ) -> anyhow::Result<Vec<ChainEvent>> {
-        let block_receipts: std::collections::HashMap<
-            alloy::primitives::B256,
-            alloy::rpc::types::TransactionReceipt,
-        > = block_receipts
-            .into_iter()
-            .map(|receipt| (receipt.transaction_hash, receipt.clone()))
-            .collect::<std::collections::HashMap<_, _>>();
-
         let mut events = Vec::new();
 
         let watchers = backlog.pending_execution(Chain::Ethereum).await;
@@ -1010,9 +1006,16 @@ impl EthereumIndexer {
 
         for (tx_id, (sign_id, pending_tx)) in watchers {
             tracing::info!(?tx_id, ?sign_id, "querying receipt for bidirectional tx");
-            let Some(receipt) = block_receipts.get(&pending_tx.id.0) else {
-                continue;
+            let receipt = match client.get_transaction_receipt(pending_tx.id.0).await {
+                Ok(Some(receipt)) => receipt,
+                Ok(None) => continue,
+                Err(err) => {
+                    tracing::warn!(?tx_id, ?sign_id, ?err, "failed to query receipt by tx hash");
+                    continue;
+                }
             };
+
+            let receipt_block = receipt.block_number.unwrap_or(block_number);
 
             let status = if receipt.status() {
                 SignStatus::Success
@@ -1023,14 +1026,14 @@ impl EthereumIndexer {
             tracing::info!(
                 ?tx_id,
                 ?sign_id,
-                block_number,
+                receipt_block,
                 "bidirectional execution observed via rpc"
             );
 
             let source_chain = pending_tx.source_chain;
 
             let result = if status == SignStatus::Success {
-                let completed_tx = CompletedTx::new(pending_tx.clone(), block_number);
+                let completed_tx = CompletedTx::new(pending_tx.clone(), receipt_block);
                 match completed_tx.extract_success_tx_output(client).await {
                     Ok(serialized_output) => {
                         tracing::info!(
@@ -1060,7 +1063,7 @@ impl EthereumIndexer {
                 tx_id,
                 sign_id,
                 source_chain,
-                block_height: block_number,
+                block_height: receipt_block,
                 result,
             });
         }

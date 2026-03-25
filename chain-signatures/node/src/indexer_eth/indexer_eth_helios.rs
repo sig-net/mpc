@@ -62,6 +62,21 @@ impl HeliosEthereumClient {
         })
     }
 
+    pub async fn get_transaction_receipt(
+        &self,
+        tx_hash: alloy::primitives::B256,
+    ) -> anyhow::Result<Option<alloy::rpc::types::TransactionReceipt>> {
+        self.client
+            .get_transaction_receipt(tx_hash)
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "Failed to get transaction receipt for {tx_hash:?}: {:?}",
+                    err
+                )
+            })
+    }
+
     pub async fn call(
         &self,
         from: Address,

@@ -62,6 +62,17 @@ impl RpcEthereumClient {
         self.transaction_by_hash(tx_hash).await
     }
 
+    pub async fn get_transaction_receipt(
+        &self,
+        tx_hash: alloy::primitives::B256,
+    ) -> anyhow::Result<Option<alloy::rpc::types::TransactionReceipt>> {
+        self.rpc_call(
+            "eth_getTransactionReceipt",
+            vec![json!(format!("{:#x}", tx_hash))],
+        )
+        .await
+    }
+
     pub async fn call(
         &self,
         from: Address,
