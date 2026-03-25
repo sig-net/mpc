@@ -569,7 +569,6 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::timeout;
 
-
     #[test]
     fn ethereum_signature_respond_event_conversion() {
         let big_r = ProjectivePoint::GENERATOR.to_affine();
