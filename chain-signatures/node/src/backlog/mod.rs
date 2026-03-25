@@ -842,16 +842,6 @@ mod tests {
         }
     }
 
-    fn create_indexed_request(
-        sign_id: SignId,
-        chain: Chain,
-        args: SignArgs,
-        kind: SignKind,
-        unix_timestamp_indexed: u64,
-    ) -> IndexedSignRequest {
-        IndexedSignRequest::recover(sign_id, args, chain, unix_timestamp_indexed, kind)
-    }
-
     fn create_bidirectional_request(
         sign_id: SignId,
         chain: Chain,
@@ -1167,12 +1157,12 @@ mod tests {
         ));
 
         backlog
-            .insert(create_indexed_request(
+            .insert(IndexedSignRequest::recover(
                 sign_id,
-                Chain::Solana,
                 args,
-                sign_kind,
+                Chain::Solana,
                 0,
+                sign_kind,
             ))
             .await;
         backlog.set_processed_block(Chain::Solana, 10).await;
@@ -1213,12 +1203,12 @@ mod tests {
         };
         let unix_timestamp_indexed = 0;
         backlog
-            .insert(create_indexed_request(
+            .insert(IndexedSignRequest::recover(
                 sign_id,
-                tx.source_chain,
                 args.clone(),
-                SignKind::Sign,
+                tx.source_chain,
                 unix_timestamp_indexed,
+                SignKind::Sign,
             ))
             .await;
 
@@ -1319,12 +1309,12 @@ mod tests {
         };
 
         backlog
-            .insert(create_indexed_request(
+            .insert(IndexedSignRequest::recover(
                 sign_id,
-                tx.source_chain,
                 args,
-                SignKind::Sign,
+                tx.source_chain,
                 0,
+                SignKind::Sign,
             ))
             .await;
 
