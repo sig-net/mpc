@@ -113,9 +113,14 @@ impl NearIndexer {
 
         IndexedSignRequest::sign(
             sign_id,
-            SignArgs::new(entropy, epsilon, payload, path, key_version),
+            SignArgs {
+                entropy,
+                epsilon,
+                payload,
+                path,
+                key_version,
+            },
             Chain::NEAR,
-            crate::util::current_unix_timestamp(),
         )
     }
 

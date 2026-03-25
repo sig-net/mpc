@@ -576,7 +576,7 @@ mod tests {
         unix_timestamp_indexed: u64,
         kind: SignKind,
     ) -> IndexedSignRequest {
-        IndexedSignRequest::new(sign_id, args, chain, unix_timestamp_indexed, kind)
+        IndexedSignRequest::recover(sign_id, args, chain, unix_timestamp_indexed, kind)
     }
 
     #[test]
@@ -603,13 +603,13 @@ mod tests {
         // Prepare backlog with a single pending sign request
         let backlog = Backlog::new();
         let sign_id = SignId::new([9u8; 32]);
-        let args = SignArgs::new(
-            [1u8; 32],
-            Scalar::from(1u64),
-            Scalar::from(2u64),
-            "test".to_string(),
-            1,
-        );
+        let args = SignArgs {
+            entropy: [1u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
 
         // Add a request and persist a checkpoint so recover() can load it
         let unix_timestamp_indexed = current_unix_timestamp();
@@ -698,13 +698,13 @@ mod tests {
         let sign_id = SignId::new(tx.request_id);
 
         // Insert a pending Sign request on the source chain
-        let args = SignArgs::new(
-            [1u8; 32],
-            Scalar::from(1u64),
-            Scalar::from(2u64),
-            "test".to_string(),
-            1,
-        );
+        let args = SignArgs {
+            entropy: [1u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
         let unix_timestamp_indexed = current_unix_timestamp();
         backlog
             .insert(test_indexed_request(
@@ -775,13 +775,13 @@ mod tests {
     async fn process_respond_event_duplicate_ethereum_is_idempotent() {
         let backlog = Backlog::new();
         let sign_id = SignId::new([3u8; 32]);
-        let args = SignArgs::new(
-            [1u8; 32],
-            Scalar::from(1u64),
-            Scalar::from(2u64),
-            "test".to_string(),
-            1,
-        );
+        let args = SignArgs {
+            entropy: [1u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
 
         backlog
             .insert(test_indexed_request(
@@ -874,13 +874,13 @@ mod tests {
         let sign_id = SignId::new(tx.request_id);
 
         // Insert pending Sign request on source chain
-        let args = SignArgs::new(
-            [2u8; 32],
-            Scalar::from(1u64),
-            Scalar::from(3u64),
-            "test".to_string(),
-            1,
-        );
+        let args = SignArgs {
+            entropy: [2u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(3u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
         let unix_timestamp_indexed = current_unix_timestamp();
         backlog
             .insert(test_indexed_request(

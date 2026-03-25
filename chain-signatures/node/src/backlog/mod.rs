@@ -849,7 +849,7 @@ mod tests {
         kind: SignKind,
         unix_timestamp_indexed: u64,
     ) -> IndexedSignRequest {
-        IndexedSignRequest::new(sign_id, args, chain, unix_timestamp_indexed, kind)
+        IndexedSignRequest::recover(sign_id, args, chain, unix_timestamp_indexed, kind)
     }
 
     fn create_bidirectional_request(
@@ -858,12 +858,12 @@ mod tests {
         dest: &str,
         unix_timestamp_indexed: u64,
     ) -> IndexedSignRequest {
-        IndexedSignRequest::sign_bidirectional(
+        IndexedSignRequest::recover(
             sign_id,
             create_test_args(sign_id.request_id[0]),
             chain,
             unix_timestamp_indexed,
-            create_test_event(dest),
+            SignKind::SignBidirectional(create_test_event(dest)),
         )
     }
 
@@ -1140,13 +1140,13 @@ mod tests {
     async fn test_recover_preserves_sign_kind() {
         let backlog = Backlog::new();
         let sign_id = SignId::new([42u8; 32]);
-        let args = SignArgs::new(
-            [1u8; 32],
-            k256::Scalar::from(1u64),
-            k256::Scalar::from(2u64),
-            "test".to_string(),
-            1,
-        );
+        let args = SignArgs {
+            entropy: [1u8; 32],
+            epsilon: k256::Scalar::from(1u64),
+            payload: k256::Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
 
         let program_id = Pubkey::new_unique();
         let sign_kind = SignKind::SignBidirectional(SignBidirectionalEvent::Solana(
@@ -1204,13 +1204,13 @@ mod tests {
         let sign_id = SignId::new(tx.request_id);
 
         // Insert a pending Sign request on the source chain
-        let args = SignArgs::new(
-            [1u8; 32],
-            Scalar::from(1u64),
-            Scalar::from(2u64),
-            "test".to_string(),
-            1,
-        );
+        let args = SignArgs {
+            entropy: [1u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
         let unix_timestamp_indexed = 0;
         backlog
             .insert(create_indexed_request(

@@ -160,15 +160,14 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {
 
         Ok(IndexedSignRequest::sign(
             sign_id,
-            SignArgs::new(
+            SignArgs {
                 entropy,
                 epsilon,
                 payload,
-                self.path.clone(),
-                self.key_version,
-            ),
+                path: self.path.clone(),
+                key_version: self.key_version,
+            },
             Chain::Hydration,
-            crate::util::current_unix_timestamp(),
         ))
     }
 
@@ -251,15 +250,14 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
 
         Ok(IndexedSignRequest::sign_bidirectional(
             sign_id,
-            SignArgs::new(
+            SignArgs {
                 entropy,
                 epsilon,
                 payload,
-                self.path.clone(),
-                self.key_version,
-            ),
+                path: self.path.clone(),
+                key_version: self.key_version,
+            },
             Chain::Hydration,
-            crate::util::current_unix_timestamp(),
             crate::stream::ops::SignBidirectionalEvent::Hydration(self.clone()),
         ))
     }

@@ -219,20 +219,19 @@ fn sign_request(seed: u8) -> Sign {
         SignId::new([seed; 32]),
         sign_arg(seed),
         Chain::NEAR,
-        0,
     ))
 }
 
 fn sign_arg(seed: u8) -> SignArgs {
     let mut entropy = [1; 32];
     entropy[0] = seed;
-    SignArgs::new(
+    SignArgs {
         entropy,
-        k256::Scalar::default(),
-        k256::Scalar::default(),
-        "test".to_owned(),
-        LATEST_MPC_KEY_VERSION,
-    )
+        epsilon: k256::Scalar::default(),
+        payload: k256::Scalar::default(),
+        path: "test".to_owned(),
+        key_version: LATEST_MPC_KEY_VERSION,
+    }
 }
 
 /// drop the first 20 presignature messages on each node and see if the system

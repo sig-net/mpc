@@ -55,7 +55,9 @@ pub struct IndexedSignRequest {
 }
 
 impl IndexedSignRequest {
-    pub fn new(
+    /// Reconstruct a sign request from persisted data (e.g. backlog recovery or tests).
+    /// Preserves the original `unix_timestamp_indexed` rather than stamping the current time.
+    pub fn recover(
         id: SignId,
         args: SignArgs,
         chain: Chain,
@@ -71,40 +73,47 @@ impl IndexedSignRequest {
         }
     }
 
-    pub fn sign(id: SignId, args: SignArgs, chain: Chain, unix_timestamp_indexed: u64) -> Self {
-        Self::new(id, args, chain, unix_timestamp_indexed, SignKind::Sign)
+    /// Create a new sign request, stamping the current time.
+    pub fn sign(id: SignId, args: SignArgs, chain: Chain) -> Self {
+        Self {
+            id,
+            args,
+            chain,
+            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
+            kind: SignKind::Sign,
+        }
     }
 
+    /// Create a new sign-bidirectional request, stamping the current time.
     pub fn sign_bidirectional(
         id: SignId,
         args: SignArgs,
         chain: Chain,
-        unix_timestamp_indexed: u64,
         event: SignBidirectionalEvent,
     ) -> Self {
-        Self::new(
+        Self {
             id,
             args,
             chain,
-            unix_timestamp_indexed,
-            SignKind::SignBidirectional(event),
-        )
+            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
+            kind: SignKind::SignBidirectional(event),
+        }
     }
 
+    /// Create a new respond-bidirectional request, stamping the current time.
     pub fn respond_bidirectional(
         id: SignId,
         args: SignArgs,
         chain: Chain,
-        unix_timestamp_indexed: u64,
         tx: crate::protocol::RespondBidirectionalTx,
     ) -> Self {
-        Self::new(
+        Self {
             id,
             args,
             chain,
-            unix_timestamp_indexed,
-            SignKind::RespondBidirectional(tx),
-        )
+            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
+            kind: SignKind::RespondBidirectional(tx),
+        }
     }
 }
 

@@ -187,7 +187,6 @@ mod tests {
     use crate::protocol::Sign;
     use crate::rpc::ContractStateWatcher;
     use crate::stream::ops::SignatureRespondedEvent;
-    use crate::util::current_unix_timestamp;
     use k256::Scalar;
     use mpc_primitives::SignArgs;
     use mpc_primitives::SignId;
@@ -216,20 +215,15 @@ mod tests {
         let sign_id = SignId::new([1u8; 32]);
 
         // construct an IndexedSignRequest
-        let args = SignArgs::new(
-            [0u8; 32],
-            Scalar::from(1u64),
-            Scalar::from(2u64),
-            "test".to_string(),
-            1,
-        );
+        let args = SignArgs {
+            entropy: [0u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
 
-        let indexed = IndexedSignRequest::sign(
-            sign_id,
-            args.clone(),
-            Chain::Solana,
-            current_unix_timestamp(),
-        );
+        let indexed = IndexedSignRequest::sign(sign_id, args.clone(), Chain::Solana);
 
         // Prepare a respond event that matches the sign id
         let sig_responded =
@@ -349,13 +343,13 @@ mod tests {
 
         // prepare a SignBidirectional request
         let sign_id = SignId::new([42u8; 32]);
-        let args = SignArgs::new(
-            [0u8; 32],
-            Scalar::from(1u64),
-            Scalar::from(2u64),
-            "test".to_string(),
-            1,
-        );
+        let args = SignArgs {
+            entropy: [0u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
         let program_id = solana_sdk::pubkey::Pubkey::new_unique();
         // Minimal legacy unsigned Ethereum tx encoded as RLP so sign_and_hash can parse it
         let mut rlp_s = rlp::RlpStream::new_list(9);
@@ -389,7 +383,6 @@ mod tests {
             sign_id,
             args.clone(),
             Chain::Solana,
-            current_unix_timestamp(),
             SBE::Solana(sign_bidir.clone()),
         );
 

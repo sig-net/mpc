@@ -111,9 +111,14 @@ impl CompletedTx {
         let entropy = self.tx.id.0;
         Ok(IndexedSignRequest::respond_bidirectional(
             SignId::new(request_id_bytes),
-            SignArgs::new(entropy.into(), epsilon, payload, path, self.tx.key_version),
+            SignArgs {
+                entropy: entropy.into(),
+                epsilon,
+                payload,
+                path,
+                key_version: self.tx.key_version,
+            },
             chain,
-            crate::util::current_unix_timestamp(),
             RespondBidirectionalTx {
                 tx_id: self.tx.id,
                 output: serialized_output,

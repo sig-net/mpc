@@ -370,15 +370,14 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
 
     Some(IndexedSignRequest::sign(
         sign_id,
-        SignArgs::new(
-            entropy.into(),
+        SignArgs {
+            entropy: entropy.into(),
             epsilon,
             payload,
-            event.path,
-            event.key_version,
-        ),
+            path: event.path,
+            key_version: event.key_version,
+        },
         Chain::Ethereum,
-        crate::util::current_unix_timestamp(),
     ))
 }
 
