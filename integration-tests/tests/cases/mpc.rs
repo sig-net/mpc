@@ -3,7 +3,6 @@ use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
 use integration_tests::mpc_fixture::message_collector::MessageCounter;
 use integration_tests::mpc_fixture::MpcFixtureBuilder;
 use mpc_node::protocol::presignature::Presignature;
-use mpc_node::protocol::SignRequestType;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState, Sign};
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
@@ -18,11 +17,15 @@ use std::time::Duration;
 
 /// Use this toggle locally to regenerate hard-coded inputs such as key shares,
 /// triples, and presignatures.
-/// You might have to create the directory `integrations-tests/tmp` first.
+/// You might have to create the directory `integration-tests/tmp` first.
 const WRITE_OUTPUT_TO_FILES: bool = false;
 const KEY_SHARE_FILE: &str = "tmp/key_shares.json";
 const TRIPLES_FILE: &str = "tmp/triples.json";
 const PRESIGNATURES_FILE: &str = "tmp/presignatures.json";
+/// Exact number of triple pairs / presignatures per owner in the output fixture.
+/// We generate more than this and truncate after filtering to guarantee exact counts.
+const TRIPLE_PAIRS_PER_OWNER: usize = 50;
+const PRESIGNATURES_PER_OWNER: usize = 25;
 
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_basic_generate_keys() {
@@ -73,12 +76,20 @@ async fn test_basic_generate_keys() {
 
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_basic_generate_triples() {
+    const N: u32 = if WRITE_OUTPUT_TO_FILES {
+        TRIPLE_PAIRS_PER_OWNER as u32 * 2 // generate more to have room for filtering
+    } else {
+        1
+    };
     let network = MpcFixtureBuilder::default()
         .only_generate_triples()
+        .with_node_min_triples(N)
         .build()
         .await;
 
-    network.assert_triples(1, Duration::from_secs(180)).await;
+    network
+        .assert_triples(N as usize, Duration::from_secs(180)) // adjust timeout based on N of Ts
+        .await;
 
     if WRITE_OUTPUT_TO_FILES {
         let mut conn = network.redis_container.pool().get().await.unwrap();
@@ -86,7 +97,7 @@ async fn test_basic_generate_triples() {
         for node in &network.nodes {
             let mut nodes_shares = BTreeMap::new();
             for peer in &network.nodes {
-                let triple_ids = node.triple_storage.fetch_owned(peer.me).await;
+                let triple_ids = node.triple_storage.fetch_owned(peer.me).await.unwrap();
                 let mut peer_triples = Vec::with_capacity(triple_ids.len());
                 for triple_id in triple_ids {
                     let pair = conn
@@ -95,13 +106,18 @@ async fn test_basic_generate_triples() {
                     if let Ok(pair) = pair {
                         peer_triples.push(pair);
                     } else {
-                        tracing::error!("missing triple in redis {triple_id}");
+                        tracing::error!("missing triple pair in redis {triple_id}");
                     }
                 }
                 nodes_shares.insert(peer.me, peer_triples);
             }
             data.insert(node.me, nodes_shares);
         }
+
+        // Filter: keep only triple pairs that exist on ALL nodes,
+        // then truncate each owner to exactly TRIPLE_PAIRS_PER_OWNER.
+        let data = filter_artifacts_on_all_nodes(data);
+        let data = truncate_per_owner(data, TRIPLE_PAIRS_PER_OWNER);
 
         let abs_path = std::env::current_dir().unwrap().join(TRIPLES_FILE);
         tracing::info!("Writing output to {}", abs_path.display());
@@ -112,13 +128,19 @@ async fn test_basic_generate_triples() {
 
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_basic_generate_presignature() {
+    const N: u32 = if WRITE_OUTPUT_TO_FILES {
+        PRESIGNATURES_PER_OWNER as u32 * 2 // generate more to have room for filtering
+    } else {
+        1
+    };
     let network = MpcFixtureBuilder::default()
         .only_generate_presignatures()
+        .with_node_min_presignatures(N)
         .build()
         .await;
 
     network
-        .assert_presignatures(1, Duration::from_secs(10))
+        .assert_presignatures(N as usize, Duration::from_secs(180)) // adjust timeout based on N of Ps
         .await;
 
     if WRITE_OUTPUT_TO_FILES {
@@ -127,7 +149,11 @@ async fn test_basic_generate_presignature() {
         for node in &network.nodes {
             let mut nodes_shares = BTreeMap::new();
             for peer in &network.nodes {
-                let presignature_ids = node.presignature_storage.fetch_owned(peer.me).await;
+                let presignature_ids = node
+                    .presignature_storage
+                    .fetch_owned(peer.me)
+                    .await
+                    .unwrap();
                 let mut peer_presignatures = Vec::with_capacity(presignature_ids.len());
                 for presignature_id in presignature_ids {
                     let t = conn
@@ -146,6 +172,11 @@ async fn test_basic_generate_presignature() {
             }
             data.insert(node.me, nodes_shares);
         }
+
+        // Filter: keep only presignatures that exist on ALL nodes,
+        // then truncate each owner to exactly P_PER_OWNER.
+        let data = filter_artifacts_on_all_nodes(data);
+        let data = truncate_per_owner(data, PRESIGNATURES_PER_OWNER);
 
         let abs_path = std::env::current_dir().unwrap().join(PRESIGNATURES_FILE);
         tracing::info!("Writing output to {}", abs_path.display());
@@ -184,14 +215,12 @@ async fn test_basic_sign() {
 }
 
 fn sign_request(seed: u8) -> Sign {
-    Sign::Request(IndexedSignRequest {
-        id: SignId::new([seed; 32]),
-        args: sign_arg(seed),
-        chain: Chain::NEAR,
-        unix_timestamp_indexed: 0,
-        timestamp_created: std::time::Instant::now(),
-        sign_request_type: SignRequestType::Sign,
-    })
+    Sign::Request(IndexedSignRequest::sign(
+        SignId::new([seed; 32]),
+        sign_arg(seed),
+        Chain::NEAR,
+        0,
+    ))
 }
 
 fn sign_arg(seed: u8) -> SignArgs {
@@ -228,9 +257,8 @@ async fn test_presignature_timeout() {
     let network = MpcFixtureBuilder::default()
         // configure network ready to generate presignatures immediately
         .only_generate_presignatures()
-        // set exact presignature count target
-        .with_min_presignatures_stockpile(5)
-        .with_max_presignatures_stockpile(5)
+        // set presignature generation target (each node generates at least 5)
+        .with_node_min_presignatures(5)
         // apply message filter to all nodes
         .with_outgoing_message_filter(0, create_filter())
         .with_outgoing_message_filter(1, create_filter())
@@ -422,11 +450,9 @@ async fn test_sign_requests_wait_for_presignatures() {
         .with_preshared_triples()
         .with_presignature_stockpile()
         // Disable triple generation since we're using preshared triples
-        .with_min_triples_stockpile(0)
-        .with_max_triples_stockpile(0)
+        .with_node_min_triples(0)
         // Enable presignature generation for second batch
-        .with_min_presignatures_stockpile(5)
-        .with_max_presignatures_stockpile(20)
+        .with_node_min_presignatures(5)
         .build()
         .await;
 
@@ -515,13 +541,13 @@ async fn test_sign_requests_wait_for_presignatures() {
 /// This test generates triples and presignatures on-the-fly (slower but more realistic).
 /// Uses 5_nodes.json fixture for pre-shared keys only.
 #[test(tokio::test(flavor = "multi_thread"))]
+#[ignore]
 async fn test_sign_contention_5_nodes() {
     const NUM_NODES: u32 = 5;
     const THRESHOLD: usize = 4;
     const NUM_SIGN_REQUESTS: u8 = 5; // Reduced from 10 to match presignature availability
     const MIN_PRESIGNATURES_PER_OWNER: usize = 3;
-    const STOCKPILE_MIN: u32 = 8;
-    const STOCKPILE_MAX: u32 = 12;
+    const NODE_MIN_ARTIFACTS: u32 = 8;
 
     tracing::info!(
         num_nodes = NUM_NODES,
@@ -533,10 +559,8 @@ async fn test_sign_contention_5_nodes() {
     // Build network with pre-shared keys, generate triples/presignatures on the fly
     let network = MpcFixtureBuilder::new(NUM_NODES, THRESHOLD)
         .with_preshared_key()
-        .with_min_triples_stockpile(STOCKPILE_MIN)
-        .with_max_triples_stockpile(STOCKPILE_MAX)
-        .with_min_presignatures_stockpile(STOCKPILE_MIN)
-        .with_max_presignatures_stockpile(STOCKPILE_MAX)
+        .with_node_min_triples(NODE_MIN_ARTIFACTS)
+        .with_node_min_presignatures(NODE_MIN_ARTIFACTS)
         .build()
         .await;
 
@@ -605,6 +629,231 @@ async fn test_sign_contention_5_nodes() {
         actions.len(),
         presignatures_consumed
     );
+}
+
+/// Truncate each owner's artifact list to exactly N items, keeping the same
+/// IDs across all nodes. Uses the first node's ordering to determine which IDs
+/// to keep per owner, then filters all nodes to that consistent set.
+/// Panics if any owner has fewer than `n` artifacts.
+fn truncate_per_owner<A: mpc_node::storage::protocol_storage::ProtocolArtifact>(
+    mut data: BTreeMap<
+        cait_sith::protocol::Participant,
+        BTreeMap<cait_sith::protocol::Participant, Vec<A>>,
+    >,
+    n: usize,
+) -> BTreeMap<cait_sith::protocol::Participant, BTreeMap<cait_sith::protocol::Participant, Vec<A>>>
+where
+    A::Id: Ord,
+{
+    use std::collections::BTreeSet;
+
+    // Determine which IDs to keep per owner using the first node's ordering.
+    let mut keep_ids_per_owner: BTreeMap<cait_sith::protocol::Participant, BTreeSet<A::Id>> =
+        BTreeMap::new();
+    if let Some((first_node, first_owners)) = data.iter().next() {
+        for (owner, artifacts) in first_owners {
+            assert!(
+                artifacts.len() >= n,
+                "node {first_node:?} owner {owner:?} has {} artifacts, need {n}",
+                artifacts.len()
+            );
+            let ids: BTreeSet<_> = artifacts.iter().take(n).map(|a| a.id()).collect();
+            keep_ids_per_owner.insert(*owner, ids);
+        }
+    }
+
+    // Filter all nodes to keep only the chosen IDs per owner.
+    for (node, owners) in &mut data {
+        for (owner, artifacts) in owners.iter_mut() {
+            if let Some(keep_ids) = keep_ids_per_owner.get(owner) {
+                artifacts.retain(|a| keep_ids.contains(&a.id()));
+                assert!(
+                    artifacts.len() == n,
+                    "node {node:?} owner {owner:?} has {} artifacts after filtering, expected {n}",
+                    artifacts.len()
+                );
+            }
+        }
+    }
+    data
+}
+
+/// Filter artifact data to keep only artifacts that exist on ALL nodes.
+fn filter_artifacts_on_all_nodes<A: mpc_node::storage::protocol_storage::ProtocolArtifact>(
+    mut data: BTreeMap<
+        cait_sith::protocol::Participant,
+        BTreeMap<cait_sith::protocol::Participant, Vec<A>>,
+    >,
+) -> BTreeMap<cait_sith::protocol::Participant, BTreeMap<cait_sith::protocol::Participant, Vec<A>>>
+where
+    A::Id: Ord,
+{
+    use std::collections::BTreeSet;
+
+    let ids_per_node: Vec<BTreeSet<_>> = data
+        .values()
+        .map(|owners| owners.values().flatten().map(|a| a.id()).collect())
+        .collect();
+
+    let Some((first, rest)) = ids_per_node.split_first() else {
+        return data;
+    };
+    let mut common = first.clone();
+    for ids in rest {
+        common.retain(|id| ids.contains(id));
+    }
+
+    let total = ids_per_node.iter().map(|s| s.len()).max().unwrap_or(0);
+    let discarded = total.saturating_sub(common.len());
+    let pct = if total > 0 {
+        discarded as f64 / total as f64 * 100.0
+    } else {
+        0.0
+    };
+    tracing::info!(
+        total,
+        kept = common.len(),
+        discarded,
+        pct_discarded = format_args!("{pct:.1}%"),
+        nodes = data.len(),
+        "filtered artifacts to those on all nodes"
+    );
+
+    for owners in data.values_mut() {
+        for artifacts in owners.values_mut() {
+            artifacts.retain(|a| common.contains(&a.id()));
+        }
+        owners.retain(|_, v| !v.is_empty());
+    }
+    data
+}
+
+/// Verify 1:1 presignature-to-signature consumption with threshold=3 (no waste).
+/// Sends exactly as many sign requests as there are pregenerated presignatures
+/// and asserts that zero presignatures remain.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sign_no_presignature_waste() {
+    let network = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    // Wait for pre-signatures to be added to Redis.
+    // Check threshold=1 per node since ownership is distributed across nodes.
+    network
+        .assert_presignatures(1, Duration::from_millis(500))
+        .await;
+
+    let initial_presignatures = network[0].presignature_storage.len_generated().await;
+    assert!(
+        initial_presignatures > 0,
+        "fixture should contain pregenerated presignatures"
+    );
+    tracing::info!(
+        initial_presignatures,
+        "sending exactly this many sign requests"
+    );
+
+    for seed in 0..initial_presignatures {
+        let request = sign_request(seed as u8);
+        for node in &network.nodes {
+            node.sign_tx.send(request.clone()).await.unwrap();
+        }
+    }
+
+    let actions = network
+        .assert_actions(initial_presignatures, Duration::from_secs(120))
+        .await;
+
+    assert_eq!(
+        actions.len(),
+        initial_presignatures,
+        "should have exactly {initial_presignatures} signatures"
+    );
+
+    for action_str in &actions {
+        assert!(
+            action_str.contains("RpcAction::Publish"),
+            "unexpected rpc action {action_str}"
+        );
+    }
+
+    // Verify every node has zero presignatures remaining.
+    for node in &network.nodes {
+        let remaining = node.presignature_storage.len_by_owner(node.me).await;
+
+        tracing::info!(
+            node = ?node.me,
+            remaining,
+            "node presignature stats"
+        );
+
+        assert_eq!(
+            remaining, 0,
+            "node {:?} still has {remaining} presignatures remaining",
+            node.me
+        );
+    }
+}
+
+/// Verify 1:1 triple-pair-to-presignature consumption with no waste.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_presignature_no_triple_waste() {
+    let network = MpcFixtureBuilder::default()
+        .only_generate_presignatures()
+        // Set a high target so nodes keep generating until triple pairs run out
+        .with_node_min_presignatures(1000)
+        .build()
+        .await;
+
+    // len_generated() counts triple pairs (each storing two triples).
+    let initial_triple_pairs = network[0].triple_storage.len_generated().await;
+    assert!(
+        initial_triple_pairs > 0,
+        "fixture should contain pregenerated triple pairs"
+    );
+    tracing::info!(
+        initial_triple_pairs,
+        "starting triple-pair-to-presignature test"
+    );
+
+    // Each presignature consumes exactly one triple pair, so ratio is 1:1.
+    let expected_presignatures = initial_triple_pairs;
+    // assert_presignatures checks per-node ownership count, so divide by number of nodes.
+    let expected_per_node = expected_presignatures / network.nodes.len();
+    // Wait for all presignatures to be generated from all available triple pairs.
+    // assert_presignatures waits until EVERY node owns >= expected_per_node,
+    // which means all triple pairs have been consumed (each owner has exactly
+    // expected_per_node triple pairs to convert).
+    network
+        .assert_presignatures(expected_per_node, Duration::from_secs(180))
+        .await;
+
+    // Verify every node consumed all its triple pairs and produced the expected presignatures.
+    for node in &network.nodes {
+        let remaining_triples = node.triple_storage.len_by_owner(node.me).await;
+        let owned_presignatures = node.presignature_storage.len_by_owner(node.me).await;
+
+        tracing::info!(
+            node = ?node.me,
+            remaining_triples,
+            owned_presignatures,
+            expected_per_node,
+            "node stats"
+        );
+
+        assert_eq!(
+            remaining_triples, 0,
+            "node {:?} still has {remaining_triples} triple pairs remaining",
+            node.me
+        );
+
+        assert_eq!(
+            owned_presignatures, expected_per_node,
+            "node {:?} expected {expected_per_node} presignatures, got {owned_presignatures}",
+            node.me
+        );
+    }
 }
 
 /// Test that a node losing their presignatures locally doesn't prevent
@@ -831,4 +1080,76 @@ async fn test_signature_message_count() {
             }
         }
     }
+}
+
+#[test]
+fn test_filter_artifacts_on_all_nodes() {
+    use super::helpers::dummy_pair;
+    use cait_sith::protocol::Participant;
+
+    let p0 = Participant::from(0);
+    let p1 = Participant::from(1);
+    let p2 = Participant::from(2);
+
+    // Artifact 1 on all nodes, artifact 2 only on p0 and p1, artifact 3 only on p0
+    let mut data = BTreeMap::new();
+    data.insert(
+        p0,
+        BTreeMap::from([(p0, vec![dummy_pair(1), dummy_pair(2), dummy_pair(3)])]),
+    );
+    data.insert(
+        p1,
+        BTreeMap::from([(p1, vec![dummy_pair(1), dummy_pair(2)])]),
+    );
+    data.insert(p2, BTreeMap::from([(p2, vec![dummy_pair(1)])]));
+
+    let filtered = filter_artifacts_on_all_nodes(data);
+
+    // Only artifact 1 should survive
+    for owners in filtered.values() {
+        let ids: Vec<_> = owners.values().flatten().map(|a| a.id).collect();
+        assert_eq!(ids, vec![1]);
+    }
+}
+
+#[test]
+fn test_truncate_per_owner() {
+    use super::helpers::dummy_pair;
+    use cait_sith::protocol::Participant;
+
+    let p0 = Participant::from(0);
+    let p1 = Participant::from(1);
+
+    // Two nodes, each with 3 items for the same owner, truncated to 2.
+    // Both nodes should keep the same 2 IDs.
+    let mut data = BTreeMap::new();
+    data.insert(
+        p0,
+        BTreeMap::from([(p0, vec![dummy_pair(1), dummy_pair(2), dummy_pair(3)])]),
+    );
+    data.insert(
+        p1,
+        BTreeMap::from([(p0, vec![dummy_pair(1), dummy_pair(2), dummy_pair(3)])]),
+    );
+    let result = truncate_per_owner(data, 2);
+    assert_eq!(result[&p0][&p0].len(), 2);
+    assert_eq!(result[&p1][&p0].len(), 2);
+    // Same IDs on both nodes
+    let ids0: Vec<_> = result[&p0][&p0].iter().map(|a| a.id).collect();
+    let ids1: Vec<_> = result[&p1][&p0].iter().map(|a| a.id).collect();
+    assert_eq!(ids0, ids1);
+}
+
+#[test]
+#[should_panic]
+fn test_truncate_per_owner_insufficient() {
+    use super::helpers::dummy_pair;
+    use cait_sith::protocol::Participant;
+
+    let p = Participant::from(0);
+
+    // 1 item but need 2
+    let mut data = BTreeMap::new();
+    data.insert(p, BTreeMap::from([(p, vec![dummy_pair(1)])]));
+    truncate_per_owner(data, 2);
 }

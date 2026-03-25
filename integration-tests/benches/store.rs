@@ -187,7 +187,7 @@ fn bench_load_keys(c: &mut Criterion) {
     c.bench_function("load 1024 mine triple keys", |b| {
         b.iter(|| {
             let task = || async {
-                env.triples.fetch_owned(env.me).await;
+                let _ = env.triples.fetch_owned(env.me).await;
             };
 
             rt.block_on(task());
@@ -197,7 +197,7 @@ fn bench_load_keys(c: &mut Criterion) {
     c.bench_function("load 1024 mine presignature keys", |b| {
         b.iter(|| {
             let task = || async {
-                env.presignatures.fetch_owned(env.me).await;
+                let _ = env.presignatures.fetch_owned(env.me).await;
             };
 
             rt.block_on(task());
@@ -223,6 +223,7 @@ fn dummy_presignature(id: u64) -> Presignature {
             sigma: <Secp256k1 as CurveArithmetic>::Scalar::ONE,
         },
         participants: vec![Participant::from(1), Participant::from(2)],
+        holders: Some(vec![Participant::from(1), Participant::from(2)]),
     }
 }
 
@@ -231,6 +232,7 @@ fn dummy_pair(id: u64) -> TriplePair {
         id,
         triple0: dummy_triple(),
         triple1: dummy_triple(),
+        holders: Some(vec![Participant::from(1), Participant::from(2)]),
     }
 }
 

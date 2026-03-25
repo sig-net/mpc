@@ -1,4 +1,4 @@
-use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::ops::{SignatureEvent, SignatureEventBox};
 use crate::stream::{ChainEvent, ChainStream};
@@ -193,20 +193,18 @@ impl SignatureEvent for SignatureRequestedEvent {
         let sign_id = SignId::new(self.generate_request_id());
         tracing::info!(?sign_id, "solana signature requested");
 
-        Ok(IndexedSignRequest {
-            id: sign_id,
-            args: SignArgs {
+        Ok(IndexedSignRequest::sign(
+            sign_id,
+            SignArgs {
                 entropy,
                 epsilon,
                 payload,
                 path: self.path.clone(),
                 key_version: self.key_version,
             },
-            chain: Chain::Solana,
-            timestamp_created: Instant::now(),
-            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            sign_request_type: SignRequestType::Sign,
-        })
+            Chain::Solana,
+            crate::util::current_unix_timestamp(),
+        ))
     }
 
     fn source_chain(&self) -> Chain {
@@ -267,22 +265,19 @@ impl SignatureEvent for SignBidirectionalEvent {
             anyhow::bail!("payload exceeds secp256k1 curve order");
         }
 
-        Ok(IndexedSignRequest {
-            id: sign_id,
-            args: SignArgs {
+        Ok(IndexedSignRequest::sign_bidirectional(
+            sign_id,
+            SignArgs {
                 entropy,
                 epsilon,
                 payload,
                 path: self.path.clone(),
                 key_version: self.key_version,
             },
-            chain: Chain::Solana,
-            timestamp_created: Instant::now(),
-            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            sign_request_type: SignRequestType::SignBidirectional(
-                crate::stream::ops::SignBidirectionalEvent::Solana(self.clone()),
-            ),
-        })
+            Chain::Solana,
+            crate::util::current_unix_timestamp(),
+            crate::stream::ops::SignBidirectionalEvent::Solana(self.clone()),
+        ))
     }
 
     fn source_chain(&self) -> Chain {
