@@ -105,7 +105,9 @@ impl std::fmt::Debug for SignArgs {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct Signature {
     #[borsh(

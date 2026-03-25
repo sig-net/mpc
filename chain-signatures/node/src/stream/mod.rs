@@ -209,14 +209,12 @@ pub async fn run_stream<S: ChainStream>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backlog::{Backlog, BacklogTransaction, SignTx};
+    use crate::backlog::Backlog;
     use crate::mesh::{connection::NodeStatus, MeshState};
     use crate::node_client::NodeClient;
-    use crate::protocol::Chain;
-    use crate::protocol::IndexedSignRequest;
     use crate::protocol::ParticipantInfo;
     use crate::protocol::Sign;
-    use crate::protocol::SignRequestType;
+    use crate::protocol::{Chain, IndexedSignRequest, SignKind};
     use crate::rpc::ContractStateWatcher;
     use crate::storage::checkpoint_storage::CheckpointStorage;
     use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
@@ -260,14 +258,8 @@ mod tests {
             key_version: 1,
         };
 
-        let indexed = IndexedSignRequest {
-            id: sign_id,
-            args: args.clone(),
-            chain: Chain::Solana,
-            timestamp_created: std::time::Instant::now(),
-            unix_timestamp_indexed: current_unix_timestamp(),
-            sign_request_type: SignRequestType::Sign,
-        };
+        let indexed =
+            IndexedSignRequest::sign(sign_id, args, Chain::Solana, current_unix_timestamp());
 
         // Prepare a respond event that matches the sign id
         let sig_responded =
@@ -366,9 +358,8 @@ mod tests {
             id: sign_id,
             args: args.clone(),
             chain: Chain::Solana,
-            timestamp_created: std::time::Instant::now(),
             unix_timestamp_indexed: current_unix_timestamp(),
-            sign_request_type: SignRequestType::Sign,
+            kind: SignKind::Sign,
         };
 
         let stream = StartAwareStream {
@@ -411,7 +402,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_handles_sign_bidirectional_block_and_recover() {
-        use crate::sign_bidirectional::PendingRequestStatus;
+        use crate::sign_bidirectional::SignStatus;
         use crate::stream::ops::RespondBidirectionalEvent as RBE;
         use crate::stream::ops::SignBidirectionalEvent as SBE;
         use crate::stream::ops::SignatureRespondedEvent as SRE;
@@ -499,14 +490,13 @@ mod tests {
             respond_serialization_schema: vec![],
         };
 
-        let indexed = IndexedSignRequest {
-            id: sign_id,
-            args: args.clone(),
-            chain: Chain::Solana,
-            timestamp_created: std::time::Instant::now(),
-            unix_timestamp_indexed: current_unix_timestamp(),
-            sign_request_type: SignRequestType::SignBidirectional(SBE::Solana(sign_bidir.clone())),
-        };
+        let indexed = IndexedSignRequest::sign_bidirectional(
+            sign_id,
+            args.clone(),
+            Chain::Solana,
+            current_unix_timestamp(),
+            SBE::Solana(sign_bidir.clone()),
+        );
 
         // push SignRequest
         events_tx
@@ -571,11 +561,7 @@ mod tests {
 
         // mark status as PendingExecution so it will be included in checkpoints
         backlog
-            .set_status(
-                Chain::Solana,
-                &sign_id,
-                PendingRequestStatus::PendingExecution,
-            )
+            .set_status(Chain::Solana, &sign_id, SignStatus::PendingExecution)
             .await;
 
         // send a block event for this chain and ensure checkpoint is persisted
@@ -656,18 +642,12 @@ mod tests {
         };
 
         seeded_backlog
-            .insert(
-                Chain::Ethereum,
+            .insert(IndexedSignRequest::sign(
                 sign_id,
-                BacklogTransaction::Sign(SignTx {
-                    request_id: sign_id.request_id,
-                    source_chain: Chain::Ethereum,
-                    status: crate::sign_bidirectional::PendingRequestStatus::AwaitingResponse,
-                    args: args.clone(),
-                    unix_timestamp_indexed: current_unix_timestamp(),
-                }),
-                SignRequestType::Sign,
-            )
+                args.clone(),
+                Chain::Ethereum,
+                current_unix_timestamp(),
+            ))
             .await;
         seeded_backlog
             .set_processed_block(Chain::Ethereum, 100)
