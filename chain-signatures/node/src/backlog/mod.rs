@@ -842,18 +842,28 @@ mod tests {
         }
     }
 
+    fn create_indexed_request(
+        sign_id: SignId,
+        chain: Chain,
+        args: SignArgs,
+        kind: SignKind,
+        unix_timestamp_indexed: u64,
+    ) -> IndexedSignRequest {
+        IndexedSignRequest::new(sign_id, args, chain, unix_timestamp_indexed, kind)
+    }
+
     fn create_bidirectional_request(
         sign_id: SignId,
         chain: Chain,
         dest: &str,
         unix_timestamp_indexed: u64,
     ) -> IndexedSignRequest {
-        IndexedSignRequest::recover(
+        create_indexed_request(
             sign_id,
-            create_test_args(sign_id.request_id[0]),
             chain,
-            unix_timestamp_indexed,
+            create_test_args(sign_id.request_id[0]),
             SignKind::SignBidirectional(create_test_event(dest)),
+            unix_timestamp_indexed,
         )
     }
 
@@ -1157,12 +1167,12 @@ mod tests {
         ));
 
         backlog
-            .insert(IndexedSignRequest::recover(
+            .insert(create_indexed_request(
                 sign_id,
-                args,
                 Chain::Solana,
-                0,
+                args,
                 sign_kind,
+                0,
             ))
             .await;
         backlog.set_processed_block(Chain::Solana, 10).await;
@@ -1203,12 +1213,12 @@ mod tests {
         };
         let unix_timestamp_indexed = 0;
         backlog
-            .insert(IndexedSignRequest::recover(
+            .insert(create_indexed_request(
                 sign_id,
-                args.clone(),
                 tx.source_chain,
-                unix_timestamp_indexed,
+                args.clone(),
                 SignKind::Sign,
+                unix_timestamp_indexed,
             ))
             .await;
 
@@ -1309,12 +1319,12 @@ mod tests {
         };
 
         backlog
-            .insert(IndexedSignRequest::recover(
+            .insert(create_indexed_request(
                 sign_id,
-                args,
                 tx.source_chain,
-                0,
+                args,
                 SignKind::Sign,
+                0,
             ))
             .await;
 

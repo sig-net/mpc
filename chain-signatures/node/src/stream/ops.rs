@@ -569,6 +569,16 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::timeout;
 
+    fn test_indexed_request(
+        sign_id: SignId,
+        chain: Chain,
+        args: SignArgs,
+        unix_timestamp_indexed: u64,
+        kind: SignKind,
+    ) -> IndexedSignRequest {
+        IndexedSignRequest::new(sign_id, args, chain, unix_timestamp_indexed, kind)
+    }
+
     #[test]
     fn ethereum_signature_respond_event_conversion() {
         let big_r = ProjectivePoint::GENERATOR.to_affine();
@@ -604,10 +614,10 @@ mod tests {
         // Add a request and persist a checkpoint so recover() can load it
         let unix_timestamp_indexed = current_unix_timestamp();
         backlog
-            .insert(IndexedSignRequest::recover(
+            .insert(test_indexed_request(
                 sign_id,
-                args.clone(),
                 Chain::Ethereum,
+                args.clone(),
                 unix_timestamp_indexed,
                 SignKind::Sign,
             ))
@@ -697,10 +707,10 @@ mod tests {
         };
         let unix_timestamp_indexed = current_unix_timestamp();
         backlog
-            .insert(IndexedSignRequest::recover(
+            .insert(test_indexed_request(
                 sign_id,
-                args.clone(),
                 tx.source_chain,
+                args.clone(),
                 unix_timestamp_indexed,
                 SignKind::Sign,
             ))
@@ -774,10 +784,10 @@ mod tests {
         };
 
         backlog
-            .insert(IndexedSignRequest::recover(
+            .insert(test_indexed_request(
                 sign_id,
-                args,
                 Chain::Ethereum,
+                args,
                 current_unix_timestamp(),
                 SignKind::Sign,
             ))
@@ -873,10 +883,10 @@ mod tests {
         };
         let unix_timestamp_indexed = current_unix_timestamp();
         backlog
-            .insert(IndexedSignRequest::recover(
+            .insert(test_indexed_request(
                 sign_id,
-                args.clone(),
                 tx.source_chain,
+                args.clone(),
                 unix_timestamp_indexed,
                 SignKind::Sign,
             ))

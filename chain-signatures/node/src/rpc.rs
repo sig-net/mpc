@@ -1800,19 +1800,19 @@ mod tests {
     }
 
     fn make_indexed(epsilon: k256::Scalar, payload: k256::Scalar) -> IndexedSignRequest {
-        IndexedSignRequest::recover(
-            SignId::new([0u8; 32]),
-            mpc_primitives::SignArgs {
+        IndexedSignRequest {
+            id: SignId::new([0u8; 32]),
+            args: mpc_primitives::SignArgs {
                 entropy: [0u8; 32],
                 epsilon,
                 payload,
                 path: "test".into(),
                 key_version: 0,
             },
-            Chain::NEAR,
-            0,
-            SignKind::Sign,
-        )
+            chain: Chain::NEAR,
+            unix_timestamp_indexed: 0,
+            kind: SignKind::Sign,
+        }
     }
 
     #[test]

@@ -55,9 +55,7 @@ pub struct IndexedSignRequest {
 }
 
 impl IndexedSignRequest {
-    /// Reconstruct a sign request from persisted data (e.g. backlog recovery or tests).
-    /// Preserves the original `unix_timestamp_indexed` rather than stamping the current time.
-    pub fn recover(
+    pub fn new(
         id: SignId,
         args: SignArgs,
         chain: Chain,
