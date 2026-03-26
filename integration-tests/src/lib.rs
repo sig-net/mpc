@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use self::local::NodeEnvConfig;
 use crate::containers::DockerClient;
+use crate::eth::EthereumTarget;
 
 use anyhow::Context as _;
 use cluster::spawner::ClusterSpawner;
@@ -311,10 +312,80 @@ impl Drop for Nodes {
     }
 }
 
+pub enum EthereumEnvironment {
+    Sandbox(containers::EthereumSandbox),
+    Kurtosis(containers::KurtosisEthereum),
+}
+
 pub struct EthereumContext {
-    pub sandbox: containers::EthereumSandbox,
+    pub environment: EthereumEnvironment,
     pub contract_address: Address,
     pub deployer_address: Address,
+}
+
+impl EthereumContext {
+    pub fn execution_rpc_http_url(&self) -> &str {
+        match &self.environment {
+            EthereumEnvironment::Sandbox(sandbox) => &sandbox.external_http_endpoint,
+            EthereumEnvironment::Kurtosis(kurtosis) => &kurtosis.external_http_endpoint,
+        }
+    }
+
+    pub fn consensus_rpc_http_url(&self) -> &str {
+        match &self.environment {
+            EthereumEnvironment::Sandbox(sandbox) => &sandbox.external_http_endpoint,
+            EthereumEnvironment::Kurtosis(kurtosis) => &kurtosis.external_consensus_http_endpoint,
+        }
+    }
+
+    pub fn node_execution_rpc_http_url(&self) -> &str {
+        match &self.environment {
+            EthereumEnvironment::Sandbox(sandbox) => &sandbox.internal_http_endpoint,
+            EthereumEnvironment::Kurtosis(kurtosis) => &kurtosis.internal_http_endpoint,
+        }
+    }
+
+    pub fn node_consensus_rpc_http_url(&self) -> &str {
+        match &self.environment {
+            EthereumEnvironment::Sandbox(sandbox) => &sandbox.internal_http_endpoint,
+            EthereumEnvironment::Kurtosis(kurtosis) => &kurtosis.internal_consensus_http_endpoint,
+        }
+    }
+
+    pub fn secret_key(&self) -> &str {
+        match &self.environment {
+            EthereumEnvironment::Sandbox(sandbox) => &sandbox.secret_key,
+            EthereumEnvironment::Kurtosis(kurtosis) => &kurtosis.secret_key,
+        }
+    }
+
+    pub fn chain_id(&self) -> u64 {
+        match &self.environment {
+            EthereumEnvironment::Sandbox(sandbox) => sandbox.chain_id,
+            EthereumEnvironment::Kurtosis(kurtosis) => kurtosis.chain_id,
+        }
+    }
+
+    pub fn network(&self) -> &str {
+        match &self.environment {
+            EthereumEnvironment::Sandbox(_) => "sepolia",
+            EthereumEnvironment::Kurtosis(kurtosis) => &kurtosis.network,
+        }
+    }
+
+    pub fn helios_data_path(&self) -> &str {
+        match &self.environment {
+            EthereumEnvironment::Sandbox(_) => "/tmp/helios",
+            EthereumEnvironment::Kurtosis(kurtosis) => &kurtosis.helios_data_path,
+        }
+    }
+
+    pub fn refresh_finalized_interval(&self) -> u64 {
+        match &self.environment {
+            EthereumEnvironment::Sandbox(_) => 1_000,
+            EthereumEnvironment::Kurtosis(kurtosis) => kurtosis.refresh_finalized_interval,
+        }
+    }
 }
 
 pub struct Context {
@@ -352,38 +423,61 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     let sk_share_local_path = sk_share_local_path.to_string_lossy().to_string();
 
     let mut ethereum = None;
-    if spawner.use_ethereum {
-        let sandbox = containers::EthereumSandbox::run(spawner).await?;
+    if let Some(target) = spawner.ethereum_target.clone() {
+        let environment = match target {
+            EthereumTarget::Sandbox => {
+                EthereumEnvironment::Sandbox(containers::EthereumSandbox::run(spawner).await?)
+            }
+            EthereumTarget::Kurtosis => {
+                EthereumEnvironment::Kurtosis(containers::KurtosisEthereum::run(spawner).await?)
+            }
+        };
+
+        let ethereum_ctx = EthereumContext {
+            environment,
+            contract_address: Address::zero(),
+            deployer_address: Address::zero(),
+        };
 
         let (client, deployer_address) = eth::client(
-            &sandbox.external_http_endpoint,
-            &sandbox.secret_key,
-            sandbox.chain_id,
+            ethereum_ctx.execution_rpc_http_url(),
+            ethereum_ctx.secret_key(),
+            ethereum_ctx.chain_id(),
         )?;
         let contract_address =
             eth::deploy_chain_signatures(client, deployer_address, U256::zero()).await?;
 
-        let rpc_endpoint = if cfg!(feature = "docker-test") {
-            sandbox.internal_http_endpoint.clone()
+        let execution_rpc_http_url = if cfg!(feature = "docker-test") {
+            ethereum_ctx.node_execution_rpc_http_url().to_string()
         } else {
-            sandbox.external_http_endpoint.clone()
+            ethereum_ctx.execution_rpc_http_url().to_string()
+        };
+        let consensus_rpc_http_url = if cfg!(feature = "docker-test") {
+            ethereum_ctx.node_consensus_rpc_http_url().to_string()
+        } else {
+            ethereum_ctx.consensus_rpc_http_url().to_string()
         };
 
         let contract_address_hex = hex::encode(contract_address);
         spawner.cfg.eth = Some(EthConfig {
-            account_sk: sandbox.secret_key.clone(),
-            consensus_rpc_http_url: rpc_endpoint.clone(),
-            execution_rpc_http_url: rpc_endpoint,
+            account_sk: ethereum_ctx.secret_key().to_string(),
+            consensus_rpc_http_url,
+            execution_rpc_http_url,
             contract_address: contract_address_hex.clone(),
-            network: "sepolia".to_string(),
-            helios_data_path: format!("/tmp/helios-{}", contract_address_hex),
-            refresh_finalized_interval: 1_000,
+            network: ethereum_ctx.network().to_string(),
+            helios_data_path: match &ethereum_ctx.environment {
+                EthereumEnvironment::Sandbox(_) => format!("/tmp/helios-{}", contract_address_hex),
+                EthereumEnvironment::Kurtosis(_) => {
+                    format!("{}-{}", ethereum_ctx.helios_data_path(), contract_address_hex)
+                }
+            },
+            refresh_finalized_interval: ethereum_ctx.refresh_finalized_interval(),
             optimistic_requests: true,
             light_client: false,
         });
 
         ethereum = Some(EthereumContext {
-            sandbox,
+            environment: ethereum_ctx.environment,
             contract_address,
             deployer_address,
         });

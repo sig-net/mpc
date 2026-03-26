@@ -40,10 +40,10 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
     let eth_ctx = ctx
         .ethereum
         .as_ref()
-        .context("ethereum sandbox not initialized")?;
-    let execution_rpc_http_url = eth_ctx.sandbox.external_http_endpoint.clone();
-    let account_sk = eth_ctx.sandbox.secret_key.clone();
-    let chain_id = eth_ctx.sandbox.chain_id;
+        .context("ethereum environment not initialized")?;
+    let execution_rpc_http_url = eth_ctx.execution_rpc_http_url().to_string();
+    let account_sk = eth_ctx.secret_key().to_string();
+    let chain_id = eth_ctx.chain_id();
     let parameters = serde_json::to_string(&json!({ "network": "sandbox" }))?;
 
     let solana = nodes

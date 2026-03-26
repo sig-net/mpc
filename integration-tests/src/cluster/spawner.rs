@@ -10,6 +10,7 @@ use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
 
 use crate::containers::{self, DockerClient};
+use crate::eth::EthereumTarget;
 use crate::utils::dev_gen_indexed;
 use crate::{execute, NodeBinarySource, NodeConfig, Nodes};
 
@@ -126,7 +127,7 @@ pub struct ClusterSpawner {
     pub program_address: Option<String>,
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
-    pub use_ethereum: bool,
+    pub ethereum_target: Option<EthereumTarget>,
     /// Tracks which binary source to use for each node index
     pub node_binary_sources: Vec<NodeBinarySource>,
 }
@@ -160,7 +161,7 @@ impl Default for ClusterSpawner {
             program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
             pregenerated_keys: PregeneratedKeys::load(nodes).unwrap(),
-            use_ethereum: false,
+            ethereum_target: None,
             node_binary_sources: vec![NodeBinarySource::CurrentCode; nodes],
         }
     }
@@ -286,7 +287,17 @@ impl ClusterSpawner {
     }
 
     pub fn ethereum(mut self) -> Self {
-        self.use_ethereum = true;
+        self.ethereum_target = Some(EthereumTarget::Sandbox);
+        self
+    }
+
+    pub fn ethereum_target(mut self, target: EthereumTarget) -> Self {
+        self.ethereum_target = Some(target);
+        self
+    }
+
+    pub fn ethereum_kurtosis(mut self) -> Self {
+        self.ethereum_target = Some(EthereumTarget::Kurtosis);
         self
     }
 

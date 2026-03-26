@@ -1,7 +1,10 @@
 use std::collections::HashMap;
+use std::net::{TcpListener, UdpSocket};
 use std::path::Path;
+use std::path::PathBuf;
 
 use crate::cluster::spawner::ClusterSpawner;
+use crate::eth::KurtosisEthereumConfig;
 use crate::local::NodeEnvConfig;
 use crate::utils::pick_preferred_or_unused_port;
 use crate::NodeConfig;
@@ -516,6 +519,256 @@ impl EthereumSandbox {
             container,
         })
     }
+}
+
+pub struct KurtosisEthereum {
+    pub enclave_name: String,
+    pub internal_http_endpoint: String,
+    pub external_http_endpoint: String,
+    pub internal_consensus_http_endpoint: String,
+    pub external_consensus_http_endpoint: String,
+    pub secret_key: String,
+    pub chain_id: u64,
+    pub network: String,
+    pub helios_data_path: String,
+    pub refresh_finalized_interval: u64,
+    config_path: PathBuf,
+}
+
+impl KurtosisEthereum {
+    const PACKAGE: &'static str = "github.com/ethpandaops/ethereum-package";
+    const ENCLAVE_PREFIX: &'static str = "mpc-eth-it";
+    const EL_SERVICE: &'static str = "el-1-geth-lighthouse";
+    const CL_SERVICE: &'static str = "cl-1-lighthouse-geth";
+    const VALUES_ARTIFACT: &'static str = "genesis-el-cl-env-file";
+    const VALUES_FILE: &'static str = "values.env";
+    const DEFAULT_REFRESH_FINALIZED_INTERVAL: u64 = 1_000;
+    const DOCKER_HOST: &'static str = "host.docker.internal";
+
+    pub async fn run(spawner: &ClusterSpawner) -> anyhow::Result<Self> {
+        let enclave_name = format!("{}-{}", Self::ENCLAVE_PREFIX, uuid::Uuid::new_v4().simple());
+
+        std::fs::create_dir_all(&spawner.tmp_dir)
+            .context("failed to create integration test tmp dir for Kurtosis")?;
+
+        let el_public_port_start = find_available_port_block(32_000, 5)
+            .context("failed to reserve a free public EL port block for Kurtosis")?;
+        let cl_public_port_start = find_available_port_block(33_000, 5)
+            .context("failed to reserve a free public CL port block for Kurtosis")?;
+
+        let config_path = spawner
+            .tmp_dir
+            .join(format!("kurtosis-ethereum-{}.yaml", enclave_name));
+        std::fs::write(
+            &config_path,
+            Self::package_config(el_public_port_start, cl_public_port_start),
+        )
+            .with_context(|| format!("failed to write Kurtosis config at {:?}", config_path))?;
+
+        let output = Command::new("kurtosis")
+            .args([
+                "run",
+                "--enclave",
+                enclave_name.as_str(),
+                Self::PACKAGE,
+                "{}",
+                "--args-file",
+                config_path.to_str().context("invalid Kurtosis config path")?,
+            ])
+            .output()
+            .await
+            .context("failed to launch Kurtosis Ethereum package")?;
+
+        if !output.status.success() {
+            let _ = std::process::Command::new("kurtosis")
+                .args(["enclave", "rm", "-f", enclave_name.as_str()])
+                .status();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "kurtosis ethereum package launch failed for enclave {enclave_name}. stdout: {stdout}, stderr: {stderr}"
+            );
+        }
+
+        let external_http_endpoint = format!(
+            "http://{}",
+            Self::port_print(&enclave_name, Self::EL_SERVICE, "rpc").await?
+        );
+        let external_consensus_http_endpoint = format!(
+            "http://{}",
+            Self::port_print(&enclave_name, Self::CL_SERVICE, "http").await?
+        );
+
+        wait_for_rpc(&external_http_endpoint).await?;
+
+        let values_env = Self::artifact_file_contents(
+            &enclave_name,
+            Self::VALUES_ARTIFACT,
+            Self::VALUES_FILE,
+        )
+        .await?;
+
+        let helios_data_path = spawner
+            .tmp_dir
+            .join(format!("helios-{}", enclave_name))
+            .to_string_lossy()
+            .to_string();
+
+        let (config, chain_id) = KurtosisEthereumConfig::from_kurtosis_values_env(
+            &values_env,
+            external_http_endpoint.clone(),
+            external_consensus_http_endpoint.clone(),
+            helios_data_path.clone(),
+            Self::DEFAULT_REFRESH_FINALIZED_INTERVAL,
+        )?;
+
+        let internal_http_endpoint = Self::rewrite_for_docker_host(&external_http_endpoint);
+        let internal_consensus_http_endpoint =
+            Self::rewrite_for_docker_host(&external_consensus_http_endpoint);
+
+        Ok(Self {
+            enclave_name,
+            internal_http_endpoint,
+            external_http_endpoint,
+            internal_consensus_http_endpoint,
+            external_consensus_http_endpoint,
+            secret_key: config.account_sk,
+            chain_id,
+            network: config.network,
+            helios_data_path: config.helios_data_path,
+            refresh_finalized_interval: config.refresh_finalized_interval,
+            config_path,
+        })
+    }
+
+    fn package_config(el_public_port_start: u16, cl_public_port_start: u16) -> String {
+                format!(
+                        "participants:\n  - el_type: geth\n    cl_type: lighthouse\n\nnetwork_params:\n  preset: minimal\n\nwait_for_finalization: true\nglobal_log_level: info\n\nport_publisher:\n  el:\n    enabled: true\n    public_port_start: {el_public_port_start}\n  cl:\n    enabled: true\n    public_port_start: {cl_public_port_start}\n"
+                )
+    }
+
+    fn rewrite_for_docker_host(endpoint: &str) -> String {
+        endpoint.replace("127.0.0.1", Self::DOCKER_HOST)
+    }
+
+    async fn port_print(enclave: &str, service: &str, port_id: &str) -> anyhow::Result<String> {
+        let output = Command::new("kurtosis")
+            .args([
+                "port",
+                "print",
+                enclave,
+                service,
+                port_id,
+                "--format",
+                "ip,number",
+            ])
+            .output()
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to query Kurtosis port {port_id} for service {service} in enclave {enclave}"
+                )
+            })?;
+
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "kurtosis port print failed for enclave {enclave}, service {service}, port {port_id}. stdout: {stdout}, stderr: {stderr}"
+            );
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    async fn artifact_file_contents(
+        enclave: &str,
+        artifact: &str,
+        file_path: &str,
+    ) -> anyhow::Result<String> {
+        let output = Command::new("kurtosis")
+            .args(["files", "inspect", enclave, artifact, file_path])
+            .output()
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to inspect Kurtosis artifact {artifact}/{file_path} in enclave {enclave}"
+                )
+            })?;
+
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "kurtosis files inspect failed for enclave {enclave}, artifact {artifact}, file {file_path}. stdout: {stdout}, stderr: {stderr}"
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout
+            .strip_prefix("File contents:\n")
+            .unwrap_or(stdout.as_ref())
+            .trim()
+            .to_string())
+    }
+}
+
+impl Drop for KurtosisEthereum {
+    fn drop(&mut self) {
+        if let Err(err) = std::process::Command::new("kurtosis")
+            .args(["enclave", "rm", "-f", self.enclave_name.as_str()])
+            .status()
+        {
+            tracing::warn!(
+                enclave = %self.enclave_name,
+                ?err,
+                "failed to remove Kurtosis enclave during drop"
+            );
+        }
+
+        if let Err(err) = std::fs::remove_file(&self.config_path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(?err, path = ?self.config_path, "failed to remove Kurtosis config file");
+            }
+        }
+
+        if let Err(err) = std::fs::remove_dir_all(&self.helios_data_path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(?err, path = %self.helios_data_path, "failed to remove Kurtosis Helios data dir");
+            }
+        }
+    }
+}
+
+fn find_available_port_block(start: u16, width: u16) -> anyhow::Result<u16> {
+    for base in start..=u16::MAX.saturating_sub(width) {
+        if is_port_block_available(base, width) {
+            return Ok(base);
+        }
+    }
+
+    anyhow::bail!("no free port block of width {width} found starting from {start}")
+}
+
+fn is_port_block_available(base: u16, width: u16) -> bool {
+    let mut tcp_listeners = Vec::with_capacity(width as usize);
+    let mut udp_sockets = Vec::with_capacity(width as usize);
+
+    for offset in 0..width {
+        let port = base + offset;
+
+        let Ok(tcp_listener) = TcpListener::bind(("0.0.0.0", port)) else {
+            return false;
+        };
+        tcp_listeners.push(tcp_listener);
+
+        let Ok(udp_socket) = UdpSocket::bind(("0.0.0.0", port)) else {
+            return false;
+        };
+        udp_sockets.push(udp_socket);
+    }
+
+    true
 }
 
 async fn wait_for_rpc(endpoint: &str) -> anyhow::Result<()> {

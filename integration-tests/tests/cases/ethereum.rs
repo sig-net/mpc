@@ -1,7 +1,9 @@
+use async_process::Command;
 use anyhow::{anyhow, Context, Result};
 use ethers::providers::Middleware;
 use ethers::types::{Address, BlockNumber, TransactionRequest, U256};
 use integration_tests::cluster::Cluster;
+use integration_tests::EthereumEnvironment;
 use integration_tests::{actions, cluster, eth};
 use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -21,10 +23,10 @@ async fn test_signature_ethereum() -> Result<()> {
     let eth_ctx = ctx
         .ethereum
         .as_ref()
-        .context("ethereum sandbox not initialized")?;
-    let endpoint = eth_ctx.sandbox.external_http_endpoint.clone();
-    let secret_key = eth_ctx.sandbox.secret_key.clone();
-    let chain_id = eth_ctx.sandbox.chain_id;
+        .context("ethereum environment not initialized")?;
+    let endpoint = eth_ctx.execution_rpc_http_url().to_string();
+    let secret_key = eth_ctx.secret_key().to_string();
+    let chain_id = eth_ctx.chain_id();
     let contract_address = eth_ctx.contract_address;
 
     let (client, requester) = eth::client(&endpoint, &secret_key, chain_id)?;
@@ -147,10 +149,10 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     let eth_ctx = ctx
         .ethereum
         .as_ref()
-        .context("ethereum sandbox not initialized")?;
-    let endpoint = eth_ctx.sandbox.external_http_endpoint.clone();
-    let secret_key = eth_ctx.sandbox.secret_key.clone();
-    let chain_id = eth_ctx.sandbox.chain_id;
+        .context("ethereum environment not initialized")?;
+    let endpoint = eth_ctx.execution_rpc_http_url().to_string();
+    let secret_key = eth_ctx.secret_key().to_string();
+    let chain_id = eth_ctx.chain_id();
     let contract_address = eth_ctx.contract_address;
 
     let (client, requester) = eth::client(&endpoint, &secret_key, chain_id)?;
@@ -294,11 +296,11 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
     let eth_ctx = ctx
         .ethereum
         .as_ref()
-        .context("ethereum sandbox not initialized")?;
+        .context("ethereum environment not initialized")?;
     let (eth_client, _requester) = eth::client(
-        &eth_ctx.sandbox.external_http_endpoint,
-        &eth_ctx.sandbox.secret_key,
-        eth_ctx.sandbox.chain_id,
+        eth_ctx.execution_rpc_http_url(),
+        eth_ctx.secret_key(),
+        eth_ctx.chain_id(),
     )?;
     let eth_contract = eth::ChainSignaturesContract::new(eth_ctx.contract_address, eth_client);
 
@@ -464,4 +466,50 @@ async fn wait_node_checkpoint(
     .unwrap_or_else(|_| {
         panic!("timed out waiting for node {node_idx} checkpoint >= {min_block_height}")
     })
+}
+
+#[test(tokio::test)]
+#[ignore = "requires Kurtosis CLI and Docker"]
+async fn test_ethereum_kurtosis_cluster_cleans_up_on_drop() -> Result<()> {
+    let cluster = cluster::spawn()
+        .disable_prestockpile()
+        .ethereum_kurtosis()
+        .await?;
+
+    let enclave_name = match &cluster
+        .nodes
+        .ctx()
+        .ethereum
+        .as_ref()
+        .context("ethereum environment not initialized")?
+        .environment
+    {
+        EthereumEnvironment::Kurtosis(kurtosis) => kurtosis.enclave_name.clone(),
+        EthereumEnvironment::Sandbox(_) => anyhow::bail!("expected managed Kurtosis environment"),
+    };
+
+    let inspect_before_drop = Command::new("kurtosis")
+        .args(["enclave", "inspect", enclave_name.as_str()])
+        .output()
+        .await?;
+    assert!(
+        inspect_before_drop.status.success(),
+        "expected Kurtosis enclave to exist while cluster is alive"
+    );
+
+    drop(cluster);
+
+    for _ in 0..20 {
+        let inspect_after_drop = Command::new("kurtosis")
+            .args(["enclave", "inspect", enclave_name.as_str()])
+            .output()
+            .await?;
+        if !inspect_after_drop.status.success() {
+            return Ok(());
+        }
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+
+    anyhow::bail!("Kurtosis enclave {enclave_name} still exists after cluster drop")
 }
