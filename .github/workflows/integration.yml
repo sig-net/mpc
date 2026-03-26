@@ -5,6 +5,8 @@ on:
     branches:
       - develop
     paths:
+      - .github/workflows/integration.yml
+      - build-contract.sh
       - integration-tests/**
       - chain-signatures/**
   pull_request:
@@ -102,3 +104,15 @@ jobs:
           IT_ETH_CONTRACT_ADDR: ${{ secrets.IT_ETH_CONTRACT_ADDR }}
           IT_ETH_CONSENSUS_RPC_URL: ${{ secrets.IT_ETH_CONSENSUS_RPC_URL }}
           IT_ETH_EXECUTION_RPC_URL: ${{ secrets.IT_ETH_EXECUTION_RPC_URL }}
+
+      - name: Run Kurtosis finality test
+        run: |
+          cargo test -p integration-tests --test lib \
+            cases::ethereum_stream::test_ethereum_stream_finality_on_kurtosis \
+            -- --ignored --exact --test-threads=1 --show-output
+        env:
+          RUST_LOG: info,workspaces=warn
+          RUST_BACKTRACE: 1
+          KURTOSIS_ETH_NETWORK: sepolia
+          KURTOSIS_ETH_HELIOS_DATA_PATH: /tmp/helios-kurtosis
+          KURTOSIS_ETH_REFRESH_FINALIZED_INTERVAL_MS: "1000"

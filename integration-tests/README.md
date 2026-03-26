@@ -18,6 +18,24 @@ cargo test -p integration-tests --jobs 1 -- --test-threads 1
 cargo test -p integration-tests --features docker-test
 ```
 
+## Kurtosis Ethereum finality test
+
+The Ethereum stream suite also includes an ignored Kurtosis-backed finality test:
+
+```BASH
+cargo test -p integration-tests --test lib \
+    cases::ethereum_stream::test_ethereum_stream_finality_on_kurtosis \
+    -- --ignored --exact --test-threads=1 --show-output
+```
+
+Optional environment variables:
+
+- `KURTOSIS_ETH_NETWORK` (defaults to `sepolia`)
+- `KURTOSIS_ETH_HELIOS_DATA_PATH`
+- `KURTOSIS_ETH_REFRESH_FINALIZED_INTERVAL_MS`
+
+CI runs this test as part of [integration.yml](../.github/workflows/integration.yml) using the repository's Ethereum integration-test RPC secrets.
+
 ## Logging and Tracing
 We have three types of logging available:
 

@@ -154,6 +154,40 @@ pub async fn pick_unused_port() -> anyhow::Result<u16> {
     Ok(port)
 }
 
+pub fn pick_unused_port_block(start: u16, width: u16) -> anyhow::Result<u16> {
+    for base in start..=u16::MAX.saturating_sub(width) {
+        let mut tcp_listeners = Vec::with_capacity(width as usize);
+        let mut udp_sockets = Vec::with_capacity(width as usize);
+        let mut available = true;
+
+        for offset in 0..width {
+            let port = base + offset;
+
+            match std::net::TcpListener::bind(("0.0.0.0", port)) {
+                Ok(listener) => tcp_listeners.push(listener),
+                Err(_) => {
+                    available = false;
+                    break;
+                }
+            }
+
+            match std::net::UdpSocket::bind(("0.0.0.0", port)) {
+                Ok(socket) => udp_sockets.push(socket),
+                Err(_) => {
+                    available = false;
+                    break;
+                }
+            }
+        }
+
+        if available {
+            return Ok(base);
+        }
+    }
+
+    anyhow::bail!("no free port block of width {width} found starting from {start}")
+}
+
 pub async fn pick_preferred_or_unused_port(preferred: u16) -> u16 {
     // Try preferred port first
     if is_port_available(preferred).await {

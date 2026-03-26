@@ -1,12 +1,11 @@
 use std::collections::HashMap;
-use std::net::{TcpListener, UdpSocket};
 use std::path::Path;
 use std::path::PathBuf;
 
 use crate::cluster::spawner::ClusterSpawner;
 use crate::eth::KurtosisEthereumConfig;
 use crate::local::NodeEnvConfig;
-use crate::utils::pick_preferred_or_unused_port;
+use crate::utils::{pick_preferred_or_unused_port, pick_unused_port_block};
 use crate::NodeConfig;
 
 use anyhow::{anyhow, Context};
@@ -551,9 +550,9 @@ impl KurtosisEthereum {
         std::fs::create_dir_all(&spawner.tmp_dir)
             .context("failed to create integration test tmp dir for Kurtosis")?;
 
-        let el_public_port_start = find_available_port_block(32_000, 5)
+        let el_public_port_start = pick_unused_port_block(32_000, 5)
             .context("failed to reserve a free public EL port block for Kurtosis")?;
-        let cl_public_port_start = find_available_port_block(33_000, 5)
+        let cl_public_port_start = pick_unused_port_block(33_000, 5)
             .context("failed to reserve a free public CL port block for Kurtosis")?;
 
         let config_path = spawner
@@ -563,7 +562,7 @@ impl KurtosisEthereum {
             &config_path,
             Self::package_config(el_public_port_start, cl_public_port_start),
         )
-            .with_context(|| format!("failed to write Kurtosis config at {:?}", config_path))?;
+        .with_context(|| format!("failed to write Kurtosis config at {:?}", config_path))?;
 
         let output = Command::new("kurtosis")
             .args([
@@ -573,7 +572,9 @@ impl KurtosisEthereum {
                 Self::PACKAGE,
                 "{}",
                 "--args-file",
-                config_path.to_str().context("invalid Kurtosis config path")?,
+                config_path
+                    .to_str()
+                    .context("invalid Kurtosis config path")?,
             ])
             .output()
             .await
@@ -601,12 +602,9 @@ impl KurtosisEthereum {
 
         wait_for_rpc(&external_http_endpoint).await?;
 
-        let values_env = Self::artifact_file_contents(
-            &enclave_name,
-            Self::VALUES_ARTIFACT,
-            Self::VALUES_FILE,
-        )
-        .await?;
+        let values_env =
+            Self::artifact_file_contents(&enclave_name, Self::VALUES_ARTIFACT, Self::VALUES_FILE)
+                .await?;
 
         let helios_data_path = spawner
             .tmp_dir
@@ -642,7 +640,7 @@ impl KurtosisEthereum {
     }
 
     fn package_config(el_public_port_start: u16, cl_public_port_start: u16) -> String {
-                format!(
+        format!(
                         "participants:\n  - el_type: geth\n    cl_type: lighthouse\n\nnetwork_params:\n  preset: minimal\n\nwait_for_finalization: true\nglobal_log_level: info\n\nport_publisher:\n  el:\n    enabled: true\n    public_port_start: {el_public_port_start}\n  cl:\n    enabled: true\n    public_port_start: {cl_public_port_start}\n"
                 )
     }
@@ -738,37 +736,6 @@ impl Drop for KurtosisEthereum {
             }
         }
     }
-}
-
-fn find_available_port_block(start: u16, width: u16) -> anyhow::Result<u16> {
-    for base in start..=u16::MAX.saturating_sub(width) {
-        if is_port_block_available(base, width) {
-            return Ok(base);
-        }
-    }
-
-    anyhow::bail!("no free port block of width {width} found starting from {start}")
-}
-
-fn is_port_block_available(base: u16, width: u16) -> bool {
-    let mut tcp_listeners = Vec::with_capacity(width as usize);
-    let mut udp_sockets = Vec::with_capacity(width as usize);
-
-    for offset in 0..width {
-        let port = base + offset;
-
-        let Ok(tcp_listener) = TcpListener::bind(("0.0.0.0", port)) else {
-            return false;
-        };
-        tcp_listeners.push(tcp_listener);
-
-        let Ok(udp_socket) = UdpSocket::bind(("0.0.0.0", port)) else {
-            return false;
-        };
-        udp_sockets.push(udp_socket);
-    }
-
-    true
 }
 
 async fn wait_for_rpc(endpoint: &str) -> anyhow::Result<()> {

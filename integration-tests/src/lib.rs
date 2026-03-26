@@ -468,7 +468,11 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             helios_data_path: match &ethereum_ctx.environment {
                 EthereumEnvironment::Sandbox(_) => format!("/tmp/helios-{}", contract_address_hex),
                 EthereumEnvironment::Kurtosis(_) => {
-                    format!("{}-{}", ethereum_ctx.helios_data_path(), contract_address_hex)
+                    format!(
+                        "{}-{}",
+                        ethereum_ctx.helios_data_path(),
+                        contract_address_hex
+                    )
                 }
             },
             refresh_finalized_interval: ethereum_ctx.refresh_finalized_interval(),

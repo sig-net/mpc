@@ -287,7 +287,7 @@ impl ClusterSpawner {
     }
 
     pub fn ethereum(mut self) -> Self {
-        self.ethereum_target = Some(EthereumTarget::Sandbox);
+        self.ethereum_target = Some(EthereumTarget::default());
         self
     }
 

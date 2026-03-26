@@ -102,8 +102,9 @@ impl KurtosisEthereumConfig {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum EthereumTarget {
+    #[default]
     Sandbox,
     Kurtosis,
 }
@@ -121,7 +122,10 @@ pub fn parse_kurtosis_values_env(contents: &str) -> Result<HashMap<String, Strin
             continue;
         };
 
-        values.insert(key.trim().to_string(), strip_shell_quotes(value.trim()).to_string());
+        values.insert(
+            key.trim().to_string(),
+            strip_shell_quotes(value.trim()).to_string(),
+        );
     }
 
     Ok(values)

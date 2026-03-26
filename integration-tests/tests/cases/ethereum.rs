@@ -1,5 +1,5 @@
-use async_process::Command;
 use anyhow::{anyhow, Context, Result};
+use async_process::Command;
 use ethers::providers::Middleware;
 use ethers::types::{Address, BlockNumber, TransactionRequest, U256};
 use integration_tests::cluster::Cluster;

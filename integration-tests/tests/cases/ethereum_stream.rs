@@ -342,8 +342,16 @@ async fn wait_for_finalized_block_at_least(
     let started = tokio::time::Instant::now();
 
     loop {
-        if let Some(block) = ctx.signer.provider().get_block(BlockNumber::Finalized).await? {
-            if block.number.is_some_and(|number| number.as_u64() >= target_block) {
+        if let Some(block) = ctx
+            .signer
+            .provider()
+            .get_block(BlockNumber::Finalized)
+            .await?
+        {
+            if block
+                .number
+                .is_some_and(|number| number.as_u64() >= target_block)
+            {
                 return Ok(());
             }
         }
@@ -389,7 +397,10 @@ async fn assert_signature_responded(
                 return Ok(());
             }
             other => {
-                tracing::info!(?other, "observed non-respond chain event while waiting for SignatureResponded");
+                tracing::info!(
+                    ?other,
+                    "observed non-respond chain event while waiting for SignatureResponded"
+                );
                 continue;
             }
         }
