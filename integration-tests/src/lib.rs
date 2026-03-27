@@ -79,8 +79,8 @@ impl Default for NodeConfig {
                     ..Default::default()
                 },
                 presignature: PresignatureConfig {
-                    min_presignatures: 16,
-                    max_presignatures: 16 * 3 * 4, // min per node * num nodes * 4 (safety factor)
+                    min_presignatures: 1,
+                    max_presignatures: 3 * 4, // min per node * num nodes * 4 (safety factor)
                     ..Default::default()
                 },
                 ..Default::default()
