@@ -32,7 +32,7 @@ struct AbiField {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum PendingRequestStatus {
+pub enum SignStatus {
     /// Request has been received on the source chain and is waiting for a `respond`
     /// transaction to be observed.
     AwaitingResponse,
@@ -62,7 +62,7 @@ pub struct BidirectionalTx {
     pub request_id: [u8; 32],
     pub from_address: Address,
     pub nonce: u64,
-    pub status: PendingRequestStatus,
+    pub status: SignStatus,
 }
 
 impl BidirectionalTx {

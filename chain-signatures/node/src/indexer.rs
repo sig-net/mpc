@@ -111,20 +111,18 @@ impl NearIndexer {
         let path = "integration-tests".to_string();
         let key_version = 0u32;
 
-        IndexedSignRequest {
-            id: sign_id,
-            args: SignArgs {
+        IndexedSignRequest::sign(
+            sign_id,
+            SignArgs {
                 entropy,
                 epsilon,
                 payload,
                 path,
                 key_version,
             },
-            chain: Chain::NEAR,
-            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            timestamp_created: Instant::now(),
-            sign_request_type: crate::protocol::SignRequestType::Sign,
-        }
+            Chain::NEAR,
+            crate::util::current_unix_timestamp(),
+        )
     }
 
     /// Derive entropy deterministically from sign_id
