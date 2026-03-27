@@ -1,6 +1,7 @@
 use ethers::signers::LocalWallet;
 use ethers::signers::Signer;
-use mpc_keys::hpke;
+use hpke::kem::X25519HkdfSha256;
+use hpke::{Kem as KemTrait, Serializable};
 use sp_core::crypto::{Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{sr25519, Pair};
 use std::env;
@@ -32,9 +33,10 @@ fn main() {
         return;
     }
 
-    let (cipher_sk, cipher_pk) = hpke::generate();
-    let cipher_pk = hex::encode(cipher_pk.to_bytes());
-    let cipher_sk = hex::encode(cipher_sk.to_bytes());
+    let mut csprng = <rand::rngs::StdRng as rand::SeedableRng>::from_entropy();
+    let (cipher_sk, cipher_pk) = X25519HkdfSha256::gen_keypair(&mut csprng);
+    let cipher_pk = hex::encode(Serializable::to_bytes(&cipher_pk));
+    let cipher_sk = hex::encode(Serializable::to_bytes(&cipher_sk));
     println!("cipher public key: {}", cipher_pk);
     println!("cipher private key: {}", cipher_sk);
     let sign_sk = near_crypto::SecretKey::from_random(near_crypto::KeyType::ED25519);

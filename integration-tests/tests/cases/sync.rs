@@ -1,101 +1,12 @@
 use std::time::Duration;
 
 use cait_sith::protocol::Participant;
-use cait_sith::triples::{TriplePub, TripleShare};
-use cait_sith::PresignOutput;
-use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster;
-use k256::Secp256k1;
 
-use integration_tests::cluster::spawner::ClusterSpawner;
-use mpc_node::mesh::Mesh;
-use mpc_node::node_client::{self, NodeClient};
-use mpc_node::protocol::contract::primitives::Participants;
-use mpc_node::protocol::contract::RunningContractState;
-use mpc_node::protocol::presignature::Presignature;
-use mpc_node::protocol::sync::{SyncTask, SyncUpdate};
-use mpc_node::protocol::triple::Triple;
-use mpc_node::protocol::{ParticipantInfo, ProtocolState};
-use mpc_node::rpc::ContractStateWatcher;
-use mpc_node::storage::{triple_storage::TriplePair, PresignatureStorage, TripleStorage};
-
-#[test_log::test(tokio::test)]
-async fn test_state_sync_update() -> anyhow::Result<()> {
-    let spawner = ClusterSpawner::default()
-        .network("protocol-sync")
-        .init_network()
-        .await
-        .unwrap();
-
-    let redis = spawner.spawn_redis().await;
-    let num_nodes = 1;
-    let threshold = 2;
-    let node0_account_id = "p0_test.near".parse().unwrap();
-    let node1 = Participant::from(1);
-
-    let sk = k256::SecretKey::random(&mut rand::thread_rng());
-    let pk = sk.public_key();
-    let ping_interval = Duration::from_millis(300);
-    let client = NodeClient::new(&node_client::Options::default());
-    let participants = participants(num_nodes);
-    let node0_triples = redis.triple_storage(&node0_account_id);
-    let node0_presignatures = redis.presignature_storage(&node0_account_id);
-
-    let (contract_watcher, _contract_tx) = ContractStateWatcher::with(
-        &node0_account_id,
-        ProtocolState::Running(RunningContractState {
-            epoch: 0,
-            public_key: *pk.as_affine(),
-            participants: participants.clone(),
-            candidates: Default::default(),
-            join_votes: Default::default(),
-            leave_votes: Default::default(),
-            threshold,
-        }),
-    );
-
-    let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
-    let mesh = Mesh::new(
-        &client,
-        mpc_node::mesh::Options {
-            ping_interval: ping_interval.as_millis() as u64,
-        },
-        &node0_account_id,
-        synced_peer_rx,
-    );
-    let (sync_channel, sync) = SyncTask::new(
-        &client,
-        node0_triples.clone(),
-        node0_presignatures.clone(),
-        mesh.watch(),
-        contract_watcher,
-        synced_peer_tx,
-    );
-    tokio::spawn(sync.run());
-
-    // insert shares of triples/presignatures to node0, that belong to node1
-    insert_triples(&node0_triples, node1, 0..=5).await;
-    insert_presignatures(&node0_presignatures, node1, 0..=5).await;
-
-    // Create an update where node1 is trying to sync with node0, where node1 only has
-    // triples/presignatures 0 to 3, so 4 and 5 should be deleted from node0.
-    let valid = vec![0, 1, 2, 3];
-    let invalid = vec![4, 5];
-
-    let update = SyncUpdate {
-        from: node1,
-        triples: valid.clone(),
-        presignatures: valid.clone(),
-    };
-    let _ = sync_channel.request_update(update).await;
-    // Give it some time for sync to process the update
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    validate_triples(&node0_triples, node1, &valid, &invalid).await;
-    validate_presignatures(&node0_presignatures, node1, &valid, &invalid).await;
-
-    Ok(())
-}
+use super::helpers::{
+    assert_presig_owned_state, assert_triples_owned_state, insert_presignatures_for_owner,
+    insert_triples_for_owner,
+};
 
 #[test_log::test(tokio::test)]
 async fn test_state_sync_e2e_large_outdated_stockpile() {
@@ -111,6 +22,7 @@ async fn test_state_sync_e2e_large_outdated_stockpile() {
     let node0_account_id = spawner.account_id(Into::<u32>::into(node0) as usize);
     let node1 = Participant::from(1);
     let node1_account_id = spawner.account_id(Into::<u32>::into(node1) as usize);
+    let holders = vec![node0, node1];
     let redis = spawner.prespawn_redis().await;
 
     // immediately add to triples/presignatures storage the triples/presignatures we want to invalidate.
@@ -121,10 +33,10 @@ async fn test_state_sync_e2e_large_outdated_stockpile() {
 
     // insert triples that will be invalidated after a sync, since nobody else has them.
     // node0 is saying that they have 0 to 5, but node1 will sync and say they have 4 and 5 only.
-    insert_triples(&node0_triples, node1, 0..=10000).await;
-    insert_triples(&node1_triples, node1, 0..=5).await;
-    insert_presignatures(&node0_presignatures, node1, 0..=10000).await;
-    insert_presignatures(&node1_presignatures, node1, 0..=5).await;
+    insert_triples_for_owner(&node0_triples, node1, &holders, 0..=10000).await;
+    insert_triples_for_owner(&node1_triples, node1, &holders, 0..=5).await;
+    insert_presignatures_for_owner(&node0_presignatures, node1, &holders, 0..=10000).await;
+    insert_presignatures_for_owner(&node1_presignatures, node1, &holders, 0..=5).await;
 
     let _nodes = spawner
         .disable_prestockpile()
@@ -141,28 +53,28 @@ async fn test_state_sync_e2e_large_outdated_stockpile() {
     // Give some time for the first sync broadcast to finish.
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    validate_triples(
+    assert_triples_owned_state(
         &node0_triples,
         node1,
         &[0, 1, 2, 3, 4, 5],
         &[6, 100, 500, 2030, 1337, 10000],
     )
     .await;
-    validate_triples(
+    assert_triples_owned_state(
         &node1_triples,
         node1,
         &[0, 1, 2, 3, 4, 5],
         &[6, 100, 500, 2030, 1337, 10000],
     )
     .await;
-    validate_presignatures(
-        &node0_presignatures,
+    assert_presig_owned_state(
+        &node1_presignatures,
         node1,
         &[0, 1, 2, 3, 4, 5],
         &[6, 100, 500, 2030, 1337, 10000],
     )
     .await;
-    validate_presignatures(
+    assert_presig_owned_state(
         &node0_presignatures,
         node1,
         &[0, 1, 2, 3, 4, 5],
@@ -176,134 +88,110 @@ async fn test_state_sync_e2e_large_outdated_stockpile() {
     // nodes.sign().await.unwrap();
 }
 
-async fn insert_triples(
-    triples: &TripleStorage,
-    node: Participant,
-    range: impl IntoIterator<Item = u64>,
-) {
-    for id in range {
-        triples
-            .reserve(id)
-            .await
-            .unwrap()
-            .insert(dummy_pair(id), node)
-            .await;
-    }
-}
-
-async fn validate_triples(
-    triples: &TripleStorage,
-    owner: Participant,
-    valid: &[u64],
-    invalid: &[u64],
-) {
-    for id in valid {
-        assert!(
-            triples.contains_by_owner(*id, owner).await,
-            "triple={id} should be valid"
-        );
+#[test_log::test(tokio::test)]
+async fn test_state_sync_e2e() {
+    // Setup 3 nodes with T=2 (default cluster setup).
+    let mut spawner = cluster::spawn();
+    {
+        let worker = spawner.prespawn_sandbox().await.unwrap().clone();
+        spawner.create_accounts(&worker).await;
     }
 
-    for id in invalid {
-        assert!(
-            !triples.contains_by_owner(*id, owner).await,
-            "triple={id} should be invalid"
-        );
-    }
-}
+    let node0 = Participant::from(0);
+    let node1 = Participant::from(1);
+    let node2 = Participant::from(2);
+    let node0_account_id = spawner.account_id(Into::<u32>::into(node0) as usize);
+    let node1_account_id = spawner.account_id(Into::<u32>::into(node1) as usize);
+    let node2_account_id = spawner.account_id(Into::<u32>::into(node2) as usize);
+    let holders = vec![node0, node1, node2];
+    let redis = spawner.prespawn_redis().await;
 
-async fn insert_presignatures(
-    presignatures: &PresignatureStorage,
-    node: Participant,
-    range: impl IntoIterator<Item = u64>,
-) {
-    for id in range {
-        presignatures
-            .reserve(id)
-            .await
-            .unwrap()
-            .insert(dummy_presignature(id), node)
-            .await;
-    }
-}
+    // Wait for Redis to be fully accepting connections on the host port.
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
-async fn validate_presignatures(
-    presignatures: &PresignatureStorage,
-    owner: Participant,
-    valid: &[u64],
-    invalid: &[u64],
-) {
-    for id in valid {
-        assert!(
-            presignatures.contains_by_owner(*id, owner).await,
-            "presignature={id} should be valid"
-        );
+    // Get triple/presignature storage for each node.
+    let node0_triples = redis.triple_storage(&node0_account_id);
+    let node0_presignatures = redis.presignature_storage(&node0_account_id);
+    let node1_triples = redis.triple_storage(&node1_account_id);
+    let node1_presignatures = redis.presignature_storage(&node1_account_id);
+    let node2_triples = redis.triple_storage(&node2_account_id);
+    let node2_presignatures = redis.presignature_storage(&node2_account_id);
+
+    // Populate 3 triples and 3 presignatures: each node owns 1, all nodes hold shares.
+    for storage in [&node0_triples, &node1_triples, &node2_triples] {
+        insert_triples_for_owner(storage, node0, &holders, 0..=0).await;
+        insert_triples_for_owner(storage, node1, &holders, 1..=1).await;
+        insert_triples_for_owner(storage, node2, &holders, 2..=2).await;
+    }
+    for storage in [
+        &node0_presignatures,
+        &node1_presignatures,
+        &node2_presignatures,
+    ] {
+        insert_presignatures_for_owner(storage, node0, &holders, 0..=0).await;
+        insert_presignatures_for_owner(storage, node1, &holders, 1..=1).await;
+        insert_presignatures_for_owner(storage, node2, &holders, 2..=2).await;
     }
 
-    for id in invalid {
-        assert!(
-            !presignatures.contains_by_owner(*id, owner).await,
-            "presignature={id} should be invalid"
-        );
-    }
-}
+    // Add 1 extra T and P owned by node0, only on node0's storage.
+    // After sync, node0 will learn that node1 and node2 don't have id=99,
+    // dropping it below threshold (T=2), so it should be pruned.
+    insert_triples_for_owner(&node0_triples, node0, &holders, 99..=99).await;
+    insert_presignatures_for_owner(&node0_presignatures, node0, &holders, 99..=99).await;
 
-// TODO: cleanup and move this to a common test utils module
-fn dummy_presignature(id: u64) -> Presignature {
-    Presignature {
-        id,
-        output: PresignOutput {
-            big_r: <Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            k: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-            sigma: <Secp256k1 as CurveArithmetic>::Scalar::ONE,
-        },
-        participants: vec![Participant::from(1), Participant::from(2)],
+    // Add 1 extra T and P owned by node1, on node0 and node1 only (not node2).
+    // After sync, node1 learns node2 doesn't have id=88, removing node2 from participants.
+    // But node0 still has it, so 2 holders remain (= threshold), and it should survive.
+    for storage in [&node0_triples, &node1_triples] {
+        insert_triples_for_owner(storage, node1, &holders, 88..=88).await;
     }
-}
+    for storage in [&node0_presignatures, &node1_presignatures] {
+        insert_presignatures_for_owner(storage, node1, &holders, 88..=88).await;
+    }
 
-// TODO: cleanup and move this to a common test utils module
-fn dummy_triple() -> Triple {
-    Triple {
-        share: TripleShare {
-            a: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-            b: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-            c: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-        },
-        public: TriplePub {
-            big_a: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            big_b: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            big_c: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            participants: vec![Participant::from(1), Participant::from(2)],
-            threshold: 5,
-        },
+    // Add 1 extra T and P owned by node0, but only on node1 and node2 (not on node0 itself).
+    // When node0 broadcasts its owned IDs, id=77 won't be included (node0 doesn't have it),
+    // so node1 and node2 will remove it via remove_outdated.
+    for storage in [&node1_triples, &node2_triples] {
+        insert_triples_for_owner(storage, node0, &holders, 77..=77).await;
     }
-}
+    for storage in [&node1_presignatures, &node2_presignatures] {
+        insert_presignatures_for_owner(storage, node0, &holders, 77..=77).await;
+    }
 
-// TODO: cleanup and move this to a common test utils module
-fn participants(num_nodes: usize) -> Participants {
-    let (_cipher_sk, cipher_pk) = mpc_keys::hpke::generate();
-    let sign_sk = near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt0");
-    let mut participants = Participants::default();
-    for i in 0..num_nodes {
-        let id = Participant::from(i as u32);
-        participants.insert(
-            &id,
-            ParticipantInfo {
-                sign_pk: sign_sk.public_key(),
-                cipher_pk: cipher_pk.clone(),
-                id: id.into(),
-                url: "http://localhost:3030".to_string(),
-                account_id: format!("p{i}_test.near").parse().unwrap(),
-            },
-        );
-    }
-    participants
-}
+    let _cluster = spawner
+        .disable_prestockpile()
+        .with_config(|cfg| {
+            cfg.protocol.triple.min_triples = 1;
+            cfg.protocol.triple.max_triples = 1;
+            cfg.protocol.presignature.min_presignatures = 1;
+            cfg.protocol.presignature.max_presignatures = 1;
+        })
+        .await
+        .unwrap();
 
-fn dummy_pair(id: u64) -> TriplePair {
-    TriplePair {
-        id,
-        triple0: dummy_triple(),
-        triple1: dummy_triple(),
+    // Give some time for the first sync broadcast to finish.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // After sync, all 3 consistent triples/presignatures should be present on every node.
+    // id=99 (only on node0) should have been pruned (below threshold).
+    // id=88 (on node0 and node1) should survive (exactly at threshold=2).
+    // id=77 (owned by node0, only on node1/node2) should be removed via remove_outdated.
+    for triples in [&node0_triples, &node1_triples] {
+        assert_triples_owned_state(triples, node0, &[0], &[1, 2, 77, 99]).await;
+        assert_triples_owned_state(triples, node1, &[1, 88], &[0, 2]).await;
+        assert_triples_owned_state(triples, node2, &[2], &[0, 1]).await;
     }
+    assert_triples_owned_state(&node2_triples, node0, &[0], &[1, 2, 77, 99]).await;
+    assert_triples_owned_state(&node2_triples, node1, &[1], &[0, 2, 88]).await;
+    assert_triples_owned_state(&node2_triples, node2, &[2], &[0, 1]).await;
+
+    for presignatures in [&node0_presignatures, &node1_presignatures] {
+        assert_presig_owned_state(presignatures, node0, &[0], &[1, 2, 77, 99]).await;
+        assert_presig_owned_state(presignatures, node1, &[1, 88], &[0, 2]).await;
+        assert_presig_owned_state(presignatures, node2, &[2], &[0, 1]).await;
+    }
+    assert_presig_owned_state(&node2_presignatures, node0, &[0], &[1, 2, 77, 99]).await;
+    assert_presig_owned_state(&node2_presignatures, node1, &[1], &[0, 2, 88]).await;
+    assert_presig_owned_state(&node2_presignatures, node2, &[2], &[0, 1]).await;
 }

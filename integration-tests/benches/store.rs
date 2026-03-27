@@ -56,16 +56,16 @@ fn participants(len: usize) -> Participants {
 }
 
 struct SyncEnv {
-    threshold: usize,
-    node_id: AccountId,
+    _threshold: usize,
+    _node_id: AccountId,
     me: Participant,
-    participants: Participants,
-    mesh_state: watch::Receiver<MeshState>,
-    client: NodeClient,
-    redis: Redis,
+    _participants: Participants,
+    _mesh_state: watch::Receiver<MeshState>,
+    _client: NodeClient,
+    _redis: Redis,
     triples: TripleStorage,
     presignatures: PresignatureStorage,
-    sync_channel: SyncChannel,
+    _sync_channel: SyncChannel,
 }
 
 fn env() -> (Runtime, SyncEnv) {
@@ -131,16 +131,16 @@ fn env() -> (Runtime, SyncEnv) {
         );
 
         SyncEnv {
-            threshold,
-            node_id,
+            _threshold: threshold,
+            _node_id: node_id,
             me,
-            participants,
-            mesh_state: mesh.watch(),
-            client,
-            redis,
+            _participants: participants,
+            _mesh_state: mesh.watch(),
+            _client: client,
+            _redis: redis,
             triples,
             presignatures,
-            sync_channel,
+            _sync_channel: sync_channel,
         }
     });
 
@@ -187,7 +187,7 @@ fn bench_load_keys(c: &mut Criterion) {
     c.bench_function("load 1024 mine triple keys", |b| {
         b.iter(|| {
             let task = || async {
-                env.triples.fetch_owned(env.me).await;
+                let _ = env.triples.fetch_owned(env.me).await;
             };
 
             rt.block_on(task());
@@ -197,7 +197,7 @@ fn bench_load_keys(c: &mut Criterion) {
     c.bench_function("load 1024 mine presignature keys", |b| {
         b.iter(|| {
             let task = || async {
-                env.presignatures.fetch_owned(env.me).await;
+                let _ = env.presignatures.fetch_owned(env.me).await;
             };
 
             rt.block_on(task());
@@ -223,6 +223,7 @@ fn dummy_presignature(id: u64) -> Presignature {
             sigma: <Secp256k1 as CurveArithmetic>::Scalar::ONE,
         },
         participants: vec![Participant::from(1), Participant::from(2)],
+        holders: Some(vec![Participant::from(1), Participant::from(2)]),
     }
 }
 
@@ -231,6 +232,7 @@ fn dummy_pair(id: u64) -> TriplePair {
         id,
         triple0: dummy_triple(),
         triple1: dummy_triple(),
+        holders: Some(vec![Participant::from(1), Participant::from(2)]),
     }
 }
 

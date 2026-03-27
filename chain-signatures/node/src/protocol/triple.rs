@@ -42,7 +42,9 @@ struct TripleGenerator {
     me: Participant,
     proposer: Participant,
     participants: Vec<Participant>,
-    protocol: TripleProtocol,
+    /// Option to temporarily move it to a blocking task. Must be Some in all
+    /// other circumstances.
+    protocol: Option<TripleProtocol>,
     timeout: Duration,
     slot: TriplePairSlot,
     created: Instant,
@@ -84,7 +86,7 @@ impl TripleGenerator {
             me,
             proposer,
             participants,
-            protocol: Box::new(protocol),
+            protocol: Some(Box::new(protocol)),
             timeout,
             slot,
             created: Instant::now(),
@@ -129,7 +131,31 @@ impl TripleGenerator {
 
         loop {
             let poke_start_time = Instant::now();
-            let action = match self.protocol.poke() {
+            // Temporarily move protocol into blocking task and restore it immediately after.
+            let mut protocol = self.protocol.take().expect("must be always be Some");
+
+            let poke_result =
+                match tokio::task::spawn_blocking(move || (protocol.poke(), protocol)).await {
+                    Ok((res, protocol)) => {
+                        self.protocol = Some(protocol);
+                        res
+                    }
+                    Err(err) => {
+                        crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
+                        if self.proposer == self.me {
+                            crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
+                        }
+                        tracing::warn!(
+                            id = self.id,
+                            ?err,
+                            elapsed = ?start_time.elapsed(),
+                            "triple generation failed in a spawned blocking task",
+                        );
+                        return;
+                    }
+                };
+
+            let action = match poke_result {
                 Ok(action) => action,
                 Err(err) => {
                     crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
@@ -164,7 +190,10 @@ impl TripleGenerator {
                         }
                         break;
                     };
-                    self.protocol.message(msg.from, msg.data);
+                    self.protocol
+                        .as_mut()
+                        .expect("must always be Some")
+                        .message(msg.from, msg.data);
                 }
                 Action::SendMany(data) => {
                     for to in &self.participants {
@@ -250,6 +279,7 @@ impl TripleGenerator {
                         id: self.id,
                         triple0: first,
                         triple1: second,
+                        holders: Some(self.participants.clone()),
                     };
                     self.slot.insert(pair, triple_owner).await;
                     break;
@@ -524,21 +554,19 @@ impl TripleSpawner {
         Ok(())
     }
 
-    /// Stockpile triples if the amount of unspent triples is below the minimum
-    /// and the maximum number of all ongoing generation protocols is below the maximum.
+    /// Generate new triples if this node owns fewer than the per-node minimum
+    /// (`min_triples`) and the network-wide total hasn't reached the cap (`max_triples`).
     async fn stockpile(&mut self, participants: &[Participant], cfg: &ProtocolConfig) {
         if participants.len() < self.threshold {
             return;
         }
 
         let not_enough_triples = {
-            // Stopgap to prevent too many triples in the system. This should be around min_triple*nodes*2
-            // for good measure so that we have enough triples to do presig generation while also maintain
-            // the minimum number of triples where a single node can't flood the system.
+            // Network-wide cap: stop generating once total potential triples reach max_triples.
             if self.len_potential().await >= cfg.triple.max_triples as usize {
                 false
             } else {
-                // We will always try to generate a new triple if we have less than the minimum
+                // Per-node floor: generate if this node owns fewer than min_triples.
                 self.len_mine().await < cfg.triple.min_triples as usize
                     && self.len_introduced() < cfg.max_concurrent_introduction as usize
                     && self.ongoing.len() < cfg.max_concurrent_generation as usize
