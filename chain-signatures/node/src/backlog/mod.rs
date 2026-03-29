@@ -617,6 +617,7 @@ impl Backlog {
                 local_checkpoint,
                 remote_checkpoint,
             )
+            .await
             else {
                 continue;
             };

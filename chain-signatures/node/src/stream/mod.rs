@@ -209,13 +209,12 @@ pub async fn run_stream<S: ChainStream>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backlog::{Backlog, BacklogTransaction, SignTx};
+    use crate::backlog::Backlog;
     use crate::mesh::{connection::NodeStatus, MeshState};
     use crate::node_client::NodeClient;
-    use crate::protocol::Chain;
-    use crate::protocol::IndexedSignRequest;
     use crate::protocol::ParticipantInfo;
     use crate::protocol::Sign;
+    use crate::protocol::{Chain, IndexedSignRequest, SignKind};
     use crate::rpc::ContractStateWatcher;
     use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
     use crate::storage::checkpoint_storage::CheckpointStorage;
@@ -363,9 +362,8 @@ mod tests {
             id: sign_id,
             args: args.clone(),
             chain: Chain::Solana,
-            timestamp_created: std::time::Instant::now(),
             unix_timestamp_indexed: current_unix_timestamp(),
-            sign_request_type: SignRequestType::Sign,
+            kind: SignKind::Sign,
         };
 
         let stream = StartAwareStream {
@@ -648,18 +646,12 @@ mod tests {
         };
 
         seeded_backlog
-            .insert(
-                Chain::Ethereum,
+            .insert(IndexedSignRequest::sign(
                 sign_id,
-                BacklogTransaction::Sign(SignTx {
-                    request_id: sign_id.request_id,
-                    source_chain: Chain::Ethereum,
-                    status: crate::sign_bidirectional::PendingRequestStatus::AwaitingResponse,
-                    args: args.clone(),
-                    unix_timestamp_indexed: current_unix_timestamp(),
-                }),
-                SignRequestType::Sign,
-            )
+                args.clone(),
+                Chain::Ethereum,
+                current_unix_timestamp(),
+            ))
             .await;
         seeded_backlog.set_processed_block(Chain::Ethereum, 100).await;
         seeded_backlog.checkpoint(Chain::Ethereum).await;
