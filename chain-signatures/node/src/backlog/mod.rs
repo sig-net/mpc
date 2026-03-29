@@ -612,12 +612,8 @@ impl Backlog {
             let local_checkpoint = local_checkpoints.remove(&chain);
             let remote_checkpoint = remote_checkpoints.remove(&chain);
 
-            let Some((checkpoint, requeue_mode)) = select_recovery_checkpoint(
-                chain,
-                local_checkpoint,
-                remote_checkpoint,
-            )
-            .await
+            let Some((checkpoint, requeue_mode)) =
+                select_recovery_checkpoint(chain, local_checkpoint, remote_checkpoint).await
             else {
                 continue;
             };

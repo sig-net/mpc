@@ -175,7 +175,10 @@ async fn next_event_within(client: &mut EthereumStream, duration: Duration) -> R
     .context("timed out waiting for chain event")
 }
 
-async fn stream_ethereum(ctx: &EthereumTestEnvironment, backlog: Backlog) -> Result<EthereumStream> {
+async fn stream_ethereum(
+    ctx: &EthereumTestEnvironment,
+    backlog: Backlog,
+) -> Result<EthereumStream> {
     let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog).await?;
     ChainStream::start(&mut stream).await;
     Ok(stream)
