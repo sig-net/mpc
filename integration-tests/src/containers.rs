@@ -17,7 +17,7 @@ use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::FullSignature;
 use elliptic_curve::rand_core::OsRng;
-use futures::StreamExt as _;
+use futures_util::StreamExt as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
 use mpc_contract::primitives::Participants;

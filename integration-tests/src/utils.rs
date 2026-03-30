@@ -6,6 +6,7 @@ use near_workspaces::{
 use rand::Rng;
 use std::sync::Once;
 use tracing_subscriber::EnvFilter;
+use futures_util::future::join_all;
 
 static INIT: Once = Once::new();
 
@@ -36,7 +37,7 @@ pub async fn vote_join(
     });
 
     let mut errs = Vec::new();
-    for result in futures::future::join_all(vote_futures).await {
+    for result in join_all(vote_futures).await {
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(err) => {
@@ -82,7 +83,7 @@ pub async fn vote_leave(
 
     let mut kicked = false;
     let mut errs = Vec::new();
-    for result in futures::future::join_all(vote_futures).await {
+    for result in join_all(vote_futures).await {
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(err) => {

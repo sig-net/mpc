@@ -7,6 +7,8 @@ use crate::cluster::Cluster;
 use anyhow::Context as _;
 use cait_sith::FullSignature;
 use elliptic_curve::sec1::ToEncodedPoint;
+use ethers::types::{Address as EthersAddress, H160, RecoveryMessage, Signature, SignatureError as EthersSignatureError};
+use ethers::utils::{hash_message, keccak256 as ethers_keccak256};
 use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -158,18 +160,18 @@ pub fn x_coordinate<C: cait_sith::CSCurve>(point: &C::AffinePoint) -> C::Scalar 
 }
 
 pub fn recover<M>(
-    signature: ethers_core::types::Signature,
+    signature: Signature,
     message: M,
-) -> Result<ethers_core::types::Address, ethers_core::types::SignatureError>
+) -> Result<EthersAddress, EthersSignatureError>
 where
-    M: Into<ethers_core::types::RecoveryMessage>,
+    M: Into<RecoveryMessage>,
 {
     let message_hash = match message.into() {
-        ethers_core::types::RecoveryMessage::Data(ref message) => {
+        RecoveryMessage::Data(ref message) => {
             println!("identified as data");
-            ethers_core::utils::hash_message(message)
+            hash_message(message)
         }
-        ethers_core::types::RecoveryMessage::Hash(hash) => hash,
+        RecoveryMessage::Hash(hash) => hash,
     };
     println!("message_hash {message_hash:#?}");
 
@@ -185,16 +187,16 @@ where
     println!("ethercore recover encoded point pk {public_key:#?}");
     let public_key = public_key.as_bytes();
     debug_assert_eq!(public_key[0], 0x04);
-    let hash = ethers_core::utils::keccak256(&public_key[1..]);
-    let result = ethers_core::types::Address::from_slice(&hash[12..]);
+    let hash = ethers_keccak256(&public_key[1..]);
+    let result = EthersAddress::from_slice(&hash[12..]);
     println!("ethercore recover result {result:#?}");
-    Ok(ethers_core::types::Address::from_slice(&hash[12..]))
+    Ok(EthersAddress::from_slice(&hash[12..]))
 }
 
 /// Retrieves the recovery signature.
 fn as_signature(
-    signature: ethers_core::types::Signature,
-) -> Result<(RecoverableSignature, k256::ecdsa::RecoveryId), ethers_core::types::SignatureError> {
+    signature: Signature,
+) -> Result<(RecoverableSignature, k256::ecdsa::RecoveryId), EthersSignatureError> {
     let mut recovery_id = signature.recovery_id()?;
     let mut signature = {
         let mut r_bytes = [0u8; 32];
@@ -215,20 +217,20 @@ fn as_signature(
     Ok((signature, recovery_id))
 }
 
-pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> ethers_core::types::Address {
+pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> EthersAddress {
     let public_key = public_key.serialize_uncompressed();
 
     debug_assert_eq!(public_key[0], 0x04);
     let hash: [u8; 32] = *alloy::primitives::keccak256(&public_key[1..]);
 
-    ethers_core::types::Address::from_slice(&hash[12..])
+    EthersAddress::from_slice(&hash[12..])
 }
 
 pub fn recover_eth_address(
     msg_hash: &[u8; 32],
     signature_bytes: &[u8; 64],
     recovery_id: u8,
-) -> ethers_core::types::H160 {
+) -> H160 {
     let r = k256::Scalar::from_bytes(signature_bytes[..32].try_into().unwrap()).unwrap();
     let s = k256::Scalar::from_bytes(signature_bytes[32..].try_into().unwrap()).unwrap();
     let signature = k256::ecdsa::Signature::from_scalars(r, s).expect("valid r,s");
@@ -352,19 +354,18 @@ mod tests {
         // assert!(k256_verify_result.is_ok());
 
         // Check signature using etheres tooling
-        let ethers_r = ethers_core::types::U256::from_big_endian(r.to_bytes().as_slice());
-        let ethers_s = ethers_core::types::U256::from_big_endian(s.to_bytes().as_slice());
+        let ethers_r = ethers::types::U256::from_big_endian(r.to_bytes().as_slice());
+        let ethers_s = ethers::types::U256::from_big_endian(s.to_bytes().as_slice());
         let ethers_v = to_eip155_v(multichain_sig.recovery_id, CHAIN_ID_ETH);
 
-        let signature = ethers_core::types::Signature {
+        let signature = Signature {
             r: ethers_r,
             s: ethers_s,
             v: ethers_v,
         };
 
         let verifying_user_pk = ecdsa::VerifyingKey::from(&user_pk_k256);
-        let user_address_ethers: ethers_core::types::H160 =
-            ethers_core::utils::public_key_to_address(&verifying_user_pk);
+        let user_address_ethers: H160 = ethers::utils::public_key_to_address(&verifying_user_pk);
 
         assert!(signature.verify(payload_hash, user_address_ethers).is_ok());
 

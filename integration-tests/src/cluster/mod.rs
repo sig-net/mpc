@@ -2,6 +2,7 @@ pub mod spawner;
 
 use std::collections::{HashMap, HashSet};
 
+use futures_util::future::try_join_all;
 use mpc_contract::primitives::Participants;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use mpc_primitives::{Chain, Checkpoint};
@@ -70,7 +71,7 @@ impl Cluster {
 
     pub async fn fetch_states(&self) -> anyhow::Result<Vec<StateView>> {
         let tasks = (0..self.len()).map(|id| self.fetch_state(id));
-        futures::future::try_join_all(tasks).await
+        try_join_all(tasks).await
     }
 
     pub async fn fetch_bench_metrics(&self, id: usize) -> anyhow::Result<BenchMetrics> {

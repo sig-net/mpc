@@ -10,7 +10,15 @@ use mpc_keys::hpke;
 use mpc_node::config::OverrideConfig;
 use mpc_node::indexer_eth::EthArgs;
 use near_workspaces::Account;
-use shell_escape::escape;
+
+fn shell_quote(arg: &str) -> String {
+    if arg.is_empty() {
+        return "''".to_string();
+    }
+
+    let escaped = arg.replace('\'', "'\\''");
+    format!("'{escaped}'")
+}
 
 pub struct Node {
     pub address: String,
@@ -101,7 +109,7 @@ impl Node {
         let args = cli.into_str_args();
         let escaped_args: Vec<_> = args
             .iter()
-            .map(|arg| escape(arg.clone().into()).to_string())
+            .map(|arg| shell_quote(arg))
             .collect();
         println!(
             "\nCommand to run node {}:\n {} {}",

@@ -18,6 +18,7 @@ use anyhow::Context as _;
 use cluster::spawner::ClusterSpawner;
 use deadpool_redis::Pool;
 use ethers::types::{Address, U256};
+use futures_util::future::join_all;
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
@@ -460,7 +461,7 @@ pub async fn docker(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
         .accounts
         .iter()
         .map(|account| containers::Node::run(&ctx, cfg, account));
-    let nodes = futures::future::join_all(node_futures)
+    let nodes = join_all(node_futures)
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
@@ -591,7 +592,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
             let binary_path = source.binary_path().unwrap();
             local::Node::run_with_binary(&ctx, cfg, account, binary_path)
         });
-    let nodes = futures::future::join_all(node_futures)
+    let nodes = join_all(node_futures)
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
