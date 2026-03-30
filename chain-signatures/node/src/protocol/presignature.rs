@@ -11,11 +11,10 @@ use crate::storage::protocol_storage::ProtocolArtifact;
 use crate::storage::triple_storage::{TriplesTaken, TriplesTakenDropper};
 use crate::storage::TripleStorage;
 use crate::types::{PresignatureProtocol, SecretKeyShare};
-use crate::util::{AffinePointExt, JoinMap};
+use crate::util::{current_unix_timestamp, AffinePointExt, JoinMap};
 
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::{KeygenOutput, PresignArguments, PresignOutput};
-use chrono::Utc;
 use k256::{AffinePoint, Scalar, Secp256k1};
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::PublicKey;
@@ -225,7 +224,7 @@ impl PresignatureGenerator {
                                     epoch,
                                     from: me,
                                     data: data.clone(),
-                                    timestamp: Utc::now().timestamp() as u64,
+                                    timestamp: current_unix_timestamp(),
                                 },
                             )
                             .await;
@@ -242,7 +241,7 @@ impl PresignatureGenerator {
                                 epoch,
                                 from: me,
                                 data,
-                                timestamp: Utc::now().timestamp() as u64,
+                                timestamp: current_unix_timestamp(),
                             },
                         )
                         .await;

@@ -16,7 +16,6 @@ use anyhow::Context as _;
 use cait_sith::FullSignature;
 use elliptic_curve::sec1::FromEncodedPoint;
 use futures::StreamExt;
-use generic_array::GenericArray;
 use k256::Secp256k1;
 use mpc_contract::primitives::SignRequest;
 use mpc_crypto::ScalarExt as _;
@@ -1227,18 +1226,15 @@ impl EthSignAction<'_> {
                 );
 
                 // Convert to k256 types
-                let x_bytes: GenericArray<u8, generic_array::typenum::U32> =
-                    GenericArray::clone_from_slice(&big_r_x.to_be_bytes::<32>());
-                let y_bytes: GenericArray<u8, generic_array::typenum::U32> =
-                    GenericArray::clone_from_slice(&big_r_y.to_be_bytes::<32>());
+                let x_bytes = k256::FieldBytes::from(big_r_x.to_be_bytes::<32>());
+                let y_bytes = k256::FieldBytes::from(big_r_y.to_be_bytes::<32>());
 
                 let encoded_point =
                     k256::EncodedPoint::from_affine_coordinates(&x_bytes, &y_bytes, false);
                 let big_r = k256::AffinePoint::from_encoded_point(&encoded_point).unwrap();
 
-                let s_bytes: GenericArray<u8, generic_array::typenum::U32> =
-                    GenericArray::clone_from_slice(&s.to_be_bytes::<32>());
-                let s = k256::Scalar::from_bytes(s_bytes.into())
+                let s_bytes = s.to_be_bytes::<32>();
+                let s = k256::Scalar::from_bytes(s_bytes)
                     .ok_or_else(|| anyhow::anyhow!("invalid scalar value in event {s_bytes:?}"))?;
 
                 let signature = FullSignature::<Secp256k1> { big_r, s };

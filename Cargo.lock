@@ -6565,7 +6565,6 @@ dependencies = [
  "backon",
  "bollard",
  "borsh 1.5.7",
- "bs58 0.5.1",
  "cait-sith",
  "ciborium",
  "clap",
@@ -6576,9 +6575,7 @@ dependencies = [
  "ethers",
  "ethers-core",
  "futures",
- "generic-array",
  "hex",
- "hyper 0.14.32",
  "k256",
  "mpc-contract",
  "mpc-crypto",
@@ -6596,7 +6593,6 @@ dependencies = [
  "reqwest 0.11.27",
  "rlp",
  "secp256k1 0.28.2",
- "semver 1.0.26",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -7647,18 +7643,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23fb14cb19457329c82206317a5663005a4d404783dc74f4252769b0d5f42856"
 
 [[package]]
-name = "local-ip-address"
-version = "0.5.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "612ed4ea9ce5acfb5d26339302528a5e1e59dfed95e9e11af3c083236ff1d15d"
-dependencies = [
- "libc",
- "neli",
- "thiserror 1.0.69",
- "windows-sys 0.48.0",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7968,14 +7952,11 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-extra",
- "borsh 0.10.4",
  "borsh 1.5.7",
  "cait-sith",
- "chrono",
  "ciborium",
  "clap",
  "deadpool-redis",
- "ed25519-zebra",
  "ethabi",
  "futures-util",
  "google-datastore1",
@@ -7988,7 +7969,6 @@ dependencies = [
  "hyper 0.14.32",
  "hyper-rustls 0.24.2",
  "k256",
- "local-ip-address",
  "lru 0.13.0",
  "maud",
  "mime",
@@ -9066,31 +9046,6 @@ dependencies = [
  "serde_json",
  "syn 1.0.109",
  "uriparse",
-]
-
-[[package]]
-name = "neli"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93062a0dce6da2517ea35f301dfc88184ce18d3601ec786a727a87bf535deca9"
-dependencies = [
- "byteorder",
- "libc",
- "log",
- "neli-proc-macros",
-]
-
-[[package]]
-name = "neli-proc-macros"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c8034b7fbb6f9455b2a96c19e6edf8dc9fc34c70449938d8ee3b4df363f61fe"
-dependencies = [
- "either",
- "proc-macro2",
- "quote",
- "serde",
- "syn 1.0.109",
 ]
 
 [[package]]

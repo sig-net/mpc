@@ -11,14 +11,12 @@ path = "src/main.rs"
 async-trait = "0.1"
 axum = "0.7.9"
 axum-extra = "0.9.6"
-chrono = "0.4.24"
 google-datastore1 = "=5.0.4"
 google-secretmanager1 = "5"
 hkdf = "0.12.4"
 highway = "1.1.0"
 http = "1.1.0"
 hyper-rustls = { version = "=0.24", features = ["http2"] }
-local-ip-address = "0.5.4"
 lru = "0.13.0"
 mime = "0.3.17"
 prometheus = "0.14.0"
@@ -39,7 +37,6 @@ opentelemetry-appender-tracing = "0.29.1"
 alloy-signer-local = "1.0.38"
 alloy-sol-types = "1.4.1"
 helios = { git = "https://github.com/a16z/helios", rev = "e1f9a50f73d7af6f6ae4acf2b663d04aab6adb19" }
-ed25519-zebra = { version = "4.1", default-features = false, features = ["alloc"] }
 subxt = { version = "0.44", default-features = false, features = ["jsonrpsee","native","unstable-light-client"] }
 sp-core = { version = "38.1", default-features = false, features = ["std"] }
 sp-runtime = { version = "44.0.0", default-features = false, features = ["std"] }
@@ -51,7 +48,6 @@ subxt-signer = "0.44"
 alloy.workspace = true
 anyhow.workspace = true
 borsh.workspace = true
-borsh_sol = { package = "borsh", version = "0.10.4" } # solana anchor requires borsh 0.10
 cait-sith.workspace = true
 ciborium.workspace = true
 clap.workspace = true

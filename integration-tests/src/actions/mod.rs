@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use k256::{
     ecdsa::{Signature as RecoverableSignature, Signature as K256Signature},
+    FieldBytes,
     PublicKey as K256PublicKey,
 };
 
@@ -200,11 +201,7 @@ fn as_signature(
         let mut s_bytes = [0u8; 32];
         signature.r.to_big_endian(&mut r_bytes);
         signature.s.to_big_endian(&mut s_bytes);
-        let gar: &generic_array::GenericArray<u8, elliptic_curve::consts::U32> =
-            generic_array::GenericArray::from_slice(&r_bytes);
-        let gas: &generic_array::GenericArray<u8, elliptic_curve::consts::U32> =
-            generic_array::GenericArray::from_slice(&s_bytes);
-        K256Signature::from_scalars(*gar, *gas)?
+        K256Signature::from_scalars(FieldBytes::from(r_bytes), FieldBytes::from(s_bytes))?
     };
 
     // Normalize into "low S" form. See:

@@ -16,12 +16,11 @@ use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenD
 use crate::storage::protocol_storage::ProtocolArtifact;
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
-use crate::util::{AffinePointExt, JoinMap, TimeoutBudget};
+use crate::util::{current_unix_timestamp, AffinePointExt, JoinMap, TimeoutBudget};
 
 use crate::protocol::SignRequestType;
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::PresignOutput;
-use chrono::Utc;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::{derive_key, PublicKey};
@@ -931,7 +930,7 @@ impl SignGenerator {
                                     epoch,
                                     from: me,
                                     data: data.clone(),
-                                    timestamp: Utc::now().timestamp() as u64,
+                                    timestamp: current_unix_timestamp(),
                                 },
                             )
                             .await;
@@ -949,7 +948,7 @@ impl SignGenerator {
                                 epoch,
                                 from: me,
                                 data,
-                                timestamp: Utc::now().timestamp() as u64,
+                                timestamp: current_unix_timestamp(),
                             },
                         )
                         .await;

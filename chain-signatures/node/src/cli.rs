@@ -19,16 +19,22 @@ use crate::{indexer, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, st
 use clap::Parser;
 use deadpool_redis::Runtime;
 use k256::sha2::Sha256;
-use local_ip_address::local_ip;
 use mpc_keys::hpke;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
+use std::net::{IpAddr, UdpSocket};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch, RwLock};
 use url::Url;
 
 const DEFAULT_WEB_PORT: u16 = 3000;
+
+fn detect_local_ip() -> std::io::Result<IpAddr> {
+    let socket = UdpSocket::bind(("0.0.0.0", 0))?;
+    socket.connect(("8.8.8.8", 80))?;
+    Ok(socket.local_addr()?.ip())
+}
 
 #[derive(Parser, Debug)]
 pub enum Cli {
@@ -258,7 +264,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let my_address = my_address.unwrap_or_else(|| {
                 // this is only used for integration tests
                 // mainnet, testnet and dev nodes should have MPC_LOCAL_ADDRESS set in their env var
-                let my_ip = local_ip().unwrap();
+                let my_ip = detect_local_ip().unwrap();
                 Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
             });
 

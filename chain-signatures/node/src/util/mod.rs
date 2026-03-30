@@ -1,6 +1,5 @@
 use mpc_crypto::{near_public_key_to_affine_point, PublicKey};
 
-use chrono::{DateTime, LocalResult, TimeZone, Utc};
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use k256::{AffinePoint, EncodedPoint};
 use tokio::task::{AbortHandle, JoinSet};
@@ -72,17 +71,13 @@ impl AffinePointExt for AffinePoint {
 }
 
 pub fn is_elapsed_longer_than_timeout(timestamp_sec: u64, timeout: u64) -> bool {
-    if let LocalResult::Single(msg_timestamp) = Utc.timestamp_opt(timestamp_sec as i64, 0) {
-        let timeout = Duration::from_millis(timeout);
-        let now_datetime: DateTime<Utc> = Utc::now();
-        // Calculate the difference in seconds
-        let elapsed_duration = now_datetime.signed_duration_since(msg_timestamp);
-        let timeout = chrono::Duration::seconds(timeout.as_secs() as i64)
-            + chrono::Duration::nanoseconds(timeout.subsec_nanos() as i64);
-        elapsed_duration > timeout
-    } else {
-        false
-    }
+    let message_time = UNIX_EPOCH + Duration::from_secs(timestamp_sec);
+    let timeout = Duration::from_millis(timeout);
+
+    SystemTime::now()
+        .duration_since(message_time)
+        .map(|elapsed| elapsed > timeout)
+        .unwrap_or(false)
 }
 
 pub fn current_unix_timestamp() -> u64 {

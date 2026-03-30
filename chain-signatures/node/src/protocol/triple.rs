@@ -7,13 +7,12 @@ use crate::mesh::MeshState;
 use crate::protocol::posit::Positor;
 use crate::storage::triple_storage::{TriplePair, TriplePairSlot, TripleStorage};
 use crate::types::TripleProtocol;
-use crate::util::{AffinePointExt, JoinMap};
+use crate::util::{current_unix_timestamp, AffinePointExt, JoinMap};
 
 use mpc_contract::config::ProtocolConfig;
 
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::triples::{TriplePub, TripleShare};
-use chrono::Utc;
 use highway::{HighwayHash, HighwayHasher};
 use k256::elliptic_curve::group::GroupEncoding;
 use k256::Secp256k1;
@@ -206,7 +205,7 @@ impl TripleGenerator {
                             epoch,
                             from: self.me,
                             data: data.clone(),
-                            timestamp: Utc::now().timestamp() as u64,
+                            timestamp: current_unix_timestamp(),
                         };
                         self.msg.send(self.me, *to, message).await;
                     }
@@ -217,7 +216,7 @@ impl TripleGenerator {
                         epoch,
                         from: self.me,
                         data: data.clone(),
-                        timestamp: Utc::now().timestamp() as u64,
+                        timestamp: current_unix_timestamp(),
                     };
                     self.msg.send(self.me, to, message).await;
                 }

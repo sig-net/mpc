@@ -1,5 +1,3 @@
-use anyhow::Context;
-use hyper::{Body, Client, Method, Request, StatusCode, Uri};
 use near_workspaces::{
     network::Sandbox,
     types::{KeyType, SecretKey},
@@ -118,23 +116,8 @@ pub async fn vote_leave(
     Ok(())
 }
 
-pub async fn get<U>(uri: U) -> anyhow::Result<StatusCode>
-where
-    Uri: TryFrom<U>,
-    <Uri as TryFrom<U>>::Error: Into<hyper::http::Error>,
-{
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::empty())
-        .context("failed to build the request")?;
-
-    let client = Client::new();
-    let response = client
-        .request(req)
-        .await
-        .context("failed to send the request")?;
+pub async fn get(uri: &str) -> anyhow::Result<reqwest::StatusCode> {
+    let response = reqwest::get(uri).await?;
     Ok(response.status())
 }
 
@@ -166,7 +149,7 @@ pub async fn ping_until_ok(addr: &str, timeout: u64) -> anyhow::Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
         loop {
             match get(addr).await {
-                Ok(status) if status == StatusCode::OK => break,
+                Ok(status) if status == reqwest::StatusCode::OK => break,
                 _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
             }
         }
