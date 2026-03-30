@@ -780,29 +780,6 @@ impl BacklogEntry {
     }
 }
 
-fn merge_checkpoints(
-    local: HashMap<Chain, Checkpoint>,
-    mut remote: HashMap<Chain, Checkpoint>,
-) -> HashMap<Chain, Checkpoint> {
-    for (chain, local_cp) in local {
-        remote
-            .entry(chain)
-            .and_modify(|remote_cp| {
-                if local_cp.block_height > remote_cp.block_height {
-                    tracing::info!(
-                        ?chain,
-                        local_height = local_cp.block_height,
-                        remote_height = remote_cp.block_height,
-                        "local checkpoint is newer than remote selection"
-                    );
-                    *remote_cp = local_cp.clone();
-                }
-            })
-            .or_insert(local_cp);
-    }
-    remote
-}
-
 fn chain_supports_deferred_local_recovery(chain: Chain) -> bool {
     matches!(chain, Chain::Ethereum)
 }
@@ -892,61 +869,6 @@ mod tests {
         SignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
             sender: Default::default(),
             serialized_transaction: vec![],
-            dest: dest.to_string(),
-            caip2_id: format!("{dest}:test"),
-            key_version: 0,
-            deposit: 0,
-            path: "".to_string(),
-            algo: "".to_string(),
-            params: "".to_string(),
-            program_id: Pubkey::new_from_array(program_id),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
-        })
-    }
-
-    fn create_test_args(id: u8) -> SignArgs {
-        SignArgs {
-            entropy: [id; 32],
-            epsilon: k256::Scalar::from(1u64),
-            payload: k256::Scalar::from(2u64),
-            path: "test".to_string(),
-            key_version: 1,
-        }
-    }
-
-    fn create_indexed_request(
-        sign_id: SignId,
-        chain: Chain,
-        args: SignArgs,
-        kind: SignKind,
-        unix_timestamp_indexed: u64,
-    ) -> IndexedSignRequest {
-        IndexedSignRequest::new(sign_id, args, chain, unix_timestamp_indexed, kind)
-    }
-
-    fn create_bidirectional_request(
-        sign_id: SignId,
-        chain: Chain,
-        dest: &str,
-        unix_timestamp_indexed: u64,
-    ) -> IndexedSignRequest {
-        IndexedSignRequest::sign_bidirectional(
-            sign_id,
-            create_test_args(sign_id.request_id[0]),
-            chain,
-            unix_timestamp_indexed,
-            create_test_event(dest),
-        )
-    }
-
-    fn create_execution_entry(mut tx: BidirectionalTx, chain: Chain, dest: &str) -> BacklogEntry {
-        tx.status = SignStatus::PendingExecution;
-        BacklogEntry::pending_execution(
-            create_bidirectional_request(SignId::new(tx.request_id), chain, dest, 0),
-            tx,
-        )
-    }
 
     async fn insert_bidirectional_with_status(
         backlog: &Backlog,
@@ -1409,58 +1331,4 @@ mod tests {
         assert!(matches!(err, BacklogError::InvalidAdvanceTransition));
     }
 
-    #[test]
-    fn test_merge_checkpoints() {
-        let mut local = HashMap::new();
-        let mut remote = HashMap::new();
-
-        // Case 1: Only local
-        local.insert(
-            Chain::Ethereum,
-            Checkpoint {
-                chain: Chain::Ethereum,
-                block_height: 100,
-                pending_requests: vec![],
-            },
-        );
-        let merged = merge_checkpoints(local.clone(), remote.clone());
-        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 100);
-
-        // Case 2: Only remote
-        local.clear();
-        remote.insert(
-            Chain::Ethereum,
-            Checkpoint {
-                chain: Chain::Ethereum,
-                block_height: 200,
-                pending_requests: vec![],
-            },
-        );
-        let merged = merge_checkpoints(local.clone(), remote.clone());
-        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 200);
-
-        // Case 3: Local higher
-        local.insert(
-            Chain::Ethereum,
-            Checkpoint {
-                chain: Chain::Ethereum,
-                block_height: 300,
-                pending_requests: vec![],
-            },
-        );
-        let merged = merge_checkpoints(local.clone(), remote.clone());
-        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 300);
-
-        // Case 4: Remote higher
-        remote.insert(
-            Chain::Ethereum,
-            Checkpoint {
-                chain: Chain::Ethereum,
-                block_height: 400,
-                pending_requests: vec![],
-            },
-        );
-        let merged = merge_checkpoints(local.clone(), remote.clone());
-        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 400);
-    }
 }
