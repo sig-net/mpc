@@ -621,7 +621,8 @@ mod tests {
 
     #[tokio::test]
     async fn recover_backlog_requeues_pending_signs() {
-        // Prepare backlog with a single pending sign request
+        // Prepare backlog with a single pending sign request on a chain that
+        // should be requeued immediately during recovery.
         let backlog = Backlog::new();
         let sign_id = SignId::new([9u8; 32]);
         let args = SignArgs {
@@ -637,13 +638,13 @@ mod tests {
         backlog
             .insert(test_indexed_request(
                 sign_id,
-                Chain::Ethereum,
+                Chain::Solana,
                 args.clone(),
                 unix_timestamp_indexed,
                 SignKind::Sign,
             ))
             .await;
-        backlog.checkpoint(Chain::Ethereum).await;
+        backlog.checkpoint(Chain::Solana).await;
 
         let threshold = 1;
         let mut mesh_state = MeshState::default();
@@ -666,7 +667,7 @@ mod tests {
             &mut contract_watcher,
             &mut mesh_rx,
             &node_client,
-            Chain::Ethereum,
+            Chain::Solana,
             sign_tx,
         )
         .await;
@@ -680,7 +681,7 @@ mod tests {
             Sign::Request(req) => {
                 assert_eq!(req.id, sign_id);
                 assert_eq!(req.args, args);
-                assert_eq!(req.chain, Chain::Ethereum);
+                assert_eq!(req.chain, Chain::Solana);
                 assert_eq!(req.kind, SignKind::Sign);
                 // Verify that the unix_timestamp_indexed is preserved from the original entry
                 assert_eq!(req.unix_timestamp_indexed, unix_timestamp_indexed);
