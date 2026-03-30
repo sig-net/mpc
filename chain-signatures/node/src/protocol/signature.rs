@@ -1276,14 +1276,13 @@ impl SignatureSpawner {
             .or_insert_with(|| {
                 Subscriber::unsubscribed("sign_task_posit", hex::encode(sign_id.request_id))
             })
-            .try_send_lossy(
-            SignTaskMessage::PositMessage {
+            .try_send_lossy(SignTaskMessage::PositMessage {
                 presignature_id,
                 round,
                 from,
                 action,
-            },
-        ) {
+            })
+        {
             tracing::error!(?err, ?sign_id, "failed to send posit message");
         }
     }
