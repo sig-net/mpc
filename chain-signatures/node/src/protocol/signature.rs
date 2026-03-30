@@ -1229,7 +1229,13 @@ impl SignatureSpawner {
         }
 
         // Subscribe to (or create) the posit inbox for this sign request
-        let rx = self.inboxes.entry(sign_id).or_default().subscribe();
+        let rx = self
+            .inboxes
+            .entry(sign_id)
+            .or_insert_with(|| {
+                Subscriber::unsubscribed("sign_task_posit", hex::encode(sign_id.request_id))
+            })
+            .subscribe();
         let task = SignTask {
             me: self.me,
             participants,
@@ -1264,21 +1270,28 @@ impl SignatureSpawner {
         if from == self.me {
             return;
         }
-        if let Err(err) = self.inboxes.entry(sign_id).or_default().try_send_lossy(
+        if let Err(err) = self
+            .inboxes
+            .entry(sign_id)
+            .or_insert_with(|| {
+                Subscriber::unsubscribed("sign_task_posit", hex::encode(sign_id.request_id))
+            })
+            .try_send_lossy(
             SignTaskMessage::PositMessage {
                 presignature_id,
                 round,
                 from,
                 action,
             },
-            "sign_task_posit",
         ) {
             tracing::error!(?err, ?sign_id, "failed to send posit message");
         }
     }
 
     fn handle_completion(&mut self, sign_id: SignId) {
-        self.inboxes.remove(&sign_id);
+        if let Some(inbox) = self.inboxes.remove(&sign_id) {
+            inbox.clear_queue_len_metric();
+        }
         self.abort_delayed_watcher(sign_id, "completion");
         if self.tasks.abort(sign_id) {
             tracing::info!(?sign_id, "aborting signature task due to completion event");
@@ -1367,13 +1380,17 @@ impl SignatureSpawner {
                         Ok(outcome) => outcome,
                         Err(sign_id) => {
                             tracing::warn!(?sign_id, "signature task interrupted");
-                            self.inboxes.remove(&sign_id);
+                            if let Some(inbox) = self.inboxes.remove(&sign_id) {
+                                inbox.clear_queue_len_metric();
+                            }
                             self.abort_delayed_watcher(sign_id, "interruption");
                             continue;
                         }
                     };
 
-                    self.inboxes.remove(&sign_id);
+                    if let Some(inbox) = self.inboxes.remove(&sign_id) {
+                        inbox.clear_queue_len_metric();
+                    }
                     self.abort_delayed_watcher(sign_id, "task completion");
                     match result {
                         Ok(()) => {

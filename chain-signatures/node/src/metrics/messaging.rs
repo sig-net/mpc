@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use prometheus::{exponential_buckets, Counter, Histogram, HistogramVec};
+use prometheus::{exponential_buckets, Counter, Histogram, HistogramVec, IntGaugeVec};
 
 use super::{
     try_create_counter_vec_with_node_account_id, try_create_histogram_vec_with_node_account_id,
@@ -78,3 +78,22 @@ pub(crate) static WEB_ENDPOINT_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|
     )
     .unwrap()
 });
+
+pub(crate) static CHANNEL_QUEUE_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    super::try_create_int_gauge_vec_with_node_account_id(
+        "multichain_message_channel_queue_size",
+        "Estimated number of buffered messages queued per message channel",
+        &["channel", "channel_id"],
+    )
+    .unwrap()
+});
+
+pub(crate) fn set_channel_queue_size(channel: &str, channel_id: &str, len: usize) {
+    CHANNEL_QUEUE_SIZE
+        .with_label_values(&[channel, channel_id])
+        .set(len as i64);
+}
+
+pub(crate) fn remove_channel_queue_size(channel: &str, channel_id: &str) {
+    let _ = CHANNEL_QUEUE_SIZE.remove_label_values(&[channel, channel_id]);
+}

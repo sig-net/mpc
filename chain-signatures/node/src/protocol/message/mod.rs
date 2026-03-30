@@ -40,6 +40,36 @@ pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
 
+const SINGLETON_CHANNEL_ID: &str = "singleton";
+
+fn estimated_channel_queue_len<T>(tx: &mpsc::Sender<T>) -> usize {
+    tx.max_capacity() - tx.capacity()
+}
+
+fn report_channel_queue_len<T>(name: &'static str, channel_id: &str, tx: &mpsc::Sender<T>) {
+    crate::metrics::messaging::set_channel_queue_size(
+        name,
+        channel_id,
+        estimated_channel_queue_len(tx),
+    );
+}
+
+fn report_singleton_channel_queue_len<T>(name: &'static str, tx: &mpsc::Sender<T>) {
+    report_channel_queue_len(name, SINGLETON_CHANNEL_ID, tx);
+}
+
+fn triple_channel_id(id: TripleId) -> String {
+    id.to_string()
+}
+
+fn presignature_channel_id(id: PresignatureId) -> String {
+    id.to_string()
+}
+
+fn signature_channel_id(sign_id: SignId, presignature_id: PresignatureId) -> String {
+    format!("{}:{}", presignature_id, hex::encode(sign_id.request_id))
+}
+
 pub struct MessageInbox {
     /// encrypted messages that are pending to be decrypted. These are messages that we received
     /// from other nodes that weren't able to be processed yet due to missing info such as the
@@ -55,9 +85,11 @@ pub struct MessageInbox {
     filter: MessageFilter,
 
     /// Incoming messages that are pending to be processed. These are encrypted and signed.
+    inbox_tx: mpsc::Sender<Ciphered>,
     inbox_rx: mpsc::Receiver<Ciphered>,
 
     /// Subscription requests from MessageChannel
+    subscribe_tx: mpsc::Sender<SubscribeRequest>,
     subscribe_rx: mpsc::Receiver<SubscribeRequest>,
 
     generating: Subscriber<GeneratingMessage>,
@@ -73,29 +105,40 @@ pub struct MessageInbox {
 
 impl MessageInbox {
     pub fn new(
+        inbox_tx: mpsc::Sender<Ciphered>,
         inbox_rx: mpsc::Receiver<Ciphered>,
+        filter_tx: mpsc::Sender<(Protocols, u64)>,
         filter_rx: mpsc::Receiver<(Protocols, u64)>,
+        subscribe_tx: mpsc::Sender<SubscribeRequest>,
         subscribe_rx: mpsc::Receiver<SubscribeRequest>,
     ) -> Self {
         Self {
             try_decrypt: VecDeque::new(),
             idempotent: lru::LruCache::new(MAX_FILTER_SIZE),
-            filter: MessageFilter::new(filter_rx),
+            filter: MessageFilter::new(filter_tx, filter_rx),
+            inbox_tx,
             inbox_rx,
+            subscribe_tx,
             subscribe_rx,
-            generating: Subscriber::unsubscribed(),
-            resharing: Subscriber::unsubscribed(),
-            ready: Subscriber::unsubscribed(),
+            generating: Subscriber::unsubscribed("generating", SINGLETON_CHANNEL_ID),
+            resharing: Subscriber::unsubscribed("resharing", SINGLETON_CHANNEL_ID),
+            ready: Subscriber::unsubscribed("ready", SINGLETON_CHANNEL_ID),
             triple: HashMap::new(),
             triple_init: Subscriber::unsubscribed_with_capacity(
+                "triple_init",
+                SINGLETON_CHANNEL_ID,
                 sub::MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE,
             ),
             presignature: HashMap::new(),
             presignature_init: Subscriber::unsubscribed_with_capacity(
+                "presignature_init",
+                SINGLETON_CHANNEL_ID,
                 sub::MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE,
             ),
             signature: HashMap::new(),
             signature_init: Subscriber::unsubscribed_with_capacity(
+                "signature_init",
+                SINGLETON_CHANNEL_ID,
                 sub::MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE,
             ),
         }
@@ -105,14 +148,12 @@ impl MessageInbox {
         match message {
             Message::Posit(message) => match message.id {
                 PositProtocolId::Triple(id) => {
-                    let _ = self
-                        .triple_init
-                        .try_send_lossy((id, message.from, message.action), "triple_init");
+                    let _ = self.triple_init.try_send_lossy((id, message.from, message.action));
                 }
                 PositProtocolId::Presignature(id) => {
                     let _ = self
                         .presignature_init
-                        .try_send_lossy((id, message.from, message.action), "presignature_init");
+                        .try_send_lossy((id, message.from, message.action));
                 }
                 PositProtocolId::Signature(sign_id, presignature_id, round) => {
                     let _ = self.signature_init.try_send_lossy(
@@ -123,18 +164,17 @@ impl MessageInbox {
                             message.from,
                             message.action,
                         ),
-                        "signature_init",
                     );
                 }
             },
             Message::Generating(message) => {
-                let _ = self.generating.try_send_lossy(message, "generating");
+                let _ = self.generating.try_send_lossy(message);
             }
             Message::Resharing(message) => {
-                let _ = self.resharing.try_send_lossy(message, "resharing");
+                let _ = self.resharing.try_send_lossy(message);
             }
             Message::Ready(message) => {
-                let _ = self.ready.try_send_lossy(message, "ready");
+                let _ = self.ready.try_send_lossy(message);
             }
             Message::Triple(message) => {
                 // NOTE: not logging the error because this is simply just channel closure.
@@ -142,22 +182,29 @@ impl MessageInbox {
                 let _ = self
                     .triple
                     .entry(message.id)
-                    .or_default()
-                    .try_send_lossy(message, "triple");
+                    .or_insert_with(|| Subscriber::unsubscribed("triple", triple_channel_id(message.id)))
+                    .try_send_lossy(message);
             }
             Message::Presignature(message) => {
                 let _ = self
                     .presignature
                     .entry(message.id)
-                    .or_default()
-                    .try_send_lossy(message, "presignature");
+                    .or_insert_with(|| {
+                        Subscriber::unsubscribed("presignature", presignature_channel_id(message.id))
+                    })
+                    .try_send_lossy(message);
             }
             Message::Signature(message) => {
                 let _ = self
                     .signature
                     .entry((message.id, message.presignature_id))
-                    .or_default()
-                    .try_send_lossy(message, "signature");
+                    .or_insert_with(|| {
+                        Subscriber::unsubscribed(
+                            "signature",
+                            signature_channel_id(message.id, message.presignature_id),
+                        )
+                    })
+                    .try_send_lossy(message);
             }
             Message::Unknown(entries) => {
                 tracing::warn!(
@@ -239,6 +286,7 @@ impl MessageInbox {
             SubscribeId::Generating => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
                     let rx = self.generating.subscribe();
+                    self.generating.report_queue_len();
                     let _ = resp.send(SubscribeResponse::Generating(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
@@ -248,6 +296,7 @@ impl MessageInbox {
             SubscribeId::Resharing => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
                     let rx = self.resharing.subscribe();
+                    self.resharing.report_queue_len();
                     let _ = resp.send(SubscribeResponse::Resharing(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
@@ -256,22 +305,35 @@ impl MessageInbox {
             },
             SubscribeId::Triple(id) => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self.triple.entry(id).or_default().subscribe();
+                    let sub = self
+                        .triple
+                        .entry(id)
+                        .or_insert_with(|| Subscriber::unsubscribed("triple", triple_channel_id(id)));
+                    let rx = sub.subscribe();
+                    sub.report_queue_len();
                     let _ = resp.send(SubscribeResponse::Triple(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
-                    if self.triple.remove(&id).is_none() {
+                    if let Some(sub) = self.triple.remove(&id) {
+                        sub.clear_queue_len_metric();
+                    } else {
                         tracing::warn!(id, "trying to unsub from an unknown triple subscription");
                     }
                 }
             },
             SubscribeId::Presignature(id) => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self.presignature.entry(id).or_default().subscribe();
+                    let sub = self.presignature.entry(id).or_insert_with(|| {
+                        Subscriber::unsubscribed("presignature", presignature_channel_id(id))
+                    });
+                    let rx = sub.subscribe();
+                    sub.report_queue_len();
                     let _ = resp.send(SubscribeResponse::Presignature(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
-                    if self.presignature.remove(&id).is_none() {
+                    if let Some(sub) = self.presignature.remove(&id) {
+                        sub.clear_queue_len_metric();
+                    } else {
                         tracing::warn!(
                             id,
                             "trying to unsub from an unknown presignature subscription"
@@ -281,15 +343,20 @@ impl MessageInbox {
             },
             SubscribeId::Signature(sign_id, presignature_id) => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self
-                        .signature
-                        .entry((sign_id, presignature_id))
-                        .or_default()
-                        .subscribe();
+                    let sub = self.signature.entry((sign_id, presignature_id)).or_insert_with(|| {
+                        Subscriber::unsubscribed(
+                            "signature",
+                            signature_channel_id(sign_id, presignature_id),
+                        )
+                    });
+                    let rx = sub.subscribe();
+                    sub.report_queue_len();
                     let _ = resp.send(SubscribeResponse::Signature(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
-                    if self.signature.remove(&(sign_id, presignature_id)).is_none() {
+                    if let Some(sub) = self.signature.remove(&(sign_id, presignature_id)) {
+                        sub.clear_queue_len_metric();
+                    } else {
                         tracing::warn!(
                             ?sign_id,
                             ?presignature_id,
@@ -301,37 +368,45 @@ impl MessageInbox {
             SubscribeId::Ready => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
                     let rx = self.ready.subscribe();
+                    self.ready.report_queue_len();
                     let _ = resp.send(SubscribeResponse::Ready(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
                     self.ready.unsubscribe();
+                    self.ready.report_queue_len();
                 }
             },
             SubscribeId::Triples => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
                     let rx = self.triple_init.subscribe();
+                    self.triple_init.report_queue_len();
                     let _ = resp.send(SubscribeResponse::TriplePosit(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
                     self.triple_init.unsubscribe();
+                    self.triple_init.report_queue_len();
                 }
             },
             SubscribeId::Presignatures => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
                     let rx = self.presignature_init.subscribe();
+                    self.presignature_init.report_queue_len();
                     let _ = resp.send(SubscribeResponse::PresignaturePosit(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
                     self.presignature_init.unsubscribe();
+                    self.presignature_init.report_queue_len();
                 }
             },
             SubscribeId::Signatures => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
                     let rx = self.signature_init.subscribe();
+                    self.signature_init.report_queue_len();
                     let _ = resp.send(SubscribeResponse::SignaturePosit(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
                     self.signature_init.unsubscribe();
+                    self.signature_init.report_queue_len();
                 }
             },
         }
@@ -342,9 +417,11 @@ impl MessageInbox {
             tokio::select! {
                 _ = self.filter.update() => {}
                 Some(sub) = self.subscribe_rx.recv() => {
+                    report_singleton_channel_queue_len("subscribe", &self.subscribe_tx);
                     self.process_subscribe(sub);
                 }
                 Some(encrypted) = self.inbox_rx.recv() => {
+                    report_singleton_channel_queue_len("incoming", &self.inbox_tx);
                     let config = config.borrow().clone();
                     let expiration = Duration::from_millis(config.protocol.message_timeout);
                     let participants = contract.participant_map().await;
@@ -383,8 +460,15 @@ impl MessageChannel {
         let (outbox_tx, outbox_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
         let (filter_tx, filter_rx) = mpsc::channel(MAX_FILTER_SIZE.into());
         let (subscribe_tx, subscribe_rx) = mpsc::channel(16384);
-        let inbox = MessageInbox::new(inbox_rx, filter_rx, subscribe_rx);
-        let outbox = MessageOutbox::new(outbox_rx);
+        let inbox = MessageInbox::new(
+            inbox_tx.clone(),
+            inbox_rx,
+            filter_tx.clone(),
+            filter_rx,
+            subscribe_tx.clone(),
+            subscribe_rx,
+        );
+        let outbox = MessageOutbox::new(outbox_tx.clone(), outbox_rx);
 
         let channel = Self {
             inbox: inbox_tx,
@@ -392,6 +476,11 @@ impl MessageChannel {
             subscribe: subscribe_tx,
             filter: filter_tx,
         };
+
+        report_singleton_channel_queue_len("incoming", &channel.inbox);
+        report_singleton_channel_queue_len("outgoing", &channel.outgoing);
+        report_singleton_channel_queue_len("filter", &channel.filter);
+        report_singleton_channel_queue_len("subscribe", &channel.subscribe);
 
         (inbox, outbox, channel)
     }
@@ -416,6 +505,16 @@ impl MessageChannel {
             .await
         {
             tracing::error!(?err, "outbox: failed to send message to participants");
+        } else {
+            report_singleton_channel_queue_len("outgoing", &self.outgoing);
+        }
+    }
+
+    pub async fn receive(&self, encrypted: Ciphered) {
+        if let Err(err) = self.inbox.send(encrypted).await {
+            tracing::error!(?err, "failed to forward an encrypted protocol message");
+        } else {
+            report_singleton_channel_queue_len("incoming", &self.inbox);
         }
     }
 
@@ -424,18 +523,24 @@ impl MessageChannel {
     pub async fn filter<M: MessageFilterId>(&self, msg: &M) {
         if let Err(err) = self.filter.send((M::PROTOCOL, msg.id())).await {
             tracing::warn!(?err, "failed to send filter message");
+        } else {
+            report_singleton_channel_queue_len("filter", &self.filter);
         }
     }
 
     pub async fn filter_triple(&self, id: TripleId) {
         if let Err(err) = self.filter.send((Protocols::Triple, id)).await {
             tracing::warn!(?err, "failed to send filter message");
+        } else {
+            report_singleton_channel_queue_len("filter", &self.filter);
         }
     }
 
     pub async fn filter_presignature(&self, id: PresignatureId) {
         if let Err(err) = self.filter.send((Protocols::Presignature, id)).await {
             tracing::warn!(?err, "failed to send filter message");
+        } else {
+            report_singleton_channel_queue_len("filter", &self.filter);
         }
     }
 
@@ -448,6 +553,7 @@ impl MessageChannel {
         if self.subscribe.send(req).await.is_err() {
             return None;
         };
+        report_singleton_channel_queue_len("subscribe", &self.subscribe);
         let Ok(subscription) = resp.await else {
             return None;
         };
@@ -476,6 +582,8 @@ impl MessageChannel {
             .is_err()
         {
             tracing::warn!(id, "unable to send unsubscribe request for triple message");
+        } else {
+            report_singleton_channel_queue_len("subscribe", &self.subscribe);
         };
     }
 
@@ -506,6 +614,8 @@ impl MessageChannel {
             .is_err()
         {
             tracing::warn!("unable to send unsubscribe request for triple posits");
+        } else {
+            report_singleton_channel_queue_len("subscribe", &self.subscribe);
         };
     }
 
@@ -537,6 +647,8 @@ impl MessageChannel {
             .is_err()
         {
             tracing::warn!("unable to send unsubscribe request for presignature");
+        } else {
+            report_singleton_channel_queue_len("subscribe", &self.subscribe);
         };
     }
 
@@ -564,6 +676,8 @@ impl MessageChannel {
             .is_err()
         {
             tracing::warn!("unable to send unsubscribe request for presignature posits");
+        } else {
+            report_singleton_channel_queue_len("subscribe", &self.subscribe);
         };
     }
 
@@ -611,6 +725,8 @@ impl MessageChannel {
                 ?presignature_id,
                 "unable to send unsubscribe request for signature"
             );
+        } else {
+            report_singleton_channel_queue_len("subscribe", &self.subscribe);
         };
     }
 
@@ -639,6 +755,8 @@ impl MessageChannel {
             .is_err()
         {
             tracing::warn!("unable to send unsubscribe request for signature posit");
+        } else {
+            report_singleton_channel_queue_len("subscribe", &self.subscribe);
         };
     }
 
@@ -770,6 +888,7 @@ pub struct Partition {
 /// These messages will be signed and encrypted before being sent out.
 pub struct MessageOutbox {
     /// The messages that are pending to be sent to other nodes.
+    outbox_tx: mpsc::Sender<SendMessage>,
     outbox_rx: mpsc::Receiver<SendMessage>,
 
     // NOTE: we have FromParticipant here to circumvent the chance that we change Participant
@@ -781,8 +900,9 @@ pub struct MessageOutbox {
 }
 
 impl MessageOutbox {
-    pub fn new(outbox_rx: mpsc::Receiver<SendMessage>) -> Self {
+    pub fn new(outbox_tx: mpsc::Sender<SendMessage>, outbox_rx: mpsc::Receiver<SendMessage>) -> Self {
         Self {
+            outbox_tx,
             outbox_rx,
             messages: HashMap::new(),
         }
@@ -931,6 +1051,7 @@ impl MessageOutbox {
         loop {
             tokio::select! {
                 Some((msg, (from, to, timestamp))) = self.outbox_rx.recv() => {
+                    report_singleton_channel_queue_len("outgoing", &self.outbox_tx);
                     // add it to the outbox and sort it by from and to participant
                     let entry = self.messages.entry((from, to)).or_default();
                     entry.push((msg, timestamp));
@@ -1021,6 +1142,8 @@ const fn cbor_name(value: &ciborium::Value) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use super::SINGLETON_CHANNEL_ID;
+
     use std::time::Duration;
 
     use cait_sith::protocol::Participant;
@@ -1372,7 +1495,7 @@ mod tests {
                 }),
             ];
             let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
-            channel.inbox.send(encrypted).await.unwrap();
+            channel.receive(encrypted).await;
 
             let mut recv1 = channel.subscribe_triple(1).await;
             let mut recv2 = channel.subscribe_triple(2).await;
@@ -1426,7 +1549,7 @@ mod tests {
             let mut recv3 = channel.subscribe_triple(3).await;
 
             channel.filter_triple(filter_id).await;
-            channel.inbox.send(encrypted).await.unwrap();
+            channel.receive(encrypted).await;
 
             let (m1, m3) = match tokio::join!(recv1.recv(), recv3.recv()) {
                 (Some(m1), Some(m3)) => (m1, m3),
@@ -1451,7 +1574,7 @@ mod tests {
         // should be received by the subscribers.
         {
             let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
-            channel.inbox.send(encrypted).await.unwrap();
+            channel.receive(encrypted).await;
             let mut recv1 =
                 tokio::time::timeout(Duration::from_millis(300), channel.subscribe_triple(1))
                     .await
@@ -1479,12 +1602,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_signature_posit_backpressure_does_not_block_ready_messages() {
-        let (_inbox_tx, inbox_rx) = mpsc::channel(1);
-        let (_filter_tx, filter_rx) = mpsc::channel(1);
-        let (_subscribe_tx, subscribe_rx) = mpsc::channel(1);
-        let mut inbox = MessageInbox::new(inbox_rx, filter_rx, subscribe_rx);
+        let (inbox_tx, inbox_rx) = mpsc::channel(1);
+        let (filter_tx, filter_rx) = mpsc::channel(1);
+        let (subscribe_tx, subscribe_rx) = mpsc::channel(1);
+        let mut inbox = MessageInbox::new(inbox_tx, inbox_rx, filter_tx, filter_rx, subscribe_tx, subscribe_rx);
 
-        inbox.signature_init = sub::Subscriber::unsubscribed_with_capacity(1);
+        inbox.signature_init = sub::Subscriber::unsubscribed_with_capacity(
+            "signature_init",
+            SINGLETON_CHANNEL_ID,
+            1,
+        );
 
         let (signature_req, signature_resp) =
             sub::SubscribeRequest::subscribe(sub::SubscribeId::Signatures);
