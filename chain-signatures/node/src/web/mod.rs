@@ -133,7 +133,7 @@ async fn msg(
     for encrypted in encrypted.into_iter() {
         let msg_channel = state.msg_channel.clone();
         tokio::spawn(async move {
-            msg_channel.receive(encrypted).await;
+            msg_channel.send_inbox(encrypted).await;
         });
     }
     WEB_ENDPOINT_LATENCY

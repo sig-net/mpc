@@ -148,23 +148,23 @@ impl MessageInbox {
         match message {
             Message::Posit(message) => match message.id {
                 PositProtocolId::Triple(id) => {
-                    let _ = self.triple_init.try_send_lossy((id, message.from, message.action));
-                }
-                PositProtocolId::Presignature(id) => {
                     let _ = self
-                        .presignature_init
+                        .triple_init
                         .try_send_lossy((id, message.from, message.action));
                 }
+                PositProtocolId::Presignature(id) => {
+                    let _ =
+                        self.presignature_init
+                            .try_send_lossy((id, message.from, message.action));
+                }
                 PositProtocolId::Signature(sign_id, presignature_id, round) => {
-                    let _ = self.signature_init.try_send_lossy(
-                        (
-                            sign_id,
-                            presignature_id,
-                            round,
-                            message.from,
-                            message.action,
-                        ),
-                    );
+                    let _ = self.signature_init.try_send_lossy((
+                        sign_id,
+                        presignature_id,
+                        round,
+                        message.from,
+                        message.action,
+                    ));
                 }
             },
             Message::Generating(message) => {
@@ -182,7 +182,9 @@ impl MessageInbox {
                 let _ = self
                     .triple
                     .entry(message.id)
-                    .or_insert_with(|| Subscriber::unsubscribed("triple", triple_channel_id(message.id)))
+                    .or_insert_with(|| {
+                        Subscriber::unsubscribed("triple", triple_channel_id(message.id))
+                    })
                     .try_send_lossy(message);
             }
             Message::Presignature(message) => {
@@ -190,7 +192,10 @@ impl MessageInbox {
                     .presignature
                     .entry(message.id)
                     .or_insert_with(|| {
-                        Subscriber::unsubscribed("presignature", presignature_channel_id(message.id))
+                        Subscriber::unsubscribed(
+                            "presignature",
+                            presignature_channel_id(message.id),
+                        )
                     })
                     .try_send_lossy(message);
             }
@@ -305,10 +310,9 @@ impl MessageInbox {
             },
             SubscribeId::Triple(id) => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
-                    let sub = self
-                        .triple
-                        .entry(id)
-                        .or_insert_with(|| Subscriber::unsubscribed("triple", triple_channel_id(id)));
+                    let sub = self.triple.entry(id).or_insert_with(|| {
+                        Subscriber::unsubscribed("triple", triple_channel_id(id))
+                    });
                     let rx = sub.subscribe();
                     sub.report_queue_len();
                     let _ = resp.send(SubscribeResponse::Triple(rx));
@@ -343,12 +347,15 @@ impl MessageInbox {
             },
             SubscribeId::Signature(sign_id, presignature_id) => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
-                    let sub = self.signature.entry((sign_id, presignature_id)).or_insert_with(|| {
-                        Subscriber::unsubscribed(
-                            "signature",
-                            signature_channel_id(sign_id, presignature_id),
-                        )
-                    });
+                    let sub = self
+                        .signature
+                        .entry((sign_id, presignature_id))
+                        .or_insert_with(|| {
+                            Subscriber::unsubscribed(
+                                "signature",
+                                signature_channel_id(sign_id, presignature_id),
+                            )
+                        });
                     let rx = sub.subscribe();
                     sub.report_queue_len();
                     let _ = resp.send(SubscribeResponse::Signature(rx));
@@ -510,7 +517,7 @@ impl MessageChannel {
         }
     }
 
-    pub async fn receive(&self, encrypted: Ciphered) {
+    pub async fn send_inbox(&self, encrypted: Ciphered) {
         if let Err(err) = self.inbox.send(encrypted).await {
             tracing::error!(?err, "failed to forward an encrypted protocol message");
         } else {
@@ -900,7 +907,10 @@ pub struct MessageOutbox {
 }
 
 impl MessageOutbox {
-    pub fn new(outbox_tx: mpsc::Sender<SendMessage>, outbox_rx: mpsc::Receiver<SendMessage>) -> Self {
+    pub fn new(
+        outbox_tx: mpsc::Sender<SendMessage>,
+        outbox_rx: mpsc::Receiver<SendMessage>,
+    ) -> Self {
         Self {
             outbox_tx,
             outbox_rx,
@@ -1495,7 +1505,7 @@ mod tests {
                 }),
             ];
             let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
-            channel.receive(encrypted).await;
+            channel.send_inbox(encrypted).await;
 
             let mut recv1 = channel.subscribe_triple(1).await;
             let mut recv2 = channel.subscribe_triple(2).await;
@@ -1549,7 +1559,7 @@ mod tests {
             let mut recv3 = channel.subscribe_triple(3).await;
 
             channel.filter_triple(filter_id).await;
-            channel.receive(encrypted).await;
+            channel.send_inbox(encrypted).await;
 
             let (m1, m3) = match tokio::join!(recv1.recv(), recv3.recv()) {
                 (Some(m1), Some(m3)) => (m1, m3),
@@ -1574,7 +1584,7 @@ mod tests {
         // should be received by the subscribers.
         {
             let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
-            channel.receive(encrypted).await;
+            channel.send_inbox(encrypted).await;
             let mut recv1 =
                 tokio::time::timeout(Duration::from_millis(300), channel.subscribe_triple(1))
                     .await
@@ -1605,13 +1615,17 @@ mod tests {
         let (inbox_tx, inbox_rx) = mpsc::channel(1);
         let (filter_tx, filter_rx) = mpsc::channel(1);
         let (subscribe_tx, subscribe_rx) = mpsc::channel(1);
-        let mut inbox = MessageInbox::new(inbox_tx, inbox_rx, filter_tx, filter_rx, subscribe_tx, subscribe_rx);
-
-        inbox.signature_init = sub::Subscriber::unsubscribed_with_capacity(
-            "signature_init",
-            SINGLETON_CHANNEL_ID,
-            1,
+        let mut inbox = MessageInbox::new(
+            inbox_tx,
+            inbox_rx,
+            filter_tx,
+            filter_rx,
+            subscribe_tx,
+            subscribe_rx,
         );
+
+        inbox.signature_init =
+            sub::Subscriber::unsubscribed_with_capacity("signature_init", SINGLETON_CHANNEL_ID, 1);
 
         let (signature_req, signature_resp) =
             sub::SubscribeRequest::subscribe(sub::SubscribeId::Signatures);

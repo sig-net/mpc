@@ -1,6 +1,6 @@
 use std::num::NonZeroUsize;
 
-use tokio::sync::mpsc::{self, error::TryRecvError};
+use tokio::sync::mpsc;
 
 use super::types::{MessageFilterId, Protocols};
 
