@@ -207,10 +207,6 @@ impl SignatureEvent for SignatureRequestedEvent {
         ))
     }
 
-    fn source_chain(&self) -> Chain {
-        Chain::Solana
-    }
-
     fn sender_string(&self) -> String {
         self.sender.to_string()
     }
@@ -278,10 +274,6 @@ impl SignatureEvent for SignBidirectionalEvent {
             crate::util::current_unix_timestamp(),
             crate::stream::ops::SignBidirectionalEvent::Solana(self.clone()),
         ))
-    }
-
-    fn source_chain(&self) -> Chain {
-        Chain::Solana
     }
 
     fn sender_string(&self) -> String {

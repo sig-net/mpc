@@ -412,14 +412,21 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     client.clone(),
                 ));
             }
-            tokio::spawn(indexer_hydration::run(
-                hydration,
-                sign_tx,
-                backlog,
-                contract_watcher,
-                mesh_state,
-                client,
-            ));
+            match indexer_hydration::HydrationStream::new(hydration).await {
+                Ok(hydration_stream) => {
+                    tokio::spawn(run_stream(
+                        hydration_stream,
+                        sign_tx,
+                        backlog,
+                        contract_watcher,
+                        mesh_state,
+                        client,
+                    ));
+                }
+                Err(err) => {
+                    tracing::error!(?err, "failed to create hydration indexer stream");
+                }
+            }
             tracing::info!("protocol http server spawned");
             protocol_handle.await?;
             web_handle.await?;

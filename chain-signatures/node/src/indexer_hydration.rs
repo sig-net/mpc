@@ -4,8 +4,10 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use crate::rpc::ContractStateWatcher;
+use crate::stream::{run_stream, ChainEvent, ChainStream};
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::ops::SignatureEvent;
+
 use alloy_sol_types::SolValue;
 use anyhow::{anyhow, Result};
 use ethabi::{encode, Token};
@@ -29,6 +31,13 @@ use subxt::ext::scale_value::{Composite, Value, ValueDef};
 use subxt::{client::OnlineClient, SubstrateConfig};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
+
+const PALLET_SIGNET: &str = "Signet";
+const EVENT_SIGNATURE_REQUESTED: &str = "SignatureRequested";
+const EVENT_SIGNATURE_RESPONDED: &str = "SignatureResponded";
+const EVENT_SIGN_BIDIRECTIONAL_REQUESTED: &str = "SignBidirectionalRequested";
+const EVENT_RESPOND_BIDIRECTIONAL: &str = "RespondBidirectionalEvent";
 
 /// Configures Hydration indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -172,10 +181,6 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {
         ))
     }
 
-    fn source_chain(&self) -> Chain {
-        Chain::Hydration
-    }
-
     fn sender_string(&self) -> String {
         ss58_address_from_account32(self.sender)
     }
@@ -264,10 +269,6 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
         ))
     }
 
-    fn source_chain(&self) -> Chain {
-        Chain::Hydration
-    }
-
     fn sender_string(&self) -> String {
         ss58_address_from_account32(self.sender)
     }
@@ -337,54 +338,98 @@ pub(crate) fn ss58_address_from_account32(sender: [u8; 32]) -> String {
     acc.to_ss58check_with_version(Ss58AddressFormatRegistry::PolkadotAccount.into())
 }
 
+pub struct HydrationStream {
+    events_rx: mpsc::Receiver<ChainEvent>,
+    tasks: Vec<JoinHandle<()>>,
+}
+
+impl HydrationStream {
+    pub async fn new(hydration: Option<HydrationConfig>) -> Result<Self> {
+        let Some(hydration) = hydration else {
+            tracing::warn!("hydration indexer is disabled");
+            anyhow::bail!("hydration indexer is disabled");
+        };
+
+        let ws_url = hydration.rpc_ws_url.clone();
+        tracing::info!("connecting to hydration rpc at {}", ws_url);
+
+        let hydration_api = OnlineClient::<SubstrateConfig>::from_url(&ws_url)
+            .await
+            .map_err(|err| anyhow!("failed to connect to hydration rpc: {err}"))?;
+        let rpc_client = RpcClient::from_url(&ws_url)
+            .await
+            .map_err(|err| anyhow!("failed to connect to hydration rpc: {err}"))?;
+        let legacy_rpc = LegacyRpcMethods::<SubstrateConfig>::new(rpc_client);
+
+        let (events_tx, events_rx) = crate::stream::channel();
+        let task = tokio::spawn(async move {
+            run_hydration_indexer(hydration_api, legacy_rpc, events_tx).await;
+        });
+
+        Ok(Self {
+            events_rx,
+            tasks: vec![task],
+        })
+    }
+}
+
+impl Drop for HydrationStream {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+impl ChainStream for HydrationStream {
+    const CHAIN: Chain = Chain::Hydration;
+
+    async fn next_event(&mut self) -> Option<ChainEvent> {
+        self.events_rx.recv().await
+    }
+}
+
 pub async fn run(
     hydration: Option<HydrationConfig>,
     sign_tx: mpsc::Sender<Sign>,
     backlog: Backlog,
-    mut contract_watcher: ContractStateWatcher,
-    mut mesh_state: watch::Receiver<MeshState>,
+    contract_watcher: ContractStateWatcher,
+    mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
 ) {
-    let Some(hydration) = hydration else {
-        tracing::warn!("hydration indexer is disabled");
-        return;
-    };
-
-    let ws_url: &str = hydration.rpc_ws_url.as_str();
-
-    tracing::info!("connecting to hydration rpc at {}", ws_url);
-
-    // High‑level Subxt client for blocks + events.
-    let hydration_api = OnlineClient::<SubstrateConfig>::from_url(ws_url).await;
-    let hydration_api = match hydration_api {
-        Ok(api) => api,
-        Err(e) => {
-            tracing::error!("failed to connect to hydration rpc: {e}");
+    let stream = match HydrationStream::new(hydration).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            tracing::error!(?err, "failed to create hydration indexer stream");
             return;
         }
     };
-    // Low‑level RPC client for legacy methods like state_get_read_proof.
-    let rpc_client = RpcClient::from_url(ws_url).await;
-    let rpc_client = match rpc_client {
-        Ok(client) => client,
-        Err(e) => {
-            tracing::error!("failed to connect to hydration rpc: {e}");
-            return;
-        }
-    };
-    let legacy_rpc = LegacyRpcMethods::<SubstrateConfig>::new(rpc_client);
 
-    // Wait for threshold to be available
-    crate::stream::ops::recover_backlog(
-        &backlog,
-        &mut contract_watcher,
-        &mut mesh_state,
-        &node_client,
-        Chain::Hydration,
-        sign_tx.clone(),
+    run_stream(
+        stream,
+        sign_tx,
+        backlog,
+        contract_watcher,
+        mesh_state,
+        node_client,
     )
     .await;
+}
 
+async fn send_chain_event(events_tx: &mpsc::Sender<ChainEvent>, event: ChainEvent) -> bool {
+    if let Err(err) = events_tx.send(event).await {
+        tracing::warn!(?err, "hydration stream receiver dropped");
+        return false;
+    }
+
+    true
+}
+
+async fn run_hydration_indexer(
+    hydration_api: OnlineClient<SubstrateConfig>,
+    legacy_rpc: LegacyRpcMethods<SubstrateConfig>,
+    events_tx: mpsc::Sender<ChainEvent>,
+) {
     spawn_runtime_updater(hydration_api.clone());
     // Subscribe to finalized Hydration blocks.
     let mut blocks = match hydration_api.blocks().subscribe_finalized().await {
@@ -448,9 +493,6 @@ pub async fn run(
         //
         // → Safe to trust individual decoded events.
 
-        let sign_tx = sign_tx.clone();
-        let backlog = backlog.clone();
-
         for ev in events.iter() {
             let ev = match ev {
                 Ok(ev) => ev,
@@ -476,15 +518,16 @@ pub async fn run(
 
                 let entropy = sp_core::hashing::blake2_256(ev.bytes());
 
-                if let Err(e) = crate::stream::ops::process_sign_event(
-                    Box::new(event),
-                    entropy,
-                    sign_tx.clone(),
-                    backlog.clone(),
-                )
-                .await
-                {
-                    tracing::error!("failed to process sign event: {e}");
+                let sign_request = match event.generate_sign_request(entropy) {
+                    Ok(sign_request) => sign_request,
+                    Err(err) => {
+                        tracing::error!(?err, "failed to generate sign request from hydration event");
+                        continue;
+                    }
+                };
+
+                if !send_chain_event(&events_tx, ChainEvent::SignRequest(sign_request)).await {
+                    return;
                 }
             }
             // SignatureResponded
@@ -500,15 +543,16 @@ pub async fn run(
                     "Hydration::Signet::SignatureResponded in block #{number} ({hash:?}): {:?}",
                     event
                 );
-                if let Err(e) = crate::stream::ops::process_respond_event(
-                    crate::stream::ops::SignatureRespondedEvent::Hydration(event),
-                    sign_tx.clone(),
-                    &mut contract_watcher,
-                    &backlog,
+
+                if !send_chain_event(
+                    &events_tx,
+                    ChainEvent::Respond(crate::stream::ops::SignatureRespondedEvent::Hydration(
+                        event,
+                    )),
                 )
                 .await
                 {
-                    tracing::error!("failed to process respond event: {e}");
+                    return;
                 }
             }
 
@@ -530,15 +574,16 @@ pub async fn run(
 
                 let entropy = sp_core::hashing::blake2_256(ev.bytes());
 
-                if let Err(e) = crate::stream::ops::process_sign_event(
-                    Box::new(event),
-                    entropy,
-                    sign_tx.clone(),
-                    backlog.clone(),
-                )
-                .await
-                {
-                    tracing::error!("failed to process sign event: {e}");
+                let sign_request = match event.generate_sign_request(entropy) {
+                    Ok(sign_request) => sign_request,
+                    Err(err) => {
+                        tracing::error!(?err, "failed to generate bidirectional hydration sign request");
+                        continue;
+                    }
+                };
+
+                if !send_chain_event(&events_tx, ChainEvent::SignRequest(sign_request)).await {
+                    return;
                 }
             }
 
@@ -556,29 +601,25 @@ pub async fn run(
                     "Hydration::Signet::RespondBidirectionalEvent in block #{number} ({hash:?}): {:?}",
                     event
                 );
-                if let Err(e) = crate::stream::ops::process_respond_bidirectional_event(
-                    crate::stream::ops::RespondBidirectionalEvent::Hydration(event),
-                    sign_tx.clone(),
-                    &backlog,
+
+                if !send_chain_event(
+                    &events_tx,
+                    ChainEvent::RespondBidirectional(
+                        crate::stream::ops::RespondBidirectionalEvent::Hydration(event),
+                    ),
                 )
                 .await
                 {
-                    tracing::error!("failed to process respond bidirectional event: {e}");
+                    return;
                 }
             }
         }
 
-        crate::metrics::indexers::LATEST_BLOCK_NUMBER
-            .with_label_values(&[crate::protocol::Chain::Hydration.as_str(), "indexed"])
-            .set(number as i64);
+        if !send_chain_event(&events_tx, ChainEvent::Block(number.into())).await {
+            return;
+        }
     }
 }
-
-const PALLET_SIGNET: &str = "Signet";
-const EVENT_SIGNATURE_REQUESTED: &str = "SignatureRequested";
-const EVENT_SIGNATURE_RESPONDED: &str = "SignatureResponded";
-const EVENT_SIGN_BIDIRECTIONAL_REQUESTED: &str = "SignBidirectionalRequested";
-const EVENT_RESPOND_BIDIRECTIONAL: &str = "RespondBidirectionalEvent";
 
 pub fn spawn_runtime_updater(api: OnlineClient<SubstrateConfig>) {
     let updater = api.updater();
