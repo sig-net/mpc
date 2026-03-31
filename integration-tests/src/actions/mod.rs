@@ -5,10 +5,11 @@ pub mod wait_for;
 use crate::cluster::Cluster;
 
 use anyhow::Context as _;
+use alloy::primitives::keccak256;
 use cait_sith::FullSignature;
 use elliptic_curve::sec1::ToEncodedPoint;
 use ethers::types::{Address as EthersAddress, H160, RecoveryMessage, Signature, SignatureError as EthersSignatureError};
-use ethers::utils::{hash_message, keccak256 as ethers_keccak256};
+use ethers::utils::hash_message;
 use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -187,7 +188,7 @@ where
     println!("ethercore recover encoded point pk {public_key:#?}");
     let public_key = public_key.as_bytes();
     debug_assert_eq!(public_key[0], 0x04);
-    let hash = ethers_keccak256(&public_key[1..]);
+    let hash = keccak256(&public_key[1..]);
     let result = EthersAddress::from_slice(&hash[12..]);
     println!("ethercore recover result {result:#?}");
     Ok(EthersAddress::from_slice(&hash[12..]))
@@ -365,7 +366,9 @@ mod tests {
         };
 
         let verifying_user_pk = ecdsa::VerifyingKey::from(&user_pk_k256);
-        let user_address_ethers: H160 = ethers::utils::public_key_to_address(&verifying_user_pk);
+        let encoded_user_pk = k256::PublicKey::from(&verifying_user_pk).to_encoded_point(false);
+        let user_address_ethers: H160 =
+            H160::from_slice(&alloy::primitives::keccak256(&encoded_user_pk.as_bytes()[1..])[12..]);
 
         assert!(signature.verify(payload_hash, user_address_ethers).is_ok());
 

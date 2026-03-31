@@ -123,7 +123,10 @@ async fn test_signature_ethereum() -> Result<()> {
     let user_public_key = K256PublicKey::from_affine(user_affine)
         .map_err(|_| anyhow!("invalid derived public key"))?;
     let verifying_key = VerifyingKey::from(&user_public_key);
-    let expected_address = ethers::utils::public_key_to_address(&verifying_key);
+    let encoded_user_pk = K256PublicKey::from(&verifying_key).to_encoded_point(false);
+    let expected_address = Address::from_slice(
+        &alloy::primitives::keccak256(&encoded_user_pk.as_bytes()[1..])[12..],
+    );
 
     anyhow::ensure!(
         recovered_address == expected_address,

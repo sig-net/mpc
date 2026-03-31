@@ -482,9 +482,12 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     // Sanity-check that the contract emitted the SignatureResponded log we're expecting.
     let logs = receipt.logs.clone();
     assert!(!logs.is_empty(), "respond transaction produced no logs");
-    let sig_topic = H256::from(ethers::utils::keccak256(
-        "SignatureResponded(bytes32,address,((uint256,uint256),uint256,uint8))",
-    ));
+    let sig_topic = H256::from_slice(
+        alloy::primitives::keccak256(
+            "SignatureResponded(bytes32,address,((uint256,uint256),uint256,uint8))",
+        )
+        .as_slice(),
+    );
     assert_eq!(logs[0].topics[0], sig_topic, "unexpected event emitted");
 
     // Verify the indexer emits the Respond event with matching data.
