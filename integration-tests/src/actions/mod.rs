@@ -250,6 +250,8 @@ pub fn recover_eth_address(
 #[cfg(test)]
 mod tests {
     use elliptic_curve::sec1::FromEncodedPoint as _;
+    use elliptic_curve::sec1::ToEncodedPoint as _;
+    use ethers::types::{H160, Signature};
     use k256::ecdsa::VerifyingKey;
     use k256::elliptic_curve::ops::{Invert, Reduce};
     use k256::elliptic_curve::point::AffineCoordinates;

@@ -4,6 +4,7 @@ use ethers::types::{Address, BlockNumber, TransactionRequest, U256};
 use integration_tests::cluster::Cluster;
 use integration_tests::{actions, cluster, eth};
 use k256::ecdsa::VerifyingKey;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, PublicKey as K256PublicKey};
 use mpc_crypto::derive_key;
