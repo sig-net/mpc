@@ -813,10 +813,7 @@ impl EthereumIndexer {
         }
 
         if expected_catchup_blocks == 0 {
-            if let Err(err) = events_tx
-                .send(ChainEvent::CatchupCompleted(Chain::Ethereum))
-                .await
-            {
+            if let Err(err) = events_tx.send(ChainEvent::CatchupCompleted).await {
                 tracing::warn!(?err, "failed to emit ethereum catchup completion event");
             } else {
                 catchup_completed_emitted = true;
@@ -879,10 +876,7 @@ impl EthereumIndexer {
             if is_catchup && !catchup_completed_emitted {
                 processed_catchup_blocks.insert(block_number);
                 if processed_catchup_blocks.len() >= expected_catchup_blocks {
-                    if let Err(err) = events_tx
-                        .send(ChainEvent::CatchupCompleted(Chain::Ethereum))
-                        .await
-                    {
+                    if let Err(err) = events_tx.send(ChainEvent::CatchupCompleted).await {
                         tracing::warn!(?err, "failed to emit ethereum catchup completion event");
                     } else {
                         catchup_completed_emitted = true;

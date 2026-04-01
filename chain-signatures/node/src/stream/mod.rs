@@ -30,7 +30,7 @@ pub enum ChainEvent {
     RespondBidirectional(RespondBidirectionalEvent),
 
     /// The stream has finished replaying catch-up data for this chain.
-    CatchupCompleted(Chain),
+    CatchupCompleted,
 
     /// Block height indicating the client has observed/processed up to `u64` (slot/block)
     Block(u64),
@@ -65,9 +65,7 @@ impl std::fmt::Debug for ChainEvent {
                 .field(&ev.request_id())
                 .field(&ev.source_chain().as_str())
                 .finish(),
-            ChainEvent::CatchupCompleted(chain) => {
-                f.debug_tuple("CatchupCompleted").field(chain).finish()
-            }
+            ChainEvent::CatchupCompleted => f.debug_tuple("CatchupCompleted").finish(),
             ChainEvent::Block(b) => write!(f, "Block({b})"),
             ChainEvent::ExecutionConfirmed {
                 tx_id,
@@ -152,12 +150,7 @@ pub async fn run_stream<S: ChainStream>(
                     tracing::error!(?err, chain = %chain, "failed to process respond bidirectional event");
                 }
             }
-            ChainEvent::CatchupCompleted(catchup_chain) => {
-                if catchup_chain != chain {
-                    tracing::warn!(stream_chain = %chain, event_chain = %catchup_chain, "received mismatched catchup completion event");
-                    continue;
-                }
-
+            ChainEvent::CatchupCompleted => {
                 if recovered.requeue_mode == crate::backlog::RecoveryRequeueMode::AfterCatchup {
                     requeue_recovered_sign_requests(
                         &backlog,
@@ -682,7 +675,7 @@ mod tests {
         let client = EthereumLocalStream {
             events: vec![
                 Some(ChainEvent::Respond(respond)),
-                Some(ChainEvent::CatchupCompleted(Chain::Ethereum)),
+                Some(ChainEvent::CatchupCompleted),
                 None,
             ],
         };
