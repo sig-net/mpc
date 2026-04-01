@@ -221,8 +221,8 @@ async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {
     // Verify it's a bidirectional sign request
     assert_eq!(req.chain, Chain::Solana);
     assert!(matches!(
-        req.sign_request_type,
-        mpc_node::protocol::SignRequestType::SignBidirectional(_)
+        req.kind,
+        mpc_node::protocol::SignKind::SignBidirectional(_)
     ));
 
     Ok(())

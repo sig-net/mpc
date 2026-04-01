@@ -11,9 +11,9 @@ use integration_tests::eth::{
     self, chain_signatures_contract, ChainSignaturesContract, SignRequest,
 };
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-use mpc_node::backlog::{Backlog, BacklogTransaction, SignTx};
+use mpc_node::backlog::Backlog;
 use mpc_node::indexer_eth::{EthConfig, EthereumStream};
-use mpc_node::protocol::Chain;
+use mpc_node::protocol::{Chain, SignKind};
 use mpc_node::stream::ops::SignatureRespondedEvent;
 use mpc_node::stream::{ChainEvent, ChainStream};
 use mpc_primitives::{SignId, LATEST_MPC_KEY_VERSION};
@@ -246,7 +246,7 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
         request_id: [7u8; 32],
         from_address: AlloyAddress::from_slice(ctx.wallet.as_bytes()),
         nonce: 0,
-        status: mpc_node::sign_bidirectional::PendingRequestStatus::PendingExecution,
+        status: mpc_node::sign_bidirectional::SignStatus::PendingExecution,
     };
     let sign_id = SignId::new([7u8; 32]);
     backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;
@@ -328,20 +328,10 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
                     // The production indexer loop inserts sign requests into the backlog.
                     // These integration tests consume `ChainEvent`s directly, so replicate
                     // that behavior here so checkpoints capture pending requests.
-                    backlog
-                        .insert(
-                            req.chain,
-                            req.id,
-                            BacklogTransaction::Sign(SignTx {
-                                request_id: req.id.request_id,
-                                source_chain: req.chain,
-                                status: mpc_node::sign_bidirectional::PendingRequestStatus::AwaitingResponse,
-                                args: req.args.clone(),
-                                unix_timestamp_indexed: req.unix_timestamp_indexed,
-                            }),
-                            req.sign_request_type.clone(),
-                        )
-                        .await;
+                    if matches!(req.kind, SignKind::RespondBidirectional(_)) {
+                        continue;
+                    }
+                    backlog.insert(req.clone()).await;
                 }
                 ChainEvent::Block(height) => {
                     tracing::info!(height, "observed block event");
@@ -383,20 +373,10 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
             ChainEvent::SignRequest(req) => {
                 saw_new_event = true;
 
-                backlog
-                    .insert(
-                        req.chain,
-                        req.id,
-                        BacklogTransaction::Sign(SignTx {
-                            request_id: req.id.request_id,
-                            source_chain: req.chain,
-                            status: mpc_node::sign_bidirectional::PendingRequestStatus::AwaitingResponse,
-                            args: req.args.clone(),
-                            unix_timestamp_indexed: req.unix_timestamp_indexed,
-                        }),
-                        req.sign_request_type.clone(),
-                    )
-                    .await;
+                if matches!(req.kind, SignKind::RespondBidirectional(_)) {
+                    continue;
+                }
+                backlog.insert(req.clone()).await;
 
                 if saw_new_checkpoint {
                     break;

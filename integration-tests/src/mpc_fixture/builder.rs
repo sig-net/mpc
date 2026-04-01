@@ -9,7 +9,9 @@ use crate::mpc_fixture::message_collector::CollectMessages;
 use crate::mpc_fixture::mock_governance::MockGovernance;
 use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
 use cait_sith::protocol::Participant;
-use mpc_contract::config::{min_to_ms, ProtocolConfig};
+use mpc_contract::config::{
+    min_to_ms, PresignatureConfig, ProtocolConfig, SignatureConfig, TripleConfig,
+};
 use mpc_contract::primitives::{
     CandidateInfo, Candidates as CandidatesById, ParticipantInfo, Participants as ParticipantsById,
 };
@@ -69,6 +71,9 @@ struct FixtureConfig {
     node_min_presignatures: u32,
     network_max_presignatures: u32,
 
+    max_concurrent_introduction: u32,
+    max_concurrent_generation: u32,
+
     signature_timeout_ms: u64,
     presignature_timeout_ms: u64,
     triple_timeout_ms: u64,
@@ -107,6 +112,7 @@ impl Default for MpcFixtureBuilder {
 
 impl FixtureConfig {
     fn new(num_nodes: u32) -> Self {
+        let defaults = ProtocolConfig::default();
         Self {
             input: FixtureInput::load(num_nodes),
             num_nodes,
@@ -116,6 +122,8 @@ impl FixtureConfig {
             network_max_triples: 10 * num_nodes * 4,
             node_min_presignatures: 10,
             network_max_presignatures: 10 * num_nodes * 4,
+            max_concurrent_introduction: defaults.max_concurrent_introduction,
+            max_concurrent_generation: defaults.max_concurrent_generation,
             signature_timeout_ms: 10_000,
             presignature_timeout_ms: 10_000,
             triple_timeout_ms: min_to_ms(10),
@@ -209,15 +217,27 @@ impl MpcFixtureBuilder {
     }
 
     fn build_protocol_config(&self) -> ProtocolConfig {
-        let mut config = ProtocolConfig::default();
-        config.signature.generation_timeout = self.fixture_config.signature_timeout_ms;
-        config.presignature.max_presignatures = self.fixture_config.network_max_presignatures;
-        config.presignature.min_presignatures = self.fixture_config.node_min_presignatures;
-        config.presignature.generation_timeout = self.fixture_config.presignature_timeout_ms;
-        config.triple.max_triples = self.fixture_config.network_max_triples;
-        config.triple.min_triples = self.fixture_config.node_min_triples;
-        config.triple.generation_timeout = self.fixture_config.triple_timeout_ms;
-        config
+        ProtocolConfig {
+            max_concurrent_introduction: self.fixture_config.max_concurrent_introduction,
+            max_concurrent_generation: self.fixture_config.max_concurrent_generation,
+            signature: SignatureConfig {
+                generation_timeout: self.fixture_config.signature_timeout_ms,
+                ..Default::default()
+            },
+            presignature: PresignatureConfig {
+                max_presignatures: self.fixture_config.network_max_presignatures,
+                min_presignatures: self.fixture_config.node_min_presignatures,
+                generation_timeout: self.fixture_config.presignature_timeout_ms,
+                ..Default::default()
+            },
+            triple: TripleConfig {
+                max_triples: self.fixture_config.network_max_triples,
+                min_triples: self.fixture_config.node_min_triples,
+                generation_timeout: self.fixture_config.triple_timeout_ms,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
     }
 
     /// Build a routing table: Participant -> msg_tx
@@ -313,6 +333,18 @@ impl MpcFixtureBuilder {
     /// Set protocol config
     pub fn with_presignature_timeout_ms(mut self, ms: u64) -> Self {
         self.fixture_config.presignature_timeout_ms = ms;
+        self
+    }
+
+    /// Set the maximum number of concurrent protocol introductions per node.
+    pub fn with_max_concurrent_introduction(mut self, value: u32) -> Self {
+        self.fixture_config.max_concurrent_introduction = value;
+        self
+    }
+
+    /// Set the maximum number of concurrent protocol generations per node.
+    pub fn with_max_concurrent_generation(mut self, value: u32) -> Self {
+        self.fixture_config.max_concurrent_generation = value;
         self
     }
 

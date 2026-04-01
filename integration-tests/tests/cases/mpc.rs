@@ -3,7 +3,6 @@ use integration_tests::mpc_fixture::fixture_tasks::MessageFilter;
 use integration_tests::mpc_fixture::message_collector::MessageCounter;
 use integration_tests::mpc_fixture::MpcFixtureBuilder;
 use mpc_node::protocol::presignature::Presignature;
-use mpc_node::protocol::SignRequestType;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState, Sign};
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
@@ -216,14 +215,12 @@ async fn test_basic_sign() {
 }
 
 fn sign_request(seed: u8) -> Sign {
-    Sign::Request(IndexedSignRequest {
-        id: SignId::new([seed; 32]),
-        args: sign_arg(seed),
-        chain: Chain::NEAR,
-        unix_timestamp_indexed: 0,
-        timestamp_created: std::time::Instant::now(),
-        sign_request_type: SignRequestType::Sign,
-    })
+    Sign::Request(IndexedSignRequest::sign(
+        SignId::new([seed; 32]),
+        sign_arg(seed),
+        Chain::NEAR,
+        0,
+    ))
 }
 
 fn sign_arg(seed: u8) -> SignArgs {
@@ -559,11 +556,14 @@ async fn test_sign_contention_5_nodes() {
         "starting 5-node contention test with on-the-fly generation"
     );
 
-    // Build network with pre-shared keys, generate triples/presignatures on the fly
+    // Build network with pre-shared keys, generate triples/presignatures on the fly.
+    // Use low concurrency limits to stress contention with 5 nodes.
     let network = MpcFixtureBuilder::new(NUM_NODES, THRESHOLD)
         .with_preshared_key()
         .with_node_min_triples(NODE_MIN_ARTIFACTS)
         .with_node_min_presignatures(NODE_MIN_ARTIFACTS)
+        .with_max_concurrent_introduction(8)
+        .with_max_concurrent_generation(8 * NUM_NODES * 4)
         .build()
         .await;
 
