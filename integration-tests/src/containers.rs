@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::path::Path;
+use std::path::PathBuf;
 
 use crate::cluster::spawner::ClusterSpawner;
 use crate::local::NodeEnvConfig;
@@ -592,7 +593,9 @@ pub struct Solana {
     pub rpc_port: u16,
     pub ws_port: u16,
     pub faucet_port: u16,
+    pub gossip_port: u16,
     pub rpc_client: SolanaRpcClient,
+    pub ledger_dir: PathBuf,
 }
 
 impl Solana {
@@ -600,6 +603,7 @@ impl Solana {
     pub const PROGRAM_ID: &str = "FR5pWwinRBn35GNhg7bsvw8Q13kRept2pm561DwZCQzT";
     /// Precompiled with https://github.com/sig-net/solana-signet-program @ 0.4.0
     pub const PROGRAM_PATH: &str = "chain-signatures/contract-sol/artifacts/chain_signatures.so";
+    const DEPLOY_AIRDROP_LAMPORTS: u64 = 10_000_000_000;
 
     /// Fixed keypair for deterministic program address/id. This is embedded in the declare_id!
     /// macro of our Solana program/contract.
@@ -638,9 +642,14 @@ impl Solana {
         let rpc_port = pick_preferred_or_unused_port(8899).await;
         let ws_port = rpc_port + 1;
         let faucet_port = pick_preferred_or_unused_port(9900).await;
+        let gossip_port = pick_preferred_or_unused_port(8000).await;
 
         let rpc_address = format!("http://127.0.0.1:{}", rpc_port);
         let ws_address = format!("ws://127.0.0.1:{}", ws_port);
+        let ledger_dir = std::env::temp_dir().join(format!(
+            "solana-test-ledger-{:032x}",
+            rand::random::<u128>()
+        ));
 
         // Start the solana-test-validator process
         let process = Command::new("solana-test-validator")
@@ -648,8 +657,12 @@ impl Solana {
             .arg(rpc_port.to_string())
             .arg("--faucet-port")
             .arg(faucet_port.to_string())
+            .arg("--gossip-port")
+            .arg(gossip_port.to_string())
             .arg("--bind-address")
             .arg("127.0.0.1")
+            .arg("--ledger")
+            .arg(&ledger_dir)
             .arg("--reset")
             .arg("--quiet")
             .spawn()
@@ -669,6 +682,17 @@ impl Solana {
             anchor_client::solana_sdk::commitment_config::CommitmentConfig::confirmed(),
         );
 
+        for attempt in 1..=20 {
+            match rpc_client.get_latest_blockhash().await {
+                Ok(_) => break,
+                Err(err) if attempt < 20 => {
+                    tracing::debug!(attempt, ?err, "waiting for solana validator RPC readiness");
+                    sleep(Duration::from_millis(500)).await;
+                }
+                Err(err) => panic!("solana-test-validator RPC did not become ready: {err}"),
+            }
+        }
+
         Self {
             process,
             rpc_address,
@@ -678,7 +702,9 @@ impl Solana {
             rpc_port,
             ws_port,
             faucet_port,
+            gossip_port,
             rpc_client,
+            ledger_dir,
         }
     }
 
@@ -689,6 +715,63 @@ impl Solana {
             rpc_ws_url: self.ws_address.clone(),
             program_address,
         }
+    }
+
+    async fn fund_payer_for_deploy(&self) -> anyhow::Result<()> {
+        let payer_pubkey = self.payer_keypair.pubkey();
+
+        for attempt in 1..=10 {
+            let balance = self
+                .rpc_client
+                .get_balance(&payer_pubkey)
+                .await
+                .unwrap_or_default();
+            if balance >= Self::DEPLOY_AIRDROP_LAMPORTS {
+                return Ok(());
+            }
+
+            tracing::info!(
+                attempt,
+                payer = %payer_pubkey,
+                "requesting solana airdrop for deployment..."
+            );
+
+            match self
+                .rpc_client
+                .request_airdrop(&payer_pubkey, Self::DEPLOY_AIRDROP_LAMPORTS)
+                .await
+            {
+                Ok(signature) => {
+                    tracing::debug!(%signature, "requested solana airdrop");
+                }
+                Err(err) if attempt < 10 => {
+                    tracing::warn!(attempt, ?err, "failed to request solana airdrop, retrying");
+                    sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+                Err(err) => {
+                    return Err(err).context("failed to request solana airdrop for deployment");
+                }
+            }
+
+            for _ in 0..10 {
+                let balance = self
+                    .rpc_client
+                    .get_balance(&payer_pubkey)
+                    .await
+                    .unwrap_or_default();
+                if balance >= Self::DEPLOY_AIRDROP_LAMPORTS {
+                    return Ok(());
+                }
+
+                sleep(Duration::from_millis(500)).await;
+            }
+        }
+
+        let balance = self.rpc_client.get_balance(&payer_pubkey).await.unwrap_or_default();
+        anyhow::bail!(
+            "payer was not funded for Solana deployment, current balance: {balance} lamports"
+        );
     }
 
     /// Deploy the Solana core contracts and return the program address
@@ -744,27 +827,9 @@ impl Solana {
             .write_to_file(&program_keypair_path)
             .unwrap();
 
-        // Request airdrop for the payer to fund deployment
-        tracing::info!(
-            ?payer_keypair_path,
-            "requesting solana airdrop for deployment..."
-        );
-        let airdrop_output = tokio::process::Command::new("solana")
-            .args([
-                "airdrop",
-                "10", // 10 SOL should be enough for whatever action
-                "--url",
-                &self.rpc_address,
-                "--keypair",
-                payer_keypair_path.to_str().unwrap(),
-            ])
-            .output()
-            .await?;
-
-        if !airdrop_output.status.success() {
-            let stderr = String::from_utf8_lossy(&airdrop_output.stderr);
-            tracing::warn!(?payer_keypair_path, "failed to airdrop SOL: {stderr}",);
-        }
+        self.fund_payer_for_deploy()
+            .await
+            .context("failed to fund payer before Solana program deployment")?;
 
         // Deploy the program using solana CLI
         tracing::info!("deploying solana program via CLI...");
@@ -1140,6 +1205,10 @@ impl Drop for Solana {
             tracing::warn!("failed to kill solana-test-validator process: {e}");
         } else {
             tracing::info!("solana-test-validator process terminated");
+        }
+
+        if let Err(e) = std::fs::remove_dir_all(&self.ledger_dir) {
+            tracing::debug!(?e, ledger_dir = ?self.ledger_dir, "failed to remove solana ledger directory");
         }
     }
 }

@@ -1,3 +1,4 @@
+use alloy::primitives::Address as AlloyAddress;
 use anyhow::{anyhow, Context, Result};
 use ethers::providers::Middleware;
 use ethers::types::{Address, BlockNumber, TransactionRequest, U256};
@@ -125,7 +126,7 @@ async fn test_signature_ethereum() -> Result<()> {
         .map_err(|_| anyhow!("invalid derived public key"))?;
     let verifying_key = VerifyingKey::from(&user_public_key);
     let encoded_user_pk = K256PublicKey::from(&verifying_key).to_encoded_point(false);
-    let expected_address = Address::from_slice(
+    let expected_address = AlloyAddress::from_slice(
         &alloy::primitives::keccak256(&encoded_user_pk.as_bytes()[1..])[12..],
     );
 
