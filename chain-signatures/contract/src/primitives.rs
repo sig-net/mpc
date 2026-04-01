@@ -133,17 +133,25 @@ impl Participants {
     }
 
     pub fn insert(&mut self, account_id: AccountId, participant_info: ParticipantInfo) {
-        if !self.account_to_participant_id.contains_key(&account_id) {
-            self.account_to_participant_id
-                .insert(account_id.clone(), self.next_id);
-            self.next_id += 1;
-        }
         self.participants.insert(account_id, participant_info);
+        self.reindex();
     }
 
     pub fn remove(&mut self, account_id: &AccountId) {
         self.participants.remove(account_id);
-        self.account_to_participant_id.remove(account_id);
+        self.reindex();
+    }
+
+    /// Rebuild `account_to_participant_id` so IDs are contiguous starting from 0,
+    /// following the BTreeMap's sorted order.
+    fn reindex(&mut self) {
+        self.account_to_participant_id = self
+            .participants
+            .keys()
+            .enumerate()
+            .map(|(id, account_id)| (account_id.clone(), id as u32))
+            .collect();
+        self.next_id = self.participants.len() as u32;
     }
 
     pub fn get(&self, account_id: &AccountId) -> Option<&ParticipantInfo> {
