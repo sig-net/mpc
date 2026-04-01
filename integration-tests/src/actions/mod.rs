@@ -7,12 +7,12 @@ use crate::cluster::Cluster;
 use anyhow::Context as _;
 use alloy::primitives::keccak256;
 use cait_sith::FullSignature;
-use elliptic_curve::sec1::ToEncodedPoint;
 use ethers::types::{Address as EthersAddress, H160, RecoveryMessage, Signature, SignatureError as EthersSignatureError};
 use ethers::utils::hash_message;
 use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, Scalar, Secp256k1};
 use mpc_contract::errors::SignError;
 use mpc_contract::primitives::SignRequest;
@@ -249,13 +249,13 @@ pub fn recover_eth_address(
 
 #[cfg(test)]
 mod tests {
-    use elliptic_curve::sec1::FromEncodedPoint as _;
-    use elliptic_curve::sec1::ToEncodedPoint as _;
     use ethers::types::{H160, Signature};
     use k256::ecdsa::VerifyingKey;
     use k256::elliptic_curve::ops::{Invert, Reduce};
     use k256::elliptic_curve::point::AffineCoordinates;
     use k256::elliptic_curve::ProjectivePoint;
+    use k256::elliptic_curve::sec1::FromEncodedPoint as _;
+    use k256::elliptic_curve::sec1::ToEncodedPoint as _;
     use k256::{AffinePoint, EncodedPoint, Scalar};
     use mpc_crypto::{derive_epsilon_near, derive_key, ScalarExt as _};
     use mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
@@ -367,7 +367,7 @@ mod tests {
             v: ethers_v,
         };
 
-        let verifying_user_pk = ecdsa::VerifyingKey::from(&user_pk_k256);
+        let verifying_user_pk = VerifyingKey::from(&user_pk_k256);
         let encoded_user_pk = k256::PublicKey::from(&verifying_user_pk).to_encoded_point(false);
         let user_address_ethers: H160 =
             H160::from_slice(&alloy::primitives::keccak256(&encoded_user_pk.as_bytes()[1..])[12..]);
@@ -411,7 +411,7 @@ mod tests {
         sig: &k256::ecdsa::Signature,
     ) -> Result<(), &'static str> {
         let q = ProjectivePoint::<k256::Secp256k1>::from(key.as_affine());
-        let z = ecdsa::hazmat::bits2field::<k256::Secp256k1>(msg).unwrap();
+        let z = k256::ecdsa::hazmat::bits2field::<k256::Secp256k1>(msg).unwrap();
 
         // &k256::FieldBytes::from_slice(&k256::Scalar::from_bytes(msg).to_bytes()),
         verify_prehashed(&q, &z, sig)

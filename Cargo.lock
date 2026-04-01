@@ -4253,7 +4253,7 @@ dependencies = [
  "sha2 0.10.9",
  "sha3",
  "thiserror 1.0.69",
- "uuid 0.8.2",
+ "uuid",
 ]
 
 [[package]]
@@ -6558,8 +6558,6 @@ dependencies = [
  "clap",
  "criterion",
  "deadpool-redis",
- "ecdsa",
- "elliptic-curve",
  "ethers",
  "futures-util",
  "hex",
@@ -6593,7 +6591,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber 0.3.20",
  "url 2.5.4",
- "uuid 1.18.1",
 ]
 
 [[package]]
@@ -17167,17 +17164,6 @@ checksum = "bc5cf98d8186244414c848017f0e2676b3fcb46807f6668a97dfe67359a3c4b7"
 dependencies = [
  "getrandom 0.2.16",
  "serde",
-]
-
-[[package]]
-name = "uuid"
-version = "1.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f87b8aa10b915a06587d0dec516c282ff295b475d94abf425d62b57710070a2"
-dependencies = [
- "getrandom 0.3.2",
- "js-sys",
- "wasm-bindgen",
 ]
 
 [[package]]

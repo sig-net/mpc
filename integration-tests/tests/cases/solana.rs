@@ -1,5 +1,5 @@
-use elliptic_curve::ops::Reduce;
 use integration_tests::cluster;
+use k256::elliptic_curve::ops::Reduce;
 use mpc_crypto::kdf::check_ec_signature;
 use mpc_crypto::{derive_epsilon_sol, derive_key, near_public_key_to_affine_point};
 use test_log::test;

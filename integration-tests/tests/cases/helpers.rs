@@ -1,8 +1,8 @@
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::PresignOutput;
-use elliptic_curve::CurveArithmetic;
 use k256::Secp256k1;
+use k256::elliptic_curve::CurveArithmetic;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;

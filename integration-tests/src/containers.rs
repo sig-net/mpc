@@ -17,9 +17,9 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use cait_sith::protocol::Participant;
 use cait_sith::triples::{TriplePub, TripleShare};
 use cait_sith::FullSignature;
-use elliptic_curve::rand_core::OsRng;
 use futures_util::StreamExt as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+use k256::elliptic_curve::rand_core::OsRng;
 use k256::Secp256k1;
 use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
@@ -733,9 +733,9 @@ impl Solana {
         // Create temporary files for keypairs
         let temp_dir = std::env::temp_dir();
         let payer_keypair_path =
-            temp_dir.join(format!("payer-keypair-{}.json", uuid::Uuid::new_v4()));
+            temp_dir.join(format!("payer-keypair-{:032x}.json", rand::random::<u128>()));
         let program_keypair_path =
-            temp_dir.join(format!("program-keypair-{}.json", uuid::Uuid::new_v4()));
+            temp_dir.join(format!("program-keypair-{:032x}.json", rand::random::<u128>()));
 
         self.payer_keypair
             .write_to_file(&payer_keypair_path)
