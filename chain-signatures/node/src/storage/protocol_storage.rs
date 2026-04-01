@@ -817,4 +817,15 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             Err(err) => Err(StorageError::RedisFailed(err.to_string())),
         }
     }
+
+    #[cfg(feature = "test-feature")]
+    pub async fn fetch_holders(&self, id: A::Id) -> Vec<Participant> {
+        use deadpool_redis::redis::AsyncCommands;
+        let mut conn = self.redis_pool.get().await.unwrap();
+        let holders_key = format!("{}:holders:{}", self.artifact_key, id);
+        let members: Vec<u32> = conn.smembers(&holders_key).await.unwrap();
+        let mut holders: Vec<Participant> = members.into_iter().map(Participant::from).collect();
+        holders.sort();
+        holders
+    }
 }

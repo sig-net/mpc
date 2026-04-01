@@ -497,7 +497,7 @@ impl MpcFixtureNodeBuilder {
                 me: account_id.clone(),
                 protocol_state_tx,
             },
-            context.contract_state,
+            context.contract_state.clone(),
             mesh_rx.clone(),
         ));
 
@@ -513,6 +513,20 @@ impl MpcFixtureNodeBuilder {
             self.messaging.filter,
         );
 
+        // --- SyncChannel and SyncTask setup ---
+        use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
+        use mpc_node::protocol::sync::SyncTask;
+        let node_client = NodeClient::new(&NodeClientOptions::default());
+        let (sync_channel, sync_task) = SyncTask::new(
+            &node_client,
+            triple_storage.clone(),
+            presignature_storage.clone(),
+            mesh_rx.clone(),
+            context.contract_state,
+            mpc_node::protocol::sync::SyncTask::synced_nodes_channel().0,
+        );
+        let sync_task_handle = tokio::spawn(sync_task.run());
+
         let mut node = MpcFixtureNode {
             me: self.me,
             state: node_state,
@@ -523,6 +537,8 @@ impl MpcFixtureNodeBuilder {
             triple_storage,
             presignature_storage,
             backlog: Backlog::new(),
+            sync_channel,
+            _sync_task_handle: sync_task_handle,
             web_handle: None,
         };
 
