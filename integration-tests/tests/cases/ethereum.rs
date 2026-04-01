@@ -1,7 +1,5 @@
 use alloy::primitives::{Address as AlloyAddress, U256 as AlloyU256};
 use anyhow::{anyhow, Context, Result};
-use ethers::providers::Middleware;
-use ethers::types::BlockNumber;
 use integration_tests::cluster::Cluster;
 use integration_tests::{actions, cluster, eth};
 use k256::ecdsa::VerifyingKey;
@@ -53,11 +51,9 @@ async fn test_signature_ethereum() -> Result<()> {
         .value(eth::to_ethers_u256(AlloyU256::from(1_u64)));
     let pending = call.send().await?;
     let receipt = pending.await?.context("sign transaction failed")?;
-    let from_block = BlockNumber::Number(
-        receipt
-            .block_number
-            .context("missing block number in receipt")?,
-    );
+    let from_block = receipt
+        .block_number
+        .context("missing block number in receipt")?;
 
     let expected_request_id = eth::compute_request_id(
         requester,
@@ -196,11 +192,9 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
         .value(eth::to_ethers_u256(AlloyU256::from(1_u64)));
     let pending = call.send().await?;
     let receipt = pending.await?.context("sign transaction failed")?;
-    let from_block = BlockNumber::Number(
-        receipt
-            .block_number
-            .context("missing block number in receipt")?,
-    );
+    let from_block = receipt
+        .block_number
+        .context("missing block number in receipt")?;
 
     let expected_request_id = eth::compute_request_id(
         requester,
@@ -444,11 +438,8 @@ async fn produce_empty_eth_blocks(
         let tx = eth::value_transfer(sink, AlloyU256::ZERO)
             .gas(eth::to_ethers_u256(AlloyU256::from(21_000_u64)));
 
-        client
-            .send_transaction(tx, None)
-            .await?
-            .await?
-            .context("empty block-pumping transaction failed")?;
+        eth::send_transaction_and_wait(client, tx, "empty block-pumping transaction failed")
+            .await?;
     }
 
     Ok(())

@@ -1,6 +1,5 @@
 use alloy::primitives::{Address as AlloyAddress, B256, U256 as AlloyU256};
 use anyhow::{Context, Result};
-use ethers::middleware::Middleware;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers::EthereumSandbox;
 use integration_tests::eth::{
@@ -65,11 +64,13 @@ impl EthereumTestEnvironment {
         // (0.001 ETH is plenty for these tests.)
         let fund_tx =
             eth::value_transfer(pumper_address, AlloyU256::from(1_000_000_000_000_000u64));
-        let pending_fund = signer.send_transaction(fund_tx, None).await?;
-        let _ = pending_fund
-            .await
-            .context("failed to mine block pumper funding transaction")?
-            .context("block pumper funding transaction dropped from mempool")?;
+        eth::send_transaction_and_wait(
+            &signer,
+            fund_tx,
+            "block pumper funding transaction dropped from mempool",
+        )
+        .await
+        .context("failed to mine block pumper funding transaction")?;
 
         let block_pumper = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -79,17 +80,22 @@ impl EthereumTestEnvironment {
                 interval.tick().await;
                 let tx = eth::value_transfer(wallet, AlloyU256::ZERO);
 
-                match pumper_client.send_transaction(tx, None).await {
-                    Ok(pending) => {
-                        // Await mining so each tick reliably corresponds to a mined block.
-                        // If it takes too long, just continue; the next iteration will try again.
-                        let _ = tokio::time::timeout(Duration::from_secs(5), pending).await;
-                    }
-                    Err(err) => {
+                match tokio::time::timeout(
+                    Duration::from_secs(5),
+                    eth::send_transaction_and_wait(
+                        &pumper_client,
+                        tx,
+                        "block pumper transaction dropped from mempool",
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
                         tracing::debug!(?err, "block pumper failed to send tx");
-                        // Brief backoff in case the node is restarting.
                         tokio::time::sleep(Duration::from_millis(250)).await;
                     }
+                    Err(_) => {}
                 }
             }
         });

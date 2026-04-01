@@ -1,9 +1,9 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use alloy::primitives::{keccak256, Address as AlloyAddress, U256 as AlloyU256};
 use alloy::sol_types::SolEvent;
 use ethers::contract::abigen;
 use ethers::middleware::SignerMiddleware;
-use ethers::providers::{Http, Provider};
+use ethers::providers::{Http, Middleware, Provider};
 use ethers::signers::{LocalWallet, Signer};
 use ethers::types::{Address as EthersAddress, H256, TransactionRequest, U256 as EthersU256};
 use rand::thread_rng;
@@ -75,6 +75,20 @@ pub fn value_transfer(to: Address, value: U256) -> TransactionRequest {
     TransactionRequest::new()
         .to(to_ethers_address(to))
         .value(to_ethers_u256(value))
+}
+
+pub async fn send_transaction_and_wait(
+    client: &Arc<SandboxMiddleware>,
+    tx: TransactionRequest,
+    dropped_message: &'static str,
+) -> Result<()> {
+    client
+        .send_transaction(tx, None)
+        .await?
+        .await?
+        .context(dropped_message)?;
+
+    Ok(())
 }
 
 pub fn signature_from_coordinates(
