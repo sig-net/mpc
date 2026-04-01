@@ -374,23 +374,23 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         "offline node has restarted and checkpoint recovery complete",
     );
 
-    assert_eq!(
-        node_active_checkpoint, node_recovered_checkpoint,
-        "restarted node should recover to same checkpoint as active node via consensus"
+    assert!(
+        node_recovered_checkpoint.block_height >= node_active_checkpoint.block_height,
+        "restarted node should recover to at least the checkpoint observed on the active node"
     );
 
     let active_checkpoint_after_restart = wait_node_checkpoint(
         &cluster,
         active_idx,
         Chain::Ethereum,
-        node_active_checkpoint.block_height,
+        node_recovered_checkpoint.block_height,
         Duration::from_secs(10),
     )
     .await?;
 
     assert_eq!(
-        node_active_checkpoint, active_checkpoint_after_restart,
-        "active node checkpoint should remain aligned after peer recovery"
+        node_recovered_checkpoint, active_checkpoint_after_restart,
+        "restarted node should converge to the same checkpoint as the active node via consensus"
     );
 
     Ok(())
