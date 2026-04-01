@@ -560,13 +560,13 @@ async fn wait_for_rpc(endpoint: &str) -> anyhow::Result<()> {
 }
 
 fn derive_secret_key(mnemonic: &str) -> anyhow::Result<String> {
-    use ethers::signers::{coins_bip39::English, MnemonicBuilder};
+    use alloy::signers::local::{coins_bip39::English, MnemonicBuilder};
 
-    let wallet = MnemonicBuilder::<English>::default()
+    let signer = MnemonicBuilder::<English>::default()
         .phrase(mnemonic)
         .derivation_path("m/44'/60'/0'/0/0")?
         .build()?;
-    let bytes = wallet.signer().to_bytes();
+    let bytes = signer.to_bytes();
 
     Ok(format!("0x{}", hex::encode(bytes)))
 }

@@ -17,7 +17,6 @@ use crate::containers::DockerClient;
 use anyhow::Context as _;
 use cluster::spawner::ClusterSpawner;
 use deadpool_redis::Pool;
-use ethers::types::{Address, U256};
 use futures_util::future::join_all;
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
@@ -314,8 +313,8 @@ impl Drop for Nodes {
 
 pub struct EthereumContext {
     pub sandbox: containers::EthereumSandbox,
-    pub contract_address: Address,
-    pub deployer_address: Address,
+    pub contract_address: eth::Address,
+    pub deployer_address: eth::Address,
 }
 
 pub struct Context {
@@ -362,7 +361,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             sandbox.chain_id,
         )?;
         let contract_address =
-            eth::deploy_chain_signatures(client, deployer_address, U256::zero()).await?;
+            eth::deploy_chain_signatures(client, deployer_address, eth::U256::ZERO).await?;
 
         let rpc_endpoint = if cfg!(feature = "docker-test") {
             sandbox.internal_http_endpoint.clone()
@@ -370,7 +369,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             sandbox.external_http_endpoint.clone()
         };
 
-        let contract_address_hex = hex::encode(contract_address);
+        let contract_address_hex = hex::encode(contract_address.as_slice());
         spawner.cfg.eth = Some(EthConfig {
             account_sk: sandbox.secret_key.clone(),
             consensus_rpc_http_url: rpc_endpoint.clone(),

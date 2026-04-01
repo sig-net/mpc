@@ -1,10 +1,6 @@
-use alloy::primitives::{Address as AlloyAddress, B256};
+use alloy::primitives::{Address as AlloyAddress, B256, U256 as AlloyU256};
 use anyhow::{Context, Result};
-use ethers::middleware::{Middleware, SignerMiddleware};
-use ethers::providers::{Http, Provider};
-use ethers::signers::{LocalWallet, Signer};
-use ethers::types::TransactionRequest;
-use ethers::types::{Address, H256, U256};
+use ethers::middleware::Middleware;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers::EthereumSandbox;
 use integration_tests::eth::{
@@ -17,13 +13,12 @@ use mpc_node::protocol::Chain;
 use mpc_node::stream::ops::SignatureRespondedEvent;
 use mpc_node::stream::{ChainEvent, ChainStream};
 use mpc_primitives::{SignId, LATEST_MPC_KEY_VERSION};
-use rand::thread_rng;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 
-fn signature_deposit() -> U256 {
-    U256::from(1u64)
+fn signature_deposit() -> AlloyU256 {
+    AlloyU256::from(1u64)
 }
 
 // Integration tests for EthereumStream
@@ -35,8 +30,8 @@ struct EthereumTestEnvironment {
     _spawner: ClusterSpawner,
     sandbox: EthereumSandbox,
     signer: Arc<eth::SandboxMiddleware>,
-    wallet: Address,
-    contract_address: Address,
+    wallet: AlloyAddress,
+    contract_address: AlloyAddress,
     _block_pumper: tokio::task::JoinHandle<()>,
 }
 
@@ -63,17 +58,13 @@ impl EthereumTestEnvironment {
         // 1) Generate a fresh, independent funded account.
         // 2) Fund it once from the sandbox deployer wallet.
         // 3) Use it to send a simple empty ETH transfer once per second.
-        let pumper_wallet = LocalWallet::new(&mut thread_rng()).with_chain_id(sandbox.chain_id);
-        let pumper_address = pumper_wallet.address();
-        let pumper_provider = Provider::<Http>::try_from(sandbox.external_http_endpoint.as_str())?;
-        let pumper_client: Arc<SignerMiddleware<Provider<Http>, LocalWallet>> =
-            Arc::new(SignerMiddleware::new(pumper_provider, pumper_wallet));
+        let (pumper_client, pumper_address) =
+            eth::random_client(&sandbox.external_http_endpoint, sandbox.chain_id)?;
 
         // Fund the pumper account with a small amount of ETH for gas.
         // (0.001 ETH is plenty for these tests.)
-        let fund_tx = TransactionRequest::new()
-            .to(pumper_address)
-            .value(U256::from(1_000_000_000_000_000u64));
+        let fund_tx =
+            eth::value_transfer(pumper_address, AlloyU256::from(1_000_000_000_000_000u64));
         let pending_fund = signer.send_transaction(fund_tx, None).await?;
         let _ = pending_fund
             .await
@@ -86,7 +77,7 @@ impl EthereumTestEnvironment {
 
             loop {
                 interval.tick().await;
-                let tx = TransactionRequest::new().to(wallet).value(U256::zero());
+                let tx = eth::value_transfer(wallet, AlloyU256::ZERO);
 
                 match pumper_client.send_transaction(tx, None).await {
                     Ok(pending) => {
@@ -135,7 +126,10 @@ impl EthereumTestEnvironment {
     }
 
     fn contract(&self) -> ChainSignaturesContract<Arc<eth::SandboxMiddleware>> {
-        ChainSignaturesContract::new(self.contract_address, self.signer.clone().into())
+        ChainSignaturesContract::new(
+            eth::to_ethers_address(self.contract_address),
+            self.signer.clone().into(),
+        )
     }
 }
 
@@ -143,7 +137,7 @@ async fn submit_sign_request(
     ctx: &EthereumTestEnvironment,
     payload: [u8; 32],
     path: &str,
-) -> Result<H256> {
+) -> Result<()> {
     let contract = ctx.contract();
     let sign_request = SignRequest {
         payload,
@@ -154,13 +148,16 @@ async fn submit_sign_request(
         params: "".to_string(),
     };
 
-    let call = contract.sign(sign_request).value(signature_deposit());
+    let call = contract
+        .sign(sign_request)
+        .value(eth::to_ethers_u256(signature_deposit()));
     let pending_tx = call.send().await?;
     let receipt = pending_tx
         .await
         .context("failed to mine sign transaction")?
         .context("sign transaction dropped from mempool")?;
-    Ok(receipt.transaction_hash)
+    let _ = receipt.transaction_hash;
+    Ok(())
 }
 
 async fn next_event_within(client: &mut EthereumStream, duration: Duration) -> Result<ChainEvent> {
@@ -244,7 +241,7 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
         output_deserialization_schema: vec![],
         respond_serialization_schema: vec![],
         request_id: [7u8; 32],
-        from_address: AlloyAddress::from_slice(ctx.wallet.as_bytes()),
+        from_address: AlloyAddress::from_slice(ctx.wallet.as_slice()),
         nonce: 0,
         status: mpc_node::sign_bidirectional::PendingRequestStatus::PendingExecution,
     };
@@ -454,17 +451,13 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     let x = enc.x().expect("generator must have x coordinate");
     let y = enc.y().expect("generator must have y coordinate");
 
-    let big_r = chain_signatures_contract::AffinePoint {
-        x: U256::from_big_endian(x),
-        y: U256::from_big_endian(y),
-    };
     let expected_s_bytes = expected_s.to_bytes();
-    let s = U256::from_big_endian(expected_s_bytes.as_slice());
-    let signature = chain_signatures_contract::Signature {
-        big_r,
-        s,
-        recovery_id: expected_recovery_id,
-    };
+    let signature = eth::signature_from_coordinates(
+        x,
+        y,
+        expected_s_bytes.as_slice(),
+        expected_recovery_id,
+    );
 
     let response = chain_signatures_contract::Response {
         request_id: sign_req.id.request_id,
@@ -482,12 +475,7 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     // Sanity-check that the contract emitted the SignatureResponded log we're expecting.
     let logs = receipt.logs.clone();
     assert!(!logs.is_empty(), "respond transaction produced no logs");
-    let sig_topic = H256::from_slice(
-        alloy::primitives::keccak256(
-            "SignatureResponded(bytes32,address,((uint256,uint256),uint256,uint8))",
-        )
-        .as_slice(),
-    );
+    let sig_topic = eth::signature_responded_topic();
     assert_eq!(logs[0].topics[0], sig_topic, "unexpected event emitted");
 
     // Verify the indexer emits the Respond event with matching data.

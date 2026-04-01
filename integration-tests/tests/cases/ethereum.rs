@@ -1,7 +1,7 @@
-use alloy::primitives::Address as AlloyAddress;
+use alloy::primitives::{Address as AlloyAddress, U256 as AlloyU256};
 use anyhow::{anyhow, Context, Result};
 use ethers::providers::Middleware;
-use ethers::types::{Address, BlockNumber, TransactionRequest, U256};
+use ethers::types::BlockNumber;
 use integration_tests::cluster::Cluster;
 use integration_tests::{actions, cluster, eth};
 use k256::ecdsa::VerifyingKey;
@@ -30,7 +30,8 @@ async fn test_signature_ethereum() -> Result<()> {
     let contract_address = eth_ctx.contract_address;
 
     let (client, requester) = eth::client(&endpoint, &secret_key, chain_id)?;
-    let contract = eth::ChainSignaturesContract::new(contract_address, client.clone());
+    let contract =
+        eth::ChainSignaturesContract::new(eth::to_ethers_address(contract_address), client.clone());
 
     let payload = [7u8; 32];
     let path = "test";
@@ -47,7 +48,9 @@ async fn test_signature_ethereum() -> Result<()> {
         params: params.to_string(),
     };
 
-    let call = contract.sign(request).value(U256::from(1_u64));
+    let call = contract
+        .sign(request)
+        .value(eth::to_ethers_u256(AlloyU256::from(1_u64)));
     let pending = call.send().await?;
     let receipt = pending.await?.context("sign transaction failed")?;
     let from_block = BlockNumber::Number(
@@ -61,7 +64,7 @@ async fn test_signature_ethereum() -> Result<()> {
         payload,
         path,
         LATEST_MPC_KEY_VERSION,
-        U256::from(chain_id),
+        AlloyU256::from(chain_id),
         algo,
         dest,
         params,
@@ -75,7 +78,8 @@ async fn test_signature_ethereum() -> Result<()> {
             .query()
             .await?;
         if let Some(event) = events.into_iter().find(|event| {
-            event.request_id == expected_request_id[..] && event.responder == requester
+            event.request_id == expected_request_id[..]
+                && event.responder == eth::to_ethers_address(requester)
         }) {
             matching_event = Some(event);
             break;
@@ -159,7 +163,8 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     let contract_address = eth_ctx.contract_address;
 
     let (client, requester) = eth::client(&endpoint, &secret_key, chain_id)?;
-    let contract = eth::ChainSignaturesContract::new(contract_address, client.clone());
+    let contract =
+        eth::ChainSignaturesContract::new(eth::to_ethers_address(contract_address), client.clone());
 
     // Get initial checkpoint state
     let node_idx = 0;
@@ -186,7 +191,9 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
         params: params.to_string(),
     };
 
-    let call = contract.sign(request).value(U256::from(1_u64));
+    let call = contract
+        .sign(request)
+        .value(eth::to_ethers_u256(AlloyU256::from(1_u64)));
     let pending = call.send().await?;
     let receipt = pending.await?.context("sign transaction failed")?;
     let from_block = BlockNumber::Number(
@@ -200,7 +207,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
         payload,
         path,
         LATEST_MPC_KEY_VERSION,
-        U256::from(chain_id),
+        AlloyU256::from(chain_id),
         algo,
         dest,
         params,
@@ -238,7 +245,8 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
             .query()
             .await?;
         if let Some(event) = events.into_iter().find(|event| {
-            event.request_id == expected_request_id[..] && event.responder == requester
+            event.request_id == expected_request_id[..]
+                && event.responder == eth::to_ethers_address(requester)
         }) {
             matching_event = Some(event);
             break;
@@ -305,7 +313,10 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         &eth_ctx.sandbox.secret_key,
         eth_ctx.sandbox.chain_id,
     )?;
-    let eth_contract = eth::ChainSignaturesContract::new(eth_ctx.contract_address, eth_client);
+    let eth_contract = eth::ChainSignaturesContract::new(
+        eth::to_ethers_address(eth_ctx.contract_address),
+        eth_client,
+    );
 
     // Produce a few sign requests up front so nodes create initial checkpoints
     for i in 0..5 {
@@ -413,7 +424,7 @@ async fn submit_eth_sign_request(
 
     contract
         .sign(request)
-        .value(U256::from(1_u64))
+        .value(eth::to_ethers_u256(AlloyU256::from(1_u64)))
         .send()
         .await?
         .await?
@@ -427,13 +438,11 @@ async fn produce_empty_eth_blocks(
     block_count: u64,
 ) -> anyhow::Result<()> {
     // Use a non-contract sink address so these transactions only advance block height.
-    let sink = Address::from_low_u64_be(0xdead_beef);
+    let sink = eth::address_from_low_u64_be(0xdead_beef);
 
     for _ in 0..block_count {
-        let tx = TransactionRequest::new()
-            .to(sink)
-            .value(U256::zero())
-            .gas(U256::from(21_000_u64));
+        let tx = eth::value_transfer(sink, AlloyU256::ZERO)
+            .gas(eth::to_ethers_u256(AlloyU256::from(21_000_u64)));
 
         client
             .send_transaction(tx, None)
