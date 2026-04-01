@@ -12,7 +12,7 @@ use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PendingRequestStatus};
 use crate::stream::ExecutionOutcome;
 
-use anchor_lang::prelude::Pubkey;
+use anchor_client::anchor_lang::prelude::Pubkey;
 use k256::Scalar;
 use mpc_primitives::{SignId, Signature};
 use std::str::FromStr;

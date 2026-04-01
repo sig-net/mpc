@@ -11,9 +11,8 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use alloy_sol_types::SolValue;
-use anchor_client::anchor_lang::AnchorDeserialize;
-use anchor_lang::solana_program::keccak;
-use anchor_lang::Discriminator;
+use anchor_client::anchor_lang::{self, AnchorDeserialize, Discriminator};
+use anchor_client::anchor_lang::solana_program::keccak;
 use ethabi::{encode, Token};
 use futures_util::StreamExt;
 use k256::elliptic_curve::sec1::FromEncodedPoint;

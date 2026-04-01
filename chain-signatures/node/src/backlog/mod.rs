@@ -781,7 +781,7 @@ mod tests {
         sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PendingRequestStatus},
     };
     use alloy::primitives::{Address, B256};
-    use anchor_lang::prelude::Pubkey;
+    use anchor_client::anchor_lang::prelude::Pubkey;
     use mpc_primitives::SignId;
     use signet_program::SignBidirectionalEvent;
 

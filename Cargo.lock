@@ -7945,7 +7945,6 @@ dependencies = [
  "alloy-signer-local",
  "alloy-sol-types",
  "anchor-client",
- "anchor-lang",
  "anyhow",
  "async-trait",
  "axum",
