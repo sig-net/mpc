@@ -9,7 +9,7 @@ use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest};
 use mpc_node::stream::{ChainEvent, ChainStream};
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
-use solana_sdk::signer::Signer;
+use anchor_client::solana_sdk::signer::Signer;
 use tokio::sync::watch;
 use tokio::time::timeout;
 
@@ -198,7 +198,7 @@ async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {
 
     // Submit bidirectional sign request
     let serialized_tx = vec![1, 2, 3, 4];
-    let callback_program = solana_sdk::pubkey::Pubkey::new_unique();
+    let callback_program = anchor_client::solana_sdk::pubkey::Pubkey::new_unique();
 
     solana
         .sign_bidirectional(

@@ -16,7 +16,7 @@ use secp256k1::PublicKey as SecpPublicKey;
 use secp256k1::{Secp256k1 as LibSecp256k1, SecretKey as SecpSecretKey};
 use serde_json::json;
 use sha3::{Digest, Keccak256};
-use solana_sdk::signer::Signer as _;
+use anchor_client::solana_sdk::signer::Signer as _;
 use std::time::Duration;
 use test_log::test;
 use tokio::time::sleep;

@@ -25,14 +25,18 @@ use near_fetch::ops::AsyncTransactionStatus;
 use near_workspaces::types::{Gas, NearToken};
 use near_workspaces::Account;
 use rand::Rng;
-use solana_client::nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient};
-use solana_client::rpc_config::{
+use anchor_client::solana_client::nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient};
+use anchor_client::solana_client::rpc_config::{
     RpcTransactionConfig, RpcTransactionLogsConfig, RpcTransactionLogsFilter,
 };
-use solana_sdk::commitment_config::CommitmentConfig;
-use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signature::Signature as SolSignature;
-use solana_sdk::signer::Signer as _;
+use anchor_client::solana_sdk::commitment_config::CommitmentConfig;
+use anchor_client::solana_sdk::pubkey::Pubkey;
+use anchor_client::solana_sdk::signature::Signature as SolSignature;
+use anchor_client::solana_sdk::signer::Signer as _;
+use solana_transaction_status_client_types::{
+    option_serializer::OptionSerializer, UiInstruction, UiParsedInstruction,
+    UiTransactionEncoding,
+};
 use tokio::sync::oneshot;
 use tokio::time::sleep;
 
@@ -129,7 +133,7 @@ impl fmt::Debug for SignOutcome {
 struct SolanaSignArgs {
     transaction_data: Option<Vec<u8>>,
     caip2_id: String,
-    program_id: Option<solana_sdk::pubkey::Pubkey>,
+    program_id: Option<anchor_client::solana_sdk::pubkey::Pubkey>,
     output_deserialization_schema: Vec<u8>,
     respond_serialization_schema: Vec<u8>,
 }
@@ -610,7 +614,7 @@ async fn wait_for_signature_responded_event(
                 }
 
                 let sig_text = &response.value.signature;
-                let Ok(tx_signature) = solana_sdk::signature::Signature::from_str(sig_text) else {
+                let Ok(tx_signature) = anchor_client::solana_sdk::signature::Signature::from_str(sig_text) else {
                     tracing::warn!(tx_signature = sig_text, "invalid solana signature string in respond logs");
                     continue;
                 };
@@ -657,16 +661,14 @@ async fn wait_for_signature_responded_event(
 
 async fn parse_signature_responded_events(
     rpc_client: &RpcClient,
-    signature: &solana_sdk::signature::Signature,
+    signature: &anchor_client::solana_sdk::signature::Signature,
     program_id: &Pubkey,
 ) -> anyhow::Result<Vec<SignatureRespondedEvent>> {
-    use solana_transaction_status::{UiInstruction, UiParsedInstruction};
-
     let tx = rpc_client
         .get_transaction_with_config(
             signature,
             RpcTransactionConfig {
-                encoding: Some(solana_transaction_status::UiTransactionEncoding::JsonParsed),
+                encoding: Some(UiTransactionEncoding::JsonParsed),
                 commitment: Some(CommitmentConfig::confirmed()),
                 max_supported_transaction_version: Some(0),
             },
@@ -678,7 +680,7 @@ async fn parse_signature_responded_events(
     };
 
     let inner_sets = match meta.inner_instructions {
-        solana_transaction_status::option_serializer::OptionSerializer::Some(inner) => inner,
+        OptionSerializer::Some(inner) => inner,
         _ => return Ok(Vec::new()),
     };
 
@@ -696,7 +698,7 @@ async fn parse_signature_responded_events(
                 continue;
             }
 
-            let Ok(ix_data) = solana_sdk::bs58::decode(&parsed.data).into_vec() else {
+            let Ok(ix_data) = anchor_client::solana_sdk::bs58::decode(&parsed.data).into_vec() else {
                 tracing::warn!(
                     "failed to decode inner instruction data for SignatureRespondedEvent"
                 );

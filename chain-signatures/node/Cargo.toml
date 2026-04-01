@@ -69,9 +69,7 @@ tracing-subscriber.workspace = true
 url.workspace = true
 ethabi.workspace = true
 anchor-client.workspace = true
-solana-sdk.workspace = true
-solana-transaction-status.workspace = true
-solana-client.workspace = true
+solana-transaction-status-client-types.workspace = true
 futures-util.workspace = true
 parity-scale-codec.workspace = true
 

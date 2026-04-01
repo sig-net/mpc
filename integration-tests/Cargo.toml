@@ -35,9 +35,7 @@ rlp = "0.5"
 # solana dependencies
 anchor-client.workspace = true
 signet-program.workspace = true
-solana-sdk.workspace = true
-solana-client.workspace = true
-solana-transaction-status.workspace = true
+solana-transaction-status-client-types.workspace = true
 
 # crypto dependencies
 ecdsa = "0.16.9"

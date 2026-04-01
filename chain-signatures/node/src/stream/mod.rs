@@ -238,7 +238,7 @@ mod tests {
         let sig_responded =
             SignatureRespondedEvent::Solana(signet_program::SignatureRespondedEvent {
                 request_id: sign_id.request_id,
-                responder: solana_sdk::pubkey::Pubkey::new_unique(),
+                responder: anchor_client::solana_sdk::pubkey::Pubkey::new_unique(),
                 signature: signet_program::Signature {
                     big_r: signet_program::AffinePoint {
                         x: [0u8; 32],
@@ -359,7 +359,7 @@ mod tests {
             path: "test".to_string(),
             key_version: 1,
         };
-        let program_id = solana_sdk::pubkey::Pubkey::new_unique();
+        let program_id = anchor_client::solana_sdk::pubkey::Pubkey::new_unique();
         // Minimal legacy unsigned Ethereum tx encoded as RLP so sign_and_hash can parse it
         let mut rlp_s = rlp::RlpStream::new_list(9);
         rlp_s.append(&0u64); // nonce
@@ -429,7 +429,7 @@ mod tests {
 
         let sig_responded = SRE::Solana(signet_program::SignatureRespondedEvent {
             request_id: sign_id.request_id,
-            responder: solana_sdk::pubkey::Pubkey::new_unique(),
+            responder: anchor_client::solana_sdk::pubkey::Pubkey::new_unique(),
             signature: signet_program::Signature {
                 big_r: signet_program::AffinePoint {
                     x: big_r_x,
@@ -497,7 +497,7 @@ mod tests {
         // RespondBidirectional should also carry a valid signature
         let respond_bidirectional = RBE::Solana(signet_program::RespondBidirectionalEvent {
             request_id: sign_id.request_id,
-            responder: solana_sdk::pubkey::Pubkey::new_unique(),
+            responder: anchor_client::solana_sdk::pubkey::Pubkey::new_unique(),
             serialized_output: vec![],
             signature: signet_program::Signature {
                 big_r: signet_program::AffinePoint {

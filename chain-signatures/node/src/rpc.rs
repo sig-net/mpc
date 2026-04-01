@@ -8,9 +8,9 @@ use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, SignRequestType};
 use crate::util::AffinePointExt as _;
 
-use solana_sdk::commitment_config::CommitmentConfig;
-use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signer::keypair::Keypair;
+use anchor_client::solana_sdk::commitment_config::CommitmentConfig;
+use anchor_client::solana_sdk::pubkey::Pubkey;
+use anchor_client::solana_sdk::signer::keypair::Keypair;
 
 use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
@@ -1615,7 +1615,7 @@ use signet_program::instruction::Respond as SolanaRespond;
 use signet_program::instruction::RespondBidirectional as SolanaRespondBidirectional;
 use signet_program::AffinePoint as SolanaContractAffinePoint;
 use signet_program::Signature as SolanaContractSignature;
-use solana_sdk::signature::Signer as SolanaSigner;
+use anchor_client::solana_sdk::signature::Signer as SolanaSigner;
 async fn try_publish_sol(
     sol: &SolanaClient,
     action: &PublishAction,

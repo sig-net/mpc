@@ -33,12 +33,12 @@ use near_workspaces::Account;
 use reqwest::Client;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
-use solana_sdk::instruction::AccountMeta;
-use solana_sdk::pubkey::Pubkey as SolanaPubkey;
-use solana_sdk::signature::Keypair as SolanaKeypair;
-use solana_sdk::signature::{EncodableKey as _, Signature as SolanaSignature};
-use solana_sdk::signer::{SeedDerivable as _, Signer as _};
+use anchor_client::solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
+use anchor_client::solana_sdk::instruction::AccountMeta;
+use anchor_client::solana_sdk::pubkey::Pubkey as SolanaPubkey;
+use anchor_client::solana_sdk::signature::Keypair as SolanaKeypair;
+use anchor_client::solana_sdk::signature::{EncodableKey as _, Signature as SolanaSignature};
+use anchor_client::solana_sdk::signer::{SeedDerivable as _, Signer as _};
 use testcontainers::core::ExecCommand;
 use testcontainers::ContainerAsync;
 use testcontainers::{
@@ -666,7 +666,7 @@ impl Solana {
         let payer_keypair = SolanaKeypair::from_seed(&[102u8; 32]).unwrap();
         let rpc_client = SolanaRpcClient::new_with_commitment(
             rpc_address.clone(),
-            solana_sdk::commitment_config::CommitmentConfig::confirmed(),
+            anchor_client::solana_sdk::commitment_config::CommitmentConfig::confirmed(),
         );
 
         Self {
@@ -858,7 +858,7 @@ impl Solana {
         // Create initialize instruction manually
         let mut data = Vec::new();
         // Add discriminator for initialize function (first 8 bytes of sha256("global:initialize"))
-        let discriminator = solana_sdk::hash::hash(b"global:initialize").to_bytes();
+        let discriminator = anchor_client::solana_sdk::hash::hash(b"global:initialize").to_bytes();
         data.extend_from_slice(&discriminator[..8]);
 
         // Serialize arguments using borsh: signature_deposit (u64) and chain_id (String)
@@ -867,18 +867,18 @@ impl Solana {
         chain_id.serialize(&mut args_data)?;
         data.extend_from_slice(&args_data);
 
-        let instruction = solana_sdk::instruction::Instruction {
+        let instruction = anchor_client::solana_sdk::instruction::Instruction {
             program_id,
             accounts: vec![
                 AccountMeta::new(program_state_pda, false),
                 AccountMeta::new(payer.pubkey(), true),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                AccountMeta::new_readonly(anchor_client::solana_sdk::system_program::id(), false),
             ],
             data,
         };
 
         let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
-        let transaction = solana_sdk::transaction::Transaction::new_signed_with_payer(
+        let transaction = anchor_client::solana_sdk::transaction::Transaction::new_signed_with_payer(
             &[instruction],
             Some(&payer.pubkey()),
             &[&*payer],
@@ -942,7 +942,7 @@ impl Solana {
 
         // Create the instruction with correct accounts matching the external contract
         // note that #[event_cpi] requires additional accounts
-        let instruction = solana_sdk::instruction::Instruction {
+        let instruction = anchor_client::solana_sdk::instruction::Instruction {
             program_id,
             accounts: vec![
                 // program_state account (writable, not signer)
@@ -952,7 +952,7 @@ impl Solana {
                 // fee_payer (writable, signer) - same as requester for simplicity
                 AccountMeta::new(self.payer_keypair.pubkey(), true),
                 // system_program (readonly, not signer)
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                AccountMeta::new_readonly(anchor_client::solana_sdk::system_program::id(), false),
                 // event_authority (readonly, not signer) - required for #[event_cpi]
                 AccountMeta::new_readonly(event_authority_pda, false),
                 // program account (readonly, not signer) - required for #[event_cpi]
@@ -963,7 +963,7 @@ impl Solana {
 
         // Create and send the transaction to solana
         let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
-        let mut transaction = solana_sdk::transaction::Transaction::new_with_payer(
+        let mut transaction = anchor_client::solana_sdk::transaction::Transaction::new_with_payer(
             &[instruction],
             Some(&self.payer_keypair.pubkey()),
         );
@@ -1030,14 +1030,14 @@ impl Solana {
         };
         args.serialize(&mut data)?;
 
-        let instruction = solana_sdk::instruction::Instruction {
+        let instruction = anchor_client::solana_sdk::instruction::Instruction {
             program_id: contract_program_id,
             accounts: vec![
                 AccountMeta::new(program_state_pda, false),
                 AccountMeta::new(self.payer_keypair.pubkey(), true),
                 AccountMeta::new(self.payer_keypair.pubkey(), true),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-                AccountMeta::new_readonly(solana_sdk::sysvar::instructions::id(), false),
+                AccountMeta::new_readonly(anchor_client::solana_sdk::system_program::id(), false),
+                AccountMeta::new_readonly(anchor_client::solana_sdk::sysvar::instructions::id(), false),
                 AccountMeta::new_readonly(event_authority_pda, false),
                 AccountMeta::new_readonly(contract_program_id, false),
             ],
@@ -1045,7 +1045,7 @@ impl Solana {
         };
 
         let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
-        let mut transaction = solana_sdk::transaction::Transaction::new_with_payer(
+        let mut transaction = anchor_client::solana_sdk::transaction::Transaction::new_with_payer(
             &[instruction],
             Some(&self.payer_keypair.pubkey()),
         );
@@ -1106,14 +1106,14 @@ impl Solana {
         };
         args.serialize(&mut data)?;
 
-        let instruction = solana_sdk::instruction::Instruction {
+        let instruction = anchor_client::solana_sdk::instruction::Instruction {
             program_id,
             accounts: vec![AccountMeta::new(self.payer_keypair.pubkey(), true)],
             data,
         };
 
         let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
-        let mut transaction = solana_sdk::transaction::Transaction::new_with_payer(
+        let mut transaction = anchor_client::solana_sdk::transaction::Transaction::new_with_payer(
             &[instruction],
             Some(&self.payer_keypair.pubkey()),
         );

@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::{self, AnchorDeserialize, Discriminator};
 use anchor_client::anchor_lang::solana_program::keccak;
+use anchor_client::solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
 use ethabi::{encode, Token};
 use futures_util::StreamExt;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -26,11 +27,14 @@ use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
     SignatureRespondedEvent,
 };
-use solana_client::{
+use solana_transaction_status_client_types::{
+    option_serializer::OptionSerializer, EncodedConfirmedTransactionWithStatusMeta,
+    UiInstruction, UiParsedInstruction, UiTransactionEncoding,
+};
+use anchor_client::solana_client::{
     nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient},
     rpc_config::{RpcTransactionLogsConfig, RpcTransactionLogsFilter},
 };
-use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
 use tokio::sync::mpsc;
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
@@ -505,7 +509,7 @@ async fn subscribe_and_process_sign_events(
             &rpc_url,
             &ws_url,
             events_tx.clone(),
-            move |event, signature: solana_sdk::signature::Signature, _slot| {
+            move |event, signature: anchor_client::solana_sdk::signature::Signature, _slot| {
                 tracing::info!("got event: {:?}", event);
                 let tx_sig: Vec<u8> = signature.as_ref().to_vec();
                 let events_tx = events_tx_clone.clone();
@@ -530,11 +534,9 @@ async fn subscribe_and_process_sign_events(
 }
 
 fn parse_cpi_events(
-    tx: solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta,
+    tx: EncodedConfirmedTransactionWithStatusMeta,
     target_program_id: &Pubkey,
 ) -> Result<Vec<SignatureEventBox>> {
-    use solana_transaction_status::{UiInstruction, UiParsedInstruction};
-
     let Some(meta) = tx.transaction.meta else {
         return Ok(Vec::new());
     };
@@ -544,7 +546,7 @@ fn parse_cpi_events(
 
     // Small helper closure to try decoding both event types from raw data
     let try_parse_events = |data: &str| -> Result<Vec<SignatureEventBox>> {
-        let Ok(ix_data) = solana_sdk::bs58::decode(data).into_vec() else {
+        let Ok(ix_data) = anchor_client::solana_sdk::bs58::decode(data).into_vec() else {
             tracing::warn!("Failed to decode instruction data for target program");
             return Ok(Vec::new());
         };
@@ -579,7 +581,7 @@ fn parse_cpi_events(
 
     // Look into inner instructions for CPI calls
     let inner_ixs = match meta.inner_instructions {
-        solana_transaction_status::option_serializer::OptionSerializer::Some(ixs) => ixs,
+        OptionSerializer::Some(ixs) => ixs,
         _ => return Ok(Vec::new()),
     };
 
@@ -732,11 +734,9 @@ fn has_log_starts_with(logs: &[String], start_with: &str) -> bool {
 }
 
 fn parse_cpi_respond_events(
-    tx: solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta,
+    tx: EncodedConfirmedTransactionWithStatusMeta,
     target_program_id: &Pubkey,
 ) -> Result<(Vec<RespondBidirectionalEvent>, Vec<SignatureRespondedEvent>)> {
-    use solana_transaction_status::{UiInstruction, UiParsedInstruction};
-
     let Some(meta) = tx.transaction.meta else {
         return Ok((Vec::new(), Vec::new()));
     };
@@ -748,7 +748,7 @@ fn parse_cpi_respond_events(
     // Helper closure to try decoding RespondBidirectionalEvent and SignatureRespondedEvent from raw data
     let try_parse_respond_event =
         |data: &str| -> Result<(Vec<RespondBidirectionalEvent>, Vec<SignatureRespondedEvent>)> {
-            let Ok(ix_data) = solana_sdk::bs58::decode(data).into_vec() else {
+            let Ok(ix_data) = anchor_client::solana_sdk::bs58::decode(data).into_vec() else {
                 tracing::warn!("Failed to decode instruction data for target program");
                 return Ok((Vec::new(), Vec::new()));
             };
@@ -789,7 +789,7 @@ fn parse_cpi_respond_events(
 
     // Look into inner instructions for CPI calls
     let inner_ixs = match meta.inner_instructions {
-        solana_transaction_status::option_serializer::OptionSerializer::Some(ixs) => ixs,
+        OptionSerializer::Some(ixs) => ixs,
         _ => return Ok((Vec::new(), Vec::new())),
     };
 
@@ -871,7 +871,7 @@ async fn get_tx(
     rpc_client: &RpcClient,
     signature: &Signature,
     retry_cfg: RetryConfig,
-) -> anyhow::Result<solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta> {
+) -> anyhow::Result<EncodedConfirmedTransactionWithStatusMeta> {
     let max_attempts = retry_cfg.max_attempts;
 
     let res = retry_async(
@@ -880,8 +880,8 @@ async fn get_tx(
             rpc_client
                 .get_transaction_with_config(
                     signature,
-                    solana_client::rpc_config::RpcTransactionConfig {
-                        encoding: Some(solana_transaction_status::UiTransactionEncoding::JsonParsed),
+                    anchor_client::solana_client::rpc_config::RpcTransactionConfig {
+                        encoding: Some(UiTransactionEncoding::JsonParsed),
                         commitment: Some(CommitmentConfig::confirmed()),
                         max_supported_transaction_version: Some(0),
                     },
