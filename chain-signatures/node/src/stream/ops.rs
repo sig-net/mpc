@@ -326,6 +326,8 @@ pub(crate) async fn requeue_recovered_sign_requests(
             continue;
         }
 
+        // This is a bidirectional execution watcher, so let's skip it and have
+        // the stream/indexer itself enqueue watching.
         if entry.execution_tx().is_some() {
             continue;
         }

@@ -780,7 +780,7 @@ impl BacklogEntry {
     }
 }
 
-fn chain_supports_deferred_local_recovery(chain: Chain) -> bool {
+fn chain_supports_catchup(chain: Chain) -> bool {
     matches!(chain, Chain::Ethereum)
 }
 
@@ -789,41 +789,34 @@ async fn select_recovery_checkpoint(
     local_checkpoint: Option<Checkpoint>,
     remote_checkpoint: Option<Checkpoint>,
 ) -> Option<(Checkpoint, RecoveryRequeueMode)> {
-    match (local_checkpoint, remote_checkpoint) {
-        (Some(local), Some(remote)) if local.block_height > remote.block_height => {
-            let requeue_mode = if chain_supports_deferred_local_recovery(chain) {
-                tracing::warn!(
-                    ?chain,
-                    block_height = local.block_height,
-                    remote_block_height = remote.block_height,
-                    "recovering from newer local checkpoint; requeue deferred until catchup"
-                );
-                RecoveryRequeueMode::AfterCatchup
+    let checkpoint = match (local_checkpoint, remote_checkpoint) {
+        (Some(local), None) => local,
+        (None, Some(remote)) => remote,
+        (Some(local), Some(remote)) => {
+            if local.block_height >= remote.block_height {
+                local
             } else {
-                RecoveryRequeueMode::Immediate
-            };
-            Some((local, requeue_mode))
+                remote
+            }
         }
-        (Some(_), Some(remote)) => Some((remote, RecoveryRequeueMode::Immediate)),
-        (Some(local), None) => {
-            let requeue_mode = if chain_supports_deferred_local_recovery(chain) {
-                tracing::warn!(
-                    ?chain,
-                    block_height = local.block_height,
-                    "recovering from local checkpoint; requeue deferred until catchup"
-                );
-                RecoveryRequeueMode::AfterCatchup
-            } else {
-                RecoveryRequeueMode::Immediate
-            };
-            Some((local, requeue_mode))
-        }
-        (None, Some(remote)) => Some((remote, RecoveryRequeueMode::Immediate)),
         (None, None) => {
-            tracing::info!(?chain, "no checkpoint available for recovery");
-            None
+            tracing::warn!(?chain, "no checkpoint available for recovery");
+            return None;
         }
-    }
+    };
+
+    let requeue_mode = if chain_supports_catchup(chain) {
+        tracing::info!(
+            ?chain,
+            block_height = checkpoint.block_height,
+            "recovering from local checkpoint; requeue deferred until catchup"
+        );
+        RecoveryRequeueMode::AfterCatchup
+    } else {
+        RecoveryRequeueMode::Immediate
+    };
+
+    Some((checkpoint, requeue_mode))
 }
 
 #[cfg(test)]
