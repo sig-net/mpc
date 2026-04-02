@@ -525,7 +525,7 @@ impl MpcFixtureNodeBuilder {
             context.contract_state,
             mpc_node::protocol::sync::SyncTask::synced_nodes_channel().0,
         );
-        let sync_task_handle = tokio::spawn(sync_task.run());
+        tokio::spawn(sync_task.run());
 
         let mut node = MpcFixtureNode {
             me: self.me,
@@ -538,7 +538,6 @@ impl MpcFixtureNodeBuilder {
             presignature_storage,
             backlog: Backlog::new(),
             sync_channel,
-            _sync_task_handle: sync_task_handle,
             web_handle: None,
         };
 

@@ -39,7 +39,6 @@ pub struct MpcFixtureNode {
     pub backlog: Backlog,
 
     pub sync_channel: mpc_node::protocol::sync::SyncChannel,
-    pub _sync_task_handle: tokio::task::JoinHandle<()>,
     pub web_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
