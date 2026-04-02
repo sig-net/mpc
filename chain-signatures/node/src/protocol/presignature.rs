@@ -375,8 +375,8 @@ impl PresignatureSpawner {
         self.ongoing.contains_key(&id)
     }
 
-    pub async fn contains_used(&self, id: PresignatureId) -> bool {
-        self.presignatures.contains_used(id).await
+    pub async fn contains_using(&self, id: PresignatureId) -> bool {
+        self.presignatures.contains_using(id).await
     }
 
     /// Returns the number of unspent presignatures available in the manager.
@@ -430,7 +430,7 @@ impl PresignatureSpawner {
             // TODO: we can potentially wait for the triples to exist first to then be able to accept.
             // whereas we just blatantly reject here. The problem with waiting is that the other side
             // might expire their posit first.
-            self.triples.contains_reserved(id.pair_id).await
+            self.triples.contains_generating(id.pair_id).await
                 || self.triples.contains(id.pair_id).await
         } {
             tracing::warn!(
@@ -566,11 +566,7 @@ impl PresignatureSpawner {
             "starting protocol to generate a new presignature",
         );
 
-        let Some(slot) = self.presignatures.reserve(id.id).await else {
-            return Err(InitializationError::BadParameters(format!(
-                "id collision: presignature_id={id:?}"
-            )));
-        };
+        let slot = self.presignatures.create_slot(id.id).await;
 
         let mut participants = participants.to_vec();
         participants.sort();

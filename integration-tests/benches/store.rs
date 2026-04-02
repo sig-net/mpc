@@ -157,12 +157,7 @@ fn bench_load_keys(c: &mut Criterion) {
             rt.block_on(async {
                 for i in 0..1000 {
                     let t = dummy_pair(i);
-                    env.triples
-                        .reserve(t.id)
-                        .await
-                        .unwrap()
-                        .insert(t, env.me)
-                        .await;
+                    env.triples.create_slot(t.id).await.insert(t, env.me).await;
                 }
             });
         })
@@ -174,9 +169,8 @@ fn bench_load_keys(c: &mut Criterion) {
                 for i in 0..1000 {
                     let p = dummy_presignature(i);
                     env.presignatures
-                        .reserve(p.id)
+                        .create_slot(p.id)
                         .await
-                        .unwrap()
                         .insert(p, env.me)
                         .await;
                 }

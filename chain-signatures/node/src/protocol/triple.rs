@@ -388,8 +388,8 @@ impl TripleSpawner {
         self.ongoing.contains_key(&id)
     }
 
-    pub async fn contains_used(&self, id: TripleId) -> bool {
-        self.triple_storage.contains_used(id).await
+    pub async fn contains_using(&self, id: TripleId) -> bool {
+        self.triple_storage.contains_using(id).await
     }
 
     /// Returns the number of unspent triples assigned to this node.
@@ -528,11 +528,7 @@ impl TripleSpawner {
         timeout: Duration,
     ) -> Result<(), InitializationError> {
         // Check if the `id` is already in the system. Error out and have the next cycle try again.
-        let Some(slot) = self.triple_storage.reserve(id).await else {
-            return Err(InitializationError::BadParameters(format!(
-                "id collision: pair_id={id}"
-            )));
-        };
+        let slot = self.triple_storage.create_slot(id).await;
 
         tracing::info!(?id, "starting protocol to generate a new triple");
         let generator = TripleGenerator::new(
