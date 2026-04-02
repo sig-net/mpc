@@ -86,9 +86,11 @@ impl<A: ProtocolArtifact> Drop for ArtifactSlot<A> {
     fn drop(&mut self) {
         let storage = self.storage.clone();
         let id = self.id;
-        tokio::spawn(async move {
-            storage.generating.write().await.remove(&id);
-        });
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                storage.generating.write().await.remove(&id);
+            });
+        }
     }
 }
 
@@ -106,9 +108,11 @@ impl<A: ProtocolArtifact> Drop for ArtifactTakenDropper<A> {
     fn drop(&mut self) {
         if let Some(storage) = self.dropper.take() {
             let id = self.id;
-            tokio::spawn(async move {
-                storage.using.write().await.remove(&id);
-            });
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    storage.using.write().await.remove(&id);
+                });
+            }
         }
     }
 }
