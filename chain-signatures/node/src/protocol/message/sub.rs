@@ -176,11 +176,20 @@ impl<T> Subscriber<T> {
     }
 
     pub async fn send(&self, msg: T) -> Result<(), mpsc::error::SendError<T>> {
-        match &self.kind {
-            SubscriberKind::Subscribed(tx) | SubscriberKind::Unsubscribed(tx, _) => {
+        match self {
+            Self::Subscribed(tx) => {
+                let cap = tx.capacity();
+                let max_cap = tx.max_capacity();
+                tracing::warn!("Sending to subscribed, capacity {cap}/{max_cap}");
                 tx.send(msg).await
             }
-            SubscriberKind::Unknown => Ok(()),
+            Self::Unsubscribed(tx, _) => {
+                let cap = tx.capacity();
+                let max_cap = tx.max_capacity();
+                tracing::warn!("Sending to unsubscribed, capacity {cap}/{max_cap}");
+                tx.send(msg).await
+            }
+            Self::Unknown => Ok(()),
         }
     }
 }
