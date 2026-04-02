@@ -7,7 +7,8 @@ use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::BidirectionalTxId;
 use crate::stream::ops::{
     process_execution_confirmed, process_respond_bidirectional_event, process_respond_event,
-    process_sign_request, recover_backlog, RespondBidirectionalEvent, SignatureRespondedEvent,
+    process_sign_request, recover_backlog, requeue_recovered_sign_requests,
+    RespondBidirectionalEvent, SignatureRespondedEvent,
 };
 
 use tokio::sync::mpsc;
@@ -27,6 +28,9 @@ pub enum ChainEvent {
     SignRequest(IndexedSignRequest),
     Respond(SignatureRespondedEvent),
     RespondBidirectional(RespondBidirectionalEvent),
+
+    /// The stream has finished replaying catch-up data for this chain.
+    CatchupCompleted,
 
     /// Block height indicating the client has observed/processed up to `u64` (slot/block)
     Block(u64),
@@ -61,6 +65,7 @@ impl std::fmt::Debug for ChainEvent {
                 .field(&ev.request_id())
                 .field(&ev.source_chain().as_str())
                 .finish(),
+            ChainEvent::CatchupCompleted => f.debug_tuple("CatchupCompleted").finish(),
             ChainEvent::Block(b) => write!(f, "Block({b})"),
             ChainEvent::ExecutionConfirmed {
                 tx_id,
@@ -89,6 +94,7 @@ pub enum ExecutionOutcome {
 #[allow(async_fn_in_trait)]
 pub trait ChainStream: Send + 'static {
     const CHAIN: Chain;
+    async fn start(&mut self) {}
     async fn next_event(&mut self) -> Option<ChainEvent>;
 }
 
@@ -105,7 +111,7 @@ pub async fn run_stream<S: ChainStream>(
 
     tracing::info!(%chain, "starting indexer loop");
 
-    recover_backlog(
+    let mut recovered = recover_backlog(
         &backlog,
         &mut contract_watcher,
         &mut mesh_state,
@@ -114,6 +120,11 @@ pub async fn run_stream<S: ChainStream>(
         sign_tx.clone(),
     )
     .await;
+
+    // NOTE: we need to start after we recover entries from backlog and starting the run_stream task
+    // such that we can guarantee getting the CatchupCompleted event from this task to modify the
+    // recovered entries.
+    stream.start().await;
 
     while let Some(event) = stream.next_event().await {
         match event {
@@ -137,6 +148,18 @@ pub async fn run_stream<S: ChainStream>(
                     process_respond_bidirectional_event(ev, sign_tx.clone(), &backlog).await
                 {
                     tracing::error!(?err, chain = %chain, "failed to process respond bidirectional event");
+                }
+            }
+            ChainEvent::CatchupCompleted => {
+                if recovered.requeue_mode == crate::backlog::RecoveryRequeueMode::AfterCatchup {
+                    requeue_recovered_sign_requests(
+                        &backlog,
+                        chain,
+                        sign_tx.clone(),
+                        &recovered.pending,
+                    )
+                    .await;
+                    recovered.pending.clear();
                 }
             }
             ChainEvent::Block(block) => {
@@ -180,17 +203,21 @@ pub async fn run_stream<S: ChainStream>(
 mod tests {
     use super::*;
     use crate::backlog::Backlog;
-    use crate::mesh::MeshState;
+    use crate::mesh::{connection::NodeStatus, MeshState};
     use crate::node_client::NodeClient;
-    use crate::protocol::Chain;
-    use crate::protocol::IndexedSignRequest;
+    use crate::protocol::ParticipantInfo;
     use crate::protocol::Sign;
+    use crate::protocol::{Chain, IndexedSignRequest, SignKind};
     use crate::rpc::ContractStateWatcher;
-    use crate::stream::ops::SignatureRespondedEvent;
+    use crate::storage::checkpoint_storage::CheckpointStorage;
+    use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
     use crate::util::current_unix_timestamp;
+    use alloy::primitives::Address;
     use k256::Scalar;
+    use mockito::Server;
     use mpc_primitives::SignArgs;
     use mpc_primitives::SignId;
+    use mpc_primitives::Signature;
     use near_primitives::types::AccountId;
     use std::time::Duration;
     use tokio::sync::mpsc;
@@ -292,6 +319,81 @@ mod tests {
         match msg2 {
             Sign::Completion(id) => assert_eq!(id, sign_id),
             _ => panic!("expected completion"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_stream_starts_stream_before_polling() {
+        struct StartAwareStream {
+            started: bool,
+            event: Option<ChainEvent>,
+        }
+
+        impl ChainStream for StartAwareStream {
+            const CHAIN: Chain = Chain::Solana;
+
+            async fn start(&mut self) {
+                self.started = true;
+            }
+
+            async fn next_event(&mut self) -> Option<ChainEvent> {
+                assert!(self.started, "stream polled before start() was called");
+                self.event.take()
+            }
+        }
+
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([7u8; 32]);
+        let args = SignArgs {
+            entropy: [0u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+        let indexed = IndexedSignRequest {
+            id: sign_id,
+            args: args.clone(),
+            chain: Chain::Solana,
+            unix_timestamp_indexed: current_unix_timestamp(),
+            kind: SignKind::Sign,
+        };
+
+        let stream = StartAwareStream {
+            started: false,
+            event: Some(ChainEvent::SignRequest(indexed)),
+        };
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+            &"test.near".parse::<AccountId>().unwrap(),
+            k256::ProjectivePoint::GENERATOR.to_affine(),
+            0,
+            Default::default(),
+        );
+        let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
+        let node_client = NodeClient::new(&Default::default());
+
+        run_stream(
+            stream,
+            sign_tx,
+            backlog,
+            contract_watcher,
+            mesh_state_rx,
+            node_client,
+        )
+        .await;
+
+        match timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Sign::Request(req) => {
+                assert_eq!(req.id, sign_id);
+                assert_eq!(req.args, args);
+            }
+            other => panic!("expected request, got {other:?}"),
         }
     }
 
@@ -521,5 +623,127 @@ mod tests {
         // stop the client and wait for the indexer to finish
         drop(events_tx);
         run_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_stream_defers_local_ethereum_requeue_until_after_catchup() {
+        let storage = CheckpointStorage::in_memory();
+        let seeded_backlog = Backlog::persisted(storage.clone());
+        let sign_id = SignId::new([99u8; 32]);
+        let args = SignArgs {
+            entropy: [9u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+
+        seeded_backlog
+            .insert(IndexedSignRequest::sign(
+                sign_id,
+                args.clone(),
+                Chain::Ethereum,
+                current_unix_timestamp(),
+            ))
+            .await;
+        seeded_backlog
+            .set_processed_block(Chain::Ethereum, 100)
+            .await;
+        seeded_backlog.checkpoint(Chain::Ethereum).await;
+
+        struct EthereumLocalStream {
+            events: Vec<Option<ChainEvent>>,
+        }
+
+        impl ChainStream for EthereumLocalStream {
+            const CHAIN: Chain = Chain::Ethereum;
+
+            async fn next_event(&mut self) -> Option<ChainEvent> {
+                if self.events.is_empty() {
+                    return None;
+                }
+                self.events.remove(0)
+            }
+        }
+
+        let respond = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
+            request_id: sign_id.request_id,
+            responder: Address::ZERO,
+            signature: Signature::new(k256::ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
+        });
+
+        let client = EthereumLocalStream {
+            events: vec![
+                Some(ChainEvent::Respond(respond)),
+                Some(ChainEvent::CatchupCompleted),
+                None,
+            ],
+        };
+
+        let backlog = Backlog::persisted(storage);
+        let (sign_tx, mut sign_rx) = mpsc::channel(8);
+
+        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+            &"test.near".parse::<AccountId>().unwrap(),
+            k256::ProjectivePoint::GENERATOR.to_affine(),
+            2,
+            Default::default(),
+        );
+
+        let mut servers = Vec::new();
+        for _ in 0..2 {
+            let mut server = Server::new_async().await;
+            let mut body = Vec::new();
+            ciborium::ser::into_writer(
+                &std::collections::HashMap::<Chain, crate::backlog::Checkpoint>::new(),
+                &mut body,
+            )
+            .unwrap();
+            server
+                .mock("GET", "/checkpoint")
+                .with_status(200)
+                .with_body(body)
+                .create_async()
+                .await;
+            servers.push(server);
+        }
+
+        let mut mesh_state = MeshState::default();
+        for (index, server) in servers.iter().enumerate() {
+            let mut info = ParticipantInfo::new(index as u32);
+            info.url = server.url();
+            mesh_state.update(
+                cait_sith::protocol::Participant::from(index as u32),
+                NodeStatus::Active,
+                info,
+            );
+        }
+        let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(mesh_state);
+        let node_client = NodeClient::new(&Default::default());
+
+        run_stream(
+            client,
+            sign_tx,
+            backlog.clone(),
+            contract_watcher,
+            mesh_state_rx,
+            node_client,
+        )
+        .await;
+
+        let first = timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match first {
+            Sign::Completion(id) => assert_eq!(id, sign_id),
+            other => panic!("expected completion before any recovered requeue, got {other:?}"),
+        }
+
+        match timeout(Duration::from_millis(100), sign_rx.recv()).await {
+            Err(_) | Ok(None) => {}
+            Ok(Some(msg)) => panic!("unexpected extra sign message after catchup: {msg:?}"),
+        }
+        assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_none());
     }
 }

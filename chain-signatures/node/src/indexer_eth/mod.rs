@@ -20,6 +20,7 @@ use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{SignArgs, SignId, Signature as MpcSignature, LATEST_MPC_KEY_VERSION};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -787,11 +788,17 @@ impl EthereumIndexer {
         ));
 
         let last_processed_block = backlog.processed_block(Chain::Ethereum).await;
+        let mut expected_catchup_blocks = 0usize;
+        let mut processed_catchup_blocks = HashSet::new();
+        let mut catchup_completed_emitted = false;
 
         let blocks_to_process_send_clone = blocks_to_process_send.clone();
         if let Some(last_processed_block) = last_processed_block {
             match Self::catchup_end_block_number(Arc::clone(&client)).await {
                 Some(end_block_number) => {
+                    expected_catchup_blocks = end_block_number
+                        .saturating_sub(last_processed_block)
+                        .saturating_add(1) as usize;
                     Self::add_catchup_blocks_to_process(
                         blocks_to_process_send_clone,
                         last_processed_block,
@@ -802,6 +809,14 @@ impl EthereumIndexer {
                 None => {
                     tracing::error!("Failed to get catchup end block number");
                 }
+            }
+        }
+
+        if expected_catchup_blocks == 0 {
+            if let Err(err) = events_tx.send(ChainEvent::CatchupCompleted).await {
+                tracing::warn!(?err, "failed to emit ethereum catchup completion event");
+            } else {
+                catchup_completed_emitted = true;
             }
         }
 
@@ -857,6 +872,18 @@ impl EthereumIndexer {
                     tracing::info!("Processed new block number {block_number}");
                 }
             }
+
+            if is_catchup && !catchup_completed_emitted {
+                processed_catchup_blocks.insert(block_number);
+                if processed_catchup_blocks.len() >= expected_catchup_blocks {
+                    if let Err(err) = events_tx.send(ChainEvent::CatchupCompleted).await {
+                        tracing::warn!(?err, "failed to emit ethereum catchup completion event");
+                    } else {
+                        catchup_completed_emitted = true;
+                    }
+                }
+            }
+
             crate::metrics::indexers::LATEST_BLOCK_NUMBER
                 .with_label_values(&[Chain::Ethereum.as_str(), "indexed"])
                 .set(block_number as i64);
@@ -1331,10 +1358,11 @@ impl EthereumIndexer {
 }
 
 /// Ethereum indexer stream implementing the `ChainStream` trait.
-/// It spawns the internal block pipeline and emits `ChainEvent`s through an
-/// internal channel consumed by the shared `run_stream()` loop.
+/// Construction is side-effect free; the shared `run_stream()` loop calls
+/// `start()` after recovery has completed.
 pub struct EthereumStream {
     events_rx: mpsc::Receiver<ChainEvent>,
+    indexer: Option<(EthereumIndexer, mpsc::Sender<ChainEvent>)>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -1354,16 +1382,27 @@ impl EthereumStream {
             "creating ethereum indexer stream"
         );
 
-        let (events_tx, events_rx) = crate::stream::channel();
         let indexer = EthereumIndexer::new(eth, backlog).await?;
+
+        let (events_tx, events_rx) = crate::stream::channel();
+
+        Ok(Self {
+            events_rx,
+            indexer: Some((indexer, events_tx)),
+            tasks: Vec::new(),
+        })
+    }
+
+    pub fn start(&mut self) {
+        let Some((indexer, events_tx)) = self.indexer.take() else {
+            return;
+        };
 
         let t_indexer: JoinHandle<()> = tokio::spawn(async move {
             indexer.run(events_tx).await;
         });
 
-        let tasks = vec![t_indexer];
-
-        Ok(Self { events_rx, tasks })
+        self.tasks.push(t_indexer);
     }
 }
 
@@ -1377,6 +1416,11 @@ impl Drop for EthereumStream {
 
 impl ChainStream for EthereumStream {
     const CHAIN: Chain = Chain::Ethereum;
+
+    async fn start(&mut self) {
+        self.start();
+    }
+
     async fn next_event(&mut self) -> Option<ChainEvent> {
         self.events_rx.recv().await
     }

@@ -1,4 +1,4 @@
-use crate::backlog::Backlog;
+use crate::backlog::{Backlog, BacklogEntry, RecoveredChainRequests, RecoveryRequeueMode};
 use crate::indexer_hydration::{
     HydrationRespondBidirectionalEvent, HydrationSignBidirectionalRequestedEvent,
     HydrationSignatureRespondedEvent,
@@ -288,27 +288,50 @@ pub(crate) async fn recover_backlog(
     node_client: &NodeClient,
     source_chain: Chain,
     sign_tx: mpsc::Sender<Sign>,
-) {
+) -> RecoveredChainRequests {
     // Recover backlog before doing anything.
     // Wait for threshold to be available
     let threshold = contract_watcher.wait_threshold().await;
     if threshold == 0 {
-        return;
+        return RecoveredChainRequests::default();
     }
     wait_threshold_active(mesh_state, threshold).await;
 
     let mesh_state = mesh_state.borrow().clone();
-    let mut pending = backlog
+    let mut recovered = backlog
         .recover(&mesh_state, node_client, threshold, &[source_chain])
         .await;
 
-    // Re-enqueue any pending sign requests so the node processes them after recovery
-    let pending = pending.remove(&source_chain).unwrap_or_default();
+    let recovered = recovered.remove(&source_chain).unwrap_or_default();
 
-    for (sign_id, entry) in pending
-        .into_iter()
-        .filter(|(_, entry)| matches!(entry.status(), SignStatus::AwaitingResponse))
-    {
+    if recovered.requeue_mode == RecoveryRequeueMode::Immediate {
+        requeue_recovered_sign_requests(backlog, source_chain, sign_tx, &recovered.pending).await;
+    }
+
+    recovered
+}
+
+pub(crate) async fn requeue_recovered_sign_requests(
+    backlog: &Backlog,
+    source_chain: Chain,
+    sign_tx: mpsc::Sender<Sign>,
+    pending: &std::collections::HashMap<SignId, BacklogEntry>,
+) {
+    for &sign_id in pending.keys() {
+        let Some(entry) = backlog.get(source_chain, &sign_id).await else {
+            continue;
+        };
+
+        if entry.status() != SignStatus::AwaitingResponse {
+            continue;
+        }
+
+        // This is a bidirectional execution watcher, so let's skip it and have
+        // the stream/indexer itself enqueue watching.
+        if entry.execution_tx().is_some() {
+            continue;
+        }
+
         let sign_request = entry.request;
 
         if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
@@ -600,7 +623,8 @@ mod tests {
 
     #[tokio::test]
     async fn recover_backlog_requeues_pending_signs() {
-        // Prepare backlog with a single pending sign request
+        // Prepare backlog with a single pending sign request on a chain that
+        // should be requeued immediately during recovery.
         let backlog = Backlog::new();
         let sign_id = SignId::new([9u8; 32]);
         let args = SignArgs {
@@ -616,13 +640,13 @@ mod tests {
         backlog
             .insert(test_indexed_request(
                 sign_id,
-                Chain::Ethereum,
+                Chain::Solana,
                 args.clone(),
                 unix_timestamp_indexed,
                 SignKind::Sign,
             ))
             .await;
-        backlog.checkpoint(Chain::Ethereum).await;
+        backlog.checkpoint(Chain::Solana).await;
 
         let threshold = 1;
         let mut mesh_state = MeshState::default();
@@ -645,7 +669,7 @@ mod tests {
             &mut contract_watcher,
             &mut mesh_rx,
             &node_client,
-            Chain::Ethereum,
+            Chain::Solana,
             sign_tx,
         )
         .await;
@@ -659,7 +683,7 @@ mod tests {
             Sign::Request(req) => {
                 assert_eq!(req.id, sign_id);
                 assert_eq!(req.args, args);
-                assert_eq!(req.chain, Chain::Ethereum);
+                assert_eq!(req.chain, Chain::Solana);
                 assert_eq!(req.kind, SignKind::Sign);
                 // Verify that the unix_timestamp_indexed is preserved from the original entry
                 assert_eq!(req.unix_timestamp_indexed, unix_timestamp_indexed);

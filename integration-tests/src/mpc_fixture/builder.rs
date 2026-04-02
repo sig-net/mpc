@@ -20,11 +20,13 @@ use mpc_node::backlog::Backlog;
 use mpc_node::config::{Config, LocalConfig, NetworkConfig};
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
+use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
 use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes, Votes};
 use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
 use mpc_node::protocol::message::{MessageInbox, MessageOutbox};
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::state::NodeKeyInfo;
+use mpc_node::protocol::sync::SyncTask;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
@@ -64,7 +66,7 @@ struct FixtureConfig {
     num_nodes: u32,
 
     use_preshared_triples: bool,
-    presignature_stockpile: bool,
+    use_preshared_presignatures: bool,
 
     node_min_triples: u32,
     network_max_triples: u32,
@@ -117,7 +119,7 @@ impl FixtureConfig {
             input: FixtureInput::load(num_nodes),
             num_nodes,
             use_preshared_triples: false,
-            presignature_stockpile: false,
+            use_preshared_presignatures: false,
             node_min_triples: 10,
             network_max_triples: 10 * num_nodes * 4,
             node_min_presignatures: 10,
@@ -295,8 +297,8 @@ impl MpcFixtureBuilder {
     }
 
     /// Use presignatures from fixture input
-    pub fn with_presignature_stockpile(mut self) -> Self {
-        self.fixture_config.presignature_stockpile = true;
+    pub fn with_preshared_presignatures(mut self) -> Self {
+        self.fixture_config.use_preshared_presignatures = true;
         self
     }
 
@@ -384,7 +386,8 @@ impl MpcFixtureBuilder {
     /// This setup will not attempt to stockpile triples or presignatures.
     pub fn only_generate_signatures(self) -> Self {
         self.with_preshared_key()
-            .with_presignature_stockpile()
+            .with_preshared_triples()
+            .with_preshared_presignatures()
             .with_node_min_triples(0)
             .with_node_min_presignatures(0)
     }
@@ -496,7 +499,7 @@ impl MpcFixtureNodeBuilder {
                 me: account_id.clone(),
                 protocol_state_tx,
             },
-            context.contract_state,
+            context.contract_state.clone(),
             mesh_rx.clone(),
         ));
 
@@ -512,6 +515,18 @@ impl MpcFixtureNodeBuilder {
             self.messaging.filter,
         );
 
+        // --- SyncChannel and SyncTask setup ---
+        let node_client = NodeClient::new(&NodeClientOptions::default());
+        let (sync_channel, sync_task) = SyncTask::new(
+            &node_client,
+            triple_storage.clone(),
+            presignature_storage.clone(),
+            mesh_rx.clone(),
+            context.contract_state,
+            mpc_node::protocol::sync::SyncTask::synced_nodes_channel().0,
+        );
+        tokio::spawn(sync_task.run());
+
         let mut node = MpcFixtureNode {
             me: self.me,
             state: node_state,
@@ -522,6 +537,7 @@ impl MpcFixtureNodeBuilder {
             triple_storage,
             presignature_storage,
             backlog: Backlog::new(),
+            sync_channel,
             web_handle: None,
         };
 
@@ -573,7 +589,7 @@ impl MpcFixtureNodeBuilder {
         let presignature_storage =
             Presignature::storage(&context.redis_pool, &self.participant_info.account_id);
 
-        if fixture_config.presignature_stockpile {
+        if fixture_config.use_preshared_presignatures {
             // removing here because we can't clone a presignature
             let my_shares = fixture_config.input.presignatures.remove(&self.me).unwrap();
             for (owner, presignature_shares) in my_shares {

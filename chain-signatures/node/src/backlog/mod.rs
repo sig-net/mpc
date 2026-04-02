@@ -190,6 +190,19 @@ pub struct Backlog {
     historical_checkpoints: Arc<RwLock<HashMap<Chain, Vec<HistoricalCheckpoint>>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecoveryRequeueMode {
+    #[default]
+    Immediate,
+    AfterCatchup,
+}
+
+#[derive(Debug, Default)]
+pub struct RecoveredChainRequests {
+    pub pending: HashMap<SignId, BacklogEntry>,
+    pub requeue_mode: RecoveryRequeueMode,
+}
+
 impl Default for Backlog {
     fn default() -> Self {
         Self::new()
@@ -558,7 +571,7 @@ impl Backlog {
         node_client: &NodeClient,
         threshold: usize,
         chains: &[Chain],
-    ) -> HashMap<Chain, HashMap<SignId, BacklogEntry>> {
+    ) -> HashMap<Chain, RecoveredChainRequests> {
         tracing::info!("attempting to recover from latest checkpoints via node selection");
 
         // Load local checkpoints first
@@ -586,21 +599,28 @@ impl Backlog {
         // Fetches all checkpoints from active participants and creates a selected checkpoint:
         // - sorts all checkpoints by block height
         // - selects threshold lowest block height checkpoint
-        let remote_checkpoints =
+        let mut remote_checkpoints =
             select_checkpoints(mesh_state, node_client, threshold, chains).await;
 
-        // Merge local and remote checkpoints, preferring the one with higher block height
-        let checkpoints = merge_checkpoints(local_checkpoints, remote_checkpoints);
-
-        if checkpoints.is_empty() {
+        if local_checkpoints.is_empty() && remote_checkpoints.is_empty() {
             tracing::info!("no selected checkpoints found, starting with empty state");
             return HashMap::new();
         }
 
-        for (chain, checkpoint) in checkpoints {
+        let mut recovered_modes = HashMap::new();
+        for &chain in chains {
+            let local_checkpoint = local_checkpoints.remove(&chain);
+            let remote_checkpoint = remote_checkpoints.remove(&chain);
+
+            let Some((checkpoint, requeue_mode)) =
+                select_recovery_checkpoint(chain, local_checkpoint, remote_checkpoint).await
+            else {
+                continue;
+            };
             tracing::info!(
                 ?chain,
                 block_height = checkpoint.block_height,
+                ?requeue_mode,
                 "found selected checkpoint, attempting recovery"
             );
             if let Err(err) = self.recover_by_checkpoint(checkpoint).await {
@@ -609,7 +629,10 @@ impl Backlog {
                     %err,
                     "failed to recover from selected checkpoint, continuing with empty state"
                 );
+                continue;
             }
+
+            recovered_modes.insert(chain, requeue_mode);
         }
 
         // Snapshot pending requests for the requested chains
@@ -617,13 +640,17 @@ impl Backlog {
         let mut recovered = HashMap::new();
         for &chain in chains {
             if let Some(pending) = requests.get(&chain) {
+                let requeue_mode = recovered_modes.get(&chain).copied().unwrap_or_default();
                 recovered.insert(
                     chain,
-                    pending
-                        .requests
-                        .iter()
-                        .map(|(id, entry)| (*id, entry.clone()))
-                        .collect(),
+                    RecoveredChainRequests {
+                        pending: pending
+                            .requests
+                            .iter()
+                            .map(|(id, entry)| (*id, entry.clone()))
+                            .collect(),
+                        requeue_mode,
+                    },
                 );
             }
         }
@@ -753,27 +780,43 @@ impl BacklogEntry {
     }
 }
 
-fn merge_checkpoints(
-    local: HashMap<Chain, Checkpoint>,
-    mut remote: HashMap<Chain, Checkpoint>,
-) -> HashMap<Chain, Checkpoint> {
-    for (chain, local_cp) in local {
-        remote
-            .entry(chain)
-            .and_modify(|remote_cp| {
-                if local_cp.block_height > remote_cp.block_height {
-                    tracing::info!(
-                        ?chain,
-                        local_height = local_cp.block_height,
-                        remote_height = remote_cp.block_height,
-                        "local checkpoint is newer than remote selection"
-                    );
-                    *remote_cp = local_cp.clone();
-                }
-            })
-            .or_insert(local_cp);
-    }
-    remote
+fn chain_supports_catchup(chain: Chain) -> bool {
+    matches!(chain, Chain::Ethereum)
+}
+
+async fn select_recovery_checkpoint(
+    chain: Chain,
+    local_checkpoint: Option<Checkpoint>,
+    remote_checkpoint: Option<Checkpoint>,
+) -> Option<(Checkpoint, RecoveryRequeueMode)> {
+    let checkpoint = match (local_checkpoint, remote_checkpoint) {
+        (Some(local), None) => local,
+        (None, Some(remote)) => remote,
+        (Some(local), Some(remote)) => {
+            if local.block_height >= remote.block_height {
+                local
+            } else {
+                remote
+            }
+        }
+        (None, None) => {
+            tracing::warn!(?chain, "no checkpoint available for recovery");
+            return None;
+        }
+    };
+
+    let requeue_mode = if chain_supports_catchup(chain) {
+        tracing::info!(
+            ?chain,
+            block_height = checkpoint.block_height,
+            "recovering from local checkpoint; requeue deferred until catchup"
+        );
+        RecoveryRequeueMode::AfterCatchup
+    } else {
+        RecoveryRequeueMode::Immediate
+    };
+
+    Some((checkpoint, requeue_mode))
 }
 
 #[cfg(test)]
@@ -867,12 +910,16 @@ mod tests {
         )
     }
 
-    fn create_execution_entry(mut tx: BidirectionalTx, chain: Chain, dest: &str) -> BacklogEntry {
-        tx.status = SignStatus::PendingExecution;
-        BacklogEntry::pending_execution(
-            create_bidirectional_request(SignId::new(tx.request_id), chain, dest, 0),
-            tx,
-        )
+    fn create_execution_entry(tx: BidirectionalTx, chain: Chain, dest: &str) -> BacklogEntry {
+        let sign_id = SignId::new(tx.request_id);
+        let request = IndexedSignRequest::new(
+            sign_id,
+            create_test_args(tx.request_id[0]),
+            chain,
+            0,
+            SignKind::SignBidirectional(create_test_event(dest)),
+        );
+        BacklogEntry::with_status(request, tx.status, Some(tx))
     }
 
     async fn insert_bidirectional_with_status(
@@ -1334,60 +1381,5 @@ mod tests {
             .expect_err("advance should fail for plain Sign requests");
 
         assert!(matches!(err, BacklogError::InvalidAdvanceTransition));
-    }
-
-    #[test]
-    fn test_merge_checkpoints() {
-        let mut local = HashMap::new();
-        let mut remote = HashMap::new();
-
-        // Case 1: Only local
-        local.insert(
-            Chain::Ethereum,
-            Checkpoint {
-                chain: Chain::Ethereum,
-                block_height: 100,
-                pending_requests: vec![],
-            },
-        );
-        let merged = merge_checkpoints(local.clone(), remote.clone());
-        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 100);
-
-        // Case 2: Only remote
-        local.clear();
-        remote.insert(
-            Chain::Ethereum,
-            Checkpoint {
-                chain: Chain::Ethereum,
-                block_height: 200,
-                pending_requests: vec![],
-            },
-        );
-        let merged = merge_checkpoints(local.clone(), remote.clone());
-        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 200);
-
-        // Case 3: Local higher
-        local.insert(
-            Chain::Ethereum,
-            Checkpoint {
-                chain: Chain::Ethereum,
-                block_height: 300,
-                pending_requests: vec![],
-            },
-        );
-        let merged = merge_checkpoints(local.clone(), remote.clone());
-        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 300);
-
-        // Case 4: Remote higher
-        remote.insert(
-            Chain::Ethereum,
-            Checkpoint {
-                chain: Chain::Ethereum,
-                block_height: 400,
-                pending_requests: vec![],
-            },
-        );
-        let merged = merge_checkpoints(local.clone(), remote.clone());
-        assert_eq!(merged.get(&Chain::Ethereum).unwrap().block_height, 400);
     }
 }
