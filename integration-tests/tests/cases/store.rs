@@ -47,7 +47,6 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
         .create_slot(triple_id2)
         .await
         .unwrap()
-        .await
         .insert(dummy_pair(triple_id2), node1)
         .await;
 
