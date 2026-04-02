@@ -8,7 +8,7 @@ use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol::state::NodeStateWatcher;
-use mpc_node::protocol::sync::SyncChannel;
+use mpc_node::protocol::sync::{SyncChannel, SyncUpdate};
 use mpc_node::protocol::{MessageChannel, ProtocolState, Sign};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use near_sdk::AccountId;
@@ -169,8 +169,7 @@ impl MpcFixtureNode {
         from: cait_sith::protocol::Participant,
         triples: Vec<u64>,
         presignatures: Vec<u64>,
-    ) -> mpc_node::protocol::sync::SyncUpdate {
-        use mpc_node::protocol::sync::SyncUpdate;
+    ) -> SyncUpdate {
         let update = SyncUpdate {
             from,
             triples,

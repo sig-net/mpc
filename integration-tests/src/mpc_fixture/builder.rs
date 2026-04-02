@@ -20,11 +20,13 @@ use mpc_node::backlog::Backlog;
 use mpc_node::config::{Config, LocalConfig, NetworkConfig};
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
+use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
 use mpc_node::protocol::contract::primitives::{Candidates, Participants, PkVotes, Votes};
 use mpc_node::protocol::contract::{InitializingContractState, RunningContractState};
 use mpc_node::protocol::message::{MessageInbox, MessageOutbox};
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::state::NodeKeyInfo;
+use mpc_node::protocol::sync::SyncTask;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
@@ -514,8 +516,6 @@ impl MpcFixtureNodeBuilder {
         );
 
         // --- SyncChannel and SyncTask setup ---
-        use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
-        use mpc_node::protocol::sync::SyncTask;
         let node_client = NodeClient::new(&NodeClientOptions::default());
         let (sync_channel, sync_task) = SyncTask::new(
             &node_client,
