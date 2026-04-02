@@ -321,8 +321,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                     .into_iter()
                     .filter(|id| !generating.contains(id) && !using.contains(id))
                     .collect();
-                drop(generating);
-                drop(using);
                 Ok(RemoveOutdatedResult::new(outdated, not_found))
             }
             Err(err) => {
