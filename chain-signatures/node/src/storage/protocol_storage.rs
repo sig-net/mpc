@@ -72,13 +72,11 @@ pub trait ProtocolArtifact:
 pub struct ArtifactSlot<A: ProtocolArtifact> {
     id: A::Id,
     storage: ProtocolStorage<A>,
-    stored: bool,
 }
 
 impl<A: ProtocolArtifact> ArtifactSlot<A> {
     pub async fn insert(&mut self, artifact: A, owner: Participant) -> bool {
-        self.stored = self.storage.insert(artifact, owner).await;
-        self.stored
+        self.storage.insert(artifact, owner).await
     }
 }
 
@@ -227,7 +225,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         Some(ArtifactSlot {
             id,
             storage: self.clone(),
-            stored: false,
         })
     }
 
