@@ -180,7 +180,7 @@ impl MpcFixture {
         let actions: tokio::sync::MutexGuard<'_, HashSet<String>> =
             self.output.rpc_actions.lock().await;
 
-        tracing::info!("All published RPC actions:");
+        tracing::info!(count = actions.len(), "All published RPC actions:");
         for action in actions.iter() {
             tracing::info!("{action}");
         }

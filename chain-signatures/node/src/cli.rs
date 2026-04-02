@@ -222,7 +222,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             );
             crate::metrics::nodes::CONFIGURATION_DIGEST.set(digest);
 
-            let (sign_tx, sign_rx) = mpsc::channel(16384);
+            let (sign_tx, sign_rx) = mpsc::channel(if cfg!(test) { 1 } else { 16384 });
 
             let gcp_service = GcpService::init(&account_id, &storage_options).await?;
             let key_storage =

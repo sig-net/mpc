@@ -12,7 +12,7 @@ use crate::protocol::presignature::{FullPresignatureId, PresignatureId};
 use crate::protocol::triple::TripleId;
 
 /// This should be enough to hold a few messages in the inbox.
-pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
+pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = if cfg!(test) { 1 } else { 4 * 1024 };
 
 pub enum SubscribeId {
     Generating,
