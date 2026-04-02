@@ -86,7 +86,7 @@ impl<A: ProtocolArtifact> Drop for ArtifactSlot<A> {
         let id = self.id;
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                storage.generating.write().await.remove(&id);
+                storage.reserved.write().await.generating.remove(&id);
             });
         }
     }
@@ -108,7 +108,7 @@ impl<A: ProtocolArtifact> Drop for ArtifactTakenDropper<A> {
             let id = self.id;
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
-                    storage.using.write().await.remove(&id);
+                    storage.reserved.write().await.using.remove(&id);
                 });
             }
         }
@@ -131,12 +131,30 @@ impl<A: ProtocolArtifact> ArtifactTaken<A> {
     }
 }
 
+/// In-memory tracking of artifact IDs that are not yet in Redis.
+/// Protected by a single `RwLock` to avoid multi-lock ordering issues.
+#[derive(Debug)]
+struct InMemoryState<Id> {
+    /// IDs currently being generated (protocol running, not yet persisted).
+    generating: HashSet<Id>,
+    /// IDs taken from Redis and actively consumed by a protocol.
+    using: HashSet<Id>,
+}
+
+impl<Id: Eq + std::hash::Hash> InMemoryState<Id> {
+    fn new() -> Self {
+        Self {
+            generating: HashSet::new(),
+            using: HashSet::new(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ProtocolStorage<A: ProtocolArtifact> {
     redis_pool: Pool,
     artifact_key: String,
-    generating: Arc<RwLock<HashSet<A::Id>>>,
-    using: Arc<RwLock<HashSet<A::Id>>>,
+    reserved: Arc<RwLock<InMemoryState<A::Id>>>,
     owner_keys: String,
     account_id: AccountId,
     _phantom: std::marker::PhantomData<A>,
@@ -147,8 +165,7 @@ impl<A: ProtocolArtifact> Clone for ProtocolStorage<A> {
         Self {
             redis_pool: self.redis_pool.clone(),
             artifact_key: self.artifact_key.clone(),
-            generating: self.generating.clone(),
-            using: self.using.clone(),
+            reserved: self.reserved.clone(),
             owner_keys: self.owner_keys.clone(),
             account_id: self.account_id.clone(),
             _phantom: std::marker::PhantomData,
@@ -159,15 +176,13 @@ impl<A: ProtocolArtifact> Clone for ProtocolStorage<A> {
 impl<A: ProtocolArtifact> ProtocolStorage<A> {
     pub fn new(pool: &Pool, account_id: &AccountId, base_prefix: &str) -> Self {
         let artifact_key = format!("{base_prefix}:{STORAGE_VERSION}:{account_id}");
-        let generating = Arc::new(RwLock::new(HashSet::new()));
-        let using = Arc::new(RwLock::new(HashSet::new()));
+        let state = Arc::new(RwLock::new(InMemoryState::new()));
         let owner_keys = format!("{base_prefix}_owners:{STORAGE_VERSION}:{account_id}");
 
         Self {
             redis_pool: pool.clone(),
             artifact_key,
-            generating,
-            using,
+            reserved: state,
             owner_keys,
             account_id: account_id.clone(),
             _phantom: std::marker::PhantomData,
@@ -206,19 +221,22 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     /// Tracks the ID in the `generating` set until the slot is inserted or dropped.
     /// Returns `None` if the ID is already generating, in use, or stored in Redis.
     pub async fn create_slot(&self, id: A::Id) -> Option<ArtifactSlot<A>> {
-        if self.using.read().await.contains(&id) {
-            tracing::error!(id, "cannot create slot: artifact is currently in use");
-            return None;
-        }
-        if !self.generating.write().await.insert(id) {
-            tracing::error!(
-                id,
-                "cannot create slot: artifact is already being generated"
-            );
-            return None;
+        {
+            let mut state = self.reserved.write().await;
+            if state.using.contains(&id) {
+                tracing::error!(id, "cannot create slot: artifact is currently in use");
+                return None;
+            }
+            if !state.generating.insert(id) {
+                tracing::error!(
+                    id,
+                    "cannot create slot: artifact is already being generated"
+                );
+                return None;
+            }
         }
         if self.contains(id).await {
-            self.generating.write().await.remove(&id);
+            self.reserved.write().await.generating.remove(&id);
             tracing::error!(id, "cannot create slot: artifact already exists in storage");
             return None;
         }
@@ -230,7 +248,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
     /// Check if an artifact is currently being generated.
     pub async fn contains_generating(&self, id: A::Id) -> bool {
-        self.generating.read().await.contains(&id)
+        self.reserved.read().await.generating.contains(&id)
     }
 
     pub async fn remove_outdated(
@@ -315,11 +333,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 // Filter out artifacts that are on this node but not in Redis:
                 // - `generating`: being generated, not yet persisted
                 // - `using`: taken from Redis, actively consumed by a protocol
-                let generating = self.generating.read().await;
-                let using = self.using.read().await;
+                let state = self.reserved.read().await;
                 let not_found: Vec<_> = not_found
                     .into_iter()
-                    .filter(|id| !generating.contains(id) && !using.contains(id))
+                    .filter(|id| !state.generating.contains(id) && !state.using.contains(id))
                     .collect();
                 Ok(RemoveOutdatedResult::new(outdated, not_found))
             }
@@ -427,12 +444,12 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
     /// Check if an artifact is currently being consumed by an active protocol.
     pub async fn contains_using(&self, id: A::Id) -> bool {
-        self.using.read().await.contains(&id)
+        self.reserved.read().await.using.contains(&id)
     }
 
     /// Returns the set of artifact IDs currently being consumed by active protocols.
     pub async fn using_ids(&self) -> HashSet<A::Id> {
-        self.using.read().await.clone()
+        self.reserved.read().await.using.clone()
     }
 
     pub async fn take(&self, id: A::Id, owner: Participant) -> Option<ArtifactTaken<A>> {
@@ -460,14 +477,14 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         "#;
 
         let start = Instant::now();
-        if !self.using.write().await.insert(id) {
+        if !self.reserved.write().await.using.insert(id) {
             tracing::warn!(id, "taking artifact that is already in use");
             return None;
         }
 
         let Some(mut conn) = self.connect().await else {
             tracing::warn!(id, "failed to take artifact: connection failed");
-            self.using.write().await.remove(&id);
+            self.reserved.write().await.using.remove(&id);
             return None;
         };
         let result: Result<(A, Vec<u32>), _> = redis::Script::new(SCRIPT)
@@ -490,7 +507,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 Some(ArtifactTaken::new(artifact, self.clone()))
             }
             Err(err) => {
-                self.using.write().await.remove(&id);
+                self.reserved.write().await.using.remove(&id);
                 tracing::warn!(id, ?err, ?elapsed, "failed to take artifact");
                 None
             }
@@ -571,8 +588,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .with_label_values(&[A::METRIC_LABEL, "clear"])
             .observe(elapsed.as_millis() as f64);
 
-        self.generating.write().await.clear();
-        self.using.write().await.clear();
+        let mut state = self.reserved.write().await;
+        state.generating.clear();
+        state.using.clear();
 
         // if the outcome is None, it means the script failed or there was an error.
         outcome.is_some()
@@ -629,7 +647,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 let holders = holders.into_iter().map(Participant::from).collect();
                 artifact.set_holders(holders);
                 let id = artifact.id();
-                self.using.write().await.insert(id);
+                self.reserved.write().await.using.insert(id);
                 let taken = ArtifactTaken::new(artifact, self.clone());
                 tracing::debug!(id, ?elapsed, "took mine artifact");
                 Some(taken)
