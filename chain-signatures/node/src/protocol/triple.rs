@@ -581,6 +581,7 @@ impl TripleSpawner {
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
         let mut stockpile_interval = tokio::time::interval(Duration::from_millis(100));
+        stockpile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(1));
         let mut posits = self.msg.subscribe_triple_posit().await;
 

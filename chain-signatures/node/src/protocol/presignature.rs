@@ -697,6 +697,7 @@ impl PresignatureSpawner {
     ) {
         let mut last_active_warn: Option<Instant> = None;
         let mut stockpile_interval = time::interval(Duration::from_millis(100));
+        stockpile_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(1));
         let mut posits = self.msg.subscribe_presignature_posit().await;
 
