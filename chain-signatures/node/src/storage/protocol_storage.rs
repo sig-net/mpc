@@ -677,9 +677,11 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             local updated = {}
             for i = 3, #ARGV do
                 local id = ARGV[i]
-                local holders_key = artifact_key .. ':holders:' .. id
-                -- Skip if holders set doesn't exist (artifact already taken/consumed)
-                if redis.call('EXISTS', holders_key) == 1 then
+                -- Skip if not owned by me (defense against malicious/buggy peer responses)
+                if redis.call('SISMEMBER', owner_key, id) == 0 then
+                    -- noop: not our artifact
+                elseif redis.call('EXISTS', artifact_key .. ':holders:' .. id) == 1 then
+                    local holders_key = artifact_key .. ':holders:' .. id
                     redis.call('SREM', holders_key, peer)
                     local count = redis.call('SCARD', holders_key)
                     if count < threshold then
