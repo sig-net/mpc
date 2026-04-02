@@ -564,7 +564,7 @@ impl MpcFixtureNodeBuilder {
                     if pair.holders.is_none() {
                         pair.holders = Some(pair.triple0.public.participants.clone());
                     }
-                    let mut slot = triple_storage.create_slot(pair_id).await;
+                    let mut slot = triple_storage.create_slot(pair_id).await.unwrap();
                     slot.insert(pair, owner).await;
                 }
             }
@@ -583,7 +583,8 @@ impl MpcFixtureNodeBuilder {
                     }
                     let mut slot = presignature_storage
                         .create_slot(presignature_share.id)
-                        .await;
+                        .await
+                        .unwrap();
                     slot.insert(presignature_share, owner).await;
                 }
             }

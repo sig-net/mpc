@@ -528,7 +528,11 @@ impl TripleSpawner {
         timeout: Duration,
     ) -> Result<(), InitializationError> {
         // Check if the `id` is already in the system. Error out and have the next cycle try again.
-        let slot = self.triple_storage.create_slot(id).await;
+        let Some(slot) = self.triple_storage.create_slot(id).await else {
+            return Err(InitializationError::BadParameters(format!(
+                "triple {id} is already generating, in use, or stored"
+            )));
+        };
 
         tracing::info!(?id, "starting protocol to generate a new triple");
         let generator = TripleGenerator::new(

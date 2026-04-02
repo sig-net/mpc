@@ -69,6 +69,7 @@ pub(crate) async fn insert_triples_for_owner(
         triples
             .create_slot(id)
             .await
+            .unwrap()
             .insert(dummy_pair_with_holders(id, holders.clone()), owner)
             .await;
     }
@@ -85,6 +86,7 @@ pub(crate) async fn insert_presignatures_for_owner(
         presignatures
             .create_slot(id)
             .await
+            .unwrap()
             .insert(dummy_presignature_with_holders(id, holders.clone()), owner)
             .await;
     }

@@ -206,18 +206,29 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
     /// Create a slot for generating an artifact with the given ID.
     /// Tracks the ID in the `generating` set until the slot is inserted or dropped.
-    pub async fn create_slot(&self, id: A::Id) -> ArtifactSlot<A> {
+    /// Returns `None` if the ID is already generating, in use, or stored in Redis.
+    pub async fn create_slot(&self, id: A::Id) -> Option<ArtifactSlot<A>> {
+        if self.using.read().await.contains(&id) {
+            tracing::error!(id, "cannot create slot: artifact is currently in use");
+            return None;
+        }
         if !self.generating.write().await.insert(id) {
             tracing::error!(
                 id,
-                "creating slot for artifact that is already being generated"
+                "cannot create slot: artifact is already being generated"
             );
+            return None;
         }
-        ArtifactSlot {
+        if self.contains(id).await {
+            self.generating.write().await.remove(&id);
+            tracing::error!(id, "cannot create slot: artifact already exists in storage");
+            return None;
+        }
+        Some(ArtifactSlot {
             id,
             storage: self.clone(),
             stored: false,
-        }
+        })
     }
 
     /// Check if an artifact is currently being generated.

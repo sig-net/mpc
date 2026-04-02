@@ -40,10 +40,13 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     triple_storage
         .create_slot(triple_id1)
         .await
+        .unwrap()
         .insert(dummy_pair(triple_id1), node1)
         .await;
     triple_storage
         .create_slot(triple_id2)
+        .await
+        .unwrap()
         .await
         .insert(dummy_pair(triple_id2), node1)
         .await;
@@ -70,6 +73,10 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(triple_storage.contains_using(triple_id1).await);
     assert!(triple_storage.contains_using(triple_id2).await);
 
+    // Attempt to re-create slot for in-use triples and check that it fails
+    assert!(triple_storage.create_slot(triple_id1).await.is_none());
+    assert!(triple_storage.create_slot(triple_id2).await.is_none());
+
     let id3 = 3;
     let id4: u64 = 4;
 
@@ -77,11 +84,13 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     triple_storage
         .create_slot(id3)
         .await
+        .unwrap()
         .insert(dummy_pair(id3), node0)
         .await;
     triple_storage
         .create_slot(id4)
         .await
+        .unwrap()
         .insert(dummy_pair(id4), node0)
         .await;
     assert!(triple_spawner.contains(id3).await);
@@ -106,12 +115,17 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(triple_storage.contains_using(id3).await);
     assert!(triple_storage.contains_using(id4).await);
 
+    // Attempt to re-create slot for in-use mine triples and check that it fails
+    assert!(triple_storage.create_slot(id3).await.is_none());
+    assert!(triple_storage.create_slot(id4).await.is_none());
+
     assert!(triple_storage.clear().await);
     // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
     for id in 10..=15 {
         triple_storage
             .create_slot(id)
             .await
+            .unwrap()
             .insert(dummy_pair(id), node1)
             .await;
     }
@@ -121,6 +135,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
         triple_storage
             .create_slot(id)
             .await
+            .unwrap()
             .insert(dummy_pair(id), node0)
             .await;
     }
@@ -185,6 +200,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
         presignature_storage
             .create_slot(presignature.id)
             .await
+            .unwrap()
             .insert(presignature, node1)
             .await
     );
@@ -205,6 +221,9 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_spawner.len_potential().await, 0);
     assert!(presignature_storage.contains_using(id).await);
 
+    // Attempt to re-create slot for in-use presignature and check that it fails
+    assert!(presignature_storage.create_slot(id).await.is_none());
+
     let id2 = 2;
     let mine_presignature = dummy_presignature(id2);
 
@@ -213,6 +232,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
         presignature_storage
             .create_slot(id2)
             .await
+            .unwrap()
             .insert(mine_presignature, node0)
             .await
     );
@@ -233,12 +253,16 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_spawner.len_potential().await, 0);
     assert!(presignature_storage.contains_using(id2).await);
 
+    // Attempt to re-create slot for in-use mine presignature and check that it fails
+    assert!(presignature_storage.create_slot(id2).await.is_none());
+
     presignature_storage.clear().await;
     // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
     for id in 10..=15 {
         presignature_storage
             .create_slot(id)
             .await
+            .unwrap()
             .insert(dummy_presignature(id), node1)
             .await;
     }
@@ -248,6 +272,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
         presignature_storage
             .create_slot(id)
             .await
+            .unwrap()
             .insert(dummy_presignature(id), node0)
             .await;
     }

@@ -431,6 +431,7 @@ impl Redis {
                         .unwrap()
                         .create_slot(pair_id)
                         .await
+                        .unwrap()
                         .insert(pair, *owner)
                         .await;
                 }
