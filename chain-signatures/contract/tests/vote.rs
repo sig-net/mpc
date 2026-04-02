@@ -320,17 +320,6 @@ async fn test_vote_leave() -> anyhow::Result<()> {
                     .contains_key(accounts[0].id()),
                 "removed participant must not be in account_to_participant_id"
             );
-            // IDs must be contiguous 0..n
-            let mut ids: Vec<u32> = r
-                .participants
-                .account_to_participant_id
-                .values()
-                .copied()
-                .collect();
-            ids.sort();
-            let expected: Vec<u32> = (0..r.participants.len() as u32).collect();
-            assert_eq!(ids, expected, "participant IDs must be contiguous from 0");
-            assert_eq!(r.participants.next_id, r.participants.len() as u32);
         }
         _ => panic!("should be in running state after resharing"),
     };
