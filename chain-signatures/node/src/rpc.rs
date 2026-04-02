@@ -1836,8 +1836,6 @@ use signet_program::accounts::Respond as SolanaRespondAccount;
 use signet_program::accounts::RespondBidirectional as SolanaRespondBidirectionalAccount;
 use signet_program::instruction::Respond as SolanaRespond;
 use signet_program::instruction::RespondBidirectional as SolanaRespondBidirectional;
-use signet_program::AffinePoint as SolanaContractAffinePoint;
-use signet_program::Signature as SolanaContractSignature;
 use solana_sdk::signature::Signer as SolanaSigner;
 async fn try_publish_sol(
     sol: &SolanaClient,
@@ -1850,14 +1848,7 @@ async fn try_publish_sol(
     let sign_id = action.indexed.id;
     let request_ids = vec![action.indexed.id.request_id];
     let big_r = signature.big_r.to_encoded_point(false);
-    let signature = SolanaContractSignature {
-        big_r: SolanaContractAffinePoint {
-            x: big_r.as_bytes()[1..33].try_into().unwrap(),
-            y: big_r.as_bytes()[33..65].try_into().unwrap(),
-        },
-        s: signature.s.to_bytes().into(),
-        recovery_id: signature.recovery_id,
-    };
+    let signature = crate::util::mpc_to_sol_signature(signature, big_r);
 
     tracing::debug!(
         ?sign_id,

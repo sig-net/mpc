@@ -3,6 +3,7 @@
 
 use crate::containers::Redis;
 use crate::mpc_fixture::message_collector::{CollectMessages, MessagePrinter};
+use crate::mpc_fixture::mock_stream::MockStream;
 use cait_sith::protocol::Participant;
 use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
@@ -34,6 +35,7 @@ pub struct MpcFixtureNode {
 
     pub sign_tx: mpsc::Sender<Sign>,
     pub msg_channel: MessageChannel,
+    pub mock_streams: Vec<MockStream>,
 
     pub triple_storage: TripleStorage,
     pub presignature_storage: PresignatureStorage,

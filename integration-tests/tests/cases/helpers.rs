@@ -7,6 +7,7 @@ use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
+use mpc_primitives::{SignArgs, LATEST_MPC_KEY_VERSION};
 
 pub(crate) fn dummy_presignature(id: u64) -> Presignature {
     dummy_presignature_with_holders(id, vec![Participant::from(1), Participant::from(2)])
@@ -131,5 +132,17 @@ pub(crate) async fn assert_presig_owned_state(
             !presignatures.contains_by_owner(*id, owner).await,
             "presignature={id} should be absent for owner={owner:?}"
         );
+    }
+}
+
+pub fn test_sign_arg(seed: u8) -> SignArgs {
+    let mut entropy = [1; 32];
+    entropy[0] = seed;
+    SignArgs {
+        entropy,
+        epsilon: k256::Scalar::default(),
+        payload: k256::Scalar::default(),
+        path: "test".to_owned(),
+        key_version: LATEST_MPC_KEY_VERSION,
     }
 }

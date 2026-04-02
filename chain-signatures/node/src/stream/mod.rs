@@ -26,6 +26,7 @@ pub fn channel() -> (mpsc::Sender<ChainEvent>, mpsc::Receiver<ChainEvent>) {
 
 /// Unified event produced by a chain stream
 #[allow(clippy::large_enum_variant)]
+#[derive(Clone)]
 pub enum ChainEvent {
     SignRequest(IndexedSignRequest),
     Respond(SignatureRespondedEvent),

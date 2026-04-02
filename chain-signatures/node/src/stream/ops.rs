@@ -171,6 +171,7 @@ impl SignBidirectionalEvent {
     }
 }
 
+#[derive(Clone)]
 pub enum RespondBidirectionalEvent {
     Solana(signet_program::RespondBidirectionalEvent),
     Hydration(HydrationRespondBidirectionalEvent),
