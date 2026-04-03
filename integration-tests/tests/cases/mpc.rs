@@ -28,8 +28,8 @@ const TRIPLE_PAIRS_PER_OWNER: usize = 50;
 const PRESIGNATURES_PER_OWNER: usize = 25;
 
 use super::helpers::{
-    assert_presig_owned_state, assert_triples_owned_state, insert_presignatures_for_owner,
-    insert_triples_for_owner,
+    assert_presig_owned_state, assert_triples_owned_state, dummy_pair_with_holders,
+    dummy_presignature_with_holders, insert_presignatures_for_owner, insert_triples_for_owner,
 };
 
 #[test(tokio::test(flavor = "multi_thread"))]
@@ -301,6 +301,130 @@ async fn test_sync_remove_outdated_orphan() {
             "fixture presig {id} should still have all holders"
         );
     }
+}
+
+/// When a peer is still generating an artifact (create_slot called, not yet inserted),
+/// sync should NOT report it as missing. After generation fails (slot dropped),
+/// the artifact should be reported as missing on the next sync.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sync_when_peer_generating() {
+    const GENERATING_ID: u64 = 600;
+
+    let fixture = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    let node0 = &fixture.nodes[0];
+    let node1 = &fixture.nodes[1];
+    let all_participants = fixture.sorted_participants();
+
+    // Owner (node0): create_slot + insert → artifact is fully generated and in Redis.
+    node0
+        .triple_storage
+        .create_slot(GENERATING_ID)
+        .await
+        .unwrap()
+        .insert(
+            dummy_pair_with_holders(GENERATING_ID, all_participants.clone()),
+            node0.me,
+        )
+        .await;
+    node0
+        .presignature_storage
+        .create_slot(GENERATING_ID)
+        .await
+        .unwrap()
+        .insert(
+            dummy_presignature_with_holders(GENERATING_ID, all_participants),
+            node0.me,
+        )
+        .await;
+
+    // Non-owner (node1): create_slot only → artifact is still generating, not in Redis.
+    let _triple_slot = node1
+        .triple_storage
+        .create_slot(GENERATING_ID)
+        .await
+        .unwrap();
+    let _presig_slot = node1
+        .presignature_storage
+        .create_slot(GENERATING_ID)
+        .await
+        .unwrap();
+
+    assert!(
+        node1
+            .triple_storage
+            .contains_generating(GENERATING_ID)
+            .await
+    );
+    assert!(
+        node1
+            .presignature_storage
+            .contains_generating(GENERATING_ID)
+            .await
+    );
+
+    // Sync: node0 broadcasts its directory (includes GENERATING_ID).
+    // node1 should NOT report it as missing because it's currently generating it.
+    let response = node1
+        .sync(
+            node0.me,
+            node0.owned_triples().await,
+            node0.owned_presignatures().await,
+        )
+        .await;
+
+    assert!(
+        !response.triples.contains(&GENERATING_ID),
+        "triple should not be reported as missing while generating"
+    );
+    assert!(
+        !response.presignatures.contains(&GENERATING_ID),
+        "presignature should not be reported as missing while generating"
+    );
+
+    // Simulate generation failure: drop the slots → no longer generating, not in Redis.
+    drop(_triple_slot);
+    drop(_presig_slot);
+    // ArtifactSlot::Drop removes from `generating` asynchronously; wait for it.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if !node1
+                .triple_storage
+                .contains_generating(GENERATING_ID)
+                .await
+                && !node1
+                    .presignature_storage
+                    .contains_generating(GENERATING_ID)
+                    .await
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("generating state should be cleared after dropping slots");
+
+    // Sync again: node1 should now report GENERATING_ID as missing.
+    let response = node1
+        .sync(
+            node0.me,
+            node0.owned_triples().await,
+            node0.owned_presignatures().await,
+        )
+        .await;
+
+    assert!(
+        response.triples.contains(&GENERATING_ID),
+        "triple should be reported as missing after generation failed"
+    );
+    assert!(
+        response.presignatures.contains(&GENERATING_ID),
+        "presignature should be reported as missing after generation failed"
+    );
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
