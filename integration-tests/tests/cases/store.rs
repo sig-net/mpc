@@ -60,8 +60,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_spawner.len_potential().await, 2);
 
     // Take triple pairs and check that they are removed from the storage and marked as using
-    triple_storage.take(triple_id1, node1).await.unwrap();
-    triple_storage.take(triple_id2, node1).await.unwrap();
+    let _taken1 = triple_storage.take(triple_id1, node1).await.unwrap();
+    let _taken2 = triple_storage.take(triple_id2, node1).await.unwrap();
     assert!(!triple_spawner.contains(triple_id1).await);
     assert!(!triple_spawner.contains(triple_id2).await);
     assert!(!triple_spawner.contains_mine(triple_id1).await);
@@ -101,8 +101,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_spawner.len_potential().await, 2);
 
     // Take mine triple pairs and check that they are removed from the storage and marked as using
-    triple_storage.take_mine(node0).await.unwrap();
-    triple_storage.take_mine(node0).await.unwrap();
+    let _taken3 = triple_storage.take_mine(node0).await.unwrap();
+    let _taken4 = triple_storage.take_mine(node0).await.unwrap();
     assert!(!triple_spawner.contains(id3).await);
     assert!(!triple_spawner.contains(id4).await);
     assert!(!triple_spawner.contains_mine(id3).await);
@@ -212,7 +212,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_spawner.len_potential().await, 1);
 
     // Take presignature and check that it is removed from the storage and marked as using
-    presignature_storage.take(id, node1).await.unwrap();
+    let _taken_ps1 = presignature_storage.take(id, node1).await.unwrap();
     assert!(!presignature_storage.contains(id).await);
     assert!(!presignature_spawner.contains_mine(id).await);
     assert_eq!(presignature_storage.len_generated().await, 0);
@@ -243,7 +243,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_spawner.len_potential().await, 1);
 
     // Take mine presignature and check that it is removed from the storage and marked as using
-    presignature_storage.take_mine(node0).await.unwrap();
+    let _taken_ps2 = presignature_storage.take_mine(node0).await.unwrap();
     assert!(!presignature_storage.contains(id2).await);
     assert!(!presignature_spawner.contains_mine(id2).await);
     assert_eq!(presignature_storage.len_generated().await, 0);
