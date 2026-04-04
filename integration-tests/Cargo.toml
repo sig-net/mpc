@@ -37,7 +37,6 @@ signet-program.workspace = true
 solana-transaction-status-client-types.workspace = true
 
 # crypto dependencies
-ethers = { version = "2.0.13", features = ["abigen"] }
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
 k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
 secp256k1.workspace = true

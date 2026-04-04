@@ -52,7 +52,6 @@ ethabi = "18.0.0"
 anchor-client = { version = "0.31.0", features = ["async"] }
 solana-transaction-status-client-types = "2.2.7"
 alloy-dyn-abi = "1.4.1"
-ethers-core = "2.0.13"
 secp256k1 = "0.28.2"
 rlp = "0.5"
 alloy-consensus = { version = "1.0.38", features = ["serde"] }

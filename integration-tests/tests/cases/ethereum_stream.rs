@@ -2,9 +2,7 @@ use alloy::primitives::{Address as AlloyAddress, B256, U256 as AlloyU256};
 use anyhow::{Context, Result};
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers::EthereumSandbox;
-use integration_tests::eth::{
-    self, chain_signatures_contract, ChainSignaturesContract, SignRequest,
-};
+use integration_tests::eth::{self, chain_signatures_contract, SignRequest};
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use mpc_node::backlog::{Backlog, BacklogTransaction, SignTx};
 use mpc_node::indexer_eth::{EthConfig, EthereumStream};
@@ -90,7 +88,7 @@ impl EthereumTestEnvironment {
                 )
                 .await
                 {
-                    Ok(Ok(())) => {}
+                    Ok(Ok(_)) => {}
                     Ok(Err(err)) => {
                         tracing::debug!(?err, "block pumper failed to send tx");
                         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -130,13 +128,6 @@ impl EthereumTestEnvironment {
     fn backlog(&self) -> Backlog {
         Backlog::new()
     }
-
-    fn contract(&self) -> ChainSignaturesContract<Arc<eth::SandboxMiddleware>> {
-        ChainSignaturesContract::new(
-            eth::to_ethers_address(self.contract_address),
-            self.signer.clone().into(),
-        )
-    }
 }
 
 async fn submit_sign_request(
@@ -144,7 +135,6 @@ async fn submit_sign_request(
     payload: [u8; 32],
     path: &str,
 ) -> Result<()> {
-    let contract = ctx.contract();
     let sign_request = SignRequest {
         payload,
         path: path.to_string(),
@@ -154,14 +144,13 @@ async fn submit_sign_request(
         params: "".to_string(),
     };
 
-    let call = contract
-        .sign(sign_request)
-        .value(eth::to_ethers_u256(signature_deposit()));
-    let pending_tx = call.send().await?;
-    let receipt = pending_tx
-        .await
-        .context("failed to mine sign transaction")?
-        .context("sign transaction dropped from mempool")?;
+    let receipt = eth::send_sign_request(
+        &ctx.signer,
+        ctx.contract_address,
+        sign_request,
+        signature_deposit(),
+    )
+    .await?;
     let _ = receipt.transaction_hash;
     Ok(())
 }
@@ -470,19 +459,13 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
         signature,
     };
 
-    let contract = ctx.contract();
-    let respond_call = contract.respond(vec![response]);
-    let pending_tx = respond_call.send().await?;
-    let receipt = pending_tx
-        .await
-        .context("respond transaction execution failed")?
-        .ok_or_else(|| anyhow::anyhow!("respond transaction dropped from mempool"))?;
+    let receipt = eth::send_responses(&ctx.signer, ctx.contract_address, vec![response]).await?;
 
     // Sanity-check that the contract emitted the SignatureResponded log we're expecting.
-    let logs = receipt.logs.clone();
+    let logs = receipt.logs();
     assert!(!logs.is_empty(), "respond transaction produced no logs");
     let sig_topic = eth::signature_responded_topic();
-    assert_eq!(logs[0].topics[0], sig_topic, "unexpected event emitted");
+    assert_eq!(logs[0].topics()[0], sig_topic, "unexpected event emitted");
 
     // Verify the indexer emits the Respond event with matching data.
     let mut saw_respond = false;

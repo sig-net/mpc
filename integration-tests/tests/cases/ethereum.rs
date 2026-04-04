@@ -28,8 +28,6 @@ async fn test_signature_ethereum() -> Result<()> {
     let contract_address = eth_ctx.contract_address;
 
     let (client, requester) = eth::client(&endpoint, &secret_key, chain_id)?;
-    let contract =
-        eth::ChainSignaturesContract::new(eth::to_ethers_address(contract_address), client.clone());
 
     let payload = [7u8; 32];
     let path = "test";
@@ -46,11 +44,8 @@ async fn test_signature_ethereum() -> Result<()> {
         params: params.to_string(),
     };
 
-    let call = contract
-        .sign(request)
-        .value(eth::to_ethers_u256(AlloyU256::from(1_u64)));
-    let pending = call.send().await?;
-    let receipt = pending.await?.context("sign transaction failed")?;
+    let receipt = eth::send_sign_request(&client, contract_address, request, AlloyU256::from(1_u64))
+        .await?;
     let from_block = receipt
         .block_number
         .context("missing block number in receipt")?;
@@ -68,14 +63,9 @@ async fn test_signature_ethereum() -> Result<()> {
 
     let mut matching_event = None;
     for _ in 0..30 {
-        let events = contract
-            .event::<eth::SignatureRespondedFilter>()
-            .from_block(from_block)
-            .query()
-            .await?;
+        let events = eth::signature_responded_events(&client, contract_address, from_block).await?;
         if let Some(event) = events.into_iter().find(|event| {
-            event.request_id == expected_request_id[..]
-                && event.responder == eth::to_ethers_address(requester)
+            event.request_id == expected_request_id && event.responder == requester
         }) {
             matching_event = Some(event);
             break;
@@ -87,9 +77,9 @@ async fn test_signature_ethereum() -> Result<()> {
         matching_event.ok_or_else(|| anyhow!("did not observe signature response on ethereum"))?;
 
     let mut x_bytes = [0u8; 32];
-    event.signature.big_r.x.to_big_endian(&mut x_bytes);
+    x_bytes.copy_from_slice(&event.signature.big_r.x.to_be_bytes::<32>());
     let mut y_bytes = [0u8; 32];
-    event.signature.big_r.y.to_big_endian(&mut y_bytes);
+    y_bytes.copy_from_slice(&event.signature.big_r.y.to_be_bytes::<32>());
     let x_field: &FieldBytes = FieldBytes::from_slice(&x_bytes);
     let y_field: &FieldBytes = FieldBytes::from_slice(&y_bytes);
     let encoded_r = EncodedPoint::from_affine_coordinates(x_field, y_field, false);
@@ -101,7 +91,7 @@ async fn test_signature_ethereum() -> Result<()> {
     let r_bytes = r_scalar.to_bytes();
 
     let mut s_bytes = [0u8; 32];
-    event.signature.s.to_big_endian(&mut s_bytes);
+    s_bytes.copy_from_slice(&event.signature.s.to_be_bytes::<32>());
 
     let mut signature_bytes = [0u8; 64];
     signature_bytes[..32].copy_from_slice(r_bytes.as_slice());
@@ -159,8 +149,6 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     let contract_address = eth_ctx.contract_address;
 
     let (client, requester) = eth::client(&endpoint, &secret_key, chain_id)?;
-    let contract =
-        eth::ChainSignaturesContract::new(eth::to_ethers_address(contract_address), client.clone());
 
     // Get initial checkpoint state
     let node_idx = 0;
@@ -187,11 +175,8 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
         params: params.to_string(),
     };
 
-    let call = contract
-        .sign(request)
-        .value(eth::to_ethers_u256(AlloyU256::from(1_u64)));
-    let pending = call.send().await?;
-    let receipt = pending.await?.context("sign transaction failed")?;
+    let receipt = eth::send_sign_request(&client, contract_address, request, AlloyU256::from(1_u64))
+        .await?;
     let from_block = receipt
         .block_number
         .context("missing block number in receipt")?;
@@ -233,14 +218,9 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     // Wait for the signature response
     let mut matching_event = None;
     for _ in 0..30 {
-        let events = contract
-            .event::<eth::SignatureRespondedFilter>()
-            .from_block(from_block)
-            .query()
-            .await?;
+        let events = eth::signature_responded_events(&client, contract_address, from_block).await?;
         if let Some(event) = events.into_iter().find(|event| {
-            event.request_id == expected_request_id[..]
-                && event.responder == eth::to_ethers_address(requester)
+            event.request_id == expected_request_id && event.responder == requester
         }) {
             matching_event = Some(event);
             break;
@@ -275,11 +255,11 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
         "pending transactions count after response"
     );
 
-    let expected_request_bytes = expected_request_id.as_bytes();
+    let expected_request_bytes: [u8; 32] = expected_request_id.into();
     let request_still_present = checkpoint
         .pending_requests
         .iter()
-        .any(|tx| tx.sign_id.request_id == *expected_request_bytes);
+        .any(|tx| tx.sign_id.request_id == expected_request_bytes);
 
     assert!(
         !request_still_present,
@@ -307,14 +287,11 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         &eth_ctx.sandbox.secret_key,
         eth_ctx.sandbox.chain_id,
     )?;
-    let eth_contract = eth::ChainSignaturesContract::new(
-        eth::to_ethers_address(eth_ctx.contract_address),
-        eth_client,
-    );
+    let eth_contract_address = eth_ctx.contract_address;
 
     // Produce a few sign requests up front so nodes create initial checkpoints
     for i in 0..5 {
-        submit_eth_sign_request(&eth_contract, i).await?;
+        submit_eth_sign_request(&eth_client, eth_contract_address, i).await?;
     }
 
     let active_idx = 1usize;
@@ -339,7 +316,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
     let mut elapsed = Duration::default();
     let mut seed = 100usize;
     while elapsed < offline_duration {
-        submit_eth_sign_request(&eth_contract, seed).await?;
+        submit_eth_sign_request(&eth_client, eth_contract_address, seed).await?;
         seed += 1;
         tokio::time::sleep(Duration::from_secs(2)).await;
         elapsed += Duration::from_secs(2);
@@ -403,7 +380,8 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
 }
 
 async fn submit_eth_sign_request(
-    contract: &eth::ChainSignaturesContract<eth::SandboxMiddleware>,
+    client: &std::sync::Arc<eth::SandboxMiddleware>,
+    contract_address: eth::Address,
     seed: usize,
 ) -> anyhow::Result<()> {
     let payload = [seed as u8; 32];
@@ -416,13 +394,7 @@ async fn submit_eth_sign_request(
         params: "{}".to_string(),
     };
 
-    contract
-        .sign(request)
-        .value(eth::to_ethers_u256(AlloyU256::from(1_u64)))
-        .send()
-        .await?
-        .await?
-        .context("sign transaction failed")?;
+    eth::send_sign_request(client, contract_address, request, AlloyU256::from(1_u64)).await?;
 
     Ok(())
 }
@@ -435,8 +407,7 @@ async fn produce_empty_eth_blocks(
     let sink = eth::address_from_low_u64_be(0xdead_beef);
 
     for _ in 0..block_count {
-        let tx = eth::value_transfer(sink, AlloyU256::ZERO)
-            .gas(eth::to_ethers_u256(AlloyU256::from(21_000_u64)));
+        let tx = eth::value_transfer_with_gas(sink, AlloyU256::ZERO, 21_000);
 
         eth::send_transaction_and_wait(client, tx, "empty block-pumping transaction failed")
             .await?;
