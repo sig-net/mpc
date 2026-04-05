@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::env;
 use std::path::Path;
 
 use crate::cluster::spawner::ClusterSpawner;
@@ -309,14 +310,30 @@ impl DockerClient {
 
 impl Default for DockerClient {
     fn default() -> Self {
+        let timeout = 600;
+        let api_version = bollard::API_DEFAULT_VERSION;
+
+        let docker = match bollard::Docker::connect_with_defaults() {
+            Ok(docker) => docker,
+            Err(default_err) => {
+                let home_socket = env::var("HOME")
+                    .ok()
+                    .map(|home| format!("unix://{home}/.docker/run/docker.sock"));
+                let Some(home_socket) = home_socket else {
+                    panic!("failed to connect to Docker using defaults: {default_err}");
+                };
+
+                bollard::Docker::connect_with_unix(&home_socket, timeout, api_version)
+                    .unwrap_or_else(|home_err| {
+                        panic!(
+                            "failed to connect to Docker using defaults ({default_err}) or Docker Desktop socket {home_socket} ({home_err})"
+                        )
+                    })
+            }
+        };
+
         Self {
-            docker: Docker::connect_with_local(
-                "unix:///var/run/docker.sock",
-                // 10 minutes timeout for all requests in case a lot of tests are being ran in parallel.
-                600,
-                bollard::API_DEFAULT_VERSION,
-            )
-            .unwrap(),
+            docker,
         }
     }
 }
@@ -458,53 +475,32 @@ impl EthereumSandbox {
 
     pub async fn run(spawner: &ClusterSpawner) -> anyhow::Result<Self> {
         let chain_id_arg = Self::DEFAULT_CHAIN_ID.to_string();
-        let command = vec![
-            "anvil".to_string(),
-            "--host".to_string(),
-            "0.0.0.0".to_string(),
-            "--chain-id".to_string(),
+        let command = format!(
+            "anvil --host 0.0.0.0 --chain-id {} --mnemonic '{}' --block-time 1",
             chain_id_arg,
-            "--mnemonic".to_string(),
-            Self::DEFAULT_MNEMONIC.to_string(),
-            "--block-time".to_string(),
-            "1".to_string(),
-        ];
+            Self::DEFAULT_MNEMONIC,
+        );
 
-        let request = if cfg!(feature = "docker-test") {
-            GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
-                .with_exposed_port(Self::RPC_PORT.tcp())
-                .with_network(&spawner.network)
-                .with_cmd(command.clone())
-        } else {
-            GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
-                .with_network("host")
-                .with_cmd(command)
-        };
+        let request = GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
+            .with_exposed_port(Self::RPC_PORT.tcp())
+            .with_network(&spawner.network)
+            .with_cmd(vec![command]);
 
         let container = request.start().await?;
 
         let secret_key = derive_secret_key(Self::DEFAULT_MNEMONIC)?;
 
-        let (internal_http_endpoint, external_http_endpoint) = if cfg!(feature = "docker-test") {
-            let network_ip = spawner
-                .docker
-                .get_network_ip_address(&container, &spawner.network)
-                .await?;
+        let network_ip = spawner
+            .docker
+            .get_network_ip_address(&container, &spawner.network)
+            .await?;
+        let external_port = container
+            .get_host_port_ipv4(Self::RPC_PORT)
+            .await
+            .context("ethereum sandbox port mapping")?;
 
-            let external_port = container
-                .get_host_port_ipv4(Self::RPC_PORT)
-                .await
-                .context("ethereum sandbox port mapping")?;
-
-            let external_http_endpoint = format!("http://127.0.0.1:{external_port}");
-            (
-                format!("http://{}:{}", network_ip, Self::RPC_PORT),
-                external_http_endpoint,
-            )
-        } else {
-            let endpoint = format!("http://127.0.0.1:{}", Self::RPC_PORT);
-            (endpoint.clone(), endpoint)
-        };
+        let internal_http_endpoint = format!("http://{}:{}", network_ip, Self::RPC_PORT);
+        let external_http_endpoint = format!("http://127.0.0.1:{external_port}");
 
         wait_for_rpc(&external_http_endpoint).await?;
 

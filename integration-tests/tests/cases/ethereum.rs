@@ -370,22 +370,40 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         "offline node has restarted and checkpoint recovery complete",
     );
 
+    anyhow::ensure!(
+        node_recovered_checkpoint.block_height >= node_active_checkpoint.block_height,
+        "restarted node should recover to at least the active checkpoint height via consensus"
+    );
+
+    let (active_checkpoint_after_restart, recovered_checkpoint_after_restart) =
+        wait_matching_node_checkpoints(
+            &cluster,
+            active_idx,
+            offline_idx,
+            Chain::Ethereum,
+            node_recovered_checkpoint
+                .block_height
+                .max(node_active_checkpoint.block_height),
+            Duration::from_secs(20),
+        )
+        .await?;
+
     assert_eq!(
-        node_active_checkpoint, node_recovered_checkpoint,
-        "restarted node should recover to same checkpoint as active node via consensus"
+        active_checkpoint_after_restart, recovered_checkpoint_after_restart,
+        "restarted node should converge to the same checkpoint as the active node via consensus"
     );
 
     let active_checkpoint_after_restart = wait_node_checkpoint(
         &cluster,
         active_idx,
         Chain::Ethereum,
-        node_active_checkpoint.block_height,
+        active_checkpoint_after_restart.block_height,
         Duration::from_secs(10),
     )
     .await?;
 
     assert_eq!(
-        node_active_checkpoint, active_checkpoint_after_restart,
+        recovered_checkpoint_after_restart, active_checkpoint_after_restart,
         "active node checkpoint should remain aligned after peer recovery"
     );
 
@@ -463,5 +481,47 @@ async fn wait_node_checkpoint(
     .await
     .unwrap_or_else(|_| {
         panic!("timed out waiting for node {node_idx} checkpoint >= {min_block_height}")
+    })
+}
+
+async fn wait_matching_node_checkpoints(
+    nodes: &Cluster,
+    left_idx: usize,
+    right_idx: usize,
+    chain: Chain,
+    min_block_height: u64,
+    timeout: Duration,
+) -> anyhow::Result<(Checkpoint, Checkpoint)> {
+    tokio::time::timeout(timeout, async {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+
+            let left = nodes.fetch_checkpoints(left_idx).await?;
+            let right = nodes.fetch_checkpoints(right_idx).await?;
+
+            let Some(left_checkpoint) = left.get(&chain).cloned() else {
+                continue;
+            };
+            let Some(right_checkpoint) = right.get(&chain).cloned() else {
+                continue;
+            };
+
+            if left_checkpoint.block_height < min_block_height
+                || right_checkpoint.block_height < min_block_height
+            {
+                continue;
+            }
+
+            if left_checkpoint == right_checkpoint {
+                return Ok((left_checkpoint, right_checkpoint));
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "timed out waiting for nodes {left_idx} and {right_idx} to converge on checkpoint >= {min_block_height}"
+        )
     })
 }
