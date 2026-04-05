@@ -1,8 +1,9 @@
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
-use crate::indexer_eth::EthereumStream;
-use crate::indexer_sol::SolanaStream;
+use crate::indexer_eth::{EthArgs, EthereumStream};
+use crate::indexer_hydration::{HydrationArgs, HydrationStream};
+use crate::indexer_sol::{SolArgs, SolanaStream};
 use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
@@ -14,7 +15,7 @@ use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::triple_storage::TriplePair;
 use crate::stream::run_stream;
-use crate::{indexer, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, storage, web};
+use crate::{indexer, logs, mesh, storage, web};
 
 use clap::Parser;
 use deadpool_redis::Runtime;
@@ -62,13 +63,13 @@ pub enum Cli {
         sign_sk: Option<SecretKey>,
         /// Ethereum Indexer options
         #[clap(flatten)]
-        eth: indexer_eth::EthArgs,
+        eth: EthArgs,
         /// Solana Indexer options
         #[clap(flatten)]
-        sol: indexer_sol::SolArgs,
+        sol: SolArgs,
         /// Hydration Indexer options
         #[clap(flatten)]
-        hydration: indexer_hydration::HydrationArgs,
+        hydration: HydrationArgs,
         /// NEAR requests options
         #[clap(flatten)]
         indexer_options: indexer::Options,
@@ -412,20 +413,15 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     client.clone(),
                 ));
             }
-            match indexer_hydration::HydrationStream::new(hydration).await {
-                Ok(hydration_stream) => {
-                    tokio::spawn(run_stream(
-                        hydration_stream,
-                        sign_tx,
-                        backlog,
-                        contract_watcher,
-                        mesh_state,
-                        client,
-                    ));
-                }
-                Err(err) => {
-                    tracing::error!(?err, "failed to create hydration indexer stream");
-                }
+            if let Some(hydration_stream) = HydrationStream::new(hydration).await {
+                tokio::spawn(run_stream(
+                    hydration_stream,
+                    sign_tx,
+                    backlog,
+                    contract_watcher,
+                    mesh_state,
+                    client,
+                ));
             }
             tracing::info!("protocol http server spawned");
             protocol_handle.await?;
@@ -444,7 +440,7 @@ fn configuration_digest(
     account_sk: SecretKey,
     cipher_pk: String,
     sign_sk: Option<SecretKey>,
-    eth: indexer_eth::EthArgs,
+    eth: EthArgs,
 ) -> i64 {
     let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
     let eth_contract_address = eth.eth_contract_address.unwrap_or_default();

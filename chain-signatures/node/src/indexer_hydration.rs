@@ -1,12 +1,8 @@
-use crate::backlog::Backlog;
 use crate::indexer_sol::MAX_SECP256K1_SCALAR;
-use crate::mesh::MeshState;
-use crate::node_client::NodeClient;
-use crate::protocol::{Chain, IndexedSignRequest, Sign};
-use crate::rpc::ContractStateWatcher;
-use crate::stream::{run_stream, ChainEvent, ChainStream};
+use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::ops::SignatureEvent;
+use crate::stream::{ChainEvent, ChainStream};
 
 use alloy_sol_types::SolValue;
 use anyhow::{anyhow, Result};
@@ -30,7 +26,6 @@ use subxt::events::EventDetails;
 use subxt::ext::scale_value::{Composite, Value, ValueDef};
 use subxt::{client::OnlineClient, SubstrateConfig};
 use tokio::sync::mpsc;
-use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 const PALLET_SIGNET: &str = "Signet";
@@ -344,29 +339,35 @@ pub struct HydrationStream {
 }
 
 impl HydrationStream {
-    pub async fn new(hydration: Option<HydrationConfig>) -> Result<Self> {
+    pub async fn new(hydration: Option<HydrationConfig>) -> Option<Self> {
         let Some(hydration) = hydration else {
             tracing::warn!("hydration indexer is disabled");
-            anyhow::bail!("hydration indexer is disabled");
+            return None;
         };
 
         let ws_url = hydration.rpc_ws_url.clone();
         tracing::info!("connecting to hydration rpc at {}", ws_url);
 
-        let hydration_api = OnlineClient::<SubstrateConfig>::from_url(&ws_url)
-            .await
-            .map_err(|err| anyhow!("failed to connect to hydration rpc: {err}"))?;
-        let rpc_client = RpcClient::from_url(&ws_url)
-            .await
-            .map_err(|err| anyhow!("failed to connect to hydration rpc: {err}"))?;
+        let hydration_api = match OnlineClient::<SubstrateConfig>::from_url(&ws_url).await {
+            Ok(api) => api,
+            Err(err) => {
+                tracing::error!(?err, "failed to connect to hydration rpc");
+                return None;
+            }
+        };
+        let rpc_client = match RpcClient::from_url(&ws_url).await {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::error!(?err, "failed to connect to hydration rpc");
+                return None;
+            }
+        };
         let legacy_rpc = LegacyRpcMethods::<SubstrateConfig>::new(rpc_client);
 
         let (events_tx, events_rx) = crate::stream::channel();
-        let task = tokio::spawn(async move {
-            run_hydration_indexer(hydration_api, legacy_rpc, events_tx).await;
-        });
+        let task = tokio::spawn(run_hydration_indexer(hydration_api, legacy_rpc, events_tx));
 
-        Ok(Self {
+        Some(Self {
             events_rx,
             tasks: vec![task],
         })
@@ -387,33 +388,6 @@ impl ChainStream for HydrationStream {
     async fn next_event(&mut self) -> Option<ChainEvent> {
         self.events_rx.recv().await
     }
-}
-
-pub async fn run(
-    hydration: Option<HydrationConfig>,
-    sign_tx: mpsc::Sender<Sign>,
-    backlog: Backlog,
-    contract_watcher: ContractStateWatcher,
-    mesh_state: watch::Receiver<MeshState>,
-    node_client: NodeClient,
-) {
-    let stream = match HydrationStream::new(hydration).await {
-        Ok(stream) => stream,
-        Err(err) => {
-            tracing::error!(?err, "failed to create hydration indexer stream");
-            return;
-        }
-    };
-
-    run_stream(
-        stream,
-        sign_tx,
-        backlog,
-        contract_watcher,
-        mesh_state,
-        node_client,
-    )
-    .await;
 }
 
 async fn send_chain_event(events_tx: &mpsc::Sender<ChainEvent>, event: ChainEvent) -> bool {
@@ -521,7 +495,10 @@ async fn run_hydration_indexer(
                 let sign_request = match event.generate_sign_request(entropy) {
                     Ok(sign_request) => sign_request,
                     Err(err) => {
-                        tracing::error!(?err, "failed to generate sign request from hydration event");
+                        tracing::error!(
+                            ?err,
+                            "failed to generate sign request from hydration event"
+                        );
                         continue;
                     }
                 };
@@ -577,7 +554,10 @@ async fn run_hydration_indexer(
                 let sign_request = match event.generate_sign_request(entropy) {
                     Ok(sign_request) => sign_request,
                     Err(err) => {
-                        tracing::error!(?err, "failed to generate bidirectional hydration sign request");
+                        tracing::error!(
+                            ?err,
+                            "failed to generate bidirectional hydration sign request"
+                        );
                         continue;
                     }
                 };
