@@ -528,7 +528,11 @@ impl TripleSpawner {
         timeout: Duration,
     ) -> Result<(), InitializationError> {
         // Check if the `id` is already in the system. Error out and have the next cycle try again.
-        let Some(slot) = self.triple_storage.create_slot(id).await else {
+        let Some(slot) = self
+            .triple_storage
+            .create_slot(id, proposer == self.me)
+            .await
+        else {
             return Err(InitializationError::BadParameters(format!(
                 "triple {id} is already generating, in use, or stored"
             )));

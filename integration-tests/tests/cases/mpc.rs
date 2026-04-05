@@ -57,7 +57,7 @@ async fn test_sync_noop_when_fully_synced() {
     let node0_triples = node0.owned_triples().await;
     let node0_presigs = node0.owned_presignatures().await;
 
-    // Responder side: node1 receives node0's directory and reports what it's missing.
+    // Responder side: node1 receives node0's sync update and reports what it's missing.
     let response = node1
         .sync(node0.me, node0_triples.clone(), node0_presigs.clone())
         .await;
@@ -209,7 +209,7 @@ async fn test_sync_prune_below_threshold() {
 }
 
 /// Orphaned artifact: owner doesn't have id=77 but other nodes do.
-/// When owner broadcasts its directory (without id=77), responders remove it
+/// When owner broadcasts its sync update (without id=77), responders remove it
 /// via remove_outdated.
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_sync_remove_outdated_orphan() {
@@ -252,7 +252,7 @@ async fn test_sync_remove_outdated_orphan() {
         "presig 77 should have all participants as holders before sync"
     );
 
-    // node0 broadcasts its directory (which does NOT include id=77 since node0 doesn't have it).
+    // node0 broadcasts its sync update (which does NOT include id=77 since node0 doesn't have it).
     // Responder runs remove_outdated, which removes id=77.
     let node0_triples = node0.owned_triples().await;
     let node0_presigs = node0.owned_presignatures().await;
@@ -322,7 +322,7 @@ async fn test_sync_when_peer_generating() {
     // Owner (node0): create_slot + insert → artifact is fully generated and in Redis.
     node0
         .triple_storage
-        .create_slot(GENERATING_ID)
+        .create_slot(GENERATING_ID, true)
         .await
         .unwrap()
         .insert(
@@ -332,7 +332,7 @@ async fn test_sync_when_peer_generating() {
         .await;
     node0
         .presignature_storage
-        .create_slot(GENERATING_ID)
+        .create_slot(GENERATING_ID, true)
         .await
         .unwrap()
         .insert(
@@ -344,12 +344,12 @@ async fn test_sync_when_peer_generating() {
     // Non-owner (node1): create_slot only → artifact is still generating, not in Redis.
     let _triple_slot = node1
         .triple_storage
-        .create_slot(GENERATING_ID)
+        .create_slot(GENERATING_ID, false)
         .await
         .unwrap();
     let _presig_slot = node1
         .presignature_storage
-        .create_slot(GENERATING_ID)
+        .create_slot(GENERATING_ID, false)
         .await
         .unwrap();
 
@@ -366,13 +366,13 @@ async fn test_sync_when_peer_generating() {
             .await
     );
 
-    // Sync: node0 broadcasts its directory (includes GENERATING_ID).
+    // Sync: node0 broadcasts its update (includes GENERATING_ID).
     // node1 should NOT report it as missing because it's currently generating it.
     let response = node1
         .sync(
             node0.me,
-            node0.owned_triples().await,
-            node0.owned_presignatures().await,
+            node0.owned_triples_with_generating().await,
+            node0.owned_presignatures_with_generating().await,
         )
         .await;
 
@@ -412,8 +412,8 @@ async fn test_sync_when_peer_generating() {
     let response = node1
         .sync(
             node0.me,
-            node0.owned_triples().await,
-            node0.owned_presignatures().await,
+            node0.owned_triples_with_generating().await,
+            node0.owned_presignatures_with_generating().await,
         )
         .await;
 
@@ -424,6 +424,123 @@ async fn test_sync_when_peer_generating() {
     assert!(
         response.presignatures.contains(&GENERATING_ID),
         "presignature should be reported as missing after generation failed"
+    );
+}
+
+/// When the owner is still generating an artifact and initiates sync,
+/// it should include generating in the sync update so peer nodes do not remove it.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sync_when_owner_generating() {
+    const GENERATING_ID: u64 = 601;
+
+    let fixture = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    let node0 = &fixture.nodes[0];
+    let node1 = &fixture.nodes[1];
+    let all_participants = fixture.sorted_participants();
+
+    // Owner (node0): create_slot only → still generating, not in Redis.
+    let mut triple_slot = node0
+        .triple_storage
+        .create_slot(GENERATING_ID, true)
+        .await
+        .unwrap();
+    let mut presig_slot = node0
+        .presignature_storage
+        .create_slot(GENERATING_ID, true)
+        .await
+        .unwrap();
+
+    assert!(
+        node0
+            .triple_storage
+            .contains_generating(GENERATING_ID)
+            .await
+    );
+    assert!(
+        node0
+            .presignature_storage
+            .contains_generating(GENERATING_ID)
+            .await
+    );
+
+    // Peer (node1): already finished generation, artifact is in Redis.
+    node1
+        .triple_storage
+        .create_slot(GENERATING_ID, false)
+        .await
+        .unwrap()
+        .insert(
+            dummy_pair_with_holders(GENERATING_ID, all_participants.clone()),
+            node0.me,
+        )
+        .await;
+    node1
+        .presignature_storage
+        .create_slot(GENERATING_ID, false)
+        .await
+        .unwrap()
+        .insert(
+            dummy_presignature_with_holders(GENERATING_ID, all_participants.clone()),
+            node0.me,
+        )
+        .await;
+
+    // Owner (node0) initiates sync — GENERATING_ID is not in Redis but IS in mine_generating.
+    let node0_triples = node0.owned_triples_with_generating().await;
+    let node0_presigs = node0.owned_presignatures_with_generating().await;
+    assert!(node0_triples.contains(&GENERATING_ID));
+    assert!(node0_presigs.contains(&GENERATING_ID));
+
+    let response = node1.sync(node0.me, node0_triples, node0_presigs).await;
+
+    // Peer (node1) sees GENERATING_ID in the update and already has it — nothing to report.
+    assert!(
+        !response.triples.contains(&GENERATING_ID),
+        "generating artifact should not appear in sync response"
+    );
+    assert!(
+        !response.presignatures.contains(&GENERATING_ID),
+        "generating artifact should not appear in sync response"
+    );
+
+    // node1 must still have the artifact — remove_outdated must NOT delete it.
+    assert_triples_owned_state(&node1.triple_storage, node0.me, &[GENERATING_ID], &[]).await;
+    assert_presig_owned_state(&node1.presignature_storage, node0.me, &[GENERATING_ID], &[]).await;
+
+    // Owner completes generation: insert into Redis.
+    triple_slot
+        .insert(
+            dummy_pair_with_holders(GENERATING_ID, all_participants.clone()),
+            node0.me,
+        )
+        .await;
+    presig_slot
+        .insert(
+            dummy_presignature_with_holders(GENERATING_ID, all_participants),
+            node0.me,
+        )
+        .await;
+
+    // Sync again: GENERATING_ID is now in Redis. node1 already has it, so nothing to report.
+    let response = node1
+        .sync(
+            node0.me,
+            node0.owned_triples_with_generating().await,
+            node0.owned_presignatures_with_generating().await,
+        )
+        .await;
+
+    assert!(
+        !response.triples.contains(&GENERATING_ID),
+        "triple should not be reported as missing since node1 already has it"
+    );
+    assert!(
+        !response.presignatures.contains(&GENERATING_ID),
+        "presignature should not be reported as missing since node1 already has it"
     );
 }
 

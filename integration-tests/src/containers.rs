@@ -429,7 +429,7 @@ impl Redis {
                     storage
                         .get(me)
                         .unwrap()
-                        .create_slot(pair_id)
+                        .create_slot(pair_id, true)
                         .await
                         .unwrap()
                         .insert(pair, *owner)

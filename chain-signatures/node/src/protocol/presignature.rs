@@ -566,7 +566,11 @@ impl PresignatureSpawner {
             "starting protocol to generate a new presignature",
         );
 
-        let Some(slot) = self.presignatures.create_slot(id.id).await else {
+        let Some(slot) = self
+            .presignatures
+            .create_slot(id.id, owner == self.me)
+            .await
+        else {
             return Err(InitializationError::BadParameters(format!(
                 "presignature {} is already generating, in use, or stored",
                 id.id

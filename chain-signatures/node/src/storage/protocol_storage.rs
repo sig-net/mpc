@@ -2,7 +2,7 @@ use cait_sith::protocol::Participant;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, ToRedisArgs};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::{fmt, time::Instant};
 use tokio::sync::RwLock;
@@ -131,22 +131,26 @@ impl<A: ProtocolArtifact> ArtifactTaken<A> {
     }
 }
 
-/// In-memory tracking of artifact IDs that are not yet in Redis.
+/// Tracks artifact IDs that are in-flight but not yet in Redis.
 /// Protected by a single `RwLock` to avoid multi-lock ordering issues.
 #[derive(Debug)]
-struct InMemoryState<Id> {
-    /// IDs currently being generated (protocol running, not yet persisted).
-    generating: HashSet<Id>,
+struct ReservedState<Id> {
+    /// IDs currently being generated. Value is `true` if this node is the owner/proposer.
+    generating: HashMap<Id, bool>,
     /// IDs taken from Redis and actively consumed by a protocol.
     using: HashSet<Id>,
 }
 
-impl<Id: Eq + std::hash::Hash> InMemoryState<Id> {
+impl<Id: Eq + std::hash::Hash> ReservedState<Id> {
     fn new() -> Self {
         Self {
-            generating: HashSet::new(),
+            generating: HashMap::new(),
             using: HashSet::new(),
         }
+    }
+
+    fn contains_generating(&self, id: &Id) -> bool {
+        self.generating.contains_key(id)
     }
 }
 
@@ -154,7 +158,7 @@ impl<Id: Eq + std::hash::Hash> InMemoryState<Id> {
 pub struct ProtocolStorage<A: ProtocolArtifact> {
     redis_pool: Pool,
     artifact_key: String,
-    reserved: Arc<RwLock<InMemoryState<A::Id>>>,
+    reserved: Arc<RwLock<ReservedState<A::Id>>>,
     owner_keys: String,
     account_id: AccountId,
     _phantom: std::marker::PhantomData<A>,
@@ -176,7 +180,7 @@ impl<A: ProtocolArtifact> Clone for ProtocolStorage<A> {
 impl<A: ProtocolArtifact> ProtocolStorage<A> {
     pub fn new(pool: &Pool, account_id: &AccountId, base_prefix: &str) -> Self {
         let artifact_key = format!("{base_prefix}:{STORAGE_VERSION}:{account_id}");
-        let state = Arc::new(RwLock::new(InMemoryState::new()));
+        let state = Arc::new(RwLock::new(ReservedState::new()));
         let owner_keys = format!("{base_prefix}_owners:{STORAGE_VERSION}:{account_id}");
 
         Self {
@@ -219,21 +223,23 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
     /// Create a slot for generating an artifact with the given ID.
     /// Tracks the ID in the `generating` set until the slot is inserted or dropped.
+    /// `mine` indicates whether this node is the owner/proposer of the artifact.
     /// Returns `None` if the ID is already generating, in use, or stored in Redis.
-    pub async fn create_slot(&self, id: A::Id) -> Option<ArtifactSlot<A>> {
+    pub async fn create_slot(&self, id: A::Id, mine: bool) -> Option<ArtifactSlot<A>> {
         {
             let mut state = self.reserved.write().await;
             if state.using.contains(&id) {
                 tracing::error!(id, "cannot create slot: artifact is currently in use");
                 return None;
             }
-            if !state.generating.insert(id) {
+            if state.contains_generating(&id) {
                 tracing::error!(
                     id,
                     "cannot create slot: artifact is already being generated"
                 );
                 return None;
             }
+            state.generating.insert(id, mine);
         }
         if self.contains(id).await {
             self.reserved.write().await.generating.remove(&id);
@@ -246,9 +252,26 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         })
     }
 
-    /// Check if an artifact is currently being generated.
+    /// Check if an artifact is currently being generated (mine or peer).
     pub async fn contains_generating(&self, id: A::Id) -> bool {
-        self.reserved.read().await.generating.contains(&id)
+        self.reserved.read().await.contains_generating(&id)
+    }
+
+    /// Owned artifacts in Redis plus artifacts currently being generated
+    /// where this node is the owner/proposer.
+    pub async fn fetch_owned_with_generating(
+        &self,
+        me: Participant,
+    ) -> Result<Vec<A::Id>, StorageError> {
+        let mut ids = self.fetch_owned(me).await?;
+        let state = self.reserved.read().await;
+        ids.extend(
+            state
+                .generating
+                .iter()
+                .filter_map(|(&id, &mine)| mine.then_some(id)),
+        );
+        Ok(ids)
     }
 
     pub async fn remove_outdated(
@@ -336,7 +359,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 let state = self.reserved.read().await;
                 let not_found: Vec<_> = not_found
                     .into_iter()
-                    .filter(|id| !state.generating.contains(id) && !state.using.contains(id))
+                    .filter(|id| !state.contains_generating(id) && !state.using.contains(id))
                     .collect();
                 Ok(RemoveOutdatedResult::new(outdated, not_found))
             }

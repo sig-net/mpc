@@ -158,7 +158,7 @@ fn bench_load_keys(c: &mut Criterion) {
                 for i in 0..1000 {
                     let t = dummy_pair(i);
                     env.triples
-                        .create_slot(t.id)
+                        .create_slot(t.id, true)
                         .await
                         .unwrap()
                         .insert(t, env.me)
@@ -174,7 +174,7 @@ fn bench_load_keys(c: &mut Criterion) {
                 for i in 0..1000 {
                     let p = dummy_presignature(i);
                     env.presignatures
-                        .create_slot(p.id)
+                        .create_slot(p.id, true)
                         .await
                         .unwrap()
                         .insert(p, env.me)

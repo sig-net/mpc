@@ -236,9 +236,8 @@ impl SyncTask {
         }
     }
 
-    // TODO: use reserved values instead. Note that we cannot fetch our own triples via reserved
     async fn new_update(&self, me: Participant) -> Option<SyncUpdate> {
-        let triples = match self.triples.fetch_owned(me).await {
+        let triples = match self.triples.fetch_owned_with_generating(me).await {
             Ok(ids) => ids,
             Err(err) => {
                 tracing::warn!(
@@ -248,7 +247,7 @@ impl SyncTask {
                 return None;
             }
         };
-        let presignatures = match self.presignatures.fetch_owned(me).await {
+        let presignatures = match self.presignatures.fetch_owned_with_generating(me).await {
             Ok(ids) => ids,
             Err(err) => {
                 tracing::warn!(

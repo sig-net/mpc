@@ -199,6 +199,28 @@ impl MpcFixtureNode {
         ids
     }
 
+    /// Owned + currently-generating-as-owner, sorted.
+    pub async fn owned_triples_with_generating(&self) -> Vec<u64> {
+        let mut ids = self
+            .triple_storage
+            .fetch_owned_with_generating(self.me)
+            .await
+            .unwrap();
+        ids.sort();
+        ids
+    }
+
+    /// Owned + currently-generating-as-owner, sorted.
+    pub async fn owned_presignatures_with_generating(&self) -> Vec<u64> {
+        let mut ids = self
+            .presignature_storage
+            .fetch_owned_with_generating(self.me)
+            .await
+            .unwrap();
+        ids.sort();
+        ids
+    }
+
     /// Simulate the caller side of /sync: process a peer's response by removing
     /// the peer from artifacts they don't have, pruning below threshold.
     pub async fn process_sync_response(
