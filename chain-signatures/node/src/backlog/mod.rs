@@ -934,6 +934,8 @@ mod tests {
             request_id: [id; 32],
             from_address: Address::ZERO,
             nonce: 0,
+            canton_operators: None,
+            canton_requester: None,
         }
     }
 

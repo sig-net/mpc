@@ -7,6 +7,7 @@ pub mod gcp;
 pub mod indexer;
 
 pub mod indexer_eth;
+pub mod indexer_canton;
 pub mod indexer_hydration;
 pub mod indexer_sol;
 pub mod kdf;

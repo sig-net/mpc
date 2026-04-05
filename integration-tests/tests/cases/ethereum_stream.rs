@@ -255,6 +255,8 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
         request_id: [7u8; 32],
         from_address: AlloyAddress::from_slice(ctx.wallet.as_bytes()),
         nonce: 0,
+        canton_operators: None,
+        canton_requester: None,
     };
     let sign_id = SignId::new([7u8; 32]);
     backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;

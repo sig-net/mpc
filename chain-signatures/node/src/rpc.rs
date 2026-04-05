@@ -43,6 +43,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
+use crate::indexer_canton::CantonConfig;
 use crate::indexer_hydration::HydrationConfig;
 use parity_scale_codec::{Decode, Encode};
 use subxt::config::substrate::{
@@ -353,6 +354,7 @@ pub struct RpcExecutor {
     eth: Option<EthClient>,
     solana: Option<SolanaClient>,
     hydration: Option<HydrationClient>,
+    canton: Option<CantonClient>,
     action_rx: mpsc::Receiver<RpcAction>,
     backlog: Backlog,
 }
@@ -363,6 +365,7 @@ impl RpcExecutor {
         eth: &Option<EthConfig>,
         solana: &Option<SolConfig>,
         hydration: &Option<HydrationConfig>,
+        canton: &Option<CantonConfig>,
         backlog: Backlog,
     ) -> (RpcChannel, Self) {
         let eth = eth.as_ref().map(EthClient::new);
@@ -377,6 +380,16 @@ impl RpcExecutor {
             },
             None => None,
         };
+        let canton = match canton {
+            Some(c) => match CantonClient::new(c).await {
+                Ok(client) => Some(client),
+                Err(e) => {
+                    tracing::error!(%e, "failed to create canton client");
+                    None
+                }
+            },
+            None => None,
+        };
         let (tx, rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
         (
             RpcChannel { tx },
@@ -385,6 +398,7 @@ impl RpcExecutor {
                 eth,
                 solana,
                 hydration,
+                canton,
                 action_rx: rx,
                 backlog,
             },
@@ -433,7 +447,7 @@ impl RpcExecutor {
 
             tokio::spawn(async move {
                 match chain {
-                    Chain::NEAR | Chain::Solana | Chain::Hydration => {
+                    Chain::NEAR | Chain::Solana | Chain::Hydration | Chain::Canton => {
                         execute_publish(client, action, backlog).await;
                     }
                     Chain::Ethereum => {
@@ -475,6 +489,13 @@ impl RpcExecutor {
                     ChainClient::Hydration(hydration.clone())
                 } else {
                     ChainClient::Err("no hydration client available for node")
+                }
+            }
+            Chain::Canton => {
+                if let Some(canton) = &self.canton {
+                    ChainClient::Canton(canton.clone())
+                } else {
+                    ChainClient::Err("no canton client available for node")
                 }
             }
             Chain::Bitcoin => ChainClient::Err("no bitcoin client available for node"),
@@ -893,6 +914,61 @@ impl HydrationClient {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct CantonClient {
+    http_client: reqwest::Client,
+    json_api_url: String,
+    jwt_private_key_path: String,
+    jwt_subject: String,
+    party_id: String,
+    signer_cid: String,
+    /// The full templateId of the discovered Signer contract (includes package hash).
+    signer_template_id: String,
+}
+
+impl CantonClient {
+    pub async fn new(config: &CantonConfig) -> anyhow::Result<Self> {
+        let http_client = reqwest::Client::new();
+
+        // Generate JWT for the discovery request
+        let jwt_pem = std::fs::read(&config.jwt_private_key_path)?;
+        let jwt_token =
+            crate::indexer_canton::generate_jwt(&jwt_pem, &config.jwt_subject)?;
+
+        // Discover the active Signer contract
+        let (signer_cid, signer_template_id) =
+            crate::indexer_canton::discover_signer_cid(
+                &http_client,
+                &config.json_api_url,
+                &jwt_token,
+                &config.party_id,
+            )
+            .await?;
+
+        tracing::info!(
+            signer_cid = %signer_cid,
+            signer_template_id = %signer_template_id,
+            "discovered canton Signer contract"
+        );
+
+        Ok(Self {
+            http_client,
+            json_api_url: config.json_api_url.clone(),
+            jwt_private_key_path: config.jwt_private_key_path.clone(),
+            jwt_subject: config.jwt_subject.clone(),
+            party_id: config.party_id.clone(),
+            signer_cid,
+            signer_template_id,
+        })
+    }
+
+    /// Generate a fresh JWT token (30s TTL) for Canton API requests.
+    fn generate_jwt(&self) -> anyhow::Result<String> {
+        let jwt_pem = std::fs::read(&self.jwt_private_key_path)?;
+        crate::indexer_canton::generate_jwt(&jwt_pem, &self.jwt_subject)
+    }
+}
+
 /// Client related to a specific chain
 #[allow(clippy::large_enum_variant)]
 pub enum ChainClient {
@@ -901,6 +977,7 @@ pub enum ChainClient {
     Ethereum(EthClient),
     Solana(SolanaClient),
     Hydration(HydrationClient),
+    Canton(CantonClient),
 }
 
 async fn update_contract(near: NearClient, contract: watch::Sender<Option<ProtocolState>>) {
@@ -968,6 +1045,11 @@ async fn execute_publish(client: ChainClient, action: PublishAction, backlog: Ba
                 }
                 ChainClient::Hydration(hyd) => {
                     try_publish_hydration(hyd, &action, &action.timestamp, &action.signature)
+                        .await
+                        .map_err(|_| ())
+                }
+                ChainClient::Canton(canton) => {
+                    try_publish_canton(canton, &action, &action.timestamp, &action.signature)
                         .await
                         .map_err(|_| ())
                 }
@@ -1547,6 +1629,10 @@ async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAc
                     tracing::error!("Hydration has no batch publish");
                     Ok(())
                 }
+                ChainClient::Canton(_) => {
+                    tracing::error!("Canton does not support batch publish");
+                    Ok(())
+                }
                 ChainClient::Err(msg) => {
                     tracing::error!(msg, "no client for chain");
                     Ok(())
@@ -1762,6 +1848,156 @@ async fn try_publish_hydration(
     }
 
     Ok(())
+}
+
+async fn try_publish_canton(
+    canton: &CantonClient,
+    action: &PublishAction,
+    timestamp: &std::time::Instant,
+    signature: &mpc_primitives::Signature,
+) -> anyhow::Result<()> {
+    let chain = action.indexed.chain;
+    let sign_id = action.indexed.id;
+    let request_id_hex = hex::encode(action.indexed.id.request_id);
+
+    tracing::info!(
+        ?sign_id,
+        ?chain,
+        elapsed = ?timestamp.elapsed(),
+        request_id = %request_id_hex,
+        "canton: publishing signature"
+    );
+
+    let jwt_token = canton.generate_jwt()?;
+    let url = format!(
+        "{}/v2/commands/submit-and-wait-for-transaction",
+        canton.json_api_url
+    );
+    let der_sig = hex::encode(crate::indexer_canton::der_encode_signature(signature));
+
+    match &action.indexed.kind {
+        SignKind::Sign | SignKind::SignBidirectional(_) => {
+            // Extract operators and requester from the Canton event
+            let (operators, requester) = extract_canton_operators_requester(action)?;
+
+            let body = serde_json::json!({
+                "commands": {
+                    "commands": [{
+                        "ExerciseCommand": {
+                            "templateId": canton.signer_template_id,
+                            "contractId": canton.signer_cid,
+                            "choice": "Respond",
+                            "choiceArgument": {
+                                "operators": operators,
+                                "requester": requester,
+                                "requestId": request_id_hex,
+                                "signature": der_sig,
+                            }
+                        }
+                    }],
+                    "commandId": format!("mpc-respond-{}", request_id_hex),
+                    "userId": canton.jwt_subject,
+                    "actAs": [&canton.party_id],
+                    "readAs": [&canton.party_id],
+                }
+            });
+
+            let resp = canton
+                .http_client
+                .post(&url)
+                .bearer_auth(&jwt_token)
+                .json(&body)
+                .send()
+                .await?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                anyhow::bail!("canton Respond failed: {status} {text}");
+            }
+
+            tracing::info!(
+                ?sign_id,
+                elapsed = ?timestamp.elapsed(),
+                "published canton Respond signature successfully"
+            );
+        }
+        SignKind::RespondBidirectional(respond_bidirectional_tx) => {
+            let (operators, requester) = extract_canton_operators_requester(action)?;
+            let serialized_output = hex::encode(&respond_bidirectional_tx.output);
+
+            let body = serde_json::json!({
+                "commands": {
+                    "commands": [{
+                        "ExerciseCommand": {
+                            "templateId": canton.signer_template_id,
+                            "contractId": canton.signer_cid,
+                            "choice": "RespondBidirectional",
+                            "choiceArgument": {
+                                "operators": operators,
+                                "requester": requester,
+                                "requestId": request_id_hex,
+                                "serializedOutput": serialized_output,
+                                "signature": der_sig,
+                            }
+                        }
+                    }],
+                    "commandId": format!("mpc-respond-bidir-{}", request_id_hex),
+                    "userId": canton.jwt_subject,
+                    "actAs": [&canton.party_id],
+                    "readAs": [&canton.party_id],
+                }
+            });
+
+            let resp = canton
+                .http_client
+                .post(&url)
+                .bearer_auth(&jwt_token)
+                .json(&body)
+                .send()
+                .await?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                anyhow::bail!("canton RespondBidirectional failed: {status} {text}");
+            }
+
+            tracing::info!(
+                ?sign_id,
+                elapsed = ?timestamp.elapsed(),
+                "published canton RespondBidirectional successfully"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract operators and requester (sender) from a Canton publish action.
+/// Phase 1 (Respond): reads from the CantonSignBidirectionalRequestedEvent on SignKind.
+/// Phase 2 (RespondBidirectional): reads from the BidirectionalTx fields populated
+/// when the tx was first created from the Canton sign event.
+fn extract_canton_operators_requester(
+    action: &PublishAction,
+) -> anyhow::Result<(Vec<String>, String)> {
+    match &action.indexed.kind {
+        SignKind::SignBidirectional(
+            crate::stream::ops::SignBidirectionalEvent::Canton(event),
+        ) => Ok((event.operators.clone(), event.requester.clone())),
+        SignKind::RespondBidirectional(respond_tx) => {
+            let operators = respond_tx
+                .canton_operators
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("missing canton_operators on RespondBidirectionalTx"))?;
+            let requester = respond_tx
+                .canton_requester
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("missing canton_requester on RespondBidirectionalTx"))?;
+            Ok((operators, requester))
+        }
+        _ => anyhow::bail!("expected Canton event variant"),
+    }
 }
 
 #[cfg(test)]

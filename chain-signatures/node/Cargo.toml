@@ -78,7 +78,10 @@ solana-sdk.workspace = true
 solana-transaction-status.workspace = true
 solana-client.workspace = true
 futures-util.workspace = true
+jsonwebtoken.workspace = true
+p256.workspace = true
 parity-scale-codec.workspace = true
+tokio-tungstenite.workspace = true
 
 near-account-id.workspace = true
 near-crypto = "0.26.0"

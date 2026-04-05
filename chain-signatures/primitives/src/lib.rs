@@ -155,6 +155,7 @@ pub enum Chain {
     Solana,
     Bitcoin,
     Hydration,
+    Canton,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
@@ -173,16 +174,18 @@ impl Chain {
             Chain::Solana => "Solana",
             Chain::Bitcoin => "Bitcoin",
             Chain::Hydration => "Hydration",
+            Chain::Canton => "Canton",
         }
     }
 
-    pub const fn iter() -> [Chain; 5] {
+    pub const fn iter() -> [Chain; 6] {
         [
             Chain::NEAR,
             Chain::Ethereum,
             Chain::Solana,
             Chain::Bitcoin,
             Chain::Hydration,
+            Chain::Canton,
         ]
     }
 
@@ -193,6 +196,7 @@ impl Chain {
             Chain::Solana => "0x800001f5",
             Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
             Chain::Hydration => "polkadot:2034",
+            Chain::Canton => "canton:global",
         }
     }
 
@@ -203,6 +207,10 @@ impl Chain {
             Chain::Solana => "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
             Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
             Chain::Hydration => "polkadot:2034",
+            // Synthetic — Canton has no registered CAIP-2 namespace in
+            // ChainAgnostic/namespaces. "canton:global" follows the
+            // namespace:reference format as a project-local identifier.
+            Chain::Canton => "canton:global",
         }
     }
 
@@ -212,6 +220,7 @@ impl Chain {
             Chain::Ethereum => ("CHECKPOINT_INTERVAL_ETHEREUM", 20),
             Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 120),
             Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 240),
+            Chain::Canton => ("CHECKPOINT_INTERVAL_CANTON", 50),
         };
 
         let interval = std::env::var(key)
@@ -226,6 +235,7 @@ impl Chain {
             ("CHECKPOINT_INTERVAL_ETHEREUM", "2"),
             ("CHECKPOINT_INTERVAL_SOLANA", "5"),
             ("CHECKPOINT_INTERVAL_HYDRATION", "5"),
+            ("CHECKPOINT_INTERVAL_CANTON", "50"),
         ]
     }
 
@@ -236,6 +246,7 @@ impl Chain {
             Chain::Solana => 3,
             Chain::Bitcoin => 60 * 60 + 20 * 60, // 6 confirmations at 10 minutes each, plus some buffer
             Chain::Hydration => 12,
+            Chain::Canton => 5,
         }
     }
 
@@ -268,6 +279,7 @@ impl FromStr for Chain {
             "solana" | "sol" => Ok(Chain::Solana),
             "bitcoin" | "btc" => Ok(Chain::Bitcoin),
             "hydration" | "hyd" => Ok(Chain::Hydration),
+            "canton" | "ctn" => Ok(Chain::Canton),
             other => Err(format!("unknown or unsupported chain {other}")),
         }
     }

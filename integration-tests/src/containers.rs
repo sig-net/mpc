@@ -129,6 +129,7 @@ impl Node {
             eth: eth_args,
             sol: sol_args,
             hydration: hydration_args,
+            canton: mpc_node::indexer_canton::CantonArgs::from_config(None),
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),

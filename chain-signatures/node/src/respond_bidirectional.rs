@@ -13,8 +13,7 @@ use std::sync::Arc;
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
 const HYDRATION_RESPOND_BIDIRECTIONAL_PATH: &str = "hydration response key";
-// Use Borsh as this is what we are using for solana
-pub(crate) const RESPOND_SERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Borsh;
+const CANTON_RESPOND_BIDIRECTIONAL_PATH: &str = "canton response key";
 // Use Abi as this is what we are using for ethereum
 pub(crate) const OUTPUT_DESERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Abi;
 
@@ -22,6 +21,14 @@ pub(crate) const OUTPUT_DESERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat:
 pub enum SerDeserFormat {
     Borsh,
     Abi,
+}
+
+fn respond_serialization_format(chain: Chain) -> SerDeserFormat {
+    match chain {
+        Chain::Canton => SerDeserFormat::Abi,
+        // Solana, Hydration use Borsh
+        _ => SerDeserFormat::Borsh,
+    }
 }
 
 pub struct CompletedTx {
@@ -33,6 +40,9 @@ pub struct CompletedTx {
 pub struct RespondBidirectionalTx {
     pub tx_id: BidirectionalTxId,
     pub output: RespondBidirectionalSerializedOutput,
+    /// Canton-specific fields threaded from the original BidirectionalTx.
+    pub canton_operators: Option<Vec<String>>,
+    pub canton_requester: Option<String>,
 }
 
 pub type RespondBidirectionalSerializedOutput = Vec<u8>;
@@ -60,7 +70,7 @@ impl CompletedTx {
     async fn process_failed_tx(&self, chain: Chain) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("Tx failed: {:?}", self.tx.id);
 
-        let respond_serialization_format = RESPOND_SERIALIZATION_FORMAT;
+        let respond_serialization_format = respond_serialization_format(chain);
         let mut output = Vec::new();
         output.extend_from_slice(&MAGIC_ERROR_PREFIX);
         let serialized_output: Vec<u8> = match respond_serialization_format {
@@ -105,6 +115,7 @@ impl CompletedTx {
         let path = match chain {
             Chain::Solana => SOLANA_RESPOND_BIDIRECTIONAL_PATH.to_string(),
             Chain::Hydration => HYDRATION_RESPOND_BIDIRECTIONAL_PATH.to_string(),
+            Chain::Canton => CANTON_RESPOND_BIDIRECTIONAL_PATH.to_string(),
             _ => anyhow::bail!("Unsupported chain: {}", chain),
         };
         let epsilon = self.tx.epsilon(&path)?;
@@ -123,6 +134,8 @@ impl CompletedTx {
             RespondBidirectionalTx {
                 tx_id: self.tx.id,
                 output: serialized_output,
+                canton_operators: self.tx.canton_operators.clone(),
+                canton_requester: self.tx.canton_requester.clone(),
             },
         ))
     }
@@ -157,7 +170,7 @@ impl CompletedTx {
             _ => TransactionOutput::non_function_call_output(),
         };
 
-        let respond_serialization_format = RESPOND_SERIALIZATION_FORMAT;
+        let respond_serialization_format = respond_serialization_format(tx.source_chain);
         let respond_serialization_schema = &tx.respond_serialization_schema;
         let serialized_output = transaction_output
             .output
