@@ -155,6 +155,10 @@ impl<Id: Eq + std::hash::Hash> ReservedState<Id> {
     fn contains_generating(&self, id: &Id) -> bool {
         self.generating.contains_key(id)
     }
+
+    fn contains_reserved(&self, id: &Id) -> bool {
+        self.generating.contains_key(id) || self.using.contains_key(id)
+    }
 }
 
 #[derive(Debug)]
@@ -277,6 +281,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         self.reserved.read().await.contains_generating(&id)
     }
 
+    pub async fn contains_reserved(&self, id: A::Id) -> bool {
+        self.reserved.read().await.contains_reserved(&id)
+    }
+
     /// Owned artifacts in Redis plus owned using and owned generating.
     /// This is the full set that should be advertised during state sync to prevent
     /// peers from pruning artifacts that are still actively in use.
@@ -383,7 +391,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 let state = self.reserved.read().await;
                 let not_found: Vec<_> = not_found
                     .into_iter()
-                    .filter(|id| !state.contains_generating(id) && !state.using.contains_key(id))
+                    .filter(|id| !state.contains_reserved(id))
                     .collect();
                 Ok(RemoveOutdatedResult::new(outdated, not_found))
             }

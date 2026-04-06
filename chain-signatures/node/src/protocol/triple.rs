@@ -388,10 +388,6 @@ impl TripleSpawner {
         self.ongoing.contains_key(&id)
     }
 
-    pub async fn contains_using(&self, id: TripleId) -> bool {
-        self.triple_storage.contains_using(id).await
-    }
-
     /// Returns the number of unspent triples assigned to this node.
     pub async fn len_mine(&self) -> usize {
         self.triple_storage.len_by_owner(self.me).await
