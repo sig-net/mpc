@@ -697,7 +697,6 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-#[ignore = "requires Kurtosis Ethereum endpoints via KURTOSIS_ETH_* env vars"]
 async fn test_ethereum_stream_finality_on_kurtosis() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let ctx = EthereumTestEnvironment::kurtosis().await?;
