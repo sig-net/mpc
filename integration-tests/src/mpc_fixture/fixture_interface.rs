@@ -199,22 +199,22 @@ impl MpcFixtureNode {
         ids
     }
 
-    /// Owned + currently-generating-as-owner, sorted.
-    pub async fn owned_triples_with_generating(&self) -> Vec<u64> {
+    /// Owned + owned using + owned generating, sorted.
+    pub async fn owned_triples_with_reserved(&self) -> Vec<u64> {
         let mut ids = self
             .triple_storage
-            .fetch_owned_with_generating(self.me)
+            .fetch_owned_with_reserved(self.me)
             .await
             .unwrap();
         ids.sort();
         ids
     }
 
-    /// Owned + currently-generating-as-owner, sorted.
-    pub async fn owned_presignatures_with_generating(&self) -> Vec<u64> {
+    /// Owned + owned using + owned generating, sorted.
+    pub async fn owned_presignatures_with_reserved(&self) -> Vec<u64> {
         let mut ids = self
             .presignature_storage
-            .fetch_owned_with_generating(self.me)
+            .fetch_owned_with_reserved(self.me)
             .await
             .unwrap();
         ids.sort();

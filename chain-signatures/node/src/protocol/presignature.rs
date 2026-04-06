@@ -865,7 +865,7 @@ impl PendingTriples {
             let mut interval = tokio::time::interval(Duration::from_millis(200));
             loop {
                 interval.tick().await;
-                if let Some(triples) = storage.take(pair_id, owner).await {
+                if let Some(triples) = storage.take(pair_id, owner, false).await {
                     break triples;
                 };
             }

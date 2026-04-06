@@ -1471,7 +1471,7 @@ impl PendingPresignature {
             let mut interval = tokio::time::interval(Duration::from_millis(250));
             loop {
                 interval.tick().await;
-                if let Some(presignature) = storage.take(id, owner).await {
+                if let Some(presignature) = storage.take(id, owner, false).await {
                     break presignature;
                 };
             }

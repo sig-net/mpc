@@ -138,14 +138,15 @@ struct ReservedState<Id> {
     /// IDs currently being generated. Value is `true` if this node is the owner/proposer.
     generating: HashMap<Id, bool>,
     /// IDs taken from Redis and actively consumed by a protocol.
-    using: HashSet<Id>,
+    /// Value is `true` if this node is the owner of the artifact.
+    using: HashMap<Id, bool>,
 }
 
 impl<Id: Eq + std::hash::Hash> ReservedState<Id> {
     fn new() -> Self {
         Self {
             generating: HashMap::new(),
-            using: HashSet::new(),
+            using: HashMap::new(),
         }
     }
 
@@ -228,7 +229,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     pub async fn create_slot(&self, id: A::Id, mine: bool) -> Option<ArtifactSlot<A>> {
         {
             let mut state = self.reserved.write().await;
-            if state.using.contains(&id) {
+            if state.using.contains_key(&id) {
                 tracing::error!(id, "cannot create slot: artifact is currently in use");
                 return None;
             }
@@ -257,9 +258,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         self.reserved.read().await.contains_generating(&id)
     }
 
-    /// Owned artifacts in Redis plus artifacts currently being generated
-    /// where this node is the owner/proposer.
-    pub async fn fetch_owned_with_generating(
+    /// Owned artifacts in Redis plus owned using and owned generating.
+    /// This is the full set that should be advertised during state sync to prevent
+    /// peers from pruning artifacts that are still actively in use.
+    pub async fn fetch_owned_with_reserved(
         &self,
         me: Participant,
     ) -> Result<Vec<A::Id>, StorageError> {
@@ -268,6 +270,12 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         ids.extend(
             state
                 .generating
+                .iter()
+                .filter_map(|(&id, &mine)| mine.then_some(id)),
+        );
+        ids.extend(
+            state
+                .using
                 .iter()
                 .filter_map(|(&id, &mine)| mine.then_some(id)),
         );
@@ -359,7 +367,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 let state = self.reserved.read().await;
                 let not_found: Vec<_> = not_found
                     .into_iter()
-                    .filter(|id| !state.contains_generating(id) && !state.using.contains(id))
+                    .filter(|id| !state.contains_generating(id) && !state.using.contains_key(id))
                     .collect();
                 Ok(RemoveOutdatedResult::new(outdated, not_found))
             }
@@ -467,15 +475,20 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
     /// Check if an artifact is currently being consumed by an active protocol.
     pub async fn contains_using(&self, id: A::Id) -> bool {
-        self.reserved.read().await.using.contains(&id)
+        self.reserved.read().await.using.contains_key(&id)
     }
 
     /// Returns the set of artifact IDs currently being consumed by active protocols.
     pub async fn using_ids(&self) -> HashSet<A::Id> {
-        self.reserved.read().await.using.clone()
+        self.reserved.read().await.using.keys().copied().collect()
     }
 
-    pub async fn take(&self, id: A::Id, owner: Participant) -> Option<ArtifactTaken<A>> {
+    pub async fn take(
+        &self,
+        id: A::Id,
+        owner: Participant,
+        mine: bool,
+    ) -> Option<ArtifactTaken<A>> {
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]
             local owner_key = KEYS[2]
@@ -500,7 +513,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         "#;
 
         let start = Instant::now();
-        if !self.reserved.write().await.using.insert(id) {
+        if self.reserved.write().await.using.insert(id, mine).is_some() {
             tracing::warn!(id, "taking artifact that is already in use");
             return None;
         }
@@ -670,7 +683,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 let holders = holders.into_iter().map(Participant::from).collect();
                 artifact.set_holders(holders);
                 let id = artifact.id();
-                self.reserved.write().await.using.insert(id);
+                self.reserved.write().await.using.insert(id, true);
                 let taken = ArtifactTaken::new(artifact, self.clone());
                 tracing::debug!(id, ?elapsed, "took mine artifact");
                 Some(taken)

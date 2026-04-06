@@ -237,7 +237,7 @@ impl SyncTask {
     }
 
     async fn new_update(&self, me: Participant) -> Option<SyncUpdate> {
-        let triples = match self.triples.fetch_owned_with_generating(me).await {
+        let triples = match self.triples.fetch_owned_with_reserved(me).await {
             Ok(ids) => ids,
             Err(err) => {
                 tracing::warn!(
@@ -247,7 +247,7 @@ impl SyncTask {
                 return None;
             }
         };
-        let presignatures = match self.presignatures.fetch_owned_with_generating(me).await {
+        let presignatures = match self.presignatures.fetch_owned_with_reserved(me).await {
             Ok(ids) => ids,
             Err(err) => {
                 tracing::warn!(

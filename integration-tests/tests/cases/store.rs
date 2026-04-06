@@ -60,8 +60,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_spawner.len_potential().await, 2);
 
     // Take triple pairs and check that they are removed from the storage and marked as using
-    let _taken1 = triple_storage.take(triple_id1, node1).await.unwrap();
-    let _taken2 = triple_storage.take(triple_id2, node1).await.unwrap();
+    let _taken1 = triple_storage.take(triple_id1, node1, false).await.unwrap();
+    let _taken2 = triple_storage.take(triple_id2, node1, false).await.unwrap();
     assert!(!triple_spawner.contains(triple_id1).await);
     assert!(!triple_spawner.contains(triple_id2).await);
     assert!(!triple_spawner.contains_mine(triple_id1).await);
@@ -218,7 +218,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_spawner.len_potential().await, 1);
 
     // Take presignature and check that it is removed from the storage and marked as using
-    let _taken_ps1 = presignature_storage.take(id, node1).await.unwrap();
+    let _taken_ps1 = presignature_storage.take(id, node1, false).await.unwrap();
     assert!(!presignature_storage.contains(id).await);
     assert!(!presignature_spawner.contains_mine(id).await);
     assert_eq!(presignature_storage.len_generated().await, 0);

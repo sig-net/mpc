@@ -28,8 +28,8 @@ const TRIPLE_PAIRS_PER_OWNER: usize = 50;
 const PRESIGNATURES_PER_OWNER: usize = 25;
 
 use super::helpers::{
-    assert_presig_owned_state, assert_triples_owned_state, dummy_pair_with_holders,
-    dummy_presignature_with_holders, insert_presignatures_for_owner, insert_triples_for_owner,
+    assert_presig_owned_state, assert_triples_owned_state, insert_presignatures_for_owner,
+    insert_triples_for_owner,
 };
 
 #[test(tokio::test(flavor = "multi_thread"))]
@@ -303,245 +303,220 @@ async fn test_sync_remove_outdated_orphan() {
     }
 }
 
-/// When a peer is still generating an artifact (create_slot called, not yet inserted),
-/// sync should NOT report it as missing. After generation fails (slot dropped),
-/// the artifact should be reported as missing on the next sync.
 #[test(tokio::test(flavor = "multi_thread"))]
-async fn test_sync_when_peer_generating() {
-    const GENERATING_ID: u64 = 600;
+async fn test_sync_matrix() {
+    #[derive(Debug, Clone, Copy)]
+    enum ArtifactState {
+        Generating,
+        Stored,
+        Using,
+        None,
+    }
+
+    struct ExpectedCallerState {
+        /// Should the artifact appear in the caller's sync update?
+        in_update: bool,
+        /// Should the caller still have it in Redis after process_sync_response?
+        stored_after: bool,
+    }
+
+    struct ExpectedResponderState {
+        /// Should the responder report the artifact as not_found (missing)?
+        missing: bool,
+        /// Should the responder still have it in Redis after sync?
+        stored_after: bool,
+    }
+
+    struct Case {
+        caller: ArtifactState,
+        responder: ArtifactState,
+        expected_caller: ExpectedCallerState,
+        expected_responder: ExpectedResponderState,
+    }
+
+    // Caller is always the owner (mine=true), responder is the peer (mine=false).
+    #[rustfmt::skip] // cargo fmt makes the matrix unreadable
+    let test_matrix = [
+        // Caller: Stored (in update) ──────────────────────────────
+        Case { caller: ArtifactState::Stored,     responder: ArtifactState::Stored,     expected_caller: ExpectedCallerState { in_update: true,  stored_after: true  }, expected_responder: ExpectedResponderState { missing: false, stored_after: true  } },
+        Case { caller: ArtifactState::Stored,     responder: ArtifactState::Generating, expected_caller: ExpectedCallerState { in_update: true,  stored_after: true  }, expected_responder: ExpectedResponderState { missing: false, stored_after: false } },
+        Case { caller: ArtifactState::Stored,     responder: ArtifactState::Using,      expected_caller: ExpectedCallerState { in_update: true,  stored_after: true  }, expected_responder: ExpectedResponderState { missing: false, stored_after: false } },
+        Case { caller: ArtifactState::Stored,     responder: ArtifactState::None,       expected_caller: ExpectedCallerState { in_update: true,  stored_after: true  }, expected_responder: ExpectedResponderState { missing: true,  stored_after: false } },
+        // Caller: Generating (in update) ──────────────────────────
+        Case { caller: ArtifactState::Generating, responder: ArtifactState::Stored,     expected_caller: ExpectedCallerState { in_update: true,  stored_after: false }, expected_responder: ExpectedResponderState { missing: false, stored_after: true  } },
+        Case { caller: ArtifactState::Generating, responder: ArtifactState::Generating, expected_caller: ExpectedCallerState { in_update: true,  stored_after: false }, expected_responder: ExpectedResponderState { missing: false, stored_after: false } },
+        Case { caller: ArtifactState::Generating, responder: ArtifactState::Using,      expected_caller: ExpectedCallerState { in_update: true,  stored_after: false }, expected_responder: ExpectedResponderState { missing: false, stored_after: false } },
+        Case { caller: ArtifactState::Generating, responder: ArtifactState::None,       expected_caller: ExpectedCallerState { in_update: true,  stored_after: false }, expected_responder: ExpectedResponderState { missing: true,  stored_after: false } },
+        // Caller: Using (in update) ──────────────────────────────
+        Case { caller: ArtifactState::Using,      responder: ArtifactState::Stored,     expected_caller: ExpectedCallerState { in_update: true,  stored_after: false }, expected_responder: ExpectedResponderState { missing: false, stored_after: true  } },
+        Case { caller: ArtifactState::Using,      responder: ArtifactState::Generating, expected_caller: ExpectedCallerState { in_update: true,  stored_after: false }, expected_responder: ExpectedResponderState { missing: false, stored_after: false } },
+        Case { caller: ArtifactState::Using,      responder: ArtifactState::Using,      expected_caller: ExpectedCallerState { in_update: true,  stored_after: false }, expected_responder: ExpectedResponderState { missing: false, stored_after: false } },
+        Case { caller: ArtifactState::Using,      responder: ArtifactState::None,       expected_caller: ExpectedCallerState { in_update: true,  stored_after: false }, expected_responder: ExpectedResponderState { missing: true,  stored_after: false } },
+        // Caller: None (NOT in update) ────────────────────────────
+        Case { caller: ArtifactState::None,       responder: ArtifactState::Stored,     expected_caller: ExpectedCallerState { in_update: false, stored_after: false }, expected_responder: ExpectedResponderState { missing: false, stored_after: false } },
+        Case { caller: ArtifactState::None,       responder: ArtifactState::Generating, expected_caller: ExpectedCallerState { in_update: false, stored_after: false }, expected_responder: ExpectedResponderState { missing: false, stored_after: false } },
+        Case { caller: ArtifactState::None,       responder: ArtifactState::Using,      expected_caller: ExpectedCallerState { in_update: false, stored_after: false }, expected_responder: ExpectedResponderState { missing: false, stored_after: false } },
+        Case { caller: ArtifactState::None,       responder: ArtifactState::None,       expected_caller: ExpectedCallerState { in_update: false, stored_after: false }, expected_responder: ExpectedResponderState { missing: false, stored_after: false } },
+    ];
 
     let fixture = MpcFixtureBuilder::default()
         .only_generate_signatures()
         .build()
         .await;
 
-    let node0 = &fixture.nodes[0];
-    let node1 = &fixture.nodes[1];
+    let caller = &fixture.nodes[0];
+    let responder = &fixture.nodes[1];
     let all_participants = fixture.sorted_participants();
 
-    // Owner (node0): create_slot + insert → artifact is fully generated and in Redis.
-    node0
-        .triple_storage
-        .create_slot(GENERATING_ID, true)
-        .await
-        .unwrap()
-        .insert(
-            dummy_pair_with_holders(GENERATING_ID, all_participants.clone()),
-            node0.me,
-        )
-        .await;
-    node0
-        .presignature_storage
-        .create_slot(GENERATING_ID, true)
-        .await
-        .unwrap()
-        .insert(
-            dummy_presignature_with_holders(GENERATING_ID, all_participants),
-            node0.me,
-        )
-        .await;
+    for (i, case) in test_matrix.iter().enumerate() {
+        let id: u64 = 800 + i as u64;
+        tracing::info!(id, ?case.caller, ?case.responder, "=== case {i} ===");
 
-    // Non-owner (node1): create_slot only → artifact is still generating, not in Redis.
-    let _triple_slot = node1
-        .triple_storage
-        .create_slot(GENERATING_ID, false)
-        .await
-        .unwrap();
-    let _presig_slot = node1
-        .presignature_storage
-        .create_slot(GENERATING_ID, false)
-        .await
-        .unwrap();
+        // Hold slots/taken artifacts alive until assertions are done.
+        let mut caller_slot = None;
+        let mut caller_taken = None;
+        let mut responder_slot = None;
+        let mut responder_taken = None;
 
-    assert!(
-        node1
-            .triple_storage
-            .contains_generating(GENERATING_ID)
-            .await
-    );
-    assert!(
-        node1
-            .presignature_storage
-            .contains_generating(GENERATING_ID)
-            .await
-    );
-
-    // Sync: node0 broadcasts its update (includes GENERATING_ID).
-    // node1 should NOT report it as missing because it's currently generating it.
-    let response = node1
-        .sync(
-            node0.me,
-            node0.owned_triples_with_generating().await,
-            node0.owned_presignatures_with_generating().await,
-        )
-        .await;
-
-    assert!(
-        !response.triples.contains(&GENERATING_ID),
-        "triple should not be reported as missing while generating"
-    );
-    assert!(
-        !response.presignatures.contains(&GENERATING_ID),
-        "presignature should not be reported as missing while generating"
-    );
-
-    // Simulate generation failure: drop the slots → no longer generating, not in Redis.
-    drop(_triple_slot);
-    drop(_presig_slot);
-    // ArtifactSlot::Drop removes from `generating` asynchronously; wait for it.
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if !node1
-                .triple_storage
-                .contains_generating(GENERATING_ID)
-                .await
-                && !node1
-                    .presignature_storage
-                    .contains_generating(GENERATING_ID)
-                    .await
-            {
-                break;
+        // --- Set up caller (owner) state ---
+        match case.caller {
+            ArtifactState::Stored => {
+                insert_triples_for_owner(
+                    &caller.triple_storage,
+                    caller.me,
+                    &all_participants,
+                    id..=id,
+                )
+                .await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            ArtifactState::Generating => {
+                caller_slot = Some(caller.triple_storage.create_slot(id, true).await.unwrap());
+            }
+            ArtifactState::Using => {
+                insert_triples_for_owner(
+                    &caller.triple_storage,
+                    caller.me,
+                    &all_participants,
+                    id..=id,
+                )
+                .await;
+                caller_taken = Some(
+                    caller
+                        .triple_storage
+                        .take(id, caller.me, true)
+                        .await
+                        .unwrap(),
+                );
+            }
+            ArtifactState::None => {}
         }
-    })
-    .await
-    .expect("generating state should be cleared after dropping slots");
 
-    // Sync again: node1 should now report GENERATING_ID as missing.
-    let response = node1
-        .sync(
-            node0.me,
-            node0.owned_triples_with_generating().await,
-            node0.owned_presignatures_with_generating().await,
-        )
-        .await;
+        // --- Set up responder (peer) state ---
+        match case.responder {
+            ArtifactState::Stored => {
+                insert_triples_for_owner(
+                    &responder.triple_storage,
+                    caller.me,
+                    &all_participants,
+                    id..=id,
+                )
+                .await;
+            }
+            ArtifactState::Generating => {
+                responder_slot = Some(
+                    responder
+                        .triple_storage
+                        .create_slot(id, false)
+                        .await
+                        .unwrap(),
+                );
+            }
+            ArtifactState::Using => {
+                insert_triples_for_owner(
+                    &responder.triple_storage,
+                    caller.me,
+                    &all_participants,
+                    id..=id,
+                )
+                .await;
+                responder_taken = Some(
+                    responder
+                        .triple_storage
+                        .take(id, caller.me, false)
+                        .await
+                        .unwrap(),
+                );
+            }
+            ArtifactState::None => {}
+        }
 
-    assert!(
-        response.triples.contains(&GENERATING_ID),
-        "triple should be reported as missing after generation failed"
-    );
-    assert!(
-        response.presignatures.contains(&GENERATING_ID),
-        "presignature should be reported as missing after generation failed"
-    );
-}
+        // --- Build caller's sync update ---
+        let caller_update = caller.owned_triples_with_reserved().await;
+        assert_eq!(
+            caller_update.contains(&id),
+            case.expected_caller.in_update,
+            "case {i}: caller={:?} → expected in_update={}",
+            case.caller,
+            case.expected_caller.in_update,
+        );
 
-/// When the owner is still generating an artifact and initiates sync,
-/// it should include generating in the sync update so peer nodes do not remove it.
-#[test(tokio::test(flavor = "multi_thread"))]
-async fn test_sync_when_owner_generating() {
-    const GENERATING_ID: u64 = 601;
+        // --- Responder processes the sync update ---
+        let response = responder
+            .sync(
+                caller.me,
+                caller_update,
+                responder.owned_presignatures().await,
+            )
+            .await;
 
-    let fixture = MpcFixtureBuilder::default()
-        .only_generate_signatures()
-        .build()
-        .await;
+        // Verify the full SyncUpdate response from the responder.
+        assert_eq!(
+            response.from, responder.me,
+            "case {i}: response.from should be the responder",
+        );
+        assert_eq!(
+            response.triples.contains(&id),
+            case.expected_responder.missing,
+            "case {i}: caller={:?}, responder={:?} → expected missing={}",
+            case.caller,
+            case.responder,
+            case.expected_responder.missing,
+        );
 
-    let node0 = &fixture.nodes[0];
-    let node1 = &fixture.nodes[1];
-    let all_participants = fixture.sorted_participants();
+        // --- Verify responder's Redis state after sync ---
+        assert_eq!(
+            responder
+                .triple_storage
+                .contains_by_owner(id, caller.me)
+                .await,
+            case.expected_responder.stored_after,
+            "case {i}: caller={:?}, responder={:?} → expected responder stored_after={}",
+            case.caller,
+            case.responder,
+            case.expected_responder.stored_after,
+        );
 
-    // Owner (node0): create_slot only → still generating, not in Redis.
-    let mut triple_slot = node0
-        .triple_storage
-        .create_slot(GENERATING_ID, true)
-        .await
-        .unwrap();
-    let mut presig_slot = node0
-        .presignature_storage
-        .create_slot(GENERATING_ID, true)
-        .await
-        .unwrap();
+        // --- Caller processes the sync response (remove holder / prune) ---
+        caller
+            .process_sync_response(responder.me, 2, &response)
+            .await;
+        assert_eq!(
+            caller.triple_storage.contains_by_owner(id, caller.me).await,
+            case.expected_caller.stored_after,
+            "case {i}: caller={:?}, responder={:?} → expected caller stored_after={}",
+            case.caller,
+            case.responder,
+            case.expected_caller.stored_after,
+        );
 
-    assert!(
-        node0
-            .triple_storage
-            .contains_generating(GENERATING_ID)
-            .await
-    );
-    assert!(
-        node0
-            .presignature_storage
-            .contains_generating(GENERATING_ID)
-            .await
-    );
-
-    // Peer (node1): already finished generation, artifact is in Redis.
-    node1
-        .triple_storage
-        .create_slot(GENERATING_ID, false)
-        .await
-        .unwrap()
-        .insert(
-            dummy_pair_with_holders(GENERATING_ID, all_participants.clone()),
-            node0.me,
-        )
-        .await;
-    node1
-        .presignature_storage
-        .create_slot(GENERATING_ID, false)
-        .await
-        .unwrap()
-        .insert(
-            dummy_presignature_with_holders(GENERATING_ID, all_participants.clone()),
-            node0.me,
-        )
-        .await;
-
-    // Owner (node0) initiates sync — GENERATING_ID is not in Redis but IS in mine_generating.
-    let node0_triples = node0.owned_triples_with_generating().await;
-    let node0_presigs = node0.owned_presignatures_with_generating().await;
-    assert!(node0_triples.contains(&GENERATING_ID));
-    assert!(node0_presigs.contains(&GENERATING_ID));
-
-    let response = node1.sync(node0.me, node0_triples, node0_presigs).await;
-
-    // Peer (node1) sees GENERATING_ID in the update and already has it — nothing to report.
-    assert!(
-        !response.triples.contains(&GENERATING_ID),
-        "generating artifact should not appear in sync response"
-    );
-    assert!(
-        !response.presignatures.contains(&GENERATING_ID),
-        "generating artifact should not appear in sync response"
-    );
-
-    // node1 must still have the artifact — remove_outdated must NOT delete it.
-    assert_triples_owned_state(&node1.triple_storage, node0.me, &[GENERATING_ID], &[]).await;
-    assert_presig_owned_state(&node1.presignature_storage, node0.me, &[GENERATING_ID], &[]).await;
-
-    // Owner completes generation: insert into Redis.
-    triple_slot
-        .insert(
-            dummy_pair_with_holders(GENERATING_ID, all_participants.clone()),
-            node0.me,
-        )
-        .await;
-    presig_slot
-        .insert(
-            dummy_presignature_with_holders(GENERATING_ID, all_participants),
-            node0.me,
-        )
-        .await;
-
-    // Sync again: GENERATING_ID is now in Redis. node1 already has it, so nothing to report.
-    let response = node1
-        .sync(
-            node0.me,
-            node0.owned_triples_with_generating().await,
-            node0.owned_presignatures_with_generating().await,
-        )
-        .await;
-
-    assert!(
-        !response.triples.contains(&GENERATING_ID),
-        "triple should not be reported as missing since node1 already has it"
-    );
-    assert!(
-        !response.presignatures.contains(&GENERATING_ID),
-        "presignature should not be reported as missing since node1 already has it"
-    );
+        // Clean up held slots/taken before next iteration.
+        drop(caller_slot);
+        drop(caller_taken);
+        drop(responder_slot);
+        drop(responder_taken);
+        // Wait for async Drop cleanup.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
