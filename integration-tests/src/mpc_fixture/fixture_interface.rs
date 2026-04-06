@@ -183,18 +183,14 @@ impl MpcFixtureNode {
 
     /// Get the list of triple IDs this node owns in storage (sorted).
     pub async fn owned_triples(&self) -> Vec<u64> {
-        let mut ids = self.triple_storage.fetch_owned(self.me).await.unwrap();
+        let mut ids = self.triple_storage.fetch_owned().await.unwrap();
         ids.sort();
         ids
     }
 
     /// Get the list of presignature IDs this node owns in storage (sorted).
     pub async fn owned_presignatures(&self) -> Vec<u64> {
-        let mut ids = self
-            .presignature_storage
-            .fetch_owned(self.me)
-            .await
-            .unwrap();
+        let mut ids = self.presignature_storage.fetch_owned().await.unwrap();
         ids.sort();
         ids
     }
@@ -203,7 +199,7 @@ impl MpcFixtureNode {
     pub async fn owned_triples_with_reserved(&self) -> Vec<u64> {
         let mut ids = self
             .triple_storage
-            .fetch_owned_with_reserved(self.me)
+            .fetch_owned_with_reserved()
             .await
             .unwrap();
         ids.sort();
@@ -214,7 +210,7 @@ impl MpcFixtureNode {
     pub async fn owned_presignatures_with_reserved(&self) -> Vec<u64> {
         let mut ids = self
             .presignature_storage
-            .fetch_owned_with_reserved(self.me)
+            .fetch_owned_with_reserved()
             .await
             .unwrap();
         ids.sort();
@@ -230,11 +226,11 @@ impl MpcFixtureNode {
         response: &mpc_node::protocol::sync::SyncUpdate,
     ) {
         self.triple_storage
-            .remove_holder_and_prune(self.me, peer, threshold, &response.triples)
+            .remove_holder_and_prune(peer, threshold, &response.triples)
             .await
             .expect("remove_holder_and_prune triples failed");
         self.presignature_storage
-            .remove_holder_and_prune(self.me, peer, threshold, &response.presignatures)
+            .remove_holder_and_prune(peer, threshold, &response.presignatures)
             .await
             .expect("remove_holder_and_prune presignatures failed");
     }

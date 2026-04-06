@@ -374,12 +374,24 @@ impl Redis {
             .unwrap()
     }
 
-    pub fn triple_storage(&self, id: &AccountId) -> mpc_node::storage::TripleStorage {
-        TriplePair::storage(&self.pool(), id)
+    pub fn triple_storage(
+        &self,
+        id: &AccountId,
+        me: Participant,
+    ) -> mpc_node::storage::TripleStorage {
+        let storage = TriplePair::storage(&self.pool(), id);
+        storage.set_me(me);
+        storage
     }
 
-    pub fn presignature_storage(&self, id: &AccountId) -> mpc_node::storage::PresignatureStorage {
-        Presignature::storage(&self.pool(), id)
+    pub fn presignature_storage(
+        &self,
+        id: &AccountId,
+        me: Participant,
+    ) -> mpc_node::storage::PresignatureStorage {
+        let storage = Presignature::storage(&self.pool(), id);
+        storage.set_me(me);
+        storage
     }
 
     pub async fn stockpile_triples(&self, cfg: &NodeConfig, participants: &Participants, mul: u32) {
@@ -388,15 +400,15 @@ impl Redis {
             .participants
             .keys()
             .map(|account_id| {
-                (
-                    Participant::from(
-                        *participants
-                            .account_to_participant_id
-                            .get(account_id)
-                            .unwrap(),
-                    ),
-                    TriplePair::storage(&pool, account_id),
-                )
+                let me = Participant::from(
+                    *participants
+                        .account_to_participant_id
+                        .get(account_id)
+                        .unwrap(),
+                );
+                let storage = TriplePair::storage(&pool, account_id);
+                storage.set_me(me);
+                (me, storage)
             })
             .collect::<HashMap<_, _>>();
 
@@ -429,7 +441,7 @@ impl Redis {
                     storage
                         .get(me)
                         .unwrap()
-                        .create_slot(pair_id, true)
+                        .create_slot(pair_id, *owner)
                         .await
                         .unwrap()
                         .insert(pair, *owner)

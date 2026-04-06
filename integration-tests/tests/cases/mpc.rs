@@ -390,7 +390,13 @@ async fn test_sync_matrix() {
                 .await;
             }
             ArtifactState::Generating => {
-                caller_slot = Some(caller.triple_storage.create_slot(id, true).await.unwrap());
+                caller_slot = Some(
+                    caller
+                        .triple_storage
+                        .create_slot(id, caller.me)
+                        .await
+                        .unwrap(),
+                );
             }
             ArtifactState::Using => {
                 insert_triples_for_owner(
@@ -400,13 +406,7 @@ async fn test_sync_matrix() {
                     id..=id,
                 )
                 .await;
-                caller_taken = Some(
-                    caller
-                        .triple_storage
-                        .take(id, caller.me, true)
-                        .await
-                        .unwrap(),
-                );
+                caller_taken = Some(caller.triple_storage.take(id, caller.me).await.unwrap());
             }
             ArtifactState::None => {}
         }
@@ -426,7 +426,7 @@ async fn test_sync_matrix() {
                 responder_slot = Some(
                     responder
                         .triple_storage
-                        .create_slot(id, false)
+                        .create_slot(id, caller.me)
                         .await
                         .unwrap(),
                 );
@@ -439,13 +439,7 @@ async fn test_sync_matrix() {
                     id..=id,
                 )
                 .await;
-                responder_taken = Some(
-                    responder
-                        .triple_storage
-                        .take(id, caller.me, false)
-                        .await
-                        .unwrap(),
-                );
+                responder_taken = Some(responder.triple_storage.take(id, caller.me).await.unwrap());
             }
             ArtifactState::None => {}
         }
@@ -589,7 +583,7 @@ async fn test_basic_generate_triples() {
         for node in &network.nodes {
             let mut nodes_shares = BTreeMap::new();
             for peer in &network.nodes {
-                let triple_ids = node.triple_storage.fetch_owned(peer.me).await.unwrap();
+                let triple_ids = node.triple_storage.fetch_owned_by(peer.me).await.unwrap();
                 let mut peer_triples = Vec::with_capacity(triple_ids.len());
                 for triple_id in triple_ids {
                     let pair = conn
@@ -643,7 +637,7 @@ async fn test_basic_generate_presignature() {
             for peer in &network.nodes {
                 let presignature_ids = node
                     .presignature_storage
-                    .fetch_owned(peer.me)
+                    .fetch_owned_by(peer.me)
                     .await
                     .unwrap();
                 let mut peer_presignatures = Vec::with_capacity(presignature_ids.len());

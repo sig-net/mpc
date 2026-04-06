@@ -328,7 +328,7 @@ impl SignOrganizer {
             let remaining = state.budget.remaining();
             let fetch = tokio::time::timeout(remaining, async {
                 loop {
-                    if let Some(taken) = ctx.presignatures.take_mine(ctx.me).await {
+                    if let Some(taken) = ctx.presignatures.take_mine().await {
                         let Some(holders) = taken.artifact.holders() else {
                             tracing::error!(
                                 id = taken.artifact.id,
@@ -1471,7 +1471,7 @@ impl PendingPresignature {
             let mut interval = tokio::time::interval(Duration::from_millis(250));
             loop {
                 interval.tick().await;
-                if let Some(presignature) = storage.take(id, owner, false).await {
+                if let Some(presignature) = storage.take(id, owner).await {
                     break presignature;
                 };
             }

@@ -570,6 +570,7 @@ impl MpcFixtureNodeBuilder {
 
         let triple_storage =
             TriplePair::storage(&context.redis_pool, &self.participant_info.account_id);
+        triple_storage.set_me(self.me);
 
         if fixture_config.use_preshared_triples {
             // removing here because we can't clone a triple
@@ -580,7 +581,7 @@ impl MpcFixtureNodeBuilder {
                     if pair.holders.is_none() {
                         pair.holders = Some(pair.triple0.public.participants.clone());
                     }
-                    let mut slot = triple_storage.create_slot(pair_id, true).await.unwrap();
+                    let mut slot = triple_storage.create_slot(pair_id, owner).await.unwrap();
                     slot.insert(pair, owner).await;
                 }
             }
@@ -588,6 +589,7 @@ impl MpcFixtureNodeBuilder {
 
         let presignature_storage =
             Presignature::storage(&context.redis_pool, &self.participant_info.account_id);
+        presignature_storage.set_me(self.me);
 
         if fixture_config.use_preshared_presignatures {
             // removing here because we can't clone a presignature
@@ -598,7 +600,7 @@ impl MpcFixtureNodeBuilder {
                         presignature_share.holders = Some(presignature_share.participants.clone());
                     }
                     let mut slot = presignature_storage
-                        .create_slot(presignature_share.id, true)
+                        .create_slot(presignature_share.id, owner)
                         .await
                         .unwrap();
                     slot.insert(presignature_share, owner).await;

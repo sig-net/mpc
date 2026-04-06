@@ -22,7 +22,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let (_, _, msg) = MessageChannel::new();
     let node0_id = "party0.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
-    let triple_storage = redis.triple_storage(&node0_id);
+    let triple_storage = redis.triple_storage(&node0_id, node0);
     let triple_spawner =
         TripleSpawner::new(node0, 5, 123, &triple_storage, msg, node0_id.to_string());
 
@@ -38,13 +38,13 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_spawner.len_potential().await, 0);
 
     triple_storage
-        .create_slot(triple_id1, false)
+        .create_slot(triple_id1, node1)
         .await
         .unwrap()
         .insert(dummy_pair(triple_id1), node1)
         .await;
     triple_storage
-        .create_slot(triple_id2, false)
+        .create_slot(triple_id2, node1)
         .await
         .unwrap()
         .insert(dummy_pair(triple_id2), node1)
@@ -60,8 +60,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_spawner.len_potential().await, 2);
 
     // Take triple pairs and check that they are removed from the storage and marked as using
-    let _taken1 = triple_storage.take(triple_id1, node1, false).await.unwrap();
-    let _taken2 = triple_storage.take(triple_id2, node1, false).await.unwrap();
+    let _taken1 = triple_storage.take(triple_id1, node1).await.unwrap();
+    let _taken2 = triple_storage.take(triple_id2, node1).await.unwrap();
     assert!(!triple_spawner.contains(triple_id1).await);
     assert!(!triple_spawner.contains(triple_id2).await);
     assert!(!triple_spawner.contains_mine(triple_id1).await);
@@ -74,11 +74,11 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
 
     // Attempt to re-create slot for in-use triples and check that it fails
     assert!(triple_storage
-        .create_slot(triple_id1, false)
+        .create_slot(triple_id1, node1)
         .await
         .is_none());
     assert!(triple_storage
-        .create_slot(triple_id2, false)
+        .create_slot(triple_id2, node1)
         .await
         .is_none());
 
@@ -87,13 +87,13 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
 
     // Add mine triple and check that it is in the storage
     triple_storage
-        .create_slot(id3, true)
+        .create_slot(id3, node0)
         .await
         .unwrap()
         .insert(dummy_pair(id3), node0)
         .await;
     triple_storage
-        .create_slot(id4, true)
+        .create_slot(id4, node0)
         .await
         .unwrap()
         .insert(dummy_pair(id4), node0)
@@ -107,8 +107,8 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_spawner.len_potential().await, 2);
 
     // Take mine triple pairs and check that they are removed from the storage and marked as using
-    let _taken3 = triple_storage.take_mine(node0).await.unwrap();
-    let _taken4 = triple_storage.take_mine(node0).await.unwrap();
+    let _taken3 = triple_storage.take_mine().await.unwrap();
+    let _taken4 = triple_storage.take_mine().await.unwrap();
     assert!(!triple_spawner.contains(id3).await);
     assert!(!triple_spawner.contains(id4).await);
     assert!(!triple_spawner.contains_mine(id3).await);
@@ -121,14 +121,14 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert!(triple_storage.contains_using(id4).await);
 
     // Attempt to re-create slot for in-use mine triples and check that it fails
-    assert!(triple_storage.create_slot(id3, true).await.is_none());
-    assert!(triple_storage.create_slot(id4, true).await.is_none());
+    assert!(triple_storage.create_slot(id3, node0).await.is_none());
+    assert!(triple_storage.create_slot(id4, node0).await.is_none());
 
     assert!(triple_storage.clear().await);
     // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
     for id in 10..=15 {
         triple_storage
-            .create_slot(id, false)
+            .create_slot(id, node1)
             .await
             .unwrap()
             .insert(dummy_pair(id), node1)
@@ -138,7 +138,7 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     // Have our node0 own 16 to 20
     for id in 16..=20 {
         triple_storage
-            .create_slot(id, true)
+            .create_slot(id, node0)
             .await
             .unwrap()
             .insert(dummy_pair(id), node0)
@@ -175,8 +175,8 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let (_, _, msg) = MessageChannel::new();
     let node0_id = "party0.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
-    let triple_storage = redis.triple_storage(&node0_id);
-    let presignature_storage = redis.presignature_storage(&node0_id);
+    let triple_storage = redis.triple_storage(&node0_id, node0);
+    let presignature_storage = redis.presignature_storage(&node0_id, node0);
     let presignature_spawner = PresignatureSpawner::new(
         Participant::from(0),
         5,
@@ -203,7 +203,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     // Insert presignature owned by node1, with our node0 view being that it is a foreign presignature
     assert!(
         presignature_storage
-            .create_slot(presignature.id, false)
+            .create_slot(presignature.id, node1)
             .await
             .unwrap()
             .insert(presignature, node1)
@@ -218,7 +218,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_spawner.len_potential().await, 1);
 
     // Take presignature and check that it is removed from the storage and marked as using
-    let _taken_ps1 = presignature_storage.take(id, node1, false).await.unwrap();
+    let _taken_ps1 = presignature_storage.take(id, node1).await.unwrap();
     assert!(!presignature_storage.contains(id).await);
     assert!(!presignature_spawner.contains_mine(id).await);
     assert_eq!(presignature_storage.len_generated().await, 0);
@@ -227,7 +227,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert!(presignature_storage.contains_using(id).await);
 
     // Attempt to re-create slot for in-use presignature and check that it fails
-    assert!(presignature_storage.create_slot(id, false).await.is_none());
+    assert!(presignature_storage.create_slot(id, node1).await.is_none());
 
     let id2 = 2;
     let mine_presignature = dummy_presignature(id2);
@@ -235,7 +235,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     // Add a presignature to our own node0
     assert!(
         presignature_storage
-            .create_slot(id2, true)
+            .create_slot(id2, node0)
             .await
             .unwrap()
             .insert(mine_presignature, node0)
@@ -249,7 +249,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_spawner.len_potential().await, 1);
 
     // Take mine presignature and check that it is removed from the storage and marked as using
-    let _taken_ps2 = presignature_storage.take_mine(node0).await.unwrap();
+    let _taken_ps2 = presignature_storage.take_mine().await.unwrap();
     assert!(!presignature_storage.contains(id2).await);
     assert!(!presignature_spawner.contains_mine(id2).await);
     assert_eq!(presignature_storage.len_generated().await, 0);
@@ -259,13 +259,13 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert!(presignature_storage.contains_using(id2).await);
 
     // Attempt to re-create slot for in-use mine presignature and check that it fails
-    assert!(presignature_storage.create_slot(id2, true).await.is_none());
+    assert!(presignature_storage.create_slot(id2, node0).await.is_none());
 
     presignature_storage.clear().await;
     // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
     for id in 10..=15 {
         presignature_storage
-            .create_slot(id, false)
+            .create_slot(id, node1)
             .await
             .unwrap()
             .insert(dummy_presignature(id), node1)
@@ -275,7 +275,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     // Have our node0 own 16 to 20
     for id in 16..=20 {
         presignature_storage
-            .create_slot(id, true)
+            .create_slot(id, node0)
             .await
             .unwrap()
             .insert(dummy_presignature(id), node0)

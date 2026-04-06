@@ -480,7 +480,7 @@ impl PresignatureSpawner {
         // to use the same triple as any other node.
         // TODO: have all this part be a separate task such that finding a pair of triples is done in parallel instead
         // of waiting for storage to respond here.
-        let Some(triples) = self.triples.take_mine(self.me).await else {
+        let Some(triples) = self.triples.take_mine().await else {
             return;
         };
 
@@ -566,11 +566,7 @@ impl PresignatureSpawner {
             "starting protocol to generate a new presignature",
         );
 
-        let Some(slot) = self
-            .presignatures
-            .create_slot(id.id, owner == self.me)
-            .await
-        else {
+        let Some(slot) = self.presignatures.create_slot(id.id, owner).await else {
             return Err(InitializationError::BadParameters(format!(
                 "presignature {} is already generating, in use, or stored",
                 id.id
@@ -865,7 +861,7 @@ impl PendingTriples {
             let mut interval = tokio::time::interval(Duration::from_millis(200));
             loop {
                 interval.tick().await;
-                if let Some(triples) = storage.take(pair_id, owner, false).await {
+                if let Some(triples) = storage.take(pair_id, owner).await {
                     break triples;
                 };
             }
