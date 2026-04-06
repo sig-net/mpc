@@ -89,6 +89,7 @@ near-fetch = "0.6.0"
 near-primitives.workspace = true
 near-sdk.workspace = true
 
+canton-types.workspace = true
 mpc-contract.workspace = true
 mpc-crypto.workspace = true
 mpc-keys.workspace = true

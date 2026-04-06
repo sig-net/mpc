@@ -9,12 +9,12 @@ use crate::stream::{ChainEvent, ChainStream};
 
 use alloy::primitives::{keccak256, Address, U256};
 use alloy_sol_types::sol;
+use canton_types::{contracts, ledger_api};
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::Scalar;
 use mpc_primitives::{ScalarExt, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION};
-use serde_json::Value;
 use std::fmt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -58,49 +58,8 @@ sol! {
 // Canton event structs
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct CantonEvmTransactionParams {
-    pub to: String,
-    pub function_signature: String,
-    pub args: Vec<String>,
-    pub value: String,
-    pub nonce: String,
-    pub gas_limit: String,
-    pub max_fee_per_gas: String,
-    pub max_priority_fee: String, // NOTE: NOT "per_gas" — matches Daml field name
-    pub chain_id: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct CantonSignBidirectionalRequestedEvent {
-    pub operators: Vec<String>,
-    /// Pre-computed predecessorId (= vaultId + keccak256(sort(operators))).
-    /// Used as the KDF sender input. NOT a party ID — computed by the Vault
-    /// contract in Daml and passed through verbatim.
-    pub sender: String,
-    /// The user party who initiated the sign request. Passed to
-    /// Signer.Respond / RespondBidirectional as `requester`.
-    pub requester: String,
-    pub sig_network: String,
-    pub vault_id: String,
-    pub evm_tx_params: CantonEvmTransactionParams,
-    pub caip2_id: String,
-    pub key_version: u32,
-    pub path: String,
-    pub algo: String,
-    pub dest: String,
-    pub params: String,
-    pub nonce_cid_text: String,
-    pub output_deserialization_schema: String,
-    pub respond_serialization_schema: String,
-}
-
-impl CantonSignBidirectionalRequestedEvent {
-    /// The sender field IS the predecessorId — pre-computed by the Vault contract.
-    pub fn predecessor_id(&self) -> String {
-        self.sender.clone()
-    }
-}
+pub use canton_types::contracts::EvmTransactionParams as CantonEvmTransactionParams;
+pub use canton_types::contracts::SignBidirectionalRequestedEvent as CantonSignBidirectionalRequestedEvent;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CantonRespondBidirectionalEvent {
@@ -126,6 +85,7 @@ pub struct CantonSignatureRespondedEvent {
 #[derive(serde::Serialize)]
 struct JwtClaims {
     sub: String,
+    scope: String,
     iat: u64,
     exp: u64,
 }
@@ -136,6 +96,7 @@ pub(crate) fn generate_jwt(private_key_pem: &[u8], subject: &str) -> anyhow::Res
         .as_secs();
     let claims = JwtClaims {
         sub: subject.to_string(),
+        scope: "daml_ledger_api".to_string(),
         iat: now,
         exp: now + 30,
     };
@@ -323,11 +284,9 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
 
         let request_id = self.generate_request_id();
 
-        let predecessor_id = self.predecessor_id();
-
         let epsilon = mpc_crypto::kdf::derive_epsilon_canton(
             self.key_version,
-            &predecessor_id,
+            self.predecessor_id(),
             &self.path,
         );
 
@@ -478,13 +437,17 @@ pub async fn discover_signer_cid(
     party_id: &str,
 ) -> anyhow::Result<(String, String)> {
     let url = format!("{json_api_url}/v2/state/active-contracts");
-    let body = serde_json::json!({
-        "filter": {
-            "filtersByParty": {
-                party_id: {}
-            }
-        }
-    });
+
+    let mut filters_by_party = serde_json::Map::new();
+    filters_by_party.insert(party_id.to_string(), serde_json::json!({}));
+
+    let body = ledger_api::GetActiveContractsRequest {
+        active_at_offset: 0,
+        event_format: ledger_api::EventFormat {
+            filters_by_party,
+            verbose: false,
+        },
+    };
 
     let resp = http_client
         .post(&url)
@@ -499,22 +462,15 @@ pub async fn discover_signer_cid(
         anyhow::bail!("active-contracts query failed: {status} {text}");
     }
 
-    let items: Vec<Value> = resp.json().await?;
+    let items: Vec<ledger_api::ActiveContractEntry> = resp.json().await?;
 
     let mut signer_contracts: Vec<(String, String)> = Vec::new();
     for item in &items {
-        // Structure: { "contractEntry": { "JsActiveContract": { "createdEvent": { ... } } } }
-        let created_event = item
-            .pointer("/contractEntry/JsActiveContract/createdEvent")
-            .or_else(|| {
-                // Fallback: direct CreatedEvent
-                item.pointer("/createdEvent")
-            });
-        if let Some(ce) = created_event {
-            let template_id = ce["templateId"].as_str().unwrap_or("");
-            let contract_id = ce["contractId"].as_str().unwrap_or("");
-            if template_suffix_matches(template_id, "Signer:Signer") {
-                signer_contracts.push((contract_id.to_string(), template_id.to_string()));
+        if let Some(entry) = &item.contract_entry {
+            let ledger_api::ContractEntry::JsActiveContract(active) = entry;
+            let ce = &active.created_event;
+            if ledger_api::template_suffix_matches(&ce.template_id, "Signer:Signer") {
+                signer_contracts.push((ce.contract_id.clone(), ce.template_id.clone()));
             }
         }
     }
@@ -524,23 +480,6 @@ pub async fn discover_signer_cid(
         1 => Ok(signer_contracts.into_iter().next().unwrap()),
         n => anyhow::bail!("expected 1 Signer:Signer contract, found {n}"),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Template ID suffix matching
-// ---------------------------------------------------------------------------
-
-/// Check if a Canton template ID ends with the given suffix.
-/// Canton template IDs include package hashes, e.g.:
-///   "abc123:Signer:SignBidirectionalEvent" — suffix match on "Signer:SignBidirectionalEvent"
-fn template_suffix_matches(template_id: &str, suffix: &str) -> bool {
-    let parts: Vec<&str> = template_id.split(':').collect();
-    let suffix_parts: Vec<&str> = suffix.split(':').collect();
-    if parts.len() < suffix_parts.len() {
-        return false;
-    }
-    let start = parts.len() - suffix_parts.len();
-    parts[start..] == suffix_parts[..]
 }
 
 // ---------------------------------------------------------------------------
@@ -671,17 +610,16 @@ async fn subscribe_and_process(
     tracing::info!("canton WebSocket connected");
 
     // Send subscription message
-    let subscribe_msg = serde_json::json!({
-        "beginExclusive": *counter,
-        "verbose": true,
-        "filter": {
-            "filtersByParty": {
-                &config.party_id: {}
-            }
-        }
-    });
+    let mut filters_by_party = serde_json::Map::new();
+    filters_by_party.insert(config.party_id.clone(), serde_json::json!({}));
+
+    let subscribe_msg = ledger_api::GetUpdatesRequest {
+        begin_exclusive: *counter,
+        verbose: true,
+        filter: ledger_api::UpdatesFilter { filters_by_party },
+    };
     write
-        .send(Message::Text(subscribe_msg.to_string().into()))
+        .send(Message::Text(serde_json::to_string(&subscribe_msg)?.into()))
         .await?;
 
     // Process incoming messages
@@ -700,7 +638,7 @@ async fn subscribe_and_process(
             _ => continue,
         };
 
-        let parsed: Value = match serde_json::from_str(&text) {
+        let msg: ledger_api::UpdateMessage = match serde_json::from_str(&text) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(%e, "failed to parse canton WebSocket message");
@@ -708,39 +646,30 @@ async fn subscribe_and_process(
             }
         };
 
-        // Check for error messages
-        if parsed.get("error").is_some() {
-            tracing::warn!(error = %parsed, "canton ledger stream error");
-            continue;
-        }
+        match msg.update {
+            Some(ledger_api::Update::Transaction { value }) => {
+                *counter = value.offset;
 
-        // Extract transaction events
-        // Structure: { "update": { "Transaction": { "value": { "offset": N, "events": [...] } } } }
-        if let Some(tx_value) = parsed.pointer("/update/Transaction/value") {
-            if let Some(offset) = tx_value.get("offset").and_then(|o| o.as_u64()) {
-                *counter = offset;
-            }
-
-            if let Some(events) = tx_value.get("events").and_then(|e| e.as_array()) {
-                for event in events {
+                for event in &value.events {
                     process_canton_event(event, tx, counter).await;
                 }
-            }
 
-            // Emit Block event for checkpoint tracking
-            if tx.send(ChainEvent::Block(*counter)).await.is_err() {
-                tracing::error!("canton event channel closed");
-                return Ok(());
-            }
-        }
-
-        // Handle OffsetCheckpoint (heartbeat)
-        if let Some(checkpoint) = parsed.pointer("/update/OffsetCheckpoint/value") {
-            if let Some(offset) = checkpoint.get("offset").and_then(|o| o.as_u64()) {
-                *counter = offset;
+                // Emit Block event for checkpoint tracking
                 if tx.send(ChainEvent::Block(*counter)).await.is_err() {
                     tracing::error!("canton event channel closed");
                     return Ok(());
+                }
+            }
+            Some(ledger_api::Update::OffsetCheckpoint { value }) => {
+                *counter = value.offset;
+                if tx.send(ChainEvent::Block(*counter)).await.is_err() {
+                    tracing::error!("canton event channel closed");
+                    return Ok(());
+                }
+            }
+            None => {
+                if msg.error.is_some() {
+                    tracing::warn!(error = ?msg.error, "canton ledger stream error");
                 }
             }
         }
@@ -751,65 +680,67 @@ async fn subscribe_and_process(
 
 /// Process a single Canton event from a WebSocket transaction update.
 async fn process_canton_event(
-    event: &Value,
+    event: &ledger_api::Event,
     tx: &mpsc::Sender<ChainEvent>,
     _counter: &u64,
 ) {
-    // CreatedEvent handling
-    if let Some(created) = event.get("CreatedEvent") {
-        let template_id = created["templateId"].as_str().unwrap_or("");
+    let created = match event {
+        ledger_api::Event::CreatedEvent(created) => created,
+        ledger_api::Event::ArchivedEvent(_) | ledger_api::Event::ExercisedEvent(_) => return,
+    };
 
-        if template_suffix_matches(template_id, "Signer:SignBidirectionalEvent") {
-            match parse_sign_bidirectional_event(created) {
-                Ok(canton_event) => {
-                    let entropy: [u8; 32] = rand::random();
-                    let boxed: crate::stream::ops::SignatureEventBox = Box::new(canton_event);
-                    match boxed.generate_sign_request(entropy) {
-                        Ok(indexed) => {
-                            if tx
-                                .send(ChainEvent::SignRequest(indexed))
-                                .await
-                                .is_err()
-                            {
-                                tracing::error!("canton event channel closed");
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(%e, "failed to generate canton sign request");
+    let template_id = &created.template_id;
+
+    if ledger_api::template_suffix_matches(template_id, "Signer:SignBidirectionalEvent") {
+        match parse_sign_bidirectional_event(created) {
+            Ok(canton_event) => {
+                let entropy: [u8; 32] = rand::random();
+                let boxed: crate::stream::ops::SignatureEventBox = Box::new(canton_event);
+                match boxed.generate_sign_request(entropy) {
+                    Ok(indexed) => {
+                        if tx
+                            .send(ChainEvent::SignRequest(indexed))
+                            .await
+                            .is_err()
+                        {
+                            tracing::error!("canton event channel closed");
                         }
                     }
-                }
-                Err(e) => {
-                    tracing::warn!(%e, "failed to parse SignBidirectionalEvent");
-                }
-            }
-        } else if template_suffix_matches(template_id, "Signer:SignatureRespondedEvent") {
-            match parse_signature_responded_event(created) {
-                Ok(responded) => {
-                    let event = SignatureRespondedEvent::Canton(responded);
-                    if tx.send(ChainEvent::Respond(event)).await.is_err() {
-                        tracing::error!("canton event channel closed");
+                    Err(e) => {
+                        tracing::warn!(%e, "failed to generate canton sign request");
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(%e, "failed to parse SignatureRespondedEvent");
+            }
+            Err(e) => {
+                tracing::warn!(%e, "failed to parse SignBidirectionalEvent");
+            }
+        }
+    } else if ledger_api::template_suffix_matches(template_id, "Signer:SignatureRespondedEvent") {
+        match parse_signature_responded_event(created) {
+            Ok(responded) => {
+                let event = SignatureRespondedEvent::Canton(responded);
+                if tx.send(ChainEvent::Respond(event)).await.is_err() {
+                    tracing::error!("canton event channel closed");
                 }
             }
-        } else if template_suffix_matches(template_id, "Signer:RespondBidirectionalEvent") {
-            match parse_respond_bidirectional_event(created) {
-                Ok(respond) => {
-                    let event = RespondBidirectionalEvent::Canton(respond);
-                    if tx
-                        .send(ChainEvent::RespondBidirectional(event))
-                        .await
-                        .is_err()
-                    {
-                        tracing::error!("canton event channel closed");
-                    }
+            Err(e) => {
+                tracing::warn!(%e, "failed to parse SignatureRespondedEvent");
+            }
+        }
+    } else if ledger_api::template_suffix_matches(template_id, "Signer:RespondBidirectionalEvent") {
+        match parse_respond_bidirectional_event(created) {
+            Ok(respond) => {
+                let event = RespondBidirectionalEvent::Canton(respond);
+                if tx
+                    .send(ChainEvent::RespondBidirectional(event))
+                    .await
+                    .is_err()
+                {
+                    tracing::error!("canton event channel closed");
                 }
-                Err(e) => {
-                    tracing::warn!(%e, "failed to parse RespondBidirectionalEvent");
-                }
+            }
+            Err(e) => {
+                tracing::warn!(%e, "failed to parse RespondBidirectionalEvent");
             }
         }
     }
@@ -820,121 +751,46 @@ async fn process_canton_event(
 // ---------------------------------------------------------------------------
 
 fn parse_sign_bidirectional_event(
-    created: &Value,
+    created: &ledger_api::CreatedEvent,
 ) -> anyhow::Result<CantonSignBidirectionalRequestedEvent> {
-    let payload = created
-        .get("payload")
-        .or_else(|| created.get("createArgument"))
-        .ok_or_else(|| anyhow::anyhow!("missing payload in SignBidirectionalEvent"))?;
-
-    let evm_params = payload
-        .get("evmTxParams")
-        .ok_or_else(|| anyhow::anyhow!("missing evmTxParams"))?;
-
-    Ok(CantonSignBidirectionalRequestedEvent {
-        operators: json_string_array(payload, "operators")?,
-        sender: json_string(payload, "sender")?,
-        requester: json_string(payload, "requester")?,
-        sig_network: json_string(payload, "sigNetwork").unwrap_or_default(),
-        vault_id: json_string(payload, "vaultId").unwrap_or_default(),
-        evm_tx_params: CantonEvmTransactionParams {
-            to: json_string(evm_params, "to")?,
-            function_signature: json_string(evm_params, "functionSignature")?,
-            args: json_string_array(evm_params, "args").unwrap_or_default(),
-            value: json_string(evm_params, "value")?,
-            nonce: json_string(evm_params, "nonce")?,
-            gas_limit: json_string(evm_params, "gasLimit")?,
-            max_fee_per_gas: json_string(evm_params, "maxFeePerGas")?,
-            max_priority_fee: json_string(evm_params, "maxPriorityFee")?,
-            chain_id: json_string(evm_params, "chainId")?,
-        },
-        caip2_id: json_string(payload, "caip2Id")?,
-        key_version: payload
-            .get("keyVersion")
-            .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
-            .unwrap_or(0) as u32,
-        path: json_string(payload, "path")?,
-        algo: json_string(payload, "algo")?,
-        dest: json_string(payload, "dest")?,
-        params: json_string(payload, "params").unwrap_or_default(),
-        nonce_cid_text: json_string(payload, "nonceCidText")?,
-        output_deserialization_schema: json_string(payload, "outputDeserializationSchema")
-            .unwrap_or_default(),
-        respond_serialization_schema: json_string(payload, "respondSerializationSchema")
-            .unwrap_or_default(),
-    })
+    let event: contracts::SignBidirectionalRequestedEvent =
+        serde_json::from_value(created.payload.clone())?;
+    Ok(event)
 }
 
 fn parse_signature_responded_event(
-    created: &Value,
+    created: &ledger_api::CreatedEvent,
 ) -> anyhow::Result<CantonSignatureRespondedEvent> {
-    let payload = created
-        .get("payload")
-        .or_else(|| created.get("createArgument"))
-        .ok_or_else(|| anyhow::anyhow!("missing payload in SignatureRespondedEvent"))?;
+    let payload: contracts::SignatureRespondedEventPayload =
+        serde_json::from_value(created.payload.clone())?;
 
-    let request_id_hex = json_string(payload, "requestId")?;
-    let request_id = hex_to_32_bytes(&request_id_hex)?;
-
-    let signature_hex = json_string(payload, "signature")?;
-    let signature = parse_der_signature(&signature_hex)?;
+    let request_id = hex_to_32_bytes(&payload.request_id)?;
+    let signature = parse_der_signature(&payload.signature)?;
 
     Ok(CantonSignatureRespondedEvent {
         request_id,
-        responder: json_string(payload, "responder")?,
+        responder: payload.responder,
         signature,
     })
 }
 
 fn parse_respond_bidirectional_event(
-    created: &Value,
+    created: &ledger_api::CreatedEvent,
 ) -> anyhow::Result<CantonRespondBidirectionalEvent> {
-    let payload = created
-        .get("payload")
-        .or_else(|| created.get("createArgument"))
-        .ok_or_else(|| anyhow::anyhow!("missing payload in RespondBidirectionalEvent"))?;
+    let payload: contracts::RespondBidirectionalEventPayload =
+        serde_json::from_value(created.payload.clone())?;
 
-    let request_id_hex = json_string(payload, "requestId")?;
-    let request_id = hex_to_32_bytes(&request_id_hex)?;
-
-    let serialized_output_hex = json_string(payload, "serializedOutput")?;
-    let serialized_output = hex::decode(&serialized_output_hex)
+    let request_id = hex_to_32_bytes(&payload.request_id)?;
+    let serialized_output = hex::decode(&payload.serialized_output)
         .map_err(|e| anyhow::anyhow!("invalid serializedOutput hex: {e}"))?;
-
-    let signature_hex = json_string(payload, "signature")?;
-    let signature = parse_der_signature(&signature_hex)?;
+    let signature = parse_der_signature(&payload.signature)?;
 
     Ok(CantonRespondBidirectionalEvent {
         request_id,
-        responder: json_string(payload, "responder")?,
+        responder: payload.responder,
         serialized_output,
         signature,
     })
-}
-
-// ---------------------------------------------------------------------------
-// JSON helpers
-// ---------------------------------------------------------------------------
-
-fn json_string(obj: &Value, key: &str) -> anyhow::Result<String> {
-    obj.get(key)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| anyhow::anyhow!("missing or non-string field: {key}"))
-}
-
-fn json_string_array(obj: &Value, key: &str) -> anyhow::Result<Vec<String>> {
-    let arr = obj
-        .get(key)
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| anyhow::anyhow!("missing or non-array field: {key}"))?;
-    arr.iter()
-        .map(|v| {
-            v.as_str()
-                .map(|s| s.to_string())
-                .ok_or_else(|| anyhow::anyhow!("non-string element in array: {key}"))
-        })
-        .collect()
 }
 
 fn hex_to_32_bytes(hex_str: &str) -> anyhow::Result<[u8; 32]> {

@@ -36,6 +36,7 @@ uuid = { version = "1.0", features = ["v4"] }
 sha3.workspace = true
 sha2 = "0.10"
 rlp = "0.5"
+jsonwebtoken = { workspace = true }
 
 # solana dependencies
 anchor-client.workspace = true
@@ -66,6 +67,7 @@ near-primitives = "0.26.0"
 near-workspaces = "0.15.0"
 
 # local chain-signatures dependencies
+canton-types.workspace = true
 mpc-crypto.workspace = true
 mpc-contract.workspace = true
 mpc-keys.workspace = true

@@ -2657,6 +2657,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "canton-types"
+version = "1.11.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "caps"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6568,6 +6576,7 @@ dependencies = [
  "borsh 1.5.7",
  "bs58 0.5.1",
  "cait-sith",
+ "canton-types",
  "ciborium",
  "clap",
  "criterion",
@@ -6580,6 +6589,7 @@ dependencies = [
  "generic-array",
  "hex",
  "hyper 0.14.32",
+ "jsonwebtoken 10.3.0",
  "k256",
  "mpc-contract",
  "mpc-crypto",
@@ -7995,6 +8005,7 @@ dependencies = [
  "borsh 0.10.4",
  "borsh 1.5.7",
  "cait-sith",
+ "canton-types",
  "chrono",
  "ciborium",
  "clap",

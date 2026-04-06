@@ -153,17 +153,11 @@ impl SignBidirectionalEvent {
                 &self.path(),
             )),
             SignBidirectionalEvent::Canton(event) => {
-                let mut sorted = event.operators.clone();
-                sorted.sort();
-                let concat = sorted.join("");
-                let predecessor_id = format!(
-                    "{}{}",
-                    event.vault_id,
-                    hex::encode(keccak256(concat.as_bytes()))
-                );
+                // `sender` IS the pre-computed predecessorId (= vaultId + keccak256(sort(operators))),
+                // computed by the Vault contract in Daml before creating the SignRequest.
                 Ok(mpc_crypto::kdf::derive_epsilon_canton(
                     self.key_version(),
-                    &predecessor_id,
+                    event.predecessor_id(),
                     &self.path(),
                 ))
             }

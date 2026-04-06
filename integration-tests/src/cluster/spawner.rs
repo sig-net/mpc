@@ -123,6 +123,8 @@ pub struct ClusterSpawner {
     pub redis: Option<containers::Redis>,
     pub worker: Option<Worker<Sandbox>>,
     pub solana: Option<containers::Solana>,
+    pub canton: Option<crate::canton::CantonSandbox>,
+    pub use_canton: bool,
     pub program_address: Option<String>,
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
@@ -158,6 +160,8 @@ impl Default for ClusterSpawner {
             redis: None,
             worker: None,
             solana: None,
+            canton: None,
+            use_canton: false,
             program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
             pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
@@ -291,6 +295,11 @@ impl ClusterSpawner {
         self
     }
 
+    pub fn canton(mut self) -> Self {
+        self.use_canton = true;
+        self
+    }
+
     pub fn debug_node(&mut self) -> &mut Self {
         self.release = false;
         self
@@ -413,6 +422,14 @@ impl IntoFuture for ClusterSpawner {
                 self.solana = Some(solana);
             }
 
+            // Canton setup (follows Solana pattern — started before self.run(),
+            // stored on spawner, moved to Cluster via .take())
+            if self.use_canton && self.canton.is_none() {
+                let sandbox = crate::canton::CantonSandbox::run().await?;
+                self.cfg.canton = Some(sandbox.get_config());
+                self.canton = Some(sandbox);
+            }
+
             let nodes = self.run().await?;
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
@@ -425,6 +442,7 @@ impl IntoFuture for ClusterSpawner {
                 docker_client: self.docker,
                 account_idx: nodes.len(),
                 solana: self.solana.take(),
+                canton: self.canton.take(),
                 nodes,
             };
 
