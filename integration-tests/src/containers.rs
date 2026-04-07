@@ -470,43 +470,23 @@ impl EthereumSandbox {
             "1".to_string(),
         ];
 
-        let request = if cfg!(feature = "docker-test") {
-            GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
-                .with_exposed_port(Self::RPC_PORT.tcp())
-                .with_network(&spawner.network)
-                .with_cmd(command.clone())
-        } else {
-            GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
-                .with_network("host")
-                .with_cmd(command)
-        };
+        let request = GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
+            .with_network("host")
+            .with_cmd(command);
 
         let container = request.start().await?;
 
         let secret_key = derive_secret_key(Self::DEFAULT_MNEMONIC)?;
 
-        let (internal_http_endpoint, external_http_endpoint) = if cfg!(feature = "docker-test") {
-            let network_ip = spawner
-                .docker
-                .get_network_ip_address(&container, &spawner.network)
-                .await?;
+        let internal_http_endpoint = format!("http://127.0.0.1:{}", Self::RPC_PORT);
+        let external_http_endpoint = internal_http_endpoint.clone();
 
-            let external_port = container
-                .get_host_port_ipv4(Self::RPC_PORT)
-                .await
-                .context("ethereum sandbox port mapping")?;
-
-            let external_http_endpoint = format!("http://127.0.0.1:{external_port}");
-            (
-                format!("http://{}:{}", network_ip, Self::RPC_PORT),
-                external_http_endpoint,
-            )
-        } else {
-            let endpoint = format!("http://127.0.0.1:{}", Self::RPC_PORT);
-            (endpoint.clone(), endpoint)
-        };
-
-        wait_for_rpc(&external_http_endpoint).await?;
+        if let Err(err) = wait_for_rpc(&external_http_endpoint).await {
+            if let Err(log_err) = dump_container_logs(&spawner.docker, &container).await {
+                tracing::error!(?log_err, "failed to dump ethereum sandbox logs after readiness failure");
+            }
+            return Err(err);
+        }
 
         Ok(Self {
             internal_http_endpoint,
@@ -559,6 +539,34 @@ async fn wait_for_rpc(endpoint: &str) -> anyhow::Result<()> {
         endpoint,
         last_err
     ))
+}
+
+async fn dump_container_logs(
+    docker: &DockerClient,
+    container: &Container,
+) -> anyhow::Result<()> {
+    use bollard::container::LogsOptions;
+    use futures::StreamExt as _;
+
+    let mut output = docker.docker.logs::<String>(
+        container.id(),
+        Some(LogsOptions {
+            follow: false,
+            stdout: true,
+            stderr: true,
+            tail: "100".to_string(),
+            ..Default::default()
+        }),
+    );
+
+    while let Some(line) = output.next().await {
+        match line {
+            Ok(line) => tracing::error!(target: "ethereum_sandbox", "{}", line.to_string().trim_end()),
+            Err(err) => tracing::error!(target: "ethereum_sandbox", ?err, "error reading ethereum sandbox logs"),
+        }
+    }
+
+    Ok(())
 }
 
 fn derive_secret_key(mnemonic: &str) -> anyhow::Result<String> {
