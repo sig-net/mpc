@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cluster::spawner::ClusterSpawner;
 use crate::local::NodeEnvConfig;
@@ -592,6 +592,7 @@ pub struct Solana {
     pub ws_port: u16,
     pub faucet_port: u16,
     pub rpc_client: SolanaRpcClient,
+    ledger_dir: PathBuf,
 }
 
 impl Solana {
@@ -631,41 +632,52 @@ impl Solana {
 
         // Generate a new keypair for the test validator
         let program_keypair = Solana::program_keypair();
+        let payer_keypair = SolanaKeypair::from_seed(&[102u8; 32]).unwrap();
 
         // Find available ports for RPC and WebSocket
         // Find available ports (websocket is automatically rpc_port + 1)
         let rpc_port = pick_preferred_or_unused_port(8899).await;
         let ws_port = rpc_port + 1;
         let faucet_port = pick_preferred_or_unused_port(9900).await;
+        let gossip_port = pick_preferred_or_unused_port(8000).await;
+        let dynamic_port_start = pick_preferred_or_unused_port(gossip_port + 1).await;
+        let dynamic_port_end = dynamic_port_start + 32;
 
         let rpc_address = format!("http://127.0.0.1:{}", rpc_port);
         let ws_address = format!("ws://127.0.0.1:{}", ws_port);
-
+        let ledger_dir = std::env::temp_dir().join(format!("solana-test-ledger-{}", uuid::Uuid::new_v4()));
         // Start the solana-test-validator process
-        let process = Command::new("solana-test-validator")
+        let mut command = Command::new("solana-test-validator");
+        command
+            .arg("--ledger")
+            .arg(&ledger_dir)
             .arg("--rpc-port")
             .arg(rpc_port.to_string())
             .arg("--faucet-port")
             .arg(faucet_port.to_string())
+            .arg("--gossip-port")
+            .arg(gossip_port.to_string())
+            .arg("--dynamic-port-range")
+            .arg(format!("{dynamic_port_start}-{dynamic_port_end}"))
             .arg("--bind-address")
             .arg("127.0.0.1")
+            .arg("--mint")
+            .arg(payer_keypair.pubkey().to_string())
             .arg("--reset")
-            .arg("--quiet")
-            .spawn()
-            .expect("failed to start solana-test-validator");
+            .arg("--quiet");
 
-        // Wait a bit for the validator to start up
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        let process = command.spawn().expect("failed to start solana-test-validator");
+
+        let rpc_client = SolanaRpcClient::new_with_commitment(
+            rpc_address.clone(),
+            solana_sdk::commitment_config::CommitmentConfig::confirmed(),
+        );
+        Self::wait_for_validator_ready(&rpc_client, &payer_keypair.pubkey()).await;
+
         tracing::info!(
             rpc_address,
             ws_address,
             "solana-test-validator process is running",
-        );
-
-        let payer_keypair = SolanaKeypair::from_seed(&[102u8; 32]).unwrap();
-        let rpc_client = SolanaRpcClient::new_with_commitment(
-            rpc_address.clone(),
-            solana_sdk::commitment_config::CommitmentConfig::confirmed(),
         );
 
         Self {
@@ -678,7 +690,34 @@ impl Solana {
             ws_port,
             faucet_port,
             rpc_client,
+            ledger_dir,
         }
+    }
+
+    async fn wait_for_validator_ready(rpc_client: &SolanaRpcClient, payer: &SolanaPubkey) {
+        const MAX_ATTEMPTS: usize = 60;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let version_ready = rpc_client.get_version().await.is_ok();
+            let blockhash_ready = rpc_client.get_latest_blockhash().await.is_ok();
+            let funded = rpc_client
+                .get_balance(payer)
+                .await
+                .ok()
+                .is_some_and(|balance| balance > 0);
+
+            if version_ready && blockhash_ready {
+                if !funded {
+                    tracing::warn!(attempt, "solana validator RPC is ready but payer balance is still zero");
+                }
+                return;
+            }
+
+            tracing::debug!(attempt, version_ready, blockhash_ready, funded, "waiting for solana-test-validator readiness");
+            sleep(Duration::from_secs(1)).await;
+        }
+
+        panic!("solana-test-validator did not become ready in time");
     }
 
     pub fn get_config(&self, program_address: String) -> mpc_node::indexer_sol::SolConfig {
@@ -742,28 +781,6 @@ impl Solana {
         self.program_keypair
             .write_to_file(&program_keypair_path)
             .unwrap();
-
-        // Request airdrop for the payer to fund deployment
-        tracing::info!(
-            ?payer_keypair_path,
-            "requesting solana airdrop for deployment..."
-        );
-        let airdrop_output = tokio::process::Command::new("solana")
-            .args([
-                "airdrop",
-                "10", // 10 SOL should be enough for whatever action
-                "--url",
-                &self.rpc_address,
-                "--keypair",
-                payer_keypair_path.to_str().unwrap(),
-            ])
-            .output()
-            .await?;
-
-        if !airdrop_output.status.success() {
-            let stderr = String::from_utf8_lossy(&airdrop_output.stderr);
-            tracing::warn!(?payer_keypair_path, "failed to airdrop SOL: {stderr}",);
-        }
 
         // Deploy the program using solana CLI
         tracing::info!("deploying solana program via CLI...");
@@ -1139,6 +1156,10 @@ impl Drop for Solana {
             tracing::warn!("failed to kill solana-test-validator process: {e}");
         } else {
             tracing::info!("solana-test-validator process terminated");
+        }
+
+        if let Err(e) = std::fs::remove_dir_all(&self.ledger_dir) {
+            tracing::debug!(?self.ledger_dir, "failed to remove solana ledger dir: {e}");
         }
     }
 }
