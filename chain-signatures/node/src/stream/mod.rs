@@ -87,8 +87,28 @@ pub enum ExecutionOutcome {
 }
 
 #[allow(async_fn_in_trait)]
+pub trait ChainBufferedStream: Send + 'static {
+    async fn initial_block_height(&mut self) -> Option<u64>;
+    async fn run(self);
+}
+
+pub struct NoopBufferedStream;
+
+impl ChainBufferedStream for NoopBufferedStream {
+    async fn initial_block_height(&mut self) -> Option<u64> {
+        None
+    }
+
+    async fn run(self) {}
+}
+
+#[allow(async_fn_in_trait)]
 pub trait ChainStream: Send + 'static {
     const CHAIN: Chain;
+    type BufferedStream: ChainBufferedStream;
+
+    async fn livestream(&mut self) -> Self::BufferedStream;
+    async fn catchup(&mut self, _anchor_height: u64) {}
     async fn next_event(&mut self) -> Option<ChainEvent>;
 }
 
@@ -105,6 +125,8 @@ pub async fn run_stream<S: ChainStream>(
 
     tracing::info!(%chain, "starting indexer loop");
 
+    let mut buffered_stream = stream.livestream().await;
+
     recover_backlog(
         &backlog,
         &mut contract_watcher,
@@ -114,6 +136,12 @@ pub async fn run_stream<S: ChainStream>(
         sign_tx.clone(),
     )
     .await;
+
+    if let Some(anchor_height) = buffered_stream.initial_block_height().await {
+        stream.catchup(anchor_height).await;
+    }
+
+    buffered_stream.run().await;
 
     while let Some(event) = stream.next_event().await {
         match event {
@@ -192,8 +220,10 @@ mod tests {
     use mpc_primitives::SignArgs;
     use mpc_primitives::SignId;
     use near_primitives::types::AccountId;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::mpsc;
+    use tokio::sync::Notify;
     use tokio::time::timeout;
 
     struct TestEventStream {
@@ -202,6 +232,13 @@ mod tests {
 
     impl ChainStream for TestEventStream {
         const CHAIN: Chain = Chain::Solana;
+
+        type BufferedStream = NoopBufferedStream;
+
+        async fn livestream(&mut self) -> Self::BufferedStream {
+            NoopBufferedStream
+        }
+
         async fn next_event(&mut self) -> Option<ChainEvent> {
             if self.events.is_empty() {
                 return None;
@@ -314,6 +351,13 @@ mod tests {
 
         impl ChainStream for LocalStream {
             const CHAIN: Chain = Chain::Solana;
+
+            type BufferedStream = NoopBufferedStream;
+
+            async fn livestream(&mut self) -> Self::BufferedStream {
+                NoopBufferedStream
+            }
+
             async fn next_event(&mut self) -> Option<ChainEvent> {
                 self.rx.recv().await
             }
@@ -521,5 +565,278 @@ mod tests {
         // stop the client and wait for the indexer to finish
         drop(events_tx);
         run_handle.await.unwrap();
+    }
+
+    struct OrderedBufferedStream {
+        steps: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl ChainBufferedStream for OrderedBufferedStream {
+        async fn initial_block_height(&mut self) -> Option<u64> {
+            self.steps.lock().unwrap().push("initial");
+            Some(7)
+        }
+
+        async fn run(self) {
+            self.steps.lock().unwrap().push("run");
+        }
+    }
+
+    struct OrderedStream {
+        steps: Arc<Mutex<Vec<&'static str>>>,
+        events: Vec<Option<ChainEvent>>,
+    }
+
+    impl ChainStream for OrderedStream {
+        const CHAIN: Chain = Chain::Solana;
+
+        type BufferedStream = OrderedBufferedStream;
+
+        async fn livestream(&mut self) -> Self::BufferedStream {
+            self.steps.lock().unwrap().push("livestream");
+            OrderedBufferedStream {
+                steps: Arc::clone(&self.steps),
+            }
+        }
+
+        async fn catchup(&mut self, anchor_height: u64) {
+            assert_eq!(anchor_height, 7);
+            self.steps.lock().unwrap().push("catchup");
+        }
+
+        async fn next_event(&mut self) -> Option<ChainEvent> {
+            self.steps.lock().unwrap().push("next_event");
+            if self.events.is_empty() {
+                return None;
+            }
+            self.events.remove(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_stream_starts_livestream_before_polling() {
+        let steps = Arc::new(Mutex::new(Vec::new()));
+        let stream = OrderedStream {
+            steps: Arc::clone(&steps),
+            events: vec![Some(ChainEvent::Block(1)), None],
+        };
+
+        let backlog = Backlog::new();
+        let (sign_tx, _sign_rx) = mpsc::channel(4);
+        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+            &"test.near".parse::<AccountId>().unwrap(),
+            k256::ProjectivePoint::GENERATOR.to_affine(),
+            0,
+            Default::default(),
+        );
+        let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
+        let node_client = NodeClient::new(&Default::default());
+
+        run_stream(
+            stream,
+            sign_tx,
+            backlog,
+            contract_watcher,
+            mesh_state_rx,
+            node_client,
+        )
+        .await;
+
+        assert_eq!(
+            *steps.lock().unwrap(),
+            vec!["livestream", "initial", "catchup", "run", "next_event", "next_event"]
+        );
+    }
+
+    struct AnchorBufferedStream {
+        steps: Arc<Mutex<Vec<&'static str>>>,
+        anchor_height: u64,
+    }
+
+    impl ChainBufferedStream for AnchorBufferedStream {
+        async fn initial_block_height(&mut self) -> Option<u64> {
+            self.steps.lock().unwrap().push("initial");
+            Some(self.anchor_height)
+        }
+
+        async fn run(self) {
+            self.steps.lock().unwrap().push("run");
+        }
+    }
+
+    struct AnchorStream {
+        steps: Arc<Mutex<Vec<&'static str>>>,
+        anchors: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl ChainStream for AnchorStream {
+        const CHAIN: Chain = Chain::Solana;
+
+        type BufferedStream = AnchorBufferedStream;
+
+        async fn livestream(&mut self) -> Self::BufferedStream {
+            self.steps.lock().unwrap().push("livestream");
+            AnchorBufferedStream {
+                steps: Arc::clone(&self.steps),
+                anchor_height: 42,
+            }
+        }
+
+        async fn catchup(&mut self, anchor_height: u64) {
+            self.steps.lock().unwrap().push("catchup");
+            self.anchors.lock().unwrap().push(anchor_height);
+        }
+
+        async fn next_event(&mut self) -> Option<ChainEvent> {
+            self.steps.lock().unwrap().push("next_event");
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_stream_uses_anchor_height_from_first_live_block() {
+        let steps = Arc::new(Mutex::new(Vec::new()));
+        let anchors = Arc::new(Mutex::new(Vec::new()));
+        let stream = AnchorStream {
+            steps: Arc::clone(&steps),
+            anchors: Arc::clone(&anchors),
+        };
+
+        let backlog = Backlog::new();
+        let (sign_tx, _sign_rx) = mpsc::channel(4);
+        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+            &"test.near".parse::<AccountId>().unwrap(),
+            k256::ProjectivePoint::GENERATOR.to_affine(),
+            0,
+            Default::default(),
+        );
+        let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
+        let node_client = NodeClient::new(&Default::default());
+
+        run_stream(
+            stream,
+            sign_tx,
+            backlog,
+            contract_watcher,
+            mesh_state_rx,
+            node_client,
+        )
+        .await;
+
+        assert_eq!(*anchors.lock().unwrap(), vec![42]);
+        assert_eq!(
+            *steps.lock().unwrap(),
+            vec!["livestream", "initial", "catchup", "run", "next_event"]
+        );
+    }
+
+    struct BlockingBufferedStream {
+        steps: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl ChainBufferedStream for BlockingBufferedStream {
+        async fn initial_block_height(&mut self) -> Option<u64> {
+            self.steps.lock().unwrap().push("initial");
+            Some(7)
+        }
+
+        async fn run(self) {
+            self.steps.lock().unwrap().push("run");
+        }
+    }
+
+    struct BlockingStream {
+        steps: Arc<Mutex<Vec<&'static str>>>,
+        notify_started: Arc<Notify>,
+        notify_finish: Arc<Notify>,
+        events: Vec<Option<ChainEvent>>,
+    }
+
+    impl ChainStream for BlockingStream {
+        const CHAIN: Chain = Chain::Solana;
+
+        type BufferedStream = BlockingBufferedStream;
+
+        async fn livestream(&mut self) -> Self::BufferedStream {
+            self.steps.lock().unwrap().push("livestream");
+            BlockingBufferedStream {
+                steps: Arc::clone(&self.steps),
+            }
+        }
+
+        async fn catchup(&mut self, anchor_height: u64) {
+            assert_eq!(anchor_height, 7);
+            self.steps.lock().unwrap().push("catchup-start");
+            self.notify_started.notify_one();
+            self.notify_finish.notified().await;
+            self.steps.lock().unwrap().push("catchup-end");
+        }
+
+        async fn next_event(&mut self) -> Option<ChainEvent> {
+            self.steps.lock().unwrap().push("next_event");
+            if self.events.is_empty() {
+                return None;
+            }
+            self.events.remove(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_stream_does_not_poll_events_before_catchup_finishes() {
+        let steps = Arc::new(Mutex::new(Vec::new()));
+        let notify_started = Arc::new(Notify::new());
+        let notify_finish = Arc::new(Notify::new());
+        let stream = BlockingStream {
+            steps: Arc::clone(&steps),
+            notify_started: Arc::clone(&notify_started),
+            notify_finish: Arc::clone(&notify_finish),
+            events: vec![Some(ChainEvent::Block(1)), None],
+        };
+
+        let backlog = Backlog::new();
+        let (sign_tx, _sign_rx) = mpsc::channel(4);
+        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+            &"test.near".parse::<AccountId>().unwrap(),
+            k256::ProjectivePoint::GENERATOR.to_affine(),
+            0,
+            Default::default(),
+        );
+        let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
+        let node_client = NodeClient::new(&Default::default());
+
+        let handle = tokio::spawn(async move {
+            run_stream(
+                stream,
+                sign_tx,
+                backlog,
+                contract_watcher,
+                mesh_state_rx,
+                node_client,
+            )
+            .await;
+        });
+
+        notify_started.notified().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            *steps.lock().unwrap(),
+            vec!["livestream", "initial", "catchup-start"]
+        );
+
+        notify_finish.notify_one();
+        handle.await.unwrap();
+
+        assert_eq!(
+            *steps.lock().unwrap(),
+            vec![
+                "livestream",
+                "initial",
+                "catchup-start",
+                "catchup-end",
+                "run",
+                "next_event",
+                "next_event"
+            ]
+        );
     }
 }

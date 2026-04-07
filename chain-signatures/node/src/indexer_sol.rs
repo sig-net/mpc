@@ -1,7 +1,7 @@
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::ops::{SignatureEvent, SignatureEventBox};
-use crate::stream::{ChainEvent, ChainStream};
+use crate::stream::{ChainEvent, ChainStream, NoopBufferedStream};
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 
 use std::collections::HashMap;
@@ -339,6 +339,13 @@ impl SolanaStream {
 
 impl ChainStream for SolanaStream {
     const CHAIN: Chain = Chain::Solana;
+
+    type BufferedStream = NoopBufferedStream;
+
+    async fn livestream(&mut self) -> Self::BufferedStream {
+        NoopBufferedStream
+    }
+
     async fn next_event(&mut self) -> Option<ChainEvent> {
         self.rx.recv().await
     }

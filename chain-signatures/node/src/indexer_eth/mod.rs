@@ -8,7 +8,7 @@ use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::SignStatus;
-use crate::stream::{ChainEvent, ChainStream, ExecutionOutcome};
+use crate::stream::{ChainBufferedStream, ChainEvent, ChainStream, ExecutionOutcome};
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
@@ -24,6 +24,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
@@ -43,7 +44,10 @@ const MAX_CATCHUP_BLOCKS: u64 = 8191;
 
 const MAX_BLOCKS_TO_PROCESS: usize = 10000;
 
-fn blocks_to_process_channel() -> (mpsc::Sender<BlockToProcess>, mpsc::Receiver<BlockToProcess>) {
+fn live_blocks_channel() -> (
+    mpsc::Sender<alloy::rpc::types::Block>,
+    mpsc::Receiver<alloy::rpc::types::Block>,
+) {
     mpsc::channel(MAX_BLOCKS_TO_PROCESS)
 }
 
@@ -72,11 +76,6 @@ fn finalized_block_channel() -> (mpsc::Sender<BlockNumber>, mpsc::Receiver<Block
 }
 
 type BlockNumber = u64;
-
-pub enum BlockToProcess {
-    Catchup(BlockNumber),
-    NewBlock(Box<alloy::rpc::types::Block>),
-}
 
 #[derive(Clone)]
 pub struct BlockAndRequests {
@@ -579,6 +578,8 @@ impl SignatureRequestedEvent {
 pub enum EthereumClient {
     Helios(indexer_eth_helios::HeliosEthereumClient),
     DirectRpc(indexer_eth_direct_rpc::RpcEthereumClient),
+    #[cfg(test)]
+    Test(TestEthereumClient),
 }
 
 impl EthereumClient {
@@ -598,6 +599,8 @@ impl EthereumClient {
         match self {
             EthereumClient::Helios(_) => "Helios",
             EthereumClient::DirectRpc(_) => "DirectRpc",
+            #[cfg(test)]
+            EthereumClient::Test(_) => "Test",
         }
     }
 
@@ -611,6 +614,8 @@ impl EthereumClient {
             match self {
                 EthereumClient::Helios(client) => client.get_block(block_id).await,
                 EthereumClient::DirectRpc(client) => client.get_block(block_id).await,
+                #[cfg(test)]
+                EthereumClient::Test(client) => client.get_block(block_id).await,
             }
         };
 
@@ -671,6 +676,8 @@ impl EthereumClient {
         match self {
             EthereumClient::Helios(client) => client.get_block_receipts(block_id).await,
             EthereumClient::DirectRpc(client) => client.get_block_receipts(block_id).await,
+            #[cfg(test)]
+            EthereumClient::Test(client) => client.get_block_receipts(block_id).await,
         }
     }
 
@@ -682,6 +689,8 @@ impl EthereumClient {
         match self {
             EthereumClient::Helios(client) => client.get_nonce(address, block_id).await,
             EthereumClient::DirectRpc(client) => client.get_nonce(address, block_id).await,
+            #[cfg(test)]
+            EthereumClient::Test(client) => client.get_nonce(address, block_id).await,
         }
     }
 
@@ -692,6 +701,8 @@ impl EthereumClient {
         match self {
             EthereumClient::Helios(client) => client.get_transaction_by_hash(tx_hash).await,
             EthereumClient::DirectRpc(client) => client.get_transaction_by_hash(tx_hash).await,
+            #[cfg(test)]
+            EthereumClient::Test(client) => client.get_transaction_by_hash(tx_hash).await,
         }
     }
 
@@ -705,169 +716,108 @@ impl EthereumClient {
         match self {
             EthereumClient::Helios(client) => client.call(from, to, data, block_number).await,
             EthereumClient::DirectRpc(client) => client.call(from, to, data, block_number).await,
+            #[cfg(test)]
+            EthereumClient::Test(client) => client.call(from, to, data, block_number).await,
+        }
+    }
+}
+
+
+#[cfg(test)]
+#[derive(Clone)]
+pub struct TestEthereumClient {
+    latest_sequence: Arc<Mutex<std::collections::VecDeque<u64>>>,
+    blocks: Arc<std::collections::HashMap<u64, alloy::rpc::types::Block>>,
+}
+
+#[cfg(test)]
+impl TestEthereumClient {
+    fn new(latest_sequence: impl IntoIterator<Item = u64>, blocks: Vec<alloy::rpc::types::Block>) -> Self {
+        let blocks = blocks
+            .into_iter()
+            .map(|block| (block.header.number, block))
+            .collect();
+
+        Self {
+            latest_sequence: Arc::new(Mutex::new(latest_sequence.into_iter().collect())),
+            blocks: Arc::new(blocks),
         }
     }
 
-    async fn get_latest_block_number(&self) -> Option<u64> {
-        self.get_block(alloy::rpc::types::BlockId::Number(
-            alloy::rpc::types::BlockNumberOrTag::Latest,
-        ))
-        .await
-        .map(|block| block.header.number)
+    async fn get_block(
+        &self,
+        block_id: alloy::rpc::types::BlockId,
+    ) -> anyhow::Result<Option<alloy::rpc::types::Block>> {
+        let block_number = match block_id {
+            alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Latest) => {
+                let mut latest_sequence = self.latest_sequence.lock().unwrap();
+                match latest_sequence.len() {
+                    0 => return Ok(None),
+                    1 => *latest_sequence.front().unwrap(),
+                    _ => latest_sequence.pop_front().unwrap(),
+                }
+            }
+            alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Number(block_number)) => {
+                block_number
+            }
+            alloy::rpc::types::BlockId::Number(_) | alloy::rpc::types::BlockId::Hash(_) => {
+                return Ok(None);
+            }
+        };
+
+        Ok(self.blocks.get(&block_number).cloned())
+    }
+
+    async fn get_block_receipts(
+        &self,
+        _block_id: alloy::rpc::types::BlockId,
+    ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>> {
+        Ok(Some(Vec::new()))
+    }
+
+    async fn get_nonce(
+        &self,
+        _address: Address,
+        _block_id: alloy::rpc::types::BlockId,
+    ) -> anyhow::Result<u64> {
+        Ok(0)
+    }
+
+    async fn get_transaction_by_hash(
+        &self,
+        _tx_hash: alloy::primitives::B256,
+    ) -> anyhow::Result<Option<alloy::rpc::types::Transaction>> {
+        Ok(None)
+    }
+
+    async fn call(
+        &self,
+        _from: Address,
+        _to: Address,
+        _data: Bytes,
+        _block_number: u64,
+    ) -> anyhow::Result<Bytes> {
+        Ok(Bytes::default())
     }
 }
 
 #[derive(Clone)]
 pub struct EthereumIndexer {
-    eth: EthConfig,
-    backlog: Backlog,
     client: EthereumClient,
 }
 
 impl EthereumIndexer {
-    pub async fn new(eth: EthConfig, backlog: Backlog) -> anyhow::Result<Self> {
+    pub async fn new(eth: EthConfig, _backlog: Backlog) -> anyhow::Result<Self> {
         let client = EthereumClient::new(eth.clone()).await?;
 
-        Ok(Self {
-            eth,
-            backlog,
-            client,
-        })
+        Ok(Self { client })
     }
 
-    pub async fn run(self, events_tx: mpsc::Sender<ChainEvent>) {
-        let backlog = self.backlog;
-        let eth = self.eth;
-        let client = Arc::new(self.client);
-
-        tracing::info!("running ethereum indexer");
-        let Ok(contract_address) = Address::from_str(&format!("0x{}", eth.contract_address)) else {
-            tracing::error!("Failed to parse contract address: {}", eth.contract_address);
-            return;
-        };
-        let (blocks_failed_send, blocks_failed_recv) = failed_blocks_channel();
-
-        let (requests_indexed_send, requests_indexed_recv) = indexed_channel();
-
-        let (finalized_block_send, finalized_block_recv) = finalized_block_channel();
-
-        let (blocks_to_process_send, mut blocks_to_process_recv) = blocks_to_process_channel();
-
-        let client_clone = Arc::clone(&client);
-        let finalized_block_send_clone = finalized_block_send.clone();
-        let refresh_interval = eth.refresh_finalized_interval;
-        tokio::spawn(async move {
-            tracing::info!("Spawned task to refresh the latest finalized block");
-            Self::refresh_finalized_block(
-                client_clone,
-                finalized_block_send_clone,
-                refresh_interval,
-            )
-            .await;
-        });
-
-        let client_clone = Arc::clone(&client);
-        let optimistic_requests = eth.optimistic_requests;
-        tokio::spawn(Self::send_requests_when_final(
-            client_clone,
-            requests_indexed_recv,
-            finalized_block_recv,
-            events_tx.clone(),
-            optimistic_requests,
-        ));
-
-        tokio::spawn(Self::retry_failed_blocks(
-            Arc::clone(&client),
-            blocks_failed_recv,
-            blocks_failed_send.clone(),
-            contract_address,
-            requests_indexed_send.clone(),
-            backlog.clone(),
-            events_tx.clone(),
-        ));
-
-        let last_processed_block = backlog.processed_block(Chain::Ethereum).await;
-
-        let blocks_to_process_send_clone = blocks_to_process_send.clone();
-        if let Some(last_processed_block) = last_processed_block {
-            match Self::catchup_end_block_number(Arc::clone(&client)).await {
-                Some(end_block_number) => {
-                    Self::add_catchup_blocks_to_process(
-                        blocks_to_process_send_clone,
-                        last_processed_block,
-                        end_block_number,
-                    )
-                    .await
-                }
-                None => {
-                    tracing::error!("Failed to get catchup end block number");
-                }
-            }
-        }
-
-        tokio::spawn(Self::add_new_block_to_process(
-            Arc::clone(&client),
-            blocks_to_process_send.clone(),
-        ));
-
-        let mut interval = tokio::time::interval(Duration::from_millis(200));
-        let requests_indexed_send_clone = requests_indexed_send.clone();
-        loop {
-            let Some(block_to_process) = blocks_to_process_recv.recv().await else {
-                interval.tick().await;
-                continue;
-            };
-            let (block, is_catchup) = match block_to_process {
-                BlockToProcess::Catchup(block_number) => {
-                    let block = client
-                        .get_block(alloy::rpc::types::BlockId::Number(
-                            BlockNumberOrTag::Number(block_number),
-                        ))
-                        .await;
-                    if let Some(block) = block {
-                        (block, true)
-                    } else {
-                        tracing::warn!("Block {block_number} not found from Ethereum client");
-                        continue;
-                    }
-                }
-                BlockToProcess::NewBlock(block) => ((*block).clone(), false),
-            };
-            let block_number = block.header.number;
-            if let Err(err) = Self::process_block(
-                client.clone(),
-                block.clone(),
-                contract_address,
-                requests_indexed_send_clone.clone(),
-                backlog.clone(),
-                events_tx.clone(),
-            )
-            .await
-            {
-                tracing::warn!(
-                    "Eth indexer failed to process block number {block_number}: {err:?}"
-                );
-                Self::add_failed_block(blocks_failed_send.clone(), block).await;
-                continue;
-            }
-            if block_number % 10 == 0 {
-                if is_catchup {
-                    tracing::info!("Processed catchup block number {block_number}");
-                } else {
-                    tracing::info!("Processed new block number {block_number}");
-                }
-            }
-            crate::metrics::indexers::LATEST_BLOCK_NUMBER
-                .with_label_values(&[Chain::Ethereum.as_str(), "indexed"])
-                .set(block_number as i64);
-        }
-    }
-
-    async fn add_new_block_to_process(
+    async fn poll_live_blocks(
         client: Arc<EthereumClient>,
-        blocks_to_process: mpsc::Sender<BlockToProcess>,
+        live_blocks: mpsc::Sender<alloy::rpc::types::Block>,
     ) {
-        tracing::info!("Adding new blocks to process...");
+        tracing::info!("polling ethereum live blocks");
         let mut current_block = 0;
         loop {
             let Some(latest_block) = client
@@ -881,17 +831,12 @@ impl EthereumIndexer {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 continue;
             }
-            if let Err(err) = blocks_to_process
-                .send(BlockToProcess::NewBlock(Box::new(latest_block)))
-                .await
-            {
-                tracing::warn!("Failed to send new block to process: {err:?}");
+            if let Err(err) = live_blocks.send(latest_block).await {
+                tracing::warn!("Failed to buffer live block: {err:?}");
+                return;
             }
             current_block = block_number;
         }
-    }
-    async fn catchup_end_block_number(client: Arc<EthereumClient>) -> Option<BlockNumber> {
-        client.get_latest_block_number().await
     }
 
     async fn process_block(
@@ -1302,40 +1247,133 @@ impl EthereumIndexer {
             }
         }
     }
+}
 
-    async fn add_catchup_blocks_to_process(
-        blocks_to_process: mpsc::Sender<BlockToProcess>,
-        start_block_number: u64,
-        end_block_number: u64,
-    ) {
-        // helios can only go back maximum MAX_CATCHUP_BLOCKS blocks, so we need to adjust the start block number if it's too far behind
-        let helios_oldest_block_number = end_block_number.saturating_sub(MAX_CATCHUP_BLOCKS);
-        let start_block_number = if start_block_number < helios_oldest_block_number {
-            tracing::warn!(
-                "Start block number {start_block_number} is too far behind the latest block {end_block_number}, adjusting to {helios_oldest_block_number}"
-            );
-            helios_oldest_block_number
-        } else {
-            start_block_number
+#[derive(Clone)]
+struct EthereumBlockProcessor {
+    client: Arc<EthereumClient>,
+    contract_address: Address,
+    requests_indexed: mpsc::Sender<BlockAndRequests>,
+    blocks_failed: mpsc::Sender<alloy::rpc::types::Block>,
+    backlog: Backlog,
+    events_tx: mpsc::Sender<ChainEvent>,
+}
+
+impl EthereumBlockProcessor {
+    async fn process_live_block(&self, block: alloy::rpc::types::Block) {
+        self.process_block(block, false).await;
+    }
+
+    async fn process_catchup_block(&self, block_number: u64) {
+        let Some(block) = self
+            .client
+            .get_block(alloy::rpc::types::BlockId::Number(
+                BlockNumberOrTag::Number(block_number),
+            ))
+            .await
+        else {
+            tracing::warn!("Block {block_number} not found from Ethereum client");
+            return;
         };
 
-        for block_number in start_block_number..=end_block_number {
-            if let Err(err) = blocks_to_process
-                .send(BlockToProcess::Catchup(block_number))
-                .await
-            {
-                tracing::warn!("Failed to send block to process: {err:?}");
+        self.process_block(block, true).await;
+    }
+
+    async fn process_block(&self, block: alloy::rpc::types::Block, is_catchup: bool) {
+        let block_number = block.header.number;
+        if let Err(err) = EthereumIndexer::process_block(
+            Arc::clone(&self.client),
+            block.clone(),
+            self.contract_address,
+            self.requests_indexed.clone(),
+            self.backlog.clone(),
+            self.events_tx.clone(),
+        )
+        .await
+        {
+            tracing::warn!("Eth indexer failed to process block number {block_number}: {err:?}");
+            EthereumIndexer::add_failed_block(self.blocks_failed.clone(), block).await;
+            return;
+        }
+
+        if block_number % 10 == 0 {
+            if is_catchup {
+                tracing::info!("Processed catchup block number {block_number}");
+            } else {
+                tracing::info!("Processed new block number {block_number}");
             }
         }
+
+        crate::metrics::indexers::LATEST_BLOCK_NUMBER
+            .with_label_values(&[Chain::Ethereum.as_str(), "indexed"])
+            .set(block_number as i64);
+    }
+}
+
+#[derive(Default)]
+struct BufferedLiveState {
+    initial_block: Option<alloy::rpc::types::Block>,
+    replay_initial_block: bool,
+}
+
+pub struct EthereumBufferedStream {
+    live_state: Arc<Mutex<BufferedLiveState>>,
+    live_blocks_rx: mpsc::Receiver<alloy::rpc::types::Block>,
+    processor: EthereumBlockProcessor,
+    tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+}
+
+impl ChainBufferedStream for EthereumBufferedStream {
+    async fn initial_block_height(&mut self) -> Option<u64> {
+        if let Some(block) = self.live_state.lock().unwrap().initial_block.as_ref() {
+            return Some(block.header.number);
+        }
+
+        if let Some(block) = self.live_blocks_rx.recv().await {
+            let block_number = block.header.number;
+            let mut live_state = self.live_state.lock().unwrap();
+            live_state.initial_block = Some(block);
+            live_state.replay_initial_block = true;
+            return Some(block_number);
+        }
+
+        None
+    }
+
+    async fn run(self) {
+        let processor = self.processor.clone();
+        let mut live_blocks_rx = self.live_blocks_rx;
+        let initial_block = {
+            let mut live_state = self.live_state.lock().unwrap();
+            if live_state.replay_initial_block {
+                live_state.initial_block.take()
+            } else {
+                live_state.initial_block = None;
+                None
+            }
+        };
+        let task = tokio::spawn(async move {
+            if let Some(initial_block) = initial_block {
+                processor.process_live_block(initial_block).await;
+            }
+
+            while let Some(block) = live_blocks_rx.recv().await {
+                processor.process_live_block(block).await;
+            }
+        });
+
+        self.tasks.lock().unwrap().push(task);
     }
 }
 
 /// Ethereum indexer stream implementing the `ChainStream` trait.
-/// It spawns the internal block pipeline and emits `ChainEvent`s through an
-/// internal channel consumed by the shared `run_stream()` loop.
 pub struct EthereumStream {
+    backlog: Backlog,
+    client: Arc<EthereumClient>,
     events_rx: mpsc::Receiver<ChainEvent>,
-    tasks: Vec<JoinHandle<()>>,
+    processor: EthereumBlockProcessor,
+    tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    live_state: Option<Arc<Mutex<BufferedLiveState>>>,
 }
 
 impl EthereumStream {
@@ -1354,30 +1392,377 @@ impl EthereumStream {
             "creating ethereum indexer stream"
         );
 
+        let indexer = EthereumIndexer::new(eth.clone(), backlog.clone()).await?;
+        let client = Arc::new(indexer.client);
+        let contract_address = Address::from_str(&format!("0x{}", eth.contract_address))
+            .map_err(|_| anyhow::anyhow!("Failed to parse contract address: {}", eth.contract_address))?;
+
         let (events_tx, events_rx) = crate::stream::channel();
-        let indexer = EthereumIndexer::new(eth, backlog).await?;
+        let (blocks_failed_send, blocks_failed_recv) = failed_blocks_channel();
+        let (requests_indexed_send, requests_indexed_recv) = indexed_channel();
+        let (finalized_block_send, finalized_block_recv) = finalized_block_channel();
+        let tasks = Arc::new(Mutex::new(Vec::new()));
 
-        let t_indexer: JoinHandle<()> = tokio::spawn(async move {
-            indexer.run(events_tx).await;
-        });
+        let processor = EthereumBlockProcessor {
+            client: Arc::clone(&client),
+            contract_address,
+            requests_indexed: requests_indexed_send.clone(),
+            blocks_failed: blocks_failed_send.clone(),
+            backlog: backlog.clone(),
+            events_tx: events_tx.clone(),
+        };
 
-        let tasks = vec![t_indexer];
+        let refresh_task = tokio::spawn(EthereumIndexer::refresh_finalized_block(
+            Arc::clone(&client),
+            finalized_block_send,
+            eth.refresh_finalized_interval,
+        ));
+        tasks.lock().unwrap().push(refresh_task);
 
-        Ok(Self { events_rx, tasks })
+        let finalized_task = tokio::spawn(EthereumIndexer::send_requests_when_final(
+            Arc::clone(&client),
+            requests_indexed_recv,
+            finalized_block_recv,
+            events_tx.clone(),
+            eth.optimistic_requests,
+        ));
+        tasks.lock().unwrap().push(finalized_task);
+
+        let retry_task = tokio::spawn(EthereumIndexer::retry_failed_blocks(
+            Arc::clone(&client),
+            blocks_failed_recv,
+            blocks_failed_send,
+            contract_address,
+            requests_indexed_send,
+            backlog.clone(),
+            events_tx,
+        ));
+        tasks.lock().unwrap().push(retry_task);
+
+        Ok(Self {
+            backlog,
+            client,
+            events_rx,
+            processor,
+            tasks,
+            live_state: None,
+        })
+    }
+
+    fn catchup_start_block(end_block_number: u64, start_block_number: u64) -> u64 {
+        let helios_oldest_block_number = end_block_number.saturating_sub(MAX_CATCHUP_BLOCKS);
+        if start_block_number < helios_oldest_block_number {
+            tracing::warn!(
+                "Start block number {start_block_number} is too far behind the latest block {end_block_number}, adjusting to {helios_oldest_block_number}"
+            );
+            helios_oldest_block_number
+        } else {
+            start_block_number
+        }
     }
 }
 
 impl Drop for EthereumStream {
     fn drop(&mut self) {
-        for t in &self.tasks {
+        let mut tasks = self.tasks.lock().unwrap();
+        for t in tasks.iter() {
             t.abort();
         }
+        tasks.clear();
     }
 }
 
 impl ChainStream for EthereumStream {
     const CHAIN: Chain = Chain::Ethereum;
+
+    type BufferedStream = EthereumBufferedStream;
+
+    async fn livestream(&mut self) -> Self::BufferedStream {
+        let (live_blocks_tx, live_blocks_rx) = live_blocks_channel();
+        let task = tokio::spawn(EthereumIndexer::poll_live_blocks(
+            Arc::clone(&self.client),
+            live_blocks_tx,
+        ));
+        self.tasks.lock().unwrap().push(task);
+
+        let live_state = Arc::new(Mutex::new(BufferedLiveState {
+            initial_block: None,
+            replay_initial_block: true,
+        }));
+        self.live_state = Some(Arc::clone(&live_state));
+
+        EthereumBufferedStream {
+            live_state,
+            live_blocks_rx,
+            processor: self.processor.clone(),
+            tasks: Arc::clone(&self.tasks),
+        }
+    }
+
+    async fn catchup(&mut self, anchor_height: u64) {
+        let Some(last_processed_block) = self.backlog.processed_block(Chain::Ethereum).await else {
+            return;
+        };
+
+        let start_block = Self::catchup_start_block(anchor_height, last_processed_block);
+        for block_number in start_block..=anchor_height {
+            self.processor.process_catchup_block(block_number).await;
+        }
+
+        if let Some(live_state) = &self.live_state {
+            live_state.lock().unwrap().replay_initial_block = false;
+        }
+    }
+
     async fn next_event(&mut self) -> Option<ChainEvent> {
         self.events_rx.recv().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::consensus::Header as ConsensusHeader;
+    use alloy::primitives::{Address, Bloom, B64, B256};
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    fn test_block_hash(number: u64) -> B256 {
+        let mut bytes = [0u8; 32];
+        bytes[24..].copy_from_slice(&number.to_be_bytes());
+        B256::from(bytes)
+    }
+
+    fn test_block(number: u64) -> alloy::rpc::types::Block {
+        alloy::rpc::types::Block {
+            header: alloy::rpc::types::Header {
+                hash: test_block_hash(number),
+                inner: ConsensusHeader {
+                    parent_hash: test_block_hash(number.saturating_sub(1)),
+                    ommers_hash: B256::ZERO,
+                    beneficiary: Address::ZERO,
+                    state_root: B256::ZERO,
+                    transactions_root: B256::ZERO,
+                    receipts_root: B256::ZERO,
+                    withdrawals_root: None,
+                    number,
+                    gas_used: 0,
+                    gas_limit: 30_000_000,
+                    extra_data: Vec::<u8>::new().into(),
+                    logs_bloom: Bloom::default(),
+                    timestamp: number,
+                    difficulty: U256::ZERO,
+                    mix_hash: B256::ZERO,
+                    nonce: B64::ZERO,
+                    base_fee_per_gas: None,
+                    blob_gas_used: None,
+                    excess_blob_gas: None,
+                    parent_beacon_block_root: None,
+                    requests_hash: None,
+                },
+                total_difficulty: None,
+                size: None,
+            },
+            uncles: vec![],
+            transactions: Vec::<alloy::rpc::types::Transaction>::new().into(),
+            withdrawals: None,
+        }
+    }
+
+    fn test_stream(
+        latest_sequence: impl IntoIterator<Item = u64>,
+        backlog: Backlog,
+        blocks: Vec<alloy::rpc::types::Block>,
+    ) -> (EthereumStream, mpsc::Receiver<BlockAndRequests>) {
+        let (events_tx, events_rx) = crate::stream::channel();
+        let (requests_indexed, requests_indexed_rx) = indexed_channel();
+        let (failed_blocks, _failed_blocks_rx) = failed_blocks_channel();
+        let client = Arc::new(EthereumClient::Test(TestEthereumClient::new(
+            latest_sequence,
+            blocks,
+        )));
+
+        let processor = EthereumBlockProcessor {
+            client: Arc::clone(&client),
+            contract_address: Address::ZERO,
+            requests_indexed,
+            blocks_failed: failed_blocks,
+            backlog: backlog.clone(),
+            events_tx,
+        };
+
+        (
+            EthereumStream {
+                backlog,
+                client,
+                events_rx,
+                processor,
+                tasks: Arc::new(Mutex::new(Vec::new())),
+                live_state: None,
+            },
+            requests_indexed_rx,
+        )
+    }
+
+    async fn recv_block_numbers(
+        requests_indexed_rx: &mut mpsc::Receiver<BlockAndRequests>,
+        expected: usize,
+    ) -> Vec<u64> {
+        let mut block_numbers = Vec::with_capacity(expected);
+        for _ in 0..expected {
+            let block = timeout(Duration::from_secs(1), requests_indexed_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            block_numbers.push(block.block_number);
+        }
+        block_numbers
+    }
+
+    #[tokio::test]
+    async fn ethereum_stream_catchup_replays_from_persisted_block_to_anchor_in_order() {
+        let backlog = Backlog::new();
+        backlog.set_processed_block(Chain::Ethereum, 100).await;
+        let (mut stream, mut requests_indexed_rx) = test_stream(
+            [],
+            backlog,
+            (100..=103).map(test_block).collect(),
+        );
+
+        stream.catchup(103).await;
+
+        assert_eq!(
+            recv_block_numbers(&mut requests_indexed_rx, 4).await,
+            vec![100, 101, 102, 103]
+        );
+    }
+
+    #[tokio::test]
+    async fn ethereum_stream_defers_buffered_live_blocks_until_after_catchup() {
+        let backlog = Backlog::new();
+        backlog.set_processed_block(Chain::Ethereum, 100).await;
+        let (mut stream, mut requests_indexed_rx) = test_stream(
+            [103, 104, 105],
+            backlog,
+            (100..=105).map(test_block).collect(),
+        );
+
+        let buffered = stream.livestream().await;
+        let mut buffered = buffered;
+        assert_eq!(buffered.initial_block_height().await, Some(103));
+
+        stream.catchup(103).await;
+
+        assert_eq!(
+            recv_block_numbers(&mut requests_indexed_rx, 4).await,
+            vec![100, 101, 102, 103]
+        );
+
+        match timeout(Duration::from_millis(100), requests_indexed_rx.recv()).await {
+            Err(_) | Ok(None) => {}
+            Ok(Some(block)) => panic!("unexpected live block before buffered stream run: {}", block.block_number),
+        }
+
+        buffered.run().await;
+
+        assert_eq!(
+            recv_block_numbers(&mut requests_indexed_rx, 2).await,
+            vec![104, 105]
+        );
+    }
+
+    #[tokio::test]
+    async fn ethereum_stream_processes_buffered_blocks_in_original_arrival_order() {
+        let backlog = Backlog::new();
+        let (mut stream, mut requests_indexed_rx) = test_stream(
+            [103, 104, 105],
+            backlog,
+            (103..=105).map(test_block).collect(),
+        );
+
+        let mut buffered = stream.livestream().await;
+        assert_eq!(buffered.initial_block_height().await, Some(103));
+        buffered.run().await;
+
+        assert_eq!(
+            recv_block_numbers(&mut requests_indexed_rx, 3).await,
+            vec![103, 104, 105]
+        );
+    }
+
+    #[tokio::test]
+    async fn ethereum_stream_does_not_duplicate_anchor_block() {
+        let backlog = Backlog::new();
+        backlog.set_processed_block(Chain::Ethereum, 100).await;
+        let (mut stream, mut requests_indexed_rx) = test_stream(
+            [103, 104],
+            backlog,
+            (100..=104).map(test_block).collect(),
+        );
+
+        let mut buffered = stream.livestream().await;
+        assert_eq!(buffered.initial_block_height().await, Some(103));
+        stream.catchup(103).await;
+        buffered.run().await;
+
+        assert_eq!(
+            recv_block_numbers(&mut requests_indexed_rx, 5).await,
+            vec![100, 101, 102, 103, 104]
+        );
+
+        match timeout(Duration::from_millis(100), requests_indexed_rx.recv()).await {
+            Err(_) | Ok(None) => {}
+            Ok(Some(block)) => panic!("unexpected duplicate anchor block: {}", block.block_number),
+        }
+    }
+
+    #[tokio::test]
+    async fn ethereum_stream_skips_catchup_when_no_persisted_block_exists() {
+        let backlog = Backlog::new();
+        let (mut stream, mut requests_indexed_rx) = test_stream(
+            [103, 104],
+            backlog,
+            (103..=104).map(test_block).collect(),
+        );
+
+        let mut buffered = stream.livestream().await;
+        assert_eq!(buffered.initial_block_height().await, Some(103));
+        stream.catchup(103).await;
+        buffered.run().await;
+
+        assert_eq!(
+            recv_block_numbers(&mut requests_indexed_rx, 2).await,
+            vec![103, 104]
+        );
+    }
+
+    #[test]
+    fn ethereum_stream_adjusts_catchup_start_when_backlog_is_too_old() {
+        assert_eq!(EthereumStream::catchup_start_block(1_000, 990), 990);
+        assert_eq!(
+            EthereumStream::catchup_start_block(MAX_CATCHUP_BLOCKS + 10, 1),
+            10
+        );
+    }
+
+    #[tokio::test]
+    async fn ethereum_buffered_stream_initial_block_height_is_stable() {
+        let backlog = Backlog::new();
+        let (mut stream, mut requests_indexed_rx) = test_stream(
+            [103, 104],
+            backlog,
+            (103..=104).map(test_block).collect(),
+        );
+
+        let mut buffered = stream.livestream().await;
+        assert_eq!(buffered.initial_block_height().await, Some(103));
+        assert_eq!(buffered.initial_block_height().await, Some(103));
+
+        buffered.run().await;
+
+        assert_eq!(
+            recv_block_numbers(&mut requests_indexed_rx, 2).await,
+            vec![103, 104]
+        );
     }
 }
