@@ -332,9 +332,7 @@ impl Default for DockerClient {
             }
         };
 
-        Self {
-            docker,
-        }
+        Self { docker }
     }
 }
 
@@ -645,7 +643,8 @@ impl Solana {
 
         let rpc_address = format!("http://127.0.0.1:{}", rpc_port);
         let ws_address = format!("ws://127.0.0.1:{}", ws_port);
-        let ledger_dir = std::env::temp_dir().join(format!("solana-test-ledger-{}", uuid::Uuid::new_v4()));
+        let ledger_dir =
+            std::env::temp_dir().join(format!("solana-test-ledger-{}", uuid::Uuid::new_v4()));
         // Start the solana-test-validator process
         let mut command = Command::new("solana-test-validator");
         command
@@ -666,7 +665,9 @@ impl Solana {
             .arg("--reset")
             .arg("--quiet");
 
-        let process = command.spawn().expect("failed to start solana-test-validator");
+        let process = command
+            .spawn()
+            .expect("failed to start solana-test-validator");
 
         let rpc_client = SolanaRpcClient::new_with_commitment(
             rpc_address.clone(),
@@ -708,12 +709,21 @@ impl Solana {
 
             if version_ready && blockhash_ready {
                 if !funded {
-                    tracing::warn!(attempt, "solana validator RPC is ready but payer balance is still zero");
+                    tracing::warn!(
+                        attempt,
+                        "solana validator RPC is ready but payer balance is still zero"
+                    );
                 }
                 return;
             }
 
-            tracing::debug!(attempt, version_ready, blockhash_ready, funded, "waiting for solana-test-validator readiness");
+            tracing::debug!(
+                attempt,
+                version_ready,
+                blockhash_ready,
+                funded,
+                "waiting for solana-test-validator readiness"
+            );
             sleep(Duration::from_secs(1)).await;
         }
 
