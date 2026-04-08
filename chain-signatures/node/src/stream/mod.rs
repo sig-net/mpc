@@ -118,10 +118,6 @@ pub trait ChainBufferedStream: Send + 'static {
 pub trait ChainIndexer: Send + 'static {
     type BufferedStream: ChainBufferedStream;
 
-    async fn emit_catchup_completed(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
-
     async fn livestream(&mut self) -> anyhow::Result<Option<Self::BufferedStream>> {
         Ok(None)
     }
@@ -138,7 +134,7 @@ pub trait ChainIndexer: Send + 'static {
         Ok(())
     }
 
-    async fn process_buffered_item(
+    async fn process_buffered_block(
         &mut self,
         _item: <Self::BufferedStream as ChainBufferedStream>::Item,
     ) -> anyhow::Result<()> {
@@ -172,8 +168,7 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(
     indexer: &mut I,
     catchup_completed_tx: oneshot::Sender<()>,
 ) {
-    let mut catchup_completed_tx = Some(catchup_completed_tx);
-    tracing::info!(%chain, "starting chain stream orchestration");
+    tracing::info!(%chain, "starting ChainStream catchup then livestream");
 
     let buffered = match indexer.livestream().await {
         Ok(buffered) => buffered,
@@ -183,18 +178,16 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(
         }
     };
     let Some(mut buffered) = buffered else {
-        if let Some(tx) = catchup_completed_tx.take() {
-            let _ = tx.send(());
-        }
+        let _ = catchup_completed_tx.send(());
         return;
     };
 
-    let Some(anchor_item) = buffered.initial().await else {
-        tracing::warn!(%chain, "buffered livestream ended before anchor item");
+    let Some(anchor_block) = buffered.initial().await else {
+        tracing::warn!(%chain, "buffered livestream ended before anchor block");
         return;
     };
 
-    let anchor_height = I::buffered_item_height(&anchor_item);
+    let anchor_height = I::buffered_item_height(&anchor_block);
     let catchup_range = loop {
         match indexer.catchup_range(anchor_height).await {
             Ok(range) => break range,
@@ -217,29 +210,17 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(
         }
     }
 
-    if let Err(err) = indexer.emit_catchup_completed().await {
-        tracing::warn!(?err, %chain, "failed to emit catchup completion event");
-        return;
-    }
+    let _ = catchup_completed_tx.send(());
 
-    if let Some(tx) = catchup_completed_tx.take() {
-        let _ = tx.send(());
-    }
-
-    let mut next_item = Some(anchor_item);
+    let mut next_block = anchor_block;
     loop {
-        let item = match next_item.take() {
-            Some(item) => item,
-            None => match buffered.next().await {
-                Some(item) => item,
-                None => break,
-            },
-        };
+        if let Err(err) = indexer.process_buffered_block(next_block).await {
+            tracing::warn!(?err, %chain, "buffered block processing failed");
+        }
 
-        if let Err(err) = indexer.process_buffered_item(item.clone()).await {
-            tracing::warn!(?err, %chain, "buffered item processing failed; retrying");
-            tokio::time::sleep(indexer.retry_delay()).await;
-            next_item = Some(item);
+        match buffered.next().await {
+            Some(block) => next_block = block,
+            None => break,
         }
     }
 }
@@ -557,7 +538,7 @@ mod tests {
             Ok(())
         }
 
-        async fn process_buffered_item(
+        async fn process_buffered_block(
             &mut self,
             item: <Self::BufferedStream as ChainBufferedStream>::Item,
         ) -> anyhow::Result<()> {

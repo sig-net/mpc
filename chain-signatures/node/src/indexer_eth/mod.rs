@@ -1205,7 +1205,7 @@ impl ChainIndexer for EthereumIndexer {
         self.process_height(height).await
     }
 
-    async fn process_buffered_item(
+    async fn process_buffered_block(
         &mut self,
         item: <Self::BufferedStream as ChainBufferedStream>::Item,
     ) -> anyhow::Result<()> {
