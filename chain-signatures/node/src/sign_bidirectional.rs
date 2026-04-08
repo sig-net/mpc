@@ -43,6 +43,23 @@ pub enum SignStatus {
     AwaitingResponseBidirectional,
 }
 
+/// Chain-specific context carried through the bidirectional signing flow.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ChainContext {
+    None,
+    Canton {
+        operators: Vec<String>,
+        requester: String,
+        sender: String,
+    },
+}
+
+impl Default for ChainContext {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 #[derive(Debug, Clone, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BidirectionalTx {
     pub id: BidirectionalTxId,
@@ -64,12 +81,8 @@ pub struct BidirectionalTx {
     pub request_id: [u8; 32],
     pub from_address: Address,
     pub nonce: u64,
-    /// Canton-specific: operator party IDs for Signer.Respond/RespondBidirectional choices.
-    /// None for non-Canton chains.
-    pub canton_operators: Option<Vec<String>>,
-    /// Canton-specific: requester party ID for Signer.Respond/RespondBidirectional choices.
-    /// None for non-Canton chains.
-    pub canton_requester: Option<String>,
+    #[serde(default)]
+    pub chain_ctx: ChainContext,
 }
 
 impl BidirectionalTx {
@@ -89,16 +102,16 @@ impl BidirectionalTx {
                 &self.sender_string()?,
                 path,
             )),
-            // sender_string() returns hex::encode(keccak256(predecessorId)) —
-            // a different string than the full predecessorId used in the initial
-            // sign phase (SignBidirectionalEvent::epsilon). This is intentional:
-            // the respond path constant ("canton response key") already makes
-            // the derived key separate, and all nodes compute the same value.
-            Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
-                self.key_version,
-                &self.sender_string()?,
-                path,
-            )),
+            Chain::Canton => {
+                let ChainContext::Canton { ref sender, .. } = self.chain_ctx else {
+                    anyhow::bail!("Canton BidirectionalTx missing ChainContext");
+                };
+                Ok(mpc_crypto::kdf::derive_epsilon_canton(
+                    self.key_version,
+                    sender,
+                    path,
+                ))
+            }
             _ => anyhow::bail!("Unsupported chain: {}", self.source_chain),
         }
     }

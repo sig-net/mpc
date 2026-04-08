@@ -908,7 +908,7 @@ mod tests {
     use crate::{
         protocol::SignKind,
         respond_bidirectional::RespondBidirectionalTx,
-        sign_bidirectional::{BidirectionalTx, BidirectionalTxId, SignStatus},
+        sign_bidirectional::{BidirectionalTx, BidirectionalTxId, ChainContext, SignStatus},
         stream::ops::SignBidirectionalEvent,
     };
     use alloy::primitives::{Address, B256};
@@ -934,8 +934,8 @@ mod tests {
             request_id: [id; 32],
             from_address: Address::ZERO,
             nonce: 0,
-            canton_operators: None,
-            canton_requester: None,
+            status,
+            chain_ctx: ChainContext::None,
         }
     }
 

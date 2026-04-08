@@ -13,7 +13,7 @@ use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignKind};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::ContractStateWatcher;
-use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, SignStatus};
+use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, ChainContext, SignStatus};
 use crate::stream::ExecutionOutcome;
 
 use alloy::primitives::keccak256;
@@ -34,10 +34,8 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.sender.to_bytes(),
             SignBidirectionalEvent::Hydration(event) => event.sender,
-            // Canton stores keccak256(predecessorId) as the 32-byte sender.
-            // The full predecessorId string is used in epsilon() for KDF.
             SignBidirectionalEvent::Canton(event) => {
-                keccak256(event.predecessor_id().as_bytes()).into()
+                keccak256(event.sender.as_bytes()).into()
             }
         }
     }
@@ -152,15 +150,11 @@ impl SignBidirectionalEvent {
                 &self.sender_string()?,
                 &self.path(),
             )),
-            SignBidirectionalEvent::Canton(event) => {
-                // `sender` IS the pre-computed predecessorId (= vaultId + keccak256(sort(operators))),
-                // computed by the Vault contract in Daml before creating the SignRequest.
-                Ok(mpc_crypto::kdf::derive_epsilon_canton(
-                    self.key_version(),
-                    event.predecessor_id(),
-                    &self.path(),
-                ))
-            }
+            SignBidirectionalEvent::Canton(event) => Ok(mpc_crypto::kdf::derive_epsilon_canton(
+                self.key_version(),
+                &event.sender,
+                &self.path(),
+            )),
         }
     }
 
@@ -452,13 +446,14 @@ pub(crate) async fn process_respond_event(
         request_id: respond_event.request_id(),
         from_address,
         nonce,
-        canton_operators: match &event {
-            SignBidirectionalEvent::Canton(e) => Some(e.operators.clone()),
-            _ => None,
-        },
-        canton_requester: match &event {
-            SignBidirectionalEvent::Canton(e) => Some(e.requester.clone()),
-            _ => None,
+        status: SignStatus::AwaitingResponse,
+        chain_ctx: match &event {
+            SignBidirectionalEvent::Canton(e) => ChainContext::Canton {
+                operators: e.operators.clone(),
+                requester: e.requester.clone(),
+                sender: e.sender.clone(),
+            },
+            _ => ChainContext::None,
         },
     };
 
@@ -619,12 +614,7 @@ pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Re
         Chain::Hydration => Ok(crate::indexer_hydration::ss58_address_from_account32(
             sender,
         )),
-        Chain::Canton => {
-            // For the respond phase, sender is the 32-byte keccak hash of predecessorId.
-            // We can only return hex::encode here since the full predecessorId string
-            // can't be reconstructed from the hash alone.
-            Ok(hex::encode(sender))
-        }
+        Chain::Canton => Ok(hex::encode(sender)),
         _ => anyhow::bail!("Unsupported chain: {source_chain}"),
     }
 }
@@ -1319,8 +1309,8 @@ mod tests {
             request_id: [2u8; 32],
             from_address: Address::ZERO,
             nonce: 0,
-            canton_operators: None,
-            canton_requester: None,
+            status: SignStatus::PendingExecution,
+            chain_ctx: ChainContext::None,
         };
         let sign_id = SignId::new(tx.request_id);
 

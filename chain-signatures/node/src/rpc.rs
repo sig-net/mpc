@@ -1981,20 +1981,16 @@ async fn try_publish_canton(
 fn extract_canton_operators_requester(
     action: &PublishAction,
 ) -> anyhow::Result<(Vec<String>, String)> {
+    use crate::sign_bidirectional::ChainContext;
     match &action.indexed.kind {
         SignKind::SignBidirectional(
             crate::stream::ops::SignBidirectionalEvent::Canton(event),
         ) => Ok((event.operators.clone(), event.requester.clone())),
         SignKind::RespondBidirectional(respond_tx) => {
-            let operators = respond_tx
-                .canton_operators
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("missing canton_operators on RespondBidirectionalTx"))?;
-            let requester = respond_tx
-                .canton_requester
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("missing canton_requester on RespondBidirectionalTx"))?;
-            Ok((operators, requester))
+            let ChainContext::Canton { ref operators, ref requester, .. } = respond_tx.chain_ctx else {
+                anyhow::bail!("missing ChainContext on RespondBidirectionalTx");
+            };
+            Ok((operators.clone(), requester.clone()))
         }
         _ => anyhow::bail!("expected Canton event variant"),
     }

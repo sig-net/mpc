@@ -41,7 +41,6 @@ pub struct EvmTransactionParams {
 #[serde(rename_all = "camelCase")]
 pub struct SignBidirectionalRequestedEvent {
     pub operators: Vec<String>,
-    /// Pre-computed predecessorId (= vaultId + keccak256(sort(operators))).
     pub sender: String,
     pub requester: String,
     pub sig_network: String,
@@ -62,12 +61,6 @@ pub struct SignBidirectionalRequestedEvent {
     pub respond_serialization_schema: String,
 }
 
-impl SignBidirectionalRequestedEvent {
-    /// The sender field IS the predecessorId — pre-computed by the Vault contract.
-    pub fn predecessor_id(&self) -> &str {
-        &self.sender
-    }
-}
 
 // ---------------------------------------------------------------------------
 // From daml-signer/daml/Signer.daml — SignatureRespondedEvent
@@ -101,21 +94,6 @@ pub struct RespondBidirectionalEventPayload {
     pub serialized_output: String,
     /// DER-encoded hex signature.
     pub signature: String,
-}
-
-// ---------------------------------------------------------------------------
-// From daml-vault/daml/Erc20Vault.daml — PendingDeposit
-// ---------------------------------------------------------------------------
-
-/// Payload of a `PendingDeposit` created event.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PendingDepositPayload {
-    pub request_id: String,
-    pub requester: String,
-    pub sig_network: String,
-    pub operators: Vec<String>,
-    pub evm_tx_params: EvmTransactionParams,
 }
 
 // ---------------------------------------------------------------------------

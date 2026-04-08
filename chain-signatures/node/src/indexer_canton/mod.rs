@@ -226,6 +226,12 @@ fn append_u256(stream: &mut rlp::RlpStream, val: U256) {
 // ---------------------------------------------------------------------------
 
 /// DER-encode an ECDSA signature from an MPC Signature (big_r, s).
+///
+/// Canton's native Daml signature verification (`secp256k1WithEcdsaOnly`)
+/// only accepts DER-encoded signatures — there is no built-in Daml function
+/// to convert from raw `(r, s)` components to DER. We encode on the MPC
+/// side so the Daml contracts can verify directly without conversion.
+///
 /// ASN.1 DER: 30 <len> 02 <r_len> <r_bytes> 02 <s_len> <s_bytes>
 pub fn der_encode_signature(signature: &Signature) -> Vec<u8> {
     let r_bytes = signature.big_r.x().to_vec();
@@ -286,7 +292,7 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
 
         let epsilon = mpc_crypto::kdf::derive_epsilon_canton(
             self.key_version,
-            self.predecessor_id(),
+            &self.sender,
             &self.path,
         );
 
@@ -805,6 +811,9 @@ fn hex_to_32_bytes(hex_str: &str) -> anyhow::Result<[u8; 32]> {
 /// Parse a DER-encoded ECDSA signature into an MPC Signature (big_r, s).
 ///
 /// The DER format is: 30 <len> 02 <r_len> <r> 02 <s_len> <s>
+/// Parse a DER-encoded ECDSA signature (hex string) back into an MPC Signature.
+///
+/// Canton emits signatures in DER format (see [`der_encode_signature`] for why).
 /// We extract r and s, then reconstruct big_r as a compressed point.
 /// Since DER only gives us the x-coordinate (r), we decompress with
 /// even parity (the recovery bit is not in DER).

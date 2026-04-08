@@ -1,7 +1,6 @@
 use crate::indexer_eth::EthereumClient;
 use crate::protocol::{Chain, IndexedSignRequest};
-use crate::sign_bidirectional::BidirectionalTx;
-use crate::sign_bidirectional::BidirectionalTxId;
+use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, ChainContext};
 use crate::sign_bidirectional::TransactionOutput;
 use alloy::consensus::Transaction;
 use alloy::primitives::Bytes;
@@ -40,9 +39,8 @@ pub struct CompletedTx {
 pub struct RespondBidirectionalTx {
     pub tx_id: BidirectionalTxId,
     pub output: RespondBidirectionalSerializedOutput,
-    /// Canton-specific fields threaded from the original BidirectionalTx.
-    pub canton_operators: Option<Vec<String>>,
-    pub canton_requester: Option<String>,
+    #[serde(default)]
+    pub chain_ctx: ChainContext,
 }
 
 pub type RespondBidirectionalSerializedOutput = Vec<u8>;
@@ -134,8 +132,7 @@ impl CompletedTx {
             RespondBidirectionalTx {
                 tx_id: self.tx.id,
                 output: serialized_output,
-                canton_operators: self.tx.canton_operators.clone(),
-                canton_requester: self.tx.canton_requester.clone(),
+                chain_ctx: self.tx.chain_ctx.clone(),
             },
         ))
     }
