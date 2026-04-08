@@ -23,17 +23,16 @@ pub struct JwtAuthMaterial {
     pub private_key_pem: String,
     pub key_path: PathBuf,
     pub cert_path: PathBuf,
+    pub auth_conf_path: PathBuf,
 }
 
-/// Generate a P-256 private key + self-signed X.509 cert for JWT ES256.
-/// The MPC node uses these to authenticate against Canton in production.
-/// The sandbox runs without auth, but the key material is still needed
-/// for the MPC node's `CantonConfig`.
+/// Generate P-256 private key + self-signed X.509 cert + HOCON auth config.
 fn generate_jwt_auth_material() -> Result<JwtAuthMaterial> {
     let tmp_dir = std::env::temp_dir();
     let id = uuid::Uuid::new_v4();
     let key_path = tmp_dir.join(format!("canton-jwt-{id}.key"));
     let cert_path = tmp_dir.join(format!("canton-jwt-{id}.crt"));
+    let auth_conf_path = tmp_dir.join(format!("canton-auth-{id}.conf"));
 
     let output = std::process::Command::new("openssl")
         .args([
@@ -59,10 +58,23 @@ fn generate_jwt_auth_material() -> Result<JwtAuthMaterial> {
 
     let private_key_pem = std::fs::read_to_string(&key_path)?;
 
+    // JWT auth on ledger-api only. The admin-api stays unauthenticated.
+    let conf = format!(
+        r#"canton.participants.sandbox.ledger-api {{
+  auth-services = [
+    {{ type = jwt-es-256-crt, certificate = "{}" }}
+  ]
+  jwt-timestamp-leeway.default = 10
+}}"#,
+        cert_path.to_string_lossy()
+    );
+    std::fs::write(&auth_conf_path, &conf)?;
+
     Ok(JwtAuthMaterial {
         private_key_pem,
         key_path,
         cert_path,
+        auth_conf_path,
     })
 }
 
@@ -70,11 +82,12 @@ fn generate_jwt_auth_material() -> Result<JwtAuthMaterial> {
 // CantonSandbox
 // ---------------------------------------------------------------------------
 
-/// A running Canton sandbox process with deployed Daml contracts.
+/// A running Canton sandbox process with JWT auth and deployed Daml contracts.
 pub struct CantonSandbox {
     process: Child,
     jwt_key_path: PathBuf,
     jwt_cert_path: PathBuf,
+    auth_conf_path: PathBuf,
     pub json_api_url: String,
     pub json_api_ws_url: String,
     pub jwt_private_key_pem: String,
@@ -130,24 +143,21 @@ impl CantonSandbox {
         };
         anyhow::ensure!(dar_path.exists(), "DAR not found at {}", dar_path.display());
 
-        // 3. Generate JWT key material (used by MPC node config, even though
-        //    the sandbox runs without auth — Canton ignores Bearer tokens when
-        //    auth-services is not configured, but the MPC node still exercises
-        //    its JWT generation code path).
+        // 3. Generate JWT key + cert + HOCON auth config.
         let auth = generate_jwt_auth_material()?;
 
-        // 4. Start dpm sandbox without auth.
-        //    Canton sandbox's internal bootstrap (--dar upload) uses the
-        //    ledger-api gRPC port, which blocks on PERMISSION_DENIED when
-        //    auth-services is configured. Running without auth lets the
-        //    bootstrap complete while the MPC node still sends JWT-authenticated
-        //    requests (Canton simply ignores them).
+        // 4. Start dpm sandbox WITH auth but WITHOUT --dar.
+        //    `dpm sandbox --dar` uses the ledger-api gRPC for DAR upload, which
+        //    fails with PERMISSION_DENIED when auth is enabled. Instead, we start
+        //    without --dar, wait for readiness, then upload the DAR via the HTTP
+        //    JSON API with a proper admin JWT. This is the pattern used by the
+        //    official cn-quickstart.
         let process = Command::new("dpm")
             .arg("sandbox")
             .arg("--json-api-port")
             .arg(CANTON_JSON_API_PORT.to_string())
-            .arg("--dar")
-            .arg(&dar_path)
+            .arg("-c")
+            .arg(&auth.auth_conf_path)
             .spawn()
             .context("failed to start dpm sandbox")?;
 
@@ -157,17 +167,23 @@ impl CantonSandbox {
         // 5. Wait for readiness (docs endpoint + synchronizer connected)
         wait_for_canton_ready(&base_url, &auth.private_key_pem).await?;
 
-        // 6. Setup parties, user, and contracts.
-        //    Without auth, any user ID works for API calls.
-        let user_id = format!("mpc-test-{}", uuid::Uuid::new_v4());
-        let client = CantonTestClient::new(&base_url, &user_id, auth.private_key_pem.clone());
+        // 6. Upload DAR via HTTP API with admin JWT (two-phase bootstrap).
+        let admin_client =
+            CantonTestClient::new(&base_url, "participant_admin", auth.private_key_pem.clone());
+        admin_client.upload_dar(&dar_path).await?;
 
-        let sig_network = client.allocate_party_with_retry("SigNetwork").await?;
-        let operator = client.allocate_party_with_retry("Operator").await?;
-        let requester = client.allocate_party_with_retry("Requester").await?;
-        client
+        // 7. Setup parties, user, and contracts — all with JWT auth.
+        //    Use participant_admin for bootstrap (party/user creation),
+        //    then switch to the test user for contract operations.
+        let user_id = format!("mpc-test-{}", uuid::Uuid::new_v4());
+        let sig_network = admin_client.allocate_party_with_retry("SigNetwork").await?;
+        let operator = admin_client.allocate_party_with_retry("Operator").await?;
+        let requester = admin_client.allocate_party_with_retry("Requester").await?;
+        admin_client
             .create_user(&user_id, &sig_network, &[&operator, &requester])
             .await?;
+
+        let client = CantonTestClient::new(&base_url, &user_id, auth.private_key_pem.clone());
 
         let signer_result = client
             .create_contract(
@@ -211,6 +227,7 @@ impl CantonSandbox {
             process,
             jwt_key_path: auth.key_path,
             jwt_cert_path: auth.cert_path,
+            auth_conf_path: auth.auth_conf_path,
             json_api_url: base_url,
             json_api_ws_url: ws_url,
             jwt_private_key_pem: auth.private_key_pem,
@@ -268,6 +285,7 @@ impl Drop for CantonSandbox {
         }
         let _ = std::fs::remove_file(&self.jwt_key_path);
         let _ = std::fs::remove_file(&self.jwt_cert_path);
+        let _ = std::fs::remove_file(&self.auth_conf_path);
     }
 }
 
@@ -393,6 +411,41 @@ impl CantonTestClient {
 
     fn auth_get(&self, url: &str) -> Result<reqwest::RequestBuilder> {
         Ok(self.http.get(url).bearer_auth(self.generate_jwt()?))
+    }
+
+    /// Upload a DAR file via the JSON API (POST /v2/packages).
+    /// Requires admin JWT (sub: "participant_admin").
+    pub async fn upload_dar(&self, dar_path: &std::path::Path) -> Result<()> {
+        let dar_bytes = std::fs::read(dar_path)
+            .context(format!("failed to read DAR at {}", dar_path.display()))?;
+        for attempt in 0..30 {
+            let resp = self
+                .http
+                .post(format!("{}/v2/packages", self.base_url))
+                .bearer_auth(self.generate_jwt()?)
+                .header("Content-Type", "application/octet-stream")
+                .body(dar_bytes.clone())
+                .send()
+                .await?;
+            if resp.status().is_success() {
+                tracing::info!("DAR uploaded successfully");
+                return Ok(());
+            }
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            // Retry on synchronizer not ready
+            if body.contains("WITHOUT_CONNECTED_SYNCHRONIZER")
+                || body.contains("PACKAGE_SERVICE_CANNOT_AUTODETECT")
+            {
+                if attempt % 5 == 0 {
+                    tracing::debug!("retrying DAR upload (attempt {attempt}): {status}");
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            anyhow::bail!("DAR upload failed: HTTP {status} — {body}");
+        }
+        anyhow::bail!("DAR upload failed after 30 retries")
     }
 
     /// Allocate a party, retrying if the synchronizer is still connecting.
