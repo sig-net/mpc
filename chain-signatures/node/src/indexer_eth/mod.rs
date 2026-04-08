@@ -1188,13 +1188,13 @@ impl ChainIndexer for EthereumIndexer {
         item.header.number
     }
 
-    async fn catchup_range(&mut self, anchor_height: u64) -> anyhow::Result<std::ops::Range<u64>> {
+    async fn catchup_range(&mut self, anchor_height: u64) -> std::ops::Range<u64> {
         let catchup_start = EthereumIndexer::catchup_start_block_number(
             self.backlog.processed_block(Chain::Ethereum).await,
             anchor_height,
         );
 
-        Ok(catchup_start..anchor_height)
+        catchup_start..anchor_height
     }
 
     async fn process_catchup_height(&mut self, height: u64) -> anyhow::Result<()> {

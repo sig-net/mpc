@@ -126,8 +126,8 @@ pub trait ChainIndexer: Send + 'static {
         0
     }
 
-    async fn catchup_range(&mut self, _anchor_height: u64) -> anyhow::Result<Range<u64>> {
-        Ok(0..0)
+    async fn catchup_range(&mut self, _anchor_height: u64) -> Range<u64> {
+        0..0
     }
 
     async fn process_catchup_height(&mut self, _height: u64) -> anyhow::Result<()> {
@@ -188,15 +188,7 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(
     };
 
     let anchor_height = I::buffered_item_height(&anchor_block);
-    let catchup_range = loop {
-        match indexer.catchup_range(anchor_height).await {
-            Ok(range) => break range,
-            Err(err) => {
-                tracing::warn!(?err, %chain, anchor_height, "failed to determine catchup range; retrying");
-                tokio::time::sleep(indexer.retry_delay()).await;
-            }
-        }
-    };
+    let catchup_range = indexer.catchup_range(anchor_height).await;
 
     for height in catchup_range {
         loop {
@@ -521,13 +513,13 @@ mod tests {
             *item
         }
 
-        async fn catchup_range(&mut self, anchor_height: u64) -> anyhow::Result<Range<u64>> {
+        async fn catchup_range(&mut self, anchor_height: u64) -> Range<u64> {
             let start = self
                 .control
                 .persisted_height
                 .map(|height| height + 1)
                 .unwrap_or(anchor_height);
-            Ok(start..anchor_height)
+            start..anchor_height
         }
 
         async fn process_catchup_height(&mut self, height: u64) -> anyhow::Result<()> {
