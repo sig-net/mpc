@@ -153,7 +153,6 @@ pub trait ChainStream: Send + 'static {
     async fn next_event(&mut self) -> Option<ChainEvent>;
 }
 
-#[cfg(test)]
 pub(crate) async fn start_chain_stream<S: ChainStream>(
     stream: &mut S,
     catchup_completed_tx: oneshot::Sender<()>,
