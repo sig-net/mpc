@@ -1134,10 +1134,10 @@ impl EthereumIndexer {
 
     async fn wait_for_finalized_block(
         client: Arc<EthereumClient>,
-        refresh_finalized_interval: u64,
+        retry_interval: u64,
         block_number: BlockNumber,
     ) -> anyhow::Result<()> {
-        let mut last_finalized_block_number: Option<BlockNumber> = None;
+        let mut last_final_block_number: Option<BlockNumber> = None;
 
         loop {
             let Some(finalized_block) = client
@@ -1148,23 +1148,46 @@ impl EthereumIndexer {
                 .await
             else {
                 tracing::warn!(block_number, "finalized ethereum block not found; retrying");
-                tokio::time::sleep(Duration::from_millis(refresh_finalized_interval)).await;
+                tokio::time::sleep(Duration::from_millis(retry_interval)).await;
                 continue;
             };
 
-            let finalized_block_number = finalized_block.header.number;
-            if last_finalized_block_number.is_none_or(|n| finalized_block_number > n) {
-                last_finalized_block_number = Some(finalized_block_number);
+            let new_final_block_number = finalized_block.header.number;
+            if last_final_block_number.is_none_or(|n| new_final_block_number > n) {
+                tracing::debug!(
+                    new_final_block_number,
+                    last_final_block_number,
+                    "New finalized block number"
+                );
+                last_final_block_number.replace(new_final_block_number);
                 crate::metrics::indexers::LATEST_BLOCK_NUMBER
                     .with_label_values(&[Chain::Ethereum.as_str(), "finalized"])
-                    .set(finalized_block_number as i64);
+                    .set(new_final_block_number as i64);
             }
 
-            if finalized_block_number >= block_number {
+            let Some(last_final_block_number) = last_final_block_number else {
+                continue;
+            };
+
+            if new_final_block_number < last_final_block_number {
+                tracing::warn!(
+                    new_final_block_number,
+                    last_final_block_number,
+                    "new finalized block number overflowed range of u64 and has wrapped around!"
+                );
+            }
+
+            if new_final_block_number == last_final_block_number {
+                tracing::debug!(new_final_block_number, "no new finalized block");
+            }
+
+            // If the finalized block number has advanced past the block we're waiting for,
+            // we can proceed with emitting it.
+            if new_final_block_number >= block_number {
                 return Ok(());
             };
 
-            tokio::time::sleep(Duration::from_millis(refresh_finalized_interval)).await;
+            tokio::time::sleep(Duration::from_millis(retry_interval)).await;
         }
     }
 }
