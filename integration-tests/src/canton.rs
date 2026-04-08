@@ -12,8 +12,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const CANTON_JSON_API_PORT: u16 = 7575;
-const DEFAULT_DAR_RELATIVE_PATH: &str =
-    "../canton-mpc-poc/daml-packages/daml-vault/.daml/dist/daml-vault-0.0.1.dar";
+const DEFAULT_DAR_RELATIVE_PATH: &str = "fixtures/canton/daml-vault-0.0.1.dar";
 
 // ---------------------------------------------------------------------------
 // JWT auth material generation
@@ -137,8 +136,6 @@ impl CantonSandbox {
         let dar_path = match std::env::var("CANTON_DAR_PATH") {
             Ok(p) => PathBuf::from(p),
             Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
                 .join(DEFAULT_DAR_RELATIVE_PATH),
         };
         anyhow::ensure!(dar_path.exists(), "DAR not found at {}", dar_path.display());
