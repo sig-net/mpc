@@ -714,7 +714,7 @@ impl EthereumClient {
 pub struct EthereumIndexer {
     eth: EthConfig,
     backlog: Backlog,
-    client: EthereumClient,
+    client: Arc<EthereumClient>,
     events_tx: mpsc::Sender<ChainEvent>,
     contract_address: Address,
 }
@@ -725,7 +725,7 @@ impl EthereumIndexer {
         backlog: Backlog,
         events_tx: mpsc::Sender<ChainEvent>,
     ) -> anyhow::Result<Self> {
-        let client = EthereumClient::new(eth.clone()).await?;
+        let client = Arc::new(EthereumClient::new(eth.clone()).await?);
         let contract_address = format!("0x{}", eth.contract_address);
         let contract_address = Address::from_str(&contract_address).map_err(|_| {
             anyhow::anyhow!("failed to parse ethereum contract address: {contract_address}")
@@ -825,7 +825,7 @@ impl EthereumIndexer {
         let block_number = block.header.number;
 
         let processed = Self::process_block(
-            Arc::new(self.client.clone()),
+            self.client.clone(),
             block,
             self.contract_address,
             self.backlog.clone(),
@@ -833,7 +833,7 @@ impl EthereumIndexer {
         .await?;
 
         Self::emit_processed_block(
-            Arc::new(self.client.clone()),
+            self.client.clone(),
             self.events_tx.clone(),
             &self.eth,
             processed,
@@ -1176,7 +1176,7 @@ impl ChainIndexer for EthereumIndexer {
     async fn livestream(&mut self) -> anyhow::Result<Option<Self::BufferedStream>> {
         let (live_blocks_tx, live_blocks_rx) = live_blocks_channel();
         tokio::spawn(EthereumIndexer::buffer_live_blocks(
-            Arc::new(self.client.clone()),
+            self.client.clone(),
             live_blocks_tx,
         ));
 
@@ -1196,7 +1196,7 @@ impl ChainIndexer for EthereumIndexer {
         catchup_start..anchor_height
     }
 
-    async fn process_catchup_height(&mut self, height: u64) -> anyhow::Result<()> {
+    async fn process_catchup_on_height(&mut self, height: u64) -> anyhow::Result<()> {
         if height.is_multiple_of(10) {
             tracing::info!(height, "processed ethereum catchup height attempt");
         }

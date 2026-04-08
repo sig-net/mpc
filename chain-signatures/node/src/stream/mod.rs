@@ -130,7 +130,7 @@ pub trait ChainIndexer: Send + 'static {
         0..0
     }
 
-    async fn process_catchup_height(&mut self, _height: u64) -> anyhow::Result<()> {
+    async fn process_catchup_on_height(&mut self, _height: u64) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -192,7 +192,7 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(
 
     for height in catchup_range {
         loop {
-            match indexer.process_catchup_height(height).await {
+            match indexer.process_catchup_on_height(height).await {
                 Ok(()) => break,
                 Err(err) => {
                     tracing::warn!(?err, %chain, height, "catchup height processing failed; retrying");
@@ -508,7 +508,7 @@ mod tests {
             start..anchor_height
         }
 
-        async fn process_catchup_height(&mut self, height: u64) -> anyhow::Result<()> {
+        async fn process_catchup_on_height(&mut self, height: u64) -> anyhow::Result<()> {
             if TestLinearControl::consume_failure(&self.control.catchup_failures, height) {
                 anyhow::bail!("synthetic catchup failure at height {height}");
             }
