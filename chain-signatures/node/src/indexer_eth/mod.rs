@@ -716,6 +716,7 @@ pub struct EthereumIndexer {
     backlog: Backlog,
     client: EthereumClient,
     events_tx: mpsc::Sender<ChainEvent>,
+    contract_address: Address,
 }
 
 impl EthereumIndexer {
@@ -725,12 +726,17 @@ impl EthereumIndexer {
         events_tx: mpsc::Sender<ChainEvent>,
     ) -> anyhow::Result<Self> {
         let client = EthereumClient::new(eth.clone()).await?;
+        let contract_address = format!("0x{}", eth.contract_address);
+        let contract_address = Address::from_str(&contract_address).map_err(|_| {
+            anyhow::anyhow!("failed to parse ethereum contract address: {contract_address}")
+        })?;
 
         Ok(Self {
             eth,
             backlog,
             client,
             events_tx,
+            contract_address,
         })
     }
 
@@ -817,18 +823,11 @@ impl EthereumIndexer {
 
     async fn process_live_block(&self, block: alloy::rpc::types::Block) -> anyhow::Result<()> {
         let block_number = block.header.number;
-        let contract_address = Address::from_str(&format!("0x{}", self.eth.contract_address))
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "failed to parse ethereum contract address: {}",
-                    self.eth.contract_address
-                )
-            })?;
 
         let processed = Self::process_block(
             Arc::new(self.client.clone()),
             block,
-            contract_address,
+            self.contract_address,
             self.backlog.clone(),
         )
         .await?;
