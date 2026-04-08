@@ -117,17 +117,19 @@ pub trait ChainStream: Send + 'static {
     const CHAIN: Chain;
     type BufferedStream: ChainBufferedStream;
 
-    fn take_event_receiver(&mut self) -> Option<mpsc::Receiver<ChainEvent>> {
-        None
+    async fn start(&mut self) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(());
+        rx
     }
-
-    async fn start(&mut self) {}
 
     async fn livestream(&mut self) -> anyhow::Result<Option<Self::BufferedStream>> {
         Ok(None)
     }
 
-    fn buffered_item_height(_item: &<Self::BufferedStream as ChainBufferedStream>::Item) -> u64;
+    fn buffered_item_height(_item: &<Self::BufferedStream as ChainBufferedStream>::Item) -> u64 {
+        0
+    }
 
     async fn catchup_range(&mut self, _anchor_height: u64) -> anyhow::Result<Range<u64>> {
         Ok(0..0)
@@ -151,10 +153,12 @@ pub trait ChainStream: Send + 'static {
     async fn next_event(&mut self) -> Option<ChainEvent>;
 }
 
+#[cfg(test)]
 pub(crate) async fn start_chain_stream<S: ChainStream>(
     stream: &mut S,
-    mut catchup_completed_tx: Option<oneshot::Sender<()>>,
+    catchup_completed_tx: oneshot::Sender<()>,
 ) {
+    let mut catchup_completed_tx = Some(catchup_completed_tx);
     tracing::info!(chain = %S::CHAIN, "starting chain stream orchestration");
 
     match stream.livestream().await {
@@ -247,165 +251,93 @@ pub async fn run_stream<S: ChainStream>(
     )
     .await;
 
-    let mut event_rx = stream.take_event_receiver();
+    let mut catchup_completed_rx = stream.start().await;
+    let mut catchup_completed = false;
 
-    if let Some(mut rx) = event_rx.take() {
-        let (catchup_completed_tx, mut catchup_completed_rx) = oneshot::channel();
-        let orchestration = start_chain_stream(&mut stream, Some(catchup_completed_tx));
-        tokio::pin!(orchestration);
-        let mut orchestration_done = false;
-        let mut catchup_completed = false;
+    loop {
+        tokio::select! {
+            result = &mut catchup_completed_rx, if !catchup_completed => {
+                catchup_completed = true;
 
-        loop {
-            tokio::select! {
-                _ = &mut orchestration, if !orchestration_done => {
-                    orchestration_done = true;
-                    continue;
+                if result.is_ok()
+                    && recovered.requeue_mode == crate::backlog::RecoveryRequeueMode::AfterCatchup
+                {
+                    requeue_recovered_sign_requests(
+                        &backlog,
+                        chain,
+                        sign_tx.clone(),
+                        &recovered.pending,
+                    )
+                    .await;
+                    recovered.pending.clear();
                 }
-                result = &mut catchup_completed_rx, if !catchup_completed => {
-                    catchup_completed = true;
 
-                    if result.is_ok()
-                        && recovered.requeue_mode == crate::backlog::RecoveryRequeueMode::AfterCatchup
-                    {
-                        requeue_recovered_sign_requests(
-                            &backlog,
-                            chain,
-                            sign_tx.clone(),
-                            &recovered.pending,
-                        )
-                        .await;
-                        recovered.pending.clear();
-                    }
-
-                    continue;
-                }
-                event = rx.recv() => {
-                    let Some(event) = event else {
-                        if orchestration_done {
-                            break;
-                        }
-                        continue;
-                    };
-
-                    match event {
-                        ChainEvent::SignRequest(req) => {
-                            if let Err(err) = process_sign_request(req, sign_tx.clone(), backlog.clone()).await
-                            {
-                                tracing::error!(?err, chain = %chain, "failed to process sign request");
-                            }
-                        }
-                        ChainEvent::Respond(ev) => {
-                            if let Err(err) =
-                                process_respond_event(ev, sign_tx.clone(), &mut contract_watcher, &backlog)
-                                    .await
-                            {
-                                tracing::error!(?err, chain = %chain, "failed to process respond event");
-                            }
-                        }
-                        ChainEvent::RespondBidirectional(ev) => {
-                            if let Err(err) =
-                                process_respond_bidirectional_event(ev, sign_tx.clone(), &backlog).await
-                            {
-                                tracing::error!(?err, chain = %chain, "failed to process respond bidirectional event");
-                            }
-                        }
-                        ChainEvent::Block(block) => {
-                            if let Some(checkpoint) = backlog.set_processed_block(S::CHAIN, block).await {
-                                tracing::info!(block, ?checkpoint, chain = %chain, "created checkpoint");
-                            }
-                            crate::metrics::indexers::LATEST_BLOCK_NUMBER
-                                .with_label_values(&[S::CHAIN.as_str(), "indexed"])
-                                .set(block as i64);
-                        }
-                        ChainEvent::ExecutionConfirmed {
-                            tx_id,
-                            sign_id,
-                            source_chain,
-                            block_height,
-                            result,
-                        } => {
-                            if let Err(err) = process_execution_confirmed(
-                                tx_id,
-                                sign_id,
-                                source_chain,
-                                block_height,
-                                result,
-                                &backlog,
-                                sign_tx.clone(),
-                                S::CHAIN,
-                            )
-                            .await
-                            {
-                                tracing::error!(?err, chain = %chain, "failed to process execution confirmation");
-                            }
-                        }
-                    }
-                }
+                continue;
             }
-        }
-    } else {
-        let (catchup_completed_tx, catchup_completed_rx) = oneshot::channel();
-        start_chain_stream(&mut stream, Some(catchup_completed_tx)).await;
-        let catchup_completed = catchup_completed_rx.await.is_ok();
+            event = stream.next_event() => {
+                let Some(event) = event else {
+                    break;
+                };
 
-        while let Some(event) = stream.next_event().await {
-            match event {
-                ChainEvent::SignRequest(req) => {
-                    if let Err(err) = process_sign_request(req, sign_tx.clone(), backlog.clone()).await
-                    {
-                        tracing::error!(?err, chain = %chain, "failed to process sign request");
+                match event {
+                    ChainEvent::SignRequest(req) => {
+                        if let Err(err) = process_sign_request(req, sign_tx.clone(), backlog.clone()).await
+                        {
+                            tracing::error!(?err, chain = %chain, "failed to process sign request");
+                        }
                     }
-                }
-                ChainEvent::Respond(ev) => {
-                    if let Err(err) =
-                        process_respond_event(ev, sign_tx.clone(), &mut contract_watcher, &backlog)
-                            .await
-                    {
-                        tracing::error!(?err, chain = %chain, "failed to process respond event");
+                    ChainEvent::Respond(ev) => {
+                        if let Err(err) =
+                            process_respond_event(ev, sign_tx.clone(), &mut contract_watcher, &backlog)
+                                .await
+                        {
+                            tracing::error!(?err, chain = %chain, "failed to process respond event");
+                        }
                     }
-                }
-                ChainEvent::RespondBidirectional(ev) => {
-                    if let Err(err) =
-                        process_respond_bidirectional_event(ev, sign_tx.clone(), &backlog).await
-                    {
-                        tracing::error!(?err, chain = %chain, "failed to process respond bidirectional event");
+                    ChainEvent::RespondBidirectional(ev) => {
+                        if let Err(err) =
+                            process_respond_bidirectional_event(ev, sign_tx.clone(), &backlog).await
+                        {
+                            tracing::error!(?err, chain = %chain, "failed to process respond bidirectional event");
+                        }
                     }
-                }
-                ChainEvent::Block(block) => {
-                    if let Some(checkpoint) = backlog.set_processed_block(S::CHAIN, block).await {
-                        tracing::info!(block, ?checkpoint, chain = %chain, "created checkpoint");
+                    ChainEvent::Block(block) => {
+                        if let Some(checkpoint) = backlog.set_processed_block(S::CHAIN, block).await {
+                            tracing::info!(block, ?checkpoint, chain = %chain, "created checkpoint");
+                        }
+                        crate::metrics::indexers::LATEST_BLOCK_NUMBER
+                            .with_label_values(&[S::CHAIN.as_str(), "indexed"])
+                            .set(block as i64);
                     }
-                    crate::metrics::indexers::LATEST_BLOCK_NUMBER
-                        .with_label_values(&[S::CHAIN.as_str(), "indexed"])
-                        .set(block as i64);
-                }
-                ChainEvent::ExecutionConfirmed {
-                    tx_id,
-                    sign_id,
-                    source_chain,
-                    block_height,
-                    result,
-                } => {
-                    if let Err(err) = process_execution_confirmed(
+                    ChainEvent::ExecutionConfirmed {
                         tx_id,
                         sign_id,
                         source_chain,
                         block_height,
                         result,
-                        &backlog,
-                        sign_tx.clone(),
-                        S::CHAIN,
-                    )
-                    .await
-                    {
-                        tracing::error!(?err, chain = %chain, "failed to process execution confirmation");
+                    } => {
+                        if let Err(err) = process_execution_confirmed(
+                            tx_id,
+                            sign_id,
+                            source_chain,
+                            block_height,
+                            result,
+                            &backlog,
+                            sign_tx.clone(),
+                            S::CHAIN,
+                        )
+                        .await
+                        {
+                            tracing::error!(?err, chain = %chain, "failed to process execution confirmation");
+                        }
                     }
                 }
             }
         }
+    }
 
-        if catchup_completed && recovered.requeue_mode == crate::backlog::RecoveryRequeueMode::AfterCatchup {
+    if catchup_completed && recovered.requeue_mode == crate::backlog::RecoveryRequeueMode::AfterCatchup {
+        if !recovered.pending.is_empty() {
             requeue_recovered_sign_requests(
                 &backlog,
                 chain,
@@ -604,7 +536,8 @@ mod tests {
     #[tokio::test]
     async fn test_run_linearized_source_orders_catchup_before_live() {
         let mut stream = TestLinearStream::new(TestLinearControl::new(Some(1), vec![4, 5]));
-        start_chain_stream(&mut stream, None).await;
+        let (tx, _rx) = oneshot::channel();
+        start_chain_stream(&mut stream, tx).await;
 
         let mut observed = Vec::new();
         while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
@@ -628,7 +561,8 @@ mod tests {
             .fail_catchup_once(3)
             .fail_live_once(4),
         );
-        start_chain_stream(&mut stream, None).await;
+        let (tx, _rx) = oneshot::channel();
+        start_chain_stream(&mut stream, tx).await;
 
         let mut observed = Vec::new();
         while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
@@ -745,8 +679,11 @@ mod tests {
                 0
             }
 
-            async fn start(&mut self) {
+            async fn start(&mut self) -> oneshot::Receiver<()> {
                 self.started = true;
+                let (tx, rx) = oneshot::channel();
+                let _ = tx.send(());
+                rx
             }
 
             async fn next_event(&mut self) -> Option<ChainEvent> {

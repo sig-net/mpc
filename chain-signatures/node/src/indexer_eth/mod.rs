@@ -729,11 +729,6 @@ impl EthereumIndexer {
         })
     }
 
-    pub async fn run(self, events_tx: mpsc::Sender<ChainEvent>) {
-        tracing::info!("running ethereum indexer");
-        let _ = events_tx;
-    }
-
     async fn buffer_live_blocks(
         client: Arc<EthereumClient>,
         live_blocks: mpsc::Sender<alloy::rpc::types::Block>,
@@ -1184,7 +1179,8 @@ impl EthereumIndexer {
 /// `start()` after recovery has completed.
 pub struct EthereumStream {
     events_tx: mpsc::Sender<ChainEvent>,
-    events_rx: Option<mpsc::Receiver<ChainEvent>>,
+    events_rx: mpsc::Receiver<ChainEvent>,
+    catchup_completed_rx: Option<tokio::sync::oneshot::Receiver<()>>,
     indexer: EthereumIndexer,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -1211,21 +1207,28 @@ impl EthereumStream {
 
         Ok(Self {
             events_tx,
-            events_rx: Some(events_rx),
+            events_rx,
+            catchup_completed_rx: None,
             indexer,
             tasks: Vec::new(),
         })
     }
 
     pub fn start(&mut self) {
+        let (catchup_completed_tx, catchup_completed_rx) = tokio::sync::oneshot::channel();
         let events_tx = self.events_tx.clone();
         let indexer = self.indexer.clone();
         self.tasks.push(tokio::spawn(async move {
-            Self::run_background(indexer, events_tx).await;
+            Self::run_background(indexer, events_tx, catchup_completed_tx).await;
         }));
+        self.catchup_completed_rx = Some(catchup_completed_rx);
     }
 
-    async fn run_background(indexer: EthereumIndexer, events_tx: mpsc::Sender<ChainEvent>) {
+    async fn run_background(
+        indexer: EthereumIndexer,
+        events_tx: mpsc::Sender<ChainEvent>,
+        catchup_completed_tx: tokio::sync::oneshot::Sender<()>,
+    ) {
         let (live_blocks_tx, mut live_blocks_rx) = live_blocks_channel();
         tokio::spawn(EthereumIndexer::buffer_live_blocks(
             Arc::new(indexer.client.clone()),
@@ -1258,6 +1261,8 @@ impl EthereumStream {
                 }
             }
         }
+
+        let _ = catchup_completed_tx.send(());
 
         let mut next_block = Some(anchor_block);
         loop {
@@ -1293,65 +1298,15 @@ impl ChainStream for EthereumStream {
     const CHAIN: Chain = Chain::Ethereum;
     type BufferedStream = EthereumBufferedStream;
 
-    fn take_event_receiver(&mut self) -> Option<mpsc::Receiver<ChainEvent>> {
-        self.events_rx.take()
-    }
-
-    async fn start(&mut self) {
+    async fn start(&mut self) -> tokio::sync::oneshot::Receiver<()> {
         self.start();
-    }
-
-    async fn livestream(&mut self) -> anyhow::Result<Option<Self::BufferedStream>> {
-        let (live_blocks_tx, live_blocks_rx) = live_blocks_channel();
-        tokio::spawn(EthereumIndexer::buffer_live_blocks(
-            Arc::new(self.indexer.client.clone()),
-            live_blocks_tx,
-        ));
-
-        Ok(Some(EthereumBufferedStream { live_blocks_rx }))
-    }
-
-    fn buffered_item_height(item: &<Self::BufferedStream as ChainBufferedStream>::Item) -> u64 {
-        item.header.number
-    }
-
-    async fn catchup_range(&mut self, anchor_height: u64) -> anyhow::Result<std::ops::Range<u64>> {
-        let catchup_start = EthereumIndexer::catchup_start_block_number(
-            self.indexer.backlog.processed_block(Chain::Ethereum).await,
-            anchor_height,
-        );
-
-        Ok(catchup_start..anchor_height)
-    }
-
-    async fn process_catchup_height(&mut self, height: u64) -> anyhow::Result<()> {
-        if height % 10 == 0 {
-            tracing::info!(height, "processed ethereum catchup height attempt");
-        }
-
-        self.indexer
-            .process_height(height, self.events_tx.clone())
-            .await
-    }
-
-    async fn process_buffered_item(
-        &mut self,
-        item: <Self::BufferedStream as ChainBufferedStream>::Item,
-    ) -> anyhow::Result<()> {
-        self.indexer
-            .process_live_block(item, self.events_tx.clone())
-            .await
-    }
-
-    fn retry_delay(&self) -> Duration {
-        Duration::from_millis(500)
+        self.catchup_completed_rx
+            .take()
+            .expect("ethereum stream start() called without catchup receiver")
     }
 
     async fn next_event(&mut self) -> Option<ChainEvent> {
-        match self.events_rx.as_mut() {
-            Some(rx) => rx.recv().await,
-            None => None,
-        }
+        self.events_rx.recv().await
     }
 }
 #[cfg(test)]
