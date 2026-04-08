@@ -268,8 +268,7 @@ pub async fn run_stream<S: ChainStream>(
     node_client: NodeClient,
 ) {
     let chain = S::CHAIN;
-
-    tracing::info!(%chain, "starting indexer loop");
+    tracing::info!(%chain, "starting stream");
 
     let mut recovered = recover_backlog(
         &backlog,
@@ -284,7 +283,7 @@ pub async fn run_stream<S: ChainStream>(
     let mut indexer = match stream.start().await {
         Ok(indexer) => indexer,
         Err(err) => {
-            tracing::error!(?err, chain = %chain, "failed to start stream");
+            tracing::error!(?err, %chain, "failed to start stream");
             return;
         }
     };
@@ -317,6 +316,7 @@ pub async fn run_stream<S: ChainStream>(
             }
             event = stream.next_event() => {
                 let Some(event) = event else {
+                    tracing::info!(%chain, "stream dropped event channel");
                     break;
                 };
 
@@ -324,7 +324,7 @@ pub async fn run_stream<S: ChainStream>(
                     ChainEvent::SignRequest(req) => {
                         if let Err(err) = process_sign_request(req, sign_tx.clone(), backlog.clone()).await
                         {
-                            tracing::error!(?err, chain = %chain, "failed to process sign request");
+                            tracing::error!(?err, %chain, "failed to process sign request");
                         }
                     }
                     ChainEvent::Respond(ev) => {
@@ -332,19 +332,19 @@ pub async fn run_stream<S: ChainStream>(
                             process_respond_event(ev, sign_tx.clone(), &mut contract_watcher, &backlog)
                                 .await
                         {
-                            tracing::error!(?err, chain = %chain, "failed to process respond event");
+                            tracing::error!(?err, %chain, "failed to process respond event");
                         }
                     }
                     ChainEvent::RespondBidirectional(ev) => {
                         if let Err(err) =
                             process_respond_bidirectional_event(ev, sign_tx.clone(), &backlog).await
                         {
-                            tracing::error!(?err, chain = %chain, "failed to process respond bidirectional event");
+                            tracing::error!(?err, %chain, "failed to process respond bidirectional event");
                         }
                     }
                     ChainEvent::Block(block) => {
                         if let Some(checkpoint) = backlog.set_processed_block(S::CHAIN, block).await {
-                            tracing::info!(block, ?checkpoint, chain = %chain, "created checkpoint");
+                            tracing::info!(block, ?checkpoint, %chain, "created checkpoint");
                         }
                         crate::metrics::indexers::LATEST_BLOCK_NUMBER
                             .with_label_values(&[S::CHAIN.as_str(), "indexed"])
@@ -369,7 +369,7 @@ pub async fn run_stream<S: ChainStream>(
                         )
                         .await
                         {
-                            tracing::error!(?err, chain = %chain, "failed to process execution confirmation");
+                            tracing::error!(?err, %chain, "failed to process execution confirmation");
                         }
                     }
                 }

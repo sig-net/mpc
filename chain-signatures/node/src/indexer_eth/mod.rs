@@ -717,16 +717,22 @@ pub struct EthereumIndexer {
     eth: EthConfig,
     backlog: Backlog,
     client: EthereumClient,
+    events_tx: mpsc::Sender<ChainEvent>,
 }
 
 impl EthereumIndexer {
-    pub async fn new(eth: EthConfig, backlog: Backlog) -> anyhow::Result<Self> {
+    pub async fn new(
+        eth: EthConfig,
+        backlog: Backlog,
+        events_tx: mpsc::Sender<ChainEvent>,
+    ) -> anyhow::Result<Self> {
         let client = EthereumClient::new(eth.clone()).await?;
 
         Ok(Self {
             eth,
             backlog,
             client,
+            events_tx,
         })
     }
 
@@ -797,11 +803,7 @@ impl EthereumIndexer {
         }
     }
 
-    async fn process_height(
-        &self,
-        block_number: u64,
-        events_tx: mpsc::Sender<ChainEvent>,
-    ) -> anyhow::Result<()> {
+    async fn process_height(&self, block_number: u64) -> anyhow::Result<()> {
         let Some(block) = self
             .client
             .get_block(alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Number(
@@ -812,14 +814,10 @@ impl EthereumIndexer {
             anyhow::bail!("ethereum block {block_number} not found");
         };
 
-        self.process_live_block(block, events_tx).await
+        self.process_live_block(block).await
     }
 
-    async fn process_live_block(
-        &self,
-        block: alloy::rpc::types::Block,
-        events_tx: mpsc::Sender<ChainEvent>,
-    ) -> anyhow::Result<()> {
+    async fn process_live_block(&self, block: alloy::rpc::types::Block) -> anyhow::Result<()> {
         let block_number = block.header.number;
         let contract_address = Address::from_str(&format!("0x{}", self.eth.contract_address))
             .map_err(|_| {
@@ -839,7 +837,7 @@ impl EthereumIndexer {
 
         Self::emit_processed_block(
             Arc::new(self.client.clone()),
-            events_tx,
+            self.events_tx.clone(),
             &self.eth,
             processed,
         )
@@ -1180,12 +1178,7 @@ impl EthereumIndexer {
 /// `start()` after recovery has completed.
 pub struct EthereumStream {
     events_rx: Option<mpsc::Receiver<ChainEvent>>,
-    start_state: Option<EthereumStreamIndexer>,
-}
-
-pub struct EthereumStreamIndexer {
-    events_tx: mpsc::Sender<ChainEvent>,
-    indexer: EthereumIndexer,
+    start_state: Option<EthereumIndexer>,
 }
 
 impl EthereumStream {
@@ -1204,25 +1197,24 @@ impl EthereumStream {
             "creating ethereum indexer stream"
         );
 
-        let indexer = EthereumIndexer::new(eth, backlog).await?;
-
         let (events_tx, events_rx) = crate::stream::channel();
+        let indexer = EthereumIndexer::new(eth, backlog, events_tx).await?;
 
         Ok(Self {
             events_rx: Some(events_rx),
-            start_state: Some(EthereumStreamIndexer { events_tx, indexer }),
+            start_state: Some(indexer),
         })
     }
 }
 
 #[async_trait]
-impl ChainIndexer for EthereumStreamIndexer {
+impl ChainIndexer for EthereumIndexer {
     type BufferedStream = EthereumBufferedStream;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<Self::BufferedStream>> {
         let (live_blocks_tx, live_blocks_rx) = live_blocks_channel();
         tokio::spawn(EthereumIndexer::buffer_live_blocks(
-            Arc::new(self.indexer.client.clone()),
+            Arc::new(self.client.clone()),
             live_blocks_tx,
         ));
 
@@ -1235,7 +1227,7 @@ impl ChainIndexer for EthereumStreamIndexer {
 
     async fn catchup_range(&mut self, anchor_height: u64) -> anyhow::Result<std::ops::Range<u64>> {
         let catchup_start = EthereumIndexer::catchup_start_block_number(
-            self.indexer.backlog.processed_block(Chain::Ethereum).await,
+            self.backlog.processed_block(Chain::Ethereum).await,
             anchor_height,
         );
 
@@ -1247,18 +1239,14 @@ impl ChainIndexer for EthereumStreamIndexer {
             tracing::info!(height, "processed ethereum catchup height attempt");
         }
 
-        self.indexer
-            .process_height(height, self.events_tx.clone())
-            .await
+        self.process_height(height).await
     }
 
     async fn process_buffered_item(
         &mut self,
         item: <Self::BufferedStream as ChainBufferedStream>::Item,
     ) -> anyhow::Result<()> {
-        self.indexer
-            .process_live_block(item, self.events_tx.clone())
-            .await
+        self.process_live_block(item).await
     }
 
     fn retry_delay(&self) -> Duration {
@@ -1270,7 +1258,7 @@ impl ChainIndexer for EthereumStreamIndexer {
 #[async_trait]
 impl ChainStream for EthereumStream {
     const CHAIN: Chain = Chain::Ethereum;
-    type Indexer = EthereumStreamIndexer;
+    type Indexer = EthereumIndexer;
 
     async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
         self.start_state
