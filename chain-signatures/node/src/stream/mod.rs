@@ -148,7 +148,6 @@ pub trait ChainIndexer: Send + 'static {
     fn retry_delay(&self) -> Duration {
         Duration::from_millis(500)
     }
-
 }
 
 pub struct DisabledChainIndexer;
@@ -380,15 +379,12 @@ pub async fn run_stream<S: ChainStream>(
         catchup_completed = catchup_completed_rx.await.is_ok();
     }
 
-    if catchup_completed && recovered.requeue_mode == crate::backlog::RecoveryRequeueMode::AfterCatchup {
+    if catchup_completed
+        && recovered.requeue_mode == crate::backlog::RecoveryRequeueMode::AfterCatchup
+    {
         if !recovered.pending.is_empty() {
-            requeue_recovered_sign_requests(
-                &backlog,
-                chain,
-                sign_tx.clone(),
-                &recovered.pending,
-            )
-            .await;
+            requeue_recovered_sign_requests(&backlog, chain, sign_tx.clone(), &recovered.pending)
+                .await;
             recovered.pending.clear();
         }
     }
@@ -521,11 +517,7 @@ mod tests {
     impl TestLinearStream {
         fn new(control: TestLinearControl) -> Self {
             let (tx, rx) = mpsc::channel(16);
-            Self {
-                control,
-                rx,
-                tx,
-            }
+            Self { control, rx, tx }
         }
     }
 
@@ -624,8 +616,8 @@ mod tests {
     async fn test_run_linearized_source_retries_without_reordering() {
         let mut stream = TestLinearStream::new(
             TestLinearControl::new(Some(1), vec![4, 5])
-            .fail_catchup_once(3)
-            .fail_live_once(4),
+                .fail_catchup_once(3)
+                .fail_live_once(4),
         );
         let mut indexer = stream.start().await.unwrap();
         let (tx, _rx) = oneshot::channel();

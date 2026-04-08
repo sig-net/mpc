@@ -8,9 +8,7 @@ use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::SignStatus;
-use crate::stream::{
-    ChainBufferedStream, ChainEvent, ChainIndexer, ChainStream, ExecutionOutcome,
-};
+use crate::stream::{ChainBufferedStream, ChainEvent, ChainIndexer, ChainStream, ExecutionOutcome};
 use async_trait::async_trait;
 
 use alloy::eips::BlockNumberOrTag;
@@ -757,9 +755,9 @@ impl EthereumIndexer {
 
             while block_number <= latest_block_number {
                 let Some(block) = client
-                    .get_block(alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Number(
-                        block_number,
-                    )))
+                    .get_block(alloy::rpc::types::BlockId::Number(
+                        BlockNumberOrTag::Number(block_number),
+                    ))
                     .await
                 else {
                     tracing::warn!(block_number, "ethereum live block not yet available");
@@ -806,9 +804,9 @@ impl EthereumIndexer {
     async fn process_height(&self, block_number: u64) -> anyhow::Result<()> {
         let Some(block) = self
             .client
-            .get_block(alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Number(
-                block_number,
-            )))
+            .get_block(alloy::rpc::types::BlockId::Number(
+                BlockNumberOrTag::Number(block_number),
+            ))
             .await
         else {
             anyhow::bail!("ethereum block {block_number} not found");
@@ -1111,10 +1109,9 @@ impl EthereumIndexer {
         }
 
         for event in execution_events {
-            events_tx
-                .send(event)
-                .await
-                .map_err(|err| anyhow::anyhow!("failed to emit ExecutionConfirmed event: {err:?}"))?;
+            events_tx.send(event).await.map_err(|err| {
+                anyhow::anyhow!("failed to emit ExecutionConfirmed event: {err:?}")
+            })?;
         }
 
         for req in indexed_requests {
@@ -1218,7 +1215,6 @@ impl ChainIndexer for EthereumIndexer {
     fn retry_delay(&self) -> Duration {
         Duration::from_millis(500)
     }
-
 }
 
 /// Ethereum indexer stream implementing the `ChainStream` trait.
@@ -1279,7 +1275,10 @@ mod tests {
 
     #[test]
     fn catchup_starts_after_processed_height() {
-        assert_eq!(EthereumIndexer::catchup_start_block_number(Some(41), 50), 42);
+        assert_eq!(
+            EthereumIndexer::catchup_start_block_number(Some(41), 50),
+            42
+        );
     }
 
     #[test]

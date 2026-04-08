@@ -417,8 +417,14 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
 
     run_handle.abort();
 
-    assert!(!saw_replayed_payload, "stream replayed the stored processed block");
-    assert!(saw_expected_payload, "stream did not catch up the next block");
+    assert!(
+        !saw_replayed_payload,
+        "stream replayed the stored processed block"
+    );
+    assert!(
+        saw_expected_payload,
+        "stream did not catch up the next block"
+    );
     Ok(())
 }
 
