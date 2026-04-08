@@ -1280,7 +1280,7 @@ impl EthereumIndexer {
 
         loop {
             interval.tick().await;
-            tracing::info!("Refreshing finalized epoch");
+            tracing::debug!("Refreshing finalized epoch");
 
             let new_finalized_block = match client
                 .as_ref()
@@ -1297,7 +1297,7 @@ impl EthereumIndexer {
             };
 
             let new_final_block_number = new_finalized_block.header.number;
-            tracing::info!(
+            tracing::debug!(
                 "New finalized block number: {new_final_block_number}, last finalized block number: {final_block_number:?}"
             );
 
@@ -1325,7 +1325,7 @@ impl EthereumIndexer {
             }
 
             if last_final_block_number == new_final_block_number {
-                tracing::info!("No new finalized block");
+                tracing::debug!("No new finalized block");
             }
         }
     }
