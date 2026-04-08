@@ -1189,11 +1189,6 @@ pub struct EthereumStream {
     tasks: Vec<JoinHandle<()>>,
 }
 
-struct EthereumBackgroundStream {
-    events_tx: mpsc::Sender<ChainEvent>,
-    indexer: EthereumIndexer,
-}
-
 impl EthereumStream {
     pub async fn new(eth: Option<EthConfig>, backlog: Backlog) -> anyhow::Result<Self> {
         let Some(eth) = eth else {
@@ -1223,14 +1218,66 @@ impl EthereumStream {
     }
 
     pub fn start(&mut self) {
-        let mut stream = EthereumBackgroundStream {
-            events_tx: self.events_tx.clone(),
-            indexer: self.indexer.clone(),
+        let events_tx = self.events_tx.clone();
+        let indexer = self.indexer.clone();
+        self.tasks.push(tokio::spawn(async move {
+            Self::run_background(indexer, events_tx).await;
+        }));
+    }
+
+    async fn run_background(indexer: EthereumIndexer, events_tx: mpsc::Sender<ChainEvent>) {
+        let (live_blocks_tx, mut live_blocks_rx) = live_blocks_channel();
+        tokio::spawn(EthereumIndexer::buffer_live_blocks(
+            Arc::new(indexer.client.clone()),
+            live_blocks_tx,
+        ));
+
+        let Some(anchor_block) = live_blocks_rx.recv().await else {
+            tracing::warn!("ethereum livestream ended before anchor block");
+            return;
         };
 
-        self.tasks.push(tokio::spawn(async move {
-            crate::stream::start_chain_stream(&mut stream).await;
-        }));
+        let anchor_height = anchor_block.header.number;
+        let catchup_start = EthereumIndexer::catchup_start_block_number(
+            indexer.backlog.processed_block(Chain::Ethereum).await,
+            anchor_height,
+        );
+
+        for height in catchup_start..anchor_height {
+            loop {
+                if height % 10 == 0 {
+                    tracing::info!(height, "processed ethereum catchup height attempt");
+                }
+
+                match indexer.process_height(height, events_tx.clone()).await {
+                    Ok(()) => break,
+                    Err(err) => {
+                        tracing::warn!(?err, height, "catchup height processing failed; retrying");
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                }
+            }
+        }
+
+        let mut next_block = Some(anchor_block);
+        loop {
+            let block = match next_block.take() {
+                Some(block) => block,
+                None => match live_blocks_rx.recv().await {
+                    Some(block) => block,
+                    None => break,
+                },
+            };
+
+            match indexer.process_live_block(block.clone(), events_tx.clone()).await {
+                Ok(()) => {}
+                Err(err) => {
+                    tracing::warn!(?err, "buffered item processing failed; retrying");
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    next_block = Some(block);
+                }
+            }
+        }
     }
 }
 
@@ -1287,13 +1334,6 @@ impl ChainStream for EthereumStream {
             .await
     }
 
-    async fn emit_catchup_completed(&mut self) -> anyhow::Result<()> {
-        self.events_tx
-            .send(ChainEvent::CatchupCompleted)
-            .await
-            .map_err(|err| anyhow::anyhow!("failed to emit ethereum catchup completion event: {err:?}"))
-    }
-
     async fn process_buffered_item(
         &mut self,
         item: <Self::BufferedStream as ChainBufferedStream>::Item,
@@ -1314,69 +1354,6 @@ impl ChainStream for EthereumStream {
         }
     }
 }
-
-impl ChainStream for EthereumBackgroundStream {
-    const CHAIN: Chain = Chain::Ethereum;
-    type BufferedStream = EthereumBufferedStream;
-
-    async fn livestream(&mut self) -> anyhow::Result<Option<Self::BufferedStream>> {
-        let (live_blocks_tx, live_blocks_rx) = live_blocks_channel();
-        tokio::spawn(EthereumIndexer::buffer_live_blocks(
-            Arc::new(self.indexer.client.clone()),
-            live_blocks_tx,
-        ));
-
-        Ok(Some(EthereumBufferedStream { live_blocks_rx }))
-    }
-
-    fn buffered_item_height(item: &<Self::BufferedStream as ChainBufferedStream>::Item) -> u64 {
-        item.header.number
-    }
-
-    async fn catchup_range(&mut self, anchor_height: u64) -> anyhow::Result<std::ops::Range<u64>> {
-        let catchup_start = EthereumIndexer::catchup_start_block_number(
-            self.indexer.backlog.processed_block(Chain::Ethereum).await,
-            anchor_height,
-        );
-
-        Ok(catchup_start..anchor_height)
-    }
-
-    async fn process_catchup_height(&mut self, height: u64) -> anyhow::Result<()> {
-        if height % 10 == 0 {
-            tracing::info!(height, "processed ethereum catchup height attempt");
-        }
-
-        self.indexer
-            .process_height(height, self.events_tx.clone())
-            .await
-    }
-
-    async fn emit_catchup_completed(&mut self) -> anyhow::Result<()> {
-        self.events_tx
-            .send(ChainEvent::CatchupCompleted)
-            .await
-            .map_err(|err| anyhow::anyhow!("failed to emit ethereum catchup completion event: {err:?}"))
-    }
-
-    async fn process_buffered_item(
-        &mut self,
-        item: <Self::BufferedStream as ChainBufferedStream>::Item,
-    ) -> anyhow::Result<()> {
-        self.indexer
-            .process_live_block(item, self.events_tx.clone())
-            .await
-    }
-
-    fn retry_delay(&self) -> Duration {
-        Duration::from_millis(500)
-    }
-
-    async fn next_event(&mut self) -> Option<ChainEvent> {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::EthereumIndexer;
