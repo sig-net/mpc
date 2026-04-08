@@ -174,74 +174,73 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(
     catchup_completed_tx: oneshot::Sender<()>,
 ) {
     let mut catchup_completed_tx = Some(catchup_completed_tx);
-    tracing::info!(chain = %chain, "starting chain stream orchestration");
+    tracing::info!(%chain, "starting chain stream orchestration");
 
-    match indexer.livestream().await {
-        Ok(Some(mut buffered)) => {
-            let Some(anchor_item) = buffered.initial().await else {
-                tracing::warn!(chain = %chain, "buffered livestream ended before anchor item");
-                return;
-            };
-
-            let anchor_height = I::buffered_item_height(&anchor_item);
-            let catchup_range = loop {
-                match indexer.catchup_range(anchor_height).await {
-                    Ok(range) => break range,
-                    Err(err) => {
-                        tracing::warn!(?err, chain = %chain, anchor_height, "failed to determine catchup range; retrying");
-                        tokio::time::sleep(indexer.retry_delay()).await;
-                    }
-                }
-            };
-
-            for height in catchup_range {
-                loop {
-                    match indexer.process_catchup_height(height).await {
-                        Ok(()) => break,
-                        Err(err) => {
-                            tracing::warn!(?err, chain = %chain, height, "catchup height processing failed; retrying");
-                            tokio::time::sleep(indexer.retry_delay()).await;
-                        }
-                    }
-                }
-            }
-
-            if let Err(err) = indexer.emit_catchup_completed().await {
-                tracing::warn!(?err, chain = %chain, "failed to emit catchup completion event");
-                return;
-            }
-
-            if let Some(tx) = catchup_completed_tx.take() {
-                let _ = tx.send(());
-            }
-
-            let mut next_item = Some(anchor_item);
-            loop {
-                let item = match next_item.take() {
-                    Some(item) => item,
-                    None => match buffered.next().await {
-                        Some(item) => item,
-                        None => break,
-                    },
-                };
-
-                match indexer.process_buffered_item(item.clone()).await {
-                    Ok(()) => {}
-                    Err(err) => {
-                        tracing::warn!(?err, chain = %chain, "buffered item processing failed; retrying");
-                        tokio::time::sleep(indexer.retry_delay()).await;
-                        next_item = Some(item);
-                    }
-                }
-            }
-        }
-        Ok(None) => {
-            if let Some(tx) = catchup_completed_tx.take() {
-                let _ = tx.send(());
-            }
-        }
+    let buffered = match indexer.livestream().await {
+        Ok(buffered) => buffered,
         Err(err) => {
-            tracing::error!(?err, chain = %chain, "failed to initialize livestream");
+            tracing::error!(?err, %chain, "failed to initialize livestream");
+            return;
+        }
+    };
+    let Some(mut buffered) = buffered else {
+        if let Some(tx) = catchup_completed_tx.take() {
+            let _ = tx.send(());
+        }
+        return;
+    };
+
+    let Some(anchor_item) = buffered.initial().await else {
+        tracing::warn!(%chain, "buffered livestream ended before anchor item");
+        return;
+    };
+
+    let anchor_height = I::buffered_item_height(&anchor_item);
+    let catchup_range = loop {
+        match indexer.catchup_range(anchor_height).await {
+            Ok(range) => break range,
+            Err(err) => {
+                tracing::warn!(?err, %chain, anchor_height, "failed to determine catchup range; retrying");
+                tokio::time::sleep(indexer.retry_delay()).await;
+            }
+        }
+    };
+
+    for height in catchup_range {
+        loop {
+            match indexer.process_catchup_height(height).await {
+                Ok(()) => break,
+                Err(err) => {
+                    tracing::warn!(?err, %chain, height, "catchup height processing failed; retrying");
+                    tokio::time::sleep(indexer.retry_delay()).await;
+                }
+            }
+        }
+    }
+
+    if let Err(err) = indexer.emit_catchup_completed().await {
+        tracing::warn!(?err, %chain, "failed to emit catchup completion event");
+        return;
+    }
+
+    if let Some(tx) = catchup_completed_tx.take() {
+        let _ = tx.send(());
+    }
+
+    let mut next_item = Some(anchor_item);
+    loop {
+        let item = match next_item.take() {
+            Some(item) => item,
+            None => match buffered.next().await {
+                Some(item) => item,
+                None => break,
+            },
+        };
+
+        if let Err(err) = indexer.process_buffered_item(item.clone()).await {
+            tracing::warn!(?err, %chain, "buffered item processing failed; retrying");
+            tokio::time::sleep(indexer.retry_delay()).await;
+            next_item = Some(item);
         }
     }
 }
