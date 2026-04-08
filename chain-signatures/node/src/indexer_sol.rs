@@ -293,7 +293,7 @@ type Result<T> = anyhow::Result<T>;
 
 /// Solana stream that implements the new ChainStream abstraction
 pub struct SolanaStream {
-    rx: mpsc::Receiver<ChainEvent>,
+    rx: Option<mpsc::Receiver<ChainEvent>>,
     start_state: Option<SolanaStreamStartState>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -328,7 +328,7 @@ impl SolanaStream {
         let (tx, rx) = crate::stream::channel();
 
         Some(SolanaStream {
-            rx,
+            rx: Some(rx),
             start_state: Some(SolanaStreamStartState {
                 program_id,
                 rpc_http_url: sol.rpc_http_url.clone(),
@@ -342,6 +342,15 @@ impl SolanaStream {
 
 impl ChainStream for SolanaStream {
     const CHAIN: Chain = Chain::Solana;
+    type BufferedStream = crate::stream::DisabledBufferedStream;
+
+    fn take_event_receiver(&mut self) -> Option<mpsc::Receiver<ChainEvent>> {
+        self.rx.take()
+    }
+
+    fn buffered_item_height(_item: &<Self::BufferedStream as crate::stream::ChainBufferedStream>::Item) -> u64 {
+        0
+    }
 
     async fn start(&mut self) {
         let Some(start_state) = self.start_state.take() else {
@@ -363,7 +372,10 @@ impl ChainStream for SolanaStream {
     }
 
     async fn next_event(&mut self) -> Option<ChainEvent> {
-        self.rx.recv().await
+        match self.rx.as_mut() {
+            Some(rx) => rx.recv().await,
+            None => None,
+        }
     }
 }
 
