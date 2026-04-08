@@ -326,8 +326,9 @@ async fn test_basic_generate_keys() {
         panic!("should reach running state eventually, final state was {protocol_state:?}");
     }
 
-    // give time to make all nodes aware that the protocol is running now
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Wait for each node to publish its generated key material instead of
+    // assuming a fixed propagation delay.
+    network.wait_for_key_info().await;
 
     let mut data = BTreeMap::new();
     for node in &network.nodes {

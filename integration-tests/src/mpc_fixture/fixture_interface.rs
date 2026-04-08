@@ -82,6 +82,12 @@ impl MpcFixture {
         }
     }
 
+    pub async fn wait_for_key_info(&self) {
+        for node in &self.nodes {
+            node.wait_for_key_info().await;
+        }
+    }
+
     pub async fn assert_triples(&self, threshold_per_node: usize, timeout: Duration) {
         let result = tokio::time::timeout(timeout, self.wait_for_triples(threshold_per_node)).await;
         if result.is_err() {
@@ -139,6 +145,14 @@ impl MpcFixture {
 }
 
 impl MpcFixtureNode {
+    pub async fn wait_for_key_info(&self) {
+        let mut watcher = self.state.test_key_info_watcher.clone();
+        watcher
+            .wait_for(|key_info| key_info.is_some())
+            .await
+            .expect("test key info watcher should stay open");
+    }
+
     pub async fn wait_for_triples(&self, threshold_per_node: usize) {
         loop {
             let count = self.triple_storage.len_by_owner(self.me).await;
