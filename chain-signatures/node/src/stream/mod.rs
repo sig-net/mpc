@@ -348,20 +348,6 @@ pub async fn run_stream<S: ChainStream>(
         }
     }
 
-    if !catchup_completed {
-        catchup_completed = catchup_completed_rx.await.is_ok();
-    }
-
-    if catchup_completed
-        && recovered.requeue_mode == crate::backlog::RecoveryRequeueMode::AfterCatchup
-    {
-        if !recovered.pending.is_empty() {
-            requeue_recovered_sign_requests(&backlog, chain, sign_tx.clone(), &recovered.pending)
-                .await;
-            recovered.pending.clear();
-        }
-    }
-
     tracing::warn!(%chain, "indexer shut down");
 }
 

@@ -1198,7 +1198,7 @@ impl ChainIndexer for EthereumIndexer {
     }
 
     async fn process_catchup_height(&mut self, height: u64) -> anyhow::Result<()> {
-        if height % 10 == 0 {
+        if height.is_multiple_of(10) {
             tracing::info!(height, "processed ethereum catchup height attempt");
         }
 
