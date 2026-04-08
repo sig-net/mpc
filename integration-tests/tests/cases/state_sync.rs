@@ -435,7 +435,7 @@ async fn test_sync_matrix() {
             .sync(
                 caller.me,
                 caller_update,
-                responder.owned_presignatures().await,
+                vec![], // this matrix only tests triples
             )
             .await;
 

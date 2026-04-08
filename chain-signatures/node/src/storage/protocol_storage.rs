@@ -84,13 +84,8 @@ impl<A: ProtocolArtifact> ArtifactSlot<A> {
 
 impl<A: ProtocolArtifact> Drop for ArtifactSlot<A> {
     fn drop(&mut self) {
-        let storage = self.storage.clone();
-        let id = self.id;
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(async move {
-                storage.reserved.write().await.generating.remove(&id);
-            });
-        }
+        self.storage
+            .remove_reserved(self.id, ReservedKind::Generating);
     }
 }
 
@@ -107,12 +102,7 @@ pub struct ArtifactTakenDropper<A: ProtocolArtifact> {
 impl<A: ProtocolArtifact> Drop for ArtifactTakenDropper<A> {
     fn drop(&mut self) {
         if let Some(storage) = self.dropper.take() {
-            let id = self.id;
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    storage.reserved.write().await.using.remove(&id);
-                });
-            }
+            storage.remove_reserved(self.id, ReservedKind::Using);
         }
     }
 }
@@ -131,6 +121,12 @@ impl<A: ProtocolArtifact> ArtifactTaken<A> {
     pub fn take(self) -> (A, ArtifactTakenDropper<A>) {
         (self.artifact, self.storage)
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ReservedKind {
+    Generating,
+    Using,
 }
 
 /// Tracks artifact IDs that are in-flight but not yet in Redis.
@@ -212,7 +208,38 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     }
 
     fn me(&self) -> Result<Participant, StorageError> {
-        self.me.get().copied().ok_or(StorageError::NotInitialized)
+        self.me.get().copied().ok_or_else(|| {
+            tracing::error!("ProtocolStorage::set_me() was not called");
+            StorageError::NotInitialized
+        })
+    }
+
+    /// Remove an ID from the reserved state, trying synchronous lock first.
+    /// Falls back to spawning an async task if the lock is contended.
+    fn remove_reserved(&self, id: A::Id, kind: ReservedKind) {
+        let reserved = self.reserved.clone();
+        if let Ok(mut state) = reserved.try_write() {
+            match kind {
+                ReservedKind::Generating => state.generating.remove(&id),
+                ReservedKind::Using => state.using.remove(&id),
+            };
+            return;
+        }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let mut state = reserved.write().await;
+                match kind {
+                    ReservedKind::Generating => state.generating.remove(&id),
+                    ReservedKind::Using => state.using.remove(&id),
+                };
+            });
+        } else {
+            tracing::warn!(
+                id,
+                ?kind,
+                "dropped with contended lock outside tokio runtime; id may remain reserved"
+            );
+        }
     }
 
     async fn connect(&self) -> Option<Connection> {
