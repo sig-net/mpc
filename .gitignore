@@ -10,6 +10,7 @@
 
 tmp
 *.log
+*.log.*.gz
 
 # Artifacts that may be left over
 **/*-secret-manager-*
