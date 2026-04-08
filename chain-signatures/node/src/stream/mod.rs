@@ -11,6 +11,7 @@ use crate::stream::ops::{
     RespondBidirectionalEvent, SignatureRespondedEvent,
 };
 
+use async_trait::async_trait;
 use std::time::Duration;
 use std::{ops::Range, vec::Vec};
 use tokio::sync::mpsc;
@@ -92,6 +93,7 @@ pub enum ExecutionOutcome {
 
 pub struct DisabledBufferedStream;
 
+#[async_trait]
 impl ChainBufferedStream for DisabledBufferedStream {
     type Item = ();
 
@@ -104,7 +106,7 @@ impl ChainBufferedStream for DisabledBufferedStream {
     }
 }
 
-#[allow(async_fn_in_trait)]
+#[async_trait]
 pub trait ChainBufferedStream: Send + 'static {
     type Item: Clone + Send + 'static;
 
@@ -112,15 +114,12 @@ pub trait ChainBufferedStream: Send + 'static {
     async fn next(&mut self) -> Option<Self::Item>;
 }
 
-#[allow(async_fn_in_trait)]
-pub trait ChainStream: Send + 'static {
-    const CHAIN: Chain;
+#[async_trait]
+pub trait ChainIndexer: Send + 'static {
     type BufferedStream: ChainBufferedStream;
 
-    async fn start(&mut self) -> oneshot::Receiver<()> {
-        let (tx, rx) = oneshot::channel();
-        let _ = tx.send(());
-        rx
+    async fn emit_catchup_completed(&mut self) -> anyhow::Result<()> {
+        Ok(())
     }
 
     async fn livestream(&mut self) -> anyhow::Result<Option<Self::BufferedStream>> {
@@ -150,44 +149,66 @@ pub trait ChainStream: Send + 'static {
         Duration::from_millis(500)
     }
 
+}
+
+pub struct DisabledChainIndexer;
+
+#[async_trait]
+impl ChainIndexer for DisabledChainIndexer {
+    type BufferedStream = DisabledBufferedStream;
+}
+
+#[async_trait]
+pub trait ChainStream: Send + 'static {
+    const CHAIN: Chain;
+    type Indexer: ChainIndexer;
+
+    async fn start(&mut self) -> anyhow::Result<Self::Indexer>;
+
     async fn next_event(&mut self) -> Option<ChainEvent>;
 }
 
-pub(crate) async fn start_chain_stream<S: ChainStream>(
-    stream: &mut S,
+pub(crate) async fn start_chain_stream<I: ChainIndexer>(
+    chain: Chain,
+    indexer: &mut I,
     catchup_completed_tx: oneshot::Sender<()>,
 ) {
     let mut catchup_completed_tx = Some(catchup_completed_tx);
-    tracing::info!(chain = %S::CHAIN, "starting chain stream orchestration");
+    tracing::info!(chain = %chain, "starting chain stream orchestration");
 
-    match stream.livestream().await {
+    match indexer.livestream().await {
         Ok(Some(mut buffered)) => {
             let Some(anchor_item) = buffered.initial().await else {
-                tracing::warn!(chain = %S::CHAIN, "buffered livestream ended before anchor item");
+                tracing::warn!(chain = %chain, "buffered livestream ended before anchor item");
                 return;
             };
 
-            let anchor_height = S::buffered_item_height(&anchor_item);
+            let anchor_height = I::buffered_item_height(&anchor_item);
             let catchup_range = loop {
-                match stream.catchup_range(anchor_height).await {
+                match indexer.catchup_range(anchor_height).await {
                     Ok(range) => break range,
                     Err(err) => {
-                        tracing::warn!(?err, chain = %S::CHAIN, anchor_height, "failed to determine catchup range; retrying");
-                        tokio::time::sleep(stream.retry_delay()).await;
+                        tracing::warn!(?err, chain = %chain, anchor_height, "failed to determine catchup range; retrying");
+                        tokio::time::sleep(indexer.retry_delay()).await;
                     }
                 }
             };
 
             for height in catchup_range {
                 loop {
-                    match stream.process_catchup_height(height).await {
+                    match indexer.process_catchup_height(height).await {
                         Ok(()) => break,
                         Err(err) => {
-                            tracing::warn!(?err, chain = %S::CHAIN, height, "catchup height processing failed; retrying");
-                            tokio::time::sleep(stream.retry_delay()).await;
+                            tracing::warn!(?err, chain = %chain, height, "catchup height processing failed; retrying");
+                            tokio::time::sleep(indexer.retry_delay()).await;
                         }
                     }
                 }
+            }
+
+            if let Err(err) = indexer.emit_catchup_completed().await {
+                tracing::warn!(?err, chain = %chain, "failed to emit catchup completion event");
+                return;
             }
 
             if let Some(tx) = catchup_completed_tx.take() {
@@ -204,27 +225,37 @@ pub(crate) async fn start_chain_stream<S: ChainStream>(
                     },
                 };
 
-                match stream.process_buffered_item(item.clone()).await {
+                match indexer.process_buffered_item(item.clone()).await {
                     Ok(()) => {}
                     Err(err) => {
-                        tracing::warn!(?err, chain = %S::CHAIN, "buffered item processing failed; retrying");
-                        tokio::time::sleep(stream.retry_delay()).await;
+                        tracing::warn!(?err, chain = %chain, "buffered item processing failed; retrying");
+                        tokio::time::sleep(indexer.retry_delay()).await;
                         next_item = Some(item);
                     }
                 }
             }
         }
         Ok(None) => {
-            stream.start().await;
-
             if let Some(tx) = catchup_completed_tx.take() {
                 let _ = tx.send(());
             }
         }
         Err(err) => {
-            tracing::error!(?err, chain = %S::CHAIN, "failed to initialize livestream");
+            tracing::error!(?err, chain = %chain, "failed to initialize livestream");
         }
     }
+}
+
+pub async fn spawn_stream_indexer<S: ChainStream>(
+    stream: &mut S,
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    let mut indexer = stream.start().await?;
+    let chain = S::CHAIN;
+
+    Ok(tokio::spawn(async move {
+        let (catchup_completed_tx, _catchup_completed_rx) = oneshot::channel();
+        start_chain_stream(chain, &mut indexer, catchup_completed_tx).await;
+    }))
 }
 
 /// Shared indexer loop: recovers backlog then processes events from the stream
@@ -250,9 +281,20 @@ pub async fn run_stream<S: ChainStream>(
     )
     .await;
 
-    let mut catchup_completed_rx = stream.start().await;
-    let mut catchup_completed = false;
+    let mut indexer = match stream.start().await {
+        Ok(indexer) => indexer,
+        Err(err) => {
+            tracing::error!(?err, chain = %chain, "failed to start stream");
+            return;
+        }
+    };
 
+    let (catchup_completed_tx, mut catchup_completed_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        start_chain_stream(chain, &mut indexer, catchup_completed_tx).await;
+    });
+
+    let mut catchup_completed = false;
     loop {
         tokio::select! {
             result = &mut catchup_completed_rx, if !catchup_completed => {
@@ -335,6 +377,10 @@ pub async fn run_stream<S: ChainStream>(
         }
     }
 
+    if !catchup_completed {
+        catchup_completed = catchup_completed_rx.await.is_ok();
+    }
+
     if catchup_completed && recovered.requeue_mode == crate::backlog::RecoveryRequeueMode::AfterCatchup {
         if !recovered.pending.is_empty() {
             requeue_recovered_sign_requests(
@@ -381,12 +427,14 @@ mod tests {
         events: Vec<Option<ChainEvent>>,
     }
 
+    #[async_trait]
     impl ChainStream for TestEventStream {
         const CHAIN: Chain = Chain::Solana;
-        type BufferedStream = DisabledBufferedStream;
 
-        fn buffered_item_height(_item: &<Self::BufferedStream as ChainBufferedStream>::Item) -> u64 {
-            0
+        type Indexer = DisabledChainIndexer;
+
+        async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
+            Ok(DisabledChainIndexer)
         }
 
         async fn next_event(&mut self) -> Option<ChainEvent> {
@@ -401,6 +449,7 @@ mod tests {
         items: Vec<u64>,
     }
 
+    #[async_trait]
     impl ChainBufferedStream for TestBufferedStream {
         type Item = u64;
 
@@ -466,20 +515,28 @@ mod tests {
 
     struct TestLinearStream {
         control: TestLinearControl,
-        events: Vec<Option<ChainEvent>>,
+        rx: mpsc::Receiver<ChainEvent>,
+        tx: mpsc::Sender<ChainEvent>,
     }
 
     impl TestLinearStream {
         fn new(control: TestLinearControl) -> Self {
+            let (tx, rx) = mpsc::channel(16);
             Self {
                 control,
-                events: Vec::new(),
+                rx,
+                tx,
             }
         }
     }
 
-    impl ChainStream for TestLinearStream {
-        const CHAIN: Chain = Chain::Ethereum;
+    struct TestLinearIndexer {
+        control: TestLinearControl,
+        tx: mpsc::Sender<ChainEvent>,
+    }
+
+    #[async_trait]
+    impl ChainIndexer for TestLinearIndexer {
         type BufferedStream = TestBufferedStream;
 
         async fn livestream(&mut self) -> anyhow::Result<Option<Self::BufferedStream>> {
@@ -505,7 +562,7 @@ mod tests {
             if TestLinearControl::consume_failure(&self.control.catchup_failures, height) {
                 anyhow::bail!("synthetic catchup failure at height {height}");
             }
-            self.events.push(Some(ChainEvent::Block(height)));
+            self.tx.send(ChainEvent::Block(height)).await?;
             Ok(())
         }
 
@@ -516,27 +573,38 @@ mod tests {
             if TestLinearControl::consume_failure(&self.control.live_failures, item) {
                 anyhow::bail!("synthetic live failure at height {item}");
             }
-            self.events.push(Some(ChainEvent::Block(item)));
+            self.tx.send(ChainEvent::Block(item)).await?;
             Ok(())
         }
 
         fn retry_delay(&self) -> Duration {
             self.control.retry_delay()
         }
+    }
+
+    #[async_trait]
+    impl ChainStream for TestLinearStream {
+        const CHAIN: Chain = Chain::Ethereum;
+        type Indexer = TestLinearIndexer;
+
+        async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
+            Ok(TestLinearIndexer {
+                control: self.control.clone(),
+                tx: self.tx.clone(),
+            })
+        }
 
         async fn next_event(&mut self) -> Option<ChainEvent> {
-            if self.events.is_empty() {
-                return None;
-            }
-            self.events.remove(0)
+            self.rx.recv().await
         }
     }
 
     #[tokio::test]
     async fn test_run_linearized_source_orders_catchup_before_live() {
         let mut stream = TestLinearStream::new(TestLinearControl::new(Some(1), vec![4, 5]));
+        let mut indexer = stream.start().await.unwrap();
         let (tx, _rx) = oneshot::channel();
-        start_chain_stream(&mut stream, tx).await;
+        start_chain_stream(Chain::Ethereum, &mut indexer, tx).await;
 
         let mut observed = Vec::new();
         while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
@@ -560,8 +628,9 @@ mod tests {
             .fail_catchup_once(3)
             .fail_live_once(4),
         );
+        let mut indexer = stream.start().await.unwrap();
         let (tx, _rx) = oneshot::channel();
-        start_chain_stream(&mut stream, tx).await;
+        start_chain_stream(Chain::Ethereum, &mut indexer, tx).await;
 
         let mut observed = Vec::new();
         while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
@@ -670,19 +739,14 @@ mod tests {
             event: Option<ChainEvent>,
         }
 
+        #[async_trait]
         impl ChainStream for StartAwareStream {
             const CHAIN: Chain = Chain::Solana;
-            type BufferedStream = DisabledBufferedStream;
+            type Indexer = DisabledChainIndexer;
 
-            fn buffered_item_height(_item: &<Self::BufferedStream as ChainBufferedStream>::Item) -> u64 {
-                0
-            }
-
-            async fn start(&mut self) -> oneshot::Receiver<()> {
+            async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
                 self.started = true;
-                let (tx, rx) = oneshot::channel();
-                let _ = tx.send(());
-                rx
+                Ok(DisabledChainIndexer)
             }
 
             async fn next_event(&mut self) -> Option<ChainEvent> {
@@ -763,12 +827,13 @@ mod tests {
             rx: mpsc::Receiver<ChainEvent>,
         }
 
+        #[async_trait]
         impl ChainStream for LocalStream {
             const CHAIN: Chain = Chain::Solana;
-            type BufferedStream = DisabledBufferedStream;
+            type Indexer = DisabledChainIndexer;
 
-            fn buffered_item_height(_item: &<Self::BufferedStream as ChainBufferedStream>::Item) -> u64 {
-                0
+            async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
+                Ok(DisabledChainIndexer)
             }
 
             async fn next_event(&mut self) -> Option<ChainEvent> {
@@ -1010,12 +1075,13 @@ mod tests {
             events: Vec<Option<ChainEvent>>,
         }
 
+        #[async_trait]
         impl ChainStream for EthereumLocalStream {
             const CHAIN: Chain = Chain::Ethereum;
-            type BufferedStream = DisabledBufferedStream;
+            type Indexer = DisabledChainIndexer;
 
-            fn buffered_item_height(_item: &<Self::BufferedStream as ChainBufferedStream>::Item) -> u64 {
-                0
+            async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
+                Ok(DisabledChainIndexer)
             }
 
             async fn next_event(&mut self) -> Option<ChainEvent> {

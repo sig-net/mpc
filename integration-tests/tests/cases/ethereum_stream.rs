@@ -21,6 +21,7 @@ use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::ops::SignBidirectionalEvent as NodeSignBidirectionalEvent;
 use mpc_node::stream::ops::SignatureRespondedEvent;
+use mpc_node::stream::spawn_stream_indexer;
 use mpc_node::stream::{run_stream, ChainEvent, ChainStream};
 use mpc_node::util::current_unix_timestamp;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
@@ -299,7 +300,29 @@ fn test_bidirectional_event() -> NodeSignBidirectionalEvent {
     })
 }
 
-async fn next_event_within(client: &mut EthereumStream, duration: Duration) -> Result<ChainEvent> {
+struct StartedEthereumStream {
+    stream: EthereumStream,
+    _indexer_task: tokio::task::JoinHandle<()>,
+}
+
+impl std::ops::Deref for StartedEthereumStream {
+    type Target = EthereumStream;
+
+    fn deref(&self) -> &Self::Target {
+        &self.stream
+    }
+}
+
+impl std::ops::DerefMut for StartedEthereumStream {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.stream
+    }
+}
+
+async fn next_event_within(
+    client: &mut StartedEthereumStream,
+    duration: Duration,
+) -> Result<ChainEvent> {
     timeout(duration, async {
         loop {
             if let Some(event) = client.next_event().await {
@@ -314,10 +337,13 @@ async fn next_event_within(client: &mut EthereumStream, duration: Duration) -> R
 async fn stream_ethereum(
     ctx: &EthereumTestEnvironment,
     backlog: Backlog,
-) -> Result<EthereumStream> {
+) -> Result<StartedEthereumStream> {
     let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog).await?;
-    ChainStream::start(&mut stream).await;
-    Ok(stream)
+    let indexer_task = spawn_stream_indexer(&mut stream).await?;
+    Ok(StartedEthereumStream {
+        stream,
+        _indexer_task: indexer_task,
+    })
 }
 
 #[test_log::test(tokio::test)]

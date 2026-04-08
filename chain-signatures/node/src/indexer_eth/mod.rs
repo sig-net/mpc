@@ -9,8 +9,9 @@ use crate::protocol::{Chain, IndexedSignRequest};
 use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::SignStatus;
 use crate::stream::{
-    ChainBufferedStream, ChainEvent, ChainStream, ExecutionOutcome,
+    ChainBufferedStream, ChainEvent, ChainIndexer, ChainStream, ExecutionOutcome,
 };
+use async_trait::async_trait;
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
@@ -27,7 +28,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
@@ -84,6 +84,7 @@ pub struct EthereumBufferedStream {
     live_blocks_rx: mpsc::Receiver<alloy::rpc::types::Block>,
 }
 
+#[async_trait]
 impl ChainBufferedStream for EthereumBufferedStream {
     type Item = alloy::rpc::types::Block;
 
@@ -1178,23 +1179,13 @@ impl EthereumIndexer {
 /// Construction is side-effect free; the shared `run_stream()` loop calls
 /// `start()` after recovery has completed.
 pub struct EthereumStream {
-    events_tx: mpsc::Sender<ChainEvent>,
     events_rx: Option<mpsc::Receiver<ChainEvent>>,
-    catchup_completed_rx: Option<tokio::sync::oneshot::Receiver<()>>,
-    indexer: EthereumIndexer,
-    tasks: Vec<JoinHandle<()>>,
+    start_state: Option<EthereumStreamIndexer>,
 }
 
-impl Clone for EthereumStream {
-    fn clone(&self) -> Self {
-        Self {
-            events_tx: self.events_tx.clone(),
-            events_rx: None,
-            catchup_completed_rx: None,
-            indexer: self.indexer.clone(),
-            tasks: Vec::new(),
-        }
-    }
+pub struct EthereumStreamIndexer {
+    events_tx: mpsc::Sender<ChainEvent>,
+    indexer: EthereumIndexer,
 }
 
 impl EthereumStream {
@@ -1218,42 +1209,15 @@ impl EthereumStream {
         let (events_tx, events_rx) = crate::stream::channel();
 
         Ok(Self {
-            events_tx,
             events_rx: Some(events_rx),
-            catchup_completed_rx: None,
-            indexer,
-            tasks: Vec::new(),
+            start_state: Some(EthereumStreamIndexer { events_tx, indexer }),
         })
     }
-
-    pub fn start(&mut self) {
-        let (catchup_completed_tx, catchup_completed_rx) = tokio::sync::oneshot::channel();
-        let mut producer = self.clone();
-        self.tasks.push(tokio::spawn(async move {
-            crate::stream::start_chain_stream(&mut producer, catchup_completed_tx).await;
-        }));
-        self.catchup_completed_rx = Some(catchup_completed_rx);
-    }
 }
 
-impl Drop for EthereumStream {
-    fn drop(&mut self) {
-        for t in &self.tasks {
-            t.abort();
-        }
-    }
-}
-
-impl ChainStream for EthereumStream {
-    const CHAIN: Chain = Chain::Ethereum;
+#[async_trait]
+impl ChainIndexer for EthereumStreamIndexer {
     type BufferedStream = EthereumBufferedStream;
-
-    async fn start(&mut self) -> tokio::sync::oneshot::Receiver<()> {
-        self.start();
-        self.catchup_completed_rx
-            .take()
-            .expect("ethereum stream start() called without catchup receiver")
-    }
 
     async fn livestream(&mut self) -> anyhow::Result<Option<Self::BufferedStream>> {
         let (live_blocks_tx, live_blocks_rx) = live_blocks_channel();
@@ -1299,6 +1263,19 @@ impl ChainStream for EthereumStream {
 
     fn retry_delay(&self) -> Duration {
         Duration::from_millis(500)
+    }
+
+}
+
+#[async_trait]
+impl ChainStream for EthereumStream {
+    const CHAIN: Chain = Chain::Ethereum;
+    type Indexer = EthereumStreamIndexer;
+
+    async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
+        self.start_state
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("ethereum stream already started"))
     }
 
     async fn next_event(&mut self) -> Option<ChainEvent> {
