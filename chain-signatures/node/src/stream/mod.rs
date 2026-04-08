@@ -95,23 +95,23 @@ pub struct DisabledBufferedStream;
 
 #[async_trait]
 impl ChainBufferedStream for DisabledBufferedStream {
-    type Item = ();
+    type Block = ();
 
-    async fn initial(&mut self) -> Option<Self::Item> {
+    async fn initial(&mut self) -> Option<Self::Block> {
         None
     }
 
-    async fn next(&mut self) -> Option<Self::Item> {
+    async fn next(&mut self) -> Option<Self::Block> {
         None
     }
 }
 
 #[async_trait]
 pub trait ChainBufferedStream: Send + 'static {
-    type Item: Clone + Send + 'static;
+    type Block: Send + 'static;
 
-    async fn initial(&mut self) -> Option<Self::Item>;
-    async fn next(&mut self) -> Option<Self::Item>;
+    async fn initial(&mut self) -> Option<Self::Block>;
+    async fn next(&mut self) -> Option<Self::Block>;
 }
 
 #[async_trait]
@@ -122,7 +122,8 @@ pub trait ChainIndexer: Send + 'static {
         Ok(None)
     }
 
-    fn buffered_item_height(_item: &<Self::BufferedStream as ChainBufferedStream>::Item) -> u64 {
+    fn buffered_item_height(block: &<Self::BufferedStream as ChainBufferedStream>::Block) -> u64 {
+        let _ = block;
         0
     }
 
@@ -136,8 +137,9 @@ pub trait ChainIndexer: Send + 'static {
 
     async fn process_buffered_block(
         &mut self,
-        _item: <Self::BufferedStream as ChainBufferedStream>::Item,
+        block: <Self::BufferedStream as ChainBufferedStream>::Block,
     ) -> anyhow::Result<()> {
+        let _ = block;
         Ok(())
     }
 
@@ -159,7 +161,6 @@ pub trait ChainStream: Send + 'static {
     type Indexer: ChainIndexer;
 
     async fn start(&mut self) -> anyhow::Result<Self::Indexer>;
-
     async fn next_event(&mut self) -> Option<ChainEvent>;
 }
 
@@ -405,16 +406,16 @@ mod tests {
 
     #[async_trait]
     impl ChainBufferedStream for TestBufferedStream {
-        type Item = u64;
+        type Block = u64;
 
-        async fn initial(&mut self) -> Option<Self::Item> {
+        async fn initial(&mut self) -> Option<Self::Block> {
             if self.items.is_empty() {
                 return None;
             }
             Some(self.items.remove(0))
         }
 
-        async fn next(&mut self) -> Option<Self::Item> {
+        async fn next(&mut self) -> Option<Self::Block> {
             if self.items.is_empty() {
                 return None;
             }
@@ -495,8 +496,10 @@ mod tests {
             }))
         }
 
-        fn buffered_item_height(item: &<Self::BufferedStream as ChainBufferedStream>::Item) -> u64 {
-            *item
+        fn buffered_item_height(
+            block: &<Self::BufferedStream as ChainBufferedStream>::Block,
+        ) -> u64 {
+            *block
         }
 
         async fn catchup_range(&mut self, anchor_height: u64) -> Range<u64> {
@@ -518,12 +521,12 @@ mod tests {
 
         async fn process_buffered_block(
             &mut self,
-            item: <Self::BufferedStream as ChainBufferedStream>::Item,
+            block: <Self::BufferedStream as ChainBufferedStream>::Block,
         ) -> anyhow::Result<()> {
-            if TestLinearControl::consume_failure(&self.control.live_failures, item) {
-                anyhow::bail!("synthetic live failure at height {item}");
+            if TestLinearControl::consume_failure(&self.control.live_failures, block) {
+                anyhow::bail!("synthetic live failure at height {block}");
             }
-            self.tx.send(ChainEvent::Block(item)).await?;
+            self.tx.send(ChainEvent::Block(block)).await?;
             Ok(())
         }
 

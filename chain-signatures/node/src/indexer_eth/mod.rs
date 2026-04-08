@@ -84,13 +84,13 @@ pub struct EthereumBufferedStream {
 
 #[async_trait]
 impl ChainBufferedStream for EthereumBufferedStream {
-    type Item = alloy::rpc::types::Block;
+    type Block = alloy::rpc::types::Block;
 
-    async fn initial(&mut self) -> Option<Self::Item> {
+    async fn initial(&mut self) -> Option<Self::Block> {
         self.live_blocks_rx.recv().await
     }
 
-    async fn next(&mut self) -> Option<Self::Item> {
+    async fn next(&mut self) -> Option<Self::Block> {
         self.live_blocks_rx.recv().await
     }
 }
@@ -1206,8 +1206,8 @@ impl ChainIndexer for EthereumIndexer {
         Ok(Some(EthereumBufferedStream { live_blocks_rx }))
     }
 
-    fn buffered_item_height(item: &<Self::BufferedStream as ChainBufferedStream>::Item) -> u64 {
-        item.header.number
+    fn buffered_item_height(block: &<Self::BufferedStream as ChainBufferedStream>::Block) -> u64 {
+        block.header.number
     }
 
     async fn catchup_range(&mut self, anchor_height: u64) -> std::ops::Range<u64> {
@@ -1229,9 +1229,9 @@ impl ChainIndexer for EthereumIndexer {
 
     async fn process_buffered_block(
         &mut self,
-        item: <Self::BufferedStream as ChainBufferedStream>::Item,
+        block: <Self::BufferedStream as ChainBufferedStream>::Block,
     ) -> anyhow::Result<()> {
-        self.process_live_block(item).await
+        self.process_live_block(block).await
     }
 
     fn retry_delay(&self) -> Duration {
