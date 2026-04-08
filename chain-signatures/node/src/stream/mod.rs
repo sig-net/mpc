@@ -168,7 +168,7 @@ pub trait ChainStream: Send + 'static {
     async fn next_event(&mut self) -> Option<ChainEvent>;
 }
 
-pub(crate) async fn start_chain_stream<I: ChainIndexer>(
+pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(
     chain: Chain,
     indexer: &mut I,
     catchup_completed_tx: oneshot::Sender<()>,
@@ -254,7 +254,7 @@ pub async fn spawn_stream_indexer<S: ChainStream>(
 
     Ok(tokio::spawn(async move {
         let (catchup_completed_tx, _catchup_completed_rx) = oneshot::channel();
-        start_chain_stream(chain, &mut indexer, catchup_completed_tx).await;
+        catchup_then_livestream(chain, &mut indexer, catchup_completed_tx).await;
     }))
 }
 
@@ -290,7 +290,7 @@ pub async fn run_stream<S: ChainStream>(
 
     let (catchup_completed_tx, mut catchup_completed_rx) = oneshot::channel();
     tokio::spawn(async move {
-        start_chain_stream(chain, &mut indexer, catchup_completed_tx).await;
+        catchup_then_livestream(chain, &mut indexer, catchup_completed_tx).await;
     });
 
     let mut catchup_completed = false;
@@ -604,7 +604,7 @@ mod tests {
         let mut stream = TestLinearStream::new(TestLinearControl::new(Some(1), vec![4, 5]));
         let mut indexer = stream.start().await.unwrap();
         let (tx, _rx) = oneshot::channel();
-        start_chain_stream(Chain::Ethereum, &mut indexer, tx).await;
+        catchup_then_livestream(Chain::Ethereum, &mut indexer, tx).await;
 
         let mut observed = Vec::new();
         while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
@@ -630,7 +630,7 @@ mod tests {
         );
         let mut indexer = stream.start().await.unwrap();
         let (tx, _rx) = oneshot::channel();
-        start_chain_stream(Chain::Ethereum, &mut indexer, tx).await;
+        catchup_then_livestream(Chain::Ethereum, &mut indexer, tx).await;
 
         let mut observed = Vec::new();
         while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())

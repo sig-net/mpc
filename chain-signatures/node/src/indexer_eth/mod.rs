@@ -43,7 +43,7 @@ pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
 // This is the maximum number of blocks that Helios can look back to
 const MAX_CATCHUP_BLOCKS: u64 = 8191;
 
-const MAX_LIVE_BLOCK_BUFFER: usize = 10000;
+const MAX_LIVE_BLOCK_BUFFER: usize = 16384;
 
 fn live_blocks_channel() -> (
     mpsc::Sender<alloy::rpc::types::Block>,
@@ -1173,40 +1173,6 @@ impl EthereumIndexer {
     }
 }
 
-/// Ethereum indexer stream implementing the `ChainStream` trait.
-/// Construction is side-effect free; the shared `run_stream()` loop calls
-/// `start()` after recovery has completed.
-pub struct EthereumStream {
-    events_rx: Option<mpsc::Receiver<ChainEvent>>,
-    start_state: Option<EthereumIndexer>,
-}
-
-impl EthereumStream {
-    pub async fn new(eth: Option<EthConfig>, backlog: Backlog) -> anyhow::Result<Self> {
-        let Some(eth) = eth else {
-            tracing::warn!(
-                "ethereum indexer is disabled: no EthConfig provided \
-                 (check that all --eth-* CLI flags were supplied)"
-            );
-            return Err(anyhow::anyhow!(
-                "ethereum indexer is disabled: no EthConfig provided"
-            ));
-        };
-        tracing::info!(
-            eth_config = ?eth,
-            "creating ethereum indexer stream"
-        );
-
-        let (events_tx, events_rx) = crate::stream::channel();
-        let indexer = EthereumIndexer::new(eth, backlog, events_tx).await?;
-
-        Ok(Self {
-            events_rx: Some(events_rx),
-            start_state: Some(indexer),
-        })
-    }
-}
-
 #[async_trait]
 impl ChainIndexer for EthereumIndexer {
     type BufferedStream = EthereumBufferedStream;
@@ -1253,6 +1219,40 @@ impl ChainIndexer for EthereumIndexer {
         Duration::from_millis(500)
     }
 
+}
+
+/// Ethereum indexer stream implementing the `ChainStream` trait.
+/// Construction is side-effect free; the shared `run_stream()` loop calls
+/// `start()` after recovery has completed.
+pub struct EthereumStream {
+    events_rx: Option<mpsc::Receiver<ChainEvent>>,
+    start_state: Option<EthereumIndexer>,
+}
+
+impl EthereumStream {
+    pub async fn new(eth: Option<EthConfig>, backlog: Backlog) -> anyhow::Result<Self> {
+        let Some(eth) = eth else {
+            tracing::warn!(
+                "ethereum indexer is disabled: no EthConfig provided \
+                 (check that all --eth-* CLI flags were supplied)"
+            );
+            return Err(anyhow::anyhow!(
+                "ethereum indexer is disabled: no EthConfig provided"
+            ));
+        };
+        tracing::info!(
+            eth_config = ?eth,
+            "creating ethereum indexer stream"
+        );
+
+        let (events_tx, events_rx) = crate::stream::channel();
+        let indexer = EthereumIndexer::new(eth, backlog, events_tx).await?;
+
+        Ok(Self {
+            events_rx: Some(events_rx),
+            start_state: Some(indexer),
+        })
+    }
 }
 
 #[async_trait]
