@@ -111,7 +111,7 @@ pub async fn run_stream<S: ChainStream>(
 
     tracing::info!(%chain, "starting indexer loop");
 
-    let mut recovered = recover_backlog(
+    let requeue_mode = recover_backlog(
         &backlog,
         &mut contract_watcher,
         &mut mesh_state,
@@ -151,15 +151,8 @@ pub async fn run_stream<S: ChainStream>(
                 }
             }
             ChainEvent::CatchupCompleted => {
-                if recovered.requeue_mode == crate::backlog::RecoveryRequeueMode::AfterCatchup {
-                    requeue_recovered_sign_requests(
-                        &backlog,
-                        chain,
-                        sign_tx.clone(),
-                        &recovered.pending,
-                    )
-                    .await;
-                    recovered.pending.clear();
+                if requeue_mode == crate::backlog::RecoveryRequeueMode::AfterCatchup {
+                    requeue_recovered_sign_requests(&backlog, chain, sign_tx.clone()).await;
                 }
             }
             ChainEvent::Block(block) => {
@@ -745,5 +738,133 @@ mod tests {
             Ok(Some(msg)) => panic!("unexpected extra sign message after catchup: {msg:?}"),
         }
         assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stream_does_not_requeue_replaced_ethereum_recovery_entry_after_catchup() {
+        let storage = CheckpointStorage::in_memory();
+        let seeded_backlog = Backlog::persisted(storage.clone());
+        let sign_id = SignId::new([100u8; 32]);
+        let args = SignArgs {
+            entropy: [5u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+        let recovered_timestamp = current_unix_timestamp();
+        let replayed_timestamp = recovered_timestamp.saturating_add(1);
+
+        seeded_backlog
+            .insert(IndexedSignRequest::sign(
+                sign_id,
+                args.clone(),
+                Chain::Ethereum,
+                recovered_timestamp,
+            ))
+            .await;
+        seeded_backlog
+            .set_processed_block(Chain::Ethereum, 100)
+            .await;
+        seeded_backlog.checkpoint(Chain::Ethereum).await;
+
+        struct EthereumLocalStream {
+            events: Vec<Option<ChainEvent>>,
+        }
+
+        impl ChainStream for EthereumLocalStream {
+            const CHAIN: Chain = Chain::Ethereum;
+
+            async fn next_event(&mut self) -> Option<ChainEvent> {
+                if self.events.is_empty() {
+                    return None;
+                }
+                self.events.remove(0)
+            }
+        }
+
+        let replacement =
+            IndexedSignRequest::sign(sign_id, args.clone(), Chain::Ethereum, replayed_timestamp);
+        let client = EthereumLocalStream {
+            events: vec![
+                Some(ChainEvent::SignRequest(replacement)),
+                Some(ChainEvent::CatchupCompleted),
+                None,
+            ],
+        };
+
+        let backlog = Backlog::persisted(storage);
+        let (sign_tx, mut sign_rx) = mpsc::channel(8);
+
+        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+            &"test.near".parse::<AccountId>().unwrap(),
+            k256::ProjectivePoint::GENERATOR.to_affine(),
+            2,
+            Default::default(),
+        );
+
+        let mut servers = Vec::new();
+        for _ in 0..2 {
+            let mut server = Server::new_async().await;
+            let mut body = Vec::new();
+            ciborium::ser::into_writer(
+                &std::collections::HashMap::<Chain, crate::backlog::Checkpoint>::new(),
+                &mut body,
+            )
+            .unwrap();
+            server
+                .mock("GET", "/checkpoint")
+                .with_status(200)
+                .with_body(body)
+                .create_async()
+                .await;
+            servers.push(server);
+        }
+
+        let mut mesh_state = MeshState::default();
+        for (index, server) in servers.iter().enumerate() {
+            let mut info = ParticipantInfo::new(index as u32);
+            info.url = server.url();
+            mesh_state.update(
+                cait_sith::protocol::Participant::from(index as u32),
+                NodeStatus::Active,
+                info,
+            );
+        }
+        let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(mesh_state);
+        let node_client = NodeClient::new(&Default::default());
+
+        run_stream(
+            client,
+            sign_tx,
+            backlog.clone(),
+            contract_watcher,
+            mesh_state_rx,
+            node_client,
+        )
+        .await;
+
+        let first = timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match first {
+            Sign::Request(req) => {
+                assert_eq!(req.id, sign_id);
+                assert_eq!(req.unix_timestamp_indexed, replayed_timestamp);
+            }
+            other => panic!("expected replayed sign request, got {other:?}"),
+        }
+
+        match timeout(Duration::from_millis(100), sign_rx.recv()).await {
+            Err(_) | Ok(None) => {}
+            Ok(Some(msg)) => panic!("unexpected extra sign message after catchup: {msg:?}"),
+        }
+
+        let entry = backlog
+            .get(Chain::Ethereum, &sign_id)
+            .await
+            .expect("replayed entry should remain in backlog");
+        assert_eq!(entry.request.unix_timestamp_indexed, replayed_timestamp);
     }
 }
