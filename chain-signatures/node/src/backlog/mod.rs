@@ -289,15 +289,25 @@ impl Backlog {
         }
     }
 
-    async fn mark_recovered_requests(&self, chain: Chain, sign_ids: HashSet<SignId>) {
+    async fn set_recovered_requests(&self, chain: Chain, sign_ids: HashSet<SignId>) {
         let mut recovered_requests = self.recovered_requests.write().await;
-        recovered_requests.insert(chain, sign_ids);
+        match recovered_requests.entry(chain) {
+            hash_map::Entry::Vacant(entry) => {
+                entry.insert(sign_ids);
+            }
+            hash_map::Entry::Occupied(entry) => {
+                tracing::error!(
+                    %chain,
+                    new_requests_len = sign_ids.len(),
+                    old_requests_len = entry.get().len(),
+                    "attempting to set recovered requests but it already has an entry",
+                );
+            }
+        }
     }
 
-    /// Takes the set of requests that were once marked as recovered and has not been
-    /// unmarked/removed from the backlog since. This also includes only requests that
-    /// haven't been marked for execution watching & are still awaiting signature response,
-    /// which means they're safe to be requeued for processing.
+    /// Removes recovered requests for a chain and returns a list of them filtered
+    /// to only those that should be enqueued for processing.
     pub async fn take_requeueable_requests(&self, chain: Chain) -> Vec<IndexedSignRequest> {
         let recovered_sign_ids = {
             let mut recovered_requests = self.recovered_requests.write().await;
@@ -685,7 +695,7 @@ impl Backlog {
             if let Some(pending) = requests.get(&chain) {
                 let sign_ids: HashSet<_> = pending.requests.keys().copied().collect();
                 if !sign_ids.is_empty() {
-                    self.mark_recovered_requests(chain, sign_ids).await;
+                    self.set_recovered_requests(chain, sign_ids).await;
                 }
             }
         }
