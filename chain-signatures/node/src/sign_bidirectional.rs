@@ -62,7 +62,6 @@ pub struct BidirectionalTx {
     pub request_id: [u8; 32],
     pub from_address: Address,
     pub nonce: u64,
-    pub status: SignStatus,
 }
 
 impl BidirectionalTx {
