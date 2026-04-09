@@ -12,7 +12,7 @@ use crate::protocol::presignature::{FullPresignatureId, PresignatureId};
 use crate::protocol::triple::TripleId;
 
 /// This should be enough to hold a few messages in the inbox.
-pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = if cfg!(test) { 1 } else { 4 * 1024 };
+pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
 
 pub enum SubscribeId {
     Generating,
@@ -110,8 +110,18 @@ impl<T> Subscriber<T> {
 
     pub async fn send(&self, msg: T) -> Result<(), mpsc::error::SendError<T>> {
         match self {
-            Self::Subscribed(tx) => tx.send(msg).await,
-            Self::Unsubscribed(tx, _) => tx.send(msg).await,
+            Self::Subscribed(tx) => {
+                let cap = tx.capacity();
+                let max_cap = tx.max_capacity();
+                tracing::warn!("Sending to subscribed, capacity {cap}/{max_cap}");
+                tx.send(msg).await
+            }
+            Self::Unsubscribed(tx, _) => {
+                let cap = tx.capacity();
+                let max_cap = tx.max_capacity();
+                tracing::warn!("Sending to unsubscribed, capacity {cap}/{max_cap}");
+                tx.send(msg).await
+            }
             Self::Unknown => Ok(()),
         }
     }

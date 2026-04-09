@@ -553,7 +553,7 @@ impl MpcFixtureNodeBuilder {
             &self.mock_streams,
             sign_tx.clone(),
             backlog.clone(),
-            context.contract_state,
+            context.contract_state.clone(),
             &mesh_rx,
         );
 

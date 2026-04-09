@@ -135,9 +135,10 @@ pub(crate) async fn assert_presig_owned_state(
     }
 }
 
-pub fn test_sign_arg(seed: u8) -> SignArgs {
+pub fn test_sign_arg(seed: impl Into<u32>) -> SignArgs {
+    let seed = seed.into();
     let mut entropy = [1; 32];
-    entropy[0] = seed;
+    entropy[0..4].copy_from_slice(&seed.to_be_bytes());
     SignArgs {
         entropy,
         epsilon: k256::Scalar::default(),
