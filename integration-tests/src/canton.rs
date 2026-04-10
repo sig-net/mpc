@@ -99,6 +99,7 @@ pub struct CantonSandbox {
     pub vault_cid: String,
     pub vault_disclosure: Value,
     pub signer_disclosure: Value,
+    pub nonce_cid: String,
     pub client: CantonTestClient,
 }
 
@@ -220,6 +221,19 @@ impl CantonSandbox {
             )
             .await?;
 
+        // Issue initial SigningNonce for the requester
+        let nonce_result = client
+            .exercise_choice(
+                &[&requester],
+                &signer_template_id,
+                &signer_cid,
+                "IssueNonce",
+                json!({ "requester": &requester }),
+                Some(&[signer_disclosure.clone()]),
+            )
+            .await?;
+        let nonce_cid = find_created_cid(&nonce_result, "SigningNonce")?;
+
         Ok(CantonSandbox {
             process,
             jwt_key_path: auth.key_path,
@@ -237,6 +251,7 @@ impl CantonSandbox {
             vault_cid,
             vault_disclosure,
             signer_disclosure,
+            nonce_cid,
             client,
         })
     }
@@ -249,6 +264,8 @@ impl CantonSandbox {
             jwt_private_key_path: self.jwt_key_path.to_string_lossy().to_string(),
             jwt_subject: self.jwt_subject.clone(),
             party_id: self.party_id.clone(),
+            signer_contract_id: self.signer_cid.clone(),
+            signer_template_id: self.signer_template_id.clone(),
         }
     }
 }
@@ -469,9 +486,9 @@ impl CantonTestClient {
     pub async fn allocate_party(&self, hint: &str) -> Result<String> {
         let req = AllocatePartyRequest {
             party_id_hint: hint.to_string(),
-            identity_provider_id: String::new(),
-            synchronizer_id: String::new(),
-            user_id: String::new(),
+            identity_provider_id: None,
+            synchronizer_id: None,
+            user_id: None,
         };
         let resp = self
             .auth_post(&format!("{}/v2/parties", self.base_url))?

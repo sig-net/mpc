@@ -2,14 +2,18 @@ use crate::protocol::{Chain, IndexedSignRequest};
 use crate::respond_bidirectional::SerDeserFormat;
 use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
+use anyhow::Context;
 use borsh::BorshSerialize;
+use k256::ecdsa::RecoveryId;
 use k256::elliptic_curve::point::AffineCoordinates;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::{AffinePoint, Scalar};
-use mpc_crypto::derive_key;
+use mpc_crypto::{derive_key, kdf::recover};
 use mpc_primitives::Signature;
 use rlp::{Rlp, RlpStream};
 use serde_json::Value;
 use sha3::{Digest, Keccak256};
+
 use std::collections::HashMap;
 use std::io::Write;
 
@@ -254,6 +258,42 @@ pub fn decode_rlp(rlp_data: Vec<u8>, is_eip1559: bool) -> anyhow::Result<Vec<Byt
     Ok(result)
 }
 
+/// Resolve the correct `recovery_id` for a signature parsed from DER format.
+///
+/// DER encoding does not carry the recovery ID (y-parity), so
+/// [`crate::indexer_canton::parse_der_signature`] defaults it to `0`.
+/// This function determines the correct value by trying both recovery IDs
+/// (0 and 1), recovering the public key for each, and comparing against the
+/// expected `derived_public_key`.
+pub fn resolve_signature_recovery_id(
+    unsigned_rlp: &[u8],
+    mut signature: Signature,
+    derived_public_key: &AffinePoint,
+) -> anyhow::Result<Signature> {
+    let msg_hash: [u8; 32] = keccak256(unsigned_rlp).into();
+    let expected_pk = derived_public_key.to_encoded_point(false);
+
+    let ecdsa_sig =
+        k256::ecdsa::Signature::from_scalars(
+            mpc_crypto::x_coordinate(&signature.big_r),
+            &signature.s,
+        )
+        .context("cannot create ECDSA signature from (r, s) scalars")?;
+
+    for rid in [0u8, 1u8] {
+        let recovery_id = RecoveryId::try_from(rid)
+            .with_context(|| format!("cannot create recovery_id={rid}"))?;
+        if let Ok(recovered) = recover(&msg_hash, &ecdsa_sig, recovery_id) {
+            if expected_pk == recovered.to_encoded_point(false) {
+                signature.recovery_id = rid;
+                return Ok(signature);
+            }
+        }
+    }
+
+    anyhow::bail!("cannot determine recovery_id: neither 0 nor 1 recovers the expected public key")
+}
+
 pub fn sign_and_hash_transaction(
     unsigned_rlp: &[u8],
     signature: Signature,
@@ -465,7 +505,7 @@ fn serialize_dynsol<W: Write>(w: &mut W, v: &DynSolValue) -> anyhow::Result<()> 
             }
         }
 
-        // -------- Tuple --------
+       // -------- Tuple --------
         // Concatenate members
         Tuple(xs) => {
             for x in xs {

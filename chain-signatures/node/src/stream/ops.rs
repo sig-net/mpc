@@ -124,9 +124,9 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.serialized_transaction.clone(),
             SignBidirectionalEvent::Hydration(event) => event.serialized_transaction.clone(),
-            // Canton carries structured EvmTransactionParams, not pre-serialized bytes.
-            // RLP encoding happens in the indexer's generate_sign_request().
-            SignBidirectionalEvent::Canton(_) => vec![],
+            SignBidirectionalEvent::Canton(event) => {
+                crate::indexer_canton::rlp_encode_unsigned_eip1559(&event.evm_tx_params)
+            }
         }
     }
 
@@ -252,7 +252,7 @@ impl SignatureRespondedEvent {
         }
     }
 
-    /// Convert the contained event into an `mpc_primitives::Signature`.
+     /// Convert the contained event into an `mpc_primitives::Signature`.
     pub fn signature(&self) -> Signature {
         match self {
             SignatureRespondedEvent::Solana(event) => {
@@ -413,7 +413,26 @@ pub(crate) async fn process_respond_event(
         anyhow::anyhow!("failed to process respond event: {err:?} for sign id: {sign_id:?}")
     })?;
 
-    let mpc_sig = respond_event.signature();
+    // Get the MPC public key and derive the from_address.
+    // This must happen before sign_and_hash_transaction for Canton signatures
+    // because DER encoding loses the recovery ID — we need the derived public
+    // key to resolve the correct parity via ecrecover.
+    let root_public_key = contract_watcher.wait_public_key().await;
+    let epsilon = event.epsilon()?;
+    let derived_public_key = mpc_crypto::derive_key(root_public_key, epsilon);
+    let from_address = crate::sign_bidirectional::derive_user_address(root_public_key, epsilon);
+
+    let mut mpc_sig = respond_event.signature();
+
+    // For Canton signatures the recovery_id parsed from DER defaults to 0
+    // and may be wrong.  Resolve the correct value before hashing.
+    if source_chain == Chain::Canton {
+        mpc_sig = crate::sign_bidirectional::resolve_signature_recovery_id(
+            &event.serialized_transaction(),
+            mpc_sig,
+            &derived_public_key,
+        )?;
+    }
 
     // Sign and hash the transaction to get the correct tx_id and nonce
     let (signed_tx_hash, nonce) = crate::sign_bidirectional::sign_and_hash_transaction(
@@ -422,11 +441,6 @@ pub(crate) async fn process_respond_event(
     )?;
 
     let tx_id = BidirectionalTxId(signed_tx_hash.into());
-
-    // Get the MPC public key and derive the from_address
-    let root_public_key = contract_watcher.wait_public_key().await;
-    let epsilon = event.epsilon()?;
-    let from_address = crate::sign_bidirectional::derive_user_address(root_public_key, epsilon);
 
     let bidirectional_tx = BidirectionalTx {
         id: tx_id,
@@ -553,7 +567,25 @@ pub async fn process_execution_confirmed(
         tracing::warn!(?tx_id, expected = ?unwatched_sign_id, actual = ?sign_id, "sign_id mismatch between event and watcher");
     }
 
-    let completed_tx = CompletedTx::new(pending_tx.clone(), block_height);
+    // Update the status on the source chain
+    let status = match result {
+        ExecutionOutcome::Success { .. } => SignStatus::Success,
+        ExecutionOutcome::Failed => SignStatus::Failed,
+    };
+
+    let set_res = backlog
+        .set_status(pending_tx.source_chain, &unwatched_sign_id, status)
+        .await;
+    let updated_tx = match set_res {
+        Some(tx) => tx,
+        None => {
+            tracing::error!(?tx_id, ?unwatched_sign_id, source_chain = ?pending_tx.source_chain, "failed to set status on pending tx");
+            anyhow::bail!("failed to set status for sign id: {unwatched_sign_id:?}");
+        }
+    };
+    tracing::info!(?tx_id, ?unwatched_sign_id, updated_status = ?updated_tx.status(), "set_status returned transaction");
+
+    let completed_tx = CompletedTx::new(pending_tx, block_height);
 
     let sign_request = match result {
         ExecutionOutcome::Success { output } => {

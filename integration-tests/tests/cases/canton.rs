@@ -1,5 +1,4 @@
 use anyhow::{Context as _, Result};
-use integration_tests::canton::find_created_cid;
 use integration_tests::cluster;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use serde_json::json;
@@ -30,41 +29,10 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
         .as_ref()
         .context("ethereum not available")?;
 
-    // 3. Submit sign request via Vault
+    // 3. Submit sign request via Vault (nonce-based flow)
     let client = &canton.client;
     let vault_template = "#daml-vault:Erc20Vault:Vault";
 
-    // RequestAuthorization
-    let req_result = client
-        .exercise_choice(
-            &[&canton.requester_party],
-            vault_template,
-            &canton.vault_cid,
-            "RequestAuthorization",
-            json!({ "requester": &canton.requester_party }),
-            Some(&[canton.vault_disclosure.clone()]),
-        )
-        .await?;
-    let request_cid = find_created_cid(&req_result, "AuthorizationRequest")?;
-
-    // ApproveAuthorization
-    let approve_result = client
-        .exercise_choice(
-            &[&canton.operator_party],
-            vault_template,
-            &canton.vault_cid,
-            "ApproveAuthorization",
-            json!({
-                "requestCid": request_cid,
-                "remainingUses": 1,
-                "approver": &canton.operator_party,
-            }),
-            None,
-        )
-        .await?;
-    let auth_cid = find_created_cid(&approve_result, "Authorization")?;
-
-    // RequestDeposit — args[0] matches evmVaultAddress (all zeros)
     let evm_tx_params = json!({
         "to": "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
         "functionSignature": "transfer(address,uint256)",
@@ -91,8 +59,8 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
                 "signerCid": &canton.signer_cid,
                 "path": &canton.requester_party,
                 "evmTxParams": evm_tx_params,
-                "authCid": &auth_cid,
-                "nonceCidText": &auth_cid,
+                "nonceCid": &canton.nonce_cid,
+                "nonceCidText": &canton.nonce_cid,
                 "keyVersion": LATEST_MPC_KEY_VERSION,
                 "algo": "ECDSA",
                 "dest": "ethereum",

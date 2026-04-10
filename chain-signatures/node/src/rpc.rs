@@ -914,11 +914,12 @@ impl HydrationClient {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CantonClient {
     http_client: reqwest::Client,
     json_api_url: String,
-    jwt_private_key_path: String,
+    /// Pre-parsed encoding key — parsed once at construction, reused for every JWT.
+    encoding_key: jsonwebtoken::EncodingKey,
     jwt_subject: String,
     party_id: String,
     signer_cid: String,
@@ -926,47 +927,50 @@ pub struct CantonClient {
     signer_template_id: String,
 }
 
+impl std::fmt::Debug for CantonClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CantonClient")
+            .field("json_api_url", &self.json_api_url)
+            .field("encoding_key", &"<hidden>")
+            .field("jwt_subject", &self.jwt_subject)
+            .field("party_id", &self.party_id)
+            .field("signer_cid", &self.signer_cid)
+            .field("signer_template_id", &self.signer_template_id)
+            .finish()
+    }
+}
+
 impl CantonClient {
     pub async fn new(config: &CantonConfig) -> anyhow::Result<Self> {
-        let http_client = reqwest::Client::new();
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
 
-        // Generate JWT for the discovery request
-        let jwt_pem = std::fs::read(&config.jwt_private_key_path)?;
-        let jwt_token =
-            crate::indexer_canton::generate_jwt(&jwt_pem, &config.jwt_subject)?;
-
-        // Discover the active Signer contract
-        let (signer_cid, signer_template_id) =
-            crate::indexer_canton::discover_signer_cid(
-                &http_client,
-                &config.json_api_url,
-                &jwt_token,
-                &config.party_id,
-            )
-            .await?;
+        let jwt_pem = tokio::fs::read(&config.jwt_private_key_path).await?;
+        let encoding_key = jsonwebtoken::EncodingKey::from_ec_pem(&jwt_pem)?;
 
         tracing::info!(
-            signer_cid = %signer_cid,
-            signer_template_id = %signer_template_id,
-            "discovered canton Signer contract"
+            signer_cid = %config.signer_contract_id,
+            signer_template_id = %config.signer_template_id,
+            "canton Signer contract configured"
         );
 
         Ok(Self {
             http_client,
             json_api_url: config.json_api_url.clone(),
-            jwt_private_key_path: config.jwt_private_key_path.clone(),
+            encoding_key,
             jwt_subject: config.jwt_subject.clone(),
             party_id: config.party_id.clone(),
-            signer_cid,
-            signer_template_id,
+            signer_cid: config.signer_contract_id.clone(),
+            signer_template_id: config.signer_template_id.clone(),
         })
     }
 
-    /// Generate a fresh JWT token (30s TTL) for Canton API requests.
+    /// Generate a fresh JWT token using the pre-parsed encoding key.
     fn generate_jwt(&self) -> anyhow::Result<String> {
-        let jwt_pem = std::fs::read(&self.jwt_private_key_path)?;
-        crate::indexer_canton::generate_jwt(&jwt_pem, &self.jwt_subject)
+        crate::indexer_canton::generate_jwt_with_key(&self.encoding_key, &self.jwt_subject)
     }
+
 }
 
 /// Client related to a specific chain
@@ -1873,10 +1877,10 @@ async fn try_publish_canton(
         "{}/v2/commands/submit-and-wait-for-transaction",
         canton.json_api_url
     );
-    let der_sig = hex::encode(crate::indexer_canton::der_encode_signature(signature));
+    let der_sig = hex::encode(crate::indexer_canton::der_encode_signature(signature)?);
 
     match &action.indexed.kind {
-        SignKind::Sign | SignKind::SignBidirectional(_) => {
+        SignKind::SignBidirectional(_) => {
             // Extract operators and requester from the Canton event
             let (operators, requester) = extract_canton_operators_requester(action)?;
 
@@ -1968,6 +1972,9 @@ async fn try_publish_canton(
                 elapsed = ?timestamp.elapsed(),
                 "published canton RespondBidirectional successfully"
             );
+        }
+        SignKind::Sign => {
+            anyhow::bail!("Canton does not support SignKind::Sign — only SignBidirectional");
         }
     }
 

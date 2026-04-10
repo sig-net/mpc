@@ -335,6 +335,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sol_signer_address = %sol_payer_address.as_deref().unwrap_or("None"),
                 hydration_rpc_url = %hydration.as_ref().map(|h| h.rpc_ws_url.as_str()).unwrap_or("None"),
                 hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
+                canton_json_api_url = %canton.as_ref().map(|c| c.json_api_url.as_str()).unwrap_or("None"),
                 "starting node",
             );
 

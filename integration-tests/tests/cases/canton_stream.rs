@@ -1,5 +1,5 @@
 use anyhow::{Context as _, Result};
-use integration_tests::canton::{find_created_cid, CantonSandbox};
+use integration_tests::canton::CantonSandbox;
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_canton::CantonStream;
 use mpc_node::protocol::Chain;
@@ -28,43 +28,14 @@ async fn stream_canton(sandbox: &CantonSandbox, backlog: Backlog) -> Result<Cant
 }
 
 /// Submit a sign request through the Vault contract.
-/// Exercises: RequestAuthorization -> ApproveAuthorization -> RequestDeposit.
+/// Uses the nonce-based flow: RequestDeposit with pre-issued SigningNonce.
+/// The Vault internally creates a SignRequest, exercises Signer.SignBidirectional
+/// (which archives the nonce and creates SignBidirectionalEvent + new nonce).
 /// Returns the requestId from the PendingDeposit event.
 async fn submit_canton_sign_request(sandbox: &CantonSandbox) -> Result<String> {
     let client = &sandbox.client;
     let vault_template = "#daml-vault:Erc20Vault:Vault";
 
-    // Step 1: RequestAuthorization (requester needs vault disclosure)
-    let req_result = client
-        .exercise_choice(
-            &[&sandbox.requester_party],
-            vault_template,
-            &sandbox.vault_cid,
-            "RequestAuthorization",
-            json!({ "requester": &sandbox.requester_party }),
-            Some(&[sandbox.vault_disclosure.clone()]),
-        )
-        .await?;
-    let request_cid = find_created_cid(&req_result, "AuthorizationRequest")?;
-
-    // Step 2: ApproveAuthorization (operator is signatory — no disclosure needed)
-    let approve_result = client
-        .exercise_choice(
-            &[&sandbox.operator_party],
-            vault_template,
-            &sandbox.vault_cid,
-            "ApproveAuthorization",
-            json!({
-                "requestCid": request_cid,
-                "remainingUses": 1,
-                "approver": &sandbox.operator_party,
-            }),
-            None,
-        )
-        .await?;
-    let auth_cid = find_created_cid(&approve_result, "Authorization")?;
-
-    // Step 3: RequestDeposit (needs vault + signer disclosures)
     // args[0] MUST match evmVaultAddress ("0".repeat(64)) — Daml asserts this
     let evm_tx_params = json!({
         "to": "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
@@ -81,6 +52,7 @@ async fn submit_canton_sign_request(sandbox: &CantonSandbox) -> Result<String> {
         "chainId": format!("{:0>64}", "aa36a7"),
     });
 
+    // RequestDeposit — nonceCid is the pre-issued SigningNonce
     let deposit_result = client
         .exercise_choice(
             &[&sandbox.requester_party],
@@ -92,8 +64,8 @@ async fn submit_canton_sign_request(sandbox: &CantonSandbox) -> Result<String> {
                 "signerCid": &sandbox.signer_cid,
                 "path": &sandbox.requester_party,
                 "evmTxParams": evm_tx_params,
-                "authCid": &auth_cid,
-                "nonceCidText": &auth_cid,
+                "nonceCid": &sandbox.nonce_cid,
+                "nonceCidText": &sandbox.nonce_cid,
                 "keyVersion": LATEST_MPC_KEY_VERSION,
                 "algo": "ECDSA",
                 "dest": "ethereum",

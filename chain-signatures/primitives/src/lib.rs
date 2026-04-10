@@ -6,6 +6,7 @@ use near_account_id::AccountId;
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use sha3::Digest;
+use std::sync::LazyLock;
 use std::{fmt, str::FromStr};
 
 use crate::bytes::cbor_scalar;
@@ -34,6 +35,17 @@ impl ScalarExt for Scalar {
         Scalar::from_bytes(hash).expect("Derived epsilon value falls outside of the field")
     }
 }
+
+/// The maximum valid scalar for the secp256k1 curve (group order minus one).
+pub static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
+    Scalar::from_bytes(
+        hex::decode("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364140")
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    )
+    .unwrap()
+});
 
 pub const LATEST_MPC_KEY_VERSION: u32 = 1;
 pub const LEGACY_MPC_KEY_VERSION_0: u32 = 0;
@@ -235,7 +247,7 @@ impl Chain {
             ("CHECKPOINT_INTERVAL_ETHEREUM", "2"),
             ("CHECKPOINT_INTERVAL_SOLANA", "5"),
             ("CHECKPOINT_INTERVAL_HYDRATION", "5"),
-            ("CHECKPOINT_INTERVAL_CANTON", "50"),
+            ("CHECKPOINT_INTERVAL_CANTON", "5"),
         ]
     }
 

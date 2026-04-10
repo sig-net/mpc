@@ -55,11 +55,16 @@ pub enum Command {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisclosedContract {
-    pub template_id: Value,
-    pub contract_id: Value,
-    pub created_event_blob: Value,
-    pub synchronizer_id: Value,
+    pub template_id: String,
+    pub contract_id: String,
+    pub created_event_blob: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synchronizer_id: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Events (response parsing)
+// ---------------------------------------------------------------------------
 
 /// Response from `POST /v2/commands/submit-and-wait-for-transaction`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,10 +72,6 @@ pub struct DisclosedContract {
 pub struct SubmitAndWaitForTransactionResponse {
     pub transaction: Transaction,
 }
-
-// ---------------------------------------------------------------------------
-// Events (response parsing)
-// ---------------------------------------------------------------------------
 
 /// A ledger transaction containing events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,9 +87,7 @@ pub struct Transaction {
 pub enum Event {
     CreatedEvent(CreatedEvent),
     ArchivedEvent(ArchivedEvent),
-    /// Exercised events are emitted when a choice is exercised.
-    /// We capture the full JSON since we don't need typed access.
-    ExercisedEvent(Value),
+    ExercisedEvent(ExercisedEvent),
 }
 
 /// A contract creation event.
@@ -103,6 +102,18 @@ pub struct CreatedEvent {
     pub payload: Value,
     #[serde(default)]
     pub created_event_blob: Option<String>,
+    /// Parties that are signatories on this contract.
+    #[serde(default)]
+    pub signatories: Vec<String>,
+    /// Parties whose participants witnessed (confirmed) this transaction.
+    #[serde(default)]
+    pub witness_parties: Vec<String>,
+    /// Position of this event in the transaction tree (LEDGER_EFFECTS only).
+    #[serde(default)]
+    pub node_id: Option<u32>,
+    /// The package name of the contract.
+    #[serde(default)]
+    pub package_name: Option<String>,
 }
 
 /// A contract archive event.
@@ -111,6 +122,28 @@ pub struct CreatedEvent {
 pub struct ArchivedEvent {
     pub contract_id: String,
     pub template_id: String,
+    #[serde(default)]
+    pub package_name: Option<String>,
+}
+
+/// A choice exercise event (LEDGER_EFFECTS shape).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExercisedEvent {
+    pub contract_id: String,
+    pub template_id: String,
+    pub choice: String,
+    #[serde(default)]
+    pub acting_parties: Vec<String>,
+    #[serde(default)]
+    pub consuming: bool,
+    #[serde(default)]
+    pub node_id: Option<u32>,
+    /// Upper boundary of descendant node IDs in this transaction.
+    #[serde(default)]
+    pub last_descendant_node_id: Option<u32>,
+    #[serde(default)]
+    pub package_name: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -118,20 +151,39 @@ pub struct ArchivedEvent {
 // ---------------------------------------------------------------------------
 
 /// Subscription message sent to `ws://.../v2/updates`.
+///
+/// Uses `updateFormat` (Canton 3.4+) instead of the deprecated
+/// `filter`/`verbose` top-level fields
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetUpdatesRequest {
     pub begin_exclusive: u64,
-    pub verbose: bool,
-    pub filter: UpdatesFilter,
+    pub update_format: UpdateFormat,
 }
 
-/// Filters for the updates stream.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Specifies what updates to include and how to render them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct UpdatesFilter {
+pub struct UpdateFormat {
+    pub include_transactions: TransactionFormat,
+}
+
+/// Specifies the transaction shape and event format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransactionFormat {
+    pub transaction_shape: String,
+    pub event_format: EventFormatInline,
+}
+
+/// Inline event format for the subscription message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventFormatInline {
     #[serde(default)]
     pub filters_by_party: serde_json::Map<String, Value>,
+    #[serde(default)]
+    pub verbose: bool,
 }
 
 /// A message received from the updates WebSocket stream.
@@ -155,7 +207,7 @@ pub enum Update {
     },
 }
 
-/// The value inside an `Update::Transaction`.
+/// The value inside an Update::Transaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransactionUpdate {
@@ -164,7 +216,7 @@ pub struct TransactionUpdate {
     pub events: Vec<Event>,
 }
 
-/// The value inside an `Update::OffsetCheckpoint`.
+/// The value inside an Update::OffsetCheckpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OffsetCheckpointValue {
@@ -180,12 +232,12 @@ pub struct OffsetCheckpointValue {
 #[serde(rename_all = "camelCase")]
 pub struct AllocatePartyRequest {
     pub party_id_hint: String,
-    #[serde(default)]
-    pub identity_provider_id: String,
-    #[serde(default)]
-    pub synchronizer_id: String,
-    #[serde(default)]
-    pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synchronizer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
 }
 
 /// Response from `POST /v2/parties`.
@@ -273,9 +325,14 @@ pub struct ActiveContractEntry {
 }
 
 /// Wraps the active contract variant.
+/// Canton API can return JsEmpty, JsIncompleteAssigned, JsIncompleteUnassigned
+/// in addition to JsActiveContract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ContractEntry {
     JsActiveContract(JsActiveContract),
+    JsEmpty(Value),
+    JsIncompleteAssigned(Value),
+    JsIncompleteUnassigned(Value),
 }
 
 /// An active contract with its created event.
@@ -313,15 +370,30 @@ pub struct CantonError {
 }
 
 // ---------------------------------------------------------------------------
+// Template constants and matching
+// ---------------------------------------------------------------------------
+
+/// Known Daml template suffixes from daml-signer.
+pub mod templates {
+    pub const SIGNER: &str = "Signer:Signer";
+    pub const SIGN_BIDIRECTIONAL_EVENT: &str = "Signer:SignBidirectionalEvent";
+    pub const SIGNATURE_RESPONDED_EVENT: &str = "Signer:SignatureRespondedEvent";
+    pub const RESPOND_BIDIRECTIONAL_EVENT: &str = "Signer:RespondBidirectionalEvent";
+    pub const SIGNING_NONCE: &str = "Signer:SigningNonce";
+}
+
+/// Check if a template ID matches a given suffix at a module boundary.
+/// Requires the suffix to be preceded by `:` (package separator) or match exactly.
+pub fn template_suffix_matches(template_id: &str, suffix: &str) -> bool {
+    template_id == suffix
+        || template_id.ends_with(&format!(":{suffix}"))
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Check if a template ID ends with a given suffix (e.g., `"Signer:Signer"`).
-pub fn template_suffix_matches(template_id: &str, suffix: &str) -> bool {
-    template_id.ends_with(suffix)
-}
-
-/// Build a `UserRight` for CanActAs.
+/// Build a UserRight for CanActAs.
 pub fn can_act_as(party: &str) -> UserRight {
     UserRight {
         kind: UserRightKind::CanActAs {
@@ -332,7 +404,7 @@ pub fn can_act_as(party: &str) -> UserRight {
     }
 }
 
-/// Build a `UserRight` for CanReadAs.
+/// Build a UserRight for CanReadAs.
 pub fn can_read_as(party: &str) -> UserRight {
     UserRight {
         kind: UserRightKind::CanReadAs {

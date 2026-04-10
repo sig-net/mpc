@@ -1,5 +1,5 @@
 use crate::backlog::Backlog;
-use crate::indexer_sol::MAX_SECP256K1_SCALAR;
+use mpc_primitives::MAX_SECP256K1_SCALAR;
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::ops::{
@@ -7,12 +7,12 @@ use crate::stream::ops::{
 };
 use crate::stream::{ChainEvent, ChainStream};
 
-use alloy::primitives::{keccak256, Address, U256};
-use alloy_sol_types::sol;
+use alloy::consensus::TxEip1559;
+use alloy::primitives::{keccak256, Address, B256, Bytes, TxKind, U256};
 use canton_types::{contracts, ledger_api};
 use futures_util::{SinkExt, StreamExt};
+use std::collections::HashSet;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-use k256::elliptic_curve::point::AffineCoordinates;
 use k256::Scalar;
 use mpc_primitives::{ScalarExt, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use std::fmt;
@@ -21,38 +21,6 @@ use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header;
 use tokio_tungstenite::tungstenite::Message;
-
-// ---------------------------------------------------------------------------
-// EIP-712 types via alloy sol! macro
-// ---------------------------------------------------------------------------
-
-sol! {
-    #[derive(Debug)]
-    struct EvmTransactionParams {
-        address to;
-        string functionSignature;
-        bytes[] args;
-        uint256 value;
-        uint256 nonce;
-        uint256 gasLimit;
-        uint256 maxFeePerGas;
-        uint256 maxPriorityFee;
-        uint256 chainId;
-    }
-
-    #[derive(Debug)]
-    struct CantonMpcSignRequest {
-        string sender;
-        EvmTransactionParams evmParams;
-        string caip2Id;
-        uint32 keyVersion;
-        string path;
-        string algo;
-        string dest;
-        string params;
-        string nonceCidText;
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Canton event structs
@@ -85,12 +53,15 @@ pub struct CantonSignatureRespondedEvent {
 #[derive(serde::Serialize)]
 struct JwtClaims {
     sub: String,
+    /// Canton supports scope-based OR audience-based tokens, not both.
+    /// We use scope-based (the default when no target-audience is configured).
     scope: String,
     iat: u64,
     exp: u64,
 }
 
-pub(crate) fn generate_jwt(private_key_pem: &[u8], subject: &str) -> anyhow::Result<String> {
+/// Generate a JWT using a pre-parsed EncodingKey.
+pub(crate) fn generate_jwt_with_key(key: &EncodingKey, subject: &str) -> anyhow::Result<String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
@@ -98,62 +69,76 @@ pub(crate) fn generate_jwt(private_key_pem: &[u8], subject: &str) -> anyhow::Res
         sub: subject.to_string(),
         scope: "daml_ledger_api".to_string(),
         iat: now,
-        exp: now + 30,
+        exp: now + 300,
     };
-    let key = EncodingKey::from_ec_pem(private_key_pem)?;
     let header = Header::new(Algorithm::ES256);
     Ok(encode(&header, &claims, &key)?)
 }
 
 // ---------------------------------------------------------------------------
-// EIP-712 request ID computation
+// Flat keccak256 request ID computation (matches Daml/TS reference)
 // ---------------------------------------------------------------------------
 
-/// Compute the EIP-712 request ID for a Canton sign request.
-///
-/// Domain: { name: "CantonMpc", version: "1" } (no chainId, no verifyingContract)
+/// keccak256(utf8(text)), or keccak256("") for empty string.
+/// Mirrors Daml's `hashText` in Eip712.daml.
+fn hash_text(text: &str) -> [u8; 32] {
+    keccak256(text.as_bytes()).into()
+}
+
+/// Left-pad a hex string to 32 bytes (big-endian U256).
+fn pad_left_32(hex_str: &str) -> [u8; 32] {
+    let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    U256::from_str_radix(stripped, 16)
+        .unwrap_or(U256::ZERO)
+        .to_be_bytes::<32>()
+}
+
+/// keccak256(concat(map keccak256 items)), or keccak256("") for empty list.
+/// Mirrors Daml's `hashBytesList` in Eip712.daml.
+fn hash_bytes_list(items: &[String]) -> [u8; 32] {
+    if items.is_empty() {
+        return keccak256(b"").into();
+    }
+    let mut concatenated = Vec::new();
+    for item in items {
+        let bytes = hex::decode(item).unwrap_or_default();
+        let h: [u8; 32] = keccak256(&bytes).into();
+        concatenated.extend_from_slice(&h);
+    }
+    keccak256(&concatenated).into()
+}
+
+/// Hash EvmTransactionParams — mirrors Daml's `hashEvmParams` in RequestId.daml.
+fn hash_evm_params(p: &CantonEvmTransactionParams) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(9 * 32);
+    buf.extend_from_slice(&pad_left_32(&p.to));
+    buf.extend_from_slice(&hash_text(&p.function_signature));
+    buf.extend_from_slice(&hash_bytes_list(&p.args));
+    buf.extend_from_slice(&pad_left_32(&p.value));
+    buf.extend_from_slice(&pad_left_32(&p.nonce));
+    buf.extend_from_slice(&pad_left_32(&p.gas_limit));
+    buf.extend_from_slice(&pad_left_32(&p.max_fee_per_gas));
+    buf.extend_from_slice(&pad_left_32(&p.max_priority_fee));
+    buf.extend_from_slice(&pad_left_32(&p.chain_id));
+    keccak256(&buf).into()
+}
+
+/// Compute the request ID using flat keccak256(concat(hashed fields)).
+/// Mirrors Daml's `computeRequestId` in RequestId.daml.
 fn compute_request_id(event: &CantonSignBidirectionalRequestedEvent) -> [u8; 32] {
-    use alloy_sol_types::eip712_domain;
-    use alloy_sol_types::SolStruct;
+    let key_version_hex = format!("{:x}", event.key_version);
 
-    let domain = eip712_domain! {
-        name: "CantonMpc",
-        version: "1",
-    };
-
-    let p = &event.evm_tx_params;
-    let evm_params = EvmTransactionParams {
-        to: format!("0x{}", p.to)
-            .parse::<Address>()
-            .unwrap_or_default(),
-        functionSignature: p.function_signature.clone(),
-        args: p
-            .args
-            .iter()
-            .map(|a| hex::decode(a).unwrap_or_default().into())
-            .collect(),
-        value: U256::from_str_radix(&p.value, 16).unwrap_or_default(),
-        nonce: U256::from_str_radix(&p.nonce, 16).unwrap_or_default(),
-        gasLimit: U256::from_str_radix(&p.gas_limit, 16).unwrap_or_default(),
-        maxFeePerGas: U256::from_str_radix(&p.max_fee_per_gas, 16).unwrap_or_default(),
-        maxPriorityFee: U256::from_str_radix(&p.max_priority_fee, 16).unwrap_or_default(),
-        chainId: U256::from_str_radix(&p.chain_id, 16).unwrap_or_default(),
-    };
-
-    let msg = CantonMpcSignRequest {
-        sender: event.sender.clone(),
-        evmParams: evm_params,
-        caip2Id: event.caip2_id.clone(),
-        keyVersion: event.key_version,
-        path: event.path.clone(),
-        algo: event.algo.clone(),
-        dest: event.dest.clone(),
-        params: event.params.clone(),
-        nonceCidText: event.nonce_cid_text.clone(),
-    };
-
-    let signing_hash = msg.eip712_signing_hash(&domain);
-    signing_hash.into()
+    let mut buf = Vec::with_capacity(9 * 32);
+    buf.extend_from_slice(&hash_text(&event.sender));
+    buf.extend_from_slice(&hash_evm_params(&event.evm_tx_params));
+    buf.extend_from_slice(&hash_text(&event.caip2_id));
+    buf.extend_from_slice(&pad_left_32(&key_version_hex));
+    buf.extend_from_slice(&hash_text(&event.path));
+    buf.extend_from_slice(&hash_text(&event.algo));
+    buf.extend_from_slice(&hash_text(&event.dest));
+    buf.extend_from_slice(&hash_text(&event.params));
+    buf.extend_from_slice(&hash_text(&event.nonce_cid_text));
+    keccak256(&buf).into()
 }
 
 // ---------------------------------------------------------------------------
@@ -175,50 +160,43 @@ fn build_calldata(function_signature: &str, args: &[String]) -> Vec<u8> {
     calldata
 }
 
-/// RLP-encode an unsigned EIP-1559 transaction from CantonEvmTransactionParams.
-/// Output: 0x02 || RLP([chainId, nonce, maxPriorityFeePerGas, maxFeePerGas,
-///                       gasLimit, to, value, data, accessList])
-pub fn rlp_encode_unsigned_eip1559(params: &CantonEvmTransactionParams) -> Vec<u8> {
-    use rlp::RlpStream;
+/// Convert Canton EvmTransactionParams to an alloy TxEip1559.
+pub fn to_tx_eip1559(p: &CantonEvmTransactionParams) -> anyhow::Result<TxEip1559> {
+    let to_bytes = hex::decode(&p.to)?;
+    // Canton pads to 64 hex chars (32 bytes) — take last 20 for the address
+    let addr_bytes = if to_bytes.len() > 20 {
+        &to_bytes[to_bytes.len() - 20..]
+    } else {
+        &to_bytes
+    };
 
-    let chain_id = u64::from_str_radix(&params.chain_id, 16).unwrap_or(0);
-    let nonce = u64::from_str_radix(&params.nonce, 16).unwrap_or(0);
-    let max_priority_fee =
-        U256::from_str_radix(&params.max_priority_fee, 16).unwrap_or(U256::ZERO);
-    let max_fee_per_gas = U256::from_str_radix(&params.max_fee_per_gas, 16).unwrap_or(U256::ZERO);
-    let gas_limit = U256::from_str_radix(&params.gas_limit, 16).unwrap_or(U256::ZERO);
-    let to_addr = hex::decode(&params.to).unwrap_or_default();
-    let value = U256::from_str_radix(&params.value, 16).unwrap_or(U256::ZERO);
-    let calldata = build_calldata(&params.function_signature, &params.args);
-
-    let mut stream = RlpStream::new_list(9);
-    stream.append(&chain_id);
-    stream.append(&nonce);
-    append_u256(&mut stream, max_priority_fee);
-    append_u256(&mut stream, max_fee_per_gas);
-    append_u256(&mut stream, gas_limit);
-    stream.append(&to_addr);
-    append_u256(&mut stream, value);
-    stream.append(&calldata);
-    // accessList = empty list
-    stream.begin_list(0);
-
-    let rlp_bytes = stream.out();
-    let mut result = Vec::with_capacity(1 + rlp_bytes.len());
-    result.push(0x02u8); // EIP-1559 type byte
-    result.extend_from_slice(&rlp_bytes);
-    result
+    Ok(TxEip1559 {
+        chain_id: u64::from_str_radix(&p.chain_id, 16).unwrap_or(0),
+        nonce: u64::from_str_radix(&p.nonce, 16).unwrap_or(0),
+        gas_limit: u64::from_str_radix(&p.gas_limit, 16).unwrap_or(0),
+        max_fee_per_gas: u128::from_str_radix(&p.max_fee_per_gas, 16).unwrap_or(0),
+        max_priority_fee_per_gas: u128::from_str_radix(&p.max_priority_fee, 16).unwrap_or(0),
+        to: TxKind::Call(Address::from_slice(addr_bytes)),
+        value: U256::from_str_radix(&p.value, 16).unwrap_or(U256::ZERO),
+        input: Bytes::from(build_calldata(&p.function_signature, &p.args)),
+        access_list: Default::default(),
+    })
 }
 
-/// Append a U256 as minimal big-endian bytes to an RLP stream.
-fn append_u256(stream: &mut rlp::RlpStream, val: U256) {
-    let be = val.to_be_bytes::<32>();
-    // Strip leading zeros for RLP encoding
-    let first_nonzero = be.iter().position(|&b| b != 0);
-    match first_nonzero {
-        Some(pos) => stream.append(&&be[pos..]),
-        None => stream.append(&vec![0u8; 0].as_slice()), // zero value -> empty bytes
-    };
+/// RLP-encode an unsigned EIP-1559 transaction using alloy.
+pub fn rlp_encode_unsigned_eip1559(params: &CantonEvmTransactionParams) -> Vec<u8> {
+    match to_tx_eip1559(params) {
+        Ok(tx) => {
+            use alloy::consensus::transaction::SignableTransaction;
+            let mut out = Vec::new();
+            tx.encode_for_signing(&mut out);
+            out
+        }
+        Err(e) => {
+            tracing::warn!(%e, "failed to build TxEip1559 from Canton params");
+            vec![]
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -231,44 +209,13 @@ fn append_u256(stream: &mut rlp::RlpStream, val: U256) {
 /// only accepts DER-encoded signatures — there is no built-in Daml function
 /// to convert from raw `(r, s)` components to DER. We encode on the MPC
 /// side so the Daml contracts can verify directly without conversion.
-///
-/// ASN.1 DER: 30 <len> 02 <r_len> <r_bytes> 02 <s_len> <s_bytes>
-pub fn der_encode_signature(signature: &Signature) -> Vec<u8> {
-    let r_bytes = signature.big_r.x().to_vec();
-    let s_bytes = signature.s.to_bytes();
+pub fn der_encode_signature(signature: &Signature) -> anyhow::Result<Vec<u8>> {
+    use mpc_crypto::x_coordinate;
 
-    // Encode r — DER integers are signed, so prepend 0x00 if high bit set
-    let r_der = der_encode_integer(&r_bytes);
-    let s_der = der_encode_integer(&s_bytes);
-
-    let inner_len = r_der.len() + s_der.len();
-    let mut result = Vec::with_capacity(2 + inner_len);
-    result.push(0x30); // SEQUENCE tag
-    result.push(inner_len as u8);
-    result.extend_from_slice(&r_der);
-    result.extend_from_slice(&s_der);
-    result
-}
-
-fn der_encode_integer(bytes: &[u8]) -> Vec<u8> {
-    // Strip leading zeros, keeping at least one byte
-    let stripped = match bytes.iter().position(|&b| b != 0) {
-        Some(pos) => &bytes[pos..],
-        None => &[0u8],
-    };
-
-    // Prepend 0x00 if high bit is set (DER integers are signed)
-    let needs_pad = stripped[0] & 0x80 != 0;
-    let len = stripped.len() + if needs_pad { 1 } else { 0 };
-
-    let mut result = Vec::with_capacity(2 + len);
-    result.push(0x02); // INTEGER tag
-    result.push(len as u8);
-    if needs_pad {
-        result.push(0x00);
-    }
-    result.extend_from_slice(stripped);
-    result
+    let r_scalar = x_coordinate(&signature.big_r);
+    let ecdsa_sig = k256::ecdsa::Signature::from_scalars(r_scalar, &signature.s)
+        .map_err(|e| anyhow::anyhow!("failed to create ECDSA signature from (r, s) scalars: {e}"))?;
+    Ok(ecdsa_sig.to_der().to_bytes().to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -349,6 +296,11 @@ pub struct CantonConfig {
     pub jwt_private_key_path: String,
     pub jwt_subject: String,
     pub party_id: String,
+    /// The Signer contract ID on the Canton ledger. Must be updated if the contract is re-deployed.
+    pub signer_contract_id: String,
+    /// The full template ID of the Signer contract (e.g. "<packageHash>:Signer:Signer").
+    /// Must be updated if the DAR is upgraded.
+    pub signer_template_id: String,
 }
 
 impl fmt::Debug for CantonConfig {
@@ -359,6 +311,8 @@ impl fmt::Debug for CantonConfig {
             .field("jwt_private_key_path", &"<hidden>")
             .field("jwt_subject", &self.jwt_subject)
             .field("party_id", &self.party_id)
+            .field("signer_contract_id", &self.signer_contract_id)
+            .field("signer_template_id", &self.signer_template_id)
             .finish()
     }
 }
@@ -367,7 +321,18 @@ impl fmt::Debug for CantonConfig {
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "indexer_canton_options")]
 pub struct CantonArgs {
-    #[arg(long, env("MPC_CANTON_JSON_API_URL"))]
+    #[arg(
+        long,
+        env("MPC_CANTON_JSON_API_URL"),
+        requires_all = [
+            "canton_json_api_ws_url",
+            "canton_jwt_private_key_path",
+            "canton_jwt_subject",
+            "canton_party_id",
+            "canton_signer_contract_id",
+            "canton_signer_template_id",
+        ]
+    )]
     pub canton_json_api_url: Option<String>,
     #[arg(long, env("MPC_CANTON_JSON_API_WS_URL"), requires = "canton_json_api_url")]
     pub canton_json_api_ws_url: Option<String>,
@@ -377,11 +342,18 @@ pub struct CantonArgs {
     pub canton_jwt_subject: Option<String>,
     #[arg(long, env("MPC_CANTON_PARTY_ID"), requires = "canton_json_api_url")]
     pub canton_party_id: Option<String>,
+    /// The Signer contract ID on the Canton ledger. Must be updated if the contract is re-deployed.
+    #[arg(long, env("MPC_CANTON_SIGNER_CONTRACT_ID"), requires = "canton_json_api_url")]
+    pub canton_signer_contract_id: Option<String>,
+    /// The full template ID of the Signer contract (e.g. "<packageHash>:Signer:Signer").
+    /// Must be updated if the DAR is upgraded.
+    #[arg(long, env("MPC_CANTON_SIGNER_TEMPLATE_ID"), requires = "canton_json_api_url")]
+    pub canton_signer_template_id: Option<String>,
 }
 
 impl CantonArgs {
     pub fn into_str_args(self) -> Vec<String> {
-        let mut args = Vec::with_capacity(10);
+        let mut args = Vec::with_capacity(16);
         if let Some(v) = self.canton_json_api_url {
             args.extend(["--canton-json-api-url".to_string(), v]);
         }
@@ -397,6 +369,12 @@ impl CantonArgs {
         if let Some(v) = self.canton_party_id {
             args.extend(["--canton-party-id".to_string(), v]);
         }
+        if let Some(v) = self.canton_signer_contract_id {
+            args.extend(["--canton-signer-contract-id".to_string(), v]);
+        }
+        if let Some(v) = self.canton_signer_template_id {
+            args.extend(["--canton-signer-template-id".to_string(), v]);
+        }
         args
     }
 
@@ -407,6 +385,8 @@ impl CantonArgs {
             jwt_private_key_path: self.canton_jwt_private_key_path?,
             jwt_subject: self.canton_jwt_subject?,
             party_id: self.canton_party_id?,
+            signer_contract_id: self.canton_signer_contract_id?,
+            signer_template_id: self.canton_signer_template_id?,
         })
     }
 
@@ -418,6 +398,9 @@ impl CantonArgs {
                 canton_jwt_private_key_path: Some(c.jwt_private_key_path),
                 canton_jwt_subject: Some(c.jwt_subject),
                 canton_party_id: Some(c.party_id),
+
+                canton_signer_contract_id: Some(c.signer_contract_id),
+                canton_signer_template_id: Some(c.signer_template_id),
             },
             None => CantonArgs {
                 canton_json_api_url: None,
@@ -425,6 +408,9 @@ impl CantonArgs {
                 canton_jwt_private_key_path: None,
                 canton_jwt_subject: None,
                 canton_party_id: None,
+
+                canton_signer_contract_id: None,
+                canton_signer_template_id: None,
             },
         }
     }
@@ -472,19 +458,18 @@ pub async fn discover_signer_cid(
 
     let mut signer_contracts: Vec<(String, String)> = Vec::new();
     for item in &items {
-        if let Some(entry) = &item.contract_entry {
-            let ledger_api::ContractEntry::JsActiveContract(active) = entry;
+        if let Some(ledger_api::ContractEntry::JsActiveContract(active)) = &item.contract_entry {
             let ce = &active.created_event;
-            if ledger_api::template_suffix_matches(&ce.template_id, "Signer:Signer") {
+            if ledger_api::template_suffix_matches(&ce.template_id, ledger_api::templates::SIGNER) {
                 signer_contracts.push((ce.contract_id.clone(), ce.template_id.clone()));
             }
         }
     }
 
-    match signer_contracts.len() {
-        0 => anyhow::bail!("no active Signer:Signer contract found"),
-        1 => Ok(signer_contracts.into_iter().next().unwrap()),
-        n => anyhow::bail!("expected 1 Signer:Signer contract, found {n}"),
+    match signer_contracts.as_slice() {
+        [] => anyhow::bail!("no active Signer:Signer contract found"),
+        [single] => Ok(single.clone()),
+        _ => anyhow::bail!("expected 1 Signer:Signer contract, found {}", signer_contracts.len()),
     }
 }
 
@@ -564,6 +549,21 @@ async fn run_canton_event_loop(
     tx: mpsc::Sender<ChainEvent>,
     backlog: Backlog,
 ) {
+    // Read PEM once at startup and parse the key (no re-parsing per reconnect)
+    let encoding_key = match tokio::fs::read(&config.jwt_private_key_path).await {
+        Ok(pem) => match EncodingKey::from_ec_pem(&pem) {
+            Ok(key) => key,
+            Err(e) => {
+                tracing::error!(%e, "failed to parse canton JWT private key — canton indexer disabled");
+                return;
+            }
+        },
+        Err(e) => {
+            tracing::error!(%e, "failed to read canton JWT private key — canton indexer disabled");
+            return;
+        }
+    };
+
     // Seed counter from backlog checkpoint
     let mut counter = backlog
         .processed_block(Chain::Canton)
@@ -576,7 +576,7 @@ async fn run_canton_event_loop(
     );
 
     loop {
-        match subscribe_and_process(&config, &tx, &mut counter).await {
+        match subscribe_and_process(&config, &encoding_key, &tx, &mut counter).await {
             Ok(()) => {
                 tracing::info!("canton WebSocket stream ended cleanly, reconnecting...");
             }
@@ -591,11 +591,11 @@ async fn run_canton_event_loop(
 /// Connect to the Canton WebSocket, subscribe, and process events until disconnection.
 async fn subscribe_and_process(
     config: &CantonConfig,
+    encoding_key: &EncodingKey,
     tx: &mpsc::Sender<ChainEvent>,
     counter: &mut u64,
 ) -> anyhow::Result<()> {
-    let jwt_pem = std::fs::read(&config.jwt_private_key_path)?;
-    let jwt_token = generate_jwt(&jwt_pem, &config.jwt_subject)?;
+    let jwt_token = generate_jwt_with_key(encoding_key, &config.jwt_subject)?;
 
     let ws_url = format!("{}/v2/updates", config.json_api_ws_url);
 
@@ -610,33 +610,64 @@ async fn subscribe_and_process(
         format!("Bearer {jwt_token}").parse()?,
     );
 
-    let (ws_stream, _) = tokio_tungstenite::connect_async(request).await?;
+    let (ws_stream, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("canton WebSocket connect timed out"))??;
     let (mut write, mut read) = ws_stream.split();
 
     tracing::info!("canton WebSocket connected");
 
-    // Send subscription message
+    // Send subscription message using updateFormat (Canton 3.4+).
+    // TRANSACTION_SHAPE_LEDGER_EFFECTS gives us ExercisedEvent which we use
+    // to verify the SignBidirectional choice was exercised on a Signer:Signer.
     let mut filters_by_party = serde_json::Map::new();
     filters_by_party.insert(config.party_id.clone(), serde_json::json!({}));
 
     let subscribe_msg = ledger_api::GetUpdatesRequest {
         begin_exclusive: *counter,
-        verbose: true,
-        filter: ledger_api::UpdatesFilter { filters_by_party },
+        update_format: ledger_api::UpdateFormat {
+            include_transactions: ledger_api::TransactionFormat {
+                transaction_shape: "TRANSACTION_SHAPE_LEDGER_EFFECTS".to_string(),
+                event_format: ledger_api::EventFormatInline {
+                    filters_by_party,
+                    verbose: true,
+                },
+            },
+        },
     };
     write
         .send(Message::Text(serde_json::to_string(&subscribe_msg)?.into()))
         .await?;
 
-    // Process incoming messages
-    while let Some(msg) = read.next().await {
-        let msg = msg?;
-        let text = match msg {
-            Message::Text(t) => t,
-            Message::Ping(data) => {
-                write.send(Message::Pong(data)).await?;
+    // Process incoming messages with stall watchdog (matches Solana pattern)
+    let stall_timeout = std::time::Duration::from_secs(60);
+    let mut last_ws_msg = tokio::time::Instant::now();
+    let mut watchdog = tokio::time::interval(std::time::Duration::from_secs(5));
+
+    loop {
+        let msg = tokio::select! {
+            maybe = read.next() => {
+                match maybe {
+                    Some(msg) => {
+                        last_ws_msg = tokio::time::Instant::now();
+                        msg?
+                    }
+                    None => break,
+                }
+            }
+            _ = watchdog.tick() => {
+                if last_ws_msg.elapsed() > stall_timeout {
+                    anyhow::bail!("canton WebSocket stalled: no message for {stall_timeout:?}");
+                }
                 continue;
             }
+        };
+        let text = match msg {
+            Message::Text(t) => t,
+            // tokio-tungstenite auto-sends pong replies; manual Pong would double-respond
             Message::Close(_) => {
                 tracing::info!("canton WebSocket received close frame");
                 break;
@@ -657,7 +688,7 @@ async fn subscribe_and_process(
                 *counter = value.offset;
 
                 for event in &value.events {
-                    process_canton_event(event, tx, counter).await;
+                    process_canton_event(event, &value.events, tx, &config.party_id, &config.signer_template_id).await;
                 }
 
                 // Emit Block event for checkpoint tracking
@@ -685,10 +716,15 @@ async fn subscribe_and_process(
 }
 
 /// Process a single Canton event from a WebSocket transaction update.
+///
+/// `tx_events` is the full list of events in the transaction, used for
+/// defense-in-depth verification (signatory checks, ExercisedEvent check).
 async fn process_canton_event(
     event: &ledger_api::Event,
+    tx_events: &[ledger_api::Event],
     tx: &mpsc::Sender<ChainEvent>,
-    _counter: &u64,
+    node_party_id: &str,
+    signer_template_id: &str,
 ) {
     let created = match event {
         ledger_api::Event::CreatedEvent(created) => created,
@@ -697,19 +733,22 @@ async fn process_canton_event(
 
     let template_id = &created.template_id;
 
-    if ledger_api::template_suffix_matches(template_id, "Signer:SignBidirectionalEvent") {
+    if ledger_api::template_suffix_matches(template_id, ledger_api::templates::SIGN_BIDIRECTIONAL_EVENT) {
         match parse_sign_bidirectional_event(created) {
             Ok(canton_event) => {
-                let entropy: [u8; 32] = rand::random();
+                if let Err(e) = verify_sign_event(&canton_event, created, tx_events, node_party_id, signer_template_id) {
+                    tracing::error!(%e, "canton SignBidirectionalEvent failed verification — dropping");
+                    return;
+                }
+
+                let request_id = canton_event.generate_request_id();
+                let entropy: [u8; 32] = keccak256(request_id).into();
                 let boxed: crate::stream::ops::SignatureEventBox = Box::new(canton_event);
                 match boxed.generate_sign_request(entropy) {
                     Ok(indexed) => {
-                        if tx
-                            .send(ChainEvent::SignRequest(indexed))
-                            .await
-                            .is_err()
-                        {
+                        if tx.send(ChainEvent::SignRequest(indexed)).await.is_err() {
                             tracing::error!("canton event channel closed");
+                            return;
                         }
                     }
                     Err(e) => {
@@ -721,28 +760,26 @@ async fn process_canton_event(
                 tracing::warn!(%e, "failed to parse SignBidirectionalEvent");
             }
         }
-    } else if ledger_api::template_suffix_matches(template_id, "Signer:SignatureRespondedEvent") {
+    } else if ledger_api::template_suffix_matches(template_id, ledger_api::templates::SIGNATURE_RESPONDED_EVENT) {
         match parse_signature_responded_event(created) {
             Ok(responded) => {
                 let event = SignatureRespondedEvent::Canton(responded);
                 if tx.send(ChainEvent::Respond(event)).await.is_err() {
                     tracing::error!("canton event channel closed");
+                    return;
                 }
             }
             Err(e) => {
                 tracing::warn!(%e, "failed to parse SignatureRespondedEvent");
             }
         }
-    } else if ledger_api::template_suffix_matches(template_id, "Signer:RespondBidirectionalEvent") {
+    } else if ledger_api::template_suffix_matches(template_id, ledger_api::templates::RESPOND_BIDIRECTIONAL_EVENT) {
         match parse_respond_bidirectional_event(created) {
             Ok(respond) => {
                 let event = RespondBidirectionalEvent::Canton(respond);
-                if tx
-                    .send(ChainEvent::RespondBidirectional(event))
-                    .await
-                    .is_err()
-                {
+                if tx.send(ChainEvent::RespondBidirectional(event)).await.is_err() {
                     tracing::error!("canton event channel closed");
+                    return;
                 }
             }
             Err(e) => {
@@ -750,6 +787,91 @@ async fn process_canton_event(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Defense-in-depth verification (mirrors canton-mpc-poc TS tx-handler.ts)
+// ---------------------------------------------------------------------------
+
+/// Verify a SignBidirectionalEvent before processing it.
+///
+/// These checks are defense-in-depth on top of the Daml ledger guarantees:
+/// 1. Operators from the payload must be actual signatories on the CreatedEvent
+/// 2. Requester must be a signatory
+/// 3. An ExercisedEvent with choice "SignBidirectional" on Signer:Signer must
+///    exist in the same transaction — proves the event was created through the
+///    correct Daml code path, not fabricated
+fn verify_sign_event(
+    event: &contracts::SignBidirectionalRequestedEvent,
+    created: &ledger_api::CreatedEvent,
+    tx_events: &[ledger_api::Event],
+    node_party_id: &str,
+    signer_template_id: &str,
+) -> anyhow::Result<()> {
+    // Check 0: sig_network must match this node's party ID
+    if event.sig_network != node_party_id {
+        anyhow::bail!(
+            "sig_network {} does not match node party_id {node_party_id} — event is for a different MPC network",
+            event.sig_network
+        );
+    }
+
+    let signatories: HashSet<&str> = created.signatories.iter().map(|s| s.as_str()).collect();
+
+    // Check 1: operators must be signatories (hard error)
+    for op in &event.operators {
+        if !signatories.contains(op.as_str()) {
+            anyhow::bail!(
+                "operator {op} is in contract payload but not in CreatedEvent.signatories — possible forgery"
+            );
+        }
+    }
+
+    // Check 2: requester must be a signatory (hard error)
+    if !signatories.contains(event.requester.as_str()) {
+        anyhow::bail!(
+            "requester {} is not in CreatedEvent.signatories — possible forgery",
+            event.requester
+        );
+    }
+
+    // Check 3: ExercisedEvent with choice "SignBidirectional" on the pinned
+    // Signer template must exist in the same transaction. Exact template ID
+    // match (not suffix) since the operator pinned it via CLI.
+    let has_exercise = tx_events.iter().any(|e| matches!(
+        e,
+        ledger_api::Event::ExercisedEvent(ex)
+            if ex.choice == "SignBidirectional" && ex.template_id == signer_template_id
+    ));
+    if !has_exercise {
+        anyhow::bail!(
+            "no ExercisedEvent with choice SignBidirectional on {signer_template_id} found in transaction"
+        );
+    }
+
+    // Check 4: nonceCidText must correspond to a consuming ExercisedEvent on a
+    // SigningNonce template in the same transaction. With LEDGER_EFFECTS, nonce
+    // archival appears as a consuming exercise (not an ArchivedEvent).
+    // This ensures: (a) the nonce was actually consumed (replay prevention),
+    // and (b) it's a SigningNonce — not an arbitrary string.
+    let nonce_cid = &event.nonce_cid_text;
+    if nonce_cid.is_empty() {
+        anyhow::bail!("nonceCidText is empty — malformed SignBidirectionalEvent");
+    }
+    let nonce_consumed = tx_events.iter().any(|e| matches!(
+        e,
+        ledger_api::Event::ExercisedEvent(ex)
+            if ex.consuming
+                && ex.contract_id == *nonce_cid
+                && ledger_api::template_suffix_matches(&ex.template_id, ledger_api::templates::SIGNING_NONCE)
+    ));
+    if !nonce_consumed {
+        anyhow::bail!(
+            "nonceCidText {nonce_cid} does not match any consuming ExercisedEvent on SigningNonce in the transaction — possible replay or forged nonce"
+        );
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -770,7 +892,8 @@ fn parse_signature_responded_event(
     let payload: contracts::SignatureRespondedEventPayload =
         serde_json::from_value(created.payload.clone())?;
 
-    let request_id = hex_to_32_bytes(&payload.request_id)?;
+    let request_id: [u8; 32] = payload.request_id.parse::<B256>()
+        .map_err(|e| anyhow::anyhow!("invalid request_id hex: {e}"))?.0;
     let signature = parse_der_signature(&payload.signature)?;
 
     Ok(CantonSignatureRespondedEvent {
@@ -786,7 +909,8 @@ fn parse_respond_bidirectional_event(
     let payload: contracts::RespondBidirectionalEventPayload =
         serde_json::from_value(created.payload.clone())?;
 
-    let request_id = hex_to_32_bytes(&payload.request_id)?;
+    let request_id: [u8; 32] = payload.request_id.parse::<B256>()
+        .map_err(|e| anyhow::anyhow!("invalid request_id hex: {e}"))?.0;
     let serialized_output = hex::decode(&payload.serialized_output)
         .map_err(|e| anyhow::anyhow!("invalid serializedOutput hex: {e}"))?;
     let signature = parse_der_signature(&payload.signature)?;
@@ -799,24 +923,17 @@ fn parse_respond_bidirectional_event(
     })
 }
 
-fn hex_to_32_bytes(hex_str: &str) -> anyhow::Result<[u8; 32]> {
-    let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    let bytes = hex::decode(stripped)
-        .map_err(|e| anyhow::anyhow!("invalid hex: {e}"))?;
-    bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("expected 32 bytes, got different length"))
-}
-
-/// Parse a DER-encoded ECDSA signature into an MPC Signature (big_r, s).
-///
-/// The DER format is: 30 <len> 02 <r_len> <r> 02 <s_len> <s>
 /// Parse a DER-encoded ECDSA signature (hex string) back into an MPC Signature.
 ///
 /// Canton emits signatures in DER format (see [`der_encode_signature`] for why).
-/// We extract r and s, then reconstruct big_r as a compressed point.
-/// Since DER only gives us the x-coordinate (r), we decompress with
-/// even parity (the recovery bit is not in DER).
+/// We extract r and s via k256's DER parser, then reconstruct `big_r` by
+/// decompressing the r scalar as a secp256k1 x-coordinate with even parity.
+///
+/// **Important:** DER does not encode the recovery ID (y-parity). The returned
+/// `recovery_id` defaults to `0` (even parity) and may be incorrect for ~50%
+/// of signatures. Callers that need the correct recovery ID must determine it
+/// themselves by recovering the public key from the message hash — see
+/// [`crate::kdf::into_signature`] for the canonical approach.
 fn parse_der_signature(hex_str: &str) -> anyhow::Result<Signature> {
     use k256::elliptic_curve::sec1::FromEncodedPoint;
     use k256::EncodedPoint;
@@ -825,64 +942,28 @@ fn parse_der_signature(hex_str: &str) -> anyhow::Result<Signature> {
     let bytes = hex::decode(stripped)
         .map_err(|e| anyhow::anyhow!("invalid DER hex: {e}"))?;
 
-    // Parse DER structure manually
-    if bytes.len() < 6 || bytes[0] != 0x30 {
-        anyhow::bail!("invalid DER signature: bad header");
-    }
+    let ecdsa_sig = k256::ecdsa::Signature::from_der(&bytes)
+        .map_err(|e| anyhow::anyhow!("invalid DER signature: {e}"))?;
 
-    let mut pos = 2; // skip SEQUENCE tag + length
-    if bytes[pos] != 0x02 {
-        anyhow::bail!("invalid DER signature: expected INTEGER tag for r");
-    }
-    pos += 1;
-    let r_len = bytes[pos] as usize;
-    pos += 1;
-    let r_bytes = &bytes[pos..pos + r_len];
-    pos += r_len;
+    let (r_scalar, s_scalar) = ecdsa_sig.split_scalars();
+    let r_bytes = r_scalar.to_bytes();
+    let s_bytes: [u8; 32] = s_scalar.to_bytes().into();
+    let s = <k256::Scalar as ScalarExt>::from_bytes(s_bytes)
+        .ok_or_else(|| anyhow::anyhow!("s is not a valid scalar"))?;
 
-    if bytes[pos] != 0x02 {
-        anyhow::bail!("invalid DER signature: expected INTEGER tag for s");
-    }
-    pos += 1;
-    let s_len = bytes[pos] as usize;
-    pos += 1;
-    let s_bytes = &bytes[pos..pos + s_len];
-
-    // Strip leading zero byte from DER signed integers
-    let r_trimmed = if !r_bytes.is_empty() && r_bytes[0] == 0x00 {
-        &r_bytes[1..]
-    } else {
-        r_bytes
-    };
-    let s_trimmed = if !s_bytes.is_empty() && s_bytes[0] == 0x00 {
-        &s_bytes[1..]
-    } else {
-        s_bytes
-    };
-
-    // Pad r to 32 bytes
-    let mut r_32 = [0u8; 32];
-    let offset = 32_usize.saturating_sub(r_trimmed.len());
-    r_32[offset..].copy_from_slice(r_trimmed);
-
-    // Pad s to 32 bytes
-    let mut s_32 = [0u8; 32];
-    let offset = 32_usize.saturating_sub(s_trimmed.len());
-    s_32[offset..].copy_from_slice(s_trimmed);
-
-    // Reconstruct big_r as compressed point (02 || x-coordinate) — even parity
+    // Reconstruct big_r from the x-coordinate with even parity (0x02).
+    // Both parities always yield valid secp256k1 points, so the old loop
+    // that checked `from_encoded_point` was a no-op — it always took the
+    // first branch.  The actual recovery_id must be resolved later against
+    // the expected public key and message hash.
     let mut compressed = [0u8; 33];
-    compressed[0] = 0x02;
-    compressed[1..].copy_from_slice(&r_32);
+    compressed[0] = 0x02; // even parity
+    compressed[1..].copy_from_slice(&r_bytes);
     let encoded = EncodedPoint::from_bytes(&compressed)
-        .map_err(|e| anyhow::anyhow!("invalid r point: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("r is not valid compressed point bytes: {e}"))?;
     let big_r = Option::from(k256::AffinePoint::from_encoded_point(&encoded))
         .ok_or_else(|| anyhow::anyhow!("r is not a valid point on secp256k1"))?;
 
-    let s = <k256::Scalar as ScalarExt>::from_bytes(s_32)
-        .ok_or_else(|| anyhow::anyhow!("s is not a valid scalar"))?;
-
-    // recovery_id is not encoded in DER; use 0 (even parity) as default.
     Ok(Signature {
         big_r,
         s,
