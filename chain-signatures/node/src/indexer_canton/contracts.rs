@@ -97,6 +97,10 @@ pub struct RespondBidirectionalEventPayload {
 // ---------------------------------------------------------------------------
 
 /// Deserialize a u32 from either a JSON number or a JSON string.
+///
+/// TODO(test): Canton sends key_version as either a JSON number or string.
+/// If this deserializer breaks, sign requests silently fail to parse and get
+/// dropped. Test with 42, "42", "0", overflow values.
 fn deserialize_u32_lenient<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: serde::Deserializer<'de>,

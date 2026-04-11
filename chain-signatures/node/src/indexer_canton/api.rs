@@ -41,6 +41,11 @@ pub(crate) fn generate_jwt_with_key(key: &EncodingKey, subject: &str) -> anyhow:
 /// only accepts DER-encoded signatures — there is no built-in Daml function
 /// to convert from raw `(r, s)` components to DER. We encode on the MPC
 /// side so the Daml contracts can verify directly without conversion.
+///
+/// TODO(test): roundtrip test — encode a known Signature to DER, then parse it
+/// back with `parse_der_signature` and verify (big_r.x, s) are preserved.
+/// Also test that the DER output is accepted by k256's verifier given the
+/// corresponding public key and message hash.
 pub fn der_encode_signature(signature: &Signature) -> anyhow::Result<Vec<u8>> {
     use mpc_crypto::x_coordinate;
 

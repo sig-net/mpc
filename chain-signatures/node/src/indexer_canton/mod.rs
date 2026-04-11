@@ -52,6 +52,9 @@ pub struct CantonSignatureRespondedEvent {
 
 /// Build calldata from function signature and args.
 /// calldata = keccak256("function " + sig)[0..4] ++ concat(args)
+///
+/// TODO(test): verify selector computation against known EVM function signatures
+/// (e.g. "transfer(address,uint256)" → 0xa9059cbb) and multi-arg concatenation.
 fn build_calldata(function_signature: &str, args: &[String]) -> Vec<u8> {
     // EVM selector = first 4 bytes of keccak256 of the bare signature,
     // e.g. "transfer(address,uint256)", NOT prefixed with "function ".
@@ -66,6 +69,10 @@ fn build_calldata(function_signature: &str, args: &[String]) -> Vec<u8> {
 }
 
 /// Convert Canton EvmTransactionParams to an alloy TxEip1559.
+///
+/// TODO(test): test address extraction from 32-byte padded hex (Canton format)
+/// vs 20-byte unpadded hex. Test hex parsing of all numeric fields (chain_id,
+/// nonce, gas_limit, fees, value) including edge cases like leading zeros.
 fn to_tx_eip1559(p: &CantonEvmTransactionParams) -> anyhow::Result<TxEip1559> {
     let to_bytes = hex::decode(&p.to)?;
     // Canton pads to 64 hex chars (32 bytes) — take last 20 for the address
@@ -89,6 +96,10 @@ fn to_tx_eip1559(p: &CantonEvmTransactionParams) -> anyhow::Result<TxEip1559> {
 }
 
 /// RLP-encode an unsigned EIP-1559 transaction using alloy.
+///
+/// TODO(test): golden-test against viem's `serializeTransaction` with known
+/// EvmTransactionParams. Verify the output matches byte-for-byte — this is
+/// what gets hashed and signed, so any divergence breaks on-chain verification.
 pub fn rlp_encode_unsigned_eip1559(params: &CantonEvmTransactionParams) -> Vec<u8> {
     match to_tx_eip1559(params) {
         Ok(tx) => {
@@ -175,6 +186,18 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
 // ---------------------------------------------------------------------------
 
 /// Canton JSON Ledger API configuration.
+///
+/// # Contract migration
+///
+/// When the Signer DAR is upgraded and redeployed, both `signer_contract_id`
+/// and `signer_template_id` change (similar to deploying a new Ethereum
+/// contract — the old address/ID is gone). Currently the MPC node requires a
+/// restart with updated CLI args to pick up the new IDs.
+///
+/// TODO: decide how to handle DAR upgrades without MPC node downtime.
+/// Options include: runtime re-discovery via `discover_signer_cid`, watching
+/// for Signer contract archival/recreation events on the stream, or a
+/// control-plane signal that triggers config reload.
 #[derive(Clone)]
 pub struct CantonConfig {
     pub json_api_url: String,
@@ -182,10 +205,11 @@ pub struct CantonConfig {
     pub jwt_private_key_path: String,
     pub jwt_subject: String,
     pub party_id: String,
-    /// The Signer contract ID on the Canton ledger. Must be updated if the contract is re-deployed.
+    /// The Signer contract ID on the Canton ledger. Changes on every DAR
+    /// redeployment — requires MPC node restart with the new value.
     pub signer_contract_id: String,
     /// The full template ID of the Signer contract (e.g. "<packageHash>:Signer:Signer").
-    /// Must be updated if the DAR is upgraded.
+    /// The package hash changes on every DAR upgrade, invalidating this value.
     pub signer_template_id: String,
 }
 

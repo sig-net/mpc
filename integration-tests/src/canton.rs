@@ -57,7 +57,8 @@ fn generate_jwt_auth_material() -> Result<JwtAuthMaterial> {
 
     let private_key_pem = std::fs::read_to_string(&key_path)?;
 
-    // JWT auth on ledger-api only. The admin-api stays unauthenticated.
+    // JWT auth on ledger-api only. The admin-api supports JWT too but is
+    // left unauthenticated here for test simplicity.
     let conf = format!(
         r#"canton.participants.sandbox.ledger-api {{
   auth-services = [
@@ -105,8 +106,12 @@ pub struct CantonSandbox {
 
 impl CantonSandbox {
     pub async fn run() -> Result<Self> {
-        // 0. Wait for ALL Canton ports to be free (previous sandbox may still be
-        //    shutting down). Canton binds 7575 (JSON API), 6865 (gRPC), 6868 (sequencer).
+        // 0. Wait for Canton ports to be free (previous sandbox may still be
+        //    shutting down). Canton binds 5 ports: 6865 (Ledger API gRPC),
+        //    6866 (Admin API gRPC), 6867 (Sequencer Public API), 6868
+        //    (Sequencer Admin API), 6869 (Mediator Admin API), plus the
+        //    JSON API on the --json-api-port. We only check a subset here
+        //    since killing the JVM releases all ports together.
         for port in [CANTON_JSON_API_PORT, 6865, 6868] {
             let mut released = false;
             for i in 0..40 {
@@ -145,11 +150,13 @@ impl CantonSandbox {
         let auth = generate_jwt_auth_material()?;
 
         // 4. Start dpm sandbox WITH auth but WITHOUT --dar.
-        //    `dpm sandbox --dar` uses the ledger-api gRPC for DAR upload, which
-        //    fails with PERMISSION_DENIED when auth is enabled. Instead, we start
-        //    without --dar, wait for readiness, then upload the DAR via the HTTP
-        //    JSON API with a proper admin JWT. This is the pattern used by the
-        //    official cn-quickstart.
+        //    `dpm sandbox --dar` uses the gRPC PackageManagementService on the
+        //    Ledger API port and has no flag to supply a JWT, so it fails with
+        //    PERMISSION_DENIED when auth is enabled. Instead, we start without
+        //    --dar, wait for readiness, then upload the DAR via the HTTP JSON
+        //    API (POST /v2/packages) with an admin JWT. This is the same pattern
+        //    used by Digital Asset's cn-quickstart and the recommended approach
+        //    since `dpm` dropped the `upload-dar` command.
         let process = Command::new("dpm")
             .arg("sandbox")
             .arg("--json-api-port")

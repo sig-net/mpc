@@ -1,7 +1,8 @@
 //! Typed structs for the Canton JSON Ledger API v2.
 //!
-//! Derived from the OpenAPI spec (version 3.4.11). Only types that the MPC node
-//! or integration tests actually use are included.
+//! Hand-translated from the OpenAPI spec (version 3.4.11). Only types that the
+//! MPC node or integration tests actually use are included. Could be
+//! auto-generated with `openapi-generator` in the future.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -361,6 +362,11 @@ pub mod templates {
 
 /// Check if a template ID matches a given suffix at a module boundary.
 /// Requires the suffix to be preceded by `:` (package separator) or match exactly.
+///
+/// TODO(test): every event gets filtered through this — a bug means events are
+/// silently ignored. Test exact match ("Signer:Signer"), prefix match
+/// ("abc123:Signer:Signer"), and near-misses ("FakeSigner:Signer",
+/// "Signer:SignerExtra").
 pub fn template_suffix_matches(template_id: &str, suffix: &str) -> bool {
     template_id == suffix
         || template_id.ends_with(&format!(":{suffix}"))

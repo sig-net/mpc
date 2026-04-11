@@ -1,8 +1,16 @@
+// NOTE: The inner hashing primitives (hash_text, pad_left_32, hash_bytes_list)
+// follow EIP-712 encoding conventions: strings are keccak256-hashed, integers
+// are left-padded to 32 bytes, and dynamic arrays are hashed element-wise then
+// concatenated. A future improvement could use alloy's EIP-712 types
+// (sol! macro, eip712_signing_hash) to make this alignment explicit and get
+// compile-time struct hashing, while keeping the outer compute_request_id as a
+// flat keccak256(concat(...)) to match the Daml implementation.
+
 use alloy::primitives::{keccak256, U256};
 use super::{CantonEvmTransactionParams, CantonSignBidirectionalRequestedEvent};
 
 /// keccak256(utf8(text)), or keccak256("") for empty string.
-/// Mirrors Daml's `hashText` in Eip712.daml.
+/// Mirrors Daml's `hashText` in Eip712.daml / EIP-712 string encoding.
 fn hash_text(text: &str) -> [u8; 32] {
     keccak256(text.as_bytes()).into()
 }
@@ -47,6 +55,10 @@ fn hash_evm_params(p: &CantonEvmTransactionParams) -> [u8; 32] {
 
 /// Compute the request ID using flat keccak256(concat(hashed fields)).
 /// Mirrors Daml's `computeRequestId` in RequestId.daml.
+///
+/// TODO(test): golden-test against the TypeScript/Daml reference implementation.
+/// Generate expected request IDs from the TS canton-sig package with known
+/// event payloads, then assert this function produces identical outputs.
 pub(super) fn compute_request_id(event: &CantonSignBidirectionalRequestedEvent) -> [u8; 32] {
     let key_version_hex = format!("{:x}", event.key_version);
 

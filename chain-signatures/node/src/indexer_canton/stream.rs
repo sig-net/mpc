@@ -236,7 +236,7 @@ async fn subscribe_and_process(
                 *counter = value.offset;
 
                 for event in &value.events {
-                    process_canton_event(event, &value.events, tx, &config.party_id, &config.signer_template_id).await;
+                    process_canton_event(event, &value.events, tx, &config.party_id, &config.signer_contract_id).await;
                 }
 
                 // Emit Block event for checkpoint tracking
@@ -267,12 +267,18 @@ async fn subscribe_and_process(
 ///
 /// `tx_events` is the full list of events in the transaction, used for
 /// defense-in-depth verification (signatory checks, ExercisedEvent check).
+///
+/// NOTE: integration tests (`canton_stream.rs`) cover `SignBidirectionalEvent`
+/// and `SignatureRespondedEvent` parsing against a real sandbox, but
+/// `RespondBidirectionalEvent` parsing and the downstream bidirectional
+/// execution flow (recovery ID fix, EVM tx construction, backlog advance)
+/// are not yet tested end-to-end.
 async fn process_canton_event(
     event: &ledger_api::Event,
     tx_events: &[ledger_api::Event],
     tx: &mpsc::Sender<ChainEvent>,
     node_party_id: &str,
-    signer_template_id: &str,
+    signer_contract_id: &str,
 ) {
     let created = match event {
         ledger_api::Event::CreatedEvent(created) => created,
@@ -284,7 +290,7 @@ async fn process_canton_event(
     if ledger_api::template_suffix_matches(template_id, ledger_api::templates::SIGN_BIDIRECTIONAL_EVENT) {
         match parse_sign_bidirectional_event(created) {
             Ok(canton_event) => {
-                if let Err(e) = verify_sign_event(&canton_event, created, tx_events, node_party_id, signer_template_id) {
+                if let Err(e) = verify_sign_event(&canton_event, created, tx_events, node_party_id, signer_contract_id) {
                     tracing::error!(%e, "canton SignBidirectionalEvent failed verification — dropping");
                     return;
                 }
@@ -349,12 +355,17 @@ async fn process_canton_event(
 /// 3. An ExercisedEvent with choice "SignBidirectional" on Signer:Signer must
 ///    exist in the same transaction — proves the event was created through the
 ///    correct Daml code path, not fabricated
+///
+/// TODO(test): unit test each check in isolation — craft events where one
+/// check fails and verify the correct error is returned. Test: mismatched
+/// sig_network, non-signatory operator, non-signatory requester, missing
+/// ExercisedEvent, missing nonce consumption, empty nonceCidText.
 fn verify_sign_event(
     event: &contracts::SignBidirectionalRequestedEvent,
     created: &ledger_api::CreatedEvent,
     tx_events: &[ledger_api::Event],
     node_party_id: &str,
-    signer_template_id: &str,
+    signer_contract_id: &str,
 ) -> anyhow::Result<()> {
     // Check 0: sig_network must match this node's party ID
     if event.sig_network != node_party_id {
@@ -384,16 +395,20 @@ fn verify_sign_event(
     }
 
     // Check 3: ExercisedEvent with choice "SignBidirectional" on the pinned
-    // Signer template must exist in the same transaction. Exact template ID
-    // match (not suffix) since the operator pinned it via CLI.
+    // Signer contract must exist in the same transaction. Exact contract ID
+    // match since the operator pinned it via CLI.
+    // NOTE: after a DAR upgrade/redeployment the contract ID changes — this
+    // check will reject all events until the node is restarted with the new ID.
+    // See CantonConfig migration TODO.
     let has_exercise = tx_events.iter().any(|e| matches!(
         e,
         ledger_api::Event::ExercisedEvent(ex)
-            if ex.choice == "SignBidirectional" && ex.template_id == signer_template_id
+            if ex.choice == "SignBidirectional"
+                && ex.contract_id == signer_contract_id
     ));
     if !has_exercise {
         anyhow::bail!(
-            "no ExercisedEvent with choice SignBidirectional on {signer_template_id} found in transaction"
+            "no ExercisedEvent with choice SignBidirectional on contract {signer_contract_id} found in transaction"
         );
     }
 
@@ -402,6 +417,9 @@ fn verify_sign_event(
     // archival appears as a consuming exercise (not an ArchivedEvent).
     // This ensures: (a) the nonce was actually consumed (replay prevention),
     // and (b) it's a SigningNonce — not an arbitrary string.
+    // NOTE: uses suffix matching for the template ID. Could be tightened to an
+    // exact match by deriving the SigningNonce template ID from the Signer
+    // package hash (same DAR, different module path).
     let nonce_cid = &event.nonce_cid_text;
     if nonce_cid.is_empty() {
         anyhow::bail!("nonceCidText is empty — malformed SignBidirectionalEvent");
@@ -482,6 +500,10 @@ fn parse_respond_bidirectional_event(
 /// of signatures. Callers that need the correct recovery ID must determine it
 /// themselves by recovering the public key from the message hash — see
 /// [`crate::kdf::into_signature`] for the canonical approach.
+///
+/// TODO(test): test with known DER signatures (both even and odd y-parity).
+/// Verify that recovery_id=0 is correctly resolved downstream when the public
+/// key is known. Test the encode→parse roundtrip preserves (r, s) scalars.
 fn parse_der_signature(hex_str: &str) -> anyhow::Result<Signature> {
     use k256::elliptic_curve::sec1::FromEncodedPoint;
     use k256::EncodedPoint;
