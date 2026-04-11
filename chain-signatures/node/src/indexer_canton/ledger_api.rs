@@ -190,12 +190,8 @@ pub struct UpdateMessage {
 /// Discriminated update types from the WebSocket stream.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Update {
-    Transaction {
-        value: TransactionUpdate,
-    },
-    OffsetCheckpoint {
-        value: OffsetCheckpoint,
-    },
+    Transaction { value: TransactionUpdate },
+    OffsetCheckpoint { value: OffsetCheckpoint },
 }
 
 /// The value inside an Update::Transaction.
@@ -368,8 +364,7 @@ pub mod templates {
 /// ("abc123:Signer:Signer"), and near-misses ("FakeSigner:Signer",
 /// "Signer:SignerExtra").
 pub fn template_suffix_matches(template_id: &str, suffix: &str) -> bool {
-    template_id == suffix
-        || template_id.ends_with(&format!(":{suffix}"))
+    template_id == suffix || template_id.ends_with(&format!(":{suffix}"))
 }
 
 // ---------------------------------------------------------------------------

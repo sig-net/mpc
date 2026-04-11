@@ -1,7 +1,7 @@
 use crate::indexer_eth::EthereumClient;
 use crate::protocol::{Chain, IndexedSignRequest};
-use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, ChainContext};
 use crate::sign_bidirectional::TransactionOutput;
+use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, ChainContext};
 use alloy::consensus::Transaction;
 use alloy::primitives::Bytes;
 use k256::Scalar;

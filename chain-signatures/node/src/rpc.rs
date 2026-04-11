@@ -970,7 +970,6 @@ impl CantonClient {
     fn generate_jwt(&self) -> anyhow::Result<String> {
         crate::indexer_canton::generate_jwt_with_key(&self.encoding_key, &self.jwt_subject)
     }
-
 }
 
 /// Client related to a specific chain
@@ -1990,11 +1989,16 @@ fn extract_canton_operators_requester(
 ) -> anyhow::Result<(Vec<String>, String)> {
     use crate::sign_bidirectional::ChainContext;
     match &action.indexed.kind {
-        SignKind::SignBidirectional(
-            crate::stream::ops::SignBidirectionalEvent::Canton(event),
-        ) => Ok((event.operators.clone(), event.requester.clone())),
+        SignKind::SignBidirectional(crate::stream::ops::SignBidirectionalEvent::Canton(event)) => {
+            Ok((event.operators.clone(), event.requester.clone()))
+        }
         SignKind::RespondBidirectional(respond_tx) => {
-            let ChainContext::Canton { ref operators, ref requester, .. } = respond_tx.chain_ctx else {
+            let ChainContext::Canton {
+                ref operators,
+                ref requester,
+                ..
+            } = respond_tx.chain_ctx
+            else {
                 anyhow::bail!("missing ChainContext on RespondBidirectionalTx");
             };
             Ok((operators.clone(), requester.clone()))

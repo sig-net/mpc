@@ -6,8 +6,8 @@
 // compile-time struct hashing, while keeping the outer compute_request_id as a
 // flat keccak256(concat(...)) to match the Daml implementation.
 
-use alloy::primitives::{keccak256, U256};
 use super::{CantonEvmTransactionParams, CantonSignBidirectionalRequestedEvent};
+use alloy::primitives::{keccak256, U256};
 
 /// keccak256(utf8(text)), or keccak256("") for empty string.
 /// Mirrors Daml's `hashText` in Eip712.daml / EIP-712 string encoding.

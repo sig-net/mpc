@@ -1,6 +1,6 @@
+use super::ledger_api;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use mpc_primitives::Signature;
-use super::ledger_api;
 
 // ---------------------------------------------------------------------------
 // JWT token generation (ES256)
@@ -50,8 +50,9 @@ pub fn der_encode_signature(signature: &Signature) -> anyhow::Result<Vec<u8>> {
     use mpc_crypto::x_coordinate;
 
     let r_scalar = x_coordinate(&signature.big_r);
-    let ecdsa_sig = k256::ecdsa::Signature::from_scalars(r_scalar, &signature.s)
-        .map_err(|e| anyhow::anyhow!("failed to create ECDSA signature from (r, s) scalars: {e}"))?;
+    let ecdsa_sig = k256::ecdsa::Signature::from_scalars(r_scalar, &signature.s).map_err(|e| {
+        anyhow::anyhow!("failed to create ECDSA signature from (r, s) scalars: {e}")
+    })?;
     Ok(ecdsa_sig.to_der().to_bytes().to_vec())
 }
 
@@ -108,6 +109,9 @@ pub async fn discover_signer_cid(
     match signer_contracts.as_slice() {
         [] => anyhow::bail!("no active Signer:Signer contract found"),
         [single] => Ok(single.clone()),
-        _ => anyhow::bail!("expected 1 Signer:Signer contract, found {}", signer_contracts.len()),
+        _ => anyhow::bail!(
+            "expected 1 Signer:Signer contract, found {}",
+            signer_contracts.len()
+        ),
     }
 }

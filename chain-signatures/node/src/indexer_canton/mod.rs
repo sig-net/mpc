@@ -1,20 +1,18 @@
 mod api;
-mod request_id;
-mod stream;
 pub mod contracts;
 pub mod ledger_api;
+mod request_id;
+mod stream;
 use request_id::compute_request_id;
 
-pub use api::{der_encode_signature, discover_signer_cid};
 pub(crate) use api::generate_jwt_with_key;
+pub use api::{der_encode_signature, discover_signer_cid};
 pub use stream::CantonStream;
 
-use mpc_primitives::MAX_SECP256K1_SCALAR;
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::stream::ops::{
-    SignBidirectionalEvent, SignatureEvent,
-};
+use crate::stream::ops::{SignBidirectionalEvent, SignatureEvent};
+use mpc_primitives::MAX_SECP256K1_SCALAR;
 
 use alloy::consensus::TxEip1559;
 use alloy::primitives::{keccak256, Address, Bytes, TxKind, U256};
@@ -124,7 +122,10 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
         compute_request_id(self)
     }
 
-    fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<crate::protocol::IndexedSignRequest> {
+    fn generate_sign_request(
+        &self,
+        entropy: [u8; 32],
+    ) -> anyhow::Result<crate::protocol::IndexedSignRequest> {
         tracing::info!("found canton event: {:?}", self);
 
         if self.key_version > LATEST_MPC_KEY_VERSION {
@@ -134,19 +135,14 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
 
         let request_id = self.generate_request_id();
 
-        let epsilon = mpc_crypto::kdf::derive_epsilon_canton(
-            self.key_version,
-            &self.sender,
-            &self.path,
-        );
+        let epsilon =
+            mpc_crypto::kdf::derive_epsilon_canton(self.key_version, &self.sender, &self.path);
 
         let rlp_encoded_tx = rlp_encode_unsigned_eip1559(&self.evm_tx_params);
         let unsigned_tx_hash = hash_rlp_data(rlp_encoded_tx);
 
         let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
-            anyhow::bail!(
-                "failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}"
-            );
+            anyhow::bail!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
         };
 
         if payload > *MAX_SECP256K1_SCALAR {
@@ -244,20 +240,36 @@ pub struct CantonArgs {
         ]
     )]
     pub canton_json_api_url: Option<String>,
-    #[arg(long, env("MPC_CANTON_JSON_API_WS_URL"), requires = "canton_json_api_url")]
+    #[arg(
+        long,
+        env("MPC_CANTON_JSON_API_WS_URL"),
+        requires = "canton_json_api_url"
+    )]
     pub canton_json_api_ws_url: Option<String>,
-    #[arg(long, env("MPC_CANTON_JWT_PRIVATE_KEY_PATH"), requires = "canton_json_api_url")]
+    #[arg(
+        long,
+        env("MPC_CANTON_JWT_PRIVATE_KEY_PATH"),
+        requires = "canton_json_api_url"
+    )]
     pub canton_jwt_private_key_path: Option<String>,
     #[arg(long, env("MPC_CANTON_JWT_SUBJECT"), requires = "canton_json_api_url")]
     pub canton_jwt_subject: Option<String>,
     #[arg(long, env("MPC_CANTON_PARTY_ID"), requires = "canton_json_api_url")]
     pub canton_party_id: Option<String>,
     /// The Signer contract ID on the Canton ledger. Must be updated if the contract is re-deployed.
-    #[arg(long, env("MPC_CANTON_SIGNER_CONTRACT_ID"), requires = "canton_json_api_url")]
+    #[arg(
+        long,
+        env("MPC_CANTON_SIGNER_CONTRACT_ID"),
+        requires = "canton_json_api_url"
+    )]
     pub canton_signer_contract_id: Option<String>,
     /// The full template ID of the Signer contract (e.g. "<packageHash>:Signer:Signer").
     /// Must be updated if the DAR is upgraded.
-    #[arg(long, env("MPC_CANTON_SIGNER_TEMPLATE_ID"), requires = "canton_json_api_url")]
+    #[arg(
+        long,
+        env("MPC_CANTON_SIGNER_TEMPLATE_ID"),
+        requires = "canton_json_api_url"
+    )]
     pub canton_signer_template_id: Option<String>,
 }
 
@@ -325,4 +337,3 @@ impl CantonArgs {
         }
     }
 }
-

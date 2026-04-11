@@ -305,9 +305,15 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
 
-            let (rpc_channel, rpc) =
-                RpcExecutor::new(&near_client, &eth, &sol, &hydration, &canton, backlog.clone())
-                    .await;
+            let (rpc_channel, rpc) = RpcExecutor::new(
+                &near_client,
+                &eth,
+                &sol,
+                &hydration,
+                &canton,
+                backlog.clone(),
+            )
+            .await;
 
             let (sync_channel, sync) = SyncTask::new(
                 &client,
@@ -431,7 +437,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 mesh_state.clone(),
                 client.clone(),
             ));
-            if let Some(canton_stream) = indexer_canton::CantonStream::new(canton, backlog.clone()) {
+            if let Some(canton_stream) = indexer_canton::CantonStream::new(canton, backlog.clone())
+            {
                 tokio::spawn(run_stream(
                     canton_stream,
                     sign_tx.clone(),

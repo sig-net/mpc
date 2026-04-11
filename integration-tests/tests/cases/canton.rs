@@ -141,8 +141,7 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
 
     // Parse DER signature → (r, s) scalars
     let der_stripped = signature_hex.strip_prefix("0x").unwrap_or(signature_hex);
-    let der_bytes =
-        hex::decode(der_stripped).context("invalid hex in DER signature")?;
+    let der_bytes = hex::decode(der_stripped).context("invalid hex in DER signature")?;
     let ecdsa_sig = k256::ecdsa::Signature::from_der(&der_bytes)
         .map_err(|e| anyhow::anyhow!("invalid DER signature: {e}"))?;
     let (r_scalar, s_scalar) = ecdsa_sig.split_scalars();
@@ -161,7 +160,9 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
 
     for y in [0u8, 1u8] {
         if let Ok(rid) = k256::ecdsa::RecoveryId::try_from(y) {
-            if let Ok(recovered) = k256::ecdsa::VerifyingKey::recover_from_prehash(&signing_hash, &ecdsa_sig, rid) {
+            if let Ok(recovered) =
+                k256::ecdsa::VerifyingKey::recover_from_prehash(&signing_hash, &ecdsa_sig, rid)
+            {
                 let pk_bytes = recovered.to_encoded_point(false);
                 let addr_hash = alloy::primitives::keccak256(&pk_bytes.as_bytes()[1..]);
                 let sender_addr = format!("0x{}", hex::encode(&addr_hash[12..]));
@@ -171,7 +172,8 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
                     &anvil_rpc_url,
                     "anvil_setBalance",
                     json!([sender_addr, "0x8AC7230489E80000"]),
-                ).await;
+                )
+                .await;
             }
         }
     }
@@ -217,8 +219,7 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
         }
     }
 
-    let _tx_hash =
-        relay_tx_hash.context("failed to relay tx with either y_parity (0 and 1)")?;
+    let _tx_hash = relay_tx_hash.context("failed to relay tx with either y_parity (0 and 1)")?;
 
     // 7. Poll for RespondBidirectionalEvent (MPC posted the outcome)
     let respond_event = client
@@ -288,16 +289,11 @@ fn build_eip1559_from_test_params(params: &serde_json::Value) -> Result<TxEip155
     }
 
     Ok(TxEip1559 {
-        chain_id: u64::from_str_radix(params["chainId"].as_str().unwrap_or("0"), 16)
-            .unwrap_or(0),
+        chain_id: u64::from_str_radix(params["chainId"].as_str().unwrap_or("0"), 16).unwrap_or(0),
         nonce: u64::from_str_radix(params["nonce"].as_str().unwrap_or("0"), 16).unwrap_or(0),
-        gas_limit: u64::from_str_radix(params["gasLimit"].as_str().unwrap_or("0"), 16)
+        gas_limit: u64::from_str_radix(params["gasLimit"].as_str().unwrap_or("0"), 16).unwrap_or(0),
+        max_fee_per_gas: u128::from_str_radix(params["maxFeePerGas"].as_str().unwrap_or("0"), 16)
             .unwrap_or(0),
-        max_fee_per_gas: u128::from_str_radix(
-            params["maxFeePerGas"].as_str().unwrap_or("0"),
-            16,
-        )
-        .unwrap_or(0),
         max_priority_fee_per_gas: u128::from_str_radix(
             params["maxPriorityFee"].as_str().unwrap_or("0"),
             16,

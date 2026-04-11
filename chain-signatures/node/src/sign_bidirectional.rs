@@ -273,12 +273,11 @@ pub fn resolve_signature_recovery_id(
     let msg_hash: [u8; 32] = keccak256(unsigned_rlp).into();
     let expected_pk = derived_public_key.to_encoded_point(false);
 
-    let ecdsa_sig =
-        k256::ecdsa::Signature::from_scalars(
-            mpc_crypto::x_coordinate(&signature.big_r),
-            &signature.s,
-        )
-        .context("cannot create ECDSA signature from (r, s) scalars")?;
+    let ecdsa_sig = k256::ecdsa::Signature::from_scalars(
+        mpc_crypto::x_coordinate(&signature.big_r),
+        &signature.s,
+    )
+    .context("cannot create ECDSA signature from (r, s) scalars")?;
 
     for rid in [0u8, 1u8] {
         let recovery_id = RecoveryId::try_from(rid)
@@ -505,7 +504,7 @@ fn serialize_dynsol<W: Write>(w: &mut W, v: &DynSolValue) -> anyhow::Result<()> 
             }
         }
 
-       // -------- Tuple --------
+        // -------- Tuple --------
         // Concatenate members
         Tuple(xs) => {
             for x in xs {

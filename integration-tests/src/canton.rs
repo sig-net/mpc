@@ -128,7 +128,10 @@ impl CantonSandbox {
                     }
                 }
             }
-            anyhow::ensure!(released, "port {port} still in use after 20s — previous Canton did not exit");
+            anyhow::ensure!(
+                released,
+                "port {port} still in use after 20s — previous Canton did not exit"
+            );
         }
 
         // 1. Check dpm is available
@@ -141,8 +144,7 @@ impl CantonSandbox {
         // 2. Resolve DAR path (env var with fallback)
         let dar_path = match std::env::var("CANTON_DAR_PATH") {
             Ok(p) => PathBuf::from(p),
-            Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join(DEFAULT_DAR_RELATIVE_PATH),
+            Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_DAR_RELATIVE_PATH),
         };
         anyhow::ensure!(dar_path.exists(), "DAR not found at {}", dar_path.display());
 
@@ -221,11 +223,7 @@ impl CantonSandbox {
             .get_disclosed_contract(&[&operator], "#daml-vault:Erc20Vault:Vault", &vault_cid)
             .await?;
         let signer_disclosure = client
-            .get_disclosed_contract(
-                &[&sig_network],
-                "#daml-signer:Signer:Signer",
-                &signer_cid,
-            )
+            .get_disclosed_contract(&[&sig_network], "#daml-signer:Signer:Signer", &signer_cid)
             .await?;
 
         // Issue initial SigningNonce for the requester
@@ -335,7 +333,11 @@ async fn wait_for_canton_ready(base_url: &str, jwt_private_key_pem: &str) -> Res
 
     // Phase 2: wait for the synchronizer to be connected using an authenticated
     // party-allocation probe. Uses `participant_admin` JWT to bypass user checks.
-    let probe_client = CantonTestClient::new(base_url, "participant_admin", jwt_private_key_pem.to_string());
+    let probe_client = CantonTestClient::new(
+        base_url,
+        "participant_admin",
+        jwt_private_key_pem.to_string(),
+    );
     let api_url = format!("{base_url}/v2/parties");
     for attempt in 0..120 {
         match probe_client
@@ -363,7 +365,9 @@ async fn wait_for_canton_ready(base_url: &str, jwt_private_key_pem: &str) -> Res
                     let body = resp.text().await.unwrap_or_default();
                     if body.contains("WITHOUT_CONNECTED_SYNCHRONIZER") {
                         if attempt % 10 == 0 {
-                            tracing::debug!("waiting for canton synchronizer (attempt {attempt})...");
+                            tracing::debug!(
+                                "waiting for canton synchronizer (attempt {attempt})..."
+                            );
                         }
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         continue;
@@ -487,7 +491,9 @@ impl CantonTestClient {
                 }
             }
         }
-        anyhow::bail!("allocate_party({hint}) failed after 30 retries — synchronizer never connected")
+        anyhow::bail!(
+            "allocate_party({hint}) failed after 30 retries — synchronizer never connected"
+        )
     }
 
     pub async fn allocate_party(&self, hint: &str) -> Result<String> {
@@ -587,7 +593,9 @@ impl CantonTestClient {
                     || body.contains("WITHOUT_CONNECTED_SYNCHRONIZER"))
             {
                 if attempt % 5 == 0 {
-                    tracing::debug!("create_contract({template_id}) retrying: {status} (attempt {attempt})");
+                    tracing::debug!(
+                        "create_contract({template_id}) retrying: {status} (attempt {attempt})"
+                    );
                 }
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;

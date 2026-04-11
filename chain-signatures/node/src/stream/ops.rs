@@ -34,9 +34,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.sender.to_bytes(),
             SignBidirectionalEvent::Hydration(event) => event.sender,
-            SignBidirectionalEvent::Canton(event) => {
-                keccak256(event.sender.as_bytes()).into()
-            }
+            SignBidirectionalEvent::Canton(event) => keccak256(event.sender.as_bytes()).into(),
         }
     }
 
@@ -252,7 +250,7 @@ impl SignatureRespondedEvent {
         }
     }
 
-     /// Convert the contained event into an `mpc_primitives::Signature`.
+    /// Convert the contained event into an `mpc_primitives::Signature`.
     pub fn signature(&self) -> Signature {
         match self {
             SignatureRespondedEvent::Solana(event) => {

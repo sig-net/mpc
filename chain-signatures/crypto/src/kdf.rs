@@ -332,8 +332,14 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(derive_epsilon_canton(0, "sender", "path"), expected_canton_v0);
-        assert_eq!(derive_epsilon_canton(1, "sender", "path"), expected_canton_v1);
+        assert_eq!(
+            derive_epsilon_canton(0, "sender", "path"),
+            expected_canton_v0
+        );
+        assert_eq!(
+            derive_epsilon_canton(1, "sender", "path"),
+            expected_canton_v1
+        );
     }
 
     // This logic is used to determine MPC PK (address) that is set as admin in Ethereum contract

@@ -120,7 +120,8 @@ where
             u32::try_from(v).map_err(|_| E::custom(format!("u32 overflow: {v}")))
         }
         fn visit_str<E: de::Error>(self, v: &str) -> Result<u32, E> {
-            v.parse().map_err(|_| E::custom(format!("invalid u32 string: {v}")))
+            v.parse()
+                .map_err(|_| E::custom(format!("invalid u32 string: {v}")))
         }
     }
     deserializer.deserialize_any(U32Visitor)
