@@ -1,6 +1,8 @@
 mod api;
 mod request_id;
 mod stream;
+pub mod contracts;
+pub mod ledger_api;
 use request_id::compute_request_id;
 
 pub use api::{der_encode_signature, discover_signer_cid};
@@ -24,8 +26,8 @@ use std::fmt;
 // Canton event structs
 // ---------------------------------------------------------------------------
 
-pub use canton_types::contracts::EvmTransactionParams as CantonEvmTransactionParams;
-pub use canton_types::contracts::SignBidirectionalRequestedEvent as CantonSignBidirectionalRequestedEvent;
+pub use contracts::EvmTransactionParams as CantonEvmTransactionParams;
+pub use contracts::SignBidirectionalRequestedEvent as CantonSignBidirectionalRequestedEvent;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CantonRespondBidirectionalEvent {

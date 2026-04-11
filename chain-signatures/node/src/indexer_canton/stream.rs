@@ -7,7 +7,7 @@ use crate::stream::ops::{
 use crate::stream::{ChainEvent, ChainStream};
 
 use alloy::primitives::{keccak256, B256};
-use canton_types::{contracts, ledger_api};
+
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashSet;
 use jsonwebtoken::EncodingKey;
@@ -19,6 +19,7 @@ use tokio_tungstenite::tungstenite::http::header;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::{
+    contracts, ledger_api,
     CantonConfig, CantonRespondBidirectionalEvent,
     CantonSignBidirectionalRequestedEvent, CantonSignatureRespondedEvent,
 };

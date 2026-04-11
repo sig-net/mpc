@@ -1,6 +1,6 @@
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use mpc_primitives::Signature;
-use canton_types::ledger_api;
+use super::ledger_api;
 
 // ---------------------------------------------------------------------------
 // JWT token generation (ES256)
