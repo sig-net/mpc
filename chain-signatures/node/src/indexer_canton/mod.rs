@@ -1,5 +1,9 @@
+mod api;
 mod request_id;
 use request_id::compute_request_id;
+
+pub use api::{der_encode_signature, discover_signer_cid};
+pub(crate) use api::generate_jwt_with_key;
 
 use crate::backlog::Backlog;
 use mpc_primitives::MAX_SECP256K1_SCALAR;
@@ -15,7 +19,7 @@ use alloy::primitives::{keccak256, Address, B256, Bytes, TxKind, U256};
 use canton_types::{contracts, ledger_api};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashSet;
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use jsonwebtoken::EncodingKey;
 use k256::Scalar;
 use mpc_primitives::{ScalarExt, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use std::fmt;
@@ -48,35 +52,6 @@ pub struct CantonSignatureRespondedEvent {
     pub signature: Signature,
 }
 // NOTE: No Hash, PartialEq, Eq derives — matches HydrationSignatureRespondedEvent
-
-// ---------------------------------------------------------------------------
-// JWT token generation (ES256)
-// ---------------------------------------------------------------------------
-
-#[derive(serde::Serialize)]
-struct JwtClaims {
-    sub: String,
-    /// Canton supports scope-based OR audience-based tokens, not both.
-    /// We use scope-based (the default when no target-audience is configured).
-    scope: String,
-    iat: u64,
-    exp: u64,
-}
-
-/// Generate a JWT using a pre-parsed EncodingKey.
-pub(crate) fn generate_jwt_with_key(key: &EncodingKey, subject: &str) -> anyhow::Result<String> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
-    let claims = JwtClaims {
-        sub: subject.to_string(),
-        scope: "daml_ledger_api".to_string(),
-        iat: now,
-        exp: now + 300,
-    };
-    let header = Header::new(Algorithm::ES256);
-    Ok(encode(&header, &claims, &key)?)
-}
 
 // ---------------------------------------------------------------------------
 // RLP encoding of unsigned EIP-1559 transaction
@@ -134,25 +109,6 @@ pub fn rlp_encode_unsigned_eip1559(params: &CantonEvmTransactionParams) -> Vec<u
             vec![]
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// DER signature encoding
-// ---------------------------------------------------------------------------
-
-/// DER-encode an ECDSA signature from an MPC Signature (big_r, s).
-///
-/// Canton's native Daml signature verification (`secp256k1WithEcdsaOnly`)
-/// only accepts DER-encoded signatures — there is no built-in Daml function
-/// to convert from raw `(r, s)` components to DER. We encode on the MPC
-/// side so the Daml contracts can verify directly without conversion.
-pub fn der_encode_signature(signature: &Signature) -> anyhow::Result<Vec<u8>> {
-    use mpc_crypto::x_coordinate;
-
-    let r_scalar = x_coordinate(&signature.big_r);
-    let ecdsa_sig = k256::ecdsa::Signature::from_scalars(r_scalar, &signature.s)
-        .map_err(|e| anyhow::anyhow!("failed to create ECDSA signature from (r, s) scalars: {e}"))?;
-    Ok(ecdsa_sig.to_der().to_bytes().to_vec())
 }
 
 // ---------------------------------------------------------------------------
