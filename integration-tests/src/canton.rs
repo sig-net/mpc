@@ -1,6 +1,6 @@
 use anyhow::{Context as _, Result};
 use async_process::{Child, Command};
-use canton_types::ledger_api::{
+use mpc_node::indexer_canton::ledger_api::{
     self, ActiveContractEntry, AllocatePartyRequest, AllocatePartyResponse, ContractEntry,
     CreateUserRequest, DisclosedContract, EventFormat, GetActiveContractsRequest, JsCommands,
     LedgerEndResponse, SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse,

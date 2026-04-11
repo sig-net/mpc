@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "chain-signatures/canton-types",
     "chain-signatures/crypto",
     "chain-signatures/contract",
     "chain-signatures/contract-sol",
@@ -19,7 +18,6 @@ version = "1.11.0"
 alloy = { version = "=1.0.38", features = ["contract", "json"] }
 anyhow = { version = "1.0.95", features = ["backtrace"] }
 borsh = "1.5.3"
-canton-types = { path = "chain-signatures/canton-types" }
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
 ciborium = "0.2.2"
 clap = { version = "4.5.4", features = ["derive", "env"] }

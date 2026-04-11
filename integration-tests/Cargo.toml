@@ -67,7 +67,6 @@ near-primitives = "0.26.0"
 near-workspaces = "0.15.0"
 
 # local chain-signatures dependencies
-canton-types.workspace = true
 mpc-crypto.workspace = true
 mpc-contract.workspace = true
 mpc-keys.workspace = true

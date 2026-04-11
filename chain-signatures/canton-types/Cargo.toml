@@ -1,9 +1,0 @@
-[package]
-name = "canton-types"
-version.workspace = true
-edition = "2021"
-publish = false
-
-[dependencies]
-serde.workspace = true
-serde_json.workspace = true
