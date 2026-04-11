@@ -450,7 +450,6 @@ impl Backlog {
             tracing::warn!(
                 ?chain,
                 ?id,
-                ?status,
                 "set_status: tx id not found in chain pending requests"
             );
             return None;
@@ -934,7 +933,6 @@ mod tests {
             request_id: [id; 32],
             from_address: Address::ZERO,
             nonce: 0,
-            status,
             chain_ctx: ChainContext::None,
         }
     }

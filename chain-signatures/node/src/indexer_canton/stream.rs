@@ -81,12 +81,8 @@ impl ChainStream for CantonStream {
             return;
         };
 
-        let config = state.config;
-        let tx = state.tx;
-        let backlog = state.backlog;
-
         self.tasks.push(tokio::spawn(async move {
-            run_canton_event_loop(config, tx, backlog).await;
+            run_canton_event_loop(state.config, state.tx, state.backlog).await;
         }));
     }
 

@@ -460,7 +460,6 @@ pub(crate) async fn process_respond_event(
         request_id: respond_event.request_id(),
         from_address,
         nonce,
-        status: SignStatus::AwaitingResponse,
         chain_ctx: match &event {
             SignBidirectionalEvent::Canton(e) => ChainContext::Canton {
                 operators: e.operators.clone(),
@@ -1341,7 +1340,6 @@ mod tests {
             request_id: [2u8; 32],
             from_address: Address::ZERO,
             nonce: 0,
-            status: SignStatus::PendingExecution,
             chain_ctx: ChainContext::None,
         };
         let sign_id = SignId::new(tx.request_id);

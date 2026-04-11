@@ -1,8 +1,8 @@
 //! Typed structs for Daml contract payloads.
 //!
 //! These represent the JSON payloads inside `CreatedEvent.payload` for specific
-//! Daml templates from `daml-signer` and `daml-vault`. Derived from the `.daml`
-//! source files in `canton-mpc-poc/daml-packages/`.
+//! Daml templates from `daml-signer` and `daml-evm-types`. Derived from the
+//! `.daml` source files in `canton-mpc-poc/daml-packages/`.
 //!
 //! All fields are raw JSON types (strings). Conversion to internal types
 //! (e.g., hex → `[u8; 32]`, DER → `Signature`) is the consumer's responsibility.
@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
-// From daml-vault/daml/Erc20Vault.daml — EvmTransactionParams record
+// From daml-evm-types/daml/EvmTypes.daml — EvmTransactionParams record
 // ---------------------------------------------------------------------------
 
 /// EVM transaction parameters passed through the Vault contract.

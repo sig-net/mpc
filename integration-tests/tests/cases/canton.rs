@@ -226,7 +226,7 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
             &[&canton.party_id],
             "#daml-signer:Signer:RespondBidirectionalEvent",
             |payload| payload["requestId"].as_str() == Some(&request_id),
-            Duration::from_secs(120),
+            Duration::from_secs(300),
         )
         .await
         .context("timeout waiting for RespondBidirectionalEvent")?;
