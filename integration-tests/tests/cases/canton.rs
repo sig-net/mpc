@@ -109,7 +109,7 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     let sig_event = client
         .poll_for_contract(
             &[&canton.party_id],
-            "#daml-vault:Signer:SignatureRespondedEvent",
+            "#daml-signer:Signer:SignatureRespondedEvent",
             |payload| payload["requestId"].as_str() == Some(&request_id),
             Duration::from_secs(120),
         )
@@ -132,7 +132,7 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     let respond_event = client
         .poll_for_contract(
             &[&canton.party_id],
-            "#daml-vault:Signer:RespondBidirectionalEvent",
+            "#daml-signer:Signer:RespondBidirectionalEvent",
             |payload| payload["requestId"].as_str() == Some(&request_id),
             Duration::from_secs(120),
         )
