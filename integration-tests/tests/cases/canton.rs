@@ -155,6 +155,10 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     unsigned_tx.encode_for_signing(&mut unsigned_rlp);
 
     // Recover sender address from the signature (try both parities) and fund it on Anvil.
+    // TODO: derive the expected address from the MPC public key +
+    // derive_epsilon_canton(key_version, sender, path) and assert the recovered
+    // address matches. Currently we only verify the signature is valid (Anvil
+    // accepts the tx), not that it was signed by the correct KDF-derived key.
     let signing_hash: [u8; 32] = alloy::primitives::keccak256(&unsigned_rlp).into();
     let http_client = Client::new();
 

@@ -48,20 +48,15 @@ pub enum SignStatus {
 }
 
 /// Chain-specific context carried through the bidirectional signing flow.
-#[derive(Debug, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum ChainContext {
+    #[default]
     None,
     Canton {
         operators: Vec<String>,
         requester: String,
         sender: String,
     },
-}
-
-impl Default for ChainContext {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Debug, Clone, Hash, serde::Serialize, serde::Deserialize)]
@@ -275,7 +270,7 @@ pub fn resolve_signature_recovery_id(
 
     let ecdsa_sig = k256::ecdsa::Signature::from_scalars(
         mpc_crypto::x_coordinate(&signature.big_r),
-        &signature.s,
+        signature.s,
     )
     .context("cannot create ECDSA signature from (r, s) scalars")?;
 

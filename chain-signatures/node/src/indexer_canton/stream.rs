@@ -307,7 +307,6 @@ async fn process_canton_event(
                     Ok(indexed) => {
                         if tx.send(ChainEvent::SignRequest(indexed)).await.is_err() {
                             tracing::error!("canton event channel closed");
-                            return;
                         }
                     }
                     Err(e) => {
@@ -328,7 +327,6 @@ async fn process_canton_event(
                 let event = SignatureRespondedEvent::Canton(responded);
                 if tx.send(ChainEvent::Respond(event)).await.is_err() {
                     tracing::error!("canton event channel closed");
-                    return;
                 }
             }
             Err(e) => {
@@ -348,7 +346,6 @@ async fn process_canton_event(
                     .is_err()
                 {
                     tracing::error!("canton event channel closed");
-                    return;
                 }
             }
             Err(e) => {
@@ -551,7 +548,7 @@ fn parse_der_signature(hex_str: &str) -> anyhow::Result<Signature> {
     let mut compressed = [0u8; 33];
     compressed[0] = 0x02; // even parity
     compressed[1..].copy_from_slice(&r_bytes);
-    let encoded = EncodedPoint::from_bytes(&compressed)
+    let encoded = EncodedPoint::from_bytes(compressed)
         .map_err(|e| anyhow::anyhow!("r is not valid compressed point bytes: {e}"))?;
     let big_r = Option::from(k256::AffinePoint::from_encoded_point(&encoded))
         .ok_or_else(|| anyhow::anyhow!("r is not a valid point on secp256k1"))?;
