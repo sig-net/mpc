@@ -1,3 +1,6 @@
+mod request_id;
+use request_id::compute_request_id;
+
 use crate::backlog::Backlog;
 use mpc_primitives::MAX_SECP256K1_SCALAR;
 use crate::protocol::Chain;
@@ -76,72 +79,6 @@ pub(crate) fn generate_jwt_with_key(key: &EncodingKey, subject: &str) -> anyhow:
 }
 
 // ---------------------------------------------------------------------------
-// Flat keccak256 request ID computation (matches Daml/TS reference)
-// ---------------------------------------------------------------------------
-
-/// keccak256(utf8(text)), or keccak256("") for empty string.
-/// Mirrors Daml's `hashText` in Eip712.daml.
-fn hash_text(text: &str) -> [u8; 32] {
-    keccak256(text.as_bytes()).into()
-}
-
-/// Left-pad a hex string to 32 bytes (big-endian U256).
-fn pad_left_32(hex_str: &str) -> [u8; 32] {
-    let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    U256::from_str_radix(stripped, 16)
-        .unwrap_or(U256::ZERO)
-        .to_be_bytes::<32>()
-}
-
-/// keccak256(concat(map keccak256 items)), or keccak256("") for empty list.
-/// Mirrors Daml's `hashBytesList` in Eip712.daml.
-fn hash_bytes_list(items: &[String]) -> [u8; 32] {
-    if items.is_empty() {
-        return keccak256(b"").into();
-    }
-    let mut concatenated = Vec::new();
-    for item in items {
-        let bytes = hex::decode(item).unwrap_or_default();
-        let h: [u8; 32] = keccak256(&bytes).into();
-        concatenated.extend_from_slice(&h);
-    }
-    keccak256(&concatenated).into()
-}
-
-/// Hash EvmTransactionParams — mirrors Daml's `hashEvmParams` in RequestId.daml.
-fn hash_evm_params(p: &CantonEvmTransactionParams) -> [u8; 32] {
-    let mut buf = Vec::with_capacity(9 * 32);
-    buf.extend_from_slice(&pad_left_32(&p.to));
-    buf.extend_from_slice(&hash_text(&p.function_signature));
-    buf.extend_from_slice(&hash_bytes_list(&p.args));
-    buf.extend_from_slice(&pad_left_32(&p.value));
-    buf.extend_from_slice(&pad_left_32(&p.nonce));
-    buf.extend_from_slice(&pad_left_32(&p.gas_limit));
-    buf.extend_from_slice(&pad_left_32(&p.max_fee_per_gas));
-    buf.extend_from_slice(&pad_left_32(&p.max_priority_fee));
-    buf.extend_from_slice(&pad_left_32(&p.chain_id));
-    keccak256(&buf).into()
-}
-
-/// Compute the request ID using flat keccak256(concat(hashed fields)).
-/// Mirrors Daml's `computeRequestId` in RequestId.daml.
-fn compute_request_id(event: &CantonSignBidirectionalRequestedEvent) -> [u8; 32] {
-    let key_version_hex = format!("{:x}", event.key_version);
-
-    let mut buf = Vec::with_capacity(9 * 32);
-    buf.extend_from_slice(&hash_text(&event.sender));
-    buf.extend_from_slice(&hash_evm_params(&event.evm_tx_params));
-    buf.extend_from_slice(&hash_text(&event.caip2_id));
-    buf.extend_from_slice(&pad_left_32(&key_version_hex));
-    buf.extend_from_slice(&hash_text(&event.path));
-    buf.extend_from_slice(&hash_text(&event.algo));
-    buf.extend_from_slice(&hash_text(&event.dest));
-    buf.extend_from_slice(&hash_text(&event.params));
-    buf.extend_from_slice(&hash_text(&event.nonce_cid_text));
-    keccak256(&buf).into()
-}
-
-// ---------------------------------------------------------------------------
 // RLP encoding of unsigned EIP-1559 transaction
 // ---------------------------------------------------------------------------
 
@@ -161,7 +98,7 @@ fn build_calldata(function_signature: &str, args: &[String]) -> Vec<u8> {
 }
 
 /// Convert Canton EvmTransactionParams to an alloy TxEip1559.
-pub fn to_tx_eip1559(p: &CantonEvmTransactionParams) -> anyhow::Result<TxEip1559> {
+fn to_tx_eip1559(p: &CantonEvmTransactionParams) -> anyhow::Result<TxEip1559> {
     let to_bytes = hex::decode(&p.to)?;
     // Canton pads to 64 hex chars (32 bytes) — take last 20 for the address
     let addr_bytes = if to_bytes.len() > 20 {
@@ -417,63 +354,6 @@ impl CantonArgs {
 }
 
 // ---------------------------------------------------------------------------
-// Signer CID discovery
-// ---------------------------------------------------------------------------
-
-/// Discover the Signer contract ID by querying active contracts.
-/// Returns (contractId, templateId) for the unique Signer:Signer contract.
-pub async fn discover_signer_cid(
-    http_client: &reqwest::Client,
-    json_api_url: &str,
-    jwt_token: &str,
-    party_id: &str,
-) -> anyhow::Result<(String, String)> {
-    let url = format!("{json_api_url}/v2/state/active-contracts");
-
-    let mut filters_by_party = serde_json::Map::new();
-    filters_by_party.insert(party_id.to_string(), serde_json::json!({}));
-
-    let body = ledger_api::GetActiveContractsRequest {
-        active_at_offset: 0,
-        event_format: ledger_api::EventFormat {
-            filters_by_party,
-            verbose: false,
-        },
-    };
-
-    let resp = http_client
-        .post(&url)
-        .bearer_auth(jwt_token)
-        .json(&body)
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("active-contracts query failed: {status} {text}");
-    }
-
-    let items: Vec<ledger_api::ActiveContractEntry> = resp.json().await?;
-
-    let mut signer_contracts: Vec<(String, String)> = Vec::new();
-    for item in &items {
-        if let Some(ledger_api::ContractEntry::JsActiveContract(active)) = &item.contract_entry {
-            let ce = &active.created_event;
-            if ledger_api::template_suffix_matches(&ce.template_id, ledger_api::templates::SIGNER) {
-                signer_contracts.push((ce.contract_id.clone(), ce.template_id.clone()));
-            }
-        }
-    }
-
-    match signer_contracts.as_slice() {
-        [] => anyhow::bail!("no active Signer:Signer contract found"),
-        [single] => Ok(single.clone()),
-        _ => anyhow::bail!("expected 1 Signer:Signer contract, found {}", signer_contracts.len()),
-    }
-}
-
-// ---------------------------------------------------------------------------
 // WebSocket event stream
 // ---------------------------------------------------------------------------
 
@@ -631,7 +511,7 @@ async fn subscribe_and_process(
         update_format: ledger_api::UpdateFormat {
             include_transactions: ledger_api::TransactionFormat {
                 transaction_shape: "TRANSACTION_SHAPE_LEDGER_EFFECTS".to_string(),
-                event_format: ledger_api::EventFormatInline {
+                event_format: ledger_api::EventFormat {
                     filters_by_party,
                     verbose: true,
                 },
