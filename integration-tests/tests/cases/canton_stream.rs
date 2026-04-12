@@ -149,7 +149,10 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
         "expected SignBidirectional, got {:?}",
         event.kind
     );
-    assert_ne!(event.id.request_id, [0u8; 32], "request_id should not be zero");
+    assert_ne!(
+        event.id.request_id, [0u8; 32],
+        "request_id should not be zero"
+    );
     Ok(())
 }
 

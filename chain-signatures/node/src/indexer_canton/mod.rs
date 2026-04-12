@@ -5,7 +5,9 @@ mod request_id;
 mod stream;
 use request_id::compute_request_id;
 
-pub use api::{der_encode_signature, discover_signer_cid, fetch_active_contracts, generate_jwt_with_key};
+pub use api::{
+    der_encode_signature, discover_signer_cid, fetch_active_contracts, generate_jwt_with_key,
+};
 pub use stream::CantonStream;
 
 use crate::protocol::Chain;
@@ -23,8 +25,10 @@ use std::fmt;
 // Canton event structs
 // ---------------------------------------------------------------------------
 
-pub use contracts::{TxParams as CantonTxParams, EvmTransactionParams as CantonEvmTransactionParams};
 pub use contracts::SignBidirectionalRequestedEvent as CantonSignBidirectionalRequestedEvent;
+pub use contracts::{
+    EvmTransactionParams as CantonEvmTransactionParams, TxParams as CantonTxParams,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CantonRespondBidirectionalEvent {
@@ -138,9 +142,7 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
             mpc_crypto::kdf::derive_epsilon_canton(self.key_version, &self.sender, &self.path);
 
         let rlp_encoded_tx = match &self.tx_params {
-            contracts::TxParams::EvmTxParams(evm_params) => {
-                rlp_encode_unsigned_eip1559(evm_params)
-            }
+            contracts::TxParams::EvmTxParams(evm_params) => rlp_encode_unsigned_eip1559(evm_params),
         };
         let unsigned_tx_hash = hash_rlp_data(rlp_encoded_tx);
 

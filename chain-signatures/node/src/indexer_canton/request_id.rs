@@ -2,9 +2,9 @@
 // The outer compute_request_id remains flat keccak256(concat(...)) to match
 // the Daml implementation -- only the per-field encoding uses EIP-712 rules.
 
+use super::contracts::{EvmTransactionParams as CantonEvmTransactionParams, TxParams};
 use super::CantonSignBidirectionalRequestedEvent;
-use super::contracts::{TxParams, EvmTransactionParams as CantonEvmTransactionParams};
-use alloy::primitives::{Address, U256, keccak256};
+use alloy::primitives::{keccak256, Address, U256};
 use alloy_sol_types::SolValue;
 
 /// Hash EvmTransactionParams -- mirrors Daml's `hashEvmParams` in RequestId.daml.

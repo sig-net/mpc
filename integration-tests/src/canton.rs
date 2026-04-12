@@ -42,13 +42,18 @@ impl CantonSandbox {
         // 0. Ensure Canton ports are free (previous sandbox may still be shutting down).
         for port in [CANTON_JSON_API_PORT, 6868] {
             for _ in 0..40 {
-                if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err() {
+                if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
             anyhow::ensure!(
-                tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err(),
+                tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .is_err(),
                 "port {port} still in use — previous Canton did not exit"
             );
         }
@@ -69,11 +74,21 @@ impl CantonSandbox {
 
         let output = std::process::Command::new("openssl")
             .args([
-                "req", "-x509", "-noenc", "-days", "3650", "-newkey", "ec",
-                "-pkeyopt", "ec_paramgen_curve:prime256v1",
-                "-keyout", &jwt_key_path.to_string_lossy(),
-                "-out", &jwt_cert_path.to_string_lossy(),
-                "-subj", "/CN=mpc-test-node",
+                "req",
+                "-x509",
+                "-noenc",
+                "-days",
+                "3650",
+                "-newkey",
+                "ec",
+                "-pkeyopt",
+                "ec_paramgen_curve:prime256v1",
+                "-keyout",
+                &jwt_key_path.to_string_lossy(),
+                "-out",
+                &jwt_cert_path.to_string_lossy(),
+                "-subj",
+                "/CN=mpc-test-node",
             ])
             .output()
             .context("openssl not found — needed to generate JWT cert")?;
@@ -126,7 +141,12 @@ canton.participants.sandbox.ledger-api {{
             // Only 200 (party created) or 409 (already exists) mean fully ready.
             // Everything else (401 auth loading, 403 admin not ready, 400
             // synchronizer not connected, connection refused) = retry.
-            let ready = match admin_client.auth_post(&probe_url)?.json(&probe).send().await {
+            let ready = match admin_client
+                .auth_post(&probe_url)?
+                .json(&probe)
+                .send()
+                .await
+            {
                 Ok(r) => r.status().as_u16() == 200 || r.status().as_u16() == 409,
                 Err(_) => false,
             };
@@ -134,7 +154,10 @@ canton.participants.sandbox.ledger-api {{
                 tracing::info!("canton ready after {attempt} attempts");
                 break;
             }
-            anyhow::ensure!(attempt < 119, "canton sandbox did not become ready within 60s");
+            anyhow::ensure!(
+                attempt < 119,
+                "canton sandbox did not become ready within 60s"
+            );
             if attempt % 10 == 0 {
                 tracing::debug!("waiting for canton (attempt {attempt})...");
             }
@@ -278,14 +301,15 @@ impl CantonTestClient {
             http: reqwest::Client::new(),
             base_url: base_url.to_string(),
             user_id: user_id.to_string(),
-            encoding_key: jsonwebtoken::EncodingKey::from_ec_pem(
-                jwt_private_key_pem.as_bytes(),
-            )?,
+            encoding_key: jsonwebtoken::EncodingKey::from_ec_pem(jwt_private_key_pem.as_bytes())?,
         })
     }
 
     fn generate_jwt(&self) -> Result<String> {
-        Ok(indexer_canton::generate_jwt_with_key(&self.encoding_key, &self.user_id)?)
+        Ok(indexer_canton::generate_jwt_with_key(
+            &self.encoding_key,
+            &self.user_id,
+        )?)
     }
 
     fn auth_post(&self, url: &str) -> Result<reqwest::RequestBuilder> {
@@ -331,7 +355,9 @@ impl CantonTestClient {
                 Ok(resp) => return Ok(resp),
                 Err(e) if attempt < 29 && is_package_not_ready(&e) => {
                     if attempt % 5 == 0 {
-                        tracing::debug!("create_contract({template_id}) retrying (attempt {attempt})");
+                        tracing::debug!(
+                            "create_contract({template_id}) retrying (attempt {attempt})"
+                        );
                     }
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
@@ -419,7 +445,9 @@ impl CantonTestClient {
         template_id: &str,
         contract_id: &str,
     ) -> Result<DisclosedContract> {
-        let entries = self.fetch_active_contracts(parties, template_id, true).await?;
+        let entries = self
+            .fetch_active_contracts(parties, template_id, true)
+            .await?;
         for entry in &entries {
             if let Some(ContractEntry::JsActiveContract(ac)) = &entry.contract_entry {
                 if ac.created_event.contract_id == contract_id {
@@ -451,7 +479,9 @@ impl CantonTestClient {
             if start.elapsed() > timeout {
                 anyhow::bail!("timeout waiting for {template_id} after {timeout:?}");
             }
-            let entries = self.fetch_active_contracts(parties, template_id, false).await?;
+            let entries = self
+                .fetch_active_contracts(parties, template_id, false)
+                .await?;
             for entry in &entries {
                 if let Some(ContractEntry::JsActiveContract(ac)) = &entry.contract_entry {
                     if predicate(&ac.created_event.payload) {

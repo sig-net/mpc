@@ -123,13 +123,11 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.serialized_transaction.clone(),
             SignBidirectionalEvent::Hydration(event) => event.serialized_transaction.clone(),
-            SignBidirectionalEvent::Canton(event) => {
-                match &event.tx_params {
-                    crate::indexer_canton::contracts::TxParams::EvmTxParams(evm_params) => {
-                        crate::indexer_canton::rlp_encode_unsigned_eip1559(evm_params)
-                    }
+            SignBidirectionalEvent::Canton(event) => match &event.tx_params {
+                crate::indexer_canton::contracts::TxParams::EvmTxParams(evm_params) => {
+                    crate::indexer_canton::rlp_encode_unsigned_eip1559(evm_params)
                 }
-            }
+            },
         }
     }
 

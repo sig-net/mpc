@@ -99,7 +99,12 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
         .poll_for_contract(
             &[&canton.party_id],
             "#daml-signer:Signer:SignatureRespondedEvent",
-            |payload| payload.get("signature").and_then(|s| s.as_str()).is_some_and(|s| !s.is_empty()),
+            |payload| {
+                payload
+                    .get("signature")
+                    .and_then(|s| s.as_str())
+                    .is_some_and(|s| !s.is_empty())
+            },
             Duration::from_secs(120),
         )
         .await
@@ -244,7 +249,11 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     let respond_sig_hex = respond_payload["signature"]
         .as_str()
         .context("RespondBidirectionalEvent missing signature")?;
-    let respond_der = hex::decode(respond_sig_hex.strip_prefix("0x").unwrap_or(respond_sig_hex))?;
+    let respond_der = hex::decode(
+        respond_sig_hex
+            .strip_prefix("0x")
+            .unwrap_or(respond_sig_hex),
+    )?;
     let respond_ecdsa = k256::ecdsa::Signature::from_der(&respond_der)
         .map_err(|e| anyhow::anyhow!("invalid DER: {e}"))?;
 
