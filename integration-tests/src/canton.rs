@@ -8,7 +8,7 @@ use mpc_node::indexer_canton::ledger_api::{
 };
 use mpc_node::indexer_canton::CantonConfig;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const CANTON_JSON_API_PORT: u16 = 7575;
@@ -26,7 +26,9 @@ pub struct JwtAuthMaterial {
 }
 
 /// Generate P-256 private key + self-signed X.509 cert + HOCON auth config.
-fn generate_jwt_auth_material() -> Result<JwtAuthMaterial> {
+/// The config includes `alpha-dynamic.dars` so the sandbox loads the DAR
+/// declaratively as the synchronizer connects — no separate upload step needed.
+fn generate_jwt_auth_material(dar_path: &Path) -> Result<JwtAuthMaterial> {
     let tmp_dir = std::env::temp_dir();
     let id = uuid::Uuid::new_v4();
     let key_path = tmp_dir.join(format!("canton-jwt-{id}.key"));
@@ -57,15 +59,19 @@ fn generate_jwt_auth_material() -> Result<JwtAuthMaterial> {
 
     let private_key_pem = std::fs::read_to_string(&key_path)?;
 
-    // JWT auth on ledger-api only. The admin-api supports JWT too but is
-    // left unauthenticated here for test simplicity.
     let conf = format!(
-        r#"canton.participants.sandbox.ledger-api {{
+        r#"canton.parameters.enable-alpha-state-via-config = yes
+canton.parameters.state-refresh-interval = 5s
+canton.participants.sandbox.alpha-dynamic.dars = [
+  {{ location = "{}" }}
+]
+canton.participants.sandbox.ledger-api {{
   auth-services = [
     {{ type = jwt-es-256-crt, certificate = "{}" }}
   ]
   jwt-timestamp-leeway.default = 10
 }}"#,
+        dar_path.display(),
         cert_path.to_string_lossy()
     );
     std::fs::write(&auth_conf_path, &conf)?;
@@ -106,59 +112,17 @@ pub struct CantonSandbox {
 
 impl CantonSandbox {
     pub async fn run() -> Result<Self> {
-        // 0. Wait for Canton ports to be free (previous sandbox may still be
-        //    shutting down). Canton binds 5 ports: 6865 (Ledger API gRPC),
-        //    6866 (Admin API gRPC), 6867 (Sequencer Public API), 6868
-        //    (Sequencer Admin API), 6869 (Mediator Admin API), plus the
-        //    JSON API on the --json-api-port. We only check a subset here
-        //    since killing the JVM releases all ports together.
-        for port in [CANTON_JSON_API_PORT, 6865, 6868] {
-            let mut released = false;
-            for i in 0..40 {
-                match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
-                    Ok(_) => {
-                        if i % 10 == 0 {
-                            tracing::debug!("waiting for port {port} to be free (attempt {i})...");
-                        }
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                    }
-                    Err(_) => {
-                        released = true;
-                        break;
-                    }
-                }
-            }
-            anyhow::ensure!(
-                released,
-                "port {port} still in use after 20s — previous Canton did not exit"
-            );
-        }
-
-        // 1. Check dpm is available
-        let output = Command::new("dpm").arg("--version").output().await;
-        anyhow::ensure!(
-            output.is_ok() && output.unwrap().status.success(),
-            "dpm CLI not found or broken — install from https://docs.digitalasset.com"
-        );
-
-        // 2. Resolve DAR path (env var with fallback)
+        // 1. Resolve DAR path (env var with fallback)
         let dar_path = match std::env::var("CANTON_DAR_PATH") {
             Ok(p) => PathBuf::from(p),
             Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_DAR_RELATIVE_PATH),
         };
         anyhow::ensure!(dar_path.exists(), "DAR not found at {}", dar_path.display());
 
-        // 3. Generate JWT key + cert + HOCON auth config.
-        let auth = generate_jwt_auth_material()?;
+        // 2. Generate JWT key + cert + HOCON auth config (includes alpha-dynamic.dars).
+        let auth = generate_jwt_auth_material(&dar_path)?;
 
-        // 4. Start dpm sandbox WITH auth but WITHOUT --dar.
-        //    `dpm sandbox --dar` uses the gRPC PackageManagementService on the
-        //    Ledger API port and has no flag to supply a JWT, so it fails with
-        //    PERMISSION_DENIED when auth is enabled. Instead, we start without
-        //    --dar, wait for readiness, then upload the DAR via the HTTP JSON
-        //    API (POST /v2/packages) with an admin JWT. This is the same pattern
-        //    used by Digital Asset's cn-quickstart and the recommended approach
-        //    since `dpm` dropped the `upload-dar` command.
+        // 3. Start dpm sandbox with auth + declarative DAR loading.
         let process = Command::new("dpm")
             .arg("sandbox")
             .arg("--json-api-port")
@@ -171,21 +135,15 @@ impl CantonSandbox {
         let base_url = format!("http://127.0.0.1:{CANTON_JSON_API_PORT}");
         let ws_url = format!("ws://127.0.0.1:{CANTON_JSON_API_PORT}");
 
-        // 5. Wait for readiness (docs endpoint + synchronizer connected)
-        wait_for_canton_ready(&base_url, &auth.private_key_pem).await?;
-
-        // 6. Upload DAR via HTTP API with admin JWT (two-phase bootstrap).
+        // 4. Wait for synchronizer readiness, then setup parties + contracts.
         let admin_client =
             CantonTestClient::new(&base_url, "participant_admin", auth.private_key_pem.clone());
-        admin_client.upload_dar(&dar_path).await?;
+        wait_for_synchronizer(&admin_client).await?;
 
-        // 7. Setup parties, user, and contracts — all with JWT auth.
-        //    Use participant_admin for bootstrap (party/user creation),
-        //    then switch to the test user for contract operations.
         let user_id = format!("mpc-test-{}", uuid::Uuid::new_v4());
-        let sig_network = admin_client.allocate_party_with_retry("SigNetwork").await?;
-        let operator = admin_client.allocate_party_with_retry("Operator").await?;
-        let requester = admin_client.allocate_party_with_retry("Requester").await?;
+        let sig_network = admin_client.allocate_party("SigNetwork").await?;
+        let operator = admin_client.allocate_party("Operator").await?;
+        let requester = admin_client.allocate_party("Requester").await?;
         admin_client
             .create_user(&user_id, &sig_network, &[&operator, &requester])
             .await?;
@@ -277,9 +235,8 @@ impl CantonSandbox {
 
 impl Drop for CantonSandbox {
     fn drop(&mut self) {
-        // Kill the Canton process group. `dpm` spawns a Java child process that
-        // binds multiple ports (7575, 6865, 6868). Killing just the parent leaves
-        // the JVM alive. Use `pkill -P` to kill child processes, then the parent.
+        // Kill the Canton process group. `dpm` spawns a JVM child — killing
+        // just the parent leaves it alive. `pkill -P` gets the children first.
         let pid = self.process.id();
         let _ = std::process::Command::new("pkill")
             .args(["-9", "-P", &pid.to_string()])
@@ -287,62 +244,29 @@ impl Drop for CantonSandbox {
         let _ = std::process::Command::new("kill")
             .args(["-9", &pid.to_string()])
             .output();
-        tracing::info!("canton sandbox killed (pid {pid} + children), waiting for cleanup");
-        // Wait until ALL Canton ports are fully released.
-        for port in [CANTON_JSON_API_PORT, 6865, 6868] {
-            for i in 0..40 {
-                match std::net::TcpStream::connect(("127.0.0.1", port)) {
-                    Ok(_) => {
-                        if i % 10 == 0 {
-                            tracing::debug!("waiting for port {port} to be released...");
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                    }
-                    Err(_) => break,
-                }
+        // Wait for the JSON API port to be released so sequential tests don't collide.
+        for _ in 0..40 {
+            if std::net::TcpStream::connect(("127.0.0.1", CANTON_JSON_API_PORT)).is_err() {
+                break;
             }
+            std::thread::sleep(std::time::Duration::from_millis(500));
         }
+        tracing::info!("canton sandbox cleaned up (pid {pid})");
         let _ = std::fs::remove_file(&self.jwt_key_path);
         let _ = std::fs::remove_file(&self.jwt_cert_path);
         let _ = std::fs::remove_file(&self.auth_conf_path);
     }
 }
 
-/// Wait for Canton to be fully ready.
-/// Phase 1: /docs/openapi (unauthenticated) — confirms the process is listening.
-/// Phase 2: Authenticated party allocation probe — confirms the synchronizer is
-///           connected. With `alpha-dynamic.dars`, the synchronizer loads
-///           asynchronously after the HTTP server starts.
-async fn wait_for_canton_ready(base_url: &str, jwt_private_key_pem: &str) -> Result<()> {
-    let client = reqwest::Client::new();
-
-    // Phase 1: wait for the HTTP server to start
-    let docs_url = format!("{base_url}/docs/openapi");
+/// Wait for the Canton synchronizer to be connected by probing party allocation.
+/// Covers both "HTTP server not up yet" (connection refused → retry) and
+/// "synchronizer still loading" (400 WITHOUT_CONNECTED_SYNCHRONIZER → retry).
+async fn wait_for_synchronizer(client: &CantonTestClient) -> Result<()> {
+    let url = format!("{}/v2/parties", client.base_url);
     for attempt in 0..120 {
-        match client.get(&docs_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!("canton docs endpoint ready after {attempt} attempts");
-                break;
-            }
-            _ => tokio::time::sleep(Duration::from_millis(500)).await,
-        }
-        if attempt == 119 {
-            anyhow::bail!("canton sandbox did not become ready within 60 seconds");
-        }
-    }
-
-    // Phase 2: wait for the synchronizer to be connected using an authenticated
-    // party-allocation probe. Uses `participant_admin` JWT to bypass user checks.
-    let probe_client = CantonTestClient::new(
-        base_url,
-        "participant_admin",
-        jwt_private_key_pem.to_string(),
-    );
-    let api_url = format!("{base_url}/v2/parties");
-    for attempt in 0..120 {
-        match probe_client
-            .auth_post(&api_url)?
-            .json(&serde_json::json!({
+        match client
+            .auth_post(&url)?
+            .json(&json!({
                 "partyIdHint": "_readiness_probe",
                 "identityProviderId": "",
                 "synchronizerId": "",
@@ -354,36 +278,33 @@ async fn wait_for_canton_ready(base_url: &str, jwt_private_key_pem: &str) -> Res
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 if status == 200 || status == 409 {
-                    // 200 = party created (synchronizer up)
-                    // 409 = party already exists (synchronizer up)
-                    tracing::info!(
-                        "canton synchronizer ready after {attempt} additional attempts (status: {status})"
-                    );
+                    tracing::info!("canton synchronizer ready after {attempt} attempts");
                     return Ok(());
                 }
-                if status == 400 {
-                    let body = resp.text().await.unwrap_or_default();
-                    if body.contains("WITHOUT_CONNECTED_SYNCHRONIZER") {
-                        if attempt % 10 == 0 {
-                            tracing::debug!(
-                                "waiting for canton synchronizer (attempt {attempt})..."
-                            );
-                        }
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                        continue;
+                // 401 = auth cert not loaded yet (Canton still initializing)
+                if status == 401 {
+                    if attempt % 10 == 0 {
+                        tracing::debug!("waiting for canton auth to initialize (attempt {attempt})...");
                     }
-                    // Other 400 = API is ready, request issue
-                    tracing::info!(
-                        "canton synchronizer ready after {attempt} additional attempts (status: 400)"
-                    );
-                    return Ok(());
+                } else {
+                    let body = resp.text().await.unwrap_or_default();
+                    if !body.contains("WITHOUT_CONNECTED_SYNCHRONIZER") {
+                        return Ok(()); // API is up, non-synchronizer error = ready
+                    }
+                    if attempt % 10 == 0 {
+                        tracing::debug!("waiting for canton synchronizer (attempt {attempt})...");
+                    }
                 }
-                tokio::time::sleep(Duration::from_millis(500)).await;
             }
-            _ => tokio::time::sleep(Duration::from_millis(500)).await,
+            _ => {
+                if attempt % 10 == 0 {
+                    tracing::debug!("waiting for canton to start (attempt {attempt})...");
+                }
+            }
         }
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    anyhow::bail!("canton synchronizer did not become ready within 60 seconds")
+    anyhow::bail!("canton sandbox did not become ready within 60 seconds")
 }
 
 // ---------------------------------------------------------------------------
@@ -436,64 +357,6 @@ impl CantonTestClient {
 
     fn auth_get(&self, url: &str) -> Result<reqwest::RequestBuilder> {
         Ok(self.http.get(url).bearer_auth(self.generate_jwt()?))
-    }
-
-    /// Upload a DAR file via the JSON API (POST /v2/packages).
-    /// Requires admin JWT (sub: "participant_admin").
-    pub async fn upload_dar(&self, dar_path: &std::path::Path) -> Result<()> {
-        let dar_bytes = std::fs::read(dar_path)
-            .context(format!("failed to read DAR at {}", dar_path.display()))?;
-        for attempt in 0..30 {
-            let resp = self
-                .http
-                .post(format!("{}/v2/packages", self.base_url))
-                .bearer_auth(self.generate_jwt()?)
-                .header("Content-Type", "application/octet-stream")
-                .body(dar_bytes.clone())
-                .send()
-                .await?;
-            if resp.status().is_success() {
-                tracing::info!("DAR uploaded successfully");
-                return Ok(());
-            }
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            // Retry on synchronizer not ready
-            if body.contains("WITHOUT_CONNECTED_SYNCHRONIZER")
-                || body.contains("PACKAGE_SERVICE_CANNOT_AUTODETECT")
-            {
-                if attempt % 5 == 0 {
-                    tracing::debug!("retrying DAR upload (attempt {attempt}): {status}");
-                }
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            }
-            anyhow::bail!("DAR upload failed: HTTP {status} — {body}");
-        }
-        anyhow::bail!("DAR upload failed after 30 retries")
-    }
-
-    /// Allocate a party, retrying if the synchronizer is still connecting.
-    pub async fn allocate_party_with_retry(&self, hint: &str) -> Result<String> {
-        for attempt in 0..30 {
-            match self.allocate_party(hint).await {
-                Ok(party) => return Ok(party),
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("WITHOUT_CONNECTED_SYNCHRONIZER") {
-                        if attempt % 5 == 0 {
-                            tracing::debug!("retrying allocate_party({hint}), synchronizer not ready (attempt {attempt})");
-                        }
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        continue;
-                    }
-                    return Err(e);
-                }
-            }
-        }
-        anyhow::bail!(
-            "allocate_party({hint}) failed after 30 retries — synchronizer never connected"
-        )
     }
 
     pub async fn allocate_party(&self, hint: &str) -> Result<String> {
@@ -557,7 +420,7 @@ impl CantonTestClient {
         args: Value,
     ) -> Result<Value> {
         let parties: Vec<String> = act_as.iter().map(|s| s.to_string()).collect();
-        // Retry on transient errors (package vetting, synchronizer connectivity).
+        // Retry while alpha-dynamic.dars is still vetting packages.
         for attempt in 0..30 {
             let req = SubmitAndWaitForTransactionRequest {
                 commands: JsCommands {
@@ -589,8 +452,7 @@ impl CantonTestClient {
             if (code == 400 || code == 404)
                 && (body.contains("PACKAGE_SELECTION_FAILED")
                     || body.contains("PACKAGE_NAMES_NOT_FOUND")
-                    || body.contains("TEMPLATES_OR_INTERFACES_NOT_FOUND")
-                    || body.contains("WITHOUT_CONNECTED_SYNCHRONIZER"))
+                    || body.contains("TEMPLATES_OR_INTERFACES_NOT_FOUND"))
             {
                 if attempt % 5 == 0 {
                     tracing::debug!(
@@ -648,13 +510,12 @@ impl CantonTestClient {
         Ok(resp.json().await?)
     }
 
-    /// Fetch a disclosed contract blob for cross-party visibility.
-    pub async fn get_disclosed_contract(
+    async fn fetch_active_contracts(
         &self,
         parties: &[&str],
         template_id: &str,
-        contract_id: &str,
-    ) -> Result<Value> {
+        include_blob: bool,
+    ) -> Result<Vec<ActiveContractEntry>> {
         let end: LedgerEndResponse = self
             .auth_get(&format!("{}/v2/state/ledger-end", self.base_url))?
             .send()
@@ -669,7 +530,7 @@ impl CantonTestClient {
                 party.to_string(),
                 json!({
                     "cumulative": [{ "identifierFilter": { "TemplateFilter": { "value": {
-                        "templateId": template_id, "includeCreatedEventBlob": true
+                        "templateId": template_id, "includeCreatedEventBlob": include_blob
                     }}}}]
                 }),
             );
@@ -681,16 +542,25 @@ impl CantonTestClient {
                 verbose: true,
             },
         };
-        let resp: Vec<ActiveContractEntry> = self
+        Ok(self
             .auth_post(&format!("{}/v2/state/active-contracts", self.base_url))?
             .json(&req)
             .send()
             .await?
             .error_for_status()?
             .json()
-            .await?;
+            .await?)
+    }
 
-        for entry in &resp {
+    /// Fetch a disclosed contract blob for cross-party visibility.
+    pub async fn get_disclosed_contract(
+        &self,
+        parties: &[&str],
+        template_id: &str,
+        contract_id: &str,
+    ) -> Result<Value> {
+        let entries = self.fetch_active_contracts(parties, template_id, true).await?;
+        for entry in &entries {
             if let Some(ContractEntry::JsActiveContract(ac)) = &entry.contract_entry {
                 if ac.created_event.contract_id == contract_id {
                     return Ok(json!({
@@ -710,41 +580,11 @@ impl CantonTestClient {
         parties: &[&str],
         template_id: &str,
     ) -> Result<Vec<Value>> {
-        let end: LedgerEndResponse = self
-            .auth_get(&format!("{}/v2/state/ledger-end", self.base_url))?
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-
-        let mut filters = serde_json::Map::new();
-        for party in parties {
-            filters.insert(
-                party.to_string(),
-                json!({
-                    "cumulative": [{ "identifierFilter": { "TemplateFilter": { "value": {
-                        "templateId": template_id, "includeCreatedEventBlob": false
-                    }}}}]
-                }),
-            );
-        }
-        let req = GetActiveContractsRequest {
-            active_at_offset: end.offset,
-            event_format: EventFormat {
-                filters_by_party: filters,
-                verbose: true,
-            },
-        };
-        let resp: Vec<Value> = self
-            .auth_post(&format!("{}/v2/state/active-contracts", self.base_url))?
-            .json(&req)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        Ok(resp)
+        let entries = self.fetch_active_contracts(parties, template_id, false).await?;
+        entries
+            .into_iter()
+            .map(|e| serde_json::to_value(e).context("failed to serialize ActiveContractEntry"))
+            .collect()
     }
 
     pub async fn poll_for_contract(
