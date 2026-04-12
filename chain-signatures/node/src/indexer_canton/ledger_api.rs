@@ -304,6 +304,34 @@ pub struct EventFormat {
     pub verbose: bool,
 }
 
+/// A party-level filter for active contracts queries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartyFilter {
+    pub cumulative: Vec<CumulativeFilter>,
+}
+
+/// A single cumulative filter entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CumulativeFilter {
+    pub identifier_filter: IdentifierFilter,
+}
+
+/// Discriminated identifier filter type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum IdentifierFilter {
+    TemplateFilter { value: TemplateFilterValue },
+}
+
+/// Value inside a TemplateFilter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateFilterValue {
+    pub template_id: String,
+    #[serde(default)]
+    pub include_created_event_blob: bool,
+}
+
 /// A single item in the active contracts response array.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

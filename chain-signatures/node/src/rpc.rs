@@ -43,6 +43,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
+use crate::indexer_canton::ledger_api::{Command, JsCommands, SubmitAndWaitForTransactionRequest};
 use crate::indexer_canton::CantonConfig;
 use crate::indexer_hydration::HydrationConfig;
 use parity_scale_codec::{Decode, Encode};
@@ -1883,33 +1884,32 @@ async fn try_publish_canton(
             // Extract operators and requester from the Canton event
             let (operators, requester) = extract_canton_operators_requester(action)?;
 
-            let body = serde_json::json!({
-                "commands": {
-                    "commands": [{
-                        "ExerciseCommand": {
-                            "templateId": canton.signer_template_id,
-                            "contractId": canton.signer_cid,
-                            "choice": "Respond",
-                            "choiceArgument": {
-                                "operators": operators,
-                                "requester": requester,
-                                "requestId": request_id_hex,
-                                "signature": der_sig,
-                            }
-                        }
+            let req = SubmitAndWaitForTransactionRequest {
+                commands: JsCommands {
+                    command_id: format!("mpc-respond-{}", request_id_hex),
+                    user_id: canton.jwt_subject.clone(),
+                    act_as: vec![canton.party_id.clone()],
+                    read_as: vec![canton.party_id.clone()],
+                    commands: vec![Command::ExerciseCommand {
+                        template_id: canton.signer_template_id.clone(),
+                        contract_id: canton.signer_cid.clone(),
+                        choice: "Respond".to_string(),
+                        choice_argument: serde_json::json!({
+                            "operators": operators,
+                            "requester": requester,
+                            "requestId": request_id_hex,
+                            "signature": der_sig,
+                        }),
                     }],
-                    "commandId": format!("mpc-respond-{}", request_id_hex),
-                    "userId": canton.jwt_subject,
-                    "actAs": [&canton.party_id],
-                    "readAs": [&canton.party_id],
-                }
-            });
+                    disclosed_contracts: vec![],
+                },
+            };
 
             let resp = canton
                 .http_client
                 .post(&url)
                 .bearer_auth(&jwt_token)
-                .json(&body)
+                .json(&req)
                 .send()
                 .await?;
 
@@ -1929,34 +1929,33 @@ async fn try_publish_canton(
             let (operators, requester) = extract_canton_operators_requester(action)?;
             let serialized_output = hex::encode(&respond_bidirectional_tx.output);
 
-            let body = serde_json::json!({
-                "commands": {
-                    "commands": [{
-                        "ExerciseCommand": {
-                            "templateId": canton.signer_template_id,
-                            "contractId": canton.signer_cid,
-                            "choice": "RespondBidirectional",
-                            "choiceArgument": {
-                                "operators": operators,
-                                "requester": requester,
-                                "requestId": request_id_hex,
-                                "serializedOutput": serialized_output,
-                                "signature": der_sig,
-                            }
-                        }
+            let req = SubmitAndWaitForTransactionRequest {
+                commands: JsCommands {
+                    command_id: format!("mpc-respond-bidir-{}", request_id_hex),
+                    user_id: canton.jwt_subject.clone(),
+                    act_as: vec![canton.party_id.clone()],
+                    read_as: vec![canton.party_id.clone()],
+                    commands: vec![Command::ExerciseCommand {
+                        template_id: canton.signer_template_id.clone(),
+                        contract_id: canton.signer_cid.clone(),
+                        choice: "RespondBidirectional".to_string(),
+                        choice_argument: serde_json::json!({
+                            "operators": operators,
+                            "requester": requester,
+                            "requestId": request_id_hex,
+                            "serializedOutput": serialized_output,
+                            "signature": der_sig,
+                        }),
                     }],
-                    "commandId": format!("mpc-respond-bidir-{}", request_id_hex),
-                    "userId": canton.jwt_subject,
-                    "actAs": [&canton.party_id],
-                    "readAs": [&canton.party_id],
-                }
-            });
+                    disclosed_contracts: vec![],
+                },
+            };
 
             let resp = canton
                 .http_client
                 .post(&url)
                 .bearer_auth(&jwt_token)
-                .json(&body)
+                .json(&req)
                 .send()
                 .await?;
 
