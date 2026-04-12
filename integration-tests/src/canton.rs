@@ -2,8 +2,9 @@ use anyhow::{Context as _, Result};
 use async_process::{Child, Command};
 use mpc_node::indexer_canton::ledger_api::{
     self, ActiveContractEntry, AllocatePartyRequest, AllocatePartyResponse, ContractEntry,
-    CreateUserRequest, DisclosedContract, EventFormat, GetActiveContractsRequest, JsCommands,
-    LedgerEndResponse, SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse,
+    CreateUserRequest, CumulativeFilter, DisclosedContract, EventFormat,
+    GetActiveContractsRequest, IdentifierFilter, JsCommands, LedgerEndResponse, PartyFilter,
+    SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse, TemplateFilterValue,
     UserInfo,
 };
 use mpc_node::indexer_canton::CantonConfig;
@@ -263,15 +264,16 @@ impl Drop for CantonSandbox {
 /// "synchronizer still loading" (400 WITHOUT_CONNECTED_SYNCHRONIZER → retry).
 async fn wait_for_synchronizer(client: &CantonTestClient) -> Result<()> {
     let url = format!("{}/v2/parties", client.base_url);
+    let probe = AllocatePartyRequest {
+        party_id_hint: "_readiness_probe".to_string(),
+        identity_provider_id: Some(String::new()),
+        synchronizer_id: Some(String::new()),
+        user_id: Some(String::new()),
+    };
     for attempt in 0..120 {
         match client
             .auth_post(&url)?
-            .json(&json!({
-                "partyIdHint": "_readiness_probe",
-                "identityProviderId": "",
-                "synchronizerId": "",
-                "userId": ""
-            }))
+            .json(&probe)
             .send()
             .await
         {
@@ -526,14 +528,17 @@ impl CantonTestClient {
 
         let mut filters = serde_json::Map::new();
         for party in parties {
-            filters.insert(
-                party.to_string(),
-                json!({
-                    "cumulative": [{ "identifierFilter": { "TemplateFilter": { "value": {
-                        "templateId": template_id, "includeCreatedEventBlob": include_blob
-                    }}}}]
-                }),
-            );
+            let filter = PartyFilter {
+                cumulative: vec![CumulativeFilter {
+                    identifier_filter: IdentifierFilter::TemplateFilter {
+                        value: TemplateFilterValue {
+                            template_id: template_id.to_string(),
+                            include_created_event_blob: include_blob,
+                        },
+                    },
+                }],
+            };
+            filters.insert(party.to_string(), serde_json::to_value(filter)?);
         }
         let req = GetActiveContractsRequest {
             active_at_offset: end.offset,
@@ -563,12 +568,17 @@ impl CantonTestClient {
         for entry in &entries {
             if let Some(ContractEntry::JsActiveContract(ac)) = &entry.contract_entry {
                 if ac.created_event.contract_id == contract_id {
-                    return Ok(json!({
-                        "templateId": ac.created_event.template_id,
-                        "contractId": ac.created_event.contract_id,
-                        "createdEventBlob": ac.created_event.created_event_blob,
-                        "synchronizerId": ac.synchronizer_id,
-                    }));
+                    let disclosed = DisclosedContract {
+                        template_id: ac.created_event.template_id.clone(),
+                        contract_id: ac.created_event.contract_id.clone(),
+                        created_event_blob: ac
+                            .created_event
+                            .created_event_blob
+                            .clone()
+                            .unwrap_or_default(),
+                        synchronizer_id: ac.synchronizer_id.clone(),
+                    };
+                    return Ok(serde_json::to_value(disclosed)?);
                 }
             }
         }
