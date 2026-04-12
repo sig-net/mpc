@@ -32,8 +32,6 @@ pub struct CantonSandbox {
     pub requester_party: String,
     pub signer_cid: String,
     pub signer_template_id: String,
-    pub vault_cid: String,
-    pub vault_disclosure: DisclosedContract,
     pub signer_disclosure: DisclosedContract,
     pub nonce_cid: String,
     pub client: CantonTestClient,
@@ -180,24 +178,6 @@ canton.participants.sandbox.ledger-api {{
             .await?;
         let (signer_cid, signer_template_id) = find_created_contract(&signer_result, "Signer")?;
 
-        let vault_result = client
-            .create_contract(
-                &[&operator],
-                "#daml-vault:Erc20Vault:Vault",
-                json!({
-                    "operators": [&operator],
-                    "sigNetwork": &sig_network,
-                    "evmVaultAddress": "0".repeat(64),
-                    "evmMpcPublicKey": "",
-                    "vaultId": "test-vault",
-                }),
-            )
-            .await?;
-        let (vault_cid, _) = find_created_contract(&vault_result, "Vault")?;
-
-        let vault_disclosure = client
-            .get_disclosed_contract(&[&operator], "#daml-vault:Erc20Vault:Vault", &vault_cid)
-            .await?;
         let signer_disclosure = client
             .get_disclosed_contract(&[&sig_network], "#daml-signer:Signer:Signer", &signer_cid)
             .await?;
@@ -228,8 +208,6 @@ canton.participants.sandbox.ledger-api {{
             requester_party: requester,
             signer_cid,
             signer_template_id,
-            vault_cid,
-            vault_disclosure,
             signer_disclosure,
             nonce_cid,
             client,

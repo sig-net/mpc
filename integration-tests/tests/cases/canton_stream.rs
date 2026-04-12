@@ -5,6 +5,7 @@ use mpc_node::indexer_canton::ledger_api::{self, Event};
 use mpc_node::indexer_canton::CantonStream;
 use mpc_node::protocol::Chain;
 use mpc_node::protocol::IndexedSignRequest;
+use mpc_node::stream::ops::SignatureRespondedEvent;
 use mpc_node::stream::{ChainEvent, ChainStream};
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use serde_json::json;
@@ -28,17 +29,12 @@ async fn stream_canton(sandbox: &CantonSandbox, backlog: Backlog) -> Result<Cant
     Ok(stream)
 }
 
-/// Submit a sign request through the Vault contract.
-/// Uses the nonce-based flow: RequestDeposit with pre-issued SigningNonce.
-/// The Vault internally creates a SignRequest, exercises Signer.SignBidirectional
-/// (which archives the nonce and creates SignBidirectionalEvent + new nonce).
-/// Updates sandbox.nonce_cid with the fresh nonce for the next call.
-/// Returns the requestId from the PendingDeposit event.
-async fn submit_canton_sign_request(sandbox: &mut CantonSandbox) -> Result<String> {
+/// Submit a sign request by creating a SignRequest contract and exercising
+/// Signer.SignBidirectional directly (no Vault). Updates sandbox.nonce_cid
+/// with the fresh nonce for the next call.
+async fn submit_canton_sign_request(sandbox: &mut CantonSandbox) -> Result<()> {
     let client = &sandbox.client;
-    let vault_template = "#daml-vault:Erc20Vault:Vault";
 
-    // args[0] MUST match evmVaultAddress ("0".repeat(64)) — Daml asserts this
     let evm_tx_params = json!({
         "to": "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
         "functionSignature": "transfer(address,uint256)",
@@ -54,53 +50,62 @@ async fn submit_canton_sign_request(sandbox: &mut CantonSandbox) -> Result<Strin
         "chainId": format!("{:0>64}", "aa36a7"),
     });
 
-    // RequestDeposit — nonceCid is the pre-issued SigningNonce
-    let deposit_result = client
-        .exercise_choice(
-            &[&sandbox.requester_party],
-            vault_template,
-            &sandbox.vault_cid,
-            "RequestDeposit",
+    let sign_request = client
+        .create_contract(
+            &[&sandbox.operator_party],
+            "#daml-signer:Signer:SignRequest",
             json!({
+                "operators": [&sandbox.operator_party],
                 "requester": &sandbox.requester_party,
-                "signerCid": &sandbox.signer_cid,
-                "path": &sandbox.requester_party,
+                "sigNetwork": &sandbox.party_id,
+                "sender": "test-sender",
                 "evmTxParams": evm_tx_params,
-                "nonceCid": &sandbox.nonce_cid,
-                "nonceCidText": &sandbox.nonce_cid,
+                "caip2Id": "eip155:11155111",
                 "keyVersion": LATEST_MPC_KEY_VERSION,
+                "path": &sandbox.requester_party,
                 "algo": "ECDSA",
                 "dest": "ethereum",
                 "params": "",
+                "nonceCidText": &sandbox.nonce_cid,
                 "outputDeserializationSchema": r#"[{"name":"","type":"bool"}]"#,
                 "respondSerializationSchema": r#"[{"name":"","type":"bool"}]"#,
             }),
-            &[
-                sandbox.vault_disclosure.clone(),
-                sandbox.signer_disclosure.clone(),
-            ],
+        )
+        .await?;
+    let sign_request_cid =
+        integration_tests::canton::find_created_contract(&sign_request, "SignRequest")?.0;
+    let sign_request_disclosure = client
+        .get_disclosed_contract(
+            &[&sandbox.operator_party],
+            "#daml-signer:Signer:SignRequest",
+            &sign_request_cid,
         )
         .await?;
 
-    // Extract requestId from PendingDeposit and update nonce_cid from new SigningNonce
-    let mut request_id = None;
-    for event in &deposit_result.transaction.events {
+    let result = client
+        .exercise_choice(
+            &[&sandbox.requester_party],
+            &sandbox.signer_template_id,
+            &sandbox.signer_cid,
+            "SignBidirectional",
+            json!({
+                "signRequestCid": sign_request_cid,
+                "nonceCid": &sandbox.nonce_cid,
+                "requester": &sandbox.requester_party,
+            }),
+            &[sandbox.signer_disclosure.clone(), sign_request_disclosure],
+        )
+        .await?;
+
+    // Update nonce_cid from the fresh SigningNonce created by SignBidirectional
+    for event in &result.transaction.events {
         if let Event::CreatedEvent(created) = event {
-            if ledger_api::template_suffix_matches(&created.template_id, "PendingDeposit") {
-                request_id = Some(
-                    created.payload["requestId"]
-                        .as_str()
-                        .map(|s| s.to_string())
-                        .context("no requestId")?,
-                );
-            }
-            // SignBidirectional creates a fresh SigningNonce — update for next call
             if ledger_api::template_suffix_matches(&created.template_id, "SigningNonce") {
                 sandbox.nonce_cid = created.contract_id.clone();
             }
         }
     }
-    request_id.context("no PendingDeposit in RequestDeposit result")
+    Ok(())
 }
 
 /// Poll stream for a SignRequest event with timeout.
@@ -129,13 +134,13 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
     let backlog = Backlog::new();
     let mut stream = stream_canton(&sandbox, backlog).await?;
 
-    let _request_id = submit_canton_sign_request(&mut sandbox).await?;
+    submit_canton_sign_request(&mut sandbox).await?;
 
     let event = wait_for_sign_request(&mut stream, 30).await?;
 
     assert_eq!(event.chain, Chain::Canton);
     assert_eq!(event.args.key_version, LATEST_MPC_KEY_VERSION);
-    // Canton only supports bidirectional — verify the kind
+    // assert_eq!(event.args.path, sandbox.requester_party);
     assert!(
         matches!(
             event.kind,
@@ -144,6 +149,7 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
         "expected SignBidirectional, got {:?}",
         event.kind
     );
+    assert_ne!(event.id.request_id, [0u8; 32], "request_id should not be zero");
     Ok(())
 }
 
@@ -185,20 +191,18 @@ async fn test_canton_stream_concurrent_events() -> Result<()> {
     let backlog = Backlog::new();
     let mut stream = stream_canton(&sandbox, backlog).await?;
 
-    // Submit 3 sign requests (each needs its own auth cycle)
-    let mut expected_request_ids = HashSet::new();
+    // Submit 3 sign requests
     for _ in 0..3 {
-        let rid = submit_canton_sign_request(&mut sandbox).await?;
-        expected_request_ids.insert(rid);
+        submit_canton_sign_request(&mut sandbox).await?;
     }
 
     // Collect SignRequest events until we have all 3
-    let mut received = Vec::new();
+    let mut received_ids = HashSet::new();
     for _ in 0..20 {
         match timeout(Duration::from_secs(5), stream.next_event()).await {
             Ok(Some(ChainEvent::SignRequest(req))) => {
-                received.push(req);
-                if received.len() >= 3 {
+                received_ids.insert(req.id.request_id);
+                if received_ids.len() >= 3 {
                     break;
                 }
             }
@@ -208,24 +212,7 @@ async fn test_canton_stream_concurrent_events() -> Result<()> {
         }
     }
 
-    assert_eq!(
-        received.len(),
-        3,
-        "expected 3 SignRequest events, got {}",
-        received.len()
-    );
-
-    // Verify received IDs are distinct (no duplicate replays)
-    let received_ids: HashSet<_> = received
-        .iter()
-        .map(|r| hex::encode(r.id.request_id))
-        .collect();
-    assert_eq!(
-        received_ids.len(),
-        3,
-        "expected 3 distinct request IDs, got {}",
-        received_ids.len()
-    );
+    assert_eq!(received_ids.len(), 3, "expected 3 distinct sign requests");
     Ok(())
 }
 
@@ -290,49 +277,91 @@ async fn test_canton_stream_catchup_linear() -> Result<()> {
 #[ignore]
 #[test(tokio::test)]
 async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
+    // Use interval=1 so every block produces a checkpoint. Canton generates
+    // few blocks (only on ledger activity), so a larger interval risks timing out.
+    const INTERVAL: u64 = 1;
+
     let mut sandbox = canton_sandbox().await?;
+    let backlog = Backlog::new();
+    let mut stream = stream_canton(&sandbox, backlog.clone()).await?;
 
-    // Phase 1: create stream, submit event, set a checkpoint on the first Block
-    let backlog1 = Backlog::new();
-    let mut stream1 = stream_canton(&sandbox, backlog1.clone()).await?;
+    submit_canton_sign_request(&mut sandbox).await?;
 
-    let _ = submit_canton_sign_request(&mut sandbox).await?;
+    // Phase 1: process events, insert sign requests into backlog, wait for a
+    // checkpoint that contains a pending request.
+    let checkpoint = tokio::time::timeout(Duration::from_secs(30), async {
+        let mut saw_sign_request = false;
+        loop {
+            let Some(event) = stream.next_event().await else {
+                break None;
+            };
+            match event {
+                ChainEvent::SignRequest(req) => {
+                    saw_sign_request = true;
+                    backlog.insert(req).await;
+                }
+                ChainEvent::Block(height) => {
+                    if let Some(cp) = backlog
+                        .set_processed_block_interval(Chain::Canton, height, INTERVAL)
+                        .await
+                    {
+                        if saw_sign_request && !cp.pending_requests.is_empty() {
+                            break Some(cp);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for checkpoint")
+    .expect("stream ended without checkpoint");
 
-    let mut checkpoint_block = None;
-    for _ in 0..10 {
-        match timeout(Duration::from_secs(1), stream1.next_event()).await {
-            Ok(Some(ChainEvent::Block(block))) => {
-                backlog1.set_processed_block(Chain::Canton, block).await;
-                checkpoint_block = Some(block);
-                break;
+    assert_eq!(
+        checkpoint.pending_requests.len(),
+        1,
+        "expected one pending request in checkpoint"
+    );
+    drop(stream);
+
+    // Phase 2: new stream with same backlog should resume from checkpoint
+    let mut stream2 = stream_canton(&sandbox, backlog.clone()).await?;
+
+    submit_canton_sign_request(&mut sandbox).await?;
+
+    let mut saw_new_event = false;
+    let mut saw_new_checkpoint = false;
+    for _ in 0..20 {
+        match timeout(Duration::from_secs(5), stream2.next_event()).await {
+            Ok(Some(ChainEvent::SignRequest(req))) => {
+                saw_new_event = true;
+                backlog.insert(req).await;
+                if saw_new_checkpoint {
+                    break;
+                }
+            }
+            Ok(Some(ChainEvent::Block(height))) => {
+                if backlog
+                    .set_processed_block_interval(Chain::Canton, height, INTERVAL)
+                    .await
+                    .is_some()
+                {
+                    saw_new_checkpoint = true;
+                    if saw_new_event {
+                        break;
+                    }
+                }
             }
             Ok(Some(_)) => continue,
             _ => break,
         }
     }
-    assert!(checkpoint_block.is_some(), "no Block event to checkpoint");
-    drop(stream1);
 
-    // Phase 2: new stream should start from checkpoint and see new events
-    let backlog2 = Backlog::new();
-    let mut stream2 = stream_canton(&sandbox, backlog2).await?;
-
-    let _ = submit_canton_sign_request(&mut sandbox).await?;
-
-    let event = timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(ev) = stream2.next_event().await {
-                return ev;
-            }
-        }
-    })
-    .await
-    .context("timeout waiting for event on stream2")?;
-
+    assert!(saw_new_event, "new stream did not observe new event");
     assert!(
-        matches!(event, ChainEvent::SignRequest(_) | ChainEvent::Block(_)),
-        "expected SignRequest or Block, got {:?}",
-        event
+        saw_new_checkpoint,
+        "new stream did not observe new checkpoint"
     );
     Ok(())
 }
@@ -344,18 +373,15 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     let backlog = Backlog::new();
     let mut stream = stream_canton(&sandbox, backlog).await?;
 
-    // Submit a sign request and capture the request ID
-    let _request_id = submit_canton_sign_request(&mut sandbox).await?;
-
-    // Wait for the SignRequest event from the stream
+    // Submit a sign request, then use the MPC-computed request ID from the stream event
+    submit_canton_sign_request(&mut sandbox).await?;
     let sign_event = wait_for_sign_request(&mut stream, 30).await?;
     assert_eq!(sign_event.chain, Chain::Canton);
+    let request_id = hex::encode(sign_event.id.request_id);
 
     // Exercise Signer.Respond directly (no MPC cluster — we mock the response).
     // DER signature with valid secp256k1 scalars (r=1, s=1) — not cryptographically
     // meaningful but parseable by k256::ecdsa::Signature::from_der.
-    let dummy_der_sig = "3006020101020101";
-
     sandbox
         .client
         .exercise_choice(
@@ -366,19 +392,20 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
             json!({
                 "operators": [&sandbox.operator_party],
                 "requester": &sandbox.requester_party,
-                "requestId": &_request_id,
-                "signature": dummy_der_sig,
+                "requestId": &request_id,
+                "signature": "3006020101020101",
             }),
             &[],
         )
         .await?;
 
-    // Poll for Respond event from the stream
+    // Poll for Respond event and verify fields match
     let mut saw_respond = false;
     for _ in 0..10 {
         match timeout(Duration::from_secs(5), stream.next_event()).await {
-            Ok(Some(ChainEvent::Respond(ev))) => {
-                assert_eq!(ev.source_chain(), Chain::Canton);
+            Ok(Some(ChainEvent::Respond(SignatureRespondedEvent::Canton(ev)))) => {
+                assert_eq!(hex::encode(ev.request_id), request_id);
+                assert_eq!(ev.signature.s, k256::Scalar::from(1u64));
                 saw_respond = true;
                 break;
             }

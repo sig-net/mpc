@@ -3,7 +3,7 @@ use alloy::consensus::TxEip1559;
 use alloy::primitives::{Address, Bytes, TxKind, U256};
 use anyhow::{Context as _, Result};
 use integration_tests::cluster;
-use mpc_node::indexer_canton::ledger_api::{self, Event};
+use mpc_node::util::NearPublicKeyExt;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use reqwest::Client;
 use rlp::{Rlp, RlpStream};
@@ -28,10 +28,8 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
         .canton
         .as_ref()
         .context("canton sandbox not available")?;
-    // 3. Submit sign request via Vault (nonce-based flow)
+    // 3. Submit sign request directly via Signer (bypasses Vault)
     let client = &canton.client;
-    let vault_template = "#daml-vault:Erc20Vault:Vault";
-
     let evm_tx_params = json!({
         "to": "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
         "functionSignature": "transfer(address,uint256)",
@@ -48,74 +46,70 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
         "chainId": format!("{:0>64}", "7a69"),
     });
 
-    let deposit_result = client
-        .exercise_choice(
-            &[&canton.requester_party],
-            vault_template,
-            &canton.vault_cid,
-            "RequestDeposit",
+    let sign_request = client
+        .create_contract(
+            &[&canton.operator_party],
+            "#daml-signer:Signer:SignRequest",
             json!({
+                "operators": [&canton.operator_party],
                 "requester": &canton.requester_party,
-                "signerCid": &canton.signer_cid,
-                "path": &canton.requester_party,
+                "sigNetwork": &canton.party_id,
+                "sender": "test-sender",
                 "evmTxParams": evm_tx_params,
-                "nonceCid": &canton.nonce_cid,
-                "nonceCidText": &canton.nonce_cid,
+                "caip2Id": "eip155:31337",
                 "keyVersion": LATEST_MPC_KEY_VERSION,
+                "path": &canton.requester_party,
                 "algo": "ECDSA",
                 "dest": "ethereum",
                 "params": "",
+                "nonceCidText": &canton.nonce_cid,
                 "outputDeserializationSchema": r#"[{"name":"","type":"bool"}]"#,
                 "respondSerializationSchema": r#"[{"name":"","type":"bool"}]"#,
             }),
-            &[
-                canton.vault_disclosure.clone(),
-                canton.signer_disclosure.clone(),
-            ],
+        )
+        .await?;
+    let sign_request_cid =
+        integration_tests::canton::find_created_contract(&sign_request, "SignRequest")?.0;
+    let sign_request_disclosure = client
+        .get_disclosed_contract(
+            &[&canton.operator_party],
+            "#daml-signer:Signer:SignRequest",
+            &sign_request_cid,
         )
         .await?;
 
-    // 4. Extract requestId from PendingDeposit
-    let mut request_id = String::new();
-    for event in &deposit_result.transaction.events {
-        if let Event::CreatedEvent(created) = event {
-            if ledger_api::template_suffix_matches(&created.template_id, "PendingDeposit") {
-                request_id = created.payload["requestId"]
-                    .as_str()
-                    .context("no requestId")?
-                    .to_string();
-                break;
-            }
-        }
-    }
-    anyhow::ensure!(
-        !request_id.is_empty(),
-        "no requestId found in deposit result"
-    );
-    tracing::info!(%request_id, "canton deposit request submitted");
+    client
+        .exercise_choice(
+            &[&canton.requester_party],
+            &canton.signer_template_id,
+            &canton.signer_cid,
+            "SignBidirectional",
+            json!({
+                "signRequestCid": sign_request_cid,
+                "nonceCid": &canton.nonce_cid,
+                "requester": &canton.requester_party,
+            }),
+            &[canton.signer_disclosure.clone(), sign_request_disclosure],
+        )
+        .await?;
+    tracing::info!("canton sign request submitted via Signer");
 
-    // 5. Poll for SignatureRespondedEvent matching the requestId
+    // 4. Poll for SignatureRespondedEvent (MPC node signs and responds)
     let sig_event = client
         .poll_for_contract(
             &[&canton.party_id],
             "#daml-signer:Signer:SignatureRespondedEvent",
-            |payload| payload["requestId"].as_str() == Some(&request_id),
+            |payload| payload.get("signature").and_then(|s| s.as_str()).is_some_and(|s| !s.is_empty()),
             Duration::from_secs(120),
         )
         .await
         .context("timeout waiting for SignatureRespondedEvent")?;
-
-    tracing::info!("received SignatureRespondedEvent");
-
-    // 6. Verify the signature exists
-    let signature_hex = sig_event
-        .created_event
-        .payload["signature"]
+    let request_id = sig_event.created_event.payload["requestId"]
         .as_str()
-        .context("missing signature field")?;
-    assert!(!signature_hex.is_empty(), "signature is empty");
+        .context("no requestId in SignatureRespondedEvent")?;
+    tracing::info!(%request_id, "received SignatureRespondedEvent");
 
-    // 6b. Relay the signed EVM transaction to Anvil
+    // 5. Relay the signed EVM transaction to Anvil
     //
     // The MPC node produced a DER-encoded ECDSA signature but does not submit the
     // Ethereum transaction itself — the test acts as the relayer.
@@ -127,7 +121,10 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
         .context("ethereum not available")?;
     let anvil_rpc_url = eth_ctx.sandbox.external_http_endpoint.clone();
 
-    // Parse DER signature → (r, s) scalars
+    // Parse DER signature from SignatureRespondedEvent → (r, s) scalars
+    let signature_hex = sig_event.created_event.payload["signature"]
+        .as_str()
+        .context("missing signature in SignatureRespondedEvent")?;
     let der_stripped = signature_hex.strip_prefix("0x").unwrap_or(signature_hex);
     let der_bytes = hex::decode(der_stripped).context("invalid hex in DER signature")?;
     let ecdsa_sig = k256::ecdsa::Signature::from_der(&der_bytes)
@@ -213,12 +210,12 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
 
     let _tx_hash = relay_tx_hash.context("failed to relay tx with either y_parity (0 and 1)")?;
 
-    // 7. Poll for RespondBidirectionalEvent (MPC posted the outcome)
+    // 6. Poll for RespondBidirectionalEvent (MPC posted the outcome)
     let respond_event = client
         .poll_for_contract(
             &[&canton.party_id],
             "#daml-signer:Signer:RespondBidirectionalEvent",
-            |payload| payload["requestId"].as_str() == Some(&request_id),
+            |payload| payload["requestId"].as_str() == Some(request_id),
             Duration::from_secs(300),
         )
         .await
@@ -226,19 +223,44 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
 
     tracing::info!("received RespondBidirectionalEvent");
 
-    // 8. Verify the respond event has the same requestId
+    // 7. Verify the Phase 2 response signature against the MPC-derived public key
     let respond_payload = &respond_event.created_event.payload;
-    assert_eq!(
-        respond_payload["requestId"].as_str(),
-        Some(request_id.as_str()),
-        "RespondBidirectionalEvent requestId mismatch"
-    );
+    let serialized_output = respond_payload["serializedOutput"]
+        .as_str()
+        .context("RespondBidirectionalEvent missing serializedOutput")?;
+    let respond_sig_hex = respond_payload["signature"]
+        .as_str()
+        .context("RespondBidirectionalEvent missing signature")?;
+    let respond_der = hex::decode(respond_sig_hex.strip_prefix("0x").unwrap_or(respond_sig_hex))?;
+    let respond_ecdsa = k256::ecdsa::Signature::from_der(&respond_der)
+        .map_err(|e| anyhow::anyhow!("invalid DER: {e}"))?;
 
-    // Verify the respond event has serializedOutput
-    assert!(
-        respond_payload.get("serializedOutput").is_some(),
-        "RespondBidirectionalEvent missing serializedOutput"
+    // Recompute the message hash: keccak256(requestId ++ serializedOutput)
+    let request_id_bytes = hex::decode(request_id)?;
+    let serialized_output_bytes = hex::decode(serialized_output)?;
+    let mut combined = Vec::with_capacity(request_id_bytes.len() + serialized_output_bytes.len());
+    combined.extend_from_slice(&request_id_bytes);
+    combined.extend_from_slice(&serialized_output_bytes);
+    let response_hash: [u8; 32] = alloy::primitives::keccak256(&combined).into();
+
+    // Derive the expected Canton public key for Phase 2 response signing.
+    // Phase 2 uses "canton response key" as the path (not the original requester path).
+    let root_pk: k256::AffinePoint = nodes.root_public_key().await?.into_affine_point();
+    let epsilon = mpc_crypto::derive_epsilon_canton(
+        LATEST_MPC_KEY_VERSION,
+        "test-sender",
+        "canton response key",
     );
+    let derived_pk = mpc_crypto::derive_key(root_pk, epsilon);
+
+    // Verify the signature against the derived public key
+    use k256::ecdsa::signature::hazmat::PrehashVerifier;
+    let verifying_key = k256::ecdsa::VerifyingKey::from_affine(derived_pk)
+        .map_err(|e| anyhow::anyhow!("invalid derived public key: {e}"))?;
+    verifying_key
+        .verify_prehash(&response_hash, &respond_ecdsa)
+        .map_err(|e| anyhow::anyhow!("RespondBidirectional signature verification failed: {e}"))?;
+    tracing::info!("RespondBidirectional signature verified against MPC-derived key");
 
     tracing::info!("Canton bidirectional flow completed successfully");
     Ok(())
