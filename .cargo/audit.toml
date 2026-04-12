@@ -19,4 +19,11 @@ ignore = [
     "RUSTSEC-2026-0098",  # rustls-webpki 0.101.7/0.102.8 URI name constraints incorrectly accepted; same dependency chain as RUSTSEC-2026-0049.
     "RUSTSEC-2026-0099",  # rustls-webpki 0.101.7/0.102.8 wildcard name constraints accepted; same dependency chain as RUSTSEC-2026-0049.
 	"RUSTSEC-2026-0104",  # rustls-webpki CRL parsing panic; we do not use CRLs, so this is not reachable in our current TLS usage.
+    "RUSTSEC-2023-0071",  # rsa 0.9.10 Marvin Attack; no fix available, pulled in by jsonwebtoken (Canton JWT auth).
+    "RUSTSEC-2024-0375",  # atty 0.2.14 unmaintained; pulled in by solana-logger transitively (same crate as RUSTSEC-2021-0145, new advisory ID).
+    "RUSTSEC-2025-0057",  # fxhash 0.2.1 unmaintained; pulled in by ethers-providers.
+    "RUSTSEC-2025-0066",  # google-apis-common 6.0.4 unmaintained; pulled in by google-secretmanager1.
+    "RUSTSEC-2024-0384",  # instant 0.1.13 unmaintained; pulled in by libp2p/ethers.
+    "RUSTSEC-2025-0119",  # number_prefix 0.4.0 unmaintained; pulled in by solana-client/indicatif.
+    "RUSTSEC-2024-0436",  # paste 1.0.15 unmaintained; pulled in by syn-solidity/alloy-sol-types.
 ]

@@ -234,7 +234,7 @@ impl CantonSandbox {
                 &signer_cid,
                 "IssueNonce",
                 json!({ "requester": &requester }),
-                Some(&[signer_disclosure.clone()]),
+                Some(std::slice::from_ref(&signer_disclosure)),
             )
             .await?;
         let nonce_cid = find_created_cid(&nonce_result, "SigningNonce")?;
