@@ -124,7 +124,11 @@ impl SignBidirectionalEvent {
             SignBidirectionalEvent::Solana(event) => event.serialized_transaction.clone(),
             SignBidirectionalEvent::Hydration(event) => event.serialized_transaction.clone(),
             SignBidirectionalEvent::Canton(event) => {
-                crate::indexer_canton::rlp_encode_unsigned_eip1559(&event.evm_tx_params)
+                match &event.tx_params {
+                    crate::indexer_canton::contracts::TxParams::EvmTxParams(evm_params) => {
+                        crate::indexer_canton::rlp_encode_unsigned_eip1559(evm_params)
+                    }
+                }
             }
         }
     }

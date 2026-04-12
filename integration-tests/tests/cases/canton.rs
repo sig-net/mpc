@@ -55,7 +55,7 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
                 "requester": &canton.requester_party,
                 "sigNetwork": &canton.party_id,
                 "sender": "test-sender",
-                "evmTxParams": evm_tx_params,
+                "txParams": { "tag": "EvmTxParams", "value": evm_tx_params },
                 "caip2Id": "eip155:31337",
                 "keyVersion": LATEST_MPC_KEY_VERSION,
                 "path": &canton.requester_party,
@@ -210,6 +210,19 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
 
     let _tx_hash = relay_tx_hash.context("failed to relay tx with either y_parity (0 and 1)")?;
 
+    // Pump blocks on Anvil so the MPC node's Ethereum execution watcher reliably
+    // detects the relayed transaction. Without continuous block production, the
+    // indexer can miss the single auto-mined block in a polling race.
+    let pump_client = http_client.clone();
+    let pump_url = anvil_rpc_url.clone();
+    let block_pumper = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            let _ = eth_rpc_call(&pump_client, &pump_url, "evm_mine", json!([])).await;
+        }
+    });
+
     // 6. Poll for RespondBidirectionalEvent (MPC posted the outcome)
     let respond_event = client
         .poll_for_contract(
@@ -262,6 +275,7 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("RespondBidirectional signature verification failed: {e}"))?;
     tracing::info!("RespondBidirectional signature verified against MPC-derived key");
 
+    block_pumper.abort();
     tracing::info!("Canton bidirectional flow completed successfully");
     Ok(())
 }

@@ -59,7 +59,7 @@ async fn submit_canton_sign_request(sandbox: &mut CantonSandbox) -> Result<()> {
                 "requester": &sandbox.requester_party,
                 "sigNetwork": &sandbox.party_id,
                 "sender": "test-sender",
-                "evmTxParams": evm_tx_params,
+                "txParams": { "tag": "EvmTxParams", "value": evm_tx_params },
                 "caip2Id": "eip155:11155111",
                 "keyVersion": LATEST_MPC_KEY_VERSION,
                 "path": &sandbox.requester_party,

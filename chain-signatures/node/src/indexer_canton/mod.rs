@@ -23,7 +23,7 @@ use std::fmt;
 // Canton event structs
 // ---------------------------------------------------------------------------
 
-pub use contracts::EvmTransactionParams as CantonEvmTransactionParams;
+pub use contracts::{TxParams as CantonTxParams, EvmTransactionParams as CantonEvmTransactionParams};
 pub use contracts::SignBidirectionalRequestedEvent as CantonSignBidirectionalRequestedEvent;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -137,7 +137,11 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
         let epsilon =
             mpc_crypto::kdf::derive_epsilon_canton(self.key_version, &self.sender, &self.path);
 
-        let rlp_encoded_tx = rlp_encode_unsigned_eip1559(&self.evm_tx_params);
+        let rlp_encoded_tx = match &self.tx_params {
+            contracts::TxParams::EvmTxParams(evm_params) => {
+                rlp_encode_unsigned_eip1559(evm_params)
+            }
+        };
         let unsigned_tx_hash = hash_rlp_data(rlp_encoded_tx);
 
         let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {

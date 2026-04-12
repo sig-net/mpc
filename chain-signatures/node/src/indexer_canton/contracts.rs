@@ -32,6 +32,18 @@ pub struct EvmTransactionParams {
 }
 
 // ---------------------------------------------------------------------------
+// TxParams — Daml variant for multi-chain support
+// ---------------------------------------------------------------------------
+
+/// Daml variant: `data TxParams = EvmParams EvmTransactionParams`
+/// Canton JSON API serializes as `{"tag": "EvmParams", "value": {...}}`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "tag", content = "value")]
+pub enum TxParams {
+    EvmTxParams(EvmTransactionParams),
+}
+
+// ---------------------------------------------------------------------------
 // From daml-signer/daml/Signer.daml — SignBidirectionalEvent
 // ---------------------------------------------------------------------------
 
@@ -44,7 +56,7 @@ pub struct SignBidirectionalRequestedEvent {
     pub sender: String,
     pub requester: String,
     pub sig_network: String,
-    pub evm_tx_params: EvmTransactionParams,
+    pub tx_params: TxParams,
     pub caip2_id: String,
     /// Canton sends this as either a number or a string.
     #[serde(deserialize_with = "deserialize_u32_lenient")]
