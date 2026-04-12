@@ -57,8 +57,65 @@ pub fn der_encode_signature(signature: &Signature) -> anyhow::Result<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
-// Signer CID discovery
+// Active contracts query
 // ---------------------------------------------------------------------------
+
+/// Fetch active contracts from Canton, filtered by template.
+pub async fn fetch_active_contracts(
+    http_client: &reqwest::Client,
+    json_api_url: &str,
+    jwt_token: &str,
+    parties: &[&str],
+    template_id: &str,
+    include_blob: bool,
+) -> anyhow::Result<Vec<ledger_api::ActiveContractEntry>> {
+    let end: ledger_api::LedgerEndResponse = http_client
+        .get(format!("{json_api_url}/v2/state/ledger-end"))
+        .bearer_auth(jwt_token)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    let mut filters = serde_json::Map::new();
+    for party in parties {
+        let filter = ledger_api::PartyFilter {
+            cumulative: vec![ledger_api::CumulativeFilter {
+                identifier_filter: ledger_api::IdentifierFilter::TemplateFilter {
+                    value: ledger_api::TemplateFilterValue {
+                        template_id: template_id.to_string(),
+                        include_created_event_blob: include_blob,
+                    },
+                },
+            }],
+        };
+        filters.insert(party.to_string(), serde_json::to_value(filter)?);
+    }
+
+    let req = ledger_api::GetActiveContractsRequest {
+        active_at_offset: end.offset,
+        event_format: ledger_api::EventFormat {
+            filters_by_party: filters,
+            verbose: true,
+        },
+    };
+
+    let resp = http_client
+        .post(format!("{json_api_url}/v2/state/active-contracts"))
+        .bearer_auth(jwt_token)
+        .json(&req)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("active-contracts query failed: {status} {text}");
+    }
+
+    Ok(resp.json().await?)
+}
 
 /// Discover the Signer contract ID by querying active contracts.
 /// Returns (contractId, templateId) for the unique Signer:Signer contract.
