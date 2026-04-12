@@ -140,7 +140,7 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
 
     assert_eq!(event.chain, Chain::Canton);
     assert_eq!(event.args.key_version, LATEST_MPC_KEY_VERSION);
-    // assert_eq!(event.args.path, sandbox.requester_party);
+    assert_eq!(event.args.path, sandbox.requester_party);
     assert!(
         matches!(
             event.kind,
@@ -196,11 +196,13 @@ async fn test_canton_stream_concurrent_events() -> Result<()> {
         submit_canton_sign_request(&mut sandbox).await?;
     }
 
-    // Collect SignRequest events until we have all 3
+    // Collect SignRequest events until we have all 3, verifying content on each
     let mut received_ids = HashSet::new();
     for _ in 0..20 {
         match timeout(Duration::from_secs(5), stream.next_event()).await {
             Ok(Some(ChainEvent::SignRequest(req))) => {
+                assert_eq!(req.chain, Chain::Canton);
+                assert_eq!(req.args.path, sandbox.requester_party);
                 received_ids.insert(req.id.request_id);
                 if received_ids.len() >= 3 {
                     break;
