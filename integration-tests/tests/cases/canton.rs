@@ -68,10 +68,10 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
                 "outputDeserializationSchema": r#"[{"name":"","type":"bool"}]"#,
                 "respondSerializationSchema": r#"[{"name":"","type":"bool"}]"#,
             }),
-            Some(&[
+            &[
                 canton.vault_disclosure.clone(),
                 canton.signer_disclosure.clone(),
-            ]),
+            ],
         )
         .await?;
 

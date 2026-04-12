@@ -75,10 +75,10 @@ async fn submit_canton_sign_request(sandbox: &mut CantonSandbox) -> Result<Strin
                 "outputDeserializationSchema": r#"[{"name":"","type":"bool"}]"#,
                 "respondSerializationSchema": r#"[{"name":"","type":"bool"}]"#,
             }),
-            Some(&[
+            &[
                 sandbox.vault_disclosure.clone(),
                 sandbox.signer_disclosure.clone(),
-            ]),
+            ],
         )
         .await?;
 
@@ -369,7 +369,7 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
                 "requestId": &_request_id,
                 "signature": dummy_der_sig,
             }),
-            None,
+            &[],
         )
         .await?;
 

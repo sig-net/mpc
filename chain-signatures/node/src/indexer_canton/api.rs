@@ -17,7 +17,7 @@ struct JwtClaims {
 }
 
 /// Generate a JWT using a pre-parsed EncodingKey.
-pub(crate) fn generate_jwt_with_key(key: &EncodingKey, subject: &str) -> anyhow::Result<String> {
+pub fn generate_jwt_with_key(key: &EncodingKey, subject: &str) -> anyhow::Result<String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();

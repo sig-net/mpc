@@ -7,7 +7,7 @@ use mpc_node::indexer_canton::ledger_api::{
     PartyFilter, SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse,
     TemplateFilterValue, UserInfo,
 };
-use mpc_node::indexer_canton::CantonConfig;
+use mpc_node::indexer_canton::{self, CantonConfig};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -105,8 +105,8 @@ pub struct CantonSandbox {
     pub signer_cid: String,
     pub signer_template_id: String,
     pub vault_cid: String,
-    pub vault_disclosure: Value,
-    pub signer_disclosure: Value,
+    pub vault_disclosure: DisclosedContract,
+    pub signer_disclosure: DisclosedContract,
     pub nonce_cid: String,
     pub client: CantonTestClient,
 }
@@ -193,7 +193,7 @@ impl CantonSandbox {
                 &signer_cid,
                 "IssueNonce",
                 json!({ "requester": &requester }),
-                Some(std::slice::from_ref(&signer_disclosure)),
+                std::slice::from_ref(&signer_disclosure),
             )
             .await?;
         let nonce_cid = find_created_cid(&nonce_result, "SigningNonce")?;
@@ -332,25 +332,9 @@ impl CantonTestClient {
     }
 
     fn generate_jwt(&self) -> Result<String> {
-        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs();
-        #[derive(serde::Serialize)]
-        struct Claims {
-            sub: String,
-            scope: String,
-            iat: u64,
-            exp: u64,
-        }
-        let claims = Claims {
-            sub: self.user_id.clone(),
-            scope: "daml_ledger_api".to_string(),
-            iat: now,
-            exp: now + 30,
-        };
-        let key = EncodingKey::from_ec_pem(self.jwt_private_key_pem.as_bytes())?;
-        Ok(encode(&Header::new(Algorithm::ES256), &claims, &key)?)
+        let key =
+            jsonwebtoken::EncodingKey::from_ec_pem(self.jwt_private_key_pem.as_bytes())?;
+        Ok(indexer_canton::generate_jwt_with_key(&key, &self.user_id)?)
     }
 
     fn auth_post(&self, url: &str) -> Result<reqwest::RequestBuilder> {
@@ -476,31 +460,39 @@ impl CantonTestClient {
         contract_id: &str,
         choice: &str,
         choice_argument: Value,
-        disclosed_contracts: Option<&[Value]>,
+        disclosed_contracts: &[DisclosedContract],
+    ) -> Result<SubmitAndWaitForTransactionResponse> {
+        self.submit_command(
+            act_as,
+            ledger_api::Command::ExerciseCommand {
+                template_id: template_id.to_string(),
+                contract_id: contract_id.to_string(),
+                choice: choice.to_string(),
+                choice_argument,
+            },
+            disclosed_contracts.to_vec(),
+        )
+        .await
+    }
+
+    async fn submit_command(
+        &self,
+        act_as: &[&str],
+        command: ledger_api::Command,
+        disclosed_contracts: Vec<DisclosedContract>,
     ) -> Result<SubmitAndWaitForTransactionResponse> {
         let parties: Vec<String> = act_as.iter().map(|s| s.to_string()).collect();
-        let disclosed: Vec<DisclosedContract> = disclosed_contracts
-            .unwrap_or(&[])
-            .iter()
-            .map(|v| serde_json::from_value(v.clone()))
-            .collect::<Result<Vec<_>, _>>()
-            .context("invalid DisclosedContract JSON")?;
         let req = SubmitAndWaitForTransactionRequest {
             commands: JsCommands {
                 command_id: uuid::Uuid::new_v4().to_string(),
                 user_id: self.user_id.clone(),
                 act_as: parties.clone(),
                 read_as: parties,
-                commands: vec![ledger_api::Command::ExerciseCommand {
-                    template_id: template_id.to_string(),
-                    contract_id: contract_id.to_string(),
-                    choice: choice.to_string(),
-                    choice_argument,
-                }],
-                disclosed_contracts: disclosed,
+                commands: vec![command],
+                disclosed_contracts,
             },
         };
-        let resp = self
+        Ok(self
             .auth_post(&format!(
                 "{}/v2/commands/submit-and-wait-for-transaction",
                 self.base_url
@@ -508,8 +500,9 @@ impl CantonTestClient {
             .json(&req)
             .send()
             .await?
-            .error_for_status()?;
-        Ok(resp.json().await?)
+            .error_for_status()?
+            .json()
+            .await?)
     }
 
     async fn fetch_active_contracts(
@@ -563,12 +556,12 @@ impl CantonTestClient {
         parties: &[&str],
         template_id: &str,
         contract_id: &str,
-    ) -> Result<Value> {
+    ) -> Result<DisclosedContract> {
         let entries = self.fetch_active_contracts(parties, template_id, true).await?;
         for entry in &entries {
             if let Some(ContractEntry::JsActiveContract(ac)) = &entry.contract_entry {
                 if ac.created_event.contract_id == contract_id {
-                    let disclosed = DisclosedContract {
+                    return Ok(DisclosedContract {
                         template_id: ac.created_event.template_id.clone(),
                         contract_id: ac.created_event.contract_id.clone(),
                         created_event_blob: ac
@@ -577,8 +570,7 @@ impl CantonTestClient {
                             .clone()
                             .unwrap_or_default(),
                         synchronizer_id: ac.synchronizer_id.clone(),
-                    };
-                    return Ok(serde_json::to_value(disclosed)?);
+                    });
                 }
             }
         }

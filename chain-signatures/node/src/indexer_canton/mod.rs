@@ -5,8 +5,7 @@ mod request_id;
 mod stream;
 use request_id::compute_request_id;
 
-pub(crate) use api::generate_jwt_with_key;
-pub use api::{der_encode_signature, discover_signer_cid};
+pub use api::{der_encode_signature, discover_signer_cid, generate_jwt_with_key};
 pub use stream::CantonStream;
 
 use crate::protocol::Chain;
