@@ -1,6 +1,7 @@
 use anyhow::{Context as _, Result};
 use integration_tests::canton::CantonSandbox;
 use mpc_node::backlog::Backlog;
+use mpc_node::indexer_canton::ledger_api::{self, Event};
 use mpc_node::indexer_canton::CantonStream;
 use mpc_node::protocol::Chain;
 use mpc_node::protocol::IndexedSignRequest;
@@ -82,31 +83,20 @@ async fn submit_canton_sign_request(sandbox: &mut CantonSandbox) -> Result<Strin
         .await?;
 
     // Extract requestId from PendingDeposit and update nonce_cid from new SigningNonce
-    let events = deposit_result["transaction"]["events"]
-        .as_array()
-        .context("no events")?;
     let mut request_id = None;
-    for event in events {
-        if let Some(created) = event.get("CreatedEvent") {
-            let tid = created["templateId"].as_str().unwrap_or("");
-            if tid.contains("PendingDeposit") {
-                let payload = created
-                    .get("payload")
-                    .or_else(|| created.get("createArgument"))
-                    .context("no payload")?;
+    for event in &deposit_result.transaction.events {
+        if let Event::CreatedEvent(created) = event {
+            if ledger_api::template_suffix_matches(&created.template_id, "PendingDeposit") {
                 request_id = Some(
-                    payload["requestId"]
+                    created.payload["requestId"]
                         .as_str()
                         .map(|s| s.to_string())
                         .context("no requestId")?,
                 );
             }
             // SignBidirectional creates a fresh SigningNonce — update for next call
-            if tid.contains("SigningNonce") {
-                sandbox.nonce_cid = created["contractId"]
-                    .as_str()
-                    .context("no contractId on new SigningNonce")?
-                    .to_string();
+            if ledger_api::template_suffix_matches(&created.template_id, "SigningNonce") {
+                sandbox.nonce_cid = created.contract_id.clone();
             }
         }
     }

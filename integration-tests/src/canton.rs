@@ -3,9 +3,9 @@ use async_process::{Child, Command};
 use mpc_node::indexer_canton::ledger_api::{
     self, ActiveContractEntry, AllocatePartyRequest, AllocatePartyResponse, ContractEntry,
     CreateUserRequest, CumulativeFilter, DisclosedContract, EventFormat,
-    GetActiveContractsRequest, IdentifierFilter, JsCommands, LedgerEndResponse, PartyFilter,
-    SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse, TemplateFilterValue,
-    UserInfo,
+    GetActiveContractsRequest, IdentifierFilter, JsActiveContract, JsCommands, LedgerEndResponse,
+    PartyFilter, SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse,
+    TemplateFilterValue, UserInfo,
 };
 use mpc_node::indexer_canton::CantonConfig;
 use serde_json::{json, Value};
@@ -420,7 +420,7 @@ impl CantonTestClient {
         act_as: &[&str],
         template_id: &str,
         args: Value,
-    ) -> Result<Value> {
+    ) -> Result<SubmitAndWaitForTransactionResponse> {
         let parties: Vec<String> = act_as.iter().map(|s| s.to_string()).collect();
         // Retry while alpha-dynamic.dars is still vetting packages.
         for attempt in 0..30 {
@@ -477,7 +477,7 @@ impl CantonTestClient {
         choice: &str,
         choice_argument: Value,
         disclosed_contracts: Option<&[Value]>,
-    ) -> Result<Value> {
+    ) -> Result<SubmitAndWaitForTransactionResponse> {
         let parties: Vec<String> = act_as.iter().map(|s| s.to_string()).collect();
         let disclosed: Vec<DisclosedContract> = disclosed_contracts
             .unwrap_or(&[])
@@ -585,41 +585,22 @@ impl CantonTestClient {
         anyhow::bail!("disclosed contract not found for {contract_id}")
     }
 
-    pub async fn get_active_contracts(
-        &self,
-        parties: &[&str],
-        template_id: &str,
-    ) -> Result<Vec<Value>> {
-        let entries = self.fetch_active_contracts(parties, template_id, false).await?;
-        entries
-            .into_iter()
-            .map(|e| serde_json::to_value(e).context("failed to serialize ActiveContractEntry"))
-            .collect()
-    }
-
     pub async fn poll_for_contract(
         &self,
         parties: &[&str],
         template_id: &str,
         predicate: impl Fn(&Value) -> bool,
         timeout: Duration,
-    ) -> Result<Value> {
+    ) -> Result<JsActiveContract> {
         let start = std::time::Instant::now();
         loop {
             if start.elapsed() > timeout {
                 anyhow::bail!("timeout waiting for {template_id} after {timeout:?}");
             }
-            let contracts = self.get_active_contracts(parties, template_id).await?;
-            for item in &contracts {
-                if let Some(ac) = item
-                    .get("contractEntry")
-                    .and_then(|e| e.get("JsActiveContract"))
-                {
-                    let payload = ac["createdEvent"]
-                        .get("payload")
-                        .or_else(|| ac["createdEvent"].get("createArgument"))
-                        .unwrap_or(&ac["createdEvent"]);
-                    if predicate(payload) {
+            let entries = self.fetch_active_contracts(parties, template_id, false).await?;
+            for entry in &entries {
+                if let Some(ContractEntry::JsActiveContract(ac)) = &entry.contract_entry {
+                    if predicate(&ac.created_event.payload) {
                         return Ok(ac.clone());
                     }
                 }
@@ -633,9 +614,10 @@ impl CantonTestClient {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn find_created_contract(result: &Value, suffix: &str) -> Result<(String, String)> {
-    let resp: SubmitAndWaitForTransactionResponse =
-        serde_json::from_value(result.clone()).context("failed to parse transaction response")?;
+fn find_created_contract(
+    resp: &SubmitAndWaitForTransactionResponse,
+    suffix: &str,
+) -> Result<(String, String)> {
     for event in &resp.transaction.events {
         if let ledger_api::Event::CreatedEvent(created) = event {
             if ledger_api::template_suffix_matches(&created.template_id, suffix) {
@@ -647,6 +629,9 @@ fn find_created_contract(result: &Value, suffix: &str) -> Result<(String, String
 }
 
 /// Extract contract ID from a transaction result. Public for use in test modules.
-pub fn find_created_cid(result: &Value, suffix: &str) -> Result<String> {
-    find_created_contract(result, suffix).map(|(cid, _)| cid)
+pub fn find_created_cid(
+    resp: &SubmitAndWaitForTransactionResponse,
+    suffix: &str,
+) -> Result<String> {
+    find_created_contract(resp, suffix).map(|(cid, _)| cid)
 }

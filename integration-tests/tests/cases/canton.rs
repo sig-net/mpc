@@ -3,6 +3,7 @@ use alloy::consensus::TxEip1559;
 use alloy::primitives::{Address, Bytes, TxKind, U256};
 use anyhow::{Context as _, Result};
 use integration_tests::cluster;
+use mpc_node::indexer_canton::ledger_api::{self, Event};
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use reqwest::Client;
 use rlp::{Rlp, RlpStream};
@@ -75,22 +76,11 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
         .await?;
 
     // 4. Extract requestId from PendingDeposit
-    let events = deposit_result["transaction"]["events"]
-        .as_array()
-        .context("no events")?;
     let mut request_id = String::new();
-    for event in events {
-        if let Some(created) = event.get("CreatedEvent") {
-            if created["templateId"]
-                .as_str()
-                .unwrap_or("")
-                .contains("PendingDeposit")
-            {
-                let payload = created
-                    .get("payload")
-                    .or_else(|| created.get("createArgument"))
-                    .context("no payload")?;
-                request_id = payload["requestId"]
+    for event in &deposit_result.transaction.events {
+        if let Event::CreatedEvent(created) = event {
+            if ledger_api::template_suffix_matches(&created.template_id, "PendingDeposit") {
+                request_id = created.payload["requestId"]
                     .as_str()
                     .context("no requestId")?
                     .to_string();
@@ -118,11 +108,9 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     tracing::info!("received SignatureRespondedEvent");
 
     // 6. Verify the signature exists
-    let sig_payload = sig_event["createdEvent"]
-        .get("payload")
-        .or_else(|| sig_event["createdEvent"].get("createArgument"))
-        .context("no payload in SignatureRespondedEvent")?;
-    let signature_hex = sig_payload["signature"]
+    let signature_hex = sig_event
+        .created_event
+        .payload["signature"]
         .as_str()
         .context("missing signature field")?;
     assert!(!signature_hex.is_empty(), "signature is empty");
@@ -239,10 +227,7 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     tracing::info!("received RespondBidirectionalEvent");
 
     // 8. Verify the respond event has the same requestId
-    let respond_payload = respond_event["createdEvent"]
-        .get("payload")
-        .or_else(|| respond_event["createdEvent"].get("createArgument"))
-        .context("no payload in RespondBidirectionalEvent")?;
+    let respond_payload = &respond_event.created_event.payload;
     assert_eq!(
         respond_payload["requestId"].as_str(),
         Some(request_id.as_str()),
