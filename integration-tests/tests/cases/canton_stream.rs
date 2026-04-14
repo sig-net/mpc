@@ -153,7 +153,7 @@ async fn test_canton_stream_emits_blocks() -> Result<()> {
     let mut stream = stream_canton(&sandbox, backlog).await?;
 
     // Submit a request to generate ledger activity
-    let _ = submit_canton_sign_request(&mut sandbox).await?;
+    submit_canton_sign_request(&mut sandbox).await?;
 
     let mut saw_block = false;
     for _ in 0..10 {
@@ -221,7 +221,7 @@ async fn test_canton_stream_catchup_linear() -> Result<()> {
     let backlog1 = Backlog::new();
     let mut stream1 = stream_canton(&sandbox, backlog1).await?;
 
-    let _ = submit_canton_sign_request(&mut sandbox).await?;
+    submit_canton_sign_request(&mut sandbox).await?;
 
     let mut seen_by_stream1 = 0;
     let mut last_block_stream1: u64 = 0;
@@ -247,7 +247,7 @@ async fn test_canton_stream_catchup_linear() -> Result<()> {
     let backlog2 = Backlog::new();
     let mut stream2 = stream_canton(&sandbox, backlog2).await?;
 
-    let _ = submit_canton_sign_request(&mut sandbox).await?;
+    submit_canton_sign_request(&mut sandbox).await?;
 
     let mut caught_up = false;
     let mut seen_sign_events = false;

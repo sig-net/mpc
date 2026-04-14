@@ -360,7 +360,7 @@ pub struct ActiveContractEntry {
 /// are edge cases (e.g., contract mid-reassignment) that we skip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ContractEntry {
-    JsActiveContract(JsActiveContract),
+    JsActiveContract(Box<JsActiveContract>),
     /// Empty slot (no contract at this position).
     JsEmpty {},
     /// Contract assigned to a synchronizer but incomplete data.

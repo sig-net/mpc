@@ -326,10 +326,7 @@ impl CantonTestClient {
     }
 
     fn generate_jwt(&self) -> Result<String> {
-        Ok(indexer_canton::generate_jwt_with_key(
-            &self.encoding_key,
-            &self.user_id,
-        )?)
+        indexer_canton::generate_jwt_with_key(&self.encoding_key, &self.user_id)
     }
 
     fn auth_post(&self, url: &str) -> Result<reqwest::RequestBuilder> {
@@ -448,7 +445,7 @@ impl CantonTestClient {
         include_blob: bool,
     ) -> Result<Vec<ledger_api::ActiveContractEntry>> {
         let jwt = self.generate_jwt()?;
-        Ok(indexer_canton::fetch_active_contracts(
+        indexer_canton::fetch_active_contracts(
             &self.http,
             &self.base_url,
             &jwt,
@@ -456,7 +453,7 @@ impl CantonTestClient {
             template_id,
             include_blob,
         )
-        .await?)
+        .await
     }
 
     pub async fn get_disclosed_contract(

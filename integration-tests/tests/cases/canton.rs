@@ -41,7 +41,6 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
 
     let evm_params = test_evm_params();
 
-    // Build event struct to compute expected requestId
     let expected_event = SignBidirectionalRequestedEvent {
         operators: vec![canton.operator_party.clone()],
         requester: canton.requester_party.clone(),
@@ -107,7 +106,6 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
         .context("timeout waiting for SignatureRespondedEvent")?;
     tracing::info!(request_id = %sig_payload.request_id, "received SignatureRespondedEvent");
 
-    // Fetch root public key once for both Phase 1 and Phase 2 derivations.
     let root_pk: k256::AffinePoint = nodes.root_public_key().await?.into_affine_point();
 
     // 5. Relay the signed EVM transaction to Anvil
@@ -118,44 +116,34 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
         .as_ref()
         .context("ethereum not available")?;
     let anvil_rpc_url = &eth_ctx.sandbox.external_http_endpoint;
-
-    // Create alloy provider for Anvil interactions
     let anvil = ProviderBuilder::new().connect_http(anvil_rpc_url.parse()?);
 
-    // Parse DER signature using existing utility
     let mpc_signature = parse_der_signature(&sig_payload.signature)?;
-
-    // Build unsigned transaction using existing utility
     let unsigned_tx = to_tx_eip1559(&evm_params)?;
     let mut unsigned_rlp = Vec::new();
     unsigned_tx.encode_for_signing(&mut unsigned_rlp);
 
-    // Derive the expected sender address using existing utility
-    let epsilon = mpc_crypto::derive_epsilon_canton(
+    let sign_epsilon = mpc_crypto::derive_epsilon_canton(
         LATEST_MPC_KEY_VERSION,
         "test-sender",
         &canton.requester_party,
     );
-    let derived_pk = mpc_crypto::derive_key(root_pk, epsilon);
-    let expected_sender_addr = derive_user_address(root_pk, epsilon);
+    let derived_pk = mpc_crypto::derive_key(root_pk, sign_epsilon);
+    let expected_sender_addr = derive_user_address(root_pk, sign_epsilon);
 
-    // Resolve correct recovery ID using existing utility
     let signature_with_recovery =
         resolve_signature_recovery_id(&unsigned_rlp, mpc_signature, &derived_pk)?;
     let y_parity = signature_with_recovery.recovery_id == 1;
 
-    // Extract r and s for alloy Signature
     let r_bytes: [u8; 32] = mpc_crypto::x_coordinate(&signature_with_recovery.big_r)
         .to_bytes()
         .into();
     let s_bytes: [u8; 32] = signature_with_recovery.s.to_bytes().into();
 
-    // Fund sender with 10 ETH via Anvil API
     anvil
         .anvil_set_balance(expected_sender_addr, U256::from(10_000_000_000_000_000_000u128))
         .await?;
 
-    // Build signed EIP-1559 transaction
     let sig = Signature::from_scalars_and_parity(
         FixedBytes::from_slice(&r_bytes),
         FixedBytes::from_slice(&s_bytes),
@@ -164,7 +152,6 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     let signed_tx = unsigned_tx.into_signed(sig);
     let signed_bytes = signed_tx.encoded_2718();
 
-    // Send raw transaction via provider
     let pending_tx = anvil.send_raw_transaction(&signed_bytes).await?;
     let tx_hash = *pending_tx.tx_hash();
     tracing::info!(%tx_hash, y_parity, "relayed signed EIP-1559 transaction to Anvil");
@@ -192,34 +179,28 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
         .context("timeout waiting for RespondBidirectionalEvent")?;
     tracing::info!(request_id = %respond_payload.request_id, "received RespondBidirectionalEvent");
 
-    // 7. Verify the Phase 2 response signature against the MPC-derived public key
+    // 7. Verify the Phase 2 response signature
     let respond_signature = parse_der_signature(&respond_payload.signature)?;
-
-    let request_id_bytes = hex::decode(&respond_payload.request_id)?;
-    let serialized_output_bytes = hex::decode(&respond_payload.serialized_output)?;
     let response_hash = mpc_node::respond_bidirectional::calculate_respond_bidirectional_hash_message(
-        &request_id_bytes,
-        &serialized_output_bytes,
+        &hex::decode(&respond_payload.request_id)?,
+        &hex::decode(&respond_payload.serialized_output)?,
     );
 
-    // Derive the expected Canton public key for Phase 2 response signing.
-    let epsilon = mpc_crypto::derive_epsilon_canton(
+    let respond_epsilon = mpc_crypto::derive_epsilon_canton(
         LATEST_MPC_KEY_VERSION,
         "test-sender",
         "canton response key",
     );
-    let phase2_derived_pk = mpc_crypto::derive_key(root_pk, epsilon);
+    let respond_derived_pk = mpc_crypto::derive_key(root_pk, respond_epsilon);
 
-    // Convert MPC signature to k256 ecdsa signature for verification
     let respond_ecdsa = k256::ecdsa::Signature::from_scalars(
         mpc_crypto::x_coordinate(&respond_signature.big_r),
         respond_signature.s,
     )
     .context("invalid signature scalars")?;
 
-    // Verify the signature against the derived public key
     use k256::ecdsa::signature::hazmat::PrehashVerifier;
-    let verifying_key = k256::ecdsa::VerifyingKey::from_affine(phase2_derived_pk)
+    let verifying_key = k256::ecdsa::VerifyingKey::from_affine(respond_derived_pk)
         .map_err(|e| anyhow::anyhow!("invalid derived public key: {e}"))?;
     verifying_key
         .verify_prehash(&response_hash, &respond_ecdsa)
