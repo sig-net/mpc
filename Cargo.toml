@@ -15,7 +15,7 @@ resolver = "2"
 version = "1.11.0"
 
 [workspace.dependencies]
-alloy = { version = "=1.0.38", features = ["contract", "json", "provider-anvil-api"] }
+alloy = { version = "=1.0.38", features = ["contract", "json"] }
 anyhow = { version = "1.0.95", features = ["backtrace"] }
 borsh = "1.5.3"
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }

@@ -195,14 +195,12 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     // 7. Verify the Phase 2 response signature against the MPC-derived public key
     let respond_signature = parse_der_signature(&respond_payload.signature)?;
 
-    // Recompute the message hash: keccak256(requestId ++ serializedOutput)
     let request_id_bytes = hex::decode(&respond_payload.request_id)?;
     let serialized_output_bytes = hex::decode(&respond_payload.serialized_output)?;
-    let mut combined =
-        Vec::with_capacity(request_id_bytes.len() + serialized_output_bytes.len());
-    combined.extend_from_slice(&request_id_bytes);
-    combined.extend_from_slice(&serialized_output_bytes);
-    let response_hash: [u8; 32] = alloy::primitives::keccak256(&combined).into();
+    let response_hash = mpc_node::respond_bidirectional::calculate_respond_bidirectional_hash_message(
+        &request_id_bytes,
+        &serialized_output_bytes,
+    );
 
     // Derive the expected Canton public key for Phase 2 response signing.
     let epsilon = mpc_crypto::derive_epsilon_canton(

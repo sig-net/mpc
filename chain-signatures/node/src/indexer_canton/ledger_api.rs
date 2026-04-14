@@ -78,7 +78,7 @@ pub struct SubmitAndWaitForTransactionResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transaction {
-    pub offset: Value,
+    pub offset: u64,
     #[serde(default)]
     pub events: Vec<Event>,
 }
@@ -183,8 +183,22 @@ pub struct TransactionFormat {
 pub struct UpdateMessage {
     #[serde(default)]
     pub update: Option<Update>,
+    /// Canton error payload. Structure varies; logged as debug info, not parsed.
     #[serde(default)]
-    pub error: Option<Value>,
+    pub error: Option<LedgerError>,
+}
+
+/// Canton ledger error from the WebSocket stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LedgerError {
+    #[serde(default)]
+    pub code: Option<i32>,
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Additional error details (varies by error type).
+    #[serde(default, flatten)]
+    pub details: serde_json::Map<String, Value>,
 }
 
 /// Discriminated update types from the WebSocket stream.
@@ -342,13 +356,17 @@ pub struct ActiveContractEntry {
 
 /// Wraps the active contract variant.
 /// Canton API can return JsEmpty, JsIncompleteAssigned, JsIncompleteUnassigned
-/// in addition to JsActiveContract.
+/// in addition to JsActiveContract. We only process JsActiveContract; others
+/// are edge cases (e.g., contract mid-reassignment) that we skip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ContractEntry {
     JsActiveContract(JsActiveContract),
-    JsEmpty(Value),
-    JsIncompleteAssigned(Value),
-    JsIncompleteUnassigned(Value),
+    /// Empty slot (no contract at this position).
+    JsEmpty {},
+    /// Contract assigned to a synchronizer but incomplete data.
+    JsIncompleteAssigned {},
+    /// Contract unassigned from synchronizer, incomplete data.
+    JsIncompleteUnassigned {},
 }
 
 /// An active contract with its created event.

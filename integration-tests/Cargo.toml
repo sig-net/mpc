@@ -6,7 +6,7 @@ publish = false
 
 
 [dependencies]
-alloy.workspace = true
+alloy = { workspace = true, features = ["provider-anvil-api"] }
 anyhow.workspace = true
 async-process = "1"
 backon = "0.4"

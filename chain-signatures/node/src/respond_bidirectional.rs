@@ -176,7 +176,7 @@ impl CompletedTx {
     }
 }
 
-fn calculate_respond_bidirectional_hash_message(
+pub fn calculate_respond_bidirectional_hash_message(
     request_id: &[u8],
     serialized_output: &[u8],
 ) -> [u8; 32] {
