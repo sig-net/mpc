@@ -1,5 +1,5 @@
 use anyhow::{Context as _, Result};
-use integration_tests::canton::CantonSandbox;
+use integration_tests::canton::{test_evm_params, CantonSandbox};
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_canton::ledger_api::{self, Event};
 use mpc_node::indexer_canton::CantonStream;
@@ -9,6 +9,7 @@ use mpc_node::stream::ops::SignatureRespondedEvent;
 use mpc_node::stream::{ChainEvent, ChainStream};
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use serde_json::json;
+use serial_test::serial;
 use std::collections::HashSet;
 use std::time::Duration;
 use test_log::test;
@@ -34,21 +35,7 @@ async fn stream_canton(sandbox: &CantonSandbox, backlog: Backlog) -> Result<Cant
 /// with the fresh nonce for the next call.
 async fn submit_canton_sign_request(sandbox: &mut CantonSandbox) -> Result<()> {
     let client = &sandbox.client;
-
-    let evm_tx_params = json!({
-        "to": "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
-        "functionSignature": "transfer(address,uint256)",
-        "args": [
-            "0".repeat(64),
-            "0000000000000000000000000000000000000000000000000000000005f5e100"
-        ],
-        "value": "0".repeat(64),
-        "nonce": format!("{:0>64}", "1"),
-        "gasLimit": format!("{:0>64}", "186a0"),
-        "maxFeePerGas": format!("{:0>64}", "3b9aca00"),
-        "maxPriorityFee": format!("{:0>64}", "3b9aca00"),
-        "chainId": format!("{:0>64}", "aa36a7"),
-    });
+    let evm_tx_params = serde_json::to_value(test_evm_params())?;
 
     let sign_request = client
         .create_contract(
@@ -128,6 +115,7 @@ async fn wait_for_sign_request(
 }
 
 #[ignore] // requires dpm
+#[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_parse_sign_event() -> Result<()> {
     let mut sandbox = canton_sandbox().await?;
@@ -157,6 +145,7 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
 }
 
 #[ignore]
+#[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_emits_blocks() -> Result<()> {
     let mut sandbox = canton_sandbox().await?;
@@ -188,6 +177,7 @@ async fn test_canton_stream_emits_blocks() -> Result<()> {
 }
 
 #[ignore]
+#[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_concurrent_events() -> Result<()> {
     let mut sandbox = canton_sandbox().await?;
@@ -222,6 +212,7 @@ async fn test_canton_stream_concurrent_events() -> Result<()> {
 }
 
 #[ignore]
+#[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_catchup_linear() -> Result<()> {
     let mut sandbox = canton_sandbox().await?;
@@ -280,6 +271,7 @@ async fn test_canton_stream_catchup_linear() -> Result<()> {
 }
 
 #[ignore]
+#[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
     // Use interval=1 so every block produces a checkpoint. Canton generates
@@ -372,6 +364,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
 }
 
 #[ignore]
+#[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     let mut sandbox = canton_sandbox().await?;
@@ -420,5 +413,80 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
         }
     }
     assert!(saw_respond, "expected Respond event from Canton stream");
+    Ok(())
+}
+
+#[ignore] // requires dpm
+#[serial]
+#[test(tokio::test)]
+async fn test_canton_rejects_unauthenticated_requests() -> Result<()> {
+    let sandbox = canton_sandbox().await?;
+    let http = reqwest::Client::new();
+    let url = format!("{}/v2/state/ledger-end", sandbox.json_api_url);
+
+    // No Authorization header at all.
+    let status = http.get(&url).send().await?.status();
+    assert_eq!(status, 401, "missing JWT should be rejected, got {status}");
+
+    // Malformed Bearer token.
+    let status = http
+        .get(&url)
+        .bearer_auth("not-a-valid-jwt")
+        .send()
+        .await?
+        .status();
+    assert_eq!(status, 401, "invalid JWT should be rejected, got {status}");
+
+    Ok(())
+}
+
+#[ignore] // requires dpm + openssl
+#[serial]
+#[test(tokio::test)]
+async fn test_canton_rejects_jwt_signed_by_unconfigured_key() -> Result<()> {
+    use mpc_node::indexer_canton::generate_jwt_with_key;
+
+    let sandbox = canton_sandbox().await?;
+
+    // Generate a fresh EC P-256 keypair NOT configured in Canton's auth-services.
+    // Use genpkey (PKCS#8 output) instead of ecparam (SEC1 output) for jsonwebtoken compatibility.
+    let tmp = std::env::temp_dir();
+    let rogue_key_path = tmp.join(format!("rogue-jwt-{}.key", uuid::Uuid::new_v4()));
+    let output = std::process::Command::new("openssl")
+        .args([
+            "genpkey",
+            "-algorithm",
+            "EC",
+            "-pkeyopt",
+            "ec_paramgen_curve:prime256v1",
+            "-out",
+            &rogue_key_path.to_string_lossy(),
+        ])
+        .output()
+        .context("openssl not found")?;
+    anyhow::ensure!(output.status.success(), "openssl genpkey failed");
+
+    let rogue_pem = std::fs::read_to_string(&rogue_key_path)?;
+    let _ = std::fs::remove_file(&rogue_key_path);
+
+    let rogue_encoding_key = jsonwebtoken::EncodingKey::from_ec_pem(rogue_pem.as_bytes())?;
+
+    // Mint a structurally valid JWT with correct claims, but signed by the wrong key.
+    let rogue_jwt = generate_jwt_with_key(&rogue_encoding_key, &sandbox.jwt_subject)?;
+
+    // Canton should reject it — signature doesn't match any configured certificate.
+    let http = reqwest::Client::new();
+    let url = format!("{}/v2/state/ledger-end", sandbox.json_api_url);
+    let status = http
+        .get(&url)
+        .bearer_auth(&rogue_jwt)
+        .send()
+        .await?
+        .status();
+    assert_eq!(
+        status, 401,
+        "JWT signed by unconfigured key should be rejected, got {status}"
+    );
+
     Ok(())
 }

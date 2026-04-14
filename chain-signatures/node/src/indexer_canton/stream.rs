@@ -524,7 +524,7 @@ fn parse_respond_bidirectional_event(
 /// TODO(test): test with known DER signatures (both even and odd y-parity).
 /// Verify that recovery_id=0 is correctly resolved downstream when the public
 /// key is known. Test the encode→parse roundtrip preserves (r, s) scalars.
-fn parse_der_signature(hex_str: &str) -> anyhow::Result<Signature> {
+pub fn parse_der_signature(hex_str: &str) -> anyhow::Result<Signature> {
     use k256::elliptic_curve::sec1::FromEncodedPoint;
     use k256::EncodedPoint;
 

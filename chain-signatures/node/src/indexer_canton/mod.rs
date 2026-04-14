@@ -3,12 +3,12 @@ pub mod contracts;
 pub mod ledger_api;
 mod request_id;
 mod stream;
-use request_id::compute_request_id;
 
 pub use api::{
     der_encode_signature, discover_signer_cid, fetch_active_contracts, generate_jwt_with_key,
 };
-pub use stream::CantonStream;
+pub use request_id::compute_request_id;
+pub use stream::{parse_der_signature, CantonStream};
 
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
@@ -74,7 +74,7 @@ fn build_calldata(function_signature: &str, args: &[String]) -> Vec<u8> {
 /// TODO(test): test address extraction from 32-byte padded hex (Canton format)
 /// vs 20-byte unpadded hex. Test hex parsing of all numeric fields (chain_id,
 /// nonce, gas_limit, fees, value) including edge cases like leading zeros.
-fn to_tx_eip1559(p: &CantonEvmTransactionParams) -> anyhow::Result<TxEip1559> {
+pub fn to_tx_eip1559(p: &CantonEvmTransactionParams) -> anyhow::Result<TxEip1559> {
     let to_bytes = hex::decode(&p.to)?;
     // Canton pads to 64 hex chars (32 bytes) — take last 20 for the address
     let addr_bytes = if to_bytes.len() > 20 {

@@ -2,16 +2,36 @@ use anyhow::{Context as _, Result};
 use async_process::{Child, Command};
 use mpc_node::indexer_canton::ledger_api::{
     self, AllocatePartyRequest, AllocatePartyResponse, ContractEntry, CreateUserRequest,
-    DisclosedContract, JsActiveContract, JsCommands, SubmitAndWaitForTransactionRequest,
+    DisclosedContract, JsCommands, SubmitAndWaitForTransactionRequest,
     SubmitAndWaitForTransactionResponse, UserInfo,
 };
+use mpc_node::indexer_canton::contracts::EvmTransactionParams;
 use mpc_node::indexer_canton::{self, CantonConfig};
+use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::time::Duration;
 
 const CANTON_JSON_API_PORT: u16 = 7575;
 const DEFAULT_DAR_RELATIVE_PATH: &str = "fixtures/canton/daml-vault-0.0.1.dar";
+
+/// Test EVM transaction params (USDC transfer on Anvil).
+pub fn test_evm_params() -> EvmTransactionParams {
+    EvmTransactionParams {
+        to: "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".to_string(),
+        function_signature: "transfer(address,uint256)".to_string(),
+        args: vec![
+            "0".repeat(64),
+            "0000000000000000000000000000000000000000000000000000000005f5e100".to_string(),
+        ],
+        value: "0".repeat(64),
+        nonce: format!("{:0>64}", "0"),
+        gas_limit: format!("{:0>64}", "186a0"),
+        max_fee_per_gas: format!("{:0>64}", "3b9aca00"),
+        max_priority_fee: format!("{:0>64}", "3b9aca00"),
+        chain_id: format!("{:0>64}", "7a69"), // Anvil 31337
+    }
+}
 
 // ---------------------------------------------------------------------------
 // CantonSandbox
@@ -192,7 +212,7 @@ canton.participants.sandbox.ledger-api {{
 
         let client = CantonTestClient::new(&base_url, &user_id, &jwt_private_key_pem)?;
 
-        let signer_result = client
+       let signer_result = client
             .create_contract(
                 &[&sig_network],
                 "#daml-signer:Signer:Signer",
@@ -467,13 +487,20 @@ impl CantonTestClient {
         anyhow::bail!("disclosed contract not found for {contract_id}")
     }
 
-    pub async fn poll_for_contract(
+    /// Poll for a contract matching the given predicate, returning the typed payload.
+    ///
+    /// Deserializes each contract's payload into `T` and passes it to the predicate.
+    /// Returns the first payload where the predicate returns `true`.
+    pub async fn poll_for_contract<T>(
         &self,
         parties: &[&str],
         template_id: &str,
-        predicate: impl Fn(&Value) -> bool,
+        predicate: impl Fn(&T) -> bool,
         timeout: Duration,
-    ) -> Result<JsActiveContract> {
+    ) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
         let start = std::time::Instant::now();
         loop {
             if start.elapsed() > timeout {
@@ -484,8 +511,11 @@ impl CantonTestClient {
                 .await?;
             for entry in &entries {
                 if let Some(ContractEntry::JsActiveContract(ac)) = &entry.contract_entry {
-                    if predicate(&ac.created_event.payload) {
-                        return Ok(ac.clone());
+                    if let Ok(payload) = serde_json::from_value::<T>(ac.created_event.payload.clone())
+                    {
+                        if predicate(&payload) {
+                            return Ok(payload);
+                        }
                     }
                 }
             }
@@ -501,6 +531,7 @@ impl CantonTestClient {
 fn is_package_not_ready(e: &anyhow::Error) -> bool {
     let msg = e.to_string();
     msg.contains("PACKAGE_SELECTION_FAILED")
+        || msg.contains("JSON_API_PACKAGE_SELECTION_FAILED")
         || msg.contains("PACKAGE_NAMES_NOT_FOUND")
         || msg.contains("TEMPLATES_OR_INTERFACES_NOT_FOUND")
 }

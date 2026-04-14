@@ -64,7 +64,7 @@ fn hash_tx_params(cp: &TxParams) -> [u8; 32] {
 /// TODO(test): golden-test against the TypeScript/Daml reference implementation.
 /// Generate expected request IDs from the TS canton-sig package with known
 /// event payloads, then assert this function produces identical outputs.
-pub(super) fn compute_request_id(event: &CantonSignBidirectionalRequestedEvent) -> [u8; 32] {
+pub fn compute_request_id(event: &CantonSignBidirectionalRequestedEvent) -> [u8; 32] {
     let key_version = U256::from(event.key_version);
 
     let mut buf = Vec::with_capacity(9 * 32);
