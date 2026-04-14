@@ -3,15 +3,9 @@
 //! These represent the JSON payloads inside `CreatedEvent.payload` for specific
 //! Daml templates from `daml-signer` and `daml-evm-types`. Derived from the
 //! `.daml` source files in `canton-mpc-poc/daml-packages/`.
-//!
-//! All fields are raw JSON types (strings). Conversion to internal types
-//! (e.g., hex → `[u8; 32]`, DER → `Signature`) is the consumer's responsibility.
 
+use alloy::primitives::{Address, U256};
 use serde::{Deserialize, Serialize};
-
-// ---------------------------------------------------------------------------
-// From daml-evm-types/daml/EvmTypes.daml — EvmTransactionParams record
-// ---------------------------------------------------------------------------
 
 /// EVM transaction parameters passed through the Vault contract.
 /// All fields are hex-encoded strings (padded to 64 chars).
@@ -31,9 +25,62 @@ pub struct EvmTransactionParams {
     pub chain_id: String,
 }
 
-// ---------------------------------------------------------------------------
-// TxParams — Daml variant for multi-chain support
-// ---------------------------------------------------------------------------
+impl EvmTransactionParams {
+    /// Canton pads addresses to 64 hex chars (32 bytes) — extracts the last 20 bytes.
+    pub fn parse_to_address(&self) -> Address {
+        let bytes = hex::decode(&self.to).unwrap_or_default();
+        let start = bytes.len().saturating_sub(20);
+        Address::from_slice(&bytes[start..])
+    }
+
+    pub fn parse_value(&self) -> U256 {
+        U256::from_str_radix(&self.value, 16).unwrap_or(U256::ZERO)
+    }
+
+    pub fn parse_nonce(&self) -> u64 {
+        u64::from_str_radix(&self.nonce, 16).unwrap_or(0)
+    }
+
+    pub fn parse_gas_limit(&self) -> u64 {
+        u64::from_str_radix(&self.gas_limit, 16).unwrap_or(0)
+    }
+
+    pub fn parse_max_fee_per_gas(&self) -> u128 {
+        u128::from_str_radix(&self.max_fee_per_gas, 16).unwrap_or(0)
+    }
+
+    pub fn parse_max_priority_fee(&self) -> u128 {
+        u128::from_str_radix(&self.max_priority_fee, 16).unwrap_or(0)
+    }
+
+    pub fn parse_chain_id(&self) -> u64 {
+        u64::from_str_radix(&self.chain_id, 16).unwrap_or(0)
+    }
+
+    pub fn parse_value_u256(&self) -> U256 {
+        self.parse_value()
+    }
+
+    pub fn parse_nonce_u256(&self) -> U256 {
+        U256::from_str_radix(&self.nonce, 16).unwrap_or(U256::ZERO)
+    }
+
+    pub fn parse_gas_limit_u256(&self) -> U256 {
+        U256::from_str_radix(&self.gas_limit, 16).unwrap_or(U256::ZERO)
+    }
+
+    pub fn parse_max_fee_per_gas_u256(&self) -> U256 {
+        U256::from_str_radix(&self.max_fee_per_gas, 16).unwrap_or(U256::ZERO)
+    }
+
+    pub fn parse_max_priority_fee_u256(&self) -> U256 {
+        U256::from_str_radix(&self.max_priority_fee, 16).unwrap_or(U256::ZERO)
+    }
+
+    pub fn parse_chain_id_u256(&self) -> U256 {
+        U256::from_str_radix(&self.chain_id, 16).unwrap_or(U256::ZERO)
+    }
+}
 
 /// Daml variant: `data TxParams = EvmParams EvmTransactionParams`
 /// Canton JSON API serializes as `{"tag": "EvmParams", "value": {...}}`.
@@ -42,10 +89,6 @@ pub struct EvmTransactionParams {
 pub enum TxParams {
     EvmTxParams(EvmTransactionParams),
 }
-
-// ---------------------------------------------------------------------------
-// From daml-signer/daml/Signer.daml — SignBidirectionalEvent
-// ---------------------------------------------------------------------------
 
 /// Payload of a `Signer:SignBidirectionalEvent` created event.
 /// Emitted when a Vault exercises `RequestDeposit` → `Signer.SignBidirectional`.
@@ -70,13 +113,7 @@ pub struct SignBidirectionalRequestedEvent {
     pub respond_serialization_schema: String,
 }
 
-// ---------------------------------------------------------------------------
-// From daml-signer/daml/Signer.daml — SignatureRespondedEvent
-// ---------------------------------------------------------------------------
-
 /// Raw payload of a `Signer:SignatureRespondedEvent` created event.
-/// Fields are hex strings; conversion to `[u8; 32]` / `Signature` is the
-/// consumer's responsibility (avoiding a dependency on `mpc-primitives`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignatureRespondedEventPayload {
@@ -86,10 +123,6 @@ pub struct SignatureRespondedEventPayload {
     /// DER-encoded hex signature.
     pub signature: String,
 }
-
-// ---------------------------------------------------------------------------
-// From daml-signer/daml/Signer.daml — RespondBidirectionalEvent
-// ---------------------------------------------------------------------------
 
 /// Raw payload of a `Signer:RespondBidirectionalEvent` created event.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,10 +136,6 @@ pub struct RespondBidirectionalEventPayload {
     /// DER-encoded hex signature.
     pub signature: String,
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /// Deserialize a u32 from either a JSON number or a JSON string.
 ///

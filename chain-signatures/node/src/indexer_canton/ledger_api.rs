@@ -7,10 +7,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-// ---------------------------------------------------------------------------
-// Commands (request construction)
-// ---------------------------------------------------------------------------
-
 /// Wrapper for `POST /v2/commands/submit-and-wait-for-transaction`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,10 +59,6 @@ pub struct DisclosedContract {
     pub synchronizer_id: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Events (response parsing)
-// ---------------------------------------------------------------------------
-
 /// Response from `POST /v2/commands/submit-and-wait-for-transaction`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,16 +95,13 @@ pub struct CreatedEvent {
     pub payload: Value,
     #[serde(default)]
     pub created_event_blob: Option<String>,
-    /// Parties that are signatories on this contract.
     #[serde(default)]
     pub signatories: Vec<String>,
-    /// Parties whose participants witnessed (confirmed) this transaction.
     #[serde(default)]
     pub witness_parties: Vec<String>,
     /// Position of this event in the transaction tree (LEDGER_EFFECTS only).
     #[serde(default)]
     pub node_id: Option<u32>,
-    /// The package name of the contract.
     #[serde(default)]
     pub package_name: Option<String>,
 }
@@ -146,10 +135,6 @@ pub struct ExercisedEvent {
     #[serde(default)]
     pub package_name: Option<String>,
 }
-
-// ---------------------------------------------------------------------------
-// WebSocket subscription
-// ---------------------------------------------------------------------------
 
 /// Subscription message sent to `ws://.../v2/updates`.
 ///
@@ -224,10 +209,6 @@ pub struct OffsetCheckpoint {
     pub offset: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Parties
-// ---------------------------------------------------------------------------
-
 /// Request body for `POST /v2/parties`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -255,10 +236,6 @@ pub struct PartyDetails {
     #[serde(default)]
     pub is_local: bool,
 }
-
-// ---------------------------------------------------------------------------
-// Users
-// ---------------------------------------------------------------------------
 
 /// Request body for `POST /v2/users`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,10 +273,6 @@ pub enum UserRightKind {
 pub struct PartyValue {
     pub party: String,
 }
-
-// ---------------------------------------------------------------------------
-// Active Contracts
-// ---------------------------------------------------------------------------
 
 /// Request body for `POST /v2/state/active-contracts`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,10 +351,6 @@ pub struct JsActiveContract {
     pub synchronizer_id: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Ledger End
-// ---------------------------------------------------------------------------
-
 /// Response from `GET /v2/state/ledger-end`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -389,11 +358,6 @@ pub struct LedgerEndResponse {
     pub offset: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Template constants and matching
-// ---------------------------------------------------------------------------
-
-/// Known Daml template suffixes from daml-signer.
 pub mod templates {
     pub const SIGNER: &str = "Signer:Signer";
     pub const SIGN_BIDIRECTIONAL_EVENT: &str = "Signer:SignBidirectionalEvent";
@@ -412,10 +376,6 @@ pub mod templates {
 pub fn template_suffix_matches(template_id: &str, suffix: &str) -> bool {
     template_id == suffix || template_id.ends_with(&format!(":{suffix}"))
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /// Build a UserRight for CanActAs.
 pub fn can_act_as(party: &str) -> UserRight {

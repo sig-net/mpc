@@ -1,10 +1,6 @@
-use super::ledger_api;
+use super::ledger_api::{self, Command, JsCommands, SubmitAndWaitForTransactionRequest};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use mpc_primitives::Signature;
-
-// ---------------------------------------------------------------------------
-// JWT token generation (ES256)
-// ---------------------------------------------------------------------------
 
 #[derive(serde::Serialize)]
 struct JwtClaims {
@@ -31,10 +27,6 @@ pub fn generate_jwt_with_key(key: &EncodingKey, subject: &str) -> anyhow::Result
     Ok(encode(&header, &claims, key)?)
 }
 
-// ---------------------------------------------------------------------------
-// DER signature encoding
-// ---------------------------------------------------------------------------
-
 /// DER-encode an ECDSA signature from an MPC Signature (big_r, s).
 ///
 /// Canton's native Daml signature verification (`secp256k1WithEcdsaOnly`)
@@ -56,9 +48,18 @@ pub fn der_encode_signature(signature: &Signature) -> anyhow::Result<Vec<u8>> {
     Ok(ecdsa_sig.to_der().to_bytes().to_vec())
 }
 
-// ---------------------------------------------------------------------------
-// Active contracts query
-// ---------------------------------------------------------------------------
+/// Check HTTP response status and return an error with body text if not successful.
+pub async fn check_response(
+    resp: reqwest::Response,
+    context: &str,
+) -> anyhow::Result<reqwest::Response> {
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("{context} failed: {status} {text}");
+    }
+    Ok(resp)
+}
 
 /// Fetch active contracts from Canton, filtered by template.
 pub async fn fetch_active_contracts(
@@ -108,12 +109,7 @@ pub async fn fetch_active_contracts(
         .send()
         .await?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("active-contracts query failed: {status} {text}");
-    }
-
+    let resp = check_response(resp, "active-contracts query").await?;
     Ok(resp.json().await?)
 }
 
@@ -145,12 +141,7 @@ pub async fn discover_signer_cid(
         .send()
         .await?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("active-contracts query failed: {status} {text}");
-    }
-
+    let resp = check_response(resp, "active-contracts query").await?;
     let items: Vec<ledger_api::ActiveContractEntry> = resp.json().await?;
 
     let mut signer_contracts: Vec<(String, String)> = Vec::new();
@@ -171,4 +162,46 @@ pub async fn discover_signer_cid(
             signer_contracts.len()
         ),
     }
+}
+
+/// Exercise a choice on a Canton contract.
+#[allow(clippy::too_many_arguments)]
+pub async fn exercise_choice(
+    http_client: &reqwest::Client,
+    json_api_url: &str,
+    jwt_token: &str,
+    user_id: &str,
+    party_id: &str,
+    template_id: &str,
+    contract_id: &str,
+    command_id: &str,
+    choice: &str,
+    choice_argument: serde_json::Value,
+) -> anyhow::Result<()> {
+    let url = format!("{json_api_url}/v2/commands/submit-and-wait-for-transaction");
+
+    let req = SubmitAndWaitForTransactionRequest {
+        commands: JsCommands {
+            command_id: command_id.to_string(),
+            user_id: user_id.to_string(),
+            act_as: vec![party_id.to_string()],
+            read_as: vec![party_id.to_string()],
+            commands: vec![Command::ExerciseCommand {
+                template_id: template_id.to_string(),
+                contract_id: contract_id.to_string(),
+                choice: choice.to_string(),
+                choice_argument,
+            }],
+            disclosed_contracts: vec![],
+        },
+    };
+
+    let resp = http_client
+        .post(&url)
+        .bearer_auth(jwt_token)
+        .json(&req)
+        .send()
+        .await?;
+    check_response(resp, &format!("canton {choice}")).await?;
+    Ok(())
 }

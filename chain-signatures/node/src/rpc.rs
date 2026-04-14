@@ -43,7 +43,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
-use crate::indexer_canton::ledger_api::{Command, JsCommands, SubmitAndWaitForTransactionRequest};
 use crate::indexer_canton::CantonConfig;
 use crate::indexer_hydration::HydrationConfig;
 use parity_scale_codec::{Decode, Encode};
@@ -1860,121 +1859,68 @@ async fn try_publish_canton(
     timestamp: &std::time::Instant,
     signature: &mpc_primitives::Signature,
 ) -> anyhow::Result<()> {
-    let chain = action.indexed.chain;
     let sign_id = action.indexed.id;
     let request_id_hex = hex::encode(action.indexed.id.request_id);
 
     tracing::info!(
         ?sign_id,
-        ?chain,
+        chain = ?action.indexed.chain,
         elapsed = ?timestamp.elapsed(),
         request_id = %request_id_hex,
         "canton: publishing signature"
     );
 
-    let jwt_token = canton.generate_jwt()?;
-    let url = format!(
-        "{}/v2/commands/submit-and-wait-for-transaction",
-        canton.json_api_url
-    );
     let der_sig = hex::encode(crate::indexer_canton::der_encode_signature(signature)?);
+    let (operators, requester) = extract_canton_operators_requester(action)?;
 
-    match &action.indexed.kind {
-        SignKind::SignBidirectional(_) => {
-            // Extract operators and requester from the Canton event
-            let (operators, requester) = extract_canton_operators_requester(action)?;
-
-            let req = SubmitAndWaitForTransactionRequest {
-                commands: JsCommands {
-                    command_id: format!("mpc-respond-{}", request_id_hex),
-                    user_id: canton.jwt_subject.clone(),
-                    act_as: vec![canton.party_id.clone()],
-                    read_as: vec![canton.party_id.clone()],
-                    commands: vec![Command::ExerciseCommand {
-                        template_id: canton.signer_template_id.clone(),
-                        contract_id: canton.signer_cid.clone(),
-                        choice: "Respond".to_string(),
-                        choice_argument: serde_json::json!({
-                            "operators": operators,
-                            "requester": requester,
-                            "requestId": request_id_hex,
-                            "signature": der_sig,
-                        }),
-                    }],
-                    disclosed_contracts: vec![],
-                },
-            };
-
-            let resp = canton
-                .http_client
-                .post(&url)
-                .bearer_auth(&jwt_token)
-                .json(&req)
-                .send()
-                .await?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
-                anyhow::bail!("canton Respond failed: {status} {text}");
-            }
-
-            tracing::info!(
-                ?sign_id,
-                elapsed = ?timestamp.elapsed(),
-                "published canton Respond signature successfully"
-            );
-        }
-        SignKind::RespondBidirectional(respond_bidirectional_tx) => {
-            let (operators, requester) = extract_canton_operators_requester(action)?;
-            let serialized_output = hex::encode(&respond_bidirectional_tx.output);
-
-            let req = SubmitAndWaitForTransactionRequest {
-                commands: JsCommands {
-                    command_id: format!("mpc-respond-bidir-{}", request_id_hex),
-                    user_id: canton.jwt_subject.clone(),
-                    act_as: vec![canton.party_id.clone()],
-                    read_as: vec![canton.party_id.clone()],
-                    commands: vec![Command::ExerciseCommand {
-                        template_id: canton.signer_template_id.clone(),
-                        contract_id: canton.signer_cid.clone(),
-                        choice: "RespondBidirectional".to_string(),
-                        choice_argument: serde_json::json!({
-                            "operators": operators,
-                            "requester": requester,
-                            "requestId": request_id_hex,
-                            "serializedOutput": serialized_output,
-                            "signature": der_sig,
-                        }),
-                    }],
-                    disclosed_contracts: vec![],
-                },
-            };
-
-            let resp = canton
-                .http_client
-                .post(&url)
-                .bearer_auth(&jwt_token)
-                .json(&req)
-                .send()
-                .await?;
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
-                anyhow::bail!("canton RespondBidirectional failed: {status} {text}");
-            }
-
-            tracing::info!(
-                ?sign_id,
-                elapsed = ?timestamp.elapsed(),
-                "published canton RespondBidirectional successfully"
-            );
-        }
+    let (choice, command_id, choice_argument) = match &action.indexed.kind {
+        SignKind::SignBidirectional(_) => (
+            "Respond",
+            format!("mpc-respond-{request_id_hex}"),
+            serde_json::json!({
+                "operators": operators,
+                "requester": requester,
+                "requestId": request_id_hex,
+                "signature": der_sig,
+            }),
+        ),
+        SignKind::RespondBidirectional(respond_tx) => (
+            "RespondBidirectional",
+            format!("mpc-respond-bidir-{request_id_hex}"),
+            serde_json::json!({
+                "operators": operators,
+                "requester": requester,
+                "requestId": request_id_hex,
+                "serializedOutput": hex::encode(&respond_tx.output),
+                "signature": der_sig,
+            }),
+        ),
         SignKind::Sign => {
             anyhow::bail!("Canton does not support SignKind::Sign — only SignBidirectional");
         }
-    }
+    };
+
+    let jwt_token = canton.generate_jwt()?;
+    crate::indexer_canton::exercise_choice(
+        &canton.http_client,
+        &canton.json_api_url,
+        &jwt_token,
+        &canton.jwt_subject,
+        &canton.party_id,
+        &canton.signer_template_id,
+        &canton.signer_cid,
+        &command_id,
+        choice,
+        choice_argument,
+    )
+    .await?;
+
+    tracing::info!(
+        ?sign_id,
+        choice,
+        elapsed = ?timestamp.elapsed(),
+        "published canton {choice} successfully"
+    );
 
     Ok(())
 }

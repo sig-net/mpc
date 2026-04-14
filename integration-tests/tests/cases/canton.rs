@@ -4,11 +4,10 @@ use alloy::primitives::{FixedBytes, Signature, U256};
 use alloy::providers::ext::AnvilApi;
 use alloy::providers::{Provider, ProviderBuilder};
 use anyhow::{Context as _, Result};
-use integration_tests::canton::test_evm_params;
+use integration_tests::canton::{test_evm_params, test_sign_request_event};
 use integration_tests::cluster;
 use mpc_node::indexer_canton::contracts::{
-    RespondBidirectionalEventPayload, SignBidirectionalRequestedEvent,
-    SignatureRespondedEventPayload, TxParams,
+    RespondBidirectionalEventPayload, SignatureRespondedEventPayload,
 };
 use mpc_node::indexer_canton::{compute_request_id, parse_der_signature, to_tx_eip1559};
 use mpc_node::sign_bidirectional::{derive_user_address, resolve_signature_recovery_id};
@@ -39,24 +38,8 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
         .context("canton sandbox not available")?;
     let client = &canton.client;
 
+    let expected_event = test_sign_request_event(canton);
     let evm_params = test_evm_params();
-
-    let expected_event = SignBidirectionalRequestedEvent {
-        operators: vec![canton.operator_party.clone()],
-        requester: canton.requester_party.clone(),
-        sig_network: canton.party_id.clone(),
-        sender: "test-sender".to_string(),
-        tx_params: TxParams::EvmTxParams(evm_params.clone()),
-        caip2_id: "eip155:31337".to_string(),
-        key_version: LATEST_MPC_KEY_VERSION,
-        path: canton.requester_party.clone(),
-        algo: "ECDSA".to_string(),
-        dest: "ethereum".to_string(),
-        params: String::new(),
-        nonce_cid_text: canton.nonce_cid.clone(),
-        output_deserialization_schema: r#"[{"name":"","type":"bool"}]"#.to_string(),
-        respond_serialization_schema: r#"[{"name":"","type":"bool"}]"#.to_string(),
-    };
     let expected_request_id = hex::encode(compute_request_id(&expected_event));
 
     // 3. Submit sign request directly via Signer (bypasses Vault)
@@ -141,7 +124,10 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     let s_bytes: [u8; 32] = signature_with_recovery.s.to_bytes().into();
 
     anvil
-        .anvil_set_balance(expected_sender_addr, U256::from(10_000_000_000_000_000_000u128))
+        .anvil_set_balance(
+            expected_sender_addr,
+            U256::from(10_000_000_000_000_000_000u128),
+        )
         .await?;
 
     let sig = Signature::from_scalars_and_parity(
@@ -181,10 +167,11 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
 
     // 7. Verify the Phase 2 response signature
     let respond_signature = parse_der_signature(&respond_payload.signature)?;
-    let response_hash = mpc_node::respond_bidirectional::calculate_respond_bidirectional_hash_message(
-        &hex::decode(&respond_payload.request_id)?,
-        &hex::decode(&respond_payload.serialized_output)?,
-    );
+    let response_hash =
+        mpc_node::respond_bidirectional::calculate_respond_bidirectional_hash_message(
+            &hex::decode(&respond_payload.request_id)?,
+            &hex::decode(&respond_payload.serialized_output)?,
+        );
 
     let respond_epsilon = mpc_crypto::derive_epsilon_canton(
         LATEST_MPC_KEY_VERSION,

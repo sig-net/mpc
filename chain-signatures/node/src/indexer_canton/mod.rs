@@ -5,7 +5,8 @@ mod request_id;
 mod stream;
 
 pub use api::{
-    der_encode_signature, discover_signer_cid, fetch_active_contracts, generate_jwt_with_key,
+    check_response, der_encode_signature, discover_signer_cid, exercise_choice,
+    fetch_active_contracts, generate_jwt_with_key,
 };
 pub use request_id::compute_request_id;
 pub use stream::{parse_der_signature, CantonStream};
@@ -16,14 +17,10 @@ use crate::stream::ops::{SignBidirectionalEvent, SignatureEvent};
 use mpc_primitives::MAX_SECP256K1_SCALAR;
 
 use alloy::consensus::TxEip1559;
-use alloy::primitives::{keccak256, Address, Bytes, TxKind, U256};
+use alloy::primitives::{keccak256, Bytes, TxKind};
 use k256::Scalar;
 use mpc_primitives::{ScalarExt, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use std::fmt;
-
-// ---------------------------------------------------------------------------
-// Canton event structs
-// ---------------------------------------------------------------------------
 
 pub use contracts::SignBidirectionalRequestedEvent as CantonSignBidirectionalRequestedEvent;
 pub use contracts::{
@@ -46,10 +43,6 @@ pub struct CantonSignatureRespondedEvent {
     pub signature: Signature,
 }
 // NOTE: No Hash, PartialEq, Eq derives — matches HydrationSignatureRespondedEvent
-
-// ---------------------------------------------------------------------------
-// RLP encoding of unsigned EIP-1559 transaction
-// ---------------------------------------------------------------------------
 
 /// Build calldata from function signature and args.
 /// calldata = keccak256("function " + sig)[0..4] ++ concat(args)
@@ -75,22 +68,14 @@ fn build_calldata(function_signature: &str, args: &[String]) -> Vec<u8> {
 /// vs 20-byte unpadded hex. Test hex parsing of all numeric fields (chain_id,
 /// nonce, gas_limit, fees, value) including edge cases like leading zeros.
 pub fn to_tx_eip1559(p: &CantonEvmTransactionParams) -> anyhow::Result<TxEip1559> {
-    let to_bytes = hex::decode(&p.to)?;
-    // Canton pads to 64 hex chars (32 bytes) — take last 20 for the address
-    let addr_bytes = if to_bytes.len() > 20 {
-        &to_bytes[to_bytes.len() - 20..]
-    } else {
-        &to_bytes
-    };
-
     Ok(TxEip1559 {
-        chain_id: u64::from_str_radix(&p.chain_id, 16).unwrap_or(0),
-        nonce: u64::from_str_radix(&p.nonce, 16).unwrap_or(0),
-        gas_limit: u64::from_str_radix(&p.gas_limit, 16).unwrap_or(0),
-        max_fee_per_gas: u128::from_str_radix(&p.max_fee_per_gas, 16).unwrap_or(0),
-        max_priority_fee_per_gas: u128::from_str_radix(&p.max_priority_fee, 16).unwrap_or(0),
-        to: TxKind::Call(Address::from_slice(addr_bytes)),
-        value: U256::from_str_radix(&p.value, 16).unwrap_or(U256::ZERO),
+        chain_id: p.parse_chain_id(),
+        nonce: p.parse_nonce(),
+        gas_limit: p.parse_gas_limit(),
+        max_fee_per_gas: p.parse_max_fee_per_gas(),
+        max_priority_fee_per_gas: p.parse_max_priority_fee(),
+        to: TxKind::Call(p.parse_to_address()),
+        value: p.parse_value(),
         input: Bytes::from(build_calldata(&p.function_signature, &p.args)),
         access_list: Default::default(),
     })
@@ -115,10 +100,6 @@ pub fn rlp_encode_unsigned_eip1559(params: &CantonEvmTransactionParams) -> Vec<u
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// SignatureEvent impl for Canton sign bidirectional
-// ---------------------------------------------------------------------------
 
 impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
@@ -181,10 +162,6 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
         self.sender.clone()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Configuration & CLI args
-// ---------------------------------------------------------------------------
 
 /// Canton JSON Ledger API configuration.
 ///

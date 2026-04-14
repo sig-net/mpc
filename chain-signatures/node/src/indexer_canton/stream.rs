@@ -21,10 +21,6 @@ use super::{
     CantonSignBidirectionalRequestedEvent, CantonSignatureRespondedEvent,
 };
 
-// ---------------------------------------------------------------------------
-// WebSocket event stream
-// ---------------------------------------------------------------------------
-
 struct CantonStreamStartState {
     config: CantonConfig,
     tx: mpsc::Sender<ChainEvent>,
@@ -355,10 +351,6 @@ async fn process_canton_event(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Defense-in-depth verification (mirrors canton-mpc-poc TS tx-handler.ts)
-// ---------------------------------------------------------------------------
-
 /// Verify a SignBidirectionalEvent before processing it.
 ///
 /// These checks are defense-in-depth on top of the Daml ledger guarantees:
@@ -454,9 +446,12 @@ fn verify_sign_event(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Event parsing from Canton JSON payloads
-// ---------------------------------------------------------------------------
+/// Parse a hex-encoded request ID into a 32-byte array.
+fn parse_request_id_hex(s: &str) -> anyhow::Result<[u8; 32]> {
+    s.parse::<B256>()
+        .map_err(|e| anyhow::anyhow!("invalid request_id hex: {e}"))
+        .map(|b| b.0)
+}
 
 fn parse_sign_bidirectional_event(
     created: &ledger_api::CreatedEvent,
@@ -472,17 +467,10 @@ fn parse_signature_responded_event(
     let payload: contracts::SignatureRespondedEventPayload =
         serde_json::from_value(created.payload.clone())?;
 
-    let request_id: [u8; 32] = payload
-        .request_id
-        .parse::<B256>()
-        .map_err(|e| anyhow::anyhow!("invalid request_id hex: {e}"))?
-        .0;
-    let signature = parse_der_signature(&payload.signature)?;
-
     Ok(CantonSignatureRespondedEvent {
-        request_id,
+        request_id: parse_request_id_hex(&payload.request_id)?,
         responder: payload.responder,
-        signature,
+        signature: parse_der_signature(&payload.signature)?,
     })
 }
 
@@ -492,20 +480,14 @@ fn parse_respond_bidirectional_event(
     let payload: contracts::RespondBidirectionalEventPayload =
         serde_json::from_value(created.payload.clone())?;
 
-    let request_id: [u8; 32] = payload
-        .request_id
-        .parse::<B256>()
-        .map_err(|e| anyhow::anyhow!("invalid request_id hex: {e}"))?
-        .0;
     let serialized_output = hex::decode(&payload.serialized_output)
         .map_err(|e| anyhow::anyhow!("invalid serializedOutput hex: {e}"))?;
-    let signature = parse_der_signature(&payload.signature)?;
 
     Ok(CantonRespondBidirectionalEvent {
-        request_id,
+        request_id: parse_request_id_hex(&payload.request_id)?,
         responder: payload.responder,
         serialized_output,
-        signature,
+        signature: parse_der_signature(&payload.signature)?,
     })
 }
 
