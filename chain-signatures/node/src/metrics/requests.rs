@@ -14,6 +14,8 @@ pub enum SignRequestStep {
     /// Time from block timestamp to first seen by indexer (Status: ok)
     /// Measures: network propagation delay + indexer polling latency
     Indexing,
+    /// Time from indexing to the request being handed off to sign processing
+    IndexingFinal,
     /// Time from indexing to signature generation start (Status: ok)
     AwaitingGeneration,
     /// Time to generate the signature (Status: ok, error)
@@ -31,6 +33,7 @@ impl SignRequestStep {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Indexing => "indexing",
+            Self::IndexingFinal => "indexing_final",
             Self::AwaitingGeneration => "awaiting_generation",
             Self::Generating => "generating",
             Self::Responding => "responding",
@@ -71,6 +74,11 @@ pub fn record_indexing_step_reached(chain: Chain) {
         .observe(0.0);
 }
 
+/// Some chains need a second indexing handoff step before sign processing starts.
+pub fn record_indexing_final_step_reached(chain: Chain, start: impl LatencyStart) {
+    record_request_latency(chain, SignRequestStep::IndexingFinal, "ok", start);
+}
+
 pub(crate) static SIGN_REQUEST_DELAYED: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec_with_node_and_version(
         "multichain_sign_request_delayed",
@@ -98,3 +106,13 @@ pub(crate) static BACKLOG_SIZE: LazyLock<prometheus::IntGaugeVec> = LazyLock::ne
     )
     .unwrap()
 });
+
+#[cfg(test)]
+mod tests {
+    use super::SignRequestStep;
+
+    #[test]
+    fn indexing_final_step_has_expected_label() {
+        assert_eq!(SignRequestStep::IndexingFinal.as_str(), "indexing_final");
+    }
+}

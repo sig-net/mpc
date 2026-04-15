@@ -224,6 +224,8 @@ impl Chain {
     pub fn expected_finality_time_secs(&self) -> u64 {
         match self {
             Chain::NEAR => 3,
+            // Assuming 12s block time and 50 confirmations for Ethereum,
+            // which is a common recommendation for high-value transactions. This results in an expected finality time of around 10 minutes, but we add some buffer to account for network variability.
             Chain::Ethereum => 15 * 60,
             Chain::Solana => 3,
             Chain::Bitcoin => 60 * 60 + 20 * 60, // 6 confirmations at 10 minutes each, plus some buffer

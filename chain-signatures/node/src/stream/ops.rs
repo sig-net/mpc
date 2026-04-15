@@ -4,7 +4,9 @@ use crate::indexer_hydration::{
     HydrationSignatureRespondedEvent,
 };
 use crate::mesh::{wait_threshold_active, MeshState};
-use crate::metrics::requests::record_indexing_step_reached;
+use crate::metrics::requests::{
+    record_indexing_final_step_reached, record_indexing_step_reached,
+};
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignKind};
 use crate::respond_bidirectional::CompletedTx;
@@ -252,9 +254,12 @@ pub(crate) async fn process_sign_event(
 
     backlog.insert(sign_request.clone()).await;
 
+    let chain = sign_request.chain;
+    let indexed_at = sign_request.unix_timestamp_indexed;
     if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
-        let chain = sign_event.source_chain();
         tracing::error!(?err, %chain, "failed to send sign request into queue");
+    } else {
+        record_indexing_final_step_reached(chain, indexed_at);
     }
 
     Ok(())
@@ -274,8 +279,11 @@ pub(crate) async fn process_sign_request(
     backlog.insert(sign_request.clone()).await;
 
     let chain = sign_request.chain;
+    let indexed_at = sign_request.unix_timestamp_indexed;
     if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
         tracing::error!(?err, %chain, "failed to send sign request into queue");
+    } else {
+        record_indexing_final_step_reached(chain, indexed_at);
     }
 
     Ok(())
