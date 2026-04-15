@@ -1,4 +1,4 @@
-use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::ops::{SignatureEvent, SignatureEventBox};
 use crate::stream::{ChainEvent, ChainStream};
@@ -193,20 +193,18 @@ impl SignatureEvent for SignatureRequestedEvent {
         let sign_id = SignId::new(self.generate_request_id());
         tracing::info!(?sign_id, "solana signature requested");
 
-        Ok(IndexedSignRequest {
-            id: sign_id,
-            args: SignArgs {
+        Ok(IndexedSignRequest::sign(
+            sign_id,
+            SignArgs {
                 entropy,
                 epsilon,
                 payload,
                 path: self.path.clone(),
                 key_version: self.key_version,
             },
-            chain: Chain::Solana,
-            timestamp_created: Instant::now(),
-            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            sign_request_type: SignRequestType::Sign,
-        })
+            Chain::Solana,
+            crate::util::current_unix_timestamp(),
+        ))
     }
 
     fn source_chain(&self) -> Chain {
@@ -267,22 +265,19 @@ impl SignatureEvent for SignBidirectionalEvent {
             anyhow::bail!("payload exceeds secp256k1 curve order");
         }
 
-        Ok(IndexedSignRequest {
-            id: sign_id,
-            args: SignArgs {
+        Ok(IndexedSignRequest::sign_bidirectional(
+            sign_id,
+            SignArgs {
                 entropy,
                 epsilon,
                 payload,
                 path: self.path.clone(),
                 key_version: self.key_version,
             },
-            chain: Chain::Solana,
-            timestamp_created: Instant::now(),
-            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            sign_request_type: SignRequestType::SignBidirectional(
-                crate::stream::ops::SignBidirectionalEvent::Solana(self.clone()),
-            ),
-        })
+            Chain::Solana,
+            crate::util::current_unix_timestamp(),
+            crate::stream::ops::SignBidirectionalEvent::Solana(self.clone()),
+        ))
     }
 
     fn source_chain(&self) -> Chain {
@@ -299,7 +294,15 @@ type Result<T> = anyhow::Result<T>;
 /// Solana stream that implements the new ChainStream abstraction
 pub struct SolanaStream {
     rx: mpsc::Receiver<ChainEvent>,
+    start_state: Option<SolanaStreamStartState>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+struct SolanaStreamStartState {
+    program_id: Pubkey,
+    rpc_http_url: String,
+    rpc_ws_url: String,
+    tx: mpsc::Sender<ChainEvent>,
 }
 
 impl Drop for SolanaStream {
@@ -323,27 +326,42 @@ impl SolanaStream {
         };
 
         let (tx, rx) = crate::stream::channel();
-        let tasks = vec![
-            spawn_cpi_sign_events(
-                program_id,
-                sol.rpc_http_url.clone(),
-                sol.rpc_ws_url.clone(),
-                tx.clone(),
-            ),
-            spawn_respond_events(
-                program_id,
-                sol.rpc_http_url.clone(),
-                sol.rpc_ws_url.clone(),
-                tx.clone(),
-            ),
-        ];
 
-        Some(SolanaStream { rx, tasks })
+        Some(SolanaStream {
+            rx,
+            start_state: Some(SolanaStreamStartState {
+                program_id,
+                rpc_http_url: sol.rpc_http_url.clone(),
+                rpc_ws_url: sol.rpc_ws_url.clone(),
+                tx,
+            }),
+            tasks: Vec::new(),
+        })
     }
 }
 
 impl ChainStream for SolanaStream {
     const CHAIN: Chain = Chain::Solana;
+
+    async fn start(&mut self) {
+        let Some(start_state) = self.start_state.take() else {
+            return;
+        };
+
+        self.tasks.push(spawn_cpi_sign_events(
+            start_state.program_id,
+            start_state.rpc_http_url.clone(),
+            start_state.rpc_ws_url.clone(),
+            start_state.tx.clone(),
+        ));
+        self.tasks.push(spawn_respond_events(
+            start_state.program_id,
+            start_state.rpc_http_url,
+            start_state.rpc_ws_url,
+            start_state.tx,
+        ));
+    }
+
     async fn next_event(&mut self) -> Option<ChainEvent> {
         self.rx.recv().await
     }

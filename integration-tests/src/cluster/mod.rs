@@ -3,7 +3,6 @@ pub mod spawner;
 use std::collections::{HashMap, HashSet};
 
 use mpc_contract::primitives::Participants;
-use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use mpc_primitives::{Chain, Checkpoint};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{Finality, NearToken};
@@ -93,17 +92,6 @@ impl Cluster {
 
     pub fn contract(&self) -> &Contract {
         self.nodes.contract()
-    }
-
-    pub fn triples(&self, idx: usize) -> TripleStorage {
-        self.nodes.ctx().redis.triple_storage(self.account_id(idx))
-    }
-
-    pub fn presignatures(&self, idx: usize) -> PresignatureStorage {
-        self.nodes
-            .ctx()
-            .redis
-            .presignature_storage(self.account_id(idx))
     }
 
     pub async fn contract_state(&self) -> anyhow::Result<ProtocolContractState> {

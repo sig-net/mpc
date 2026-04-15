@@ -16,7 +16,6 @@ use crate::containers::DockerClient;
 
 use anyhow::Context as _;
 use cluster::spawner::ClusterSpawner;
-use deadpool_redis::Pool;
 use ethers::types::{Address, U256};
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
@@ -24,7 +23,6 @@ use mpc_node::gcp::GcpService;
 use mpc_node::indexer_eth::EthConfig;
 use mpc_node::indexer_hydration::HydrationConfig;
 use mpc_node::indexer_sol::SolConfig;
-use mpc_node::storage::triple_storage::{TriplePair, TripleStorage};
 use mpc_node::{logs, mesh, node_client, storage};
 use mpc_primitives::{Chain, Checkpoint};
 use near_workspaces::network::Sandbox;
@@ -238,10 +236,6 @@ impl Nodes {
         Ok(())
     }
 
-    pub async fn triple_storage(&self, redis_pool: &Pool, account_id: &AccountId) -> TripleStorage {
-        TriplePair::storage(redis_pool, account_id)
-    }
-
     pub async fn gcp_services(&self) -> anyhow::Result<Vec<GcpService>> {
         let mut gcp_services = Vec::new();
         match self {
@@ -406,6 +400,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     let message_options = node_client::Options {
         timeout: 1000,
         state_timeout: 1000,
+        sync_timeout: 60000,
     };
 
     // If using pregenerated keys, inject them into storage before nodes start

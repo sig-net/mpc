@@ -8,8 +8,8 @@ const strategies = {
     scenarios: {
       smoke: {
         executor: 'constant-arrival-rate',
-        rate: 0.1,
-        timeUnit: '1s',
+        rate: 1,
+        timeUnit: '10s',
         preAllocatedVUs: 2,
         maxVUs: 10,
       },
@@ -96,12 +96,12 @@ export default function () {
     console.error(`One or more required environment variables are not set: chain ${chain}, env ${env}, check ${checkRaw}`);
     throw new Error("Missing required environment variables. Exiting script.");
   }
-  let check = checkRaw === 'true';
+  let checkSignature = checkRaw === 'true';
 
   let params = JSON.stringify({
     chain: chain,
     env: env,
-    check: check,
+    check: checkSignature,
   });
 
   console.log(`Sending request to ${PINGER_URL} with params: ${params}`);
@@ -109,7 +109,7 @@ export default function () {
   let response = http.post(PINGER_URL, params, {
     headers: {
       'Content-Type': 'application/json',
-      'x-api-secret': __ENV.LT_PINGER_API_KEY || 'default-secret-key',
+      'x-api-secret': __ENV.LT_PINGER_API_KEY,
     },
   });
 

@@ -11,9 +11,9 @@ use integration_tests::eth::{
     self, chain_signatures_contract, ChainSignaturesContract, SignRequest,
 };
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-use mpc_node::backlog::{Backlog, BacklogTransaction, SignTx};
+use mpc_node::backlog::Backlog;
 use mpc_node::indexer_eth::{EthConfig, EthereumStream};
-use mpc_node::protocol::Chain;
+use mpc_node::protocol::{Chain, SignKind};
 use mpc_node::stream::ops::SignatureRespondedEvent;
 use mpc_node::stream::{ChainEvent, ChainStream};
 use mpc_primitives::{SignId, LATEST_MPC_KEY_VERSION};
@@ -175,12 +175,21 @@ async fn next_event_within(client: &mut EthereumStream, duration: Duration) -> R
     .context("timed out waiting for chain event")
 }
 
+async fn stream_ethereum(
+    ctx: &EthereumTestEnvironment,
+    backlog: Backlog,
+) -> Result<EthereumStream> {
+    let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog).await?;
+    ChainStream::start(&mut stream).await;
+    Ok(stream)
+}
+
 #[test_log::test(tokio::test)]
 async fn test_ethereum_stream_parse_sign_event() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     let ctx = EthereumTestEnvironment::new().await?;
     let backlog = ctx.backlog();
-    let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog).await?;
+    let mut stream = stream_ethereum(&ctx, backlog).await?;
 
     let payload = k256::Scalar::from(1u64).to_bytes().into();
     let path = "m/44'/60'/0'/0/0";
@@ -203,7 +212,7 @@ async fn test_ethereum_stream_parse_sign_event() -> Result<()> {
 async fn test_ethereum_stream_emits_blocks() -> Result<()> {
     let ctx = EthereumTestEnvironment::new().await?;
     let backlog = ctx.backlog();
-    let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog).await?;
+    let mut stream = stream_ethereum(&ctx, backlog).await?;
 
     submit_sign_request(&ctx, [2u8; 32], "test-path").await?;
 
@@ -246,12 +255,11 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
         request_id: [7u8; 32],
         from_address: AlloyAddress::from_slice(ctx.wallet.as_bytes()),
         nonce: 0,
-        status: mpc_node::sign_bidirectional::PendingRequestStatus::PendingExecution,
     };
     let sign_id = SignId::new([7u8; 32]);
     backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;
 
-    let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
+    let mut stream = stream_ethereum(&ctx, backlog.clone()).await?;
 
     // Send a transaction from the watched address to bump nonce and trigger the staleness check.
     submit_sign_request(&ctx, [4u8; 32], "execution-path").await?;
@@ -275,7 +283,7 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
 async fn test_ethereum_stream_concurrent_events() -> Result<()> {
     let ctx = EthereumTestEnvironment::new().await?;
     let backlog = ctx.backlog();
-    let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog).await?;
+    let mut stream = stream_ethereum(&ctx, backlog).await?;
 
     let payloads: Vec<[u8; 32]> = (0u8..5)
         .map(|i| {
@@ -312,7 +320,7 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
     let ctx = EthereumTestEnvironment::new().await?;
     let backlog = ctx.backlog();
 
-    let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
+    let mut stream = stream_ethereum(&ctx, backlog.clone()).await?;
     submit_sign_request(&ctx, [5u8; 32], "some-path").await?;
 
     let checkpoint = tokio::time::timeout(Duration::from_secs(20), async move {
@@ -328,20 +336,10 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
                     // The production indexer loop inserts sign requests into the backlog.
                     // These integration tests consume `ChainEvent`s directly, so replicate
                     // that behavior here so checkpoints capture pending requests.
-                    backlog
-                        .insert(
-                            req.chain,
-                            req.id,
-                            BacklogTransaction::Sign(SignTx {
-                                request_id: req.id.request_id,
-                                source_chain: req.chain,
-                                status: mpc_node::sign_bidirectional::PendingRequestStatus::AwaitingResponse,
-                                args: req.args.clone(),
-                                unix_timestamp_indexed: req.unix_timestamp_indexed,
-                            }),
-                            req.sign_request_type.clone(),
-                        )
-                        .await;
+                    if matches!(req.kind, SignKind::RespondBidirectional(_)) {
+                        continue;
+                    }
+                    backlog.insert(req.clone()).await;
                 }
                 ChainEvent::Block(height) => {
                     tracing::info!(height, "observed block event");
@@ -373,7 +371,7 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
 
     // Start a fresh client with the same storage; it should resume and observe new events.
     let backlog = ctx.backlog();
-    let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
+    let mut stream = stream_ethereum(&ctx, backlog.clone()).await?;
     submit_sign_request(&ctx, [6u8; 32], "checkpoint-path").await?;
 
     let mut saw_new_event = false;
@@ -383,20 +381,10 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
             ChainEvent::SignRequest(req) => {
                 saw_new_event = true;
 
-                backlog
-                    .insert(
-                        req.chain,
-                        req.id,
-                        BacklogTransaction::Sign(SignTx {
-                            request_id: req.id.request_id,
-                            source_chain: req.chain,
-                            status: mpc_node::sign_bidirectional::PendingRequestStatus::AwaitingResponse,
-                            args: req.args.clone(),
-                            unix_timestamp_indexed: req.unix_timestamp_indexed,
-                        }),
-                        req.sign_request_type.clone(),
-                    )
-                    .await;
+                if matches!(req.kind, SignKind::RespondBidirectional(_)) {
+                    continue;
+                }
+                backlog.insert(req.clone()).await;
 
                 if saw_new_checkpoint {
                     break;
@@ -430,7 +418,7 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
 async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     let ctx = EthereumTestEnvironment::new().await?;
     let backlog = ctx.backlog();
-    let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog).await?;
+    let mut stream = stream_ethereum(&ctx, backlog).await?;
     let _ = tracing_subscriber::fmt::try_init();
 
     // Submit a sign request and capture its id from the emitted event.

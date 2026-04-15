@@ -5,9 +5,9 @@ use crate::backlog::Backlog;
 use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
 
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
-use crate::protocol::{Chain, IndexedSignRequest, SignRequestType};
+use crate::protocol::{Chain, IndexedSignRequest};
 use crate::respond_bidirectional::CompletedTx;
-use crate::sign_bidirectional::PendingRequestStatus;
+use crate::sign_bidirectional::SignStatus;
 use crate::stream::{ChainEvent, ChainStream, ExecutionOutcome};
 
 use alloy::eips::BlockNumberOrTag;
@@ -20,11 +20,11 @@ use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{SignArgs, SignId, Signature as MpcSignature, LATEST_MPC_KEY_VERSION};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::LazyLock;
-use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
@@ -148,27 +148,44 @@ impl fmt::Debug for EthConfig {
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "indexer_eth_options")]
 pub struct EthArgs {
+    // -- Core --
     /// The ethereum account secret key used to sign eth respond txn.
-    #[arg(long, env("MPC_ETH_ACCOUNT_SK"))]
-    pub eth_account_sk: Option<String>,
-    /// Ethereum WebSocket RPC URL
-    #[clap(
+    #[arg(
         long,
-        env("MPC_ETH_CONSENSUS_RPC_HTTP_URL"),
-        requires = "eth_account_sk"
+        env("MPC_ETH_ACCOUNT_SK"),
+        requires_all = ["eth_execution_rpc_http_url", "eth_contract_address"]
     )]
-    pub eth_consensus_rpc_http_url: Option<String>,
-    /// Ethereum EXECUTION RPC URL
+    pub eth_account_sk: Option<String>,
+    /// The contract address to watch without the `0x` prefix
+    #[clap(long, env("MPC_ETH_CONTRACT_ADDRESS"), requires = "eth_account_sk")]
+    pub eth_contract_address: Option<String>,
+
+    // -- RPC endpoints --
+    /// Ethereum execution RPC URL
     #[clap(
         long,
         env("MPC_ETH_EXECUTION_RPC_HTTP_URL"),
         requires = "eth_account_sk"
     )]
     pub eth_execution_rpc_http_url: Option<String>,
-    /// The contract address to watch without the `0x` prefix
-    #[clap(long, env("MPC_ETH_CONTRACT_ADDRESS"), requires = "eth_account_sk")]
-    pub eth_contract_address: Option<String>,
-    /// the network that the eth indexer is running on. Either "sepolia"/"mainnet"
+
+    // -- Helios light-client --
+    /// Use Helios light client instead of direct RPC
+    #[clap(
+        long,
+        env("MPC_ETH_LIGHT_CLIENT"),
+        default_value = "false",
+        requires_if("true", "eth_consensus_rpc_http_url")
+    )]
+    pub eth_light_client: bool,
+    /// Ethereum consensus RPC URL (required when --eth-light-client is set)
+    #[clap(
+        long,
+        env("MPC_ETH_CONSENSUS_RPC_HTTP_URL"),
+        requires = "eth_account_sk"
+    )]
+    pub eth_consensus_rpc_http_url: Option<String>,
+    /// The network that the eth indexer is running on. Either "sepolia"/"mainnet"
     #[clap(
         long,
         env("MPC_ETH_NETWORK"),
@@ -177,7 +194,7 @@ pub struct EthArgs {
         value_parser = ["sepolia", "mainnet"],
     )]
     pub eth_network: Option<String>,
-    /// helios light client data path
+    /// Helios light client data path
     #[clap(
         long,
         env("MPC_ETH_HELIOS_DATA_PATH"),
@@ -185,7 +202,9 @@ pub struct EthArgs {
         default_value = "/helios/sepolia"
     )]
     pub eth_helios_data_path: Option<String>,
-    /// refresh finalized block interval in milliseconds
+
+    // -- Behaviour --
+    /// Refresh finalized block interval in milliseconds
     #[clap(
         long,
         env("MPC_ETH_REFRESH_FINALIZED_INTERVAL"),
@@ -196,9 +215,6 @@ pub struct EthArgs {
     /// Useful for testing where we do not want to reach finality due to how long it takes.
     #[clap(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "false")]
     pub eth_optimistic_requests: bool,
-    /// light client is true if using helios, false if using direct rpc
-    #[clap(long, env("MPC_ETH_LIGHT_CLIENT"), default_value = "false")]
-    pub eth_light_client: bool,
 }
 
 impl EthArgs {
@@ -246,12 +262,12 @@ impl EthArgs {
     pub fn into_config(self) -> Option<EthConfig> {
         Some(EthConfig {
             account_sk: self.eth_account_sk?,
-            consensus_rpc_http_url: self.eth_consensus_rpc_http_url?,
-            execution_rpc_http_url: self.eth_execution_rpc_http_url?,
-            contract_address: self.eth_contract_address?,
-            network: self.eth_network?,
-            helios_data_path: self.eth_helios_data_path?,
-            refresh_finalized_interval: self.eth_refresh_finalized_interval?,
+            consensus_rpc_http_url: self.eth_consensus_rpc_http_url.unwrap_or_default(),
+            execution_rpc_http_url: self.eth_execution_rpc_http_url.unwrap(),
+            contract_address: self.eth_contract_address.unwrap(),
+            network: self.eth_network.unwrap_or_default(),
+            helios_data_path: self.eth_helios_data_path.unwrap_or_default(),
+            refresh_finalized_interval: self.eth_refresh_finalized_interval.unwrap(),
             optimistic_requests: self.eth_optimistic_requests,
             light_client: self.eth_light_client,
         })
@@ -369,20 +385,18 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
     let sign_id = SignId::new(event.generate_request_id());
     tracing::info!(?sign_id, "eth signature requested");
 
-    Some(IndexedSignRequest {
-        id: sign_id,
-        args: SignArgs {
+    Some(IndexedSignRequest::sign(
+        sign_id,
+        SignArgs {
             entropy: entropy.into(),
             epsilon,
             payload,
             path: event.path,
             key_version: event.key_version,
         },
-        chain: Chain::Ethereum,
-        unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-        timestamp_created: Instant::now(),
-        sign_request_type: SignRequestType::Sign,
-    })
+        Chain::Ethereum,
+        crate::util::current_unix_timestamp(),
+    ))
 }
 
 // Helper function to parse event logs
@@ -774,11 +788,17 @@ impl EthereumIndexer {
         ));
 
         let last_processed_block = backlog.processed_block(Chain::Ethereum).await;
+        let mut expected_catchup_blocks = 0usize;
+        let mut processed_catchup_blocks = HashSet::new();
+        let mut catchup_completed_emitted = false;
 
         let blocks_to_process_send_clone = blocks_to_process_send.clone();
         if let Some(last_processed_block) = last_processed_block {
             match Self::catchup_end_block_number(Arc::clone(&client)).await {
                 Some(end_block_number) => {
+                    expected_catchup_blocks = end_block_number
+                        .saturating_sub(last_processed_block)
+                        .saturating_add(1) as usize;
                     Self::add_catchup_blocks_to_process(
                         blocks_to_process_send_clone,
                         last_processed_block,
@@ -789,6 +809,14 @@ impl EthereumIndexer {
                 None => {
                     tracing::error!("Failed to get catchup end block number");
                 }
+            }
+        }
+
+        if expected_catchup_blocks == 0 {
+            if let Err(err) = events_tx.send(ChainEvent::CatchupCompleted).await {
+                tracing::warn!(?err, "failed to emit ethereum catchup completion event");
+            } else {
+                catchup_completed_emitted = true;
             }
         }
 
@@ -844,6 +872,18 @@ impl EthereumIndexer {
                     tracing::info!("Processed new block number {block_number}");
                 }
             }
+
+            if is_catchup && !catchup_completed_emitted {
+                processed_catchup_blocks.insert(block_number);
+                if processed_catchup_blocks.len() >= expected_catchup_blocks {
+                    if let Err(err) = events_tx.send(ChainEvent::CatchupCompleted).await {
+                        tracing::warn!(?err, "failed to emit ethereum catchup completion event");
+                    } else {
+                        catchup_completed_emitted = true;
+                    }
+                }
+            }
+
             crate::metrics::indexers::LATEST_BLOCK_NUMBER
                 .with_label_values(&[Chain::Ethereum.as_str(), "indexed"])
                 .set(block_number as i64);
@@ -1018,9 +1058,9 @@ impl EthereumIndexer {
             };
 
             let status = if receipt.status() {
-                PendingRequestStatus::Success
+                SignStatus::Success
             } else {
-                PendingRequestStatus::Failed
+                SignStatus::Failed
             };
 
             tracing::info!(
@@ -1032,7 +1072,7 @@ impl EthereumIndexer {
 
             let source_chain = pending_tx.source_chain;
 
-            let result = if status == PendingRequestStatus::Success {
+            let result = if status == SignStatus::Success {
                 let completed_tx = CompletedTx::new(pending_tx.clone(), block_number);
                 match completed_tx.extract_success_tx_output(client).await {
                     Ok(serialized_output) => {
@@ -1240,7 +1280,7 @@ impl EthereumIndexer {
 
         loop {
             interval.tick().await;
-            tracing::info!("Refreshing finalized epoch");
+            tracing::debug!("Refreshing finalized epoch");
 
             let new_finalized_block = match client
                 .as_ref()
@@ -1257,7 +1297,7 @@ impl EthereumIndexer {
             };
 
             let new_final_block_number = new_finalized_block.header.number;
-            tracing::info!(
+            tracing::debug!(
                 "New finalized block number: {new_final_block_number}, last finalized block number: {final_block_number:?}"
             );
 
@@ -1285,7 +1325,7 @@ impl EthereumIndexer {
             }
 
             if last_final_block_number == new_final_block_number {
-                tracing::info!("No new finalized block");
+                tracing::debug!("No new finalized block");
             }
         }
     }
@@ -1318,30 +1358,51 @@ impl EthereumIndexer {
 }
 
 /// Ethereum indexer stream implementing the `ChainStream` trait.
-/// It spawns the internal block pipeline and emits `ChainEvent`s through an
-/// internal channel consumed by the shared `run_stream()` loop.
+/// Construction is side-effect free; the shared `run_stream()` loop calls
+/// `start()` after recovery has completed.
 pub struct EthereumStream {
     events_rx: mpsc::Receiver<ChainEvent>,
+    indexer: Option<(EthereumIndexer, mpsc::Sender<ChainEvent>)>,
     tasks: Vec<JoinHandle<()>>,
 }
 
 impl EthereumStream {
     pub async fn new(eth: Option<EthConfig>, backlog: Backlog) -> anyhow::Result<Self> {
         let Some(eth) = eth else {
-            tracing::warn!("ethereum indexer is disabled");
-            return Err(anyhow::anyhow!("ethereum indexer is disabled"));
+            tracing::warn!(
+                "ethereum indexer is disabled: no EthConfig provided \
+                 (check that all --eth-* CLI flags were supplied)"
+            );
+            return Err(anyhow::anyhow!(
+                "ethereum indexer is disabled: no EthConfig provided"
+            ));
         };
+        tracing::info!(
+            eth_config = ?eth,
+            "creating ethereum indexer stream"
+        );
+
+        let indexer = EthereumIndexer::new(eth, backlog).await?;
 
         let (events_tx, events_rx) = crate::stream::channel();
-        let indexer = EthereumIndexer::new(eth, backlog).await?;
+
+        Ok(Self {
+            events_rx,
+            indexer: Some((indexer, events_tx)),
+            tasks: Vec::new(),
+        })
+    }
+
+    pub fn start(&mut self) {
+        let Some((indexer, events_tx)) = self.indexer.take() else {
+            return;
+        };
 
         let t_indexer: JoinHandle<()> = tokio::spawn(async move {
             indexer.run(events_tx).await;
         });
 
-        let tasks = vec![t_indexer];
-
-        Ok(Self { events_rx, tasks })
+        self.tasks.push(t_indexer);
     }
 }
 
@@ -1355,6 +1416,11 @@ impl Drop for EthereumStream {
 
 impl ChainStream for EthereumStream {
     const CHAIN: Chain = Chain::Ethereum;
+
+    async fn start(&mut self) {
+        self.start();
+    }
+
     async fn next_event(&mut self) -> Option<ChainEvent> {
         self.events_rx.recv().await
     }

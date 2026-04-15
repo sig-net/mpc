@@ -143,6 +143,7 @@ impl Participants {
 
     pub fn remove(&mut self, account_id: &AccountId) {
         self.participants.remove(account_id);
+        self.account_to_participant_id.remove(account_id);
     }
 
     pub fn get(&self, account_id: &AccountId) -> Option<&ParticipantInfo> {

@@ -1,12 +1,14 @@
 name: Production Compatibility
 
 on:
-  push:
-    branches:
-      - develop
-    paths:
-      - chain-signatures/**
-  pull_request:
+  workflow_dispatch:
+  # Temporarily disabled until finalized
+  # push:
+  #   branches:
+  #     - develop
+  #   paths:
+  #     - chain-signatures/**
+  # pull_request:
 
 env:
   RUSTFLAGS: -D warnings
