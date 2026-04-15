@@ -113,28 +113,53 @@ pub struct SignBidirectionalRequestedEvent {
     pub respond_serialization_schema: String,
 }
 
-/// Raw payload of a `Signer:SignatureRespondedEvent` created event.
+// ---------------------------------------------------------------------------
+// Signature types
+// ---------------------------------------------------------------------------
+//
+// Why DER encoding?
+// Daml lacks byte-manipulation libraries, so we can't convert between signature
+// formats on-ledger. The built-in `secp256k1WithEcdsaOnly` function requires
+// DER-encoded signatures, so we use DER throughout the Canton ↔ MPC interface.
+//
+// Why a union type?
+// Future-proofs for EdDSA (Solana, Sui) and Schnorr (Bitcoin Taproot) without
+// changing the wire format. Each variant carries algorithm-specific data.
+// ---------------------------------------------------------------------------
+
+/// ECDSA signature with DER encoding and recovery ID.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EcdsaSigData {
+    /// DER-encoded (r, s) as hex string.
+    pub der: String,
+    /// Recovery ID (0 or 1) — y-parity for EVM ecrecover.
+    pub recovery_id: u8,
+}
+
+/// Signature union type matching Daml's `Signature` (see Signer.daml).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "tag", content = "value")]
+pub enum CantonSignature {
+    EcdsaSig(EcdsaSigData),
+    // Future: EddsaSig(EddsaSigData), SchnorrSig(SchnorrSigData)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignatureRespondedEventPayload {
-    /// Hex-encoded 32-byte request ID.
     pub request_id: String,
     pub responder: String,
-    /// DER-encoded hex signature.
-    pub signature: String,
+    pub signature: CantonSignature,
 }
 
-/// Raw payload of a `Signer:RespondBidirectionalEvent` created event.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RespondBidirectionalEventPayload {
-    /// Hex-encoded 32-byte request ID.
     pub request_id: String,
     pub responder: String,
-    /// Hex-encoded serialized output from the destination chain.
     pub serialized_output: String,
-    /// DER-encoded hex signature.
-    pub signature: String,
+    pub signature: CantonSignature,
 }
 
 /// Deserialize a u32 from either a JSON number or a JSON string.

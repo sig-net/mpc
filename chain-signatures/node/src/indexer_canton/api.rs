@@ -28,16 +28,7 @@ pub fn generate_jwt_with_key(key: &EncodingKey, subject: &str) -> anyhow::Result
 }
 
 /// DER-encode an ECDSA signature from an MPC Signature (big_r, s).
-///
-/// Canton's native Daml signature verification (`secp256k1WithEcdsaOnly`)
-/// only accepts DER-encoded signatures — there is no built-in Daml function
-/// to convert from raw `(r, s)` components to DER. We encode on the MPC
-/// side so the Daml contracts can verify directly without conversion.
-///
-/// TODO(test): roundtrip test — encode a known Signature to DER, then parse it
-/// back with `parse_der_signature` and verify (big_r.x, s) are preserved.
-/// Also test that the DER output is accepted by k256's verifier given the
-/// corresponding public key and message hash.
+/// See `contracts.rs` for why we use DER encoding.
 pub fn der_encode_signature(signature: &Signature) -> anyhow::Result<Vec<u8>> {
     use mpc_crypto::x_coordinate;
 

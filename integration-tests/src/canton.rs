@@ -300,20 +300,12 @@ canton.participants.sandbox.ledger-api {{
         let sign_request = self
             .client
             .create_contract(
-                &[&self.operator_party],
+                &[&self.operator_party, &self.requester_party],
                 "#daml-signer:Signer:SignRequest",
                 serde_json::to_value(&event)?,
             )
             .await?;
         let sign_request_cid = find_created_contract(&sign_request, "SignRequest")?.0;
-        let sign_request_disclosure = self
-            .client
-            .get_disclosed_contract(
-                &[&self.operator_party],
-                "#daml-signer:Signer:SignRequest",
-                &sign_request_cid,
-            )
-            .await?;
 
         let result = self
             .client
@@ -327,7 +319,7 @@ canton.participants.sandbox.ledger-api {{
                     "nonceCid": &self.nonce_cid,
                     "requester": &self.requester_party,
                 }),
-                &[self.signer_disclosure.clone(), sign_request_disclosure],
+                std::slice::from_ref(&self.signer_disclosure),
             )
             .await?;
 

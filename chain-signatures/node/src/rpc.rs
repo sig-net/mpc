@@ -1873,6 +1873,15 @@ async fn try_publish_canton(
     let der_sig = hex::encode(crate::indexer_canton::der_encode_signature(signature)?);
     let (operators, requester) = extract_canton_operators_requester(action)?;
 
+    // Canton Signature is a union type: EcdsaSig { der, recoveryId }
+    let canton_signature = serde_json::json!({
+        "tag": "EcdsaSig",
+        "value": {
+            "der": der_sig,
+            "recoveryId": signature.recovery_id
+        }
+    });
+
     let (choice, command_id, choice_argument) = match &action.indexed.kind {
         SignKind::SignBidirectional(_) => (
             "Respond",
@@ -1881,7 +1890,7 @@ async fn try_publish_canton(
                 "operators": operators,
                 "requester": requester,
                 "requestId": request_id_hex,
-                "signature": der_sig,
+                "signature": canton_signature,
             }),
         ),
         SignKind::RespondBidirectional(respond_tx) => (
@@ -1892,7 +1901,7 @@ async fn try_publish_canton(
                 "requester": requester,
                 "requestId": request_id_hex,
                 "serializedOutput": hex::encode(&respond_tx.output),
-                "signature": der_sig,
+                "signature": canton_signature,
             }),
         ),
         SignKind::Sign => {

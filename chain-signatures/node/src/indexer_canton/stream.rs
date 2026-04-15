@@ -470,7 +470,7 @@ fn parse_signature_responded_event(
     Ok(CantonSignatureRespondedEvent {
         request_id: parse_request_id_hex(&payload.request_id)?,
         responder: payload.responder,
-        signature: parse_der_signature(&payload.signature)?,
+        signature: parse_canton_signature(&payload.signature)?,
     })
 }
 
@@ -487,57 +487,48 @@ fn parse_respond_bidirectional_event(
         request_id: parse_request_id_hex(&payload.request_id)?,
         responder: payload.responder,
         serialized_output,
-        signature: parse_der_signature(&payload.signature)?,
+        signature: parse_canton_signature(&payload.signature)?,
     })
 }
 
-/// Parse a DER-encoded ECDSA signature (hex string) back into an MPC Signature.
+/// Parse a CantonSignature (union type) into an MPC Signature.
 ///
-/// Canton emits signatures in DER format (see [`der_encode_signature`] for why).
-/// We extract r and s via k256's DER parser, then reconstruct `big_r` by
-/// decompressing the r scalar as a secp256k1 x-coordinate with even parity.
+/// The recovery_id from the CantonSignature is preserved, allowing correct
+/// reconstruction of the full `big_r` point with the right y-parity.
+pub fn parse_canton_signature(sig: &contracts::CantonSignature) -> anyhow::Result<Signature> {
+    match sig {
+        contracts::CantonSignature::EcdsaSig(data) => {
+            parse_der_signature_with_recovery(&data.der, data.recovery_id)
+        }
+    }
+}
+
+/// Parse a DER-encoded ECDSA signature with known recovery ID.
 ///
-/// **Important:** DER does not encode the recovery ID (y-parity). The returned
-/// `recovery_id` defaults to `0` (even parity) and may be incorrect for ~50%
-/// of signatures. Callers that need the correct recovery ID must determine it
-/// themselves by recovering the public key from the message hash — see
-/// [`crate::kdf::into_signature`] for the canonical approach.
-///
-/// TODO(test): test with known DER signatures (both even and odd y-parity).
-/// Verify that recovery_id=0 is correctly resolved downstream when the public
-/// key is known. Test the encode→parse roundtrip preserves (r, s) scalars.
-pub fn parse_der_signature(hex_str: &str) -> anyhow::Result<Signature> {
-    use k256::elliptic_curve::sec1::FromEncodedPoint;
-    use k256::EncodedPoint;
+/// The recovery_id determines the y-parity for reconstructing `big_r`:
+/// - 0 = even parity (0x02 compressed prefix)
+/// - 1 = odd parity (0x03 compressed prefix)
+pub fn parse_der_signature_with_recovery(
+    hex_str: &str,
+    recovery_id: u8,
+) -> anyhow::Result<Signature> {
+    use k256::elliptic_curve::{point::DecompressPoint, subtle::Choice};
 
-    let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    let bytes = hex::decode(stripped).map_err(|e| anyhow::anyhow!("invalid DER hex: {e}"))?;
+    let sig = k256::ecdsa::Signature::from_der(
+        &hex::decode(hex_str.strip_prefix("0x").unwrap_or(hex_str))?,
+    )?;
+    let (r, s) = sig.split_scalars();
 
-    let ecdsa_sig = k256::ecdsa::Signature::from_der(&bytes)
-        .map_err(|e| anyhow::anyhow!("invalid DER signature: {e}"))?;
-
-    let (r_scalar, s_scalar) = ecdsa_sig.split_scalars();
-    let r_bytes = r_scalar.to_bytes();
-    let s_bytes: [u8; 32] = s_scalar.to_bytes().into();
-    let s = <k256::Scalar as ScalarExt>::from_bytes(s_bytes)
-        .ok_or_else(|| anyhow::anyhow!("s is not a valid scalar"))?;
-
-    // Reconstruct big_r from the x-coordinate with even parity (0x02).
-    // Both parities always yield valid secp256k1 points, so the old loop
-    // that checked `from_encoded_point` was a no-op — it always took the
-    // first branch.  The actual recovery_id must be resolved later against
-    // the expected public key and message hash.
-    let mut compressed = [0u8; 33];
-    compressed[0] = 0x02; // even parity
-    compressed[1..].copy_from_slice(&r_bytes);
-    let encoded = EncodedPoint::from_bytes(compressed)
-        .map_err(|e| anyhow::anyhow!("r is not valid compressed point bytes: {e}"))?;
-    let big_r = Option::from(k256::AffinePoint::from_encoded_point(&encoded))
-        .ok_or_else(|| anyhow::anyhow!("r is not a valid point on secp256k1"))?;
+    // Use correct parity based on recovery_id
+    let parity = Choice::from(recovery_id & 1);
 
     Ok(Signature {
-        big_r,
-        s,
-        recovery_id: 0,
+        big_r: k256::AffinePoint::decompress(&r.to_bytes(), parity)
+            .into_option()
+            .ok_or_else(|| anyhow::anyhow!("invalid r"))?,
+        s: <k256::Scalar as ScalarExt>::from_bytes(s.to_bytes().into())
+            .ok_or_else(|| anyhow::anyhow!("invalid s"))?,
+        recovery_id,
     })
 }
+

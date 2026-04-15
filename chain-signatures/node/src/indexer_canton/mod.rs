@@ -9,7 +9,7 @@ pub use api::{
     fetch_active_contracts, generate_jwt_with_key,
 };
 pub use request_id::compute_request_id;
-pub use stream::{parse_der_signature, CantonStream};
+pub use stream::{parse_canton_signature, CantonStream};
 
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;

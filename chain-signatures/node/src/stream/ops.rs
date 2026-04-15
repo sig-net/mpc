@@ -415,25 +415,11 @@ pub(crate) async fn process_respond_event(
     })?;
 
     // Get the MPC public key and derive the from_address.
-    // This must happen before sign_and_hash_transaction for Canton signatures
-    // because DER encoding loses the recovery ID — we need the derived public
-    // key to resolve the correct parity via ecrecover.
     let root_public_key = contract_watcher.wait_public_key().await;
     let epsilon = event.epsilon()?;
-    let derived_public_key = mpc_crypto::derive_key(root_public_key, epsilon);
     let from_address = crate::sign_bidirectional::derive_user_address(root_public_key, epsilon);
 
-    let mut mpc_sig = respond_event.signature();
-
-    // For Canton signatures the recovery_id parsed from DER defaults to 0
-    // and may be wrong.  Resolve the correct value before hashing.
-    if source_chain == Chain::Canton {
-        mpc_sig = crate::sign_bidirectional::resolve_signature_recovery_id(
-            &event.serialized_transaction(),
-            mpc_sig,
-            &derived_public_key,
-        )?;
-    }
+    let mpc_sig = respond_event.signature();
 
     // Sign and hash the transaction to get the correct tx_id and nonce
     let (signed_tx_hash, nonce) = crate::sign_bidirectional::sign_and_hash_transaction(

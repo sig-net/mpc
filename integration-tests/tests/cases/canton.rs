@@ -9,8 +9,8 @@ use integration_tests::cluster;
 use mpc_node::indexer_canton::contracts::{
     RespondBidirectionalEventPayload, SignatureRespondedEventPayload,
 };
-use mpc_node::indexer_canton::{compute_request_id, parse_der_signature, to_tx_eip1559};
-use mpc_node::sign_bidirectional::{derive_user_address, resolve_signature_recovery_id};
+use mpc_node::indexer_canton::{compute_request_id, parse_canton_signature, to_tx_eip1559};
+use mpc_node::sign_bidirectional::derive_user_address;
 use mpc_node::util::NearPublicKeyExt;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use serde_json::json;
@@ -45,21 +45,13 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     // 3. Submit sign request directly via Signer (bypasses Vault)
     let sign_request = client
         .create_contract(
-            &[&canton.operator_party],
+            &[&canton.operator_party, &canton.requester_party],
             "#daml-signer:Signer:SignRequest",
             serde_json::to_value(&expected_event)?,
         )
         .await?;
-    let (sign_request_cid, sign_request_template_id) =
+    let (sign_request_cid, _) =
         integration_tests::canton::find_created_contract(&sign_request, "SignRequest")?;
-
-    let sign_request_disclosure = client
-        .get_disclosed_contract(
-            &[&canton.operator_party],
-            &sign_request_template_id,
-            &sign_request_cid,
-        )
-        .await?;
 
     client
         .exercise_choice(
@@ -72,7 +64,7 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
                 "nonceCid": &canton.nonce_cid,
                 "requester": &canton.requester_party,
             }),
-            &[canton.signer_disclosure.clone(), sign_request_disclosure],
+            std::slice::from_ref(&canton.signer_disclosure),
         )
         .await?;
     tracing::info!("canton sign request submitted via Signer");
@@ -101,7 +93,7 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     let anvil_rpc_url = &eth_ctx.sandbox.external_http_endpoint;
     let anvil = ProviderBuilder::new().connect_http(anvil_rpc_url.parse()?);
 
-    let mpc_signature = parse_der_signature(&sig_payload.signature)?;
+    let mpc_signature = parse_canton_signature(&sig_payload.signature)?;
     let unsigned_tx = to_tx_eip1559(&evm_params)?;
     let mut unsigned_rlp = Vec::new();
     unsigned_tx.encode_for_signing(&mut unsigned_rlp);
@@ -111,17 +103,15 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
         "test-sender",
         &canton.requester_party,
     );
-    let derived_pk = mpc_crypto::derive_key(root_pk, sign_epsilon);
     let expected_sender_addr = derive_user_address(root_pk, sign_epsilon);
 
-    let signature_with_recovery =
-        resolve_signature_recovery_id(&unsigned_rlp, mpc_signature, &derived_pk)?;
-    let y_parity = signature_with_recovery.recovery_id == 1;
+    // recovery_id is now preserved from Canton, no brute-force needed
+    let y_parity = mpc_signature.recovery_id == 1;
 
-    let r_bytes: [u8; 32] = mpc_crypto::x_coordinate(&signature_with_recovery.big_r)
+    let r_bytes: [u8; 32] = mpc_crypto::x_coordinate(&mpc_signature.big_r)
         .to_bytes()
         .into();
-    let s_bytes: [u8; 32] = signature_with_recovery.s.to_bytes().into();
+    let s_bytes: [u8; 32] = mpc_signature.s.to_bytes().into();
 
     anvil
         .anvil_set_balance(
@@ -166,7 +156,7 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     tracing::info!(request_id = %respond_payload.request_id, "received RespondBidirectionalEvent");
 
     // 7. Verify the Phase 2 response signature
-    let respond_signature = parse_der_signature(&respond_payload.signature)?;
+    let respond_signature = parse_canton_signature(&respond_payload.signature)?;
     let response_hash =
         mpc_node::respond_bidirectional::calculate_respond_bidirectional_hash_message(
             &hex::decode(&respond_payload.request_id)?,
