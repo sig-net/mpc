@@ -581,7 +581,7 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
     let node_futures = spawner
         .accounts
         .iter()
-        .zip(std::mem::take(&mut spawner.node_binary_sources).into_iter())
+        .zip(std::mem::take(&mut spawner.node_binary_sources))
         .map(|(account, source)| {
             let binary_path = source.binary_path().unwrap();
             local::Node::run_with_binary(&ctx, cfg, account, binary_path)
