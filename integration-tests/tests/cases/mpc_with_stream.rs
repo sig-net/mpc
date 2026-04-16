@@ -22,28 +22,22 @@ fn sign_request(seed: u32) -> IndexedSignRequest {
     )
 }
 
+/// Simple test, mostly just here to check the MockStream setup is working.
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_sign() {
     let network = MpcFixtureBuilder::default()
         .only_generate_signatures()
-        .with_mock_stream(MockStream::default())
+        .with_mock_stream(Chain::Solana, MockStream::default())
         .await
         .build()
         .await;
 
     tracing::info!("sending requests now");
-    let request = [sign_request(0)];
-    // TODO: abstraction to send to all
-    network[0].mock_streams[0].sign_requests(&request).await;
-    network[1].mock_streams[0].sign_requests(&request).await;
-    network[2].mock_streams[0].sign_requests(&request).await;
-
-    network[0].mock_streams[0].progress_block_height(1).await;
-    network[1].mock_streams[0].progress_block_height(1).await;
-    network[2].mock_streams[0].progress_block_height(1).await;
+    network
+        .process_sign_requests(Chain::Solana, &[sign_request(0)])
+        .await;
 
     let timeout = Duration::from_secs(10);
-
     let actions = network.assert_actions(1, timeout).await;
 
     assert_eq!(actions.len(), 1);
@@ -54,33 +48,54 @@ async fn test_sign() {
     );
 }
 
+/// Common checker function called with different parameters in test case below.
 async fn check_channel_contention(
+    // number of blocks with requests to send
     num_blocks: usize,
+    // number of requests within each block
     req_per_block: usize,
+    // how many signatures should be generated successfully, usually
+    // `num_blocks` * `req_per_block`
     expected_signatures: usize,
+    // add an observation delay between nodes
+    observation_delay: Option<Duration>,
 ) {
-    let network = MpcFixtureBuilder::default()
+    let num_nodes = 3;
+    let threshold = 2;
+    let network = MpcFixtureBuilder::new(num_nodes as u32, threshold)
         .only_generate_signatures()
-        .with_mock_stream(MockStream::default())
+        .with_mock_stream(Chain::Solana, MockStream::default())
         .await
         .build()
         .await;
 
-    let num_nodes = 3;
+    // prepare blocks but do not send process them, yet
     for outer in 0..(num_blocks as u16) {
         let requests = (0..req_per_block)
             .map(|inner| sign_request(outer as u32 * req_per_block as u32 + inner as u32))
             .collect::<Vec<_>>();
 
         for i in 0..num_nodes {
-            network[i].mock_streams[0].sign_requests(&requests).await;
+            network[i]
+                .mock_streams
+                .get(&Chain::Solana)
+                .unwrap()
+                .prepare_block_of_sign_requests(&requests)
+                .await;
         }
     }
 
+    // start sending requests, with optional observation delays between nodes
     for i in 0..num_nodes {
-        network[i].mock_streams[0]
+        network[i]
+            .mock_streams
+            .get(&Chain::Solana)
+            .unwrap()
             .progress_block_height(num_blocks)
             .await;
+        if let Some(delay) = observation_delay {
+            tokio::time::sleep(delay).await;
+        }
     }
 
     let actions = network
@@ -97,28 +112,36 @@ async fn check_channel_contention(
 
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_channel_contention_many_requests_per_block() {
-    check_channel_contention(1, 50, 50).await;
+    check_channel_contention(1, 50, 50, None).await;
 }
+
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_channel_contention_multiple_blocks_at_once() {
-    check_channel_contention(5, 10, 50).await;
+    check_channel_contention(5, 10, 50, None).await;
+}
+
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_channel_contention_multiple_blocks_at_once_delayed() {
+    // delay should be > ORGANIZE_POSIT_TIMEOUT
+    let delay = mpc_node::protocol::signature::organize_posit_timeout() * 3 / 2;
+    check_channel_contention(5, 10, 50, Some(delay)).await;
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_channel_contention_show_limit() {
     // There are exactly enough presignatures in the fixture input for 75 signatures.
-    check_channel_contention(6, 50, 75).await;
+    check_channel_contention(6, 50, 75, None).await;
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_channel_contention_10k_requests() {
     // sending 100 x 100 requests at once
-    check_channel_contention(100, 100, 75).await;
+    check_channel_contention(100, 100, 75, None).await;
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
 #[allow(non_snake_case)]
 async fn test_channel_contention_1M_requests() {
     // sending 1000 x 1000 requests at once
-    check_channel_contention(1000, 1000, 75).await;
+    check_channel_contention(1000, 1000, 75, None).await;
 }

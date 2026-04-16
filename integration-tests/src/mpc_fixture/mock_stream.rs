@@ -62,14 +62,16 @@ impl MockStream {
         guard.progress_block_height(steps)
     }
 
-    pub async fn sign_requests(&self, requests: &[IndexedSignRequest]) {
+    /// Add a future block that contains signature requesting events.
+    pub async fn prepare_block_of_sign_requests(&self, requests: &[IndexedSignRequest]) {
         let mut guard = self.inner.lock().await;
-        guard.sign_requests(requests)
+        guard.prepare_block_of_sign_requests(requests)
     }
 
-    pub async fn rpc_actions(&self, actions: &[RpcAction]) {
+    /// Add a future block that contains events corresponding to the provided rpc actions.
+    pub async fn prepare_block_of_rpc_actions(&self, actions: &[RpcAction]) {
         let mut guard = self.inner.lock().await;
-        guard.rpc_actions(actions)
+        guard.prepare_block_of_rpc_actions(actions)
     }
 }
 
@@ -86,7 +88,7 @@ impl InnerMockStream {
     }
 
     /// Add a future block that contains signature requesting events.
-    pub fn sign_requests(&mut self, requests: &[IndexedSignRequest]) {
+    pub fn prepare_block_of_sign_requests(&mut self, requests: &[IndexedSignRequest]) {
         let mut block = Vec::new();
 
         for request in requests {
@@ -102,7 +104,7 @@ impl InnerMockStream {
     }
 
     /// Add a future block that contains events corresponding to the provided rpc actions.
-    pub fn rpc_actions(&mut self, actions: &[RpcAction]) {
+    pub fn prepare_block_of_rpc_actions(&mut self, actions: &[RpcAction]) {
         let mut block = Vec::new();
 
         for action in actions {

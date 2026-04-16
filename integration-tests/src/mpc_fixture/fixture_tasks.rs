@@ -87,7 +87,7 @@ pub(super) fn test_mock_network(
                     actions_log.insert(action_str);
                     let block = [rpc];
                     for stream in &mock_streams {
-                        stream.rpc_actions(&block).await;
+                        stream.prepare_block_of_rpc_actions(&block).await;
                     }
                 }
 

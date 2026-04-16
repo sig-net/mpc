@@ -33,6 +33,7 @@ use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
 use mpc_node::storage::{secret_storage, triple_storage::TriplePair, Options};
+use mpc_primitives::Chain;
 use near_sdk::AccountId;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -58,7 +59,7 @@ struct MpcFixtureNodeBuilder {
     config: Config,
     messaging: NodeMessagingBuilder,
     key_info: Option<NodeKeyInfo>,
-    mock_streams: Vec<MockStream>,
+    mock_streams: HashMap<Chain, MockStream>,
 }
 
 /// Config options for the test setup.
@@ -428,9 +429,14 @@ impl MpcFixtureBuilder {
     ///
     /// Each node will have a independent deep-clone of the provided stream.
     /// Events are thus delivered to all nodes.
-    pub async fn with_mock_stream(mut self, stream: MockStream) -> Self {
+    pub async fn with_mock_stream(mut self, chain: Chain, stream: MockStream) -> Self {
         for node in &mut self.prepared_nodes {
-            node.mock_streams.push(stream.deep_clone().await)
+            let cloned = stream.deep_clone().await;
+            let prev = node.mock_streams.insert(chain, cloned);
+            assert!(
+                prev.is_none(),
+                "test setup only supports one stream per chain"
+            );
         }
         self
     }
@@ -481,7 +487,7 @@ impl MpcFixtureNodeBuilder {
             config,
             messaging,
             key_info: None,
-            mock_streams: vec![],
+            mock_streams: Default::default(),
         }
     }
 
@@ -549,8 +555,9 @@ impl MpcFixtureNodeBuilder {
 
         let backlog = Backlog::new();
 
+        let flat_mock_streams = self.mock_streams.values().cloned().collect::<Vec<_>>();
         fixture_tasks::start_mock_stream_tasks(
-            &self.mock_streams,
+            &flat_mock_streams,
             sign_tx.clone(),
             backlog.clone(),
             context.contract_state.clone(),
@@ -567,7 +574,7 @@ impl MpcFixtureNodeBuilder {
             mesh_tx.clone(),
             config_tx.clone(),
             self.messaging.filter,
-            self.mock_streams.clone(),
+            flat_mock_streams.clone(),
         );
 
         // --- SyncChannel and SyncTask setup ---

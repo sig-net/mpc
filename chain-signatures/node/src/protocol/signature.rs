@@ -1556,6 +1556,10 @@ impl PendingPresignature {
     }
 }
 
+#[cfg(feature = "test-feature")]
+pub fn organize_posit_timeout() -> Duration {
+    ORGANIZE_POSIT_TIMEOUT
+}
 #[cfg(test)]
 mod tests {
     use super::*;

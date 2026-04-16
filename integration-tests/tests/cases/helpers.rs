@@ -139,7 +139,7 @@ pub(crate) async fn assert_presig_owned_state(
 pub fn test_sign_arg(seed: impl Into<u32>) -> SignArgs {
     let seed = seed.into();
     // entropy should have well-distributed bits even in tests
-    let entropy: [u8; 32] = sha2::Sha256::digest(&seed.to_be_bytes())
+    let entropy: [u8; 32] = sha2::Sha256::digest(seed.to_be_bytes())
         .as_slice()
         .try_into()
         .expect("digest length should be 32");
