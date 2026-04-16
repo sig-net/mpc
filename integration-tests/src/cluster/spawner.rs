@@ -37,13 +37,13 @@ pub enum PregeneratedKeys {
 }
 
 impl PregeneratedKeys {
-    /// Load pregenerated keys for the given number of nodes from fixture data
-    pub fn load(num_nodes: usize) -> Option<Self> {
-        let data = match num_nodes {
-            3 => include_str!("../mpc_fixture/3_nodes.json"),
-            5 => include_str!("../mpc_fixture/5_nodes.json"),
-            other => {
-                tracing::warn!("No pregenerated keys for {other} nodes available");
+    /// Load pregenerated keys for the given number of nodes and threshold from fixture data.
+    pub fn load(num_nodes: usize, threshold: usize) -> Option<Self> {
+        let data = match (num_nodes, threshold) {
+            (3, 2) => include_str!("../mpc_fixture/3_nodes_2_threshold.json"),
+            (5, 4) => include_str!("../mpc_fixture/5_nodes_4_threshold.json"),
+            _ => {
+                tracing::warn!("No pregenerated keys for {num_nodes} nodes, threshold {threshold}");
                 return None;
             }
         };
@@ -137,9 +137,10 @@ impl Default for ClusterSpawner {
         tmp_dir.push("tmp");
 
         let nodes = 3;
+        let threshold = 2;
         let cfg = NodeConfig {
             nodes,
-            threshold: 2,
+            threshold,
             ..Default::default()
         };
         Self {
@@ -159,7 +160,7 @@ impl Default for ClusterSpawner {
             solana: None,
             program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
-            pregenerated_keys: PregeneratedKeys::load(nodes).unwrap(),
+            pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
             use_ethereum: false,
             node_binary_sources: vec![NodeBinarySource::CurrentCode; nodes],
         }
@@ -243,8 +244,8 @@ impl ClusterSpawner {
 
     fn load_pregenerated_keys(mut self) -> Self {
         if self.pregenerated_keys.is_enabled() && self.pregenerated_keys.len() != self.cfg.nodes {
-            self.pregenerated_keys =
-                PregeneratedKeys::load(self.cfg.nodes).unwrap_or(PregeneratedKeys::Disabled);
+            self.pregenerated_keys = PregeneratedKeys::load(self.cfg.nodes, self.cfg.threshold)
+                .unwrap_or(PregeneratedKeys::Disabled);
         }
         self
     }
