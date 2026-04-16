@@ -8,6 +8,7 @@ use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use mpc_primitives::{SignArgs, LATEST_MPC_KEY_VERSION};
+use sha2::Digest;
 
 pub(crate) fn dummy_presignature(id: u64) -> Presignature {
     dummy_presignature_with_holders(id, vec![Participant::from(1), Participant::from(2)])
@@ -137,8 +138,11 @@ pub(crate) async fn assert_presig_owned_state(
 
 pub fn test_sign_arg(seed: impl Into<u32>) -> SignArgs {
     let seed = seed.into();
-    let mut entropy = [1; 32];
-    entropy[0..4].copy_from_slice(&seed.to_be_bytes());
+    // entropy should have well-distributed bits even in tests
+    let entropy: [u8; 32] = sha2::Sha256::digest(&seed.to_be_bytes())
+        .as_slice()
+        .try_into()
+        .expect("digest length should be 32");
     SignArgs {
         entropy,
         epsilon: k256::Scalar::default(),
