@@ -95,31 +95,30 @@ async fn check_channel_contention(
     );
 }
 
-// WIP: up to 50 seems to work fine
-
 #[test(tokio::test(flavor = "multi_thread"))]
-async fn test_channel_contention_ok_a() {
+async fn test_channel_contention_many_requests_per_block() {
     check_channel_contention(1, 50, 50).await;
 }
 #[test(tokio::test(flavor = "multi_thread"))]
-async fn test_channel_contention_ok_b() {
+async fn test_channel_contention_multiple_blocks_at_once() {
     check_channel_contention(5, 10, 50).await;
 }
 
-// WIP: proof that there are enough Ps for more signatures for more than 50
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_channel_contention_show_limit() {
+    // There are exactly enough presignatures in the fixture input for 75 signatures.
     check_channel_contention(6, 50, 75).await;
 }
 
-// TODO: find out why it stops at 50 signatures
-#[should_panic(expected = "should produce enough signatures")]
 #[test(tokio::test(flavor = "multi_thread"))]
-async fn test_channel_contention_nok_a() {
-    check_channel_contention(1, 51, 51).await;
+async fn test_channel_contention_10k_requests() {
+    // sending 100 x 100 requests at once
+    check_channel_contention(100, 100, 75).await;
 }
-#[should_panic(expected = "should produce enough signatures")]
+
 #[test(tokio::test(flavor = "multi_thread"))]
-async fn test_channel_contention_nok_b() {
-    check_channel_contention(6, 10, 60).await;
+#[allow(non_snake_case)]
+async fn test_channel_contention_1M_requests() {
+    // sending 1000 x 1000 requests at once
+    check_channel_contention(1000, 1000, 75).await;
 }
