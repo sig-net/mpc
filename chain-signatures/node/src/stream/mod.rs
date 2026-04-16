@@ -161,7 +161,7 @@ pub async fn run_stream<S: ChainStream>(
                     tracing::info!(block, ?checkpoint, chain = %chain, "created checkpoint");
                 }
                 crate::metrics::indexers::LATEST_BLOCK_NUMBER
-                    .with_label_values(&[S::CHAIN.as_str(), "indexed"])
+                    .with_label_values(&[S::CHAIN.as_str(), "finalized"])
                     .set(block as i64);
             }
             ChainEvent::ExecutionConfirmed {
