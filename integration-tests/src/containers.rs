@@ -883,7 +883,7 @@ impl Solana {
 
         // Call initialize function
         let signature_deposit = 1_000_000u64; // 0.001 SOL in lamports
-        let chain_id = "solana:localnet".to_string(); // CAIP-2 format for local testnet
+        let chain_id = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp".to_string(); // CAIP-2 format for local testnet
 
         tracing::info!(
             program_id = %program_id,

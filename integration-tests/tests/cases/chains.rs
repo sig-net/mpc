@@ -99,7 +99,7 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
         .solana()
         .bidirectional()
         .transaction_data(unsigned_rlp.clone())
-        .caip2_id("eip155:60")
+        .caip2_id("eip155:1")
         .output_deserialization_schema(Vec::new())
         .respond_serialization_schema(Vec::new())
         .payload(msg_hash_bytes)

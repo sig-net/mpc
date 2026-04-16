@@ -205,7 +205,7 @@ async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {
     solana
         .sign_bidirectional(
             &serialized_tx,
-            "solana:localnet",
+            "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
             LATEST_MPC_KEY_VERSION,
             "test",
             "secp256k1",
