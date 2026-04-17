@@ -1,12 +1,11 @@
 use anyhow::{Context as _, Result};
-use integration_tests::canton::CantonSandbox;
+use integration_tests::canton::{test_sign_request_event, CantonSandbox};
 use mpc_node::backlog::Backlog;
-use mpc_node::indexer_canton::CantonStream;
-use mpc_node::protocol::Chain;
-use mpc_node::protocol::IndexedSignRequest;
+use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
+use mpc_node::protocol::{Chain, IndexedSignRequest, SignKind};
 use mpc_node::stream::ops::SignatureRespondedEvent;
 use mpc_node::stream::{ChainEvent, ChainStream};
-use mpc_primitives::LATEST_MPC_KEY_VERSION;
+use mpc_primitives::{ScalarExt, Signature, LATEST_MPC_KEY_VERSION};
 use serde_json::json;
 use serial_test::serial;
 use std::collections::HashSet;
@@ -51,6 +50,7 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
     let backlog = Backlog::new();
     let mut stream = stream_canton(&sandbox, backlog).await?;
 
+    let expected_event = test_sign_request_event(&sandbox);
     sandbox.submit_sign_request().await?;
 
     let event = wait_for_sign_request(&mut stream, 30).await?;
@@ -58,17 +58,40 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
     assert_eq!(event.chain, Chain::Canton);
     assert_eq!(event.args.key_version, LATEST_MPC_KEY_VERSION);
     assert_eq!(event.args.path, sandbox.requester_party);
-    assert!(
-        matches!(
-            event.kind,
-            mpc_node::protocol::SignKind::SignBidirectional(_)
-        ),
-        "expected SignBidirectional, got {:?}",
-        event.kind
-    );
     assert_ne!(
         event.id.request_id, [0u8; 32],
         "request_id should not be zero"
+    );
+
+    // Verify payload round-trips: the indexer RLP-encodes the EVM tx params and
+    // hashes the result — the scalar must match what we'd compute from the
+    // known test_evm_params.
+    let rlp = mpc_node::indexer_canton::rlp_encode_unsigned_eip1559(
+        &integration_tests::canton::test_evm_params(),
+    );
+    let expected_hash = mpc_node::sign_bidirectional::hash_rlp_data(rlp);
+    let expected_payload = <k256::Scalar as ScalarExt>::from_bytes(expected_hash)
+        .expect("test tx hash must be a valid scalar");
+    assert_eq!(
+        event.args.payload, expected_payload,
+        "payload should match keccak256 of RLP-encoded test EVM tx"
+    );
+
+    // Verify bidirectional inner fields survive the indexer pipeline.
+    let SignKind::SignBidirectional(ref bidir) = event.kind else {
+        panic!("expected SignBidirectional, got {:?}", event.kind);
+    };
+    assert_eq!(bidir.caip2_id(), expected_event.caip2_id);
+    assert_eq!(bidir.dest(), expected_event.dest);
+    assert_eq!(bidir.key_version(), expected_event.key_version);
+    assert_eq!(bidir.path(), expected_event.path);
+    assert_eq!(
+        bidir.output_deserialization_schema(),
+        expected_event.output_deserialization_schema.as_bytes()
+    );
+    assert_eq!(
+        bidir.respond_serialization_schema(),
+        expected_event.respond_serialization_schema.as_bytes()
     );
     Ok(())
 }
@@ -298,15 +321,21 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     let backlog = Backlog::new();
     let mut stream = stream_canton(&sandbox, backlog).await?;
 
-    // Submit a sign request, then use the MPC-computed request ID from the stream event
     sandbox.submit_sign_request().await?;
     let sign_event = wait_for_sign_request(&mut stream, 30).await?;
     assert_eq!(sign_event.chain, Chain::Canton);
     let request_id = hex::encode(sign_event.id.request_id);
 
-    // Exercise Signer.Respond directly (no MPC cluster — we mock the response).
-    // DER signature with valid secp256k1 scalars (r=1, s=1) — not cryptographically
-    // meaningful but parseable by k256::ecdsa::Signature::from_der.
+    // Build a valid on-curve signature using the secp256k1 generator point,
+    // then DER-encode it — this mirrors how the real MPC respond path works.
+    let expected_big_r = k256::ProjectivePoint::GENERATOR.to_affine();
+    let expected_s = k256::Scalar::from(11u64);
+    let expected_recovery_id: u8 = 0;
+
+    let mpc_sig = Signature::new(expected_big_r, expected_s, expected_recovery_id);
+    let der_bytes = der_encode_signature(&mpc_sig)?;
+    let der_hex = hex::encode(&der_bytes);
+
     sandbox
         .client
         .exercise_choice(
@@ -321,8 +350,8 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
                 "signature": {
                     "tag": "EcdsaSig",
                     "value": {
-                        "der": "3006020101020101",
-                        "recoveryId": 0,
+                        "der": &der_hex,
+                        "recoveryId": expected_recovery_id,
                     },
                 },
             }),
@@ -330,13 +359,14 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
         )
         .await?;
 
-    // Poll for Respond event and verify fields match
     let mut saw_respond = false;
     for _ in 0..10 {
         match timeout(Duration::from_secs(5), stream.next_event()).await {
             Ok(Some(ChainEvent::Respond(SignatureRespondedEvent::Canton(ev)))) => {
                 assert_eq!(hex::encode(ev.request_id), request_id);
-                assert_eq!(ev.signature.s, k256::Scalar::from(1u64));
+                assert_eq!(ev.signature.big_r, expected_big_r);
+                assert_eq!(ev.signature.s, expected_s);
+                assert_eq!(ev.signature.recovery_id, expected_recovery_id);
                 saw_respond = true;
                 break;
             }
@@ -348,6 +378,58 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     assert!(saw_respond, "expected Respond event from Canton stream");
     Ok(())
 }
+
+/// Verify bidirectional inner fields are fully parsed from the Canton ledger event.
+/// Mirrors Solana's test_solana_stream_parse_sign_bidirectional — Canton always
+/// submits SignBidirectional, but we assert the structured inner fields here.
+#[ignore] // requires dpm
+#[serial]
+#[test(tokio::test)]
+async fn test_canton_stream_parse_sign_bidirectional_fields() -> Result<()> {
+    let mut sandbox = CantonSandbox::run().await?;
+    let backlog = Backlog::new();
+    let mut stream = stream_canton(&sandbox, backlog).await?;
+
+    let expected_event = test_sign_request_event(&sandbox);
+    sandbox.submit_sign_request().await?;
+
+    let req = wait_for_sign_request(&mut stream, 30).await?;
+    assert_eq!(req.chain, Chain::Canton);
+
+    let SignKind::SignBidirectional(ref bidir) = req.kind else {
+        panic!("expected SignBidirectional, got {:?}", req.kind);
+    };
+
+    assert_eq!(bidir.caip2_id(), expected_event.caip2_id);
+    assert_eq!(bidir.dest(), expected_event.dest);
+    assert_eq!(bidir.path(), expected_event.path);
+    assert_eq!(bidir.key_version(), expected_event.key_version);
+    assert!(
+        matches!(bidir, mpc_node::stream::ops::SignBidirectionalEvent::Canton(_)),
+        "expected Canton variant"
+    );
+    assert_eq!(
+        bidir.target_chain(),
+        Some(Chain::Ethereum),
+        "dest='ethereum' should parse to Chain::Ethereum"
+    );
+    assert_eq!(
+        bidir.output_deserialization_schema(),
+        expected_event.output_deserialization_schema.as_bytes()
+    );
+    assert_eq!(
+        bidir.respond_serialization_schema(),
+        expected_event.respond_serialization_schema.as_bytes()
+    );
+    assert!(!bidir.serialized_transaction().is_empty(), "RLP-encoded tx should not be empty");
+    Ok(())
+}
+
+// NOTE: No execution-confirmation test for Canton's stream. ExecutionConfirmed
+// is emitted only by the Ethereum indexer (nonce-staleness check). Canton acts
+// as a *source* chain for bidirectional flows — the target chain (Ethereum)
+// emits ExecutionConfirmed. The full Canton→Ethereum path is covered by the
+// integration test in test_canton_eth_bidirectional_flow (canton.rs).
 
 #[ignore] // requires dpm
 #[serial]
