@@ -62,9 +62,10 @@ struct MpcFixtureNodeBuilder {
 ///
 /// This struct is used to change settings before building the final network.
 struct FixtureConfig {
-    input: FixtureInput,
     num_nodes: u32,
+    threshold: usize,
 
+    use_preshared_key: bool,
     use_preshared_triples: bool,
     use_preshared_presignatures: bool,
 
@@ -113,11 +114,12 @@ impl Default for MpcFixtureBuilder {
 }
 
 impl FixtureConfig {
-    fn new(num_nodes: u32) -> Self {
+    fn new(num_nodes: u32, threshold: usize) -> Self {
         let defaults = ProtocolConfig::default();
         Self {
-            input: FixtureInput::load(num_nodes),
             num_nodes,
+            threshold,
+            use_preshared_key: false,
             use_preshared_triples: false,
             use_preshared_presignatures: false,
             node_min_triples: 10,
@@ -165,12 +167,56 @@ impl MpcFixtureBuilder {
             participants,
             participants_by_id,
             candidates,
-            fixture_config: FixtureConfig::new(num_nodes),
+            fixture_config: FixtureConfig::new(num_nodes, threshold),
             output: SharedOutput::default(),
         }
     }
 
     pub async fn build(mut self) -> MpcFixture {
+        let needs_fixture = self.fixture_config.use_preshared_key
+            || self.fixture_config.use_preshared_triples
+            || self.fixture_config.use_preshared_presignatures;
+
+        let mut fixture_input = if needs_fixture {
+            Some(FixtureInput::load(
+                self.fixture_config.num_nodes,
+                self.fixture_config.threshold,
+            ))
+        } else {
+            None
+        };
+
+        if self.fixture_config.use_preshared_key {
+            let input = fixture_input.as_ref().unwrap();
+            let keys = &input.keys;
+            let public_key = keys.first_key_value().unwrap().1.public_key;
+            self.shared_public_key = Some(public_key);
+
+            self.protocol_state = ProtocolState::Running(RunningContractState {
+                epoch: 0,
+                public_key,
+                participants: self.participants.clone(),
+                candidates: self.candidates.clone(),
+                join_votes: Votes::default(),
+                leave_votes: Default::default(),
+                threshold: self.threshold,
+            });
+
+            for node in &mut self.prepared_nodes {
+                node.key_info = keys.get(&node.me).cloned();
+            }
+        }
+
+        // Clear parts of the fixture that weren't requested.
+        if let Some(input) = fixture_input.as_mut() {
+            if !self.fixture_config.use_preshared_triples {
+                input.triples.clear();
+            }
+            if !self.fixture_config.use_preshared_presignatures {
+                input.presignatures.clear();
+            }
+        }
+
         let finalized_protocol_config = self.build_protocol_config();
         let redis_container = redis().await;
         let routing_table = self.build_routing_table();
@@ -202,7 +248,7 @@ impl MpcFixtureBuilder {
                 .start(
                     node_context,
                     shared_contract_state_tx.clone(),
-                    &mut self.fixture_config,
+                    &mut fixture_input,
                     &output,
                 )
                 .await;
@@ -269,24 +315,7 @@ impl MpcFixtureBuilder {
     }
 
     pub fn with_preshared_key(mut self) -> Self {
-        let keys = &self.fixture_config.input.keys;
-        let public_key = keys.first_key_value().unwrap().1.public_key;
-        self.shared_public_key = Some(public_key);
-
-        self.protocol_state = ProtocolState::Running(RunningContractState {
-            epoch: 0,
-            public_key: self.shared_public_key.unwrap(),
-            participants: self.participants.clone(),
-            candidates: self.candidates.clone(),
-            join_votes: Votes::default(),
-            leave_votes: Default::default(),
-            threshold: self.threshold,
-        });
-
-        for node in &mut self.prepared_nodes {
-            node.key_info = keys.get(&node.me).cloned();
-        }
-
+        self.fixture_config.use_preshared_key = true;
         self
     }
 
@@ -445,14 +474,14 @@ impl MpcFixtureNodeBuilder {
         mut self,
         context: MockedNodeContext,
         protocol_state_tx: watch::Sender<Option<ProtocolState>>,
-        fixture_config: &mut FixtureConfig,
+        fixture_input: &mut Option<FixtureInput>,
         shared_output: &SharedOutput,
     ) -> MpcFixtureNode {
         // overwrite the default protocol config with the built config
         self.config.protocol = context.protocol_config.clone();
 
         // build storage
-        let storage = self.build_storage(&context, fixture_config).await;
+        let storage = self.build_storage(&context, fixture_input).await;
         let triple_storage = storage.triple_storage.clone();
         let presignature_storage = storage.presignature_storage.clone();
 
@@ -550,7 +579,7 @@ impl MpcFixtureNodeBuilder {
     async fn build_storage(
         &self,
         context: &MockedNodeContext,
-        fixture_config: &mut FixtureConfig,
+        fixture_input: &mut Option<FixtureInput>,
     ) -> protocol::test_setup::TestProtocolStorage {
         let secret_storage = if let Some(key) = &self.key_info {
             secret_storage::test_store(0, key.private_share, key.public_key)
@@ -572,9 +601,16 @@ impl MpcFixtureNodeBuilder {
             TriplePair::storage(&context.redis_pool, &self.participant_info.account_id);
         triple_storage.set_me(self.me);
 
-        if fixture_config.use_preshared_triples {
-            // removing here because we can't clone a triple
-            let my_shares = fixture_config.input.triples.remove(&self.me).unwrap();
+        if fixture_input
+            .as_ref()
+            .is_some_and(|i| !i.triples.is_empty())
+        {
+            let my_shares = fixture_input
+                .as_mut()
+                .unwrap()
+                .triples
+                .remove(&self.me)
+                .unwrap();
             for (owner, triple_shares) in my_shares {
                 for mut pair in triple_shares {
                     let pair_id = pair.id;
@@ -591,9 +627,16 @@ impl MpcFixtureNodeBuilder {
             Presignature::storage(&context.redis_pool, &self.participant_info.account_id);
         presignature_storage.set_me(self.me);
 
-        if fixture_config.use_preshared_presignatures {
-            // removing here because we can't clone a presignature
-            let my_shares = fixture_config.input.presignatures.remove(&self.me).unwrap();
+        if fixture_input
+            .as_ref()
+            .is_some_and(|i| !i.presignatures.is_empty())
+        {
+            let my_shares = fixture_input
+                .as_mut()
+                .unwrap()
+                .presignatures
+                .remove(&self.me)
+                .unwrap();
             for (owner, presignature_shares) in my_shares {
                 for mut presignature_share in presignature_shares {
                     if presignature_share.holders.is_none() {

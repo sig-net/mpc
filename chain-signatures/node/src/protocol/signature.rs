@@ -448,7 +448,7 @@ impl SignPositor {
                     ctx.msg
                         .send(
                             ctx.me,
-                            proposer,
+                            *from,
                             PositMessage {
                                 id: PositProtocolId::Signature(
                                     sign_id,
