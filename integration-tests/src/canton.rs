@@ -53,8 +53,8 @@ pub fn test_sign_request_event(sandbox: &CantonSandbox) -> SignBidirectionalRequ
         dest: "ethereum".to_string(),
         params: String::new(),
         nonce_cid_text: sandbox.nonce_cid.clone(),
-        output_deserialization_schema: r#"[{"name":"","type":"bool"}]"#.to_string(),
-        respond_serialization_schema: r#"[{"name":"","type":"bool"}]"#.to_string(),
+        output_deserialization_schema: r#"[{"name":"output","type":"bool"}]"#.to_string(),
+        respond_serialization_schema: r#"[{"name":"respond","type":"bool"}]"#.to_string(),
     }
 }
 
