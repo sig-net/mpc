@@ -15,10 +15,7 @@ use alloy_json_abi::Function;
 /// `selector || encoded_args`. The `encoded_args_hex` blob is the full
 /// ABI-encoded parameter tuple (may include dynamic-type head+tail words);
 /// no arg-count or per-arg size checks are performed here.
-pub fn build_calldata(
-    function_signature: &str,
-    encoded_args_hex: &str,
-) -> anyhow::Result<Vec<u8>> {
+pub fn build_calldata(function_signature: &str, encoded_args_hex: &str) -> anyhow::Result<Vec<u8>> {
     let full_sig = format!("function {function_signature}");
     Function::parse(&full_sig).map_err(|e| {
         anyhow::anyhow!("failed to parse function signature '{function_signature}': {e}")

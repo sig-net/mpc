@@ -59,7 +59,10 @@ pub fn to_tx_eip1559(p: &CantonEvmTransactionParams) -> anyhow::Result<TxEip1559
         max_priority_fee_per_gas: p.parse_max_priority_fee()?,
         to: TxKind::Call(p.parse_to_address()?),
         value: p.parse_value()?,
-        input: Bytes::from(calldata::build_calldata(&p.function_signature, &p.encoded_args)?),
+        input: Bytes::from(calldata::build_calldata(
+            &p.function_signature,
+            &p.encoded_args,
+        )?),
         access_list: Default::default(),
     })
 }

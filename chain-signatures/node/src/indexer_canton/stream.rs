@@ -284,7 +284,11 @@ async fn subscribe_and_process(
         }
 
         if !*catchup_completed && *counter >= catchup_target {
-            tracing::info!(counter = *counter, catchup_target, "canton catchup completed");
+            tracing::info!(
+                counter = *counter,
+                catchup_target,
+                "canton catchup completed"
+            );
             if tx.send(ChainEvent::CatchupCompleted).await.is_err() {
                 tracing::error!("canton event channel closed");
                 return Ok(());
@@ -555,9 +559,9 @@ pub fn parse_der_signature_with_recovery(
 ) -> anyhow::Result<Signature> {
     use k256::elliptic_curve::{point::DecompressPoint, subtle::Choice};
 
-    let sig = k256::ecdsa::Signature::from_der(
-        &hex::decode(hex_str.strip_prefix("0x").unwrap_or(hex_str))?,
-    )?;
+    let sig = k256::ecdsa::Signature::from_der(&hex::decode(
+        hex_str.strip_prefix("0x").unwrap_or(hex_str),
+    )?)?;
     let (r, s) = sig.split_scalars();
 
     // Use correct parity based on recovery_id
@@ -572,4 +576,3 @@ pub fn parse_der_signature_with_recovery(
         recovery_id,
     })
 }
-

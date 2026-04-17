@@ -143,4 +143,3 @@ pub struct RespondBidirectionalEventPayload {
     pub serialized_output: String,
     pub signature: CantonSignature,
 }
-

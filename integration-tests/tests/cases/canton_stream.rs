@@ -2,7 +2,6 @@ use anyhow::{Context as _, Result};
 use integration_tests::canton::CantonSandbox;
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_canton::CantonStream;
-use mpc_node::rpc::CantonClient;
 use mpc_node::protocol::Chain;
 use mpc_node::protocol::IndexedSignRequest;
 use mpc_node::stream::ops::SignatureRespondedEvent;
@@ -19,9 +18,8 @@ use tokio::time::timeout;
 /// Accepts Backlog as parameter (needed for checkpoint tests).
 async fn stream_canton(sandbox: &CantonSandbox, backlog: Backlog) -> Result<CantonStream> {
     let config = sandbox.get_config();
-    let client = CantonClient::new(&config).await?;
     let mut stream =
-        CantonStream::new(Some(client), backlog).context("failed to create CantonStream")?;
+        CantonStream::new(Some(config), backlog).context("failed to create CantonStream")?;
     ChainStream::start(&mut stream).await;
     Ok(stream)
 }
