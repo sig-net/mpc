@@ -15,8 +15,6 @@ pub use stream::{parse_canton_signature, CantonStream};
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::ops::{SignBidirectionalEvent, SignatureEvent};
-use mpc_primitives::MAX_SECP256K1_SCALAR;
-
 use alloy::consensus::TxEip1559;
 use alloy::primitives::{Bytes, TxKind};
 use k256::Scalar;
@@ -127,11 +125,6 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
         let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
             anyhow::bail!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
         };
-
-        if payload > *MAX_SECP256K1_SCALAR {
-            tracing::warn!("payload exceeds secp256k1 curve order: {payload:?}");
-            anyhow::bail!("payload exceeds secp256k1 curve order");
-        }
 
         let sign_id = SignId::new(request_id);
         tracing::info!(?sign_id, "canton signature requested");

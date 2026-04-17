@@ -997,16 +997,6 @@ impl CantonClient {
         .await
     }
 
-    pub async fn discover_signer_cid(&self) -> anyhow::Result<(String, String)> {
-        crate::indexer_canton::discover_signer_cid(
-            &self.http_client,
-            &self.json_api_url,
-            &self.generate_jwt()?,
-            &self.party_id,
-        )
-        .await
-    }
-
     pub async fn exercise_choice(
         &self,
         command_id: &str,

@@ -10,6 +10,7 @@ struct JwtClaims {
     scope: String,
     iat: u64,
     exp: u64,
+    nbf: u64,
 }
 
 /// Generate a JWT using a pre-parsed EncodingKey.
@@ -22,6 +23,7 @@ pub fn generate_jwt_with_key(key: &EncodingKey, subject: &str) -> anyhow::Result
         scope: "daml_ledger_api".to_string(),
         iat: now,
         exp: now + 300,
+        nbf: now.saturating_sub(10),
     };
     let header = Header::new(Algorithm::ES256);
     Ok(encode(&header, &claims, key)?)
@@ -126,8 +128,10 @@ pub async fn discover_signer_cid(
     let mut filters_by_party = serde_json::Map::new();
     filters_by_party.insert(party_id.to_string(), serde_json::json!({}));
 
+    let offset = fetch_ledger_end(http_client, json_api_url, jwt_token).await?;
+
     let body = ledger_api::GetActiveContractsRequest {
-        active_at_offset: 0,
+        active_at_offset: offset,
         event_format: ledger_api::EventFormat {
             filters_by_party,
             verbose: false,

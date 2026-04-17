@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_aux::field_attributes::deserialize_number_from_string;
 
 /// EVM transaction parameters passed through the Vault contract.
-/// All fields are hex-encoded strings (padded to 64 chars).
+/// Address fields are 40-char hex (20 bytes); numeric fields are 64-char hex.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvmTransactionParams {

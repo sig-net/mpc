@@ -525,8 +525,12 @@ fn parse_respond_bidirectional_event(
     let payload: contracts::RespondBidirectionalEventPayload =
         serde_json::from_value(created.payload.clone())?;
 
-    let serialized_output = hex::decode(&payload.serialized_output)
-        .map_err(|e| anyhow::anyhow!("invalid serializedOutput hex: {e}"))?;
+    let raw = payload
+        .serialized_output
+        .strip_prefix("0x")
+        .unwrap_or(&payload.serialized_output);
+    let serialized_output =
+        hex::decode(raw).map_err(|e| anyhow::anyhow!("invalid serializedOutput hex: {e}"))?;
 
     Ok(CantonRespondBidirectionalEvent {
         request_id: parse_request_id_hex(&payload.request_id)?,
@@ -564,8 +568,11 @@ pub fn parse_der_signature_with_recovery(
     )?)?;
     let (r, s) = sig.split_scalars();
 
-    // Use correct parity based on recovery_id
-    let parity = Choice::from(recovery_id & 1);
+    anyhow::ensure!(
+        recovery_id <= 1,
+        "invalid recovery_id {recovery_id}: expected 0 or 1"
+    );
+    let parity = Choice::from(recovery_id);
 
     Ok(Signature {
         big_r: k256::AffinePoint::decompress(&r.to_bytes(), parity)
