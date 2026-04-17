@@ -23,10 +23,11 @@ pub fn test_evm_params() -> EvmTransactionParams {
     EvmTransactionParams {
         to: "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".to_string(),
         function_signature: "transfer(address,uint256)".to_string(),
-        args: vec![
+        encoded_args: format!(
+            "{}{}",
             "0".repeat(64),
-            "0000000000000000000000000000000000000000000000000000000005f5e100".to_string(),
-        ],
+            "0000000000000000000000000000000000000000000000000000000005f5e100"
+        ),
         value: "0".repeat(64),
         nonce: format!("{:0>64}", "0"),
         gas_limit: format!("{:0>64}", "186a0"),

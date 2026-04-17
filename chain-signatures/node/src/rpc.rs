@@ -918,12 +918,11 @@ impl HydrationClient {
 pub struct CantonClient {
     http_client: reqwest::Client,
     json_api_url: String,
-    /// Pre-parsed encoding key — parsed once at construction, reused for every JWT.
+    pub(crate) json_api_ws_url: String,
     encoding_key: jsonwebtoken::EncodingKey,
     jwt_subject: String,
-    party_id: String,
-    signer_cid: String,
-    /// The full templateId of the discovered Signer contract (includes package hash).
+    pub(crate) party_id: String,
+    pub(crate) signer_cid: String,
     signer_template_id: String,
 }
 
@@ -931,6 +930,7 @@ impl std::fmt::Debug for CantonClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CantonClient")
             .field("json_api_url", &self.json_api_url)
+            .field("json_api_ws_url", &self.json_api_ws_url)
             .field("encoding_key", &"<hidden>")
             .field("jwt_subject", &self.jwt_subject)
             .field("party_id", &self.party_id)
@@ -958,6 +958,7 @@ impl CantonClient {
         Ok(Self {
             http_client,
             json_api_url: config.json_api_url.clone(),
+            json_api_ws_url: config.json_api_ws_url.clone(),
             encoding_key,
             jwt_subject: config.jwt_subject.clone(),
             party_id: config.party_id.clone(),
@@ -966,9 +967,65 @@ impl CantonClient {
         })
     }
 
-    /// Generate a fresh JWT token using the pre-parsed encoding key.
-    fn generate_jwt(&self) -> anyhow::Result<String> {
+    pub fn generate_jwt(&self) -> anyhow::Result<String> {
         crate::indexer_canton::generate_jwt_with_key(&self.encoding_key, &self.jwt_subject)
+    }
+
+    pub async fn fetch_ledger_end(&self) -> anyhow::Result<u64> {
+        crate::indexer_canton::fetch_ledger_end(
+            &self.http_client,
+            &self.json_api_url,
+            &self.generate_jwt()?,
+        )
+        .await
+    }
+
+    pub async fn fetch_active_contracts(
+        &self,
+        parties: &[&str],
+        template_id: &str,
+        include_blob: bool,
+    ) -> anyhow::Result<Vec<crate::indexer_canton::ledger_api::ActiveContractEntry>> {
+        crate::indexer_canton::fetch_active_contracts(
+            &self.http_client,
+            &self.json_api_url,
+            &self.generate_jwt()?,
+            parties,
+            template_id,
+            include_blob,
+        )
+        .await
+    }
+
+    pub async fn discover_signer_cid(&self) -> anyhow::Result<(String, String)> {
+        crate::indexer_canton::discover_signer_cid(
+            &self.http_client,
+            &self.json_api_url,
+            &self.generate_jwt()?,
+            &self.party_id,
+        )
+        .await
+    }
+
+    pub async fn exercise_choice(
+        &self,
+        command_id: &str,
+        choice: &str,
+        choice_argument: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        crate::indexer_canton::exercise_choice(
+            &self.http_client,
+            &self.json_api_url,
+            &self.generate_jwt()?,
+            &self.jwt_subject,
+            &self.party_id,
+            &self.signer_template_id,
+            &self.signer_cid,
+            command_id,
+            choice,
+            choice_argument,
+        )
+        .await
     }
 }
 
@@ -1909,20 +1966,9 @@ async fn try_publish_canton(
         }
     };
 
-    let jwt_token = canton.generate_jwt()?;
-    crate::indexer_canton::exercise_choice(
-        &canton.http_client,
-        &canton.json_api_url,
-        &jwt_token,
-        &canton.jwt_subject,
-        &canton.party_id,
-        &canton.signer_template_id,
-        &canton.signer_cid,
-        &command_id,
-        choice,
-        choice_argument,
-    )
-    .await?;
+    canton
+        .exercise_choice(&command_id, choice, choice_argument)
+        .await?;
 
     tracing::info!(
         ?sign_id,

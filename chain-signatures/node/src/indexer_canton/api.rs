@@ -52,6 +52,22 @@ pub async fn check_response(
     Ok(resp)
 }
 
+/// Fetch the current ledger end offset from Canton.
+pub async fn fetch_ledger_end(
+    http_client: &reqwest::Client,
+    json_api_url: &str,
+    jwt_token: &str,
+) -> anyhow::Result<u64> {
+    let resp = http_client
+        .get(format!("{json_api_url}/v2/state/ledger-end"))
+        .bearer_auth(jwt_token)
+        .send()
+        .await?;
+    let resp = check_response(resp, "ledger-end").await?;
+    let body: ledger_api::LedgerEndResponse = resp.json().await?;
+    Ok(body.offset)
+}
+
 /// Fetch active contracts from Canton, filtered by template.
 pub async fn fetch_active_contracts(
     http_client: &reqwest::Client,
@@ -61,14 +77,7 @@ pub async fn fetch_active_contracts(
     template_id: &str,
     include_blob: bool,
 ) -> anyhow::Result<Vec<ledger_api::ActiveContractEntry>> {
-    let end: ledger_api::LedgerEndResponse = http_client
-        .get(format!("{json_api_url}/v2/state/ledger-end"))
-        .bearer_auth(jwt_token)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let offset = fetch_ledger_end(http_client, json_api_url, jwt_token).await?;
 
     let mut filters = serde_json::Map::new();
     for party in parties {
@@ -86,7 +95,7 @@ pub async fn fetch_active_contracts(
     }
 
     let req = ledger_api::GetActiveContractsRequest {
-        active_at_offset: end.offset,
+        active_at_offset: offset,
         event_format: ledger_api::EventFormat {
             filters_by_party: filters,
             verbose: true,

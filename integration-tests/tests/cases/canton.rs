@@ -40,7 +40,7 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
 
     let expected_event = test_sign_request_event(canton);
     let evm_params = test_evm_params();
-    let expected_request_id = hex::encode(compute_request_id(&expected_event));
+    let expected_request_id = hex::encode(compute_request_id(&expected_event)?);
 
     // 3. Submit sign request directly via Signer (bypasses Vault)
     let sign_request = client
@@ -95,8 +95,6 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
 
     let mpc_signature = parse_canton_signature(&sig_payload.signature)?;
     let unsigned_tx = to_tx_eip1559(&evm_params)?;
-    let mut unsigned_rlp = Vec::new();
-    unsigned_tx.encode_for_signing(&mut unsigned_rlp);
 
     let sign_epsilon = mpc_crypto::derive_epsilon_canton(
         LATEST_MPC_KEY_VERSION,

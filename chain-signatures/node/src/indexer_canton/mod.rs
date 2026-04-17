@@ -1,4 +1,5 @@
 mod api;
+mod calldata;
 pub mod contracts;
 pub mod ledger_api;
 mod request_id;
@@ -6,7 +7,7 @@ mod stream;
 
 pub use api::{
     check_response, der_encode_signature, discover_signer_cid, exercise_choice,
-    fetch_active_contracts, generate_jwt_with_key,
+    fetch_active_contracts, fetch_ledger_end, generate_jwt_with_key,
 };
 pub use request_id::compute_request_id;
 pub use stream::{parse_canton_signature, CantonStream};
@@ -17,7 +18,7 @@ use crate::stream::ops::{SignBidirectionalEvent, SignatureEvent};
 use mpc_primitives::MAX_SECP256K1_SCALAR;
 
 use alloy::consensus::TxEip1559;
-use alloy::primitives::{keccak256, Bytes, TxKind};
+use alloy::primitives::{Bytes, TxKind};
 use k256::Scalar;
 use mpc_primitives::{ScalarExt, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use std::fmt;
@@ -44,24 +45,6 @@ pub struct CantonSignatureRespondedEvent {
 }
 // NOTE: No Hash, PartialEq, Eq derives — matches HydrationSignatureRespondedEvent
 
-/// Build calldata from function signature and args.
-/// calldata = keccak256("function " + sig)[0..4] ++ concat(args)
-///
-/// TODO(test): verify selector computation against known EVM function signatures
-/// (e.g. "transfer(address,uint256)" → 0xa9059cbb) and multi-arg concatenation.
-fn build_calldata(function_signature: &str, args: &[String]) -> Vec<u8> {
-    // EVM selector = first 4 bytes of keccak256 of the bare signature,
-    // e.g. "transfer(address,uint256)", NOT prefixed with "function ".
-    let selector: [u8; 4] = keccak256(function_signature.as_bytes()).0[..4]
-        .try_into()
-        .unwrap();
-    let mut calldata = selector.to_vec();
-    for arg in args {
-        calldata.extend_from_slice(&hex::decode(arg).unwrap_or_default());
-    }
-    calldata
-}
-
 /// Convert Canton EvmTransactionParams to an alloy TxEip1559.
 ///
 /// TODO(test): test address extraction from 32-byte padded hex (Canton format)
@@ -69,14 +52,14 @@ fn build_calldata(function_signature: &str, args: &[String]) -> Vec<u8> {
 /// nonce, gas_limit, fees, value) including edge cases like leading zeros.
 pub fn to_tx_eip1559(p: &CantonEvmTransactionParams) -> anyhow::Result<TxEip1559> {
     Ok(TxEip1559 {
-        chain_id: p.parse_chain_id(),
-        nonce: p.parse_nonce(),
-        gas_limit: p.parse_gas_limit(),
-        max_fee_per_gas: p.parse_max_fee_per_gas(),
-        max_priority_fee_per_gas: p.parse_max_priority_fee(),
-        to: TxKind::Call(p.parse_to_address()),
-        value: p.parse_value(),
-        input: Bytes::from(build_calldata(&p.function_signature, &p.args)),
+        chain_id: p.parse_chain_id()?,
+        nonce: p.parse_nonce()?,
+        gas_limit: p.parse_gas_limit()?,
+        max_fee_per_gas: p.parse_max_fee_per_gas()?,
+        max_priority_fee_per_gas: p.parse_max_priority_fee()?,
+        to: TxKind::Call(p.parse_to_address()?),
+        value: p.parse_value()?,
+        input: Bytes::from(calldata::build_calldata(&p.function_signature, &p.encoded_args)?),
         access_list: Default::default(),
     })
 }
@@ -95,6 +78,8 @@ pub fn rlp_encode_unsigned_eip1559(params: &CantonEvmTransactionParams) -> Vec<u
             out
         }
         Err(e) => {
+            // Return empty vec on parse failure (matches Solana/Hydration: garbage bytes
+            // pass through here and fail downstream in sign_and_hash_transaction)
             tracing::warn!(%e, "failed to build TxEip1559 from Canton params");
             vec![]
         }
@@ -103,7 +88,16 @@ pub fn rlp_encode_unsigned_eip1559(params: &CantonEvmTransactionParams) -> Vec<u
 
 impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
-        compute_request_id(self)
+        // Note: compute_request_id can fail on malformed hex data, but the trait
+        // requires infallible request ID generation. We log and return zeros on
+        // failure — generate_sign_request will fail with a proper error anyway.
+        match compute_request_id(self) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!(%e, "failed to compute canton request_id");
+                [0u8; 32]
+            }
+        }
     }
 
     fn generate_sign_request(
@@ -117,7 +111,7 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
             anyhow::bail!("unsupported key version");
         }
 
-        let request_id = self.generate_request_id();
+        let request_id = compute_request_id(self)?;
 
         let epsilon =
             mpc_crypto::kdf::derive_epsilon_canton(self.key_version, &self.sender, &self.path);

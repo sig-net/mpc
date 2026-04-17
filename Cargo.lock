@@ -7999,6 +7999,7 @@ version = "1.11.0"
 dependencies = [
  "alloy",
  "alloy-dyn-abi",
+ "alloy-json-abi",
  "alloy-primitives",
  "alloy-signer-local",
  "alloy-sol-types",
@@ -8057,6 +8058,7 @@ dependencies = [
  "secp256k1 0.28.2",
  "semver 1.0.26",
  "serde",
+ "serde-aux",
  "serde_bytes",
  "serde_json",
  "sha3",
@@ -8649,7 +8651,7 @@ dependencies = [
  "near-time 0.26.0",
  "num-rational 0.3.2",
  "once_cell",
- "ordered-float",
+ "ordered-float 4.6.0",
  "primitive-types 0.10.1",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
@@ -8691,7 +8693,7 @@ dependencies = [
  "near-stdx 0.27.0",
  "near-time 0.27.0",
  "num-rational 0.3.2",
- "ordered-float",
+ "ordered-float 4.6.0",
  "primitive-types 0.10.1",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
@@ -8733,7 +8735,7 @@ dependencies = [
  "near-stdx 0.29.2",
  "near-time 0.29.2",
  "num-rational 0.3.2",
- "ordered-float",
+ "ordered-float 4.6.0",
  "primitive-types 0.10.1",
  "serde",
  "serde_json",
@@ -9813,6 +9815,15 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "ordered-float"
+version = "2.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68f19d67e5a2795c94e73e0bb1cc1a7edeb2e28efd39e2e1c9b7a40c1108b11c"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "ordered-float"
@@ -12442,11 +12453,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde-aux"
+version = "4.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "207f67b28fe90fb596503a9bf0bf1ea5e831e21307658e177c5dfcdfc3ab8a0a"
+dependencies = [
+ "serde",
+ "serde-value",
+ "serde_json",
+]
+
+[[package]]
 name = "serde-big-array"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11fc7cc2c76d73e0f27ee52abbd64eec84d46f370c88371120433196934e4b7f"
 dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "serde-value"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3a1a3341211875ef120e117ea7fd5228530ae7e7036a779fdc9117be6b3282c"
+dependencies = [
+ "ordered-float 2.10.1",
  "serde",
 ]
 

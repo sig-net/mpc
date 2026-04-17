@@ -6,6 +6,7 @@
 
 use alloy::primitives::{Address, U256};
 use serde::{Deserialize, Serialize};
+use serde_aux::field_attributes::deserialize_number_from_string;
 
 /// EVM transaction parameters passed through the Vault contract.
 /// All fields are hex-encoded strings (padded to 64 chars).
@@ -15,7 +16,7 @@ pub struct EvmTransactionParams {
     pub to: String,
     pub function_signature: String,
     #[serde(default)]
-    pub args: Vec<String>,
+    pub encoded_args: String,
     pub value: String,
     pub nonce: String,
     pub gas_limit: String,
@@ -26,59 +27,38 @@ pub struct EvmTransactionParams {
 }
 
 impl EvmTransactionParams {
-    /// Canton pads addresses to 64 hex chars (32 bytes) — extracts the last 20 bytes.
-    pub fn parse_to_address(&self) -> Address {
-        let bytes = hex::decode(&self.to).unwrap_or_default();
-        let start = bytes.len().saturating_sub(20);
-        Address::from_slice(&bytes[start..])
+    pub fn parse_to_address(&self) -> anyhow::Result<Address> {
+        Ok(format!("0x{}", self.to).parse()?)
     }
 
-    pub fn parse_value(&self) -> U256 {
-        U256::from_str_radix(&self.value, 16).unwrap_or(U256::ZERO)
+    pub fn parse_value(&self) -> anyhow::Result<U256> {
+        U256::from_str_radix(&self.value, 16)
+            .map_err(|e| anyhow::anyhow!("invalid hex in 'value': {e}"))
     }
 
-    pub fn parse_nonce(&self) -> u64 {
-        u64::from_str_radix(&self.nonce, 16).unwrap_or(0)
+    pub fn parse_nonce(&self) -> anyhow::Result<u64> {
+        u64::from_str_radix(&self.nonce, 16)
+            .map_err(|e| anyhow::anyhow!("invalid hex in 'nonce': {e}"))
     }
 
-    pub fn parse_gas_limit(&self) -> u64 {
-        u64::from_str_radix(&self.gas_limit, 16).unwrap_or(0)
+    pub fn parse_gas_limit(&self) -> anyhow::Result<u64> {
+        u64::from_str_radix(&self.gas_limit, 16)
+            .map_err(|e| anyhow::anyhow!("invalid hex in 'gas_limit': {e}"))
     }
 
-    pub fn parse_max_fee_per_gas(&self) -> u128 {
-        u128::from_str_radix(&self.max_fee_per_gas, 16).unwrap_or(0)
+    pub fn parse_max_fee_per_gas(&self) -> anyhow::Result<u128> {
+        u128::from_str_radix(&self.max_fee_per_gas, 16)
+            .map_err(|e| anyhow::anyhow!("invalid hex in 'max_fee_per_gas': {e}"))
     }
 
-    pub fn parse_max_priority_fee(&self) -> u128 {
-        u128::from_str_radix(&self.max_priority_fee, 16).unwrap_or(0)
+    pub fn parse_max_priority_fee(&self) -> anyhow::Result<u128> {
+        u128::from_str_radix(&self.max_priority_fee, 16)
+            .map_err(|e| anyhow::anyhow!("invalid hex in 'max_priority_fee': {e}"))
     }
 
-    pub fn parse_chain_id(&self) -> u64 {
-        u64::from_str_radix(&self.chain_id, 16).unwrap_or(0)
-    }
-
-    pub fn parse_value_u256(&self) -> U256 {
-        self.parse_value()
-    }
-
-    pub fn parse_nonce_u256(&self) -> U256 {
-        U256::from_str_radix(&self.nonce, 16).unwrap_or(U256::ZERO)
-    }
-
-    pub fn parse_gas_limit_u256(&self) -> U256 {
-        U256::from_str_radix(&self.gas_limit, 16).unwrap_or(U256::ZERO)
-    }
-
-    pub fn parse_max_fee_per_gas_u256(&self) -> U256 {
-        U256::from_str_radix(&self.max_fee_per_gas, 16).unwrap_or(U256::ZERO)
-    }
-
-    pub fn parse_max_priority_fee_u256(&self) -> U256 {
-        U256::from_str_radix(&self.max_priority_fee, 16).unwrap_or(U256::ZERO)
-    }
-
-    pub fn parse_chain_id_u256(&self) -> U256 {
-        U256::from_str_radix(&self.chain_id, 16).unwrap_or(U256::ZERO)
+    pub fn parse_chain_id(&self) -> anyhow::Result<u64> {
+        u64::from_str_radix(&self.chain_id, 16)
+            .map_err(|e| anyhow::anyhow!("invalid hex in 'chain_id': {e}"))
     }
 }
 
@@ -102,7 +82,7 @@ pub struct SignBidirectionalRequestedEvent {
     pub tx_params: TxParams,
     pub caip2_id: String,
     /// Canton sends this as either a number or a string.
-    #[serde(deserialize_with = "deserialize_u32_lenient")]
+    #[serde(deserialize_with = "deserialize_number_from_string")]
     pub key_version: u32,
     pub path: String,
     pub algo: String,
@@ -134,6 +114,8 @@ pub struct EcdsaSigData {
     /// DER-encoded (r, s) as hex string.
     pub der: String,
     /// Recovery ID (0 or 1) — y-parity for EVM ecrecover.
+    /// Canton serializes Daml `Int` as a JSON string on outbound events.
+    #[serde(deserialize_with = "deserialize_number_from_string")]
     pub recovery_id: u8,
 }
 
@@ -162,33 +144,3 @@ pub struct RespondBidirectionalEventPayload {
     pub signature: CantonSignature,
 }
 
-/// Deserialize a u32 from either a JSON number or a JSON string.
-///
-/// TODO(test): Canton sends key_version as either a JSON number or string.
-/// If this deserializer breaks, sign requests silently fail to parse and get
-/// dropped. Test with 42, "42", "0", overflow values.
-fn deserialize_u32_lenient<'de, D>(deserializer: D) -> Result<u32, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de;
-
-    struct U32Visitor;
-    impl<'de> de::Visitor<'de> for U32Visitor {
-        type Value = u32;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a u32 as number or string")
-        }
-        fn visit_u64<E: de::Error>(self, v: u64) -> Result<u32, E> {
-            u32::try_from(v).map_err(|_| E::custom(format!("u32 overflow: {v}")))
-        }
-        fn visit_i64<E: de::Error>(self, v: i64) -> Result<u32, E> {
-            u32::try_from(v).map_err(|_| E::custom(format!("u32 overflow: {v}")))
-        }
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<u32, E> {
-            v.parse()
-                .map_err(|_| E::custom(format!("invalid u32 string: {v}")))
-        }
-    }
-    deserializer.deserialize_any(U32Visitor)
-}
