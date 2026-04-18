@@ -23,7 +23,7 @@ pub fn generate_jwt_with_key(key: &EncodingKey, subject: &str) -> anyhow::Result
         scope: "daml_ledger_api".to_string(),
         iat: now,
         exp: now + 300,
-        nbf: now.saturating_sub(10),
+        nbf: now.saturating_sub(60),
     };
     let header = Header::new(Algorithm::ES256);
     Ok(encode(&header, &claims, key)?)

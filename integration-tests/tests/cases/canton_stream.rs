@@ -270,32 +270,49 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
         1,
         "expected one pending request in checkpoint"
     );
+    let checkpoint_height = checkpoint.block_height;
+    let phase1_request_id = checkpoint.pending_requests[0].sign_id.request_id;
     drop(stream);
 
-    // Phase 2: new stream with same backlog should resume from checkpoint
+    // Verify the backlog actually persisted the block height
+    assert_eq!(
+        backlog.processed_block(Chain::Canton).await,
+        Some(checkpoint_height),
+        "backlog should retain checkpoint height after stream1 is dropped"
+    );
+
+    // Phase 2: new stream with same backlog should resume from checkpoint.
+    // Key invariant: stream2 must start from the checkpointed offset, not
+    // replay from 0. We verify this by asserting:
+    // (a) the first Block event is >= checkpoint_height
+    // (b) exactly 1 SignRequest arrives (the new one, not a replay of phase 1)
     let mut stream2 = stream_canton(&sandbox, backlog.clone()).await?;
 
     sandbox.submit_sign_request().await?;
 
-    let mut saw_new_event = false;
+    let mut sign_request_ids = Vec::new();
+    let mut first_block: Option<u64> = None;
     let mut saw_new_checkpoint = false;
     for _ in 0..20 {
         match timeout(Duration::from_secs(5), stream2.next_event()).await {
             Ok(Some(ChainEvent::SignRequest(req))) => {
-                saw_new_event = true;
+                sign_request_ids.push(req.id.request_id);
                 backlog.insert(req).await;
                 if saw_new_checkpoint {
                     break;
                 }
             }
             Ok(Some(ChainEvent::Block(height))) => {
+                if first_block.is_none() {
+                    first_block = Some(height);
+                }
                 if backlog
                     .set_processed_block_interval(Chain::Canton, height, INTERVAL)
                     .await
                     .is_some()
                 {
                     saw_new_checkpoint = true;
-                    if saw_new_event {
+                    if !sign_request_ids.is_empty() {
                         break;
                     }
                 }
@@ -305,10 +322,28 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
         }
     }
 
-    assert!(saw_new_event, "new stream did not observe new event");
+    // stream2 must have started at or past the checkpoint, not from 0
+    let first_block = first_block.expect("stream2 did not emit any Block events");
+    assert!(
+        first_block >= checkpoint_height,
+        "stream2 started at offset {first_block}, expected >= {checkpoint_height} (checkpoint was not used)"
+    );
+
+    // Exactly one sign request: the Phase 2 submission, not a replay of Phase 1
+    assert_eq!(
+        sign_request_ids.len(),
+        1,
+        "expected exactly 1 sign request in phase 2, got {} — checkpoint may not have prevented replay",
+        sign_request_ids.len()
+    );
+    assert_ne!(
+        sign_request_ids[0], phase1_request_id,
+        "stream2 replayed the phase 1 request instead of skipping it"
+    );
+
     assert!(
         saw_new_checkpoint,
-        "new stream did not observe new checkpoint"
+        "stream2 did not produce a new checkpoint"
     );
     Ok(())
 }
@@ -424,12 +459,6 @@ async fn test_canton_stream_parse_sign_bidirectional_fields() -> Result<()> {
     assert!(!bidir.serialized_transaction().is_empty(), "RLP-encoded tx should not be empty");
     Ok(())
 }
-
-// NOTE: No execution-confirmation test for Canton's stream. ExecutionConfirmed
-// is emitted only by the Ethereum indexer (nonce-staleness check). Canton acts
-// as a *source* chain for bidirectional flows — the target chain (Ethereum)
-// emits ExecutionConfirmed. The full Canton→Ethereum path is covered by the
-// integration test in test_canton_eth_bidirectional_flow (canton.rs).
 
 #[ignore] // requires dpm
 #[serial]
