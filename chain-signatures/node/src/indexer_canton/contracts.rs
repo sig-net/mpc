@@ -8,7 +8,7 @@ use alloy::primitives::{Address, U256};
 use serde::{Deserialize, Serialize};
 use serde_aux::field_attributes::deserialize_number_from_string;
 
-/// EVM transaction parameters passed through the Vault contract.
+/// EVM transaction parameters from the Signer contract.
 /// Address fields are 40-char hex (20 bytes); numeric fields are 64-char hex.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,7 +71,7 @@ pub enum TxParams {
 }
 
 /// Payload of a `Signer:SignBidirectionalEvent` created event.
-/// Emitted when a Vault exercises `RequestDeposit` → `Signer.SignBidirectional`.
+/// Emitted when `Signer.SignBidirectional` is exercised.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignBidirectionalRequestedEvent {

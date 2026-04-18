@@ -440,7 +440,10 @@ async fn test_canton_stream_parse_sign_bidirectional_fields() -> Result<()> {
     assert_eq!(bidir.path(), expected_event.path);
     assert_eq!(bidir.key_version(), expected_event.key_version);
     assert!(
-        matches!(bidir, mpc_node::stream::ops::SignBidirectionalEvent::Canton(_)),
+        matches!(
+            bidir,
+            mpc_node::stream::ops::SignBidirectionalEvent::Canton(_)
+        ),
         "expected Canton variant"
     );
     assert_eq!(
@@ -456,7 +459,10 @@ async fn test_canton_stream_parse_sign_bidirectional_fields() -> Result<()> {
         bidir.respond_serialization_schema(),
         expected_event.respond_serialization_schema.as_bytes()
     );
-    assert!(!bidir.serialized_transaction().is_empty(), "RLP-encoded tx should not be empty");
+    assert!(
+        !bidir.serialized_transaction().is_empty(),
+        "RLP-encoded tx should not be empty"
+    );
     Ok(())
 }
 
