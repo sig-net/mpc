@@ -422,8 +422,6 @@ impl IntoFuture for ClusterSpawner {
                 self.solana = Some(solana);
             }
 
-            // Canton setup (follows Solana pattern — started before self.run(),
-            // stored on spawner, moved to Cluster via .take())
             if self.use_canton && self.canton.is_none() {
                 let sandbox = crate::canton::CantonSandbox::run().await?;
                 self.cfg.canton = Some(sandbox.get_config());
