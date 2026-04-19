@@ -166,14 +166,13 @@ async fn subscribe_and_process(
 
     let ws_url = format!("{}/v2/updates", client.json_api_ws_url);
 
-    // Build request with subprotocol header
+    // Canton JSON Ledger API v2 authenticates WS connections via subprotocols:
+    // `jwt.token.<jwt>` (token carrier) must precede `daml.ws.auth` (protocol marker).
+    // Ref: github.com/digital-asset/canton community/ledger/ledger-json-api/README.md
     let mut request = ws_url.into_client_request()?;
-    request
-        .headers_mut()
-        .insert(header::SEC_WEBSOCKET_PROTOCOL, "daml.ws.auth".parse()?);
     request.headers_mut().insert(
-        header::AUTHORIZATION,
-        format!("Bearer {jwt_token}").parse()?,
+        header::SEC_WEBSOCKET_PROTOCOL,
+        format!("jwt.token.{jwt_token}, daml.ws.auth").parse()?,
     );
 
     let (ws_stream, _) = tokio::time::timeout(
