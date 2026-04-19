@@ -4,7 +4,8 @@
 //! Daml templates from `daml-signer` and `daml-evm-types`. Derived from the
 //! `.daml` source files in `canton-mpc-poc/daml-packages/`.
 
-use alloy::primitives::{Address, U256};
+use alloy::consensus::TxEip1559;
+use alloy::primitives::{Address, Bytes, TxKind, U256};
 use serde::{Deserialize, Serialize};
 use serde_aux::field_attributes::deserialize_number_from_string;
 
@@ -21,8 +22,7 @@ pub struct EvmTransactionParams {
     pub nonce: String,
     pub gas_limit: String,
     pub max_fee_per_gas: String,
-    /// Daml field name is `maxPriorityFee` (NOT `maxPriorityFeePerGas`).
-    pub max_priority_fee: String,
+    pub max_priority_fee_per_gas: String,
     pub chain_id: String,
 }
 
@@ -51,14 +51,40 @@ impl EvmTransactionParams {
             .map_err(|e| anyhow::anyhow!("invalid hex in 'max_fee_per_gas': {e}"))
     }
 
-    pub fn parse_max_priority_fee(&self) -> anyhow::Result<u128> {
-        u128::from_str_radix(&self.max_priority_fee, 16)
-            .map_err(|e| anyhow::anyhow!("invalid hex in 'max_priority_fee': {e}"))
+    pub fn parse_max_priority_fee_per_gas(&self) -> anyhow::Result<u128> {
+        u128::from_str_radix(&self.max_priority_fee_per_gas, 16)
+            .map_err(|e| anyhow::anyhow!("invalid hex in 'max_priority_fee_per_gas': {e}"))
     }
 
     pub fn parse_chain_id(&self) -> anyhow::Result<u64> {
         u64::from_str_radix(&self.chain_id, 16)
             .map_err(|e| anyhow::anyhow!("invalid hex in 'chain_id': {e}"))
+    }
+}
+
+/// Convert Canton EvmTransactionParams to an alloy TxEip1559.
+///
+/// TODO(test): test address extraction from 32-byte padded hex (Canton format)
+/// vs 20-byte unpadded hex. Test hex parsing of all numeric fields (chain_id,
+/// nonce, gas_limit, fees, value) including edge cases like leading zeros.
+impl TryFrom<&EvmTransactionParams> for TxEip1559 {
+    type Error = anyhow::Error;
+
+    fn try_from(p: &EvmTransactionParams) -> anyhow::Result<Self> {
+        Ok(Self {
+            chain_id: p.parse_chain_id()?,
+            nonce: p.parse_nonce()?,
+            gas_limit: p.parse_gas_limit()?,
+            max_fee_per_gas: p.parse_max_fee_per_gas()?,
+            max_priority_fee_per_gas: p.parse_max_priority_fee_per_gas()?,
+            to: TxKind::Call(p.parse_to_address()?),
+            value: p.parse_value()?,
+            input: Bytes::from(super::calldata::build_calldata(
+                &p.function_signature,
+                &p.encoded_args,
+            )?),
+            access_list: Default::default(),
+        })
     }
 }
 

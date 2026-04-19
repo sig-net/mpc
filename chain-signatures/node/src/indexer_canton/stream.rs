@@ -166,9 +166,6 @@ async fn subscribe_and_process(
 
     let ws_url = format!("{}/v2/updates", client.json_api_ws_url);
 
-    // Canton JSON Ledger API v2 authenticates WS connections via subprotocols:
-    // `jwt.token.<jwt>` (token carrier) must precede `daml.ws.auth` (protocol marker).
-    // Ref: github.com/digital-asset/canton community/ledger/ledger-json-api/README.md
     let mut request = ws_url.into_client_request()?;
     request.headers_mut().insert(
         header::SEC_WEBSOCKET_PROTOCOL,
@@ -210,7 +207,7 @@ async fn subscribe_and_process(
     .await
     .map_err(|_| anyhow::anyhow!("canton WebSocket subscription send timed out"))??;
 
-    // Process incoming messages with stall watchdog (matches Solana pattern)
+    // Process incoming messages with stall watchdog
     let stall_timeout = std::time::Duration::from_secs(60);
     let mut last_ws_msg = tokio::time::Instant::now();
     let mut watchdog = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -256,14 +253,7 @@ async fn subscribe_and_process(
                 *counter = value.offset;
 
                 for event in &value.events {
-                    process_canton_event(
-                        event,
-                        &value.events,
-                        tx,
-                        &client.party_id,
-                        &client.signer_cid,
-                    )
-                    .await;
+                    process_canton_event(event, &value.events, tx, &client.signer_cid).await;
                 }
             }
             Some(ledger_api::Update::OffsetCheckpoint { value }) => {
@@ -303,17 +293,10 @@ async fn subscribe_and_process(
 ///
 /// `tx_events` is the full list of events in the transaction, used for
 /// defense-in-depth verification (signatory checks, ExercisedEvent check).
-///
-/// NOTE: integration tests (`canton_stream.rs`) cover `SignBidirectionalEvent`
-/// and `SignatureRespondedEvent` parsing against a real sandbox, but
-/// `RespondBidirectionalEvent` parsing and the downstream bidirectional
-/// execution flow (recovery ID fix, EVM tx construction, backlog advance)
-/// are not yet tested end-to-end.
 async fn process_canton_event(
     event: &ledger_api::Event,
     tx_events: &[ledger_api::Event],
     tx: &mpsc::Sender<ChainEvent>,
-    node_party_id: &str,
     signer_contract_id: &str,
 ) {
     let created = match event {
@@ -333,7 +316,6 @@ async fn process_canton_event(
                     &canton_event,
                     created,
                     tx_events,
-                    node_party_id,
                     signer_contract_id,
                 ) {
                     tracing::warn!(%e, "canton SignBidirectionalEvent failed verification — dropping");
@@ -403,26 +385,19 @@ async fn process_canton_event(
 /// 3. An ExercisedEvent with choice "SignBidirectional" on Signer:Signer must
 ///    exist in the same transaction — proves the event was created through the
 ///    correct Daml code path, not fabricated
+/// 4. nonceCidText must match a consuming ExercisedEvent on a SigningNonce
+///    template in the same transaction — prevents replay and forged nonces
 ///
 /// TODO(test): unit test each check in isolation — craft events where one
-/// check fails and verify the correct error is returned. Test: mismatched
-/// sig_network, non-signatory operator, non-signatory requester, missing
-/// ExercisedEvent, missing nonce consumption, empty nonceCidText.
+/// check fails and verify the correct error is returned. Test: non-signatory
+/// operator, non-signatory requester, missing ExercisedEvent, missing nonce
+/// consumption, empty nonceCidText.
 fn verify_sign_event(
     event: &contracts::SignBidirectionalRequestedEvent,
     created: &ledger_api::CreatedEvent,
     tx_events: &[ledger_api::Event],
-    node_party_id: &str,
     signer_contract_id: &str,
 ) -> anyhow::Result<()> {
-    // Check 0: sig_network must match this node's party ID
-    if event.sig_network != node_party_id {
-        anyhow::bail!(
-            "sig_network {} does not match node party_id {node_party_id} — event is for a different MPC network",
-            event.sig_network
-        );
-    }
-
     let signatories: HashSet<&str> = created.signatories.iter().map(|s| s.as_str()).collect();
 
     // Check 1: operators must be signatories (hard error)
@@ -540,9 +515,6 @@ fn parse_respond_bidirectional_event(
 }
 
 /// Parse a CantonSignature (union type) into an MPC Signature.
-///
-/// The recovery_id from the CantonSignature is preserved, allowing correct
-/// reconstruction of the full `big_r` point with the right y-parity.
 pub fn parse_canton_signature(sig: &contracts::CantonSignature) -> anyhow::Result<Signature> {
     match sig {
         contracts::CantonSignature::EcdsaSig(data) => {
@@ -552,10 +524,6 @@ pub fn parse_canton_signature(sig: &contracts::CantonSignature) -> anyhow::Resul
 }
 
 /// Parse a DER-encoded ECDSA signature with known recovery ID.
-///
-/// The recovery_id determines the y-parity for reconstructing `big_r`:
-/// - 0 = even parity (0x02 compressed prefix)
-/// - 1 = odd parity (0x03 compressed prefix)
 pub fn parse_der_signature_with_recovery(
     hex_str: &str,
     recovery_id: u8,

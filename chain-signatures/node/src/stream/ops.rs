@@ -35,6 +35,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.sender.to_bytes(),
             SignBidirectionalEvent::Hydration(event) => event.sender,
+            // Canton party IDs are variable-length strings; hash fits them into [u8; 32].
             SignBidirectionalEvent::Canton(event) => keccak256(event.sender.as_bytes()).into(),
         }
     }
@@ -183,6 +184,7 @@ impl RespondBidirectionalEvent {
         match self {
             RespondBidirectionalEvent::Solana(event) => event.responder.to_bytes(),
             RespondBidirectionalEvent::Hydration(event) => event.responder,
+            // Canton party IDs are variable-length strings; hash fits them into [u8; 32].
             RespondBidirectionalEvent::Canton(event) => {
                 keccak256(event.responder.as_bytes()).into()
             }

@@ -16,7 +16,6 @@ use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::ops::{SignBidirectionalEvent, SignatureEvent};
 use alloy::consensus::TxEip1559;
-use alloy::primitives::{Bytes, TxKind};
 use k256::Scalar;
 use mpc_primitives::{ScalarExt, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use std::fmt;
@@ -43,35 +42,13 @@ pub struct CantonSignatureRespondedEvent {
 }
 // NOTE: No Hash, PartialEq, Eq derives — matches HydrationSignatureRespondedEvent
 
-/// Convert Canton EvmTransactionParams to an alloy TxEip1559.
-///
-/// TODO(test): test address extraction from 32-byte padded hex (Canton format)
-/// vs 20-byte unpadded hex. Test hex parsing of all numeric fields (chain_id,
-/// nonce, gas_limit, fees, value) including edge cases like leading zeros.
-pub fn to_tx_eip1559(p: &CantonEvmTransactionParams) -> anyhow::Result<TxEip1559> {
-    Ok(TxEip1559 {
-        chain_id: p.parse_chain_id()?,
-        nonce: p.parse_nonce()?,
-        gas_limit: p.parse_gas_limit()?,
-        max_fee_per_gas: p.parse_max_fee_per_gas()?,
-        max_priority_fee_per_gas: p.parse_max_priority_fee()?,
-        to: TxKind::Call(p.parse_to_address()?),
-        value: p.parse_value()?,
-        input: Bytes::from(calldata::build_calldata(
-            &p.function_signature,
-            &p.encoded_args,
-        )?),
-        access_list: Default::default(),
-    })
-}
-
 /// RLP-encode an unsigned EIP-1559 transaction using alloy.
 ///
 /// TODO(test): golden-test against viem's `serializeTransaction` with known
 /// EvmTransactionParams. Verify the output matches byte-for-byte — this is
 /// what gets hashed and signed, so any divergence breaks on-chain verification.
 pub fn rlp_encode_unsigned_eip1559(params: &CantonEvmTransactionParams) -> Vec<u8> {
-    match to_tx_eip1559(params) {
+    match TxEip1559::try_from(params) {
         Ok(tx) => {
             use alloy::consensus::transaction::SignableTransaction;
             let mut out = Vec::new();

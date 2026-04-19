@@ -1,4 +1,4 @@
-use alloy::consensus::transaction::SignableTransaction;
+use alloy::consensus::{transaction::SignableTransaction, TxEip1559};
 use alloy::eips::eip2718::Encodable2718;
 use alloy::primitives::{FixedBytes, Signature, U256};
 use alloy::providers::ext::AnvilApi;
@@ -9,7 +9,7 @@ use integration_tests::cluster;
 use mpc_node::indexer_canton::contracts::{
     RespondBidirectionalEventPayload, SignatureRespondedEventPayload,
 };
-use mpc_node::indexer_canton::{compute_request_id, parse_canton_signature, to_tx_eip1559};
+use mpc_node::indexer_canton::{compute_request_id, parse_canton_signature};
 use mpc_node::sign_bidirectional::derive_user_address;
 use mpc_node::util::NearPublicKeyExt;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
@@ -94,7 +94,7 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     let anvil = ProviderBuilder::new().connect_http(anvil_rpc_url.parse()?);
 
     let mpc_signature = parse_canton_signature(&sig_payload.signature)?;
-    let unsigned_tx = to_tx_eip1559(&evm_params)?;
+    let unsigned_tx = TxEip1559::try_from(&evm_params)?;
 
     let sign_epsilon = mpc_crypto::derive_epsilon_canton(
         LATEST_MPC_KEY_VERSION,

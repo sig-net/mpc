@@ -30,7 +30,7 @@ fn hash_evm_params(p: &CantonEvmTransactionParams) -> anyhow::Result<[u8; 32]> {
             .as_slice(),
     );
     buf.extend_from_slice(
-        hex_u256("max_priority_fee", &p.max_priority_fee)?
+        hex_u256("max_priority_fee_per_gas", &p.max_priority_fee_per_gas)?
             .eip712_data_word()
             .as_slice(),
     );

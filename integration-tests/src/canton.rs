@@ -31,7 +31,7 @@ pub fn test_evm_params() -> EvmTransactionParams {
         nonce: format!("{:0>64}", "0"),
         gas_limit: format!("{:0>64}", "186a0"),
         max_fee_per_gas: format!("{:0>64}", "3b9aca00"),
-        max_priority_fee: format!("{:0>64}", "3b9aca00"),
+        max_priority_fee_per_gas: format!("{:0>64}", "3b9aca00"),
         chain_id: format!("{:0>64}", "7a69"), // Anvil 31337
     }
 }
