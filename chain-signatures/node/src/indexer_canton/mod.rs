@@ -6,8 +6,8 @@ mod request_id;
 mod stream;
 
 pub use api::{
-    check_response, der_encode_signature, discover_signer_cid, exercise_choice,
-    fetch_active_contracts, fetch_ledger_end, generate_jwt_with_key,
+    check_response, der_encode_signature, discover_signer_cid, fetch_active_contracts,
+    fetch_ledger_end, generate_jwt_with_key, submit_and_wait,
 };
 pub use request_id::compute_request_id;
 pub use stream::{parse_canton_signature, CantonStream};

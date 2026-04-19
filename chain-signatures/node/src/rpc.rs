@@ -991,7 +991,7 @@ impl CantonClient {
             &self.json_api_url,
             &self.generate_jwt()?,
             parties,
-            template_id,
+            Some(template_id),
             include_blob,
         )
         .await
@@ -1003,19 +1003,29 @@ impl CantonClient {
         choice: &str,
         choice_argument: serde_json::Value,
     ) -> anyhow::Result<()> {
-        crate::indexer_canton::exercise_choice(
+        use crate::indexer_canton::ledger_api::{Command, JsCommands};
+        let commands = JsCommands {
+            command_id: command_id.to_string(),
+            user_id: self.jwt_subject.clone(),
+            act_as: vec![self.party_id.clone()],
+            read_as: vec![self.party_id.clone()],
+            commands: vec![Command::ExerciseCommand {
+                template_id: self.signer_template_id.clone(),
+                contract_id: self.signer_cid.clone(),
+                choice: choice.to_string(),
+                choice_argument,
+            }],
+            disclosed_contracts: vec![],
+        };
+        crate::indexer_canton::submit_and_wait(
             &self.http_client,
             &self.json_api_url,
             &self.generate_jwt()?,
-            &self.jwt_subject,
-            &self.party_id,
-            &self.signer_template_id,
-            &self.signer_cid,
-            command_id,
-            choice,
-            choice_argument,
+            commands,
+            &format!("canton {choice}"),
         )
-        .await
+        .await?;
+        Ok(())
     }
 }
 
@@ -1917,17 +1927,14 @@ async fn try_publish_canton(
         "canton: publishing signature"
     );
 
+    use crate::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
     let der_sig = hex::encode(crate::indexer_canton::der_encode_signature(signature)?);
     let (operators, requester) = extract_canton_operators_requester(action)?;
 
-    // Canton Signature is a union type: EcdsaSig { der, recoveryId }
-    let canton_signature = serde_json::json!({
-        "tag": "EcdsaSig",
-        "value": {
-            "der": der_sig,
-            "recoveryId": signature.recovery_id
-        }
-    });
+    let canton_signature = serde_json::to_value(CantonSignature::EcdsaSig(EcdsaSigData {
+        der: der_sig,
+        recovery_id: signature.recovery_id,
+    }))?;
 
     let (choice, command_id, choice_argument) = match &action.indexed.kind {
         SignKind::SignBidirectional(_) => (

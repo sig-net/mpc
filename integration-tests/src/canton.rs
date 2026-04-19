@@ -5,8 +5,7 @@ use mpc_node::indexer_canton::contracts::{
 };
 use mpc_node::indexer_canton::ledger_api::{
     self, AllocatePartyRequest, AllocatePartyResponse, ContractEntry, CreateUserRequest,
-    DisclosedContract, JsCommands, SubmitAndWaitForTransactionRequest,
-    SubmitAndWaitForTransactionResponse, UserInfo,
+    DisclosedContract, JsCommands, SubmitAndWaitForTransactionResponse, UserInfo,
 };
 use mpc_node::indexer_canton::{self, CantonConfig};
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
@@ -473,25 +472,22 @@ impl CantonTestClient {
         disclosed_contracts: Vec<DisclosedContract>,
     ) -> Result<SubmitAndWaitForTransactionResponse> {
         let parties: Vec<String> = act_as.iter().map(|s| s.to_string()).collect();
-        let resp = self
-            .auth_post(&format!(
-                "{}/v2/commands/submit-and-wait-for-transaction",
-                self.base_url
-            ))?
-            .json(&SubmitAndWaitForTransactionRequest {
-                commands: JsCommands {
-                    command_id: uuid::Uuid::new_v4().to_string(),
-                    user_id: self.user_id.clone(),
-                    act_as: parties.clone(),
-                    read_as: parties,
-                    commands: vec![command],
-                    disclosed_contracts,
-                },
-            })
-            .send()
-            .await?;
-        let resp = indexer_canton::check_response(resp, "command").await?;
-        Ok(resp.json().await?)
+        let commands = JsCommands {
+            command_id: uuid::Uuid::new_v4().to_string(),
+            user_id: self.user_id.clone(),
+            act_as: parties.clone(),
+            read_as: parties,
+            commands: vec![command],
+            disclosed_contracts,
+        };
+        indexer_canton::submit_and_wait(
+            &self.http,
+            &self.base_url,
+            &self.generate_jwt()?,
+            commands,
+            "command",
+        )
+        .await
     }
 
     async fn fetch_active_contracts(
@@ -506,7 +502,7 @@ impl CantonTestClient {
             &self.base_url,
             &jwt,
             parties,
-            template_id,
+            Some(template_id),
             include_blob,
         )
         .await
