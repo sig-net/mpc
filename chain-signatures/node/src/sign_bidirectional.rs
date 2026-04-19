@@ -83,6 +83,10 @@ pub struct BidirectionalTx {
 
 impl BidirectionalTx {
     pub(crate) fn sender_string(&self) -> anyhow::Result<String> {
+        // Canton's [u8; 32] sender is an irreversible hash; read the original party ID from the Canton chain context.
+        if let ChainContext::Canton { sender, .. } = &self.chain_ctx {
+            return Ok(sender.clone());
+        }
         crate::stream::ops::sender_string(self.sender, self.source_chain)
     }
 

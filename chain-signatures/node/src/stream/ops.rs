@@ -41,7 +41,11 @@ impl SignBidirectionalEvent {
     }
 
     pub(crate) fn sender_string(&self) -> anyhow::Result<String> {
-        sender_string(self.sender(), self.source_chain())
+        // Canton's [u8; 32] sender is an irreversible hash; read the original party ID from the Canton variant.
+        match self {
+            SignBidirectionalEvent::Canton(event) => Ok(event.sender.clone()),
+            _ => sender_string(self.sender(), self.source_chain()),
+        }
     }
 
     pub(crate) fn source_chain(&self) -> Chain {
@@ -116,6 +120,9 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.deposit,
             SignBidirectionalEvent::Hydration(event) => event.deposit,
+            // Canton deposits can't be charged in Canton-native tokens the way
+            // Solana/Hydration do; charging for a Canton signature would require
+            // a separate mechanism.
             SignBidirectionalEvent::Canton(_) => 0,
         }
     }
@@ -628,13 +635,17 @@ pub async fn process_execution_confirmed(
     Ok(())
 }
 
+/// Decode a [u8; 32] sender into its canonical on-chain address string.
+/// Canton is intentionally absent: its sender is a variable-length party ID
+/// hashed irreversibly into the [u8; 32] slot, so callers with access to the
+/// original party string must short-circuit before reaching here (see
+/// `SignBidirectionalEvent::sender_string` / `BidirectionalTx::sender_string`).
 pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Result<String> {
     match source_chain {
         Chain::Solana => Ok(Pubkey::new_from_array(sender).to_string()),
         Chain::Hydration => Ok(crate::indexer_hydration::ss58_address_from_account32(
             sender,
         )),
-        Chain::Canton => Ok(hex::encode(sender)),
         _ => anyhow::bail!("Unsupported chain: {source_chain}"),
     }
 }
