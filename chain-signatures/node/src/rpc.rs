@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
-use crate::indexer_canton::CantonConfig;
+use crate::indexer_canton::{CantonConfig, CantonConn};
 use crate::indexer_hydration::HydrationConfig;
 use parity_scale_codec::{Decode, Encode};
 use subxt::config::substrate::{
@@ -916,26 +916,16 @@ impl HydrationClient {
 
 #[derive(Clone)]
 pub struct CantonClient {
+    pub(crate) config: CantonConfig,
     http_client: reqwest::Client,
-    json_api_url: String,
-    pub(crate) json_api_ws_url: String,
     encoding_key: jsonwebtoken::EncodingKey,
-    jwt_subject: String,
-    pub(crate) party_id: String,
-    pub(crate) signer_cid: String,
-    signer_template_id: String,
 }
 
 impl std::fmt::Debug for CantonClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CantonClient")
-            .field("json_api_url", &self.json_api_url)
-            .field("json_api_ws_url", &self.json_api_ws_url)
+            .field("config", &self.config)
             .field("encoding_key", &"<hidden>")
-            .field("jwt_subject", &self.jwt_subject)
-            .field("party_id", &self.party_id)
-            .field("signer_cid", &self.signer_cid)
-            .field("signer_template_id", &self.signer_template_id)
             .finish()
     }
 }
@@ -956,45 +946,10 @@ impl CantonClient {
         );
 
         Ok(Self {
+            config: config.clone(),
             http_client,
-            json_api_url: config.json_api_url.clone(),
-            json_api_ws_url: config.json_api_ws_url.clone(),
             encoding_key,
-            jwt_subject: config.jwt_subject.clone(),
-            party_id: config.party_id.clone(),
-            signer_cid: config.signer_contract_id.clone(),
-            signer_template_id: config.signer_template_id.clone(),
         })
-    }
-
-    pub fn generate_jwt(&self) -> anyhow::Result<String> {
-        crate::indexer_canton::generate_jwt_with_key(&self.encoding_key, &self.jwt_subject)
-    }
-
-    pub async fn fetch_ledger_end(&self) -> anyhow::Result<u64> {
-        crate::indexer_canton::fetch_ledger_end(
-            &self.http_client,
-            &self.json_api_url,
-            &self.generate_jwt()?,
-        )
-        .await
-    }
-
-    pub async fn fetch_active_contracts(
-        &self,
-        parties: &[&str],
-        template_id: &str,
-        include_blob: bool,
-    ) -> anyhow::Result<Vec<crate::indexer_canton::ledger_api::ActiveContractEntry>> {
-        crate::indexer_canton::fetch_active_contracts(
-            &self.http_client,
-            &self.json_api_url,
-            &self.generate_jwt()?,
-            parties,
-            Some(template_id),
-            include_blob,
-        )
-        .await
     }
 
     pub async fn exercise_choice(
@@ -1006,26 +961,35 @@ impl CantonClient {
         use crate::indexer_canton::ledger_api::{Command, JsCommands};
         let commands = JsCommands {
             command_id: command_id.to_string(),
-            user_id: self.jwt_subject.clone(),
-            act_as: vec![self.party_id.clone()],
-            read_as: vec![self.party_id.clone()],
+            user_id: self.config.jwt_subject.clone(),
+            act_as: vec![self.config.party_id.clone()],
+            read_as: vec![self.config.party_id.clone()],
             commands: vec![Command::ExerciseCommand {
-                template_id: self.signer_template_id.clone(),
-                contract_id: self.signer_cid.clone(),
+                template_id: self.config.signer_template_id.clone(),
+                contract_id: self.config.signer_contract_id.clone(),
                 choice: choice.to_string(),
                 choice_argument,
             }],
             disclosed_contracts: vec![],
         };
-        crate::indexer_canton::submit_and_wait(
-            &self.http_client,
-            &self.json_api_url,
-            &self.generate_jwt()?,
-            commands,
-            &format!("canton {choice}"),
-        )
-        .await?;
+        self.submit_and_wait(commands, &format!("canton {choice}"))
+            .await?;
         Ok(())
+    }
+}
+
+impl crate::indexer_canton::CantonConn for CantonClient {
+    fn http(&self) -> &reqwest::Client {
+        &self.http_client
+    }
+    fn json_api_url(&self) -> &str {
+        &self.config.json_api_url
+    }
+    fn jwt_encoding_key(&self) -> &jsonwebtoken::EncodingKey {
+        &self.encoding_key
+    }
+    fn jwt_subject(&self) -> &str {
+        &self.config.jwt_subject
     }
 }
 

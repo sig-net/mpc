@@ -46,12 +46,12 @@ async fn wait_for_sign_request(
 #[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_parse_sign_event() -> Result<()> {
-    let mut sandbox = CantonSandbox::run().await?;
+    let sandbox = CantonSandbox::run().await?;
     let backlog = Backlog::new();
     let mut stream = stream_canton(&sandbox, backlog).await?;
 
-    let expected_event = test_sign_request_event(&sandbox);
-    sandbox.submit_sign_request().await?;
+    let expected_event = test_sign_request_event(&sandbox, None);
+    sandbox.submit_sign_request(None).await?;
 
     let event = wait_for_sign_request(&mut stream, 30).await?;
 
@@ -67,7 +67,7 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
     // hashes the result — the scalar must match what we'd compute from the
     // known test_evm_params.
     let rlp = mpc_node::indexer_canton::rlp_encode_unsigned_eip1559(
-        &integration_tests::canton::test_evm_params(),
+        &integration_tests::canton::test_evm_params(0),
     );
     let expected_hash = mpc_node::sign_bidirectional::hash_rlp_data(rlp);
     let expected_payload = <k256::Scalar as ScalarExt>::from_bytes(expected_hash)
@@ -100,11 +100,11 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
 #[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_emits_blocks() -> Result<()> {
-    let mut sandbox = CantonSandbox::run().await?;
+    let sandbox = CantonSandbox::run().await?;
     let backlog = Backlog::new();
     let mut stream = stream_canton(&sandbox, backlog).await?;
 
-    sandbox.submit_sign_request().await?;
+    sandbox.submit_sign_request(None).await?;
 
     let mut saw_block = false;
     for _ in 0..10 {
@@ -131,12 +131,14 @@ async fn test_canton_stream_emits_blocks() -> Result<()> {
 #[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_concurrent_events() -> Result<()> {
-    let mut sandbox = CantonSandbox::run().await?;
+    let sandbox = CantonSandbox::run().await?;
     let backlog = Backlog::new();
     let mut stream = stream_canton(&sandbox, backlog).await?;
 
-    for _ in 0..3 {
-        sandbox.submit_sign_request().await?;
+    // Distinct EVM nonces produce distinct request_ids, which is what this
+    // test exercises — the Canton stream must deliver each as a separate event.
+    for nonce in 0..3 {
+        sandbox.submit_sign_request(Some(nonce)).await?;
     }
 
     // Collect SignRequest events until we have all 3, verifying content on each
@@ -165,13 +167,13 @@ async fn test_canton_stream_concurrent_events() -> Result<()> {
 #[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_catchup_linear() -> Result<()> {
-    let mut sandbox = CantonSandbox::run().await?;
+    let sandbox = CantonSandbox::run().await?;
 
     // Phase 1: stream1 sees events
     let backlog1 = Backlog::new();
     let mut stream1 = stream_canton(&sandbox, backlog1).await?;
 
-    sandbox.submit_sign_request().await?;
+    sandbox.submit_sign_request(None).await?;
 
     let mut seen_by_stream1 = 0;
     let mut last_block_stream1: u64 = 0;
@@ -197,7 +199,7 @@ async fn test_canton_stream_catchup_linear() -> Result<()> {
     let backlog2 = Backlog::new();
     let mut stream2 = stream_canton(&sandbox, backlog2).await?;
 
-    sandbox.submit_sign_request().await?;
+    sandbox.submit_sign_request(None).await?;
 
     let mut caught_up = false;
     let mut seen_sign_events = false;
@@ -228,11 +230,11 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
     // few blocks (only on ledger activity), so a larger interval risks timing out.
     const INTERVAL: u64 = 1;
 
-    let mut sandbox = CantonSandbox::run().await?;
+    let sandbox = CantonSandbox::run().await?;
     let backlog = Backlog::new();
     let mut stream = stream_canton(&sandbox, backlog.clone()).await?;
 
-    sandbox.submit_sign_request().await?;
+    sandbox.submit_sign_request(None).await?;
 
     // Phase 1: process events, insert sign requests into backlog, wait for a
     // checkpoint that contains a pending request.
@@ -283,12 +285,13 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
 
     // Phase 2: new stream with same backlog should resume from checkpoint.
     // Key invariant: stream2 must start from the checkpointed offset, not
-    // replay from 0. We verify this by asserting:
+    // replay from 0. Phase 2 uses a distinct EVM nonce so its request_id
+    // differs from phase 1, letting us prove no replay occurred. We verify:
     // (a) the first Block event is >= checkpoint_height
     // (b) exactly 1 SignRequest arrives (the new one, not a replay of phase 1)
     let mut stream2 = stream_canton(&sandbox, backlog.clone()).await?;
 
-    sandbox.submit_sign_request().await?;
+    sandbox.submit_sign_request(Some(1)).await?;
 
     let mut sign_request_ids = Vec::new();
     let mut first_block: Option<u64> = None;
@@ -352,11 +355,11 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
 #[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
-    let mut sandbox = CantonSandbox::run().await?;
+    let sandbox = CantonSandbox::run().await?;
     let backlog = Backlog::new();
     let mut stream = stream_canton(&sandbox, backlog).await?;
 
-    sandbox.submit_sign_request().await?;
+    sandbox.submit_sign_request(None).await?;
     let sign_event = wait_for_sign_request(&mut stream, 30).await?;
     assert_eq!(sign_event.chain, Chain::Canton);
     let request_id = hex::encode(sign_event.id.request_id);
@@ -421,12 +424,12 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
 #[serial]
 #[test(tokio::test)]
 async fn test_canton_stream_parse_sign_bidirectional_fields() -> Result<()> {
-    let mut sandbox = CantonSandbox::run().await?;
+    let sandbox = CantonSandbox::run().await?;
     let backlog = Backlog::new();
     let mut stream = stream_canton(&sandbox, backlog).await?;
 
-    let expected_event = test_sign_request_event(&sandbox);
-    sandbox.submit_sign_request().await?;
+    let expected_event = test_sign_request_event(&sandbox, None);
+    sandbox.submit_sign_request(None).await?;
 
     let req = wait_for_sign_request(&mut stream, 30).await?;
     assert_eq!(req.chain, Chain::Canton);

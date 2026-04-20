@@ -1,24 +1,42 @@
+use alloy::primitives::keccak256;
 use anyhow::{Context as _, Result};
 use async_process::{Child, Command};
 use mpc_node::indexer_canton::contracts::{
-    EvmTransactionParams, SignBidirectionalRequestedEvent, TxParams,
+    EvmTransactionParams, SignBidirectionalRequestedEvent, SignRequestPayload, TxParams,
 };
 use mpc_node::indexer_canton::ledger_api::{
     self, AllocatePartyRequest, AllocatePartyResponse, ContractEntry, CreateUserRequest,
     DisclosedContract, JsCommands, SubmitAndWaitForTransactionResponse, UserInfo,
 };
-use mpc_node::indexer_canton::{self, CantonConfig};
+use mpc_node::indexer_canton::{CantonConfig, CantonConn};
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Mirror of Daml `computeOperatorsHash` (Signer.daml → RequestId.daml):
+/// `keccak256(mconcat(map (keccak256 . toHex) (sort operatorTexts)))`.
+///
+/// Golden vector verified in TS+Daml: `["Alice","Bob"]` →
+/// `9b1a0a45cfdc60f45820808958c1895d44da61c8f804f5560020a373b23ad51e`.
+pub fn compute_operators_hash(operators: &[String]) -> String {
+    let mut sorted: Vec<&String> = operators.iter().collect();
+    sorted.sort();
+    let mut concat = Vec::with_capacity(sorted.len() * 32);
+    for op in sorted {
+        concat.extend_from_slice(keccak256(op.as_bytes()).as_slice());
+    }
+    hex::encode(keccak256(&concat))
+}
+
 const CANTON_JSON_API_PORT: u16 = 7575;
 const DEFAULT_DAR_RELATIVE_PATH: &str = "fixtures/canton/daml-vault-0.0.1.dar";
 
-/// Test EVM transaction params (USDC transfer on Anvil).
-pub fn test_evm_params() -> EvmTransactionParams {
+/// Test EVM transaction params (USDC transfer on Anvil). Callers that need
+/// distinct request_ids across submissions (e.g. concurrency tests) pass
+/// different `nonce` values.
+pub fn test_evm_params(nonce: u64) -> EvmTransactionParams {
     EvmTransactionParams {
         to: "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".to_string(),
         function_signature: "transfer(address,uint256)".to_string(),
@@ -28,7 +46,7 @@ pub fn test_evm_params() -> EvmTransactionParams {
             "0000000000000000000000000000000000000000000000000000000005f5e100"
         ),
         value: "0".repeat(64),
-        nonce: format!("{:0>64}", "0"),
+        nonce: format!("{:0>64x}", nonce),
         gas_limit: format!("{:0>64}", "186a0"),
         max_fee_per_gas: format!("{:0>64}", "3b9aca00"),
         max_priority_fee_per_gas: format!("{:0>64}", "3b9aca00"),
@@ -38,22 +56,48 @@ pub fn test_evm_params() -> EvmTransactionParams {
 
 /// Build a test SignBidirectionalRequestedEvent for Canton.
 /// Uses Anvil chain ID (31337) and default test EVM params.
-pub fn test_sign_request_event(sandbox: &CantonSandbox) -> SignBidirectionalRequestedEvent {
+///
+/// `sender` is set to `computeOperatorsHash([operator])` — exactly what
+/// `SignRequest.Execute` will compute on-ledger, so the locally computed
+/// request_id matches the one the MPC node derives from the emitted event.
+pub fn test_sign_request_event(
+    sandbox: &CantonSandbox,
+    nonce: Option<u64>,
+) -> SignBidirectionalRequestedEvent {
+    let operators = vec![sandbox.operator_party.clone()];
+    let sender = compute_operators_hash(&operators);
     SignBidirectionalRequestedEvent {
-        operators: vec![sandbox.operator_party.clone()],
+        operators,
         requester: sandbox.requester_party.clone(),
         sig_network: sandbox.party_id.clone(),
-        sender: "test-sender".to_string(),
-        tx_params: TxParams::EvmTxParams(test_evm_params()),
+        sender,
+        tx_params: TxParams::EvmTxParams(test_evm_params(nonce.unwrap_or(0))),
         caip2_id: "eip155:31337".to_string(),
         key_version: LATEST_MPC_KEY_VERSION,
         path: sandbox.requester_party.clone(),
         algo: "ECDSA".to_string(),
         dest: "ethereum".to_string(),
         params: String::new(),
-        nonce_cid_text: sandbox.nonce_cid.clone(),
         output_deserialization_schema: r#"[{"name":"output","type":"bool"}]"#.to_string(),
         respond_serialization_schema: r#"[{"name":"respond","type":"bool"}]"#.to_string(),
+    }
+}
+
+/// Build the SignRequest create payload from the test event (same fields minus `sender`).
+pub fn test_sign_request_payload(event: &SignBidirectionalRequestedEvent) -> SignRequestPayload {
+    SignRequestPayload {
+        operators: event.operators.clone(),
+        requester: event.requester.clone(),
+        sig_network: event.sig_network.clone(),
+        tx_params: event.tx_params.clone(),
+        caip2_id: event.caip2_id.clone(),
+        key_version: event.key_version,
+        path: event.path.clone(),
+        algo: event.algo.clone(),
+        dest: event.dest.clone(),
+        params: event.params.clone(),
+        output_deserialization_schema: event.output_deserialization_schema.clone(),
+        respond_serialization_schema: event.respond_serialization_schema.clone(),
     }
 }
 
@@ -73,7 +117,6 @@ pub struct CantonSandbox {
     pub signer_cid: String,
     pub signer_template_id: String,
     pub signer_disclosure: DisclosedContract,
-    pub nonce_cid: String,
     pub client: CantonTestClient,
 }
 
@@ -245,18 +288,6 @@ canton.participants.sandbox.ledger-api {{
             .get_disclosed_contract(&[&sig_network], "#daml-signer:Signer:Signer", &signer_cid)
             .await?;
 
-        let nonce_result = client
-            .exercise_choice(
-                &[&requester],
-                &signer_template_id,
-                &signer_cid,
-                "IssueNonce",
-                json!({ "requester": &requester }),
-                std::slice::from_ref(&signer_disclosure),
-            )
-            .await?;
-        let (nonce_cid, _) = find_created_contract(&nonce_result, "SigningNonce")?;
-
         Ok(CantonSandbox {
             process,
             jwt_key_path,
@@ -272,7 +303,6 @@ canton.participants.sandbox.ledger-api {{
             signer_cid,
             signer_template_id,
             signer_disclosure,
-            nonce_cid,
             client,
         })
     }
@@ -290,25 +320,23 @@ canton.participants.sandbox.ledger-api {{
         }
     }
 
-    /// Submit a sign request by creating a SignRequest contract and exercising
-    /// Signer.SignBidirectional directly (no Vault). Updates `nonce_cid`
-    /// with the fresh nonce for the next call.
-    ///
-    /// Uses Anvil chain ID (31337) and default test EVM params/schemas.
-    pub async fn submit_sign_request(&mut self) -> Result<()> {
-        let event = test_sign_request_event(self);
+    /// Submit a test sign request. `nonce = None` uses the default (0); tests
+    /// that need distinct request_ids across multiple submissions pass
+    /// different `Some(n)` values so each submission hashes to a unique id.
+    pub async fn submit_sign_request(&self, nonce: Option<u64>) -> Result<()> {
+        let event = test_sign_request_event(self, nonce);
+        let payload = test_sign_request_payload(&event);
         let sign_request = self
             .client
             .create_contract(
                 &[&self.operator_party, &self.requester_party],
                 "#daml-signer:Signer:SignRequest",
-                serde_json::to_value(&event)?,
+                serde_json::to_value(&payload)?,
             )
             .await?;
         let sign_request_cid = find_created_contract(&sign_request, "SignRequest")?.0;
 
-        let result = self
-            .client
+        self.client
             .exercise_choice(
                 &[&self.requester_party],
                 &self.signer_template_id,
@@ -316,20 +344,11 @@ canton.participants.sandbox.ledger-api {{
                 "SignBidirectional",
                 json!({
                     "signRequestCid": sign_request_cid,
-                    "nonceCid": &self.nonce_cid,
                     "requester": &self.requester_party,
                 }),
                 std::slice::from_ref(&self.signer_disclosure),
             )
             .await?;
-
-        for event in &result.transaction.events {
-            if let ledger_api::Event::CreatedEvent(created) = event {
-                if ledger_api::template_suffix_matches(&created.template_id, "SigningNonce") {
-                    self.nonce_cid = created.contract_id.clone();
-                }
-            }
-        }
         Ok(())
     }
 }
@@ -382,10 +401,6 @@ impl CantonTestClient {
             user_id: user_id.to_string(),
             encoding_key: jsonwebtoken::EncodingKey::from_ec_pem(jwt_private_key_pem.as_bytes())?,
         })
-    }
-
-    fn generate_jwt(&self) -> Result<String> {
-        indexer_canton::generate_jwt_with_key(&self.encoding_key, &self.user_id)
     }
 
     fn auth_post(&self, url: &str) -> Result<reqwest::RequestBuilder> {
@@ -480,32 +495,7 @@ impl CantonTestClient {
             commands: vec![command],
             disclosed_contracts,
         };
-        indexer_canton::submit_and_wait(
-            &self.http,
-            &self.base_url,
-            &self.generate_jwt()?,
-            commands,
-            "command",
-        )
-        .await
-    }
-
-    async fn fetch_active_contracts(
-        &self,
-        parties: &[&str],
-        template_id: &str,
-        include_blob: bool,
-    ) -> Result<Vec<ledger_api::ActiveContractEntry>> {
-        let jwt = self.generate_jwt()?;
-        indexer_canton::fetch_active_contracts(
-            &self.http,
-            &self.base_url,
-            &jwt,
-            parties,
-            Some(template_id),
-            include_blob,
-        )
-        .await
+        self.submit_and_wait(commands, "command").await
     }
 
     pub async fn get_disclosed_contract(
@@ -515,7 +505,7 @@ impl CantonTestClient {
         contract_id: &str,
     ) -> Result<DisclosedContract> {
         let entries = self
-            .fetch_active_contracts(parties, template_id, true)
+            .fetch_active_contracts(parties, Some(template_id), true)
             .await?;
         for entry in &entries {
             if let Some(ContractEntry::JsActiveContract(ac)) = &entry.contract_entry {
@@ -556,7 +546,7 @@ impl CantonTestClient {
                 anyhow::bail!("timeout waiting for {template_id} after {timeout:?}");
             }
             let entries = self
-                .fetch_active_contracts(parties, template_id, false)
+                .fetch_active_contracts(parties, Some(template_id), false)
                 .await?;
             for entry in &entries {
                 if let Some(ContractEntry::JsActiveContract(ac)) = &entry.contract_entry {
@@ -571,6 +561,21 @@ impl CantonTestClient {
             }
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
+    }
+}
+
+impl CantonConn for CantonTestClient {
+    fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+    fn json_api_url(&self) -> &str {
+        &self.base_url
+    }
+    fn jwt_encoding_key(&self) -> &jsonwebtoken::EncodingKey {
+        &self.encoding_key
+    }
+    fn jwt_subject(&self) -> &str {
+        &self.user_id
     }
 }
 

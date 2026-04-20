@@ -114,7 +114,24 @@ pub struct SignBidirectionalRequestedEvent {
     pub algo: String,
     pub dest: String,
     pub params: String,
-    pub nonce_cid_text: String,
+    pub output_deserialization_schema: String,
+    pub respond_serialization_schema: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignRequestPayload {
+    pub operators: Vec<String>,
+    pub requester: String,
+    pub sig_network: String,
+    pub tx_params: TxParams,
+    pub caip2_id: String,
+    #[serde(deserialize_with = "deserialize_number_from_string")]
+    pub key_version: u32,
+    pub path: String,
+    pub algo: String,
+    pub dest: String,
+    pub params: String,
     pub output_deserialization_schema: String,
     pub respond_serialization_schema: String,
 }

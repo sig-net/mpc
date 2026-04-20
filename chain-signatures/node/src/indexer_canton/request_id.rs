@@ -57,7 +57,7 @@ pub fn compute_request_id(
 ) -> anyhow::Result<[u8; 32]> {
     let key_version = U256::from(event.key_version);
 
-    let mut buf = Vec::with_capacity(9 * 32);
+    let mut buf = Vec::with_capacity(8 * 32);
     buf.extend_from_slice(event.sender.as_str().eip712_data_word().as_slice());
     buf.extend_from_slice(&hash_tx_params(&event.tx_params)?);
     buf.extend_from_slice(event.caip2_id.as_str().eip712_data_word().as_slice());
@@ -66,6 +66,5 @@ pub fn compute_request_id(
     buf.extend_from_slice(event.algo.as_str().eip712_data_word().as_slice());
     buf.extend_from_slice(event.dest.as_str().eip712_data_word().as_slice());
     buf.extend_from_slice(event.params.as_str().eip712_data_word().as_slice());
-    buf.extend_from_slice(event.nonce_cid_text.as_str().eip712_data_word().as_slice());
     Ok(keccak256(&buf).into())
 }

@@ -16,7 +16,7 @@ use tokio_tungstenite::tungstenite::http::header;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::{
-    contracts, ledger_api, CantonConfig, CantonRespondBidirectionalEvent,
+    contracts, ledger_api, CantonConfig, CantonConn, CantonRespondBidirectionalEvent,
     CantonSignBidirectionalRequestedEvent, CantonSignatureRespondedEvent,
 };
 
@@ -164,7 +164,7 @@ async fn subscribe_and_process(
 ) -> anyhow::Result<()> {
     let jwt_token = client.generate_jwt()?;
 
-    let ws_url = format!("{}/v2/updates", client.json_api_ws_url);
+    let ws_url = format!("{}/v2/updates", client.config.json_api_ws_url);
 
     let mut request = ws_url.into_client_request()?;
     request.headers_mut().insert(
@@ -186,7 +186,7 @@ async fn subscribe_and_process(
     // TRANSACTION_SHAPE_LEDGER_EFFECTS gives us ExercisedEvent which we use
     // to verify the SignBidirectional choice was exercised on a Signer:Signer.
     let mut filters_by_party = serde_json::Map::new();
-    filters_by_party.insert(client.party_id.clone(), serde_json::json!({}));
+    filters_by_party.insert(client.config.party_id.clone(), serde_json::json!({}));
 
     let subscribe_msg = ledger_api::GetUpdatesRequest {
         begin_exclusive: *counter,
@@ -253,7 +253,7 @@ async fn subscribe_and_process(
                 *counter = value.offset;
 
                 for event in &value.events {
-                    process_canton_event(event, &value.events, tx, &client.signer_cid).await;
+                    process_canton_event(event, &value.events, tx, &client.config.signer_contract_id).await;
                 }
             }
             Some(ledger_api::Update::OffsetCheckpoint { value }) => {
@@ -385,13 +385,10 @@ async fn process_canton_event(
 /// 3. An ExercisedEvent with choice "SignBidirectional" on Signer:Signer must
 ///    exist in the same transaction — proves the event was created through the
 ///    correct Daml code path, not fabricated
-/// 4. nonceCidText must match a consuming ExercisedEvent on a SigningNonce
-///    template in the same transaction — prevents replay and forged nonces
 ///
 /// TODO(test): unit test each check in isolation — craft events where one
 /// check fails and verify the correct error is returned. Test: non-signatory
-/// operator, non-signatory requester, missing ExercisedEvent, missing nonce
-/// consumption, empty nonceCidText.
+/// operator, non-signatory requester, missing ExercisedEvent.
 fn verify_sign_event(
     event: &contracts::SignBidirectionalRequestedEvent,
     created: &ledger_api::CreatedEvent,
@@ -434,31 +431,6 @@ fn verify_sign_event(
     if !has_exercise {
         anyhow::bail!(
             "no ExercisedEvent with choice SignBidirectional on contract {signer_contract_id} found in transaction"
-        );
-    }
-
-    // Check 4: nonceCidText must correspond to a consuming ExercisedEvent on a
-    // SigningNonce template in the same transaction. With LEDGER_EFFECTS, nonce
-    // archival appears as a consuming exercise (not an ArchivedEvent).
-    // This ensures: (a) the nonce was actually consumed (replay prevention),
-    // and (b) it's a SigningNonce — not an arbitrary string.
-    // NOTE: uses suffix matching for the template ID. Could be tightened to an
-    // exact match by deriving the SigningNonce template ID from the Signer
-    // package hash (same DAR, different module path).
-    let nonce_cid = &event.nonce_cid_text;
-    if nonce_cid.is_empty() {
-        anyhow::bail!("nonceCidText is empty — malformed SignBidirectionalEvent");
-    }
-    let nonce_consumed = tx_events.iter().any(|e| matches!(
-        e,
-        ledger_api::Event::ExercisedEvent(ex)
-            if ex.consuming
-                && ex.contract_id == *nonce_cid
-                && ledger_api::template_suffix_matches(&ex.template_id, ledger_api::templates::SIGNING_NONCE)
-    ));
-    if !nonce_consumed {
-        anyhow::bail!(
-            "nonceCidText {nonce_cid} does not match any consuming ExercisedEvent on SigningNonce in the transaction — possible replay or forged nonce"
         );
     }
 

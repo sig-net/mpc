@@ -363,7 +363,6 @@ pub mod templates {
     pub const SIGN_BIDIRECTIONAL_EVENT: &str = "Signer:SignBidirectionalEvent";
     pub const SIGNATURE_RESPONDED_EVENT: &str = "Signer:SignatureRespondedEvent";
     pub const RESPOND_BIDIRECTIONAL_EVENT: &str = "Signer:RespondBidirectionalEvent";
-    pub const SIGNING_NONCE: &str = "Signer:SigningNonce";
 }
 
 /// Check if a template ID matches a given suffix at a module boundary.

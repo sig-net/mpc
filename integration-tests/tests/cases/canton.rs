@@ -4,7 +4,7 @@ use alloy::primitives::{FixedBytes, Signature, U256};
 use alloy::providers::ext::AnvilApi;
 use alloy::providers::{Provider, ProviderBuilder};
 use anyhow::{Context as _, Result};
-use integration_tests::canton::{test_evm_params, test_sign_request_event};
+use integration_tests::canton::{test_evm_params, test_sign_request_event, test_sign_request_payload};
 use integration_tests::cluster;
 use mpc_node::indexer_canton::contracts::{
     RespondBidirectionalEventPayload, SignatureRespondedEventPayload,
@@ -38,8 +38,8 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
         .context("canton sandbox not available")?;
     let client = &canton.client;
 
-    let expected_event = test_sign_request_event(canton);
-    let evm_params = test_evm_params();
+    let expected_event = test_sign_request_event(canton, None);
+    let evm_params = test_evm_params(0);
     let expected_request_id = hex::encode(compute_request_id(&expected_event)?);
 
     // 3. Submit sign request directly via Signer (bypasses Vault)
@@ -47,7 +47,7 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
         .create_contract(
             &[&canton.operator_party, &canton.requester_party],
             "#daml-signer:Signer:SignRequest",
-            serde_json::to_value(&expected_event)?,
+            serde_json::to_value(test_sign_request_payload(&expected_event))?,
         )
         .await?;
     let (sign_request_cid, _) =
@@ -61,7 +61,6 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
             "SignBidirectional",
             json!({
                 "signRequestCid": sign_request_cid,
-                "nonceCid": &canton.nonce_cid,
                 "requester": &canton.requester_party,
             }),
             std::slice::from_ref(&canton.signer_disclosure),
@@ -98,7 +97,7 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
 
     let sign_epsilon = mpc_crypto::derive_epsilon_canton(
         LATEST_MPC_KEY_VERSION,
-        "test-sender",
+        &expected_event.sender,
         &canton.requester_party,
     );
     let expected_sender_addr = derive_user_address(root_pk, sign_epsilon);
@@ -163,7 +162,7 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
 
     let respond_epsilon = mpc_crypto::derive_epsilon_canton(
         LATEST_MPC_KEY_VERSION,
-        "test-sender",
+        &expected_event.sender,
         "canton response key",
     );
     let respond_derived_pk = mpc_crypto::derive_key(root_pk, respond_epsilon);

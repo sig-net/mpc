@@ -1,15 +1,14 @@
-mod api;
 mod calldata;
+mod conn;
 pub mod contracts;
 pub mod ledger_api;
 mod request_id;
+mod signature;
 mod stream;
 
-pub use api::{
-    check_response, der_encode_signature, discover_signer_cid, fetch_active_contracts,
-    fetch_ledger_end, generate_jwt_with_key, submit_and_wait,
-};
+pub use conn::{generate_jwt_with_key, CantonConn};
 pub use request_id::compute_request_id;
+pub use signature::der_encode_signature;
 pub use stream::{parse_canton_signature, CantonStream};
 
 use crate::protocol::Chain;
@@ -140,9 +139,6 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
 /// restart with updated CLI args to pick up the new IDs.
 ///
 /// TODO: decide how to handle DAR upgrades without MPC node downtime.
-/// Options include: runtime re-discovery via `discover_signer_cid`, watching
-/// for Signer contract archival/recreation events on the stream, or a
-/// control-plane signal that triggers config reload.
 #[derive(Clone)]
 pub struct CantonConfig {
     pub json_api_url: String,
