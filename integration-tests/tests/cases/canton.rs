@@ -4,7 +4,9 @@ use alloy::primitives::{FixedBytes, Signature, U256};
 use alloy::providers::ext::AnvilApi;
 use alloy::providers::{Provider, ProviderBuilder};
 use anyhow::{Context as _, Result};
-use integration_tests::canton::{test_evm_params, test_sign_request_event, test_sign_request_payload};
+use integration_tests::canton::{
+    test_evm_params, test_sign_request_event, test_sign_request_payload,
+};
 use integration_tests::cluster;
 use mpc_node::indexer_canton::contracts::{
     RespondBidirectionalEventPayload, SignatureRespondedEventPayload,

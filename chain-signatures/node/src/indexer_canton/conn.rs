@@ -102,10 +102,7 @@ pub trait CantonConn {
 
         let resp = self
             .http()
-            .post(format!(
-                "{}/v2/state/active-contracts",
-                self.json_api_url()
-            ))
+            .post(format!("{}/v2/state/active-contracts", self.json_api_url()))
             .bearer_auth(self.generate_jwt()?)
             .json(&req)
             .send()

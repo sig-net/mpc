@@ -253,7 +253,13 @@ async fn subscribe_and_process(
                 *counter = value.offset;
 
                 for event in &value.events {
-                    process_canton_event(event, &value.events, tx, &client.config.signer_contract_id).await;
+                    process_canton_event(
+                        event,
+                        &value.events,
+                        tx,
+                        &client.config.signer_contract_id,
+                    )
+                    .await;
                 }
             }
             Some(ledger_api::Update::OffsetCheckpoint { value }) => {
@@ -312,12 +318,9 @@ async fn process_canton_event(
     ) {
         match parse_sign_bidirectional_event(created) {
             Ok(canton_event) => {
-                if let Err(e) = verify_sign_event(
-                    &canton_event,
-                    created,
-                    tx_events,
-                    signer_contract_id,
-                ) {
+                if let Err(e) =
+                    verify_sign_event(&canton_event, created, tx_events, signer_contract_id)
+                {
                     tracing::warn!(%e, "canton SignBidirectionalEvent failed verification — dropping");
                     return;
                 }
