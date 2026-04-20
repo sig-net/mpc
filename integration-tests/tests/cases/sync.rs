@@ -26,10 +26,10 @@ async fn test_state_sync_e2e_large_outdated_stockpile() {
     let redis = spawner.prespawn_redis().await;
 
     // immediately add to triples/presignatures storage the triples/presignatures we want to invalidate.
-    let node0_triples = redis.triple_storage(&node0_account_id);
-    let node0_presignatures = redis.presignature_storage(&node0_account_id);
-    let node1_triples = redis.triple_storage(&node1_account_id);
-    let node1_presignatures = redis.presignature_storage(&node1_account_id);
+    let node0_triples = redis.triple_storage(&node0_account_id, node0);
+    let node0_presignatures = redis.presignature_storage(&node0_account_id, node0);
+    let node1_triples = redis.triple_storage(&node1_account_id, node1);
+    let node1_presignatures = redis.presignature_storage(&node1_account_id, node1);
 
     // insert triples that will be invalidated after a sync, since nobody else has them.
     // node0 is saying that they have 0 to 5, but node1 will sync and say they have 4 and 5 only.
@@ -110,12 +110,12 @@ async fn test_state_sync_e2e() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Get triple/presignature storage for each node.
-    let node0_triples = redis.triple_storage(&node0_account_id);
-    let node0_presignatures = redis.presignature_storage(&node0_account_id);
-    let node1_triples = redis.triple_storage(&node1_account_id);
-    let node1_presignatures = redis.presignature_storage(&node1_account_id);
-    let node2_triples = redis.triple_storage(&node2_account_id);
-    let node2_presignatures = redis.presignature_storage(&node2_account_id);
+    let node0_triples = redis.triple_storage(&node0_account_id, node0);
+    let node0_presignatures = redis.presignature_storage(&node0_account_id, node0);
+    let node1_triples = redis.triple_storage(&node1_account_id, node1);
+    let node1_presignatures = redis.presignature_storage(&node1_account_id, node1);
+    let node2_triples = redis.triple_storage(&node2_account_id, node2);
+    let node2_presignatures = redis.presignature_storage(&node2_account_id, node2);
 
     // Populate 3 triples and 3 presignatures: each node owns 1, all nodes hold shares.
     for storage in [&node0_triples, &node1_triples, &node2_triples] {

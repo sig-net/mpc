@@ -105,7 +105,9 @@ impl std::fmt::Debug for SignArgs {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct Signature {
     #[borsh(
@@ -222,7 +224,7 @@ impl Chain {
     pub fn expected_finality_time_secs(&self) -> u64 {
         match self {
             Chain::NEAR => 3,
-            Chain::Ethereum => 15 * 60,
+            Chain::Ethereum => 30 * 60,
             Chain::Solana => 3,
             Chain::Bitcoin => 60 * 60 + 20 * 60, // 6 confirmations at 10 minutes each, plus some buffer
             Chain::Hydration => 12,
@@ -230,7 +232,7 @@ impl Chain {
     }
 
     pub fn expected_response_time_secs(&self) -> u64 {
-        self.expected_finality_time_secs() + 60
+        self.expected_finality_time_secs() + 5 // + Buffer time
     }
 }
 

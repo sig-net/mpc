@@ -377,10 +377,6 @@ impl TripleSpawner {
         self.ongoing.contains_key(&id)
     }
 
-    pub async fn contains_used(&self, id: TripleId) -> bool {
-        self.triple_storage.contains_used(id).await
-    }
-
     /// Returns the number of unspent triples assigned to this node.
     pub async fn len_mine(&self) -> usize {
         self.triple_storage.len_by_owner(self.me).await
@@ -517,9 +513,9 @@ impl TripleSpawner {
         timeout: Duration,
     ) -> Result<(), InitializationError> {
         // Check if the `id` is already in the system. Error out and have the next cycle try again.
-        let Some(slot) = self.triple_storage.reserve(id).await else {
+        let Some(slot) = self.triple_storage.create_slot(id, proposer).await else {
             return Err(InitializationError::BadParameters(format!(
-                "id collision: pair_id={id}"
+                "triple {id} is already generating, in use, or stored"
             )));
         };
 
@@ -546,10 +542,6 @@ impl TripleSpawner {
     /// Generate new triples if this node owns fewer than the per-node minimum
     /// (`min_triples`) and the network-wide total hasn't reached the cap (`max_triples`).
     async fn stockpile(&mut self, participants: &[Participant], cfg: &ProtocolConfig) {
-        if participants.len() < self.threshold {
-            return;
-        }
-
         let not_enough_triples = {
             // Network-wide cap: stop generating once total potential triples reach max_triples.
             if self.len_potential().await >= cfg.triple.max_triples as usize {
@@ -574,11 +566,13 @@ impl TripleSpawner {
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
         let mut stockpile_interval = tokio::time::interval(Duration::from_millis(100));
+        stockpile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(1));
         let mut posits = self.msg.subscribe_triple_posit().await;
 
         let mut active = mesh_state.borrow().active().keys_vec();
         let mut protocol = cfg.borrow().protocol.clone();
+        let mut last_active_warn = None;
 
         loop {
             tokio::select! {
@@ -607,22 +601,28 @@ impl TripleSpawner {
                     self.ongoing_owned.remove(&id);
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
                 }
-                _ = stockpile_interval.tick(), if active.len() >= self.threshold => {
-                    self.stockpile(&active, &protocol).await;
-                    let _ = ongoing_gen_tx.send(self.ongoing.len());
+                _ = stockpile_interval.tick() => {
+                    if active.len() >= self.threshold {
+                        last_active_warn = None;
+                        self.stockpile(&active, &protocol).await;
+                        let _ = ongoing_gen_tx.send(self.ongoing.len());
 
-                    crate::metrics::storage::NUM_TRIPLES_MINE
-
-                        .set(self.len_mine().await as i64);
-                    crate::metrics::storage::NUM_TRIPLES_TOTAL
-
-                        .set(self.triple_storage.len_generated().await as i64);
-                    crate::metrics::protocols::NUM_TRIPLE_GENERATORS_INTRODUCED
-
-                        .set(self.len_introduced() as i64);
-                    crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL
-
-                        .set(self.len_ongoing() as i64);
+                        crate::metrics::storage::NUM_TRIPLES_MINE
+                            .set(self.len_mine().await as i64);
+                        crate::metrics::storage::NUM_TRIPLES_TOTAL
+                            .set(self.triple_storage.len_generated().await as i64);
+                        crate::metrics::protocols::NUM_TRIPLE_GENERATORS_INTRODUCED
+                            .set(self.len_introduced() as i64);
+                        crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL
+                            .set(self.len_ongoing() as i64);
+                    } else if last_active_warn.is_none_or(|i: Instant| i.elapsed() > Duration::from_secs(60)) {
+                        tracing::warn!(
+                            ?active,
+                            threshold = self.threshold,
+                            "not enough active participants to generate triples"
+                        );
+                        last_active_warn = Some(Instant::now());
+                    }
                 }
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();

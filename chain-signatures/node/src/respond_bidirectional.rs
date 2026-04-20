@@ -109,25 +109,22 @@ impl CompletedTx {
         };
         let epsilon = self.tx.epsilon(&path)?;
         let entropy = self.tx.id.0;
-        Ok(IndexedSignRequest {
-            id: SignId::new(request_id_bytes),
-            chain,
-            args: SignArgs {
+        Ok(IndexedSignRequest::respond_bidirectional(
+            SignId::new(request_id_bytes),
+            SignArgs {
                 entropy: entropy.into(),
                 epsilon,
                 payload,
                 path,
                 key_version: self.tx.key_version,
             },
-            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            timestamp_created: std::time::Instant::now(),
-            sign_request_type: crate::protocol::SignRequestType::RespondBidirectional(
-                RespondBidirectionalTx {
-                    tx_id: self.tx.id,
-                    output: serialized_output,
-                },
-            ),
-        })
+            chain,
+            crate::util::current_unix_timestamp(),
+            RespondBidirectionalTx {
+                tx_id: self.tx.id,
+                output: serialized_output,
+            },
+        ))
     }
 
     pub async fn extract_success_tx_output(

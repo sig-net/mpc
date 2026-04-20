@@ -15,10 +15,11 @@ use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::protocol_storage::ProtocolArtifact;
 use crate::storage::PresignatureStorage;
+use crate::stream::ops::SignBidirectionalEvent;
 use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap, TimeoutBudget};
 
-use crate::protocol::SignRequestType;
+use crate::protocol::SignKind;
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::PresignOutput;
 use chrono::Utc;
@@ -41,8 +42,8 @@ const ROUND_INTERVAL: usize = 512;
 /// The default timeout budget for organizing and posit phases.
 const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// All relevant info pertaining to an Indexed sign request from an indexer.
-#[derive(Debug, Clone, PartialEq)]
+/// All relevant info pertaining to an indexed sign request.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IndexedSignRequest {
     pub id: SignId,
     pub args: SignArgs,
@@ -50,10 +51,61 @@ pub struct IndexedSignRequest {
     /// Unix timestamp when the request was indexed by MPC node.
     /// Preserved across recoveries to maintain original request creation time.
     pub unix_timestamp_indexed: u64,
-    /// Monotonic system time when the request entered the system for processing.
-    /// Set during initial indexing or updated on recovery/requeue to current system time.
-    pub timestamp_created: Instant,
-    pub sign_request_type: SignRequestType,
+    pub kind: SignKind,
+}
+
+impl IndexedSignRequest {
+    pub fn new(
+        id: SignId,
+        args: SignArgs,
+        chain: Chain,
+        unix_timestamp_indexed: u64,
+        kind: SignKind,
+    ) -> Self {
+        Self {
+            id,
+            args,
+            chain,
+            unix_timestamp_indexed,
+            kind,
+        }
+    }
+
+    pub fn sign(id: SignId, args: SignArgs, chain: Chain, unix_timestamp_indexed: u64) -> Self {
+        Self::new(id, args, chain, unix_timestamp_indexed, SignKind::Sign)
+    }
+
+    pub fn sign_bidirectional(
+        id: SignId,
+        args: SignArgs,
+        chain: Chain,
+        unix_timestamp_indexed: u64,
+        event: SignBidirectionalEvent,
+    ) -> Self {
+        Self::new(
+            id,
+            args,
+            chain,
+            unix_timestamp_indexed,
+            SignKind::SignBidirectional(event),
+        )
+    }
+
+    pub fn respond_bidirectional(
+        id: SignId,
+        args: SignArgs,
+        chain: Chain,
+        unix_timestamp_indexed: u64,
+        tx: crate::protocol::RespondBidirectionalTx,
+    ) -> Self {
+        Self::new(
+            id,
+            args,
+            chain,
+            unix_timestamp_indexed,
+            SignKind::RespondBidirectional(tx),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -273,11 +325,10 @@ impl SignOrganizer {
         let (presignature_id, presignature, active) = if is_proposer {
             tracing::info!(?sign_id, round = ?state.round, "proposer waiting for presignature");
             let active = active.iter().copied().collect::<Vec<_>>();
-            let mut recycle = Vec::new();
             let remaining = state.budget.remaining();
             let fetch = tokio::time::timeout(remaining, async {
                 loop {
-                    if let Some(taken) = ctx.presignatures.take_mine(ctx.me).await {
+                    if let Some(taken) = ctx.presignatures.take_mine().await {
                         let Some(holders) = taken.artifact.holders() else {
                             tracing::error!(
                                 id = taken.artifact.id,
@@ -287,7 +338,13 @@ impl SignOrganizer {
                         };
                         let participants = intersect_vec(&[holders, &active]);
                         if participants.len() < ctx.threshold {
-                            recycle.push(taken);
+                            tracing::warn!(
+                                ?sign_id,
+                                id = taken.artifact.id,
+                                ?holders,
+                                ?active,
+                                "discarding presignature due to inactive participants"
+                            );
                             continue;
                         }
 
@@ -297,13 +354,6 @@ impl SignOrganizer {
                 }
             })
             .await;
-
-            let presignatures = ctx.presignatures.clone();
-            tokio::spawn(async move {
-                for taken in recycle {
-                    presignatures.recycle_mine(me, taken).await;
-                }
-            });
 
             let (taken, participants) = match fetch {
                 Ok(value) => value,
@@ -398,7 +448,7 @@ impl SignPositor {
                     ctx.msg
                         .send(
                             ctx.me,
-                            proposer,
+                            *from,
                             PositMessage {
                                 id: PositProtocolId::Signature(
                                     sign_id,
@@ -630,9 +680,8 @@ impl SignPositor {
 
                         if counter.enough_rejects(ctx.threshold) {
                             tracing::warn!(?sign_id, ?round, ?from, "received enough REJECTs, reorganizing");
-                            if let Some(taken) = presignature {
-                                tracing::warn!(?sign_id, "recycling presignature due to REJECTs");
-                                ctx.presignatures.recycle_mine(ctx.me, taken).await;
+                            if let Some(_taken) = presignature {
+                                tracing::warn!(?sign_id, "discarding presignature due to REJECTs");
                             }
                             state.bump_round();
                             return SignPhase::Organizing(SignOrganizer);
@@ -672,9 +721,8 @@ impl SignPositor {
                             ?round,
                             "proposer posit deadline reached, expiring round"
                         );
-                        if let Some(taken) = presignature {
-                            tracing::warn!(?sign_id, "recycling presignature due to proposer timeout");
-                            ctx.presignatures.recycle_mine(ctx.me, taken).await;
+                        if let Some(_taken) = presignature {
+                            tracing::warn!(?sign_id, "discarding presignature due to proposer timeout");
                         }
                     } else {
                         tracing::warn!(?sign_id, me=?ctx.me, ?proposer, "deliberator posit timeout waiting for Start, reorganizing");
@@ -991,9 +1039,7 @@ impl SignGenerator {
                         );
                     }
 
-                    if let SignRequestType::SignBidirectional(event) =
-                        &self.indexed.sign_request_type
-                    {
+                    if let SignKind::SignBidirectional(event) = &self.indexed.kind {
                         // Note: The promotion to Bidirectional will happen when we receive the
                         // SignatureRespondedEvent in the Solana indexer, which has the signature data.
                         // For now, we just complete the signature generation. The indexer will handle the promotion.
@@ -1139,6 +1185,10 @@ pub struct SignatureSpawner {
 }
 
 impl SignatureSpawner {
+    fn observe_queue_size(&self) {
+        crate::metrics::requests::SIGN_QUEUE_SIZE.set(self.tasks.len() as i64);
+    }
+
     /// Creates a signature task for a new sign request
     /// The task will handle organizing, posit, and generation internally
     fn spawn_task(
@@ -1237,6 +1287,30 @@ impl SignatureSpawner {
         }
     }
 
+    fn handle_task_exit(&mut self, result: Result<(SignId, Result<(), SignError>), SignId>) {
+        self.observe_queue_size();
+        let (sign_id, result) = match result {
+            Ok(outcome) => outcome,
+            Err(sign_id) => {
+                tracing::warn!(?sign_id, "signature task interrupted");
+                self.inboxes.remove(&sign_id);
+                self.abort_delayed_watcher(sign_id, "interruption");
+                return;
+            }
+        };
+
+        self.inboxes.remove(&sign_id);
+        self.abort_delayed_watcher(sign_id, "task completion");
+        match result {
+            Ok(()) => {
+                tracing::info!(?sign_id, "signature task completed successfully");
+            }
+            Err(SignError::Aborted) => {
+                tracing::warn!(?sign_id, "signature task terminated");
+            }
+        }
+    }
+
     fn abort_delayed_watcher(&mut self, sign_id: SignId, reason: &str) {
         if let Some(watcher) = self.delayed_watchers.remove(&sign_id) {
             tracing::info!(?sign_id, reason = %reason, "aborting delayed watcher");
@@ -1280,8 +1354,7 @@ impl SignatureSpawner {
             }
         }
 
-        // Update metrics
-        crate::metrics::requests::SIGN_QUEUE_SIZE.set(self.tasks.len() as i64);
+        self.observe_queue_size();
     }
 
     async fn run(
@@ -1313,26 +1386,7 @@ impl SignatureSpawner {
                     self.handle_posit(sign_id, presignature_id, round, from, action).await;
                 }
                 Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
-                    let (sign_id, result) = match result {
-                        Ok(outcome) => outcome,
-                        Err(sign_id) => {
-                            tracing::warn!(?sign_id, "signature task interrupted");
-                            self.inboxes.remove(&sign_id);
-                            self.abort_delayed_watcher(sign_id, "interruption");
-                            continue;
-                        }
-                    };
-
-                    self.inboxes.remove(&sign_id);
-                    self.abort_delayed_watcher(sign_id, "task completion");
-                    match result {
-                        Ok(()) => {
-                            tracing::info!(?sign_id, "signature task completed successfully");
-                        }
-                        Err(SignError::Aborted) => {
-                            tracing::warn!(?sign_id, "signature task terminated");
-                        }
-                    }
+                    self.handle_task_exit(result);
                 }
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();

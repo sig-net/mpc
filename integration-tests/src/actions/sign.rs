@@ -799,16 +799,43 @@ pub async fn wait_for_respond_bidirectional(
 
     tracing::info!(
         request_id = %hex::encode(expected_request_id),
+        timeout_secs = timeout.as_secs(),
         "subscribed to RespondBidirectionalEvent, waiting for MPC response...",
     );
-    let result = tokio::time::timeout(timeout, rx).await;
+
+    // Wrap the oneshot receiver with periodic progress logging so CI
+    // output shows the test is still alive and how long it has been waiting.
+    let request_id_hex = hex::encode(expected_request_id);
+    let result = tokio::time::timeout(timeout, async {
+        let mut elapsed_secs = 0u64;
+        let mut rx = rx;
+        loop {
+            tokio::select! {
+                res = &mut rx => { return res; }
+                _ = tokio::time::sleep(Duration::from_secs(15)) => {
+                    elapsed_secs += 15;
+                    tracing::info!(
+                        request_id = %request_id_hex,
+                        elapsed_secs,
+                        "still waiting for RespondBidirectionalEvent..."
+                    );
+                }
+            }
+        }
+    })
+    .await;
     event_unsub.unsubscribe().await;
 
     match result {
         Ok(Ok(Ok(outcome))) => Ok(outcome),
         Ok(Ok(Err(e))) => anyhow::bail!("failed to parse sol respond bidirectional signature: {e}"),
-        Ok(Err(_)) => anyhow::bail!("sol respond bidirectional event channel closed unexpectedly"),
-        Err(_) => anyhow::bail!("timeout waiting for respond bidirectional on sol"),
+        Ok(Err(_)) => anyhow::bail!(
+            "sol respond bidirectional event channel closed unexpectedly \
+             (request_id={request_id_hex})",
+        ),
+        Err(_) => anyhow::bail!(
+            "timeout ({timeout:?}) waiting for respond bidirectional on sol (request_id={request_id_hex})",
+        ),
     }
 }
 

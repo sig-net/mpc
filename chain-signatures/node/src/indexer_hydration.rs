@@ -2,7 +2,7 @@ use crate::backlog::Backlog;
 use crate::indexer_sol::MAX_SECP256K1_SCALAR;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::{Chain, IndexedSignRequest, Sign, SignRequestType};
+use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::ops::SignatureEvent;
@@ -22,7 +22,6 @@ use sp_state_machine::read_proof_check;
 use sp_trie::StorageProof;
 use std::convert::TryInto;
 use std::fmt;
-use std::time::Instant;
 use subxt::backend::{legacy::LegacyRpcMethods, rpc::RpcClient};
 use subxt::config::HashFor;
 use subxt::events::EventDetails;
@@ -159,20 +158,18 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {
         let sign_id = SignId::new(self.generate_request_id());
         tracing::info!(?sign_id, "hydration signature requested");
 
-        Ok(IndexedSignRequest {
-            id: sign_id,
-            args: SignArgs {
+        Ok(IndexedSignRequest::sign(
+            sign_id,
+            SignArgs {
                 entropy,
                 epsilon,
                 payload,
                 path: self.path.clone(),
                 key_version: self.key_version,
             },
-            chain: Chain::Hydration,
-            timestamp_created: Instant::now(),
-            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            sign_request_type: SignRequestType::Sign,
-        })
+            Chain::Hydration,
+            crate::util::current_unix_timestamp(),
+        ))
     }
 
     fn source_chain(&self) -> Chain {
@@ -252,22 +249,19 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
             anyhow::bail!("payload exceeds secp256k1 curve order");
         }
 
-        Ok(IndexedSignRequest {
-            id: sign_id,
-            args: SignArgs {
+        Ok(IndexedSignRequest::sign_bidirectional(
+            sign_id,
+            SignArgs {
                 entropy,
                 epsilon,
                 payload,
                 path: self.path.clone(),
                 key_version: self.key_version,
             },
-            chain: Chain::Hydration,
-            timestamp_created: Instant::now(),
-            unix_timestamp_indexed: crate::util::current_unix_timestamp(),
-            sign_request_type: SignRequestType::SignBidirectional(
-                crate::stream::ops::SignBidirectionalEvent::Hydration(self.clone()),
-            ),
-        })
+            Chain::Hydration,
+            crate::util::current_unix_timestamp(),
+            crate::stream::ops::SignBidirectionalEvent::Hydration(self.clone()),
+        ))
     }
 
     fn source_chain(&self) -> Chain {
