@@ -504,25 +504,7 @@ pub async fn process_execution_confirmed(
         tracing::warn!(?tx_id, expected = ?unwatched_sign_id, actual = ?sign_id, "sign_id mismatch between event and watcher");
     }
 
-    // Update the status on the source chain
-    let status = match result {
-        ExecutionOutcome::Success { .. } => SignStatus::Success,
-        ExecutionOutcome::Failed => SignStatus::Failed,
-    };
-
-    let set_res = backlog
-        .set_status(pending_tx.source_chain, &unwatched_sign_id, status)
-        .await;
-    let updated_tx = match set_res {
-        Some(tx) => tx,
-        None => {
-            tracing::error!(?tx_id, ?unwatched_sign_id, source_chain = ?pending_tx.source_chain, "failed to set status on pending tx");
-            anyhow::bail!("failed to set status for sign id: {unwatched_sign_id:?}");
-        }
-    };
-    tracing::info!(?tx_id, ?unwatched_sign_id, updated_status = ?updated_tx.status(), "set_status returned transaction");
-
-    let completed_tx = CompletedTx::new(pending_tx, block_height);
+    let completed_tx = CompletedTx::new(pending_tx.clone(), block_height);
 
     let sign_request = match result {
         ExecutionOutcome::Success { output } => {
@@ -534,6 +516,40 @@ pub async fn process_execution_confirmed(
                 .await?
         }
     };
+
+    if let Err(err) = backlog
+        .set_request(
+            pending_tx.source_chain,
+            &unwatched_sign_id,
+            sign_request.clone(),
+        )
+        .await
+    {
+        tracing::error!(
+            ?tx_id,
+            ?unwatched_sign_id,
+            ?source_chain,
+            ?err,
+            "failed to persist completion request on pending tx"
+        );
+        anyhow::bail!("failed to persist completion request for sign id: {unwatched_sign_id:?}");
+    }
+
+    let set_res = backlog
+        .set_status(
+            pending_tx.source_chain,
+            &unwatched_sign_id,
+            SignStatus::AwaitingResponseBidirectional,
+        )
+        .await;
+    let updated_tx = match set_res {
+        Some(tx) => tx,
+        None => {
+            tracing::error!(?tx_id, ?unwatched_sign_id, source_chain = ?pending_tx.source_chain, "failed to set status on pending tx");
+            anyhow::bail!("failed to set status for sign id: {unwatched_sign_id:?}");
+        }
+    };
+    tracing::info!(?tx_id, ?unwatched_sign_id, updated_status = ?updated_tx.status(), "set_status returned transaction");
 
     let chain = sign_request.chain;
     if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
@@ -748,14 +764,21 @@ mod tests {
         tracing::info!(?watchers, "watchers after execution confirmed");
         assert!(watchers.is_empty());
 
-        // Source chain request should be marked Success
+        // Source chain request should now wait for final bidirectional response.
         // inspect the transaction to provide more debugging info on failure
         let maybe_tx = backlog.get(tx.source_chain, &sign_id).await;
         assert!(maybe_tx.is_some(), "expected sign tx to still exist");
         let tx_after = maybe_tx.unwrap();
-        if tx_after.status() != SignStatus::Success {
-            panic!("expected Success but found status: {:?}", tx_after.status());
-        }
+        assert_eq!(
+            tx_after.status(),
+            SignStatus::AwaitingResponseBidirectional,
+            "expected AwaitingResponseBidirectional but found status: {:?}",
+            tx_after.status()
+        );
+        assert!(matches!(
+            tx_after.request.kind,
+            SignKind::RespondBidirectional(_)
+        ));
 
         // A sign request should have been sent to the sign queue
         let msg = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -917,11 +940,17 @@ mod tests {
         let watchers = backlog.pending_execution(tx.target_chain).await;
         assert!(watchers.is_empty());
 
-        // Source chain should be marked Failed
-        let failed = backlog
-            .get_by_status(tx.source_chain, SignStatus::Failed)
+        // Source chain should now wait for final bidirectional response.
+        let waiting = backlog
+            .get_by_status(tx.source_chain, SignStatus::AwaitingResponseBidirectional)
             .await;
-        assert!(failed.contains_key(&sign_id));
+        assert!(waiting.contains_key(&sign_id));
+
+        let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
+        assert!(matches!(
+            tx_after.request.kind,
+            SignKind::RespondBidirectional(_)
+        ));
 
         // A sign request should have been sent
         let msg = timeout(Duration::from_secs(1), sign_rx.recv())

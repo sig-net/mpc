@@ -39,6 +39,8 @@ pub enum SignStatus {
     /// Request has been responded to and the derived transaction is now waiting to
     /// execute on the destination chain.
     PendingExecution,
+    /// Execution was confirmed and final respond request is waiting to be signed.
+    AwaitingResponseBidirectional,
     Failed,
     Success,
 }
