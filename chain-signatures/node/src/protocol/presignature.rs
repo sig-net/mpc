@@ -472,7 +472,7 @@ impl PresignatureSpawner {
     /// Starts a new presignature generation protocol.
     async fn propose_posit(&mut self, active: &[Participant]) {
         // To ensure there is no contention between different nodes we are only using triples
-        // that we proposed. This way in a non-BFT environment we are guaranteed to never try
+        // that we own. This way in a non-BFT environment we are guaranteed to never try
         // to use the same triple as any other node.
         // TODO: have all this part be a separate task such that finding a pair of triples is done in parallel instead
         // of waiting for storage to respond here.
@@ -550,9 +550,9 @@ impl PresignatureSpawner {
         timeout: Duration,
     ) -> Result<(), InitializationError> {
         let (owner, triples) = match positor {
-            Positor::Proposer(proposer, triples) => (proposer, PendingTriples::Available(triples)),
-            Positor::Deliberator(proposer) => (
-                proposer,
+            Positor::Proposer(owner, triples) => (owner, PendingTriples::Available(triples)),
+            Positor::Deliberator(owner) => (
+                owner,
                 PendingTriples::InStorage(id.pair_id, self.triples.clone()),
             ),
         };

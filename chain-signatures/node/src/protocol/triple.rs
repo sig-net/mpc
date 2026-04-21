@@ -14,8 +14,6 @@ use mpc_contract::config::ProtocolConfig;
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::triples::{TriplePub, TripleShare};
 use chrono::Utc;
-use highway::{HighwayHash, HighwayHasher};
-use k256::elliptic_curve::group::GroupEncoding;
 use k256::Secp256k1;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
@@ -40,7 +38,7 @@ pub struct Triple {
 struct TripleGenerator {
     id: TripleId,
     me: Participant,
-    proposer: Participant,
+    owner: Participant,
     participants: Vec<Participant>,
     /// Option to temporarily move it to a blocking task. Must be Some in all
     /// other circumstances.
@@ -59,7 +57,7 @@ impl TripleGenerator {
     pub async fn new(
         id: TripleId,
         me: Participant,
-        proposer: Participant,
+        owner: Participant,
         threshold: usize,
         participants: &[Participant],
         timeout: Duration,
@@ -73,8 +71,7 @@ impl TripleGenerator {
         let _ = _node_account_id;
 
         let mut participants = participants.to_vec();
-        // Participants can be out of order, so let's sort them before doing anything. Critical
-        // for the triple_is_mine check:
+        // Participants can be out of order, so let's sort them before doing anything.
         participants.sort();
 
         let protocol =
@@ -84,7 +81,7 @@ impl TripleGenerator {
         Ok(Self {
             id,
             me,
-            proposer,
+            owner,
             participants,
             protocol: Some(Box::new(protocol)),
             timeout,
@@ -142,7 +139,7 @@ impl TripleGenerator {
                     }
                     Err(err) => {
                         crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
-                        if self.proposer == self.me {
+                        if self.owner == self.me {
                             crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
                         }
                         tracing::warn!(
@@ -159,7 +156,7 @@ impl TripleGenerator {
                 Ok(action) => action,
                 Err(err) => {
                     crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
-                    if self.proposer == self.me {
+                    if self.owner == self.me {
                         crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
                     }
                     tracing::warn!(
@@ -185,7 +182,7 @@ impl TripleGenerator {
                     // Wait for the next set of messages to arrive.
                     let Some(msg) = self.recv().await else {
                         crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
-                        if self.proposer == self.me {
+                        if self.owner == self.me {
                             crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
                         }
                         break;
@@ -250,20 +247,12 @@ impl TripleGenerator {
                         public: second.1.clone(),
                     };
 
-                    // For simplicity, assign both triples to the same owner based on the first triple
-                    let triple_owner = {
-                        let big_c = first.public.big_c;
-                        let entropy = HighwayHasher::default().hash64(&big_c.to_bytes()) as usize;
-                        let num_participants = self.participants.len();
-                        self.participants[entropy % num_participants]
-                    };
-                    let pair_is_mine = triple_owner == self.me;
+                    let pair_is_mine = self.owner == self.me;
 
                     tracing::debug!(
                         id = ?self.id,
                         me = ?self.me,
-                        proposer = ?self.proposer,
-                        ?triple_owner,
+                        owner = ?self.owner,
                         pair_is_mine,
                         participants = ?self.participants,
                         big_a0 = ?first.public.big_a.to_base58(),
@@ -272,7 +261,7 @@ impl TripleGenerator {
                         "completed triple pair generation"
                     );
 
-                    if self.proposer == self.me {
+                    if pair_is_mine {
                         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_OWNED_SUCCESS.inc();
                     }
                     let pair = TriplePair {
@@ -281,7 +270,7 @@ impl TripleGenerator {
                         triple1: second,
                         holders: Some(self.participants.clone()),
                     };
-                    self.slot.insert(pair, triple_owner).await;
+                    self.slot.insert(pair, self.owner).await;
                     break;
                 }
             }
@@ -320,8 +309,8 @@ pub struct TripleSpawner {
     /// through max introduction and concurrent generation in the system.
     ongoing: JoinMap<TripleId, ()>,
 
-    /// The set of ongoing triples that were introduced to the system by the current node.
-    ongoing_introduced: HashSet<TripleId>,
+    /// The set of ongoing triples that are owned by the current node.
+    ongoing_owned: HashSet<TripleId>,
 
     /// The protocol posits that are currently in progress.
     posits: Posits<TripleId, ()>,
@@ -342,7 +331,7 @@ impl fmt::Debug for TripleSpawner {
             .field("me", &self.me)
             .field("threshold", &self.threshold)
             .field("epoch", &self.epoch)
-            .field("ongoing_introduced", &self.ongoing_introduced)
+            .field("ongoing_owned", &self.ongoing_owned)
             .finish()
     }
 }
@@ -367,7 +356,7 @@ impl TripleSpawner {
             epoch,
             triple_storage: storage.clone(),
             ongoing: JoinMap::new(),
-            ongoing_introduced: HashSet::new(),
+            ongoing_owned: HashSet::new(),
             posits: Posits::new(me),
             msg,
             node_account_id,
@@ -398,7 +387,7 @@ impl TripleSpawner {
     }
 
     pub fn len_introduced(&self) -> usize {
-        self.posits.len_proposed() + self.ongoing_introduced.len()
+        self.posits.len_proposed() + self.ongoing_owned.len()
     }
 
     /// Returns the number of unspent triples we will have in the manager once
@@ -498,14 +487,14 @@ impl TripleSpawner {
                     )
                     .await;
             }
-            self.ongoing_introduced.insert(id);
+            self.ongoing_owned.insert(id);
         }
 
         if let Err(err) = self
             .generate_with_id(id, &participants, positor.id(), timeout)
             .await
         {
-            self.ongoing_introduced.remove(&id);
+            self.ongoing_owned.remove(&id);
             tracing::warn!(
                 id,
                 ?participants,
@@ -520,11 +509,11 @@ impl TripleSpawner {
         &mut self,
         id: TripleId,
         participants: &[Participant],
-        proposer: Participant,
+        owner: Participant,
         timeout: Duration,
     ) -> Result<(), InitializationError> {
         // Check if the `id` is already in the system. Error out and have the next cycle try again.
-        let Some(slot) = self.triple_storage.create_slot(id, proposer).await else {
+        let Some(slot) = self.triple_storage.create_slot(id, owner).await else {
             return Err(InitializationError::BadParameters(format!(
                 "triple {id} is already generating, in use, or stored"
             )));
@@ -534,7 +523,7 @@ impl TripleSpawner {
         let generator = TripleGenerator::new(
             id,
             self.me,
-            proposer,
+            owner,
             self.threshold,
             participants,
             timeout,
@@ -609,7 +598,7 @@ impl TripleSpawner {
                             id
                         }
                     };
-                    self.ongoing_introduced.remove(&id);
+                    self.ongoing_owned.remove(&id);
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
                 }
                 _ = stockpile_interval.tick() => {

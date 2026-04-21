@@ -1185,6 +1185,10 @@ pub struct SignatureSpawner {
 }
 
 impl SignatureSpawner {
+    fn observe_queue_size(&self) {
+        crate::metrics::requests::SIGN_QUEUE_SIZE.set(self.tasks.len() as i64);
+    }
+
     /// Creates a signature task for a new sign request
     /// The task will handle organizing, posit, and generation internally
     fn spawn_task(
@@ -1283,6 +1287,30 @@ impl SignatureSpawner {
         }
     }
 
+    fn handle_task_exit(&mut self, result: Result<(SignId, Result<(), SignError>), SignId>) {
+        self.observe_queue_size();
+        let (sign_id, result) = match result {
+            Ok(outcome) => outcome,
+            Err(sign_id) => {
+                tracing::warn!(?sign_id, "signature task interrupted");
+                self.inboxes.remove(&sign_id);
+                self.abort_delayed_watcher(sign_id, "interruption");
+                return;
+            }
+        };
+
+        self.inboxes.remove(&sign_id);
+        self.abort_delayed_watcher(sign_id, "task completion");
+        match result {
+            Ok(()) => {
+                tracing::info!(?sign_id, "signature task completed successfully");
+            }
+            Err(SignError::Aborted) => {
+                tracing::warn!(?sign_id, "signature task terminated");
+            }
+        }
+    }
+
     fn abort_delayed_watcher(&mut self, sign_id: SignId, reason: &str) {
         if let Some(watcher) = self.delayed_watchers.remove(&sign_id) {
             tracing::info!(?sign_id, reason = %reason, "aborting delayed watcher");
@@ -1326,8 +1354,7 @@ impl SignatureSpawner {
             }
         }
 
-        // Update metrics
-        crate::metrics::requests::SIGN_QUEUE_SIZE.set(self.tasks.len() as i64);
+        self.observe_queue_size();
     }
 
     async fn run(
@@ -1359,26 +1386,7 @@ impl SignatureSpawner {
                     self.handle_posit(sign_id, presignature_id, round, from, action).await;
                 }
                 Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
-                    let (sign_id, result) = match result {
-                        Ok(outcome) => outcome,
-                        Err(sign_id) => {
-                            tracing::warn!(?sign_id, "signature task interrupted");
-                            self.inboxes.remove(&sign_id);
-                            self.abort_delayed_watcher(sign_id, "interruption");
-                            continue;
-                        }
-                    };
-
-                    self.inboxes.remove(&sign_id);
-                    self.abort_delayed_watcher(sign_id, "task completion");
-                    match result {
-                        Ok(()) => {
-                            tracing::info!(?sign_id, "signature task completed successfully");
-                        }
-                        Err(SignError::Aborted) => {
-                            tracing::warn!(?sign_id, "signature task terminated");
-                        }
-                    }
+                    self.handle_task_exit(result);
                 }
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();
