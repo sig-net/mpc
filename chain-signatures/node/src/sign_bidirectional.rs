@@ -41,8 +41,6 @@ pub enum SignStatus {
     PendingExecution,
     /// Execution was confirmed and final respond request is waiting to be signed.
     AwaitingResponseBidirectional,
-    Failed,
-    Success,
 }
 
 #[derive(Debug, Clone, Hash, serde::Serialize, serde::Deserialize)]

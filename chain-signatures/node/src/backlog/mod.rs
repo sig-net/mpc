@@ -1024,14 +1024,29 @@ mod tests {
 
         match status {
             SignStatus::AwaitingResponse => {}
-            SignStatus::AwaitingResponseBidirectional => {}
+            SignStatus::AwaitingResponseBidirectional => {
+                let completion_request = IndexedSignRequest::respond_bidirectional(
+                    sign_id,
+                    create_test_args(sign_id.request_id[0]),
+                    chain,
+                    0,
+                    RespondBidirectionalTx {
+                        tx_id: tx.id,
+                        output: vec![],
+                    },
+                );
+                backlog
+                    .set_request(chain, &sign_id, completion_request)
+                    .await
+                    .unwrap();
+            }
             SignStatus::PendingExecution => {
                 backlog.advance(chain, sign_id, tx).await.unwrap();
             }
-            SignStatus::Success | SignStatus::Failed => {
-                backlog.advance(chain, sign_id, tx).await.unwrap();
-                backlog.set_status(chain, &sign_id, status).await;
-            }
+        }
+
+        if status == SignStatus::AwaitingResponseBidirectional {
+            backlog.set_status(chain, &sign_id, status).await;
         }
     }
 
@@ -1103,7 +1118,7 @@ mod tests {
             &backlog,
             Chain::Ethereum,
             tx2,
-            SignStatus::Success,
+            SignStatus::AwaitingResponseBidirectional,
             "ethereum",
         )
         .await;
@@ -1138,11 +1153,11 @@ mod tests {
             .await;
         assert_eq!(eth_awaiting.len(), 1);
 
-        // Filter Ethereum by Success
-        let eth_success = backlog
-            .get_by_status(Chain::Ethereum, SignStatus::Success)
+        // Filter Ethereum by bidirectional completion awaiting final respond
+        let eth_completion = backlog
+            .get_by_status(Chain::Ethereum, SignStatus::AwaitingResponseBidirectional)
             .await;
-        assert_eq!(eth_success.len(), 1);
+        assert_eq!(eth_completion.len(), 1);
 
         // Filter Solana by Pending
         let sol_pending = backlog
@@ -1245,7 +1260,7 @@ mod tests {
             &backlog,
             Chain::Ethereum,
             tx2.clone(),
-            SignStatus::Success,
+            SignStatus::AwaitingResponseBidirectional,
             "ethereum",
         )
         .await;
@@ -1442,10 +1457,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_recovered_completed_bidirectional_requests_are_requeued_for_final_respond() {
-        for (offset, status) in [SignStatus::Success, SignStatus::Failed]
-            .into_iter()
-            .enumerate()
-        {
+        let status = SignStatus::AwaitingResponseBidirectional;
+        for offset in 0..2 {
             let backlog = Backlog::new();
             let tx = create_test_tx(8 + offset as u8);
             let sign_id = SignId::new(tx.request_id);
@@ -1583,10 +1596,14 @@ mod tests {
 
         // set_status should update the sign request status
         backlog
-            .set_status(tx.source_chain, &sign_id, SignStatus::Success)
+            .set_status(
+                tx.source_chain,
+                &sign_id,
+                SignStatus::AwaitingResponseBidirectional,
+            )
             .await;
         let successes = backlog
-            .get_by_status(tx.source_chain, SignStatus::Success)
+            .get_by_status(tx.source_chain, SignStatus::AwaitingResponseBidirectional)
             .await;
         assert!(successes.contains_key(&sign_id));
     }
