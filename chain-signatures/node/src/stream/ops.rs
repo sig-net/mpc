@@ -128,7 +128,6 @@ impl SignBidirectionalEvent {
     }
 
     pub fn target_chain(&self) -> Result<Chain, mpc_primitives::ChainFromError> {
-        // we can directly unwrap because we've checked that the chain id is valid during event deserialization in the indexer
         Chain::from_caip2_chain_id(&self.caip2_id())
     }
 }
@@ -682,7 +681,7 @@ mod tests {
             serialized_transaction: vec![1, 2, 3],
             source_chain: Chain::Solana,
             target_chain: Chain::Ethereum,
-            caip2_id: "test_caip2_id".to_string(),
+            caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
             key_version: 1,
             deposit: 1000,
             path: "test_path".to_string(),
@@ -857,7 +856,7 @@ mod tests {
             serialized_transaction: vec![1, 2, 3],
             source_chain: Chain::Solana,
             target_chain: Chain::Ethereum,
-            caip2_id: "test_caip2_id".to_string(),
+            caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
             key_version: 1,
             deposit: 1000,
             path: "test_path".to_string(),

@@ -249,13 +249,6 @@ impl Chain {
             .find(|chain| chain.caip2_chain_id() == chain_id)
             .ok_or_else(|| ChainFromError::UnknownCaip2Id(chain_id.to_string()))
     }
-
-    pub fn from_deprecated_chain_id(chain_id: &str) -> Result<Self, ChainFromError> {
-        Self::iter()
-            .into_iter()
-            .find(|chain| chain.deprecated_chain_id() == chain_id)
-            .ok_or_else(|| ChainFromError::UnknownDeprecatedId(chain_id.to_string()))
-    }
 }
 
 impl fmt::Display for Chain {

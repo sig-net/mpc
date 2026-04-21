@@ -243,7 +243,7 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
         serialized_transaction: vec![],
         source_chain: Chain::Solana,
         target_chain: Chain::Ethereum,
-        caip2_id: "eip155:31337".to_string(),
+        caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
         key_version: LATEST_MPC_KEY_VERSION,
         deposit: 0,
         path: "m/44'/60'/0'/0/0".to_string(),

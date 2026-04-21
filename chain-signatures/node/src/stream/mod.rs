@@ -469,7 +469,7 @@ mod tests {
             sender: Default::default(),
             serialized_transaction: unsigned_rlp,
             dest: Chain::Ethereum.to_string(),
-            caip2_id: "eip155:1".to_string(),
+            caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
             key_version: 0,
             deposit: 0,
             path: "".to_string(),
