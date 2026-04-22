@@ -16,6 +16,9 @@ use serde_aux::field_attributes::deserialize_number_from_string;
 pub struct EvmTransactionParams {
     pub to: String,
     pub function_signature: String,
+    /// ABI-encoded call arguments as a hex string (no `0x` prefix,
+    /// no 4-byte function selector — the selector is derived from
+    /// `function_signature` when building calldata). Empty for no-arg calls.
     #[serde(default)]
     pub encoded_args: String,
     pub value: String,

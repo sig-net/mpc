@@ -5,14 +5,20 @@ use super::ledger_api::{
 };
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 
+/// JWT claims accepted by the Canton Ledger API.
+/// See https://docs.digitalasset.com/operate/3.5/howtos/secure/apis/jwt.html.
 #[derive(serde::Serialize)]
 struct JwtClaims {
+    /// Participant user id; its `act_as`/`read_as` rights gate commands.
     sub: String,
-    /// Canton supports scope-based OR audience-based tokens, not both.
-    /// We use scope-based (the default when no target-audience is configured).
+    /// `daml_ledger_api` unless the participant sets a custom `target-scope`
+    /// (mutually exclusive with `target-audience`).
     scope: String,
+    /// Issued-at, Unix seconds.
     iat: u64,
+    /// Expiration, Unix seconds.
     exp: u64,
+    /// Not-before, Unix seconds. Set slightly in the past to absorb clock skew.
     nbf: u64,
 }
 
