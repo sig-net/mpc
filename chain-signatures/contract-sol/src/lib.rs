@@ -90,6 +90,7 @@ pub mod signet_program {
     pub fn sign_bidirectional(
         ctx: Context<SignBidirectional>,
         serialized_transaction: Vec<u8>,
+        // the mainnet caip2_id of the target chain where the signed transaction will be sent
         caip2_id: String,
         key_version: u32,
         path: String,
@@ -229,7 +230,7 @@ pub struct SignBidirectionalEvent {
     /// The serialized transaction payload to be signed.
     pub serialized_transaction: Vec<u8>,
 
-    /// CAIP-2 chain ID of the *target chain* where the signed transaction will be sent.
+    /// mainnet CAIP-2 chain ID of the *target chain* where the signed transaction will be sent.
     ///
     /// Note: This is NOT the chain where `respond()` or `respond_bidirectional()` is executed.
     pub caip2_id: String,
