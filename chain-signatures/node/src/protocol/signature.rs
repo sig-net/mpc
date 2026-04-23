@@ -55,9 +55,9 @@ const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(if cfg!(feature = "
 ///
 /// Use shorter time for tests, as network delays are much smaller.
 const ACCEPT_POSIT_TIMEOUT: Duration = Duration::from_millis(if cfg!(feature = "test-feature") {
-    500
-} else {
     100
+} else {
+    500
 });
 
 /// All relevant info pertaining to an indexed sign request.
