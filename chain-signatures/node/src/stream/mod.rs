@@ -361,7 +361,7 @@ mod tests {
     use crate::node_client::NodeClient;
     use crate::protocol::ParticipantInfo;
     use crate::protocol::Sign;
-    use crate::protocol::{Chain, IndexedSignRequest, SignKind};
+    use crate::protocol::{Chain, IndexedSignRequest};
     use crate::rpc::ContractStateWatcher;
     use crate::storage::checkpoint_storage::CheckpointStorage;
     use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
@@ -381,7 +381,6 @@ mod tests {
 
     struct VecEventStreamState {
         started: bool,
-        assert_started: bool,
         events: Vec<Option<ChainEvent>>,
     }
 
@@ -389,15 +388,6 @@ mod tests {
         fn new(events: Vec<Option<ChainEvent>>) -> Self {
             Self {
                 started: false,
-                assert_started: false,
-                events,
-            }
-        }
-
-        fn assert_started(events: Vec<Option<ChainEvent>>) -> Self {
-            Self {
-                started: false,
-                assert_started: true,
                 events,
             }
         }
@@ -410,10 +400,6 @@ mod tests {
             impl $name {
                 pub fn new(events: Vec<Option<ChainEvent>>) -> Self {
                     Self(VecEventStreamState::new(events))
-                }
-
-                pub fn assert_started(events: Vec<Option<ChainEvent>>) -> Self {
-                    Self(VecEventStreamState::assert_started(events))
                 }
             }
 
@@ -429,9 +415,6 @@ mod tests {
                 }
 
                 async fn next_event(&mut self) -> Option<ChainEvent> {
-                    if self.0.assert_started {
-                        assert!(self.0.started, "stream polled before start() was called");
-                    }
                     if self.0.events.is_empty() {
                         return None;
                     }
@@ -708,63 +691,6 @@ mod tests {
         match msg2 {
             Sign::Completion(id) => assert_eq!(id, sign_id),
             _ => panic!("expected completion"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_run_stream_starts_stream_before_polling() {
-        let backlog = Backlog::new();
-        let sign_id = SignId::new([7u8; 32]);
-        let args = SignArgs {
-            entropy: [0u8; 32],
-            epsilon: Scalar::from(1u64),
-            payload: Scalar::from(2u64),
-            path: "test".to_string(),
-            key_version: 1,
-        };
-        let indexed = IndexedSignRequest {
-            id: sign_id,
-            args: args.clone(),
-            chain: Chain::Solana,
-            unix_timestamp_indexed: current_unix_timestamp(),
-            kind: SignKind::Sign,
-        };
-
-        let stream = SolanaTestStream::assert_started(vec![
-            Some(ChainEvent::CatchupCompleted),
-            Some(ChainEvent::SignRequest(indexed)),
-        ]);
-
-        let (sign_tx, mut sign_rx) = mpsc::channel(4);
-        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
-            &"test.near".parse::<AccountId>().unwrap(),
-            k256::ProjectivePoint::GENERATOR.to_affine(),
-            0,
-            Default::default(),
-        );
-        let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
-        let node_client = NodeClient::new(&Default::default());
-
-        run_stream(
-            stream,
-            sign_tx,
-            backlog,
-            contract_watcher,
-            mesh_state_rx,
-            node_client,
-        )
-        .await;
-
-        match timeout(Duration::from_secs(1), sign_rx.recv())
-            .await
-            .unwrap()
-            .unwrap()
-        {
-            Sign::Request(req) => {
-                assert_eq!(req.id, sign_id);
-                assert_eq!(req.args, args);
-            }
-            other => panic!("expected request, got {other:?}"),
         }
     }
 

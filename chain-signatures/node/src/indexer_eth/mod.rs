@@ -796,40 +796,23 @@ impl EthereumIndexer {
             anyhow::bail!("ethereum block {block_number} not found");
         };
 
-        self.process_live_block(&block).await
+        self.process_block(&block).await
     }
 
-    async fn process_live_block(&self, block: &Block) -> anyhow::Result<()> {
+    /// Process the block and emit relevant ChainEvents from the block.
+    async fn process_block(&self, block: &Block) -> anyhow::Result<()> {
         let block_number = block.header.number;
         crate::metrics::indexers::LATEST_BLOCK_NUMBER
             .with_label_values(&[Chain::Ethereum.as_str(), "indexed"])
             .set(block_number as i64);
 
-        let processed = Self::process_block(
-            self.client.clone(),
-            block,
-            self.contract_address,
-            self.backlog.clone(),
-        )
-        .await?;
-
-        Self::emit_processed_block(
-            self.client.clone(),
-            self.events_tx.clone(),
-            &self.eth,
-            processed,
-        )
-        .await?;
+        let processed = self.parse_block(block).await?;
+        self.emit_processed_block(processed).await?;
 
         Ok(())
     }
 
-    async fn process_block(
-        client: Arc<EthereumClient>,
-        block: &Block,
-        contract_address: Address,
-        backlog: Backlog,
-    ) -> anyhow::Result<BlockAndRequests> {
+    async fn parse_block(&self, block: &Block) -> anyhow::Result<BlockAndRequests> {
         let block_number = block.header.number;
         let block_hash = block.header.hash;
         let block_timestamp = block.header.timestamp;
@@ -838,13 +821,13 @@ impl EthereumIndexer {
             block_number,
             block_hash
         );
-        let block_receipts = client
+        let block_receipts = self
+            .client
             .get_block_receipts(block_number.into())
             .await
             .map_err(|err| {
                 anyhow::anyhow!(
-                    "Failed to get block receipts for block number {block_number}: {:?}",
-                    err
+                    "Failed to get block receipts for block number {block_number}: {err:?}",
                 )
             })?;
 
@@ -868,7 +851,7 @@ impl EthereumIndexer {
                 receipt
                     .logs
                     .iter()
-                    .filter(|log| log.address() == contract_address)
+                    .filter(|log| log.address() == self.contract_address)
                     .cloned()
             })
             .collect();
@@ -892,13 +875,9 @@ impl EthereumIndexer {
         }
 
         // Collect execution confirmations (if any) and emit ExecutionConfirmed events
-        let exec_events = Self::collect_execution_confirmations(
-            &client,
-            block_number,
-            &backlog,
-            block_receipts.clone(),
-        )
-        .await?;
+        let exec_events = self
+            .collect_execution_confirmations(block_number, block_receipts)
+            .await?;
 
         for _request in &sign_requests {
             record_request_latency(
@@ -921,9 +900,8 @@ impl EthereumIndexer {
     }
 
     async fn collect_execution_confirmations(
-        client: &Arc<EthereumClient>,
+        &self,
         block_number: u64,
-        backlog: &Backlog,
         block_receipts: Vec<alloy::rpc::types::TransactionReceipt>,
     ) -> anyhow::Result<Vec<ChainEvent>> {
         let block_receipts: std::collections::HashMap<
@@ -936,7 +914,7 @@ impl EthereumIndexer {
 
         let mut events = Vec::new();
 
-        let watchers = backlog.pending_execution(Chain::Ethereum).await;
+        let watchers = self.backlog.pending_execution(Chain::Ethereum).await;
         tracing::info!(
             watchers_count = watchers.len(),
             block_number,
@@ -966,7 +944,7 @@ impl EthereumIndexer {
 
             let result = if status == SignStatus::Success {
                 let completed_tx = CompletedTx::new(pending_tx.clone(), block_number);
-                match completed_tx.extract_success_tx_output(client).await {
+                match completed_tx.extract_success_tx_output(&self.client).await {
                     Ok(serialized_output) => {
                         tracing::info!(
                             ?tx_id,
@@ -1001,10 +979,11 @@ impl EthereumIndexer {
         }
 
         // Staleness checks (nonce too low)
-        let remaining_pending = backlog.pending_execution(Chain::Ethereum).await;
+        let remaining_pending = self.backlog.pending_execution(Chain::Ethereum).await;
 
         for (tx_id, (sign_id, tx)) in remaining_pending {
-            let current_nonce = match client
+            let current_nonce = match self
+                .client
                 .as_ref()
                 .get_nonce(
                     tx.from_address,
@@ -1047,9 +1026,7 @@ impl EthereumIndexer {
 
     /// Emits the processed block in-order once we reach finality for it.
     async fn emit_processed_block(
-        client: Arc<EthereumClient>,
-        events_tx: mpsc::Sender<ChainEvent>,
-        eth: &EthConfig,
+        &self,
         BlockAndRequests {
             block_number,
             block_hash,
@@ -1058,16 +1035,12 @@ impl EthereumIndexer {
             execution_events,
         }: BlockAndRequests,
     ) -> anyhow::Result<()> {
-        if !eth.optimistic_requests {
-            Self::wait_for_finalized_block(
-                Arc::clone(&client),
-                eth.refresh_finalized_interval,
-                block_number,
-            )
-            .await?;
+        if !self.eth.optimistic_requests {
+            self.wait_for_finalized_block(block_number).await?;
         }
 
-        let Some(block) = client
+        let Some(block) = self
+            .client
             .as_ref()
             .get_block(BlockId::Number(BlockNumberOrTag::Number(block_number)))
             .await
@@ -1084,23 +1057,23 @@ impl EthereumIndexer {
         }
 
         for event in execution_events {
-            events_tx.send(event).await.map_err(|err| {
+            self.events_tx.send(event).await.map_err(|err| {
                 anyhow::anyhow!("failed to emit ExecutionConfirmed event: {err:?}")
             })?;
         }
 
         for req in indexed_requests {
-            events_tx
+            self.events_tx
                 .send(ChainEvent::SignRequest(req))
                 .await
                 .map_err(|err| anyhow::anyhow!("failed to emit SignRequest event: {err:?}"))?;
         }
 
         if !respond_logs.is_empty() {
-            emit_respond_events(&respond_logs, events_tx.clone()).await;
+            emit_respond_events(&respond_logs, self.events_tx.clone()).await;
         }
 
-        events_tx
+        self.events_tx
             .send(ChainEvent::Block(block_number))
             .await
             .map_err(|err| anyhow::anyhow!("failed to emit block event: {err:?}"))?;
@@ -1108,21 +1081,19 @@ impl EthereumIndexer {
         Ok(())
     }
 
-    async fn wait_for_finalized_block(
-        client: Arc<EthereumClient>,
-        retry_interval: u64,
-        block_number: BlockNumber,
-    ) -> anyhow::Result<()> {
+    async fn wait_for_finalized_block(&self, block_number: BlockNumber) -> anyhow::Result<()> {
+        let retry_interval = Duration::from_millis(self.eth.refresh_finalized_interval);
         let mut last_final_block_number: Option<BlockNumber> = None;
 
         loop {
-            let Some(finalized_block) = client
+            let Some(finalized_block) = self
+                .client
                 .as_ref()
                 .get_block(BlockId::Number(BlockNumberOrTag::Finalized))
                 .await
             else {
                 tracing::warn!(block_number, "finalized ethereum block not found; retrying");
-                tokio::time::sleep(Duration::from_millis(retry_interval)).await;
+                tokio::time::sleep(retry_interval).await;
                 continue;
             };
 
@@ -1157,7 +1128,7 @@ impl EthereumIndexer {
                 return Ok(());
             };
 
-            tokio::time::sleep(Duration::from_millis(retry_interval)).await;
+            tokio::time::sleep(retry_interval).await;
         }
     }
 }
@@ -1209,7 +1180,7 @@ impl ChainIndexer for EthereumIndexer {
     }
 
     async fn process(&mut self, block: &Self::Block) -> anyhow::Result<()> {
-        self.process_live_block(block).await?;
+        self.process_block(block).await?;
         Ok(())
     }
 
