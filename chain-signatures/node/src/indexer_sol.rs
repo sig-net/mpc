@@ -351,20 +351,22 @@ impl ChainStream for SolanaStream {
             anyhow::bail!("solana stream already started");
         };
 
+        let events_tx = start_state.tx;
+
         self.tasks.push(spawn_cpi_sign_events(
             start_state.program_id,
             start_state.rpc_http_url.clone(),
             start_state.rpc_ws_url.clone(),
-            start_state.tx.clone(),
+            events_tx.clone(),
         ));
         self.tasks.push(spawn_respond_events(
             start_state.program_id,
             start_state.rpc_http_url,
             start_state.rpc_ws_url,
-            start_state.tx,
+            events_tx.clone(),
         ));
 
-        Ok(DisabledChainIndexer)
+        Ok(DisabledChainIndexer::new(events_tx))
     }
 
     async fn next_event(&mut self) -> Option<ChainEvent> {

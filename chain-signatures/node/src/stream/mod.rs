@@ -94,40 +94,18 @@ pub enum ExecutionOutcome {
     Failed,
 }
 
-pub struct DisabledBufferedStream;
-
-#[async_trait]
-impl ChainBufferedStream for DisabledBufferedStream {
-    type Block = ();
-
-    async fn next(&mut self) -> Option<Self::Block> {
-        None
-    }
-}
-
-#[async_trait]
-pub trait ChainBufferedStream: Send + 'static {
-    type Block: Send + 'static;
-    async fn next(&mut self) -> Option<Self::Block>;
-}
-
 #[async_trait]
 pub trait ChainIndexer: Send + 'static {
-    type BufferedStream: ChainBufferedStream;
+    type Block: Clone + Send + 'static;
 
     const RETRY_DELAY: Duration = Duration::from_millis(500);
 
-    async fn livestream(&mut self) -> anyhow::Result<Option<Self::BufferedStream>> {
+    async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         Ok(None)
     }
 
     async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
         Ok(())
-    }
-
-    fn buffered_item_height(block: &<Self::BufferedStream as ChainBufferedStream>::Block) -> u64 {
-        let _ = block;
-        0
     }
 
     async fn catchup_range(&mut self, anchor_height: u64) -> RangeInclusive<u64> {
@@ -143,20 +121,57 @@ pub trait ChainIndexer: Send + 'static {
         Ok(())
     }
 
-    async fn process_buffered_block(
-        &mut self,
-        block: &<Self::BufferedStream as ChainBufferedStream>::Block,
-    ) -> anyhow::Result<()> {
+    async fn next(&mut self) -> Option<Self::Block>;
+
+    async fn process(&mut self, block: &Self::Block) -> anyhow::Result<()> {
         let _ = block;
         Ok(())
     }
+
+    /// Process the next block, return true for success, false for shutdown, and error
+    /// for every other case that can go wrong.
+    async fn process_next_block(&mut self) -> anyhow::Result<bool> {
+        let Some(block) = self.next().await else {
+            return Ok(false);
+        };
+
+        self.process(&block).await?;
+        Ok(true)
+    }
 }
 
-pub struct DisabledChainIndexer;
+/// Type used to denote a disabled stream (i.e. Solana, Hydration) that does
+/// not yet support the flow for general catchup & livestream.
+pub struct DisabledChainIndexer {
+    events_tx: Option<mpsc::Sender<ChainEvent>>,
+}
+
+impl DisabledChainIndexer {
+    pub fn new(events_tx: mpsc::Sender<ChainEvent>) -> Self {
+        Self {
+            events_tx: Some(events_tx),
+        }
+    }
+
+    pub fn silent() -> Self {
+        Self { events_tx: None }
+    }
+}
 
 #[async_trait]
 impl ChainIndexer for DisabledChainIndexer {
-    type BufferedStream = DisabledBufferedStream;
+    type Block = ();
+
+    async fn next(&mut self) -> Option<Self::Block> {
+        None
+    }
+
+    async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
+        if let Some(events_tx) = &self.events_tx {
+            events_tx.send(ChainEvent::CatchupCompleted).await?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -173,29 +188,23 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(chain: Chain, index
 
     // TODO: on failure, we currently send catchup_completed due to some streams not enabling
     // this particular catchup_then_livestream function (i.e. Solana & Hydration). Once
-    // those ar implemented, we can remove the catchup_completed sending on error here.
+    // those are implemented, we can remove the catchup_completed sending on error here.
 
-    let buffered = match indexer.livestream().await {
-        Ok(buffered) => buffered,
+    let anchor_height = match indexer.livestream().await {
+        Ok(anchor_height) => anchor_height,
         Err(err) => {
             tracing::error!(?err, %chain, "failed to initialize livestream");
             return;
         }
     };
-    let Some(mut buffered) = buffered else {
-        let _ = indexer.notify_catchup_completed().await;
+    let Some(anchor_height) = anchor_height else {
+        if let Err(err) = indexer.notify_catchup_completed().await {
+            tracing::warn!(?err, %chain, "failed to signal catchup completion");
+        }
         return;
     };
 
-    let Some(anchor_block) = buffered.next().await else {
-        tracing::warn!(%chain, "buffered livestream ended before anchor block");
-        let _ = indexer.notify_catchup_completed().await;
-        return;
-    };
-
-    let anchor_height = I::buffered_item_height(&anchor_block);
     let catchup_range = indexer.catchup_range(anchor_height).await;
-
     for height in catchup_range {
         while let Err(err) = indexer.process_catchup_on_height(height).await {
             tracing::warn!(?err, %chain, height, "catchup height processing failed; retrying");
@@ -208,15 +217,16 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(chain: Chain, index
         return;
     }
 
-    let mut next_block = buffered.next().await;
-    while let Some(block) = next_block.as_ref() {
-        if let Err(err) = indexer.process_buffered_block(block).await {
-            tracing::warn!(?err, %chain, "buffered block processing failed; retrying");
-            tokio::time::sleep(I::RETRY_DELAY).await;
-            continue;
+    loop {
+        match indexer.process_next_block().await {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(err) => {
+                tracing::warn!(?err, %chain, "live block processing failed; retrying");
+                tokio::time::sleep(I::RETRY_DELAY).await;
+                continue;
+            }
         }
-
-        next_block = buffered.next().await;
     }
 }
 
@@ -398,7 +408,7 @@ mod tests {
         type Indexer = DisabledChainIndexer;
 
         async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-            Ok(DisabledChainIndexer)
+            Ok(DisabledChainIndexer::silent())
         }
 
         async fn next_event(&mut self) -> Option<ChainEvent> {
@@ -406,22 +416,6 @@ mod tests {
                 return None;
             }
             self.events.remove(0)
-        }
-    }
-
-    struct TestBufferedStream {
-        items: Vec<u64>,
-    }
-
-    #[async_trait]
-    impl ChainBufferedStream for TestBufferedStream {
-        type Block = u64;
-
-        async fn next(&mut self) -> Option<Self::Block> {
-            if self.items.is_empty() {
-                return None;
-            }
-            Some(self.items.remove(0))
         }
     }
 
@@ -482,24 +476,35 @@ mod tests {
     struct TestLinearIndexer {
         control: TestLinearControl,
         tx: mpsc::Sender<ChainEvent>,
+        live_items: Vec<u64>,
+        pending_live_block: Option<u64>,
     }
 
     #[async_trait]
     impl ChainIndexer for TestLinearIndexer {
-        type BufferedStream = TestBufferedStream;
+        type Block = u64;
 
         const RETRY_DELAY: Duration = Duration::from_millis(1);
 
-        async fn livestream(&mut self) -> anyhow::Result<Option<Self::BufferedStream>> {
-            Ok(Some(TestBufferedStream {
-                items: self.control.live_items.clone(),
-            }))
+        async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
+            self.live_items = self
+                .control
+                .live_items
+                .clone()
+                .into_iter()
+                .skip(1)
+                .collect();
+            Ok(self.control.live_items.first().copied())
         }
 
-        fn buffered_item_height(
-            block: &<Self::BufferedStream as ChainBufferedStream>::Block,
-        ) -> u64 {
-            *block
+        async fn next(&mut self) -> Option<Self::Block> {
+            if let Some(block) = self.pending_live_block {
+                return Some(block);
+            }
+
+            let block = self.live_items.first().copied()?;
+            self.pending_live_block = Some(block);
+            Some(block)
         }
 
         async fn catchup_range(&mut self, anchor_height: u64) -> RangeInclusive<u64> {
@@ -519,14 +524,15 @@ mod tests {
             Ok(())
         }
 
-        async fn process_buffered_block(
-            &mut self,
-            block: &<Self::BufferedStream as ChainBufferedStream>::Block,
-        ) -> anyhow::Result<()> {
+        async fn process(&mut self, block: &Self::Block) -> anyhow::Result<()> {
             if TestLinearControl::consume_failure(&self.control.live_failures, *block) {
                 anyhow::bail!("synthetic live failure at height {block}");
             }
             self.tx.send(ChainEvent::Block(*block)).await?;
+            self.pending_live_block = None;
+            if !self.live_items.is_empty() {
+                self.live_items.remove(0);
+            }
             Ok(())
         }
     }
@@ -540,6 +546,8 @@ mod tests {
             Ok(TestLinearIndexer {
                 control: self.control.clone(),
                 tx: self.tx.clone(),
+                live_items: Vec::new(),
+                pending_live_block: None,
             })
         }
 
@@ -694,7 +702,7 @@ mod tests {
 
             async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
                 self.started = true;
-                Ok(DisabledChainIndexer)
+                Ok(DisabledChainIndexer::silent())
             }
 
             async fn next_event(&mut self) -> Option<ChainEvent> {
@@ -787,7 +795,7 @@ mod tests {
             type Indexer = DisabledChainIndexer;
 
             async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-                Ok(DisabledChainIndexer)
+                Ok(DisabledChainIndexer::silent())
             }
 
             async fn next_event(&mut self) -> Option<ChainEvent> {
@@ -1037,7 +1045,7 @@ mod tests {
             type Indexer = DisabledChainIndexer;
 
             async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-                Ok(DisabledChainIndexer)
+                Ok(DisabledChainIndexer::silent())
             }
 
             async fn next_event(&mut self) -> Option<ChainEvent> {
@@ -1158,7 +1166,7 @@ mod tests {
             type Indexer = DisabledChainIndexer;
 
             async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-                Ok(DisabledChainIndexer)
+                Ok(DisabledChainIndexer::silent())
             }
 
             async fn next_event(&mut self) -> Option<ChainEvent> {

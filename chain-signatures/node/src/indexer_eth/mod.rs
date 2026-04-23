@@ -7,7 +7,7 @@ use crate::protocol::{Chain, IndexedSignRequest};
 use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::SignStatus;
 use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
-use crate::stream::{ChainBufferedStream, ChainEvent, ChainIndexer, ChainStream, ExecutionOutcome};
+use crate::stream::{ChainEvent, ChainIndexer, ChainStream, ExecutionOutcome};
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
@@ -70,19 +70,6 @@ impl BlockAndRequests {
             respond_logs,
             execution_events,
         }
-    }
-}
-
-pub struct EthereumBufferedStream {
-    live_blocks_rx: mpsc::Receiver<Block>,
-}
-
-#[async_trait]
-impl ChainBufferedStream for EthereumBufferedStream {
-    type Block = Block;
-
-    async fn next(&mut self) -> Option<Self::Block> {
-        self.live_blocks_rx.recv().await
     }
 }
 
@@ -692,7 +679,6 @@ impl EthereumClient {
     }
 }
 
-#[derive(Clone)]
 pub struct EthereumIndexer {
     eth: EthConfig,
     backlog: Backlog,
@@ -700,6 +686,8 @@ pub struct EthereumIndexer {
     events_tx: mpsc::Sender<ChainEvent>,
     contract_address: Address,
     catchup_complete: Arc<Notify>,
+    live_blocks_rx: Option<mpsc::Receiver<Block>>,
+    pending_live_block: Option<Block>,
 }
 
 impl EthereumIndexer {
@@ -721,6 +709,8 @@ impl EthereumIndexer {
             events_tx,
             contract_address,
             catchup_complete: Arc::new(Notify::new()),
+            live_blocks_rx: None,
+            pending_live_block: None,
         })
     }
 
@@ -1176,9 +1166,9 @@ impl EthereumIndexer {
 
 #[async_trait]
 impl ChainIndexer for EthereumIndexer {
-    type BufferedStream = EthereumBufferedStream;
+    type Block = Block;
 
-    async fn livestream(&mut self) -> anyhow::Result<Option<Self::BufferedStream>> {
+    async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         let start_block_number = loop {
             if let Some(block_number) = self.client.get_latest_block_number().await {
                 break block_number.saturating_add(1);
@@ -1194,11 +1184,19 @@ impl ChainIndexer for EthereumIndexer {
             live_blocks_tx,
         ));
 
-        Ok(Some(EthereumBufferedStream { live_blocks_rx }))
+        self.live_blocks_rx = Some(live_blocks_rx);
+        Ok(Some(start_block_number))
     }
 
-    fn buffered_item_height(block: &<Self::BufferedStream as ChainBufferedStream>::Block) -> u64 {
-        block.header.number
+    async fn next(&mut self) -> Option<Self::Block> {
+        if let Some(block) = self.pending_live_block.clone() {
+            return Some(block);
+        }
+
+        let rx = self.live_blocks_rx.as_mut()?;
+        let block = rx.recv().await?;
+        self.pending_live_block = Some(block.clone());
+        Some(block)
     }
 
     async fn catchup_range(&mut self, anchor_height: u64) -> std::ops::RangeInclusive<u64> {
@@ -1218,11 +1216,10 @@ impl ChainIndexer for EthereumIndexer {
         self.process_height(height).await
     }
 
-    async fn process_buffered_block(
-        &mut self,
-        block: &<Self::BufferedStream as ChainBufferedStream>::Block,
-    ) -> anyhow::Result<()> {
-        self.process_live_block(block.clone()).await
+    async fn process(&mut self, block: &Self::Block) -> anyhow::Result<()> {
+        self.process_live_block(block.clone()).await?;
+        self.pending_live_block = None;
+        Ok(())
     }
 
     async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
