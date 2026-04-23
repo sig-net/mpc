@@ -2,20 +2,19 @@ pub mod indexer_eth_direct_rpc;
 pub mod indexer_eth_helios;
 
 use crate::backlog::Backlog;
-use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
-
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::SignStatus;
+use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
 use crate::stream::{ChainBufferedStream, ChainEvent, ChainIndexer, ChainStream, ExecutionOutcome};
-use async_trait::async_trait;
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
-use alloy::rpc::types::Log;
+use alloy::rpc::types::{Block, BlockId, Log};
 use alloy::sol_types::{sol, SolEvent};
+use async_trait::async_trait;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
@@ -42,10 +41,7 @@ const MAX_CATCHUP_BLOCKS: u64 = 8191;
 
 const MAX_LIVE_BLOCK_BUFFER: usize = 16384;
 
-fn live_blocks_channel() -> (
-    mpsc::Sender<alloy::rpc::types::Block>,
-    mpsc::Receiver<alloy::rpc::types::Block>,
-) {
+fn live_blocks_channel() -> (mpsc::Sender<Block>, mpsc::Receiver<Block>) {
     mpsc::channel(MAX_LIVE_BLOCK_BUFFER)
 }
 
@@ -78,12 +74,12 @@ impl BlockAndRequests {
 }
 
 pub struct EthereumBufferedStream {
-    live_blocks_rx: mpsc::Receiver<alloy::rpc::types::Block>,
+    live_blocks_rx: mpsc::Receiver<Block>,
 }
 
 #[async_trait]
 impl ChainBufferedStream for EthereumBufferedStream {
-    type Block = alloy::rpc::types::Block;
+    type Block = Block;
 
     async fn next(&mut self) -> Option<Self::Block> {
         self.live_blocks_rx.recv().await
@@ -589,10 +585,7 @@ impl EthereumClient {
         }
     }
 
-    async fn get_block(
-        &self,
-        block_id: alloy::rpc::types::BlockId,
-    ) -> Option<alloy::rpc::types::Block> {
+    async fn get_block(&self, block_id: BlockId) -> Option<Block> {
         // Configure retry behaviour and delegate to shared retry_async helper.
         let retry_config = crate::util::retry::RetryConfig::default();
         let get_block_op = |_attempt: usize| async {
@@ -654,7 +647,7 @@ impl EthereumClient {
 
     async fn get_block_receipts(
         &self,
-        block_id: alloy::rpc::types::BlockId,
+        block_id: BlockId,
     ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>> {
         match self {
             EthereumClient::Helios(client) => client.get_block_receipts(block_id).await,
@@ -662,11 +655,7 @@ impl EthereumClient {
         }
     }
 
-    async fn get_nonce(
-        &self,
-        address: Address,
-        block_id: alloy::rpc::types::BlockId,
-    ) -> anyhow::Result<u64> {
+    async fn get_nonce(&self, address: Address, block_id: BlockId) -> anyhow::Result<u64> {
         match self {
             EthereumClient::Helios(client) => client.get_nonce(address, block_id).await,
             EthereumClient::DirectRpc(client) => client.get_nonce(address, block_id).await,
@@ -697,11 +686,9 @@ impl EthereumClient {
     }
 
     async fn get_latest_block_number(&self) -> Option<u64> {
-        self.get_block(alloy::rpc::types::BlockId::Number(
-            alloy::rpc::types::BlockNumberOrTag::Latest,
-        ))
-        .await
-        .map(|block| block.header.number)
+        self.get_block(BlockId::Number(alloy::rpc::types::BlockNumberOrTag::Latest))
+            .await
+            .map(|block| block.header.number)
     }
 }
 
@@ -741,7 +728,7 @@ impl EthereumIndexer {
         client: Arc<EthereumClient>,
         catchup_complete: Arc<Notify>,
         start_block_number: u64,
-        live_blocks: mpsc::Sender<alloy::rpc::types::Block>,
+        live_blocks: mpsc::Sender<Block>,
     ) {
         tracing::info!("indexing ethereum live blocks");
 
@@ -762,9 +749,9 @@ impl EthereumIndexer {
 
             while current_block_number <= latest_block_number {
                 let Some(block) = client
-                    .get_block(alloy::rpc::types::BlockId::Number(
-                        BlockNumberOrTag::Number(current_block_number),
-                    ))
+                    .get_block(BlockId::Number(BlockNumberOrTag::Number(
+                        current_block_number,
+                    )))
                     .await
                 else {
                     tracing::warn!(
@@ -815,9 +802,7 @@ impl EthereumIndexer {
     async fn process_height(&self, block_number: u64) -> anyhow::Result<()> {
         let Some(block) = self
             .client
-            .get_block(alloy::rpc::types::BlockId::Number(
-                BlockNumberOrTag::Number(block_number),
-            ))
+            .get_block(BlockId::Number(BlockNumberOrTag::Number(block_number)))
             .await
         else {
             anyhow::bail!("ethereum block {block_number} not found");
@@ -826,7 +811,7 @@ impl EthereumIndexer {
         self.process_live_block(block).await
     }
 
-    async fn process_live_block(&self, block: alloy::rpc::types::Block) -> anyhow::Result<()> {
+    async fn process_live_block(&self, block: Block) -> anyhow::Result<()> {
         let block_number = block.header.number;
 
         let processed = Self::process_block(
@@ -854,7 +839,7 @@ impl EthereumIndexer {
 
     async fn process_block(
         client: Arc<EthereumClient>,
-        block: alloy::rpc::types::Block,
+        block: Block,
         contract_address: Address,
         backlog: Backlog,
     ) -> anyhow::Result<BlockAndRequests> {
@@ -1036,7 +1021,7 @@ impl EthereumIndexer {
                 .as_ref()
                 .get_nonce(
                     tx.from_address,
-                    alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Number(block_number)),
+                    BlockId::Number(BlockNumberOrTag::Number(block_number)),
                 )
                 .await
             {
@@ -1097,19 +1082,18 @@ impl EthereumIndexer {
 
         let Some(block) = client
             .as_ref()
-            .get_block(alloy::rpc::types::BlockId::Number(
-                BlockNumberOrTag::Number(block_number),
-            ))
+            .get_block(BlockId::Number(BlockNumberOrTag::Number(block_number)))
             .await
         else {
             anyhow::bail!("ethereum block {block_number} not found during emission");
         };
 
         if block.header.hash != block_hash {
-            anyhow::bail!(
-                "block {block_number} hash mismatch: expected {block_hash:?}, got {:?}",
-                block.header.hash
-            );
+            // The block was reorged after `process_block` produced this payload.
+            // Do not emit stale events for a different canonical block, but also do
+            // not return an error that would cause the catchup path to retry this
+            // same stale payload forever.
+            return Ok(());
         }
 
         for event in execution_events {
@@ -1147,9 +1131,7 @@ impl EthereumIndexer {
         loop {
             let Some(finalized_block) = client
                 .as_ref()
-                .get_block(alloy::rpc::types::BlockId::Number(
-                    BlockNumberOrTag::Finalized,
-                ))
+                .get_block(BlockId::Number(BlockNumberOrTag::Finalized))
                 .await
             else {
                 tracing::warn!(block_number, "finalized ethereum block not found; retrying");
@@ -1158,32 +1140,31 @@ impl EthereumIndexer {
             };
 
             let new_final_block_number = finalized_block.header.number;
-            if last_final_block_number.is_none_or(|n| new_final_block_number > n) {
+            let prev_final_block_number = last_final_block_number.replace(new_final_block_number);
+
+            if prev_final_block_number.is_none_or(|n| new_final_block_number > n) {
                 tracing::debug!(
                     new_final_block_number,
-                    last_final_block_number,
+                    prev_final_block_number,
                     "New finalized block number"
                 );
-                last_final_block_number.replace(new_final_block_number);
                 crate::metrics::indexers::LATEST_BLOCK_NUMBER
                     .with_label_values(&[Chain::Ethereum.as_str(), "finalized"])
                     .set(new_final_block_number as i64);
             }
 
-            let Some(last_final_block_number) = last_final_block_number else {
-                continue;
-            };
+            if let Some(prev_final_block_number) = prev_final_block_number {
+                if new_final_block_number < prev_final_block_number {
+                    tracing::warn!(
+                        new_final_block_number,
+                        prev_final_block_number,
+                        "new finalized block number overflowed range of u64 and has wrapped around!"
+                    );
+                }
 
-            if new_final_block_number < last_final_block_number {
-                tracing::warn!(
-                    new_final_block_number,
-                    last_final_block_number,
-                    "new finalized block number overflowed range of u64 and has wrapped around!"
-                );
-            }
-
-            if new_final_block_number == last_final_block_number {
-                tracing::debug!(new_final_block_number, "no new finalized block");
+                if new_final_block_number == prev_final_block_number {
+                    tracing::debug!(new_final_block_number, "no new finalized block");
+                }
             }
 
             // If the finalized block number has advanced past the block we're waiting for,
