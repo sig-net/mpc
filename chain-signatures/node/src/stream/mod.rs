@@ -15,7 +15,6 @@ use async_trait::async_trait;
 use std::time::Duration;
 use std::{ops::RangeInclusive, vec::Vec};
 use tokio::sync::mpsc;
-use tokio::sync::oneshot;
 use tokio::sync::watch;
 
 pub mod ops;
@@ -32,6 +31,9 @@ pub enum ChainEvent {
     SignRequest(IndexedSignRequest),
     Respond(SignatureRespondedEvent),
     RespondBidirectional(RespondBidirectionalEvent),
+
+    /// Catchup has completed and live events may be forwarded to the signer.
+    CatchupCompleted,
 
     /// Block height indicating the client has observed/processed up to `u64` (slot/block)
     Block(u64),
@@ -66,6 +68,7 @@ impl std::fmt::Debug for ChainEvent {
                 .field(&ev.request_id())
                 .field(&ev.source_chain().as_str())
                 .finish(),
+            ChainEvent::CatchupCompleted => write!(f, "CatchupCompleted"),
             ChainEvent::Block(b) => write!(f, "Block({b})"),
             ChainEvent::ExecutionConfirmed {
                 tx_id,
@@ -165,11 +168,7 @@ pub trait ChainStream: Send + 'static {
     async fn next_event(&mut self) -> Option<ChainEvent>;
 }
 
-pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(
-    chain: Chain,
-    indexer: &mut I,
-    catchup_completed_tx: oneshot::Sender<()>,
-) {
+pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(chain: Chain, indexer: &mut I) {
     tracing::info!(%chain, "starting ChainStream catchup then livestream");
 
     // TODO: on failure, we currently send catchup_completed due to some streams not enabling
@@ -184,13 +183,13 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(
         }
     };
     let Some(mut buffered) = buffered else {
-        let _ = catchup_completed_tx.send(());
+        let _ = indexer.notify_catchup_completed().await;
         return;
     };
 
     let Some(anchor_block) = buffered.next().await else {
         tracing::warn!(%chain, "buffered livestream ended before anchor block");
-        let _ = catchup_completed_tx.send(());
+        let _ = indexer.notify_catchup_completed().await;
         return;
     };
 
@@ -208,8 +207,6 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(
         tracing::warn!(?err, %chain, "failed to signal catchup completion");
         return;
     }
-
-    let _ = catchup_completed_tx.send(());
 
     let mut next_block = buffered.next().await;
     while let Some(block) = next_block.as_ref() {
@@ -229,8 +226,7 @@ pub async fn spawn_stream_indexer<S: ChainStream>(
     let mut indexer = stream.start().await?;
 
     Ok(tokio::spawn(async move {
-        let (catchup_completed_tx, _catchup_completed_rx) = oneshot::channel();
-        catchup_then_livestream(S::CHAIN, &mut indexer, catchup_completed_tx).await;
+        catchup_then_livestream(S::CHAIN, &mut indexer).await;
     }))
 }
 
@@ -264,20 +260,13 @@ pub async fn run_stream<S: ChainStream>(
         }
     };
 
-    let (catchup_completed_tx, mut catchup_completed_rx) = oneshot::channel();
     tokio::spawn(async move {
-        catchup_then_livestream(chain, &mut indexer, catchup_completed_tx).await;
+        catchup_then_livestream(chain, &mut indexer).await;
     });
 
-    let mut catchup_completed = false;
+    let mut caught_up = false;
     loop {
         tokio::select! {
-            Ok(()) = &mut catchup_completed_rx, if !catchup_completed => {
-                catchup_completed = true;
-                if requeue_mode == RecoveryRequeueMode::AfterCatchup {
-                    requeue_recovered_sign_requests(&backlog, chain, sign_tx.clone()).await;
-                }
-            }
             event = stream.next_event() => {
                 let Some(event) = event else {
                     tracing::info!(%chain, "stream dropped event channel");
@@ -285,23 +274,50 @@ pub async fn run_stream<S: ChainStream>(
                 };
 
                 match event {
+                    ChainEvent::CatchupCompleted => {
+                        if caught_up {
+                            continue;
+                        }
+                        caught_up = true;
+                        if requeue_mode == RecoveryRequeueMode::AfterCatchup {
+                            requeue_recovered_sign_requests(&backlog, chain, sign_tx.clone()).await;
+                        }
+                    }
                     ChainEvent::SignRequest(req) => {
-                        if let Err(err) = process_sign_request(req, sign_tx.clone(), backlog.clone()).await
+                        if let Err(err) = process_sign_request(
+                            req,
+                            sign_tx.clone(),
+                            backlog.clone(),
+                            caught_up,
+                        )
+                        .await
                         {
                             tracing::error!(?err, %chain, "failed to process sign request");
                         }
                     }
                     ChainEvent::Respond(ev) => {
                         if let Err(err) =
-                            process_respond_event(ev, sign_tx.clone(), &mut contract_watcher, &backlog)
-                                .await
+                            process_respond_event(
+                                ev,
+                                sign_tx.clone(),
+                                &mut contract_watcher,
+                                &backlog,
+                                caught_up,
+                            )
+                            .await
                         {
                             tracing::error!(?err, %chain, "failed to process respond event");
                         }
                     }
                     ChainEvent::RespondBidirectional(ev) => {
                         if let Err(err) =
-                            process_respond_bidirectional_event(ev, sign_tx.clone(), &backlog).await
+                            process_respond_bidirectional_event(
+                                ev,
+                                sign_tx.clone(),
+                                &backlog,
+                                caught_up,
+                            )
+                            .await
                         {
                             tracing::error!(?err, %chain, "failed to process respond bidirectional event");
                         }
@@ -330,6 +346,7 @@ pub async fn run_stream<S: ChainStream>(
                             &backlog,
                             sign_tx.clone(),
                             S::CHAIN,
+                            caught_up,
                         )
                         .await
                         {
@@ -535,8 +552,7 @@ mod tests {
     async fn test_run_linearized_source_orders_catchup_before_live() {
         let mut stream = TestLinearStream::new(TestLinearControl::new(Some(1), vec![4, 5]));
         let mut indexer = stream.start().await.unwrap();
-        let (tx, _rx) = oneshot::channel();
-        catchup_then_livestream(Chain::Ethereum, &mut indexer, tx).await;
+        catchup_then_livestream(Chain::Ethereum, &mut indexer).await;
 
         let mut observed = Vec::new();
         while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
@@ -561,8 +577,7 @@ mod tests {
                 .fail_live_once(4),
         );
         let mut indexer = stream.start().await.unwrap();
-        let (tx, _rx) = oneshot::channel();
-        catchup_then_livestream(Chain::Ethereum, &mut indexer, tx).await;
+        catchup_then_livestream(Chain::Ethereum, &mut indexer).await;
 
         let mut observed = Vec::new();
         while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
@@ -616,6 +631,7 @@ mod tests {
             });
         let client = TestEventStream {
             events: vec![
+                Some(ChainEvent::CatchupCompleted),
                 Some(ChainEvent::SignRequest(indexed.clone())),
                 Some(ChainEvent::Respond(sig_responded)),
                 None,
@@ -668,7 +684,7 @@ mod tests {
     async fn test_run_stream_starts_stream_before_polling() {
         struct StartAwareStream {
             started: bool,
-            event: Option<ChainEvent>,
+            events: Vec<ChainEvent>,
         }
 
         #[async_trait]
@@ -683,7 +699,10 @@ mod tests {
 
             async fn next_event(&mut self) -> Option<ChainEvent> {
                 assert!(self.started, "stream polled before start() was called");
-                self.event.take()
+                if self.events.is_empty() {
+                    return None;
+                }
+                Some(self.events.remove(0))
             }
         }
 
@@ -706,7 +725,10 @@ mod tests {
 
         let stream = StartAwareStream {
             started: false,
-            event: Some(ChainEvent::SignRequest(indexed)),
+            events: vec![
+                ChainEvent::CatchupCompleted,
+                ChainEvent::SignRequest(indexed),
+            ],
         };
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -846,6 +868,8 @@ mod tests {
             current_unix_timestamp(),
             SBE::Solana(sign_bidir.clone()),
         );
+
+        events_tx.send(ChainEvent::CatchupCompleted).await.unwrap();
 
         // push SignRequest
         events_tx
@@ -1031,7 +1055,11 @@ mod tests {
         });
 
         let client = EthereumLocalStream {
-            events: vec![Some(ChainEvent::Respond(respond)), None],
+            events: vec![
+                Some(ChainEvent::Respond(respond)),
+                Some(ChainEvent::CatchupCompleted),
+                None,
+            ],
         };
 
         let backlog = Backlog::persisted(storage);
@@ -1085,18 +1113,9 @@ mod tests {
         )
         .await;
 
-        let first = timeout(Duration::from_secs(1), sign_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        match first {
-            Sign::Completion(id) => assert_eq!(id, sign_id),
-            other => panic!("expected completion before any recovered requeue, got {other:?}"),
-        }
-
         match timeout(Duration::from_millis(100), sign_rx.recv()).await {
             Err(_) | Ok(None) => {}
-            Ok(Some(msg)) => panic!("unexpected extra sign message after catchup: {msg:?}"),
+            Ok(Some(msg)) => panic!("unexpected sign message during catchup: {msg:?}"),
         }
         assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_none());
     }
@@ -1210,18 +1229,6 @@ mod tests {
             node_client,
         )
         .await;
-
-        let first = timeout(Duration::from_secs(1), sign_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        match first {
-            Sign::Request(req) => {
-                assert_eq!(req.id, sign_id);
-                assert_eq!(req.unix_timestamp_indexed, replayed_timestamp);
-            }
-            other => panic!("expected replayed sign request, got {other:?}"),
-        }
 
         match timeout(Duration::from_millis(100), sign_rx.recv()).await {
             Err(_) | Ok(None) => {}

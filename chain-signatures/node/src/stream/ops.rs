@@ -240,6 +240,7 @@ pub(crate) async fn process_sign_event(
     entropy: [u8; 32],
     sign_tx: mpsc::Sender<Sign>,
     backlog: Backlog,
+    caught_up: bool,
 ) -> anyhow::Result<()> {
     let sign_request = sign_event.generate_sign_request(entropy)?;
     record_indexing_step_reached(sign_event.source_chain());
@@ -252,9 +253,11 @@ pub(crate) async fn process_sign_event(
 
     backlog.insert(sign_request.clone()).await;
 
-    if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
-        let chain = sign_event.source_chain();
-        tracing::error!(?err, %chain, "failed to send sign request into queue");
+    if caught_up {
+        if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
+            let chain = sign_event.source_chain();
+            tracing::error!(?err, %chain, "failed to send sign request into queue");
+        }
     }
 
     Ok(())
@@ -264,6 +267,7 @@ pub(crate) async fn process_sign_request(
     sign_request: IndexedSignRequest,
     sign_tx: mpsc::Sender<Sign>,
     backlog: Backlog,
+    caught_up: bool,
 ) -> anyhow::Result<()> {
     record_indexing_step_reached(sign_request.chain);
 
@@ -274,8 +278,10 @@ pub(crate) async fn process_sign_request(
     backlog.insert(sign_request.clone()).await;
 
     let chain = sign_request.chain;
-    if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
-        tracing::error!(?err, %chain, "failed to send sign request into queue");
+    if caught_up {
+        if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
+            tracing::error!(?err, %chain, "failed to send sign request into queue");
+        }
     }
 
     Ok(())
@@ -332,6 +338,7 @@ pub(crate) async fn process_respond_event(
     sign_tx: mpsc::Sender<Sign>,
     contract_watcher: &mut ContractStateWatcher,
     backlog: &Backlog,
+    caught_up: bool,
 ) -> anyhow::Result<()> {
     let sign_id = SignId::new(respond_event.request_id());
     let source_chain = respond_event.source_chain();
@@ -348,8 +355,10 @@ pub(crate) async fn process_respond_event(
         SignKind::Sign => {
             tracing::info!(?sign_id, "sign request completed successfully");
             backlog.remove(source_chain, &sign_id).await;
-            if let Err(err) = sign_tx.send(Sign::Completion(sign_id)).await {
-                anyhow::bail!("failed to send completion for respond event: {err:?}");
+            if caught_up {
+                if let Err(err) = sign_tx.send(Sign::Completion(sign_id)).await {
+                    anyhow::bail!("failed to send completion for respond event: {err:?}");
+                }
             }
             return Ok(());
         }
@@ -447,6 +456,7 @@ pub(crate) async fn process_respond_bidirectional_event(
     event: RespondBidirectionalEvent,
     sign_tx: mpsc::Sender<Sign>,
     backlog: &Backlog,
+    caught_up: bool,
 ) -> anyhow::Result<()> {
     let sign_id = SignId::new(event.request_id());
     tracing::info!(?sign_id, "processing RespondBidirectionalEvent");
@@ -460,10 +470,12 @@ pub(crate) async fn process_respond_bidirectional_event(
         tracing::warn!(?sign_id, "bidirectional tx not found on completion");
     }
 
-    sign_tx
-        .send(Sign::Completion(sign_id))
-        .await
-        .map_err(|err| anyhow::anyhow!("failed to send completion for respond bidirectional: {err:?} for sign id: {sign_id:?}"))?;
+    if caught_up {
+        sign_tx
+            .send(Sign::Completion(sign_id))
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to send completion for respond bidirectional: {err:?} for sign id: {sign_id:?}"))?;
+    }
 
     Ok(())
 }
@@ -480,6 +492,7 @@ pub async fn process_execution_confirmed(
     backlog: &Backlog,
     sign_tx: mpsc::Sender<Sign>,
     target_chain: Chain,
+    caught_up: bool,
 ) -> anyhow::Result<()> {
     tracing::info!(
         ?tx_id,
@@ -536,8 +549,10 @@ pub async fn process_execution_confirmed(
     };
 
     let chain = sign_request.chain;
-    if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
-        tracing::error!(?err, %chain, "failed to send sign request into queue");
+    if caught_up {
+        if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
+            tracing::error!(?err, %chain, "failed to send sign request into queue");
+        }
     }
 
     Ok(())
@@ -739,6 +754,7 @@ mod tests {
             &backlog,
             sign_tx,
             tx.target_chain,
+            true,
         )
         .await
         .unwrap();
@@ -815,6 +831,7 @@ mod tests {
             sign_tx.clone(),
             &mut contract_watcher,
             &backlog,
+            true,
         )
         .await
         .expect("first respond event should succeed");
@@ -837,6 +854,7 @@ mod tests {
                 sign_tx.clone(),
                 &mut contract_watcher,
                 &backlog,
+                true,
             )
             .await
             .expect("duplicate respond event should be idempotent");
@@ -909,6 +927,7 @@ mod tests {
             &backlog,
             sign_tx,
             tx.target_chain,
+            true,
         )
         .await
         .unwrap();

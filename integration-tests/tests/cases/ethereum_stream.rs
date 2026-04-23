@@ -511,7 +511,6 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         request_id: execution_sign_id.request_id,
         from_address: AlloyAddress::from_slice(ctx.wallet.as_bytes()),
         nonce: checkpoint_nonce,
-        status: mpc_node::sign_bidirectional::SignStatus::PendingExecution,
     };
     backlog
         .advance(Chain::Solana, execution_sign_id, execution_tx)

@@ -833,7 +833,6 @@ impl EthereumIndexer {
         )
         .await?;
 
-
         Ok(())
     }
 
@@ -1227,6 +1226,10 @@ impl ChainIndexer for EthereumIndexer {
     }
 
     async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
+        self.events_tx
+            .send(ChainEvent::CatchupCompleted)
+            .await
+            .map_err(|_| anyhow::anyhow!("failed to send catchup completed event"))?;
         self.catchup_complete.notify_waiters();
         Ok(())
     }
