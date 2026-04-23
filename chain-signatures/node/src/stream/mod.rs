@@ -96,7 +96,7 @@ pub enum ExecutionOutcome {
 
 #[async_trait]
 pub trait ChainIndexer: Send + 'static {
-    type Block: Clone + Send + 'static;
+    type Block: Send + 'static;
 
     const RETRY_DELAY: Duration = Duration::from_millis(500);
 
@@ -128,15 +128,17 @@ pub trait ChainIndexer: Send + 'static {
         Ok(())
     }
 
-    /// Process the next block, return true for success, false for shutdown, and error
-    /// for every other case that can go wrong.
-    async fn process_next_block(&mut self) -> anyhow::Result<bool> {
+    /// Process the next block, return true for success, false for shutdown.
+    async fn process_next_block(&mut self) -> bool {
         let Some(block) = self.next().await else {
-            return Ok(false);
+            return false;
         };
 
-        self.process(&block).await?;
-        Ok(true)
+        while let Err(err) = self.process(&block).await {
+            tracing::warn!(?err, "live block processing failed; retrying");
+            tokio::time::sleep(Self::RETRY_DELAY).await;
+        }
+        true
     }
 }
 
@@ -183,7 +185,7 @@ pub trait ChainStream: Send + 'static {
     async fn next_event(&mut self) -> Option<ChainEvent>;
 }
 
-pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(chain: Chain, indexer: &mut I) {
+pub async fn catchup_then_livestream<I: ChainIndexer>(chain: Chain, indexer: &mut I) {
     tracing::info!(%chain, "starting ChainStream catchup then livestream");
 
     // TODO: on failure, we currently send catchup_completed due to some streams not enabling
@@ -217,27 +219,7 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(chain: Chain, index
         return;
     }
 
-    loop {
-        match indexer.process_next_block().await {
-            Ok(true) => {}
-            Ok(false) => break,
-            Err(err) => {
-                tracing::warn!(?err, %chain, "live block processing failed; retrying");
-                tokio::time::sleep(I::RETRY_DELAY).await;
-                continue;
-            }
-        }
-    }
-}
-
-pub async fn spawn_stream_indexer<S: ChainStream>(
-    stream: &mut S,
-) -> anyhow::Result<tokio::task::JoinHandle<()>> {
-    let mut indexer = stream.start().await?;
-
-    Ok(tokio::spawn(async move {
-        catchup_then_livestream(S::CHAIN, &mut indexer).await;
-    }))
+    while indexer.process_next_block().await {}
 }
 
 /// Shared indexer loop: recovers backlog then processes events from the stream
@@ -397,27 +379,70 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::time::timeout;
 
-    struct TestEventStream {
+    struct VecEventStreamState {
+        started: bool,
+        assert_started: bool,
         events: Vec<Option<ChainEvent>>,
     }
 
-    #[async_trait]
-    impl ChainStream for TestEventStream {
-        const CHAIN: Chain = Chain::Solana;
-
-        type Indexer = DisabledChainIndexer;
-
-        async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-            Ok(DisabledChainIndexer::silent())
+    impl VecEventStreamState {
+        fn new(events: Vec<Option<ChainEvent>>) -> Self {
+            Self {
+                started: false,
+                assert_started: false,
+                events,
+            }
         }
 
-        async fn next_event(&mut self) -> Option<ChainEvent> {
-            if self.events.is_empty() {
-                return None;
+        fn assert_started(events: Vec<Option<ChainEvent>>) -> Self {
+            Self {
+                started: false,
+                assert_started: true,
+                events,
             }
-            self.events.remove(0)
         }
     }
+
+    macro_rules! impl_vec_event_stream {
+        ($name:ident, $chain:expr) => {
+            struct $name(VecEventStreamState);
+
+            impl $name {
+                pub fn new(events: Vec<Option<ChainEvent>>) -> Self {
+                    Self(VecEventStreamState::new(events))
+                }
+
+                pub fn assert_started(events: Vec<Option<ChainEvent>>) -> Self {
+                    Self(VecEventStreamState::assert_started(events))
+                }
+            }
+
+            #[async_trait]
+            impl ChainStream for $name {
+                const CHAIN: Chain = $chain;
+
+                type Indexer = DisabledChainIndexer;
+
+                async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
+                    self.0.started = true;
+                    Ok(DisabledChainIndexer::silent())
+                }
+
+                async fn next_event(&mut self) -> Option<ChainEvent> {
+                    if self.0.assert_started {
+                        assert!(self.0.started, "stream polled before start() was called");
+                    }
+                    if self.0.events.is_empty() {
+                        return None;
+                    }
+                    self.0.events.remove(0)
+                }
+            }
+        };
+    }
+
+    impl_vec_event_stream!(SolanaTestStream, Chain::Solana);
+    impl_vec_event_stream!(EthereumTestStream, Chain::Ethereum);
 
     #[derive(Clone)]
     struct TestLinearControl {
@@ -637,14 +662,12 @@ mod tests {
                     recovery_id: 0,
                 },
             });
-        let client = TestEventStream {
-            events: vec![
-                Some(ChainEvent::CatchupCompleted),
-                Some(ChainEvent::SignRequest(indexed.clone())),
-                Some(ChainEvent::Respond(sig_responded)),
-                None,
-            ],
-        };
+        let client = SolanaTestStream::new(vec![
+            Some(ChainEvent::CatchupCompleted),
+            Some(ChainEvent::SignRequest(indexed.clone())),
+            Some(ChainEvent::Respond(sig_responded)),
+            None,
+        ]);
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
 
@@ -690,30 +713,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_stream_starts_stream_before_polling() {
-        struct StartAwareStream {
-            started: bool,
-            events: Vec<ChainEvent>,
-        }
-
-        #[async_trait]
-        impl ChainStream for StartAwareStream {
-            const CHAIN: Chain = Chain::Solana;
-            type Indexer = DisabledChainIndexer;
-
-            async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-                self.started = true;
-                Ok(DisabledChainIndexer::silent())
-            }
-
-            async fn next_event(&mut self) -> Option<ChainEvent> {
-                assert!(self.started, "stream polled before start() was called");
-                if self.events.is_empty() {
-                    return None;
-                }
-                Some(self.events.remove(0))
-            }
-        }
-
         let backlog = Backlog::new();
         let sign_id = SignId::new([7u8; 32]);
         let args = SignArgs {
@@ -731,13 +730,10 @@ mod tests {
             kind: SignKind::Sign,
         };
 
-        let stream = StartAwareStream {
-            started: false,
-            events: vec![
-                ChainEvent::CatchupCompleted,
-                ChainEvent::SignRequest(indexed),
-            ],
-        };
+        let stream = SolanaTestStream::assert_started(vec![
+            Some(ChainEvent::CatchupCompleted),
+            Some(ChainEvent::SignRequest(indexed)),
+        ]);
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let (contract_watcher, _tx) = ContractStateWatcher::with_running(
@@ -1035,40 +1031,17 @@ mod tests {
             .await;
         seeded_backlog.checkpoint(Chain::Ethereum).await;
 
-        struct EthereumLocalStream {
-            events: Vec<Option<ChainEvent>>,
-        }
-
-        #[async_trait]
-        impl ChainStream for EthereumLocalStream {
-            const CHAIN: Chain = Chain::Ethereum;
-            type Indexer = DisabledChainIndexer;
-
-            async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-                Ok(DisabledChainIndexer::silent())
-            }
-
-            async fn next_event(&mut self) -> Option<ChainEvent> {
-                if self.events.is_empty() {
-                    return None;
-                }
-                self.events.remove(0)
-            }
-        }
-
         let respond = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
             request_id: sign_id.request_id,
             responder: Address::ZERO,
             signature: Signature::new(k256::ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
         });
 
-        let client = EthereumLocalStream {
-            events: vec![
-                Some(ChainEvent::Respond(respond)),
-                Some(ChainEvent::CatchupCompleted),
-                None,
-            ],
-        };
+        let client = EthereumTestStream::new(vec![
+            Some(ChainEvent::Respond(respond)),
+            Some(ChainEvent::CatchupCompleted),
+            None,
+        ]);
 
         let backlog = Backlog::persisted(storage);
         let (sign_tx, mut sign_rx) = mpsc::channel(8);
@@ -1156,36 +1129,13 @@ mod tests {
             .await;
         seeded_backlog.checkpoint(Chain::Ethereum).await;
 
-        struct EthereumLocalStream {
-            events: Vec<Option<ChainEvent>>,
-        }
-
-        #[async_trait]
-        impl ChainStream for EthereumLocalStream {
-            const CHAIN: Chain = Chain::Ethereum;
-            type Indexer = DisabledChainIndexer;
-
-            async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-                Ok(DisabledChainIndexer::silent())
-            }
-
-            async fn next_event(&mut self) -> Option<ChainEvent> {
-                if self.events.is_empty() {
-                    return None;
-                }
-                self.events.remove(0)
-            }
-        }
-
         let replacement =
             IndexedSignRequest::sign(sign_id, args.clone(), Chain::Ethereum, replayed_timestamp);
-        let client = EthereumLocalStream {
-            events: vec![
-                Some(ChainEvent::SignRequest(replacement)),
-                Some(ChainEvent::CatchupCompleted),
-                None,
-            ],
-        };
+        let client = EthereumTestStream::new(vec![
+            Some(ChainEvent::SignRequest(replacement)),
+            Some(ChainEvent::CatchupCompleted),
+            None,
+        ]);
 
         let backlog = Backlog::persisted(storage);
         let (sign_tx, mut sign_rx) = mpsc::channel(8);

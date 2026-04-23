@@ -687,7 +687,6 @@ pub struct EthereumIndexer {
     contract_address: Address,
     catchup_complete: Arc<Notify>,
     live_blocks_rx: Option<mpsc::Receiver<Block>>,
-    pending_live_block: Option<Block>,
 }
 
 impl EthereumIndexer {
@@ -710,7 +709,6 @@ impl EthereumIndexer {
             contract_address,
             catchup_complete: Arc::new(Notify::new()),
             live_blocks_rx: None,
-            pending_live_block: None,
         })
     }
 
@@ -798,10 +796,10 @@ impl EthereumIndexer {
             anyhow::bail!("ethereum block {block_number} not found");
         };
 
-        self.process_live_block(block).await
+        self.process_live_block(&block).await
     }
 
-    async fn process_live_block(&self, block: Block) -> anyhow::Result<()> {
+    async fn process_live_block(&self, block: &Block) -> anyhow::Result<()> {
         let block_number = block.header.number;
         crate::metrics::indexers::LATEST_BLOCK_NUMBER
             .with_label_values(&[Chain::Ethereum.as_str(), "indexed"])
@@ -828,7 +826,7 @@ impl EthereumIndexer {
 
     async fn process_block(
         client: Arc<EthereumClient>,
-        block: Block,
+        block: &Block,
         contract_address: Address,
         backlog: Backlog,
     ) -> anyhow::Result<BlockAndRequests> {
@@ -1189,14 +1187,8 @@ impl ChainIndexer for EthereumIndexer {
     }
 
     async fn next(&mut self) -> Option<Self::Block> {
-        if let Some(block) = self.pending_live_block.clone() {
-            return Some(block);
-        }
-
         let rx = self.live_blocks_rx.as_mut()?;
-        let block = rx.recv().await?;
-        self.pending_live_block = Some(block.clone());
-        Some(block)
+        rx.recv().await
     }
 
     async fn catchup_range(&mut self, anchor_height: u64) -> std::ops::RangeInclusive<u64> {
@@ -1217,8 +1209,7 @@ impl ChainIndexer for EthereumIndexer {
     }
 
     async fn process(&mut self, block: &Self::Block) -> anyhow::Result<()> {
-        self.process_live_block(block.clone()).await?;
-        self.pending_live_block = None;
+        self.process_live_block(block).await?;
         Ok(())
     }
 

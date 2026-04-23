@@ -21,8 +21,7 @@ use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::ops::SignBidirectionalEvent as NodeSignBidirectionalEvent;
 use mpc_node::stream::ops::SignatureRespondedEvent;
-use mpc_node::stream::spawn_stream_indexer;
-use mpc_node::stream::{run_stream, ChainEvent, ChainStream};
+use mpc_node::stream::{catchup_then_livestream, run_stream, ChainEvent, ChainStream};
 use mpc_node::util::current_unix_timestamp;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use near_primitives::types::AccountId;
@@ -334,12 +333,18 @@ async fn next_event_within(
     .context("timed out waiting for chain event")
 }
 
+/// Helper for starting the ethereum stream, especially in cases where we do not want
+/// to call into run_stream where we want to directly call `next_event` on each test.
 async fn stream_ethereum(
     ctx: &EthereumTestEnvironment,
     backlog: Backlog,
 ) -> Result<StartedEthereumStream> {
     let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog).await?;
-    let indexer_task = spawn_stream_indexer(&mut stream).await?;
+    let mut indexer = stream.start().await?;
+    let indexer_task = tokio::spawn(async move {
+        catchup_then_livestream(EthereumStream::CHAIN, &mut indexer).await;
+    });
+
     Ok(StartedEthereumStream {
         stream,
         _indexer_task: indexer_task,
