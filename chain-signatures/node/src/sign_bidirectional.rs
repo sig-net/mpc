@@ -62,7 +62,6 @@ pub struct BidirectionalTx {
     pub request_id: [u8; 32],
     pub from_address: Address,
     pub nonce: u64,
-    pub status: SignStatus,
 }
 
 impl BidirectionalTx {
@@ -184,7 +183,7 @@ impl TransactionOutput {
 
         // Map to named output
         let mut output_map = HashMap::new();
-        for (field, value) in schema.into_iter().zip(values.into_iter()) {
+        for (field, value) in schema.into_iter().zip(values) {
             output_map.insert(field.name, value);
         }
 

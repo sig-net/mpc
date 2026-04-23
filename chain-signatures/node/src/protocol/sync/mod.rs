@@ -219,7 +219,7 @@ impl SyncTask {
                     match handle.await {
                         Ok(responses) => {
                             // Process sync responses: update artifact participants based on not_found data
-                            if let Err(err) = self.process_sync_responses(responses, me, threshold).await {
+                            if let Err(err) = self.process_sync_responses(responses, threshold).await {
                                 tracing::warn!(?err, "failed to process sync responses");
                             }
                             tracing::debug!(elapsed = ?start.elapsed(), "processed broadcast");
@@ -236,9 +236,8 @@ impl SyncTask {
         }
     }
 
-    // TODO: use reserved values instead. Note that we cannot fetch our own triples via reserved
     async fn new_update(&self, me: Participant) -> Option<SyncUpdate> {
-        let triples = match self.triples.fetch_owned(me).await {
+        let triples = match self.triples.fetch_owned_with_reserved().await {
             Ok(ids) => ids,
             Err(err) => {
                 tracing::warn!(
@@ -248,7 +247,7 @@ impl SyncTask {
                 return None;
             }
         };
-        let presignatures = match self.presignatures.fetch_owned(me).await {
+        let presignatures = match self.presignatures.fetch_owned_with_reserved().await {
             Ok(ids) => ids,
             Err(err) => {
                 tracing::warn!(
@@ -272,7 +271,6 @@ impl SyncTask {
     async fn process_sync_responses(
         &self,
         responses: Vec<(Participant, SyncPeerResponse)>,
-        me: Participant,
         threshold: usize,
     ) -> Result<(), String> {
         for (peer, result) in responses {
@@ -294,13 +292,13 @@ impl SyncTask {
                     // Batch remove peer from all triples and prune
                     let triple_res = self
                         .triples
-                        .remove_holder_and_prune(me, peer, threshold, &response.triples)
+                        .remove_holder_and_prune(peer, threshold, &response.triples)
                         .await;
 
                     // Batch remove peer from all presignatures and prune
                     let presig_res = self
                         .presignatures
-                        .remove_holder_and_prune(me, peer, threshold, &response.presignatures)
+                        .remove_holder_and_prune(peer, threshold, &response.presignatures)
                         .await;
 
                     match (triple_res, presig_res) {

@@ -813,6 +813,9 @@ impl EthereumIndexer {
 
     async fn process_live_block(&self, block: Block) -> anyhow::Result<()> {
         let block_number = block.header.number;
+        crate::metrics::indexers::LATEST_BLOCK_NUMBER
+            .with_label_values(&[Chain::Ethereum.as_str(), "indexed"])
+            .set(block_number as i64);
 
         let processed = Self::process_block(
             self.client.clone(),
@@ -830,9 +833,6 @@ impl EthereumIndexer {
         )
         .await?;
 
-        crate::metrics::indexers::LATEST_BLOCK_NUMBER
-            .with_label_values(&[Chain::Ethereum.as_str(), "indexed"])
-            .set(block_number as i64);
 
         Ok(())
     }
@@ -1058,7 +1058,7 @@ impl EthereumIndexer {
         Ok(events)
     }
 
-    /// Emits the processed block in-order once the configured buffer policy allows it.
+    /// Emits the processed block in-order once we reach finality for it.
     async fn emit_processed_block(
         client: Arc<EthereumClient>,
         events_tx: mpsc::Sender<ChainEvent>,
@@ -1148,9 +1148,6 @@ impl EthereumIndexer {
                     prev_final_block_number,
                     "New finalized block number"
                 );
-                crate::metrics::indexers::LATEST_BLOCK_NUMBER
-                    .with_label_values(&[Chain::Ethereum.as_str(), "finalized"])
-                    .set(new_final_block_number as i64);
             }
 
             if let Some(prev_final_block_number) = prev_final_block_number {

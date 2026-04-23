@@ -15,11 +15,11 @@ pub struct FixtureInput {
 }
 
 impl FixtureInput {
-    pub fn load(num_nodes: u32) -> Self {
-        let data = match num_nodes {
-            3 => include_str!("./3_nodes.json"),
-            5 => include_str!("./5_nodes.json"),
-            other => panic!("No fixture input for {other} nodes available"),
+    pub fn load(num_nodes: u32, threshold: usize) -> Self {
+        let data = match (num_nodes, threshold) {
+            (3, 2) => include_str!("./3_nodes_2_threshold.json"),
+            (5, 4) => include_str!("./5_nodes_4_threshold.json"),
+            _ => panic!("No fixture available for num_nodes={num_nodes}, threshold={threshold}"),
         };
 
         serde_json::from_str(data).expect("parsing failed")

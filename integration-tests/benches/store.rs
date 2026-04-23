@@ -87,8 +87,8 @@ fn env() -> (Runtime, SyncEnv) {
             .unwrap();
 
         let redis = spawner.spawn_redis().await;
-        let triples = redis.triple_storage(&node_id);
-        let presignatures = redis.presignature_storage(&node_id);
+        let triples = redis.triple_storage(&node_id, me);
+        let presignatures = redis.presignature_storage(&node_id, me);
         {
             let participants = into_contract_participants(&participants);
             redis
@@ -158,7 +158,7 @@ fn bench_load_keys(c: &mut Criterion) {
                 for i in 0..1000 {
                     let t = dummy_pair(i);
                     env.triples
-                        .reserve(t.id)
+                        .create_slot(t.id, env.me)
                         .await
                         .unwrap()
                         .insert(t, env.me)
@@ -174,7 +174,7 @@ fn bench_load_keys(c: &mut Criterion) {
                 for i in 0..1000 {
                     let p = dummy_presignature(i);
                     env.presignatures
-                        .reserve(p.id)
+                        .create_slot(p.id, env.me)
                         .await
                         .unwrap()
                         .insert(p, env.me)
@@ -187,7 +187,7 @@ fn bench_load_keys(c: &mut Criterion) {
     c.bench_function("load 1024 mine triple keys", |b| {
         b.iter(|| {
             let task = || async {
-                let _ = env.triples.fetch_owned(env.me).await;
+                let _ = env.triples.fetch_owned().await;
             };
 
             rt.block_on(task());
@@ -197,7 +197,7 @@ fn bench_load_keys(c: &mut Criterion) {
     c.bench_function("load 1024 mine presignature keys", |b| {
         b.iter(|| {
             let task = || async {
-                let _ = env.presignatures.fetch_owned(env.me).await;
+                let _ = env.presignatures.fetch_owned().await;
             };
 
             rt.block_on(task());

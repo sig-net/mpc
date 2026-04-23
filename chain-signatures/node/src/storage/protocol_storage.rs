@@ -2,11 +2,10 @@ use cait_sith::protocol::Participant;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
 use redis::{AsyncCommands, FromRedisValue, ToRedisArgs};
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, OnceLock};
 use std::{fmt, time::Instant};
 use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
 use tracing;
 
 use super::{owner_key, STORAGE_VERSION};
@@ -17,6 +16,8 @@ pub enum StorageError {
     ConnectionFailed,
     #[error("redis operation failed: {0}")]
     RedisFailed(String),
+    #[error("ProtocolStorage::set_me() was not called")]
+    NotInitialized,
 }
 
 #[derive(Debug, Clone)]
@@ -68,37 +69,23 @@ pub trait ProtocolArtifact:
     fn set_holders(&mut self, holders: Vec<Participant>);
 }
 
-/// A pre-reserved slot for an artifact that will eventually be inserted.
+/// A handle for inserting a generated artifact into storage.
+/// Tracks the artifact ID in the `generating` set until insertion or drop.
 pub struct ArtifactSlot<A: ProtocolArtifact> {
     id: A::Id,
     storage: ProtocolStorage<A>,
-    stored: bool,
 }
 
 impl<A: ProtocolArtifact> ArtifactSlot<A> {
     pub async fn insert(&mut self, artifact: A, owner: Participant) -> bool {
-        self.stored = self.storage.insert(artifact, owner).await;
-        self.stored
-    }
-
-    pub fn unreserve(&self) -> Option<JoinHandle<()>> {
-        if self.stored {
-            return None;
-        }
-
-        let storage = self.storage.clone();
-        let id = self.id;
-        let task = tokio::spawn(async move {
-            tracing::info!(id, "unreserving artifact");
-            storage.unreserve(id).await;
-        });
-        Some(task)
+        self.storage.insert(artifact, owner).await
     }
 }
 
 impl<A: ProtocolArtifact> Drop for ArtifactSlot<A> {
     fn drop(&mut self) {
-        self.unreserve();
+        self.storage
+            .remove_reserved(self.id, ReservedKind::Generating);
     }
 }
 
@@ -115,10 +102,7 @@ pub struct ArtifactTakenDropper<A: ProtocolArtifact> {
 impl<A: ProtocolArtifact> Drop for ArtifactTakenDropper<A> {
     fn drop(&mut self) {
         if let Some(storage) = self.dropper.take() {
-            let id = self.id;
-            tokio::spawn(async move {
-                storage.unreserve(id).await;
-            });
+            storage.remove_reserved(self.id, ReservedKind::Using);
         }
     }
 }
@@ -139,14 +123,48 @@ impl<A: ProtocolArtifact> ArtifactTaken<A> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ReservedKind {
+    Generating,
+    Using,
+}
+
+/// Tracks artifact IDs that are in-flight but not yet in Redis.
+/// Protected by a single `RwLock` to avoid multi-lock ordering issues.
+#[derive(Debug)]
+struct ReservedState<Id> {
+    /// IDs currently being generated. Value is `true` if this node is the owner/proposer.
+    generating: HashMap<Id, bool>,
+    /// IDs taken from Redis and actively consumed by a protocol.
+    /// Value is `true` if this node is the owner of the artifact.
+    using: HashMap<Id, bool>,
+}
+
+impl<Id: Eq + std::hash::Hash> ReservedState<Id> {
+    fn new() -> Self {
+        Self {
+            generating: HashMap::new(),
+            using: HashMap::new(),
+        }
+    }
+
+    fn contains_generating(&self, id: &Id) -> bool {
+        self.generating.contains_key(id)
+    }
+
+    fn contains_reserved(&self, id: &Id) -> bool {
+        self.generating.contains_key(id) || self.using.contains_key(id)
+    }
+}
+
 #[derive(Debug)]
 pub struct ProtocolStorage<A: ProtocolArtifact> {
     redis_pool: Pool,
     artifact_key: String,
-    used: Arc<RwLock<HashSet<A::Id>>>,
-    reserved: Arc<RwLock<HashSet<A::Id>>>,
+    reserved: Arc<RwLock<ReservedState<A::Id>>>,
     owner_keys: String,
     account_id: AccountId,
+    me: Arc<OnceLock<Participant>>,
     _phantom: std::marker::PhantomData<A>,
 }
 
@@ -155,10 +173,10 @@ impl<A: ProtocolArtifact> Clone for ProtocolStorage<A> {
         Self {
             redis_pool: self.redis_pool.clone(),
             artifact_key: self.artifact_key.clone(),
-            used: self.used.clone(),
             reserved: self.reserved.clone(),
             owner_keys: self.owner_keys.clone(),
             account_id: self.account_id.clone(),
+            me: self.me.clone(),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -167,23 +185,63 @@ impl<A: ProtocolArtifact> Clone for ProtocolStorage<A> {
 impl<A: ProtocolArtifact> ProtocolStorage<A> {
     pub fn new(pool: &Pool, account_id: &AccountId, base_prefix: &str) -> Self {
         let artifact_key = format!("{base_prefix}:{STORAGE_VERSION}:{account_id}");
-        let used = Arc::new(RwLock::new(HashSet::new()));
-        let reserved = Arc::new(RwLock::new(HashSet::new()));
+        let state = Arc::new(RwLock::new(ReservedState::new()));
         let owner_keys = format!("{base_prefix}_owners:{STORAGE_VERSION}:{account_id}");
 
         Self {
             redis_pool: pool.clone(),
             artifact_key,
-            used,
-            reserved,
+            reserved: state,
             owner_keys,
             account_id: account_id.clone(),
+            me: Arc::new(OnceLock::new()),
             _phantom: std::marker::PhantomData,
         }
     }
 }
 
 impl<A: ProtocolArtifact> ProtocolStorage<A> {
+    /// Set this node's participant identity. Must be called before using
+    /// methods that depend on ownership
+    pub fn set_me(&self, me: Participant) {
+        let _ = self.me.set(me);
+    }
+
+    fn me(&self) -> Result<Participant, StorageError> {
+        self.me.get().copied().ok_or_else(|| {
+            tracing::error!("ProtocolStorage::set_me() was not called");
+            StorageError::NotInitialized
+        })
+    }
+
+    /// Remove an ID from the reserved state, trying synchronous lock first.
+    /// Falls back to spawning an async task if the lock is contended.
+    fn remove_reserved(&self, id: A::Id, kind: ReservedKind) {
+        let reserved = self.reserved.clone();
+        if let Ok(mut state) = reserved.try_write() {
+            match kind {
+                ReservedKind::Generating => state.generating.remove(&id),
+                ReservedKind::Using => state.using.remove(&id),
+            };
+            return;
+        }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let mut state = reserved.write().await;
+                match kind {
+                    ReservedKind::Generating => state.generating.remove(&id),
+                    ReservedKind::Using => state.using.remove(&id),
+                };
+            });
+        } else {
+            tracing::warn!(
+                id,
+                ?kind,
+                "dropped with contended lock outside tokio runtime; id may remain reserved"
+            );
+        }
+    }
+
     async fn connect(&self) -> Option<Connection> {
         self.redis_pool
             .get()
@@ -194,13 +252,17 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .ok()
     }
 
-    pub async fn fetch_owned(&self, me: Participant) -> Result<Vec<A::Id>, StorageError> {
+    pub async fn fetch_owned(&self) -> Result<Vec<A::Id>, StorageError> {
+        self.fetch_owned_by(self.me()?).await
+    }
+
+    pub async fn fetch_owned_by(&self, owner: Participant) -> Result<Vec<A::Id>, StorageError> {
         let Some(mut conn) = self.connect().await else {
             return Err(StorageError::ConnectionFailed);
         };
 
         let owned: HashSet<A::Id> = conn
-            .smembers(owner_key(&self.owner_keys, me))
+            .smembers(owner_key(&self.owner_keys, owner))
             .await
             .map_err(|err| {
                 tracing::warn!(?err, "failed to fetch my owned artifacts");
@@ -210,51 +272,65 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         Ok(owned.into_iter().collect())
     }
 
-    pub async fn reserve(&self, id: A::Id) -> Option<ArtifactSlot<A>> {
-        let used = self.used.read().await;
-        if used.contains(&id) {
-            return None;
-        }
-        if !self.reserved.write().await.insert(id) {
-            return None;
-        }
-        drop(used);
-
-        let start = Instant::now();
-        let Some(mut conn) = self.connect().await else {
-            self.reserved.write().await.remove(&id);
-            return None;
-        };
-
-        // Check directly whether the artifact is already stored in Redis.
-        let artifact_exists: Result<bool, _> = conn.hexists(&self.artifact_key, id).await;
-        let elapsed = start.elapsed();
-        crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "reserve"])
-            .observe(elapsed.as_millis() as f64);
-
-        match artifact_exists {
-            Ok(true) => {
-                // artifact already stored, reserve cannot be done, remove reservation
-                self.reserved.write().await.remove(&id);
-                None
+    /// Create a slot for generating an artifact with the given ID.
+    /// Tracks the ID in the `generating` set until the slot is inserted or dropped.
+    /// Returns `None` if the ID is already generating, in use, or stored in Redis.
+    pub async fn create_slot(&self, id: A::Id, owner: Participant) -> Option<ArtifactSlot<A>> {
+        {
+            let mut state = self.reserved.write().await;
+            if state.using.contains_key(&id) {
+                tracing::error!(id, "cannot create slot: artifact is currently in use");
+                return None;
             }
-            // artifact does not exist, reservation successful
-            Ok(false) => Some(ArtifactSlot {
-                id,
-                storage: self.clone(),
-                stored: false,
-            }),
-            Err(err) => {
-                self.reserved.write().await.remove(&id);
-                tracing::warn!(id, ?err, ?elapsed, "failed to reserve artifact");
-                None
+            if state.contains_generating(&id) {
+                tracing::error!(
+                    id,
+                    "cannot create slot: artifact is already being generated"
+                );
+                return None;
             }
+            let me = self.me().ok()?;
+            state.generating.insert(id, owner == me);
         }
+        if self.contains(id).await {
+            self.reserved.write().await.generating.remove(&id);
+            tracing::error!(id, "cannot create slot: artifact already exists in storage");
+            return None;
+        }
+        Some(ArtifactSlot {
+            id,
+            storage: self.clone(),
+        })
     }
 
-    async fn unreserve(&self, id: A::Id) -> bool {
-        self.reserved.write().await.remove(&id)
+    /// Check if an artifact is currently being generated (mine or peer).
+    pub async fn contains_generating(&self, id: A::Id) -> bool {
+        self.reserved.read().await.contains_generating(&id)
+    }
+
+    pub async fn contains_reserved(&self, id: A::Id) -> bool {
+        self.reserved.read().await.contains_reserved(&id)
+    }
+
+    /// Owned artifacts in Redis plus owned using and owned generating.
+    /// This is the full set that should be advertised during state sync to prevent
+    /// peers from pruning artifacts that are still actively in use.
+    pub async fn fetch_owned_with_reserved(&self) -> Result<Vec<A::Id>, StorageError> {
+        let mut ids = self.fetch_owned().await?;
+        let state = self.reserved.read().await;
+        ids.extend(
+            state
+                .generating
+                .iter()
+                .filter_map(|(&id, &mine)| mine.then_some(id)),
+        );
+        ids.extend(
+            state
+                .using
+                .iter()
+                .filter_map(|(&id, &mine)| mine.then_some(id)),
+        );
+        Ok(ids)
     }
 
     pub async fn remove_outdated(
@@ -336,20 +412,14 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         match result {
             Ok((outdated, not_found)) => {
-                if !outdated.is_empty() {
-                    tracing::info!(?outdated, ?elapsed, "removed outdated artifacts");
-                    // remove outdated entries from our in-memory reserved set
-                    let mut reserved = self.reserved.write().await;
-                    for id in outdated.iter() {
-                        reserved.remove(id);
-                    }
-                    drop(reserved);
-                    // remove outdated entries from our in-memory used set
-                    let mut used = self.used.write().await;
-                    for id in outdated.iter() {
-                        used.remove(id);
-                    }
-                }
+                // Filter out artifacts that are on this node but not in Redis:
+                // - `generating`: being generated, not yet persisted
+                // - `using`: taken from Redis, actively consumed by a protocol
+                let state = self.reserved.read().await;
+                let not_found: Vec<_> = not_found
+                    .into_iter()
+                    .filter(|id| !state.contains_reserved(id))
+                    .collect();
                 Ok(RemoveOutdatedResult::new(outdated, not_found))
             }
             Err(err) => {
@@ -362,7 +432,8 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     /// Insert an artifact into storage under `owner`'s ownership set.
     /// Holders must be set on the artifact before calling this; they are
     /// persisted as a dedicated Redis set for later holder-tracking.
-    pub async fn insert(&self, artifact: A, owner: Participant) -> bool {
+    /// Private: callers must use `create_slot()` + `ArtifactSlot::insert()`.
+    async fn insert(&self, artifact: A, owner: Participant) -> bool {
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]
             local owner_keys = KEYS[2]
@@ -385,11 +456,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let start = Instant::now();
         let id = artifact.id();
-        let used = self.used.read().await;
-        if used.contains(&id) {
-            tracing::warn!(id, "artifact already marked used");
-            return false;
-        }
 
         let holders: Vec<u32> = artifact
             .holders()
@@ -412,7 +478,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .arg(holders.as_slice())
             .invoke_async(&mut conn)
             .await;
-        drop(used);
 
         let elapsed = start.elapsed();
         crate::metrics::storage::REDIS_LATENCY
@@ -420,10 +485,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .observe(elapsed.as_millis() as f64);
 
         match outcome {
-            Ok(()) => {
-                self.reserved.write().await.remove(&id);
-                true
-            }
+            Ok(()) => true,
             Err(err) => {
                 tracing::warn!(id, ?err, ?elapsed, "failed to insert artifact");
                 false
@@ -462,8 +524,14 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         }
     }
 
-    pub async fn contains_used(&self, id: A::Id) -> bool {
-        self.used.read().await.contains(&id)
+    /// Check if an artifact is currently being consumed by an active protocol.
+    pub async fn contains_using(&self, id: A::Id) -> bool {
+        self.reserved.read().await.using.contains_key(&id)
+    }
+
+    /// Returns the set of artifact IDs currently being consumed by active protocols.
+    pub async fn using_ids(&self) -> HashSet<A::Id> {
+        self.reserved.read().await.using.keys().copied().collect()
     }
 
     pub async fn take(&self, id: A::Id, owner: Participant) -> Option<ArtifactTaken<A>> {
@@ -491,14 +559,15 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         "#;
 
         let start = Instant::now();
-        if !self.used.write().await.insert(id) {
-            tracing::warn!(id, "taking artifact that is already used");
+        let mine = owner == self.me().ok()?;
+        if self.reserved.write().await.using.insert(id, mine).is_some() {
+            tracing::warn!(id, "taking artifact that is already in use");
             return None;
         }
 
         let Some(mut conn) = self.connect().await else {
             tracing::warn!(id, "failed to take artifact: connection failed");
-            self.used.write().await.remove(&id);
+            self.reserved.write().await.using.remove(&id);
             return None;
         };
         let result: Result<(A, Vec<u32>), _> = redis::Script::new(SCRIPT)
@@ -521,7 +590,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 Some(ArtifactTaken::new(artifact, self.clone()))
             }
             Err(err) => {
-                self.used.write().await.remove(&id);
+                self.reserved.write().await.using.remove(&id);
                 tracing::warn!(id, ?err, ?elapsed, "failed to take artifact");
                 None
             }
@@ -602,8 +671,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             .with_label_values(&[A::METRIC_LABEL, "clear"])
             .observe(elapsed.as_millis() as f64);
 
-        self.reserved.write().await.clear();
-        self.used.write().await.clear();
+        let mut state = self.reserved.write().await;
+        state.generating.clear();
+        state.using.clear();
 
         // if the outcome is None, it means the script failed or there was an error.
         outcome.is_some()
@@ -612,7 +682,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     /// Take one artifact owned by the given participant.
     /// It is very important to NOT reuse the same artifact twice for two different
     /// protocols.
-    pub async fn take_mine(&self, me: Participant) -> Option<ArtifactTaken<A>> {
+    pub async fn take_mine(&self) -> Option<ArtifactTaken<A>> {
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]
             local mine_key = KEYS[2]
@@ -644,6 +714,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         let start = Instant::now();
         let mut conn = self.connect().await?;
+        let me = self.me().ok()?;
         let result: Result<Option<(A, Vec<u32>)>, _> = redis::Script::new(SCRIPT)
             .key(&self.artifact_key)
             .key(owner_key(&self.owner_keys, me))
@@ -659,10 +730,8 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             Ok(Some((mut artifact, holders))) => {
                 let holders = holders.into_iter().map(Participant::from).collect();
                 artifact.set_holders(holders);
-                // mark reserved and used in-memory so that it won't be reserved or reused locally
                 let id = artifact.id();
-                self.reserved.write().await.insert(id);
-                self.used.write().await.insert(id);
+                self.reserved.write().await.using.insert(id, true);
                 let taken = ArtifactTaken::new(artifact, self.clone());
                 tracing::debug!(id, ?elapsed, "took mine artifact");
                 Some(taken)
@@ -675,92 +744,16 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         }
     }
 
-    /// Return a taken artifact back to the available pool.
-    pub async fn recycle_mine(&self, me: Participant, taken: ArtifactTaken<A>) -> bool {
-        const SCRIPT: &str = r#"
-            local artifact_key = KEYS[1]
-            local mine_key = KEYS[2]
-            local artifact_id = ARGV[1]
-            local artifact = ARGV[2]
-            local num_holders = tonumber(ARGV[3])
-
-            -- Add back to artifact hash map
-            redis.call("HSET", artifact_key, artifact_id, artifact)
-
-            -- Add back to mine set
-            redis.call("SADD", mine_key, artifact_id)
-
-            -- Restore holders set
-            local holders_key = artifact_key .. ':holders:' .. artifact_id
-            redis.call("DEL", holders_key)
-            if num_holders > 0 then
-                redis.call("SADD", holders_key, unpack(ARGV, 4, 3 + num_holders))
-            end
-
-            return 1
-        "#;
-
-        let start = Instant::now();
-        let (artifact, mut dropper) = taken.take();
-        // We manually handle the return, so we don't want the dropper to unreserve it.
-        dropper.dropper.take();
-
-        let id = artifact.id();
-        let holders: Vec<u32> = artifact
-            .holders()
-            .expect("holders must be set before recycle")
-            .iter()
-            .map(|p| Into::<u32>::into(*p))
-            .collect();
-
-        let Some(mut conn) = self.connect().await else {
-            tracing::warn!(id, "failed to return artifact: connection failed");
-            return false;
-        };
-
-        let result: Result<i32, _> = redis::Script::new(SCRIPT)
-            .key(&self.artifact_key)
-            .key(owner_key(&self.owner_keys, me))
-            .arg(id)
-            .arg(&artifact)
-            .arg(holders.len() as i64)
-            .arg(holders.as_slice())
-            .invoke_async(&mut conn)
-            .await;
-
-        let elapsed = start.elapsed();
-        crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "return_mine"])
-            .observe(elapsed.as_millis() as f64);
-
-        match result {
-            Ok(_) => {
-                self.reserved.write().await.remove(&id);
-                self.used.write().await.remove(&id);
-                tracing::info!(id, ?elapsed, "returned mine artifact");
-                true
-            }
-            Err(err) => {
-                tracing::warn!(id, ?err, ?elapsed, "failed to return mine artifact");
-                false
-            }
-        }
-    }
-
-    /// Check if an artifact is reserved.
-    pub async fn contains_reserved(&self, id: A::Id) -> bool {
-        self.reserved.read().await.contains(&id)
-    }
-
     pub fn artifact_key(&self) -> &str {
         &self.artifact_key
     }
 
-    /// Batch remove a peer from holders for a set of artifact IDs, and prune artifacts below threshold if owned by `me`.
+    /// Batch remove a peer from holders for a set of artifact IDs, and prune
+    /// artifacts that fall below the holder threshold.
+    /// Assumes the given IDs are owned by this node for ownership-set cleanup.
     /// Returns (Vec<removed>, Vec<updated>)
     pub async fn remove_holder_and_prune(
         &self,
-        me: Participant,
         peer: Participant,
         threshold: usize,
         ids: &[A::Id],
@@ -769,7 +762,8 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             return Ok((vec![], vec![]));
         }
 
-        // Lua script expects: KEYS[1]=artifact_key, KEYS[2]=owner_key, ARGV[1]=peer, ARGV[2]=threshold, ARGV[3...]=ids
+        // Lua script expects: KEYS[1]=artifact_key, KEYS[2]=owner_key,
+        // ARGV[1]=peer, ARGV[2]=threshold, ARGV[3...]=ids
         const SCRIPT: &str = r#"
             local artifact_key = KEYS[1]
             local owner_key = KEYS[2]
@@ -779,22 +773,21 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             local updated = {}
             for i = 3, #ARGV do
                 local id = ARGV[i]
-                -- Error if 'me' does not own this artifact
+                -- Skip if not owned by me (defense against malicious/buggy peer responses)
                 if redis.call('SISMEMBER', owner_key, id) == 0 then
-                    return redis.error_reply('OWNERSHIP_VIOLATION:' .. id)
-                end
-                -- Remove peer from holders set
-                local holders_key = artifact_key .. ':holders:' .. id
-                redis.call('SREM', holders_key, peer)
-                local count = redis.call('SCARD', holders_key)
-                if count < threshold then
-                    -- Prune: remove artifact, holders set, and owner set entry
-                    redis.call('HDEL', artifact_key, id)
-                    redis.call('DEL', holders_key)
-                    redis.call('SREM', owner_key, id)
-                    table.insert(removed, id)
-                else
-                    table.insert(updated, id)
+                    -- noop: not our artifact
+                elseif redis.call('EXISTS', artifact_key .. ':holders:' .. id) == 1 then
+                    local holders_key = artifact_key .. ':holders:' .. id
+                    redis.call('SREM', holders_key, peer)
+                    local count = redis.call('SCARD', holders_key)
+                    if count < threshold then
+                        redis.call('HDEL', artifact_key, id)
+                        redis.call('DEL', holders_key)
+                        redis.call('SREM', owner_key, id)
+                        table.insert(removed, id)
+                    else
+                        table.insert(updated, id)
+                    end
                 end
             end
             return {removed, updated}
@@ -806,7 +799,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         type SyncResult<Id> = Result<(Vec<Id>, Vec<Id>), redis::RedisError>;
         let result: SyncResult<A::Id> = redis::Script::new(SCRIPT)
             .key(&self.artifact_key)
-            .key(owner_key(&self.owner_keys, me))
+            .key(owner_key(&self.owner_keys, self.me()?))
             .arg(Into::<u32>::into(peer))
             .arg(threshold as i64)
             .arg(ids)

@@ -67,7 +67,7 @@ pub(crate) async fn insert_triples_for_owner(
     let holders = holders.to_vec();
     for id in ids {
         triples
-            .reserve(id)
+            .create_slot(id, owner)
             .await
             .unwrap()
             .insert(dummy_pair_with_holders(id, holders.clone()), owner)
@@ -84,7 +84,7 @@ pub(crate) async fn insert_presignatures_for_owner(
     let holders = holders.to_vec();
     for id in ids {
         presignatures
-            .reserve(id)
+            .create_slot(id, owner)
             .await
             .unwrap()
             .insert(dummy_presignature_with_holders(id, holders.clone()), owner)

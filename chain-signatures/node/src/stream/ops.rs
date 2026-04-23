@@ -1,4 +1,4 @@
-use crate::backlog::{Backlog, BacklogEntry, RecoveredChainRequests, RecoveryRequeueMode};
+use crate::backlog::{Backlog, RecoveryRequeueMode};
 use crate::indexer_hydration::{
     HydrationRespondBidirectionalEvent, HydrationSignBidirectionalRequestedEvent,
     HydrationSignatureRespondedEvent,
@@ -288,52 +288,34 @@ pub(crate) async fn recover_backlog(
     node_client: &NodeClient,
     source_chain: Chain,
     sign_tx: mpsc::Sender<Sign>,
-) -> RecoveredChainRequests {
+) -> RecoveryRequeueMode {
     // Recover backlog before doing anything.
     // Wait for threshold to be available
     let threshold = contract_watcher.wait_threshold().await;
     if threshold == 0 {
-        return RecoveredChainRequests::default();
+        return RecoveryRequeueMode::default();
     }
     wait_threshold_active(mesh_state, threshold).await;
 
     let mesh_state = mesh_state.borrow().clone();
-    let mut recovered = backlog
+    let mut requeue_modes = backlog
         .recover(&mesh_state, node_client, threshold, &[source_chain])
         .await;
 
-    let recovered = recovered.remove(&source_chain).unwrap_or_default();
-
-    if recovered.requeue_mode == RecoveryRequeueMode::Immediate {
-        requeue_recovered_sign_requests(backlog, source_chain, sign_tx, &recovered.pending).await;
+    let requeue_mode = requeue_modes.remove(&source_chain).unwrap_or_default();
+    if requeue_mode == RecoveryRequeueMode::Immediate {
+        requeue_recovered_sign_requests(backlog, source_chain, sign_tx).await;
     }
-
-    recovered
+    requeue_mode
 }
 
 pub(crate) async fn requeue_recovered_sign_requests(
     backlog: &Backlog,
     source_chain: Chain,
     sign_tx: mpsc::Sender<Sign>,
-    pending: &std::collections::HashMap<SignId, BacklogEntry>,
 ) {
-    for &sign_id in pending.keys() {
-        let Some(entry) = backlog.get(source_chain, &sign_id).await else {
-            continue;
-        };
-
-        if entry.status() != SignStatus::AwaitingResponse {
-            continue;
-        }
-
-        // This is a bidirectional execution watcher, so let's skip it and have
-        // the stream/indexer itself enqueue watching.
-        if entry.execution_tx().is_some() {
-            continue;
-        }
-
-        let sign_request = entry.request;
-
+    for sign_request in backlog.take_requeueable_requests(source_chain).await {
+        let sign_id = sign_request.id;
         if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
             tracing::error!(
                 ?err,
@@ -425,7 +407,6 @@ pub(crate) async fn process_respond_event(
         request_id: respond_event.request_id(),
         from_address,
         nonce,
-        status: SignStatus::AwaitingResponse,
     };
 
     tracing::info!(
@@ -510,7 +491,7 @@ pub async fn process_execution_confirmed(
     );
 
     // Remove the watcher; if it's not found, it might have been processed already
-    let Some((unwatched_sign_id, mut pending_tx)) =
+    let Some((unwatched_sign_id, pending_tx)) =
         backlog.unwatch_execution(target_chain, &tx_id).await
     else {
         tracing::warn!(
@@ -541,7 +522,6 @@ pub async fn process_execution_confirmed(
     };
     tracing::info!(?tx_id, ?unwatched_sign_id, updated_status = ?updated_tx.status(), "set_status returned transaction");
 
-    pending_tx.status = status;
     let completed_tx = CompletedTx::new(pending_tx, block_height);
 
     let sign_request = match result {
@@ -717,7 +697,6 @@ mod tests {
             request_id: [1u8; 32],
             from_address: Address::ZERO,
             nonce: 0,
-            status: SignStatus::PendingExecution,
         };
         let sign_id = SignId::new(tx.request_id);
 
@@ -893,7 +872,6 @@ mod tests {
             request_id: [2u8; 32],
             from_address: Address::ZERO,
             nonce: 0,
-            status: SignStatus::PendingExecution,
         };
         let sign_id = SignId::new(tx.request_id);
 
