@@ -1,4 +1,4 @@
-use crate::backlog::Backlog;
+use crate::backlog::{Backlog, RecoveryRequeueMode};
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::IndexedSignRequest;
@@ -172,6 +172,10 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(
 ) {
     tracing::info!(%chain, "starting ChainStream catchup then livestream");
 
+    // TODO: on failure, we currently send catchup_completed due to some streams not enabling
+    // this particular catchup_then_livestream function (i.e. Solana & Hydration). Once
+    // those ar implemented, we can remove the catchup_completed sending on error here.
+
     let buffered = match indexer.livestream().await {
         Ok(buffered) => buffered,
         Err(err) => {
@@ -186,6 +190,7 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(
 
     let Some(anchor_block) = buffered.next().await else {
         tracing::warn!(%chain, "buffered livestream ended before anchor block");
+        let _ = catchup_completed_tx.send(());
         return;
     };
 
@@ -207,11 +212,7 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(
     let _ = catchup_completed_tx.send(());
 
     let mut next_block = buffered.next().await;
-    loop {
-        let Some(block) = next_block.as_ref() else {
-            break;
-        };
-
+    while let Some(block) = next_block.as_ref() {
         if let Err(err) = indexer.process_buffered_block(block).await {
             tracing::warn!(?err, %chain, "buffered block processing failed; retrying");
             tokio::time::sleep(I::RETRY_DELAY).await;
@@ -271,11 +272,9 @@ pub async fn run_stream<S: ChainStream>(
     let mut catchup_completed = false;
     loop {
         tokio::select! {
-            result = &mut catchup_completed_rx, if !catchup_completed => {
+            Ok(()) = &mut catchup_completed_rx, if !catchup_completed => {
                 catchup_completed = true;
-
-                if result.is_ok()
-                    && recovered.requeue_mode == crate::backlog::RecoveryRequeueMode::AfterCatchup
+                if recovered.requeue_mode == RecoveryRequeueMode::AfterCatchup
                 {
                     requeue_recovered_sign_requests(
                         &backlog,
@@ -286,8 +285,6 @@ pub async fn run_stream<S: ChainStream>(
                     .await;
                     recovered.pending.clear();
                 }
-
-                continue;
             }
             event = stream.next_event() => {
                 let Some(event) = event else {
@@ -352,7 +349,7 @@ pub async fn run_stream<S: ChainStream>(
         }
     }
 
-    tracing::warn!(%chain, "indexer shut down");
+    tracing::warn!(%chain, "stream shutting down");
 }
 
 #[cfg(test)]
