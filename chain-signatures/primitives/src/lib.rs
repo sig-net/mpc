@@ -240,7 +240,8 @@ impl Chain {
     }
 
     pub fn expected_response_time_secs(&self) -> u64 {
-        self.expected_finality_time_secs() + 5 // + Buffer time
+        // finality time * 2 = finality time of sign/sign_bidirectional event + finality time of respond event
+        self.expected_finality_time_secs() * 2 + 5 // + Buffer time
     }
 
     pub fn from_caip2_chain_id(chain_id: &str) -> Result<Self, ChainFromError> {
