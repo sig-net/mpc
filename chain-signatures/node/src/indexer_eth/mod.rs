@@ -21,6 +21,7 @@ use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{SignArgs, SignId, Signature as MpcSignature, LATEST_MPC_KEY_VERSION};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::ops::Range;
 use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::{mpsc, Notify};
@@ -724,7 +725,7 @@ impl EthereumIndexer {
         catchup_complete.notified().await;
 
         let mut current_block_number = start_block_number;
-        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        let mut interval = tokio::time::interval(Self::RETRY_DELAY);
         loop {
             interval.tick().await;
             let Some(latest_block_number) = client.get_latest_block_number().await else {
@@ -1142,11 +1143,11 @@ impl ChainIndexer for EthereumIndexer {
             if let Some(block_number) = self.client.get_latest_block_number().await {
                 break block_number.saturating_add(1);
             };
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(Self::RETRY_DELAY).await;
         };
 
         let (live_blocks_tx, live_blocks_rx) = live_blocks_channel();
-        tokio::spawn(EthereumIndexer::index_live_blocks(
+        tokio::spawn(Self::index_live_blocks(
             self.client.clone(),
             self.catchup_complete.clone(),
             start_block_number,
@@ -1162,13 +1163,13 @@ impl ChainIndexer for EthereumIndexer {
         rx.recv().await
     }
 
-    async fn catchup_range(&mut self, anchor_height: u64) -> std::ops::RangeInclusive<u64> {
-        let catchup_start = EthereumIndexer::catchup_start_block_number(
+    async fn catchup_range(&mut self, anchor_height: u64) -> Range<u64> {
+        let catchup_start = Self::catchup_start_block_number(
             self.backlog.processed_block(Chain::Ethereum).await,
             anchor_height,
         );
 
-        catchup_start..=anchor_height
+        catchup_start..anchor_height
     }
 
     async fn process_catchup_on_height(&mut self, height: u64) -> anyhow::Result<()> {
