@@ -41,7 +41,24 @@ use tokio::task::JoinHandle;
 const ROUND_INTERVAL: usize = 512;
 
 /// The default timeout budget for organizing and posit phases.
-const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(20);
+///
+/// Tests have stable network conditions and don't benefit from a longer
+/// timeout. It only makes them run for longer.
+const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(if cfg!(feature = "test-feature") {
+    5
+} else {
+    20
+});
+
+/// A proposer tries to include all eligible deliberators but will go ahead with
+/// a subset after this timeout, if above the minimum threshold.
+///
+/// Use shorter time for tests, as network delays are much smaller.
+const ACCEPT_POSIT_TIMEOUT: Duration = Duration::from_millis(if cfg!(feature = "test-feature") {
+    500
+} else {
+    100
+});
 
 /// All relevant info pertaining to an indexed sign request.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -630,6 +647,9 @@ impl SignPositor {
         let remaining = state.budget.remaining();
         let posit_deadline = tokio::time::sleep(remaining);
         tokio::pin!(posit_deadline);
+        let accept_deadline = tokio::time::sleep(ACCEPT_POSIT_TIMEOUT);
+        tokio::pin!(accept_deadline);
+        let mut accept_deadline_reached = false;
 
         let accepted_participants = loop {
             tokio::select! {
@@ -691,27 +711,24 @@ impl SignPositor {
                             return SignPhase::Organizing(SignOrganizer);
                         }
 
-                        // Start as soon as we have enough accepts
-                        if counter.enough_accepts(ctx.threshold) {
-                            let participants = counter.accepts.into_iter().collect::<Vec<_>>();
-                            tracing::info!(?sign_id, ?round, me = ?ctx.me, ?participants, "proposer broadcasting Start");
-
-                            for &p in &participants {
-                                if p == ctx.me {
-                                    continue;
-                                }
-                                ctx.msg
-                                    .send(
-                                        ctx.me,
-                                        p,
-                                        PositMessage {
-                                            id: PositProtocolId::Signature(sign_id, presignature_id, state.round),
-                                            from: ctx.me,
-                                            action: PositAction::Start(participants.clone()),
-                                        },
-                                    )
-                                    .await;
-                            }
+                        // Starting as soon as we have enough accepts leaves
+                        // participants accepting a bit later in a bad state.
+                        // They will try to become propose in later rounds,
+                        // wasting Presignatures, memory and CPU time.
+                        //
+                        // Instead, wait for at least the `accept_deadline`,
+                        // only nodes answer slower will be left out. This isn't
+                        // perfect but much better than always forcing nodes
+                        // into the bad state.
+                        let ready_to_go = counter.meets_totality() ||  accept_deadline_reached;
+                        if ready_to_go && counter.enough_accepts(ctx.threshold) {
+                            let participants = Self::start_with_current_accepts(
+                                ctx,
+                                state,
+                                counter,
+                                sign_id,
+                                presignature_id
+                            ).await;
                             break participants;
                         }
                     }
@@ -735,6 +752,20 @@ impl SignPositor {
                     state.bump_round();
                     return SignPhase::Organizing(SignOrganizer);
                 }
+                _ = &mut accept_deadline, if is_proposer && !accept_deadline_reached => {
+                    accept_deadline_reached = true;
+                    if counter.enough_accepts(ctx.threshold) {
+                        let participants = Self::start_with_current_accepts(
+                            ctx,
+                            state,
+                            counter,
+                            sign_id,
+                            presignature_id
+                        ).await;
+                        break participants;
+                    }
+                }
+
             }
         };
 
@@ -744,6 +775,35 @@ impl SignPositor {
             presignature,
             accepted_participants,
         })
+    }
+
+    async fn start_with_current_accepts(
+        ctx: &SignTask,
+        state: &mut SignState,
+        counter: SinglePositCounter,
+        sign_id: SignId,
+        presignature_id: PresignatureId,
+    ) -> Vec<Participant> {
+        let participants = counter.accepts.into_iter().collect::<Vec<_>>();
+        tracing::info!(?sign_id, round=?state.round, me = ?ctx.me, ?participants, "proposer broadcasting Start");
+
+        for &p in &participants {
+            if p == ctx.me {
+                continue;
+            }
+            ctx.msg
+                .send(
+                    ctx.me,
+                    p,
+                    PositMessage {
+                        id: PositProtocolId::Signature(sign_id, presignature_id, state.round),
+                        from: ctx.me,
+                        action: PositAction::Start(participants.clone()),
+                    },
+                )
+                .await;
+        }
+        participants
     }
 }
 
