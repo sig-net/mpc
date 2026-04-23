@@ -1252,10 +1252,6 @@ impl ChainIndexer for EthereumIndexer {
         self.catchup_complete.notify_waiters();
         Ok(())
     }
-
-    fn retry_delay(&self) -> Duration {
-        Duration::from_millis(500)
-    }
 }
 
 /// Ethereum indexer stream implementing the `ChainStream` trait.

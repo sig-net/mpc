@@ -112,6 +112,8 @@ pub trait ChainBufferedStream: Send + 'static {
 pub trait ChainIndexer: Send + 'static {
     type BufferedStream: ChainBufferedStream;
 
+    const RETRY_DELAY: Duration = Duration::from_millis(500);
+
     async fn livestream(&mut self) -> anyhow::Result<Option<Self::BufferedStream>> {
         Ok(None)
     }
@@ -144,10 +146,6 @@ pub trait ChainIndexer: Send + 'static {
     ) -> anyhow::Result<()> {
         let _ = block;
         Ok(())
-    }
-
-    fn retry_delay(&self) -> Duration {
-        Duration::from_millis(500)
     }
 }
 
@@ -197,7 +195,7 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(
     for height in catchup_range {
         while let Err(err) = indexer.process_catchup_on_height(height).await {
             tracing::warn!(?err, %chain, height, "catchup height processing failed; retrying");
-            tokio::time::sleep(indexer.retry_delay()).await;
+            tokio::time::sleep(I::RETRY_DELAY).await;
         }
     }
 
@@ -216,7 +214,7 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(
 
         if let Err(err) = indexer.process_buffered_block(block).await {
             tracing::warn!(?err, %chain, "buffered block processing failed; retrying");
-            tokio::time::sleep(indexer.retry_delay()).await;
+            tokio::time::sleep(I::RETRY_DELAY).await;
             continue;
         }
 
@@ -228,11 +226,10 @@ pub async fn spawn_stream_indexer<S: ChainStream>(
     stream: &mut S,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let mut indexer = stream.start().await?;
-    let chain = S::CHAIN;
 
     Ok(tokio::spawn(async move {
         let (catchup_completed_tx, _catchup_completed_rx) = oneshot::channel();
-        catchup_then_livestream(chain, &mut indexer, catchup_completed_tx).await;
+        catchup_then_livestream(S::CHAIN, &mut indexer, catchup_completed_tx).await;
     }))
 }
 
@@ -461,10 +458,6 @@ mod tests {
             *remaining -= 1;
             true
         }
-
-        fn retry_delay(&self) -> Duration {
-            Duration::from_millis(1)
-        }
     }
 
     struct TestLinearStream {
@@ -488,6 +481,8 @@ mod tests {
     #[async_trait]
     impl ChainIndexer for TestLinearIndexer {
         type BufferedStream = TestBufferedStream;
+
+        const RETRY_DELAY: Duration = Duration::from_millis(1);
 
         async fn livestream(&mut self) -> anyhow::Result<Option<Self::BufferedStream>> {
             Ok(Some(TestBufferedStream {
@@ -527,10 +522,6 @@ mod tests {
             }
             self.tx.send(ChainEvent::Block(*block)).await?;
             Ok(())
-        }
-
-        fn retry_delay(&self) -> Duration {
-            self.control.retry_delay()
         }
     }
 
