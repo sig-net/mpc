@@ -181,18 +181,53 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {
     }
 }
 
+/// The deserialized representation of a bidirectional signing request
+/// event emitted from the Hydration chain.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct HydrationSignBidirectionalRequestedEvent {
+    /// The 32-byte identifier of the sender.
     pub sender: [u8; 32],
+
+    /// The serialized transaction payload to be signed.
     pub serialized_transaction: Vec<u8>,
+
+    /// CAIP-2 chain ID of the *target chain* where the signed transaction will be sent.
+    ///
+    /// Note: This is NOT the chain where `respond()` or `respond_bidirectional()` is executed.
     pub caip2_id: String,
+
+    /// Version of the key to be used for signing.
     pub key_version: u32,
+
+    /// Deposit associated with the request.
     pub deposit: u64,
+
+    /// Derivation path used for signing.
     pub path: String,
+
+    /// Signing algorithm identifier.
+    ///
+    /// If empty (`""`), ECDSA will be used by default.
     pub algo: String,
+
+    /// Destination field (currently unused).
+    ///
+    /// Should be left empty (`""`).
     pub dest: String,
+
+    /// Additional parameters encoded as a string (currently unused).
+    ///
+    /// Should be left empty (`""`).
     pub params: String,
+
+    /// Schema used to deserialize the output of the signed transaction.
+    ///
+    /// MUST be provided.
     pub output_deserialization_schema: Vec<u8>,
+
+    /// Schema used to serialize the `respond_bidirectional` payload.
+    ///
+    /// MUST be provided.
     pub respond_serialization_schema: Vec<u8>,
 }
 
@@ -657,6 +692,9 @@ fn decode_sign_bidirectional_requested(
 
     let output_deserialization_schema = get_named_vec_u8(&fields, "output_deserialization_schema")?;
     let respond_serialization_schema = get_named_vec_u8(&fields, "respond_serialization_schema")?;
+
+    Chain::from_caip2_chain_id(&caip2_id)
+        .map_err(|e| anyhow!("invalid caip2 chain id in sign bidirectional event: {e:?}"))?;
 
     Ok(HydrationSignBidirectionalRequestedEvent {
         sender,

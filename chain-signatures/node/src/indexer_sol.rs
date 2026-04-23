@@ -586,7 +586,15 @@ fn parse_cpi_events(
             }
         } else if event_discriminator == SignBidirectionalEvent::DISCRIMINATOR {
             match <SignBidirectionalEvent as AnchorDeserialize>::deserialize(&mut &event_data[..]) {
-                Ok(ev) => acc.push(Box::new(ev) as SignatureEventBox),
+                Ok(ev) => {
+                    // caip2_id represents the mainnet CAIP-2 chain ID of the target chain
+                    // we won't process the event if the caip2_id is invalid, since it won't be able to be handled correctly downstream anyway
+                    if let Err(e) = Chain::from_caip2_chain_id(&ev.caip2_id) {
+                        tracing::warn!("invalid caip2 chain id in sign bidirectional event: {e:?}")
+                    } else {
+                        acc.push(Box::new(ev) as SignatureEventBox)
+                    }
+                }
                 Err(e) => {
                     tracing::warn!("Failed to deserialize SignBidirectionalEvent: {e}")
                 }

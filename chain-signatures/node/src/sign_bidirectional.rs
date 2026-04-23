@@ -50,6 +50,8 @@ pub struct BidirectionalTx {
     pub serialized_transaction: Vec<u8>,
     pub source_chain: Chain,
     pub target_chain: Chain,
+    // mainnet caip2_id of the target chain where the signed transaction will be sent
+    // This must be a supported chain in the Chain enum in primitives.
     pub caip2_id: String,
     pub key_version: u32,
     pub deposit: u64,

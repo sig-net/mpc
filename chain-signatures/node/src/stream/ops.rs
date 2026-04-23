@@ -15,7 +15,6 @@ use crate::stream::ExecutionOutcome;
 use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
 use mpc_primitives::{SignId, Signature};
-use std::str::FromStr;
 use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -40,13 +39,6 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(_) => Chain::Solana,
             SignBidirectionalEvent::Hydration(_) => Chain::Hydration,
-        }
-    }
-
-    pub fn target_chain(&self) -> Option<Chain> {
-        match self {
-            SignBidirectionalEvent::Solana(event) => Chain::from_str(&event.dest).ok(),
-            SignBidirectionalEvent::Hydration(event) => Chain::from_str(&event.dest).ok(),
         }
     }
 
@@ -133,6 +125,10 @@ impl SignBidirectionalEvent {
                 &self.path(),
             )),
         }
+    }
+
+    pub fn target_chain(&self) -> Result<Chain, mpc_primitives::ChainFromError> {
+        Chain::from_caip2_chain_id(&self.caip2_id())
     }
 }
 
@@ -370,8 +366,8 @@ pub(crate) async fn process_respond_event(
     }
 
     tracing::info!(?sign_id, "bidirectional processing initial respond event");
-    let target_chain = event.target_chain().ok_or_else(|| {
-        anyhow::anyhow!("unable to parse target chain from dest: {}", event.dest())
+    let target_chain = event.target_chain().map_err(|err| {
+        anyhow::anyhow!("failed to process respond event: {err:?} for sign id: {sign_id:?}")
     })?;
 
     let mpc_sig = respond_event.signature();
@@ -610,7 +606,7 @@ mod tests {
             serialized_transaction: vec![1, 2, 3],
             source_chain,
             target_chain,
-            caip2_id: "test_caip2_id".to_string(),
+            caip2_id: target_chain.caip2_chain_id().to_string(),
             key_version: 1,
             deposit: 1000,
             path: "test_path".to_string(),
@@ -623,23 +619,6 @@ mod tests {
             from_address: Address::ZERO,
             nonce: 0,
         }
-    }
-
-    fn test_sign_bidirectional_event(dest: &str) -> SignBidirectionalEvent {
-        SignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
-            sender: Default::default(),
-            serialized_transaction: vec![1, 2, 3, 4],
-            dest: dest.to_string(),
-            caip2_id: "eip155:1".to_string(),
-            key_version: 0,
-            deposit: 0,
-            path: "m/0".to_string(),
-            algo: "ECDSA".to_string(),
-            params: "{}".to_string(),
-            program_id: Pubkey::new_unique(),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
-        })
     }
 
     #[test]
@@ -1044,13 +1023,38 @@ mod tests {
             key_version: 1,
         };
 
+        let mut rlp_s = rlp::RlpStream::new_list(9);
+        rlp_s.append(&0u64);
+        rlp_s.append(&0u64);
+        rlp_s.append(&0u64);
+        rlp_s.append(&Vec::<u8>::new());
+        rlp_s.append(&0u64);
+        rlp_s.append(&Vec::<u8>::new());
+        rlp_s.append(&1u64);
+        rlp_s.append(&0u64);
+        rlp_s.append(&0u64);
+        let unsigned_rlp = rlp_s.out().to_vec();
+
         backlog
             .insert(IndexedSignRequest::sign_bidirectional(
                 sign_id,
                 args,
                 Chain::Ethereum,
                 current_unix_timestamp(),
-                test_sign_bidirectional_event("not-a-chain"),
+                SignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
+                    sender: Default::default(),
+                    serialized_transaction: unsigned_rlp,
+                    dest: "0x1234567890123456789012345678901234567890".to_string(),
+                    caip2_id: "not-a-chain".to_string(),
+                    key_version: 0,
+                    deposit: 0,
+                    path: "m/0".to_string(),
+                    algo: "ECDSA".to_string(),
+                    params: "{}".to_string(),
+                    program_id: Pubkey::new_unique(),
+                    output_deserialization_schema: vec![],
+                    respond_serialization_schema: vec![],
+                }),
             ))
             .await;
 
@@ -1070,7 +1074,7 @@ mod tests {
         let err = process_respond_event(event, sign_tx, &mut contract_watcher, &backlog)
             .await
             .expect_err("invalid chain should fail");
-        assert!(err.to_string().contains("unable to parse target chain"));
+        assert!(err.to_string().contains("UnknownCaip2Id(\"not-a-chain\")"));
     }
 
     #[tokio::test]
@@ -1240,7 +1244,7 @@ mod tests {
             serialized_transaction: vec![1, 2, 3],
             source_chain: Chain::Solana,
             target_chain: Chain::Ethereum,
-            caip2_id: "test_caip2_id".to_string(),
+            caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
             key_version: 1,
             deposit: 1000,
             path: "test_path".to_string(),

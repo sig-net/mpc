@@ -28,6 +28,7 @@ use mpc_node::indexer_eth::EthArgs;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;
+use mpc_primitives::Chain;
 use near_account_id::AccountId;
 use near_workspaces::Account;
 use reqwest::Client;
@@ -883,7 +884,7 @@ impl Solana {
 
         // Call initialize function
         let signature_deposit = 1_000_000u64; // 0.001 SOL in lamports
-        let chain_id = "solana:localnet".to_string(); // CAIP-2 format for local testnet
+        let chain_id = Chain::Solana.caip2_chain_id().to_string(); // CAIP-2 format for local testnet
 
         tracing::info!(
             program_id = %program_id,

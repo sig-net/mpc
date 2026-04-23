@@ -829,7 +829,7 @@ impl BacklogEntry {
             .map(|tx| tx.target_chain)
             .or_else(|| match &self.request.kind {
                 SignKind::Sign => None,
-                SignKind::SignBidirectional(event) => event.target_chain(),
+                SignKind::SignBidirectional(event) => event.target_chain().ok(),
                 SignKind::RespondBidirectional(_) => None,
             })
     }
@@ -922,7 +922,7 @@ mod tests {
             serialized_transaction: vec![1, 2, 3],
             source_chain: Chain::Solana,
             target_chain: Chain::Ethereum,
-            caip2_id: "test_caip2_id".to_string(),
+            caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
             key_version: 1,
             deposit: 1000,
             path: "test_path".to_string(),
@@ -946,7 +946,7 @@ mod tests {
             sender: Default::default(),
             serialized_transaction: vec![],
             dest: dest.to_string(),
-            caip2_id: format!("{dest}:test"),
+            caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
             key_version: 0,
             deposit: 0,
             path: "".to_string(),
@@ -1413,7 +1413,7 @@ mod tests {
                 sender: Default::default(),
                 serialized_transaction: vec![1, 2, 3],
                 dest: "ethereum".to_string(),
-                caip2_id: "eip155:1".to_string(),
+                caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
                 key_version: 1,
                 deposit: 10,
                 path: "m/0".to_string(),

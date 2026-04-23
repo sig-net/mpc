@@ -78,12 +78,12 @@ pub enum BlockToProcess {
     NewBlock(Box<alloy::rpc::types::Block>),
 }
 
-#[derive(Clone)]
 pub struct BlockAndRequests {
     block_number: u64,
     block_hash: alloy::primitives::B256,
     indexed_requests: Vec<IndexedSignRequest>,
     respond_logs: Vec<Log>,
+    exec_events: Vec<ChainEvent>,
 }
 
 impl BlockAndRequests {
@@ -92,12 +92,14 @@ impl BlockAndRequests {
         block_hash: alloy::primitives::B256,
         indexed_requests: Vec<IndexedSignRequest>,
         respond_logs: Vec<Log>,
+        exec_events: Vec<ChainEvent>,
     ) -> Self {
         Self {
             block_number,
             block_hash,
             indexed_requests,
             respond_logs,
+            exec_events,
         }
     }
 }
@@ -783,7 +785,6 @@ impl EthereumIndexer {
             contract_address,
             requests_indexed_send.clone(),
             backlog.clone(),
-            events_tx.clone(),
         ));
 
         let last_processed_block = backlog.processed_block(Chain::Ethereum).await;
@@ -854,7 +855,6 @@ impl EthereumIndexer {
                 contract_address,
                 requests_indexed_send_clone.clone(),
                 backlog.clone(),
-                events_tx.clone(),
             )
             .await
             {
@@ -926,7 +926,6 @@ impl EthereumIndexer {
         contract_address: Address,
         requests_indexed: mpsc::Sender<BlockAndRequests>,
         backlog: Backlog,
-        events_tx: mpsc::Sender<ChainEvent>,
     ) -> anyhow::Result<()> {
         let block_number = block.header.number;
         let block_hash = block.header.hash;
@@ -997,11 +996,6 @@ impl EthereumIndexer {
             block_receipts.clone(),
         )
         .await?;
-        for ev in exec_events {
-            if let Err(err) = events_tx.send(ev).await {
-                tracing::error!(?err, "failed to emit ExecutionConfirmed event");
-            }
-        }
 
         for _request in &sign_requests {
             record_request_latency(
@@ -1020,6 +1014,7 @@ impl EthereumIndexer {
                 block_hash,
                 sign_requests,
                 respond_logs,
+                exec_events,
             ))
             .await
             .map_err(|err| anyhow::anyhow!("Failed to send indexed requests: {:?}", err))?;
@@ -1165,6 +1160,7 @@ impl EthereumIndexer {
                 block_hash,
                 indexed_requests,
                 respond_logs,
+                exec_events,
             }) = requests_indexed.recv().await
             else {
                 tracing::error!("Failed to receive indexed requests");
@@ -1208,6 +1204,14 @@ impl EthereumIndexer {
                     emit_respond_events(&respond_logs, events_tx.clone()).await;
                 }
 
+                if !exec_events.is_empty() {
+                    for exec_event in exec_events {
+                        if let Err(err) = events_tx.send(exec_event).await {
+                            tracing::error!(?err, "failed to emit ExecutionConfirmed event");
+                        }
+                    }
+                }
+
                 if let Err(err) = events_tx.send(ChainEvent::Block(block_number)).await {
                     tracing::error!(?err, "failed to emit block event");
                 }
@@ -1230,7 +1234,6 @@ impl EthereumIndexer {
         contract_address: Address,
         requests_indexed: mpsc::Sender<BlockAndRequests>,
         backlog: Backlog,
-        events_tx: mpsc::Sender<ChainEvent>,
     ) {
         loop {
             let Some(block) = blocks_failed_rx.recv().await else {
@@ -1244,7 +1247,6 @@ impl EthereumIndexer {
                 contract_address,
                 requests_indexed.clone(),
                 backlog.clone(),
-                events_tx.clone(),
             )
             .await
             {
