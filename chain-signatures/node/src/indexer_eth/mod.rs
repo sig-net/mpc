@@ -23,9 +23,8 @@ use mpc_primitives::{SignArgs, SignId, Signature as MpcSignature, LATEST_MPC_KEY
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::LazyLock;
-use tokio::sync::mpsc;
+use std::sync::{Arc, LazyLock};
+use tokio::sync::{mpsc, Notify};
 use tokio::time::Duration;
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
@@ -85,10 +84,6 @@ pub struct EthereumBufferedStream {
 #[async_trait]
 impl ChainBufferedStream for EthereumBufferedStream {
     type Block = alloy::rpc::types::Block;
-
-    async fn initial(&mut self) -> Option<Self::Block> {
-        self.live_blocks_rx.recv().await
-    }
 
     async fn next(&mut self) -> Option<Self::Block> {
         self.live_blocks_rx.recv().await
@@ -717,6 +712,7 @@ pub struct EthereumIndexer {
     client: Arc<EthereumClient>,
     events_tx: mpsc::Sender<ChainEvent>,
     contract_address: Address,
+    catchup_complete: Arc<Notify>,
 }
 
 impl EthereumIndexer {
@@ -737,49 +733,58 @@ impl EthereumIndexer {
             client,
             events_tx,
             contract_address,
+            catchup_complete: Arc::new(Notify::new()),
         })
     }
 
-    async fn buffer_live_blocks(
+    async fn index_live_blocks(
         client: Arc<EthereumClient>,
+        catchup_complete: Arc<Notify>,
+        start_block_number: u64,
         live_blocks: mpsc::Sender<alloy::rpc::types::Block>,
     ) {
-        tracing::info!("buffering ethereum live blocks");
-        let mut next_block_number: Option<u64> = None;
+        tracing::info!("indexing ethereum live blocks");
 
+        // Wait for catchup to complete before starting to index live blocks
+        catchup_complete.notified().await;
+
+        let mut current_block_number = start_block_number;
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
         loop {
+            interval.tick().await;
             let Some(latest_block_number) = client.get_latest_block_number().await else {
-                tokio::time::sleep(Duration::from_millis(500)).await;
                 continue;
             };
 
-            let mut block_number = next_block_number.unwrap_or(latest_block_number);
-            if block_number > latest_block_number {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+            if current_block_number > latest_block_number {
                 continue;
             }
 
-            while block_number <= latest_block_number {
+            while current_block_number <= latest_block_number {
                 let Some(block) = client
                     .get_block(alloy::rpc::types::BlockId::Number(
-                        BlockNumberOrTag::Number(block_number),
+                        BlockNumberOrTag::Number(current_block_number),
                     ))
                     .await
                 else {
-                    tracing::warn!(block_number, "ethereum live block not yet available");
+                    tracing::warn!(
+                        current_block_number,
+                        "ethereum live block not yet available"
+                    );
                     break;
                 };
 
                 if let Err(err) = live_blocks.send(block).await {
-                    tracing::warn!(?err, block_number, "failed to buffer ethereum live block");
+                    tracing::warn!(
+                        ?err,
+                        current_block_number,
+                        "failed to add ethereum live block"
+                    );
                     return;
                 }
 
-                next_block_number = Some(block_number.saturating_add(1));
-                block_number = block_number.saturating_add(1);
+                current_block_number = current_block_number.saturating_add(1);
             }
-
-            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
@@ -1197,9 +1202,18 @@ impl ChainIndexer for EthereumIndexer {
     type BufferedStream = EthereumBufferedStream;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<Self::BufferedStream>> {
+        let start_block_number = loop {
+            if let Some(block_number) = self.client.get_latest_block_number().await {
+                break block_number.saturating_add(1);
+            };
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        };
+
         let (live_blocks_tx, live_blocks_rx) = live_blocks_channel();
-        tokio::spawn(EthereumIndexer::buffer_live_blocks(
+        tokio::spawn(EthereumIndexer::index_live_blocks(
             self.client.clone(),
+            self.catchup_complete.clone(),
+            start_block_number,
             live_blocks_tx,
         ));
 
@@ -1210,13 +1224,13 @@ impl ChainIndexer for EthereumIndexer {
         block.header.number
     }
 
-    async fn catchup_range(&mut self, anchor_height: u64) -> std::ops::Range<u64> {
+    async fn catchup_range(&mut self, anchor_height: u64) -> std::ops::RangeInclusive<u64> {
         let catchup_start = EthereumIndexer::catchup_start_block_number(
             self.backlog.processed_block(Chain::Ethereum).await,
             anchor_height,
         );
 
-        catchup_start..anchor_height
+        catchup_start..=anchor_height
     }
 
     async fn process_catchup_on_height(&mut self, height: u64) -> anyhow::Result<()> {
@@ -1229,9 +1243,14 @@ impl ChainIndexer for EthereumIndexer {
 
     async fn process_buffered_block(
         &mut self,
-        block: <Self::BufferedStream as ChainBufferedStream>::Block,
+        block: &<Self::BufferedStream as ChainBufferedStream>::Block,
     ) -> anyhow::Result<()> {
-        self.process_live_block(block).await
+        self.process_live_block(block.clone()).await
+    }
+
+    async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
+        self.catchup_complete.notify_waiters();
+        Ok(())
     }
 
     fn retry_delay(&self) -> Duration {

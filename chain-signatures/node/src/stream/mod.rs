@@ -13,7 +13,7 @@ use crate::stream::ops::{
 
 use async_trait::async_trait;
 use std::time::Duration;
-use std::{ops::Range, vec::Vec};
+use std::{ops::RangeInclusive, vec::Vec};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
@@ -97,10 +97,6 @@ pub struct DisabledBufferedStream;
 impl ChainBufferedStream for DisabledBufferedStream {
     type Block = ();
 
-    async fn initial(&mut self) -> Option<Self::Block> {
-        None
-    }
-
     async fn next(&mut self) -> Option<Self::Block> {
         None
     }
@@ -109,8 +105,6 @@ impl ChainBufferedStream for DisabledBufferedStream {
 #[async_trait]
 pub trait ChainBufferedStream: Send + 'static {
     type Block: Send + 'static;
-
-    async fn initial(&mut self) -> Option<Self::Block>;
     async fn next(&mut self) -> Option<Self::Block>;
 }
 
@@ -122,22 +116,31 @@ pub trait ChainIndexer: Send + 'static {
         Ok(None)
     }
 
+    async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     fn buffered_item_height(block: &<Self::BufferedStream as ChainBufferedStream>::Block) -> u64 {
         let _ = block;
         0
     }
 
-    async fn catchup_range(&mut self, _anchor_height: u64) -> Range<u64> {
-        0..0
+    async fn catchup_range(&mut self, anchor_height: u64) -> RangeInclusive<u64> {
+        let _ = anchor_height;
+        // TODO: having start be greater than end is valid and will be treated as an empty range
+        // so this becomes the default for disabled streams like Solana. Once this is required
+        // implementation, this will no longer be the case.
+        RangeInclusive::new(1, 0)
     }
 
-    async fn process_catchup_on_height(&mut self, _height: u64) -> anyhow::Result<()> {
+    async fn process_catchup_on_height(&mut self, height: u64) -> anyhow::Result<()> {
+        let _ = height;
         Ok(())
     }
 
     async fn process_buffered_block(
         &mut self,
-        block: <Self::BufferedStream as ChainBufferedStream>::Block,
+        block: &<Self::BufferedStream as ChainBufferedStream>::Block,
     ) -> anyhow::Result<()> {
         let _ = block;
         Ok(())
@@ -183,7 +186,7 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(
         return;
     };
 
-    let Some(anchor_block) = buffered.initial().await else {
+    let Some(anchor_block) = buffered.next().await else {
         tracing::warn!(%chain, "buffered livestream ended before anchor block");
         return;
     };
@@ -192,29 +195,32 @@ pub(crate) async fn catchup_then_livestream<I: ChainIndexer>(
     let catchup_range = indexer.catchup_range(anchor_height).await;
 
     for height in catchup_range {
-        loop {
-            match indexer.process_catchup_on_height(height).await {
-                Ok(()) => break,
-                Err(err) => {
-                    tracing::warn!(?err, %chain, height, "catchup height processing failed; retrying");
-                    tokio::time::sleep(indexer.retry_delay()).await;
-                }
-            }
+        while let Err(err) = indexer.process_catchup_on_height(height).await {
+            tracing::warn!(?err, %chain, height, "catchup height processing failed; retrying");
+            tokio::time::sleep(indexer.retry_delay()).await;
         }
+    }
+
+    if let Err(err) = indexer.notify_catchup_completed().await {
+        tracing::warn!(?err, %chain, "failed to signal catchup completion");
+        return;
     }
 
     let _ = catchup_completed_tx.send(());
 
-    let mut next_block = anchor_block;
+    let mut next_block = buffered.next().await;
     loop {
-        if let Err(err) = indexer.process_buffered_block(next_block).await {
-            tracing::warn!(?err, %chain, "buffered block processing failed");
+        let Some(block) = next_block.as_ref() else {
+            break;
+        };
+
+        if let Err(err) = indexer.process_buffered_block(block).await {
+            tracing::warn!(?err, %chain, "buffered block processing failed; retrying");
+            tokio::time::sleep(indexer.retry_delay()).await;
+            continue;
         }
 
-        match buffered.next().await {
-            Some(block) => next_block = block,
-            None => break,
-        }
+        next_block = buffered.next().await;
     }
 }
 
@@ -408,13 +414,6 @@ mod tests {
     impl ChainBufferedStream for TestBufferedStream {
         type Block = u64;
 
-        async fn initial(&mut self) -> Option<Self::Block> {
-            if self.items.is_empty() {
-                return None;
-            }
-            Some(self.items.remove(0))
-        }
-
         async fn next(&mut self) -> Option<Self::Block> {
             if self.items.is_empty() {
                 return None;
@@ -502,13 +501,13 @@ mod tests {
             *block
         }
 
-        async fn catchup_range(&mut self, anchor_height: u64) -> Range<u64> {
+        async fn catchup_range(&mut self, anchor_height: u64) -> RangeInclusive<u64> {
             let start = self
                 .control
                 .persisted_height
                 .map(|height| height + 1)
                 .unwrap_or(anchor_height);
-            start..anchor_height
+            start..=anchor_height
         }
 
         async fn process_catchup_on_height(&mut self, height: u64) -> anyhow::Result<()> {
@@ -521,12 +520,12 @@ mod tests {
 
         async fn process_buffered_block(
             &mut self,
-            block: <Self::BufferedStream as ChainBufferedStream>::Block,
+            block: &<Self::BufferedStream as ChainBufferedStream>::Block,
         ) -> anyhow::Result<()> {
-            if TestLinearControl::consume_failure(&self.control.live_failures, block) {
+            if TestLinearControl::consume_failure(&self.control.live_failures, *block) {
                 anyhow::bail!("synthetic live failure at height {block}");
             }
-            self.tx.send(ChainEvent::Block(block)).await?;
+            self.tx.send(ChainEvent::Block(*block)).await?;
             Ok(())
         }
 
