@@ -22,12 +22,12 @@ use super::{
 
 struct CantonStreamStartState {
     config: CantonConfig,
-    tx: mpsc::Sender<ChainEvent>,
+    events_tx: mpsc::Sender<ChainEvent>,
     backlog: Backlog,
 }
 
 pub struct CantonStream {
-    rx: mpsc::Receiver<ChainEvent>,
+    events_rx: mpsc::Receiver<ChainEvent>,
     start_state: Option<CantonStreamStartState>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -50,13 +50,13 @@ impl CantonStream {
             }
         };
 
-        let (tx, rx) = crate::stream::channel();
+        let (events_tx, events_rx) = crate::stream::channel();
 
         Some(CantonStream {
-            rx,
+            events_rx,
             start_state: Some(CantonStreamStartState {
                 config,
-                tx,
+                events_tx,
                 backlog,
             }),
             tasks: Vec::new(),
@@ -73,19 +73,19 @@ impl ChainStream for CantonStream {
         };
 
         self.tasks.push(tokio::spawn(async move {
-            run_canton_event_loop(state.config, state.tx, state.backlog).await;
+            run_canton_event_loop(state.config, state.events_tx, state.backlog).await;
         }));
     }
 
     async fn next_event(&mut self) -> Option<ChainEvent> {
-        self.rx.recv().await
+        self.events_rx.recv().await
     }
 }
 
 /// Main event loop with reconnection logic and exponential backoff.
 async fn run_canton_event_loop(
     config: CantonConfig,
-    tx: mpsc::Sender<ChainEvent>,
+    events_tx: mpsc::Sender<ChainEvent>,
     backlog: Backlog,
 ) {
     let client = match CantonClient::new(&config).await {
@@ -115,13 +115,18 @@ async fn run_canton_event_loop(
     // If already at or past the ledger end, emit CatchupCompleted immediately
     if counter >= catchup_target {
         tracing::info!(counter, catchup_target, "canton already caught up");
-        if tx.send(ChainEvent::CatchupCompleted).await.is_err() {
+        if events_tx.send(ChainEvent::CatchupCompleted).await.is_err() {
             tracing::error!("canton event channel closed");
             return;
         }
         catchup_completed = true;
     } else {
-        tracing::info!(counter, catchup_target, "canton catching up");
+        tracing::info!(
+            counter,
+            catchup_target,
+            remaining = catchup_target.saturating_sub(counter),
+            "canton catching up"
+        );
     }
 
     // Exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 30s
@@ -132,7 +137,7 @@ async fn run_canton_event_loop(
     loop {
         match subscribe_and_process(
             &client,
-            &tx,
+            &events_tx,
             &mut counter,
             catchup_target,
             &mut catchup_completed,
@@ -157,7 +162,7 @@ async fn run_canton_event_loop(
 /// Connect to the Canton WebSocket, subscribe, and process events until disconnection.
 async fn subscribe_and_process(
     client: &CantonClient,
-    tx: &mpsc::Sender<ChainEvent>,
+    events_tx: &mpsc::Sender<ChainEvent>,
     counter: &mut u64,
     catchup_target: u64,
     catchup_completed: &mut bool,
@@ -178,7 +183,7 @@ async fn subscribe_and_process(
     )
     .await
     .map_err(|_| anyhow::anyhow!("canton WebSocket connect timed out"))??;
-    let (mut write, mut read) = ws_stream.split();
+    let (mut ws_write, mut ws_read) = ws_stream.split();
 
     tracing::info!("canton WebSocket connected");
 
@@ -202,7 +207,7 @@ async fn subscribe_and_process(
     };
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        write.send(Message::Text(serde_json::to_string(&subscribe_msg)?.into())),
+        ws_write.send(Message::Text(serde_json::to_string(&subscribe_msg)?.into())),
     )
     .await
     .map_err(|_| anyhow::anyhow!("canton WebSocket subscription send timed out"))??;
@@ -214,7 +219,7 @@ async fn subscribe_and_process(
 
     loop {
         let msg = tokio::select! {
-            maybe = read.next() => {
+            maybe = ws_read.next() => {
                 match maybe {
                     Some(msg) => {
                         last_ws_msg = tokio::time::Instant::now();
@@ -256,7 +261,7 @@ async fn subscribe_and_process(
                     process_canton_event(
                         event,
                         &value.events,
-                        tx,
+                        events_tx,
                         &client.config.signer_contract_id,
                     )
                     .await;
@@ -273,7 +278,7 @@ async fn subscribe_and_process(
             }
         }
 
-        if tx.send(ChainEvent::Block(*counter)).await.is_err() {
+        if events_tx.send(ChainEvent::Block(*counter)).await.is_err() {
             tracing::error!("canton event channel closed");
             return Ok(());
         }
@@ -284,7 +289,7 @@ async fn subscribe_and_process(
                 catchup_target,
                 "canton catchup completed"
             );
-            if tx.send(ChainEvent::CatchupCompleted).await.is_err() {
+            if events_tx.send(ChainEvent::CatchupCompleted).await.is_err() {
                 tracing::error!("canton event channel closed");
                 return Ok(());
             }
@@ -302,7 +307,7 @@ async fn subscribe_and_process(
 async fn process_canton_event(
     event: &ledger_api::Event,
     tx_events: &[ledger_api::Event],
-    tx: &mpsc::Sender<ChainEvent>,
+    events_tx: &mpsc::Sender<ChainEvent>,
     signer_contract_id: &str,
 ) {
     let created = match event {
@@ -330,7 +335,7 @@ async fn process_canton_event(
                 let boxed: crate::stream::ops::SignatureEventBox = Box::new(canton_event);
                 match boxed.generate_sign_request(entropy) {
                     Ok(indexed) => {
-                        if tx.send(ChainEvent::SignRequest(indexed)).await.is_err() {
+                        if events_tx.send(ChainEvent::SignRequest(indexed)).await.is_err() {
                             tracing::error!("canton event channel closed");
                         }
                     }
@@ -350,7 +355,7 @@ async fn process_canton_event(
         match parse_signature_responded_event(created) {
             Ok(responded) => {
                 let event = SignatureRespondedEvent::Canton(responded);
-                if tx.send(ChainEvent::Respond(event)).await.is_err() {
+                if events_tx.send(ChainEvent::Respond(event)).await.is_err() {
                     tracing::error!("canton event channel closed");
                 }
             }
@@ -365,7 +370,7 @@ async fn process_canton_event(
         match parse_respond_bidirectional_event(created) {
             Ok(respond) => {
                 let event = RespondBidirectionalEvent::Canton(respond);
-                if tx
+                if events_tx
                     .send(ChainEvent::RespondBidirectional(event))
                     .await
                     .is_err()
