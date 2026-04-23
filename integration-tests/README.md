@@ -13,9 +13,9 @@ In case of authorization issues make sure you have logged into docker using your
 Then run the integration tests:
 
 ```BASH
-cargo test -p integration-tests --jobs 1 -- --test-threads 1
+cargo nextest run -P integration -p integration-tests
 # or if you want to run tests in docker
-cargo test -p integration-tests --features docker-test
+cargo nextest run -P integration -p integration-tests --features docker-test
 ```
 
 ## Logging and Tracing
