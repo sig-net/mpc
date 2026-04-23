@@ -1190,7 +1190,7 @@ impl ChainIndexer for EthereumIndexer {
             .send(ChainEvent::CatchupCompleted)
             .await
             .map_err(|_| anyhow::anyhow!("failed to send catchup completed event"))?;
-        self.catchup_complete.notify_waiters();
+        self.catchup_complete.notify_one();
         Ok(())
     }
 }

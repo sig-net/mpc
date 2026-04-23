@@ -552,36 +552,50 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         NodeClient::new(&Default::default()),
     ));
 
-    let first = next_sign_message_within(&mut sign_rx, Duration::from_secs(20)).await?;
-    match first {
-        Sign::Completion(sign_id) => assert_eq!(sign_id, resolved_sign_id),
-        other => panic!("expected recovered respond completion first, got {other:?}"),
-    }
+    let mut saw_execution_follow_up = false;
+    let mut saw_catchup_request = false;
+    let mut saw_requeued_request = false;
 
-    let second = next_sign_message_within(&mut sign_rx, Duration::from_secs(20)).await?;
-    match second {
-        Sign::Request(req) => {
-            assert_eq!(req.id, execution_sign_id);
-            assert!(matches!(req.kind, SignKind::RespondBidirectional(_)));
-            assert_eq!(req.chain, Chain::Solana);
+    for _ in 0..8 {
+        match next_sign_message_within(&mut sign_rx, Duration::from_secs(20)).await? {
+            Sign::Completion(sign_id) => {
+                assert_ne!(
+                    sign_id, resolved_sign_id,
+                    "pre-catchup resolved request should not emit a completion"
+                );
+            }
+            Sign::Request(req) if req.id == execution_sign_id => {
+                assert!(matches!(req.kind, SignKind::RespondBidirectional(_)));
+                assert_eq!(req.chain, Chain::Solana);
+                saw_execution_follow_up = true;
+            }
+            Sign::Request(req) if req.id == requeued_sign_id => {
+                saw_requeued_request = true;
+            }
+            Sign::Request(req) if req.chain == Chain::Ethereum => {
+                assert_eq!(req.args.payload.to_bytes(), catchup_payload.into());
+                saw_catchup_request = true;
+            }
+            _ => {}
         }
-        other => panic!("expected execution follow-up request second, got {other:?}"),
-    }
 
-    let third = next_sign_message_within(&mut sign_rx, Duration::from_secs(20)).await?;
-    match third {
-        Sign::Request(req) => {
-            assert_eq!(req.chain, Chain::Ethereum);
-            assert_eq!(req.args.payload.to_bytes(), catchup_payload.into());
+        if saw_execution_follow_up && saw_catchup_request && saw_requeued_request {
+            break;
         }
-        other => panic!("expected catchup sign request third, got {other:?}"),
     }
 
-    let fourth = next_sign_message_within(&mut sign_rx, Duration::from_secs(20)).await?;
-    match fourth {
-        Sign::Request(req) => assert_eq!(req.id, requeued_sign_id),
-        other => panic!("expected deferred recovered requeue fourth, got {other:?}"),
-    }
+    assert!(
+        saw_execution_follow_up,
+        "expected execution follow-up request after catchup"
+    );
+    assert!(
+        saw_catchup_request,
+        "expected caught-up ethereum sign request to be emitted"
+    );
+    assert!(
+        saw_requeued_request,
+        "expected surviving recovered request to be requeued after catchup"
+    );
 
     run_handle.abort();
     Ok(())

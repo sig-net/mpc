@@ -1,4 +1,4 @@
-use crate::backlog::{Backlog, RecoveryRequeueMode};
+use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::IndexedSignRequest;
@@ -7,7 +7,7 @@ use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::BidirectionalTxId;
 use crate::stream::ops::{
     process_execution_confirmed, process_respond_bidirectional_event, process_respond_event,
-    process_sign_request, recover_backlog, requeue_recovered_sign_requests,
+    process_sign_request, recover_backlog, requeue_pending_sign_requests,
     RespondBidirectionalEvent, SignatureRespondedEvent,
 };
 
@@ -235,13 +235,12 @@ pub async fn run_stream<S: ChainStream>(
     let chain = S::CHAIN;
     tracing::info!(%chain, "starting stream");
 
-    let requeue_mode = recover_backlog(
+    recover_backlog(
         &backlog,
         &mut contract_watcher,
         &mut mesh_state,
         &node_client,
         chain,
-        sign_tx.clone(),
     )
     .await;
 
@@ -262,9 +261,8 @@ pub async fn run_stream<S: ChainStream>(
                     continue;
                 }
                 caught_up = true;
-                if requeue_mode == RecoveryRequeueMode::AfterCatchup {
-                    requeue_recovered_sign_requests(&backlog, chain, sign_tx.clone()).await;
-                }
+
+                requeue_pending_sign_requests(&backlog, chain, sign_tx.clone()).await;
             }
             ChainEvent::SignRequest(req) => {
                 if let Err(err) =
@@ -287,9 +285,13 @@ pub async fn run_stream<S: ChainStream>(
                 }
             }
             ChainEvent::RespondBidirectional(ev) => {
-                if let Err(err) =
-                    process_respond_bidirectional_event(ev, sign_tx.clone(), &backlog, caught_up)
-                        .await
+                if let Err(err) = process_respond_bidirectional_event(
+                    ev,
+                    sign_tx.clone(),
+                    &backlog,
+                    caught_up,
+                )
+                .await
                 {
                     tracing::error!(?err, %chain, "failed to process respond bidirectional event");
                 }
@@ -479,7 +481,6 @@ mod tests {
                 .live_items
                 .clone()
                 .into_iter()
-                .skip(1)
                 .collect();
             Ok(self.control.live_items.first().copied())
         }
@@ -911,7 +912,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stream_defers_local_ethereum_requeue_until_after_catchup() {
+    async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
         let storage = CheckpointStorage::in_memory();
         let seeded_backlog = Backlog::persisted(storage.clone());
         let sign_id = SignId::new([99u8; 32]);
@@ -1007,7 +1008,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stream_does_not_requeue_replaced_ethereum_recovery_entry_after_catchup() {
+    async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
         let storage = CheckpointStorage::in_memory();
         let seeded_backlog = Backlog::persisted(storage.clone());
         let sign_id = SignId::new([100u8; 32]);
@@ -1093,9 +1094,16 @@ mod tests {
         )
         .await;
 
-        match timeout(Duration::from_millis(100), sign_rx.recv()).await {
-            Err(_) | Ok(None) => {}
-            Ok(Some(msg)) => panic!("unexpected extra sign message after catchup: {msg:?}"),
+        let msg = timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .expect("recv should not timeout")
+            .expect("replacement request should be requeued");
+        match msg {
+            Sign::Request(req) => {
+                assert_eq!(req.id, sign_id);
+                assert_eq!(req.unix_timestamp_indexed, replayed_timestamp);
+            }
+            other => panic!("expected replacement request after catchup, got {other:?}"),
         }
 
         let entry = backlog

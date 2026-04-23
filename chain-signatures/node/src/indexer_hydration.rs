@@ -381,7 +381,6 @@ pub async fn run(
         &mut mesh_state,
         &node_client,
         Chain::Hydration,
-        sign_tx.clone(),
     )
     .await;
 
