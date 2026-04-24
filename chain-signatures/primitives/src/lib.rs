@@ -258,7 +258,7 @@ impl Chain {
             Chain::Solana => 3,
             Chain::Bitcoin => 60 * 60 + 20 * 60, // 6 confirmations at 10 minutes each, plus some buffer
             Chain::Hydration => 12,
-            Chain::Canton => 5,
+            Chain::Canton => 15,
         }
     }
 

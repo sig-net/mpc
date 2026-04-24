@@ -7,7 +7,6 @@ use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
-use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use alloy_sol_types::SolValue;
@@ -20,7 +19,7 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
-use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use signet_program::{
@@ -33,16 +32,6 @@ use solana_client::{
 };
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
 use tokio::sync::mpsc;
-
-pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
-    Scalar::from_bytes(
-        hex::decode("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364140")
-            .unwrap()
-            .try_into()
-            .unwrap(),
-    )
-    .unwrap()
-});
 
 const CPI_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: Sign",

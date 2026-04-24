@@ -1,23 +1,13 @@
 name: Canton Integration Tests
 
 on:
-  schedule:
-    - cron: "0 4 * * *" # Daily at 4:00 AM UTC (after nightly at 3:00 AM)
-  workflow_dispatch: # Allow manual triggers
   push:
     branches:
       - develop
     paths:
-      - integration-tests/src/canton.rs
-      - integration-tests/tests/cases/canton*.rs
-      - integration-tests/fixtures/canton/**
-      - chain-signatures/node/src/indexer_canton/**
+      - integration-tests/**
+      - chain-signatures/**
   pull_request:
-    paths:
-      - integration-tests/src/canton.rs
-      - integration-tests/tests/cases/canton*.rs
-      - integration-tests/fixtures/canton/**
-      - chain-signatures/node/src/indexer_canton/**
 
 env:
   RUSTFLAGS: -D warnings

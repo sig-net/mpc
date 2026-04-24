@@ -159,9 +159,9 @@ impl SignBidirectionalEvent {
                 &self.sender_string()?,
                 &self.path(),
             )),
-            SignBidirectionalEvent::Canton(event) => Ok(mpc_crypto::kdf::derive_epsilon_canton(
+            SignBidirectionalEvent::Canton(_) => Ok(mpc_crypto::kdf::derive_epsilon_canton(
                 self.key_version(),
-                &event.sender,
+                &self.sender_string()?,
                 &self.path(),
             )),
         }
