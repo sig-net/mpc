@@ -82,6 +82,18 @@ impl ChainStream for CantonStream {
     }
 }
 
+async fn close_split_websocket<S>(
+    ws_write: &mut futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<S>, Message>,
+) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    tokio::time::timeout(std::time::Duration::from_secs(5), ws_write.close())
+        .await
+        .map_err(|_| anyhow::anyhow!("canton WebSocket close reply timed out"))?
+        .map_err(|e| anyhow::anyhow!("failed to flush canton WebSocket close reply: {e}"))
+}
+
 /// Main event loop with reconnection logic and exponential backoff.
 async fn run_canton_event_loop(
     config: CantonConfig,
@@ -240,6 +252,9 @@ async fn subscribe_and_process(
             // tokio-tungstenite auto-sends pong replies; manual Pong would double-respond
             Message::Close(_) => {
                 tracing::info!("canton WebSocket received close frame");
+                if let Err(e) = close_split_websocket(&mut ws_write).await {
+                    tracing::debug!(%e, "failed to flush canton WebSocket close reply");
+                }
                 break;
             }
             _ => continue,
