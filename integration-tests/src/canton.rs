@@ -9,6 +9,7 @@ use mpc_node::indexer_canton::ledger_api::{
     DisclosedContract, JsCommands, SubmitAndWaitForTransactionResponse, UserInfo,
 };
 use mpc_node::indexer_canton::{CantonConfig, CantonConn};
+use mpc_node::protocol::Chain;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -72,7 +73,7 @@ pub fn test_sign_request_event(
         sig_network: sandbox.party_id.clone(),
         sender,
         tx_params: TxParams::EvmTxParams(test_evm_params(nonce.unwrap_or(0))),
-        caip2_id: "eip155:31337".to_string(),
+        caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
         key_version: LATEST_MPC_KEY_VERSION,
         path: sandbox.requester_party.clone(),
         algo: "ECDSA".to_string(),

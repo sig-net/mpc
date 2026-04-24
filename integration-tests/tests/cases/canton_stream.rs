@@ -450,9 +450,9 @@ async fn test_canton_stream_parse_sign_bidirectional_fields() -> Result<()> {
         "expected Canton variant"
     );
     assert_eq!(
-        bidir.target_chain(),
-        Some(Chain::Ethereum),
-        "dest='ethereum' should parse to Chain::Ethereum"
+        bidir.target_chain()?,
+        Chain::Ethereum,
+        "caip2_id should parse to Chain::Ethereum"
     );
     assert_eq!(
         bidir.output_deserialization_schema(),

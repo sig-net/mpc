@@ -562,25 +562,7 @@ pub async fn process_execution_confirmed(
         tracing::warn!(?tx_id, expected = ?unwatched_sign_id, actual = ?sign_id, "sign_id mismatch between event and watcher");
     }
 
-    // Update the status on the source chain
-    let status = match result {
-        ExecutionOutcome::Success { .. } => SignStatus::Success,
-        ExecutionOutcome::Failed => SignStatus::Failed,
-    };
-
-    let set_res = backlog
-        .set_status(pending_tx.source_chain, &unwatched_sign_id, status)
-        .await;
-    let updated_tx = match set_res {
-        Some(tx) => tx,
-        None => {
-            tracing::error!(?tx_id, ?unwatched_sign_id, source_chain = ?pending_tx.source_chain, "failed to set status on pending tx");
-            anyhow::bail!("failed to set status for sign id: {unwatched_sign_id:?}");
-        }
-    };
-    tracing::info!(?tx_id, ?unwatched_sign_id, updated_status = ?updated_tx.status(), "set_status returned transaction");
-
-    let completed_tx = CompletedTx::new(pending_tx, block_height);
+    let completed_tx = CompletedTx::new(pending_tx.clone(), block_height);
 
     let sign_request = match result {
         ExecutionOutcome::Success { output } => {
@@ -702,6 +684,7 @@ mod tests {
             request_id: [id; 32],
             from_address: Address::ZERO,
             nonce: 0,
+            chain_ctx: ChainContext::None,
         }
     }
 
@@ -1181,6 +1164,7 @@ mod tests {
             RespondBidirectionalTx {
                 tx_id: BidirectionalTxId(B256::from([12u8; 32])),
                 output: vec![],
+                chain_ctx: ChainContext::None,
             },
         );
 
@@ -1212,6 +1196,7 @@ mod tests {
                 RespondBidirectionalTx {
                     tx_id: BidirectionalTxId(B256::from([13u8; 32])),
                     output: vec![1, 2, 3],
+                    chain_ctx: ChainContext::None,
                 },
             ))
             .await;

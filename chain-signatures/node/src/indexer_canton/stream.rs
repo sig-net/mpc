@@ -350,7 +350,11 @@ async fn process_canton_event(
                 let boxed: crate::stream::ops::SignatureEventBox = Box::new(canton_event);
                 match boxed.generate_sign_request(entropy) {
                     Ok(indexed) => {
-                        if events_tx.send(ChainEvent::SignRequest(indexed)).await.is_err() {
+                        if events_tx
+                            .send(ChainEvent::SignRequest(indexed))
+                            .await
+                            .is_err()
+                        {
                             tracing::error!("canton event channel closed");
                         }
                     }
