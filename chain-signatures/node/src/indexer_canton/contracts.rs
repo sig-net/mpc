@@ -66,10 +66,6 @@ impl EvmTransactionParams {
 }
 
 /// Convert Canton EvmTransactionParams to an alloy TxEip1559.
-///
-/// TODO(test): test address extraction from 32-byte padded hex (Canton format)
-/// vs 20-byte unpadded hex. Test hex parsing of all numeric fields (chain_id,
-/// nonce, gas_limit, fees, value) including edge cases like leading zeros.
 impl TryFrom<&EvmTransactionParams> for TxEip1559 {
     type Error = anyhow::Error;
 

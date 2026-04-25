@@ -412,10 +412,6 @@ async fn process_canton_event(
 /// 3. An ExercisedEvent with choice "SignBidirectional" on Signer:Signer must
 ///    exist in the same transaction — proves the event was created through the
 ///    correct Daml code path, not fabricated
-///
-/// TODO(test): unit test each check in isolation — craft events where one
-/// check fails and verify the correct error is returned. Test: non-signatory
-/// operator, non-signatory requester, missing ExercisedEvent.
 fn verify_sign_event(
     event: &CantonSignBidirectionalRequestedEvent,
     created: &ledger_api::CreatedEvent,
@@ -446,7 +442,6 @@ fn verify_sign_event(
     // match since the operator pinned it via CLI.
     // NOTE: after a DAR upgrade/redeployment the contract ID changes — this
     // check will reject all events until the node is restarted with the new ID.
-    // See CantonConfig migration TODO.
     let has_exercise = tx_events.iter().any(|e| {
         matches!(
             e,

@@ -1,10 +1,3 @@
-// TODO(test): golden-test build_calldata against viem's encodeFunctionData for:
-// - ERC20 transfer/approve (static types)
-// - Uniswap exactInputSingle with tuple arg
-// - Functions with dynamic types (string, bytes, address[])
-// - Empty-args view functions (totalSupply)
-// - Invalid signature rejection, invalid hex rejection
-
 use alloy_json_abi::Function;
 
 pub fn build_calldata(function_signature: &str, encoded_args_hex: &str) -> anyhow::Result<Vec<u8>> {

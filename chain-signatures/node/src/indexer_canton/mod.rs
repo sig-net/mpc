@@ -95,9 +95,6 @@ pub struct CantonSignatureRespondedEvent {
 }
 // NOTE: No Hash, PartialEq, Eq derives — matches HydrationSignatureRespondedEvent
 
-/// TODO(test): golden-test against viem's `serializeTransaction` with known
-/// EvmTransactionParams. Verify the output matches byte-for-byte — this is
-/// what gets hashed and signed, so any divergence breaks on-chain verification.
 fn encode_unsigned_eip1559(params: &CantonEvmTransactionParams) -> anyhow::Result<Vec<u8>> {
     use alloy::consensus::transaction::SignableTransaction;
 
@@ -169,8 +166,6 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
 /// and `signer_template_id` change (similar to deploying a new Ethereum
 /// contract — the old address/ID is gone). Currently the MPC node requires a
 /// restart with updated CLI args to pick up the new IDs.
-///
-/// TODO: decide how to handle DAR upgrades without MPC node downtime.
 #[derive(Clone)]
 pub struct CantonConfig {
     pub json_api_url: String,
