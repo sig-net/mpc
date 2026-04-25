@@ -102,16 +102,11 @@ impl BidirectionalTx {
                 &self.sender_string()?,
                 path,
             )),
-            Chain::Canton => {
-                let ChainContext::Canton { ref sender, .. } = self.chain_ctx else {
-                    anyhow::bail!("Canton BidirectionalTx missing ChainContext");
-                };
-                Ok(mpc_crypto::kdf::derive_epsilon_canton(
-                    self.key_version,
-                    sender,
-                    path,
-                ))
-            }
+            Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
+                self.key_version,
+                &self.sender_string()?,
+                path,
+            )),
             _ => anyhow::bail!("Unsupported chain: {}", self.source_chain),
         }
     }

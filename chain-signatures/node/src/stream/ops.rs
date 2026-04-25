@@ -92,9 +92,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.output_deserialization_schema.clone(),
             SignBidirectionalEvent::Hydration(event) => event.output_deserialization_schema.clone(),
-            SignBidirectionalEvent::Canton(event) => {
-                event.output_deserialization_schema.as_bytes().to_vec()
-            }
+            SignBidirectionalEvent::Canton(event) => event.output_deserialization_schema.clone(),
         }
     }
 
@@ -102,9 +100,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.respond_serialization_schema.clone(),
             SignBidirectionalEvent::Hydration(event) => event.respond_serialization_schema.clone(),
-            SignBidirectionalEvent::Canton(event) => {
-                event.respond_serialization_schema.as_bytes().to_vec()
-            }
+            SignBidirectionalEvent::Canton(event) => event.respond_serialization_schema.clone(),
         }
     }
 
@@ -120,9 +116,6 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.deposit,
             SignBidirectionalEvent::Hydration(event) => event.deposit,
-            // Canton deposits can't be charged in Canton-native tokens the way
-            // Solana/Hydration do; charging for a Canton signature would require
-            // a separate mechanism.
             SignBidirectionalEvent::Canton(_) => 0,
         }
     }
@@ -131,11 +124,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.serialized_transaction.clone(),
             SignBidirectionalEvent::Hydration(event) => event.serialized_transaction.clone(),
-            SignBidirectionalEvent::Canton(event) => match &event.tx_params {
-                crate::indexer_canton::contracts::TxParams::EvmTxParams(evm_params) => {
-                    crate::indexer_canton::rlp_encode_unsigned_eip1559(evm_params)
-                }
-            },
+            SignBidirectionalEvent::Canton(event) => event.serialized_transaction.clone(),
         }
     }
 

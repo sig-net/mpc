@@ -124,7 +124,6 @@ pub struct ClusterSpawner {
     pub worker: Option<Worker<Sandbox>>,
     pub solana: Option<containers::Solana>,
     pub canton: Option<crate::canton::CantonSandbox>,
-    pub use_canton: bool,
     pub program_address: Option<String>,
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
@@ -161,7 +160,6 @@ impl Default for ClusterSpawner {
             worker: None,
             solana: None,
             canton: None,
-            use_canton: false,
             program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
             pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
@@ -296,7 +294,17 @@ impl ClusterSpawner {
     }
 
     pub fn canton(mut self) -> Self {
-        self.use_canton = true;
+        if self.cfg.canton.is_none() {
+            self.cfg.canton = Some(mpc_node::indexer_canton::CantonConfig {
+                json_api_url: String::new(),
+                json_api_ws_url: String::new(),
+                jwt_private_key_path: String::new(),
+                jwt_subject: String::new(),
+                party_id: String::new(),
+                signer_contract_id: String::new(),
+                signer_template_id: String::new(),
+            });
+        }
         self
     }
 
@@ -422,7 +430,7 @@ impl IntoFuture for ClusterSpawner {
                 self.solana = Some(solana);
             }
 
-            if self.use_canton && self.canton.is_none() {
+            if self.cfg.canton.is_some() && self.canton.is_none() {
                 let sandbox = crate::canton::CantonSandbox::run().await?;
                 self.cfg.canton = Some(sandbox.get_config());
                 self.canton = Some(sandbox);

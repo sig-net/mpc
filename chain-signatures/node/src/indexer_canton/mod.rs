@@ -19,10 +19,64 @@ use k256::Scalar;
 use mpc_primitives::{ScalarExt, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use std::fmt;
 
-pub use contracts::SignBidirectionalRequestedEvent as CantonSignBidirectionalRequestedEvent;
-pub use contracts::{
-    EvmTransactionParams as CantonEvmTransactionParams, TxParams as CantonTxParams,
-};
+use contracts::{EvmTransactionParams as CantonEvmTransactionParams, TxParams as CantonTxParams};
+
+/// Node-facing Canton sign event.
+///
+/// The raw Daml payload uses Canton-native shapes such as `Text` schemas and
+/// transaction params. This type is created at the indexer boundary and carries
+/// the byte fields expected by the shared bidirectional signing flow.
+///
+/// The current Daml Signer contract does not model signature fees/deposits:
+/// Canton Coin transfers are explicit token-standard/Daml workflows, not an
+/// attached value on this `SignBidirectional` choice. Until the contract composes
+/// that transfer and exposes a deposit amount, the shared bidirectional flow
+/// treats Canton deposit as zero.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct CantonSignBidirectionalRequestedEvent {
+    pub operators: Vec<String>,
+    pub sender: String,
+    pub requester: String,
+    pub sig_network: String,
+    pub request_id: [u8; 32],
+    pub serialized_transaction: Vec<u8>,
+    pub caip2_id: String,
+    pub key_version: u32,
+    pub path: String,
+    pub algo: String,
+    pub dest: String,
+    pub params: String,
+    pub output_deserialization_schema: Vec<u8>,
+    pub respond_serialization_schema: Vec<u8>,
+}
+
+impl TryFrom<contracts::SignBidirectionalRequestedEvent> for CantonSignBidirectionalRequestedEvent {
+    type Error = anyhow::Error;
+
+    fn try_from(raw: contracts::SignBidirectionalRequestedEvent) -> anyhow::Result<Self> {
+        let request_id = compute_request_id(&raw)?;
+        let serialized_transaction = match &raw.tx_params {
+            CantonTxParams::EvmTxParams(params) => encode_unsigned_eip1559(params)?,
+        };
+
+        Ok(Self {
+            operators: raw.operators,
+            sender: raw.sender,
+            requester: raw.requester,
+            sig_network: raw.sig_network,
+            request_id,
+            serialized_transaction,
+            caip2_id: raw.caip2_id,
+            key_version: raw.key_version,
+            path: raw.path,
+            algo: raw.algo,
+            dest: raw.dest,
+            params: raw.params,
+            output_deserialization_schema: raw.output_deserialization_schema.into_bytes(),
+            respond_serialization_schema: raw.respond_serialization_schema.into_bytes(),
+        })
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CantonRespondBidirectionalEvent {
@@ -41,40 +95,21 @@ pub struct CantonSignatureRespondedEvent {
 }
 // NOTE: No Hash, PartialEq, Eq derives — matches HydrationSignatureRespondedEvent
 
-/// RLP-encode an unsigned EIP-1559 transaction using alloy.
-///
 /// TODO(test): golden-test against viem's `serializeTransaction` with known
 /// EvmTransactionParams. Verify the output matches byte-for-byte — this is
 /// what gets hashed and signed, so any divergence breaks on-chain verification.
-pub fn rlp_encode_unsigned_eip1559(params: &CantonEvmTransactionParams) -> Vec<u8> {
-    match TxEip1559::try_from(params) {
-        Ok(tx) => {
-            use alloy::consensus::transaction::SignableTransaction;
-            let mut out = Vec::new();
-            tx.encode_for_signing(&mut out);
-            out
-        }
-        Err(e) => {
-            // Return empty vec on parse failure (matches Solana/Hydration: garbage bytes
-            // pass through here and fail downstream in sign_and_hash_transaction)
-            tracing::warn!(%e, "failed to build TxEip1559 from Canton params");
-            vec![]
-        }
-    }
+fn encode_unsigned_eip1559(params: &CantonEvmTransactionParams) -> anyhow::Result<Vec<u8>> {
+    use alloy::consensus::transaction::SignableTransaction;
+
+    let tx = TxEip1559::try_from(params)?;
+    let mut out = Vec::new();
+    tx.encode_for_signing(&mut out);
+    Ok(out)
 }
 
 impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
-        // Note: compute_request_id can fail on malformed hex data, but the trait
-        // requires infallible request ID generation. We log and return zeros on
-        // failure — generate_sign_request will fail with a proper error anyway.
-        match compute_request_id(self) {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::error!(%e, "failed to compute canton request_id");
-                [0u8; 32]
-            }
-        }
+        self.request_id
     }
 
     fn generate_sign_request(
@@ -88,15 +123,12 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
             anyhow::bail!("unsupported key version");
         }
 
-        let request_id = compute_request_id(self)?;
+        let request_id = self.request_id;
 
         let epsilon =
             mpc_crypto::kdf::derive_epsilon_canton(self.key_version, &self.sender, &self.path);
 
-        let rlp_encoded_tx = match &self.tx_params {
-            contracts::TxParams::EvmTxParams(evm_params) => rlp_encode_unsigned_eip1559(evm_params),
-        };
-        let unsigned_tx_hash = hash_rlp_data(rlp_encoded_tx);
+        let unsigned_tx_hash = hash_rlp_data(self.serialized_transaction.clone());
 
         let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
             anyhow::bail!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");

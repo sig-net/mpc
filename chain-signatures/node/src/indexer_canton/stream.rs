@@ -417,7 +417,7 @@ async fn process_canton_event(
 /// check fails and verify the correct error is returned. Test: non-signatory
 /// operator, non-signatory requester, missing ExercisedEvent.
 fn verify_sign_event(
-    event: &contracts::SignBidirectionalRequestedEvent,
+    event: &CantonSignBidirectionalRequestedEvent,
     created: &ledger_api::CreatedEvent,
     tx_events: &[ledger_api::Event],
     signer_contract_id: &str,
@@ -474,9 +474,9 @@ fn parse_request_id_hex(s: &str) -> anyhow::Result<[u8; 32]> {
 fn parse_sign_bidirectional_event(
     created: &ledger_api::CreatedEvent,
 ) -> anyhow::Result<CantonSignBidirectionalRequestedEvent> {
-    let event: contracts::SignBidirectionalRequestedEvent =
+    let raw: contracts::SignBidirectionalRequestedEvent =
         serde_json::from_value(created.payload.clone())?;
-    Ok(event)
+    raw.try_into()
 }
 
 fn parse_signature_responded_event(

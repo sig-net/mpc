@@ -63,24 +63,18 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
         "request_id should not be zero"
     );
 
-    // Verify payload round-trips: the indexer RLP-encodes the EVM tx params and
-    // hashes the result — the scalar must match what we'd compute from the
-    // known test_evm_params.
-    let rlp = mpc_node::indexer_canton::rlp_encode_unsigned_eip1559(
-        &integration_tests::canton::test_evm_params(0),
-    );
-    let expected_hash = mpc_node::sign_bidirectional::hash_rlp_data(rlp);
-    let expected_payload = <k256::Scalar as ScalarExt>::from_bytes(expected_hash)
-        .expect("test tx hash must be a valid scalar");
-    assert_eq!(
-        event.args.payload, expected_payload,
-        "payload should match keccak256 of RLP-encoded test EVM tx"
-    );
-
     // Verify bidirectional inner fields survive the indexer pipeline.
     let SignKind::SignBidirectional(ref bidir) = event.kind else {
         panic!("expected SignBidirectional, got {:?}", event.kind);
     };
+
+    let expected_hash = mpc_node::sign_bidirectional::hash_rlp_data(bidir.serialized_transaction());
+    let expected_payload = <k256::Scalar as ScalarExt>::from_bytes(expected_hash)
+        .expect("test tx hash must be a valid scalar");
+    assert_eq!(
+        event.args.payload, expected_payload,
+        "payload should match keccak256 of normalized serialized_transaction"
+    );
     assert_eq!(bidir.caip2_id(), expected_event.caip2_id);
     assert_eq!(bidir.dest(), expected_event.dest);
     assert_eq!(bidir.key_version(), expected_event.key_version);
