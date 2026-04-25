@@ -45,7 +45,12 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     let evm_params = test_evm_params(0);
     let expected_request_id = hex::encode(compute_request_id(&expected_event)?);
 
-    // 3. Submit sign request directly via Signer (bypasses Vault)
+    // 3. EVM analogy: an EVM contract could call another contract directly and
+    // emit the request event in one transaction. Canton does not model this as
+    // a contract-to-contract call, so we first create a SignRequest contract
+    // that stores the unsigned EVM transaction request. The next command passes
+    // this contract ID into Signer.SignBidirectional, which validates it and
+    // emits the event watched by the MPC Canton indexer.
     let sign_request = client
         .create_contract(
             &[&canton.operator_party, &canton.requester_party],
@@ -56,6 +61,13 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     let (sign_request_cid, _) =
         integration_tests::canton::find_created_contract(&sign_request, "SignRequest")?;
 
+    // 4. EVM contracts are globally visible, so a caller can reference any
+    // contract address. Canton contracts are private to stakeholders. The
+    // requester is not a stakeholder on the Signer contract, so the Signer
+    // stakeholder gives the requester an explicit disclosure blob. Attaching it
+    // lets the command read the Signer contract while Daml still enforces
+    // authorization checks:
+    // https://docs.digitalasset.com/build/3.4/sdlc-howtos/applications/develop/explicit-contract-disclosure.html
     client
         .exercise_choice(
             &[&canton.requester_party],
