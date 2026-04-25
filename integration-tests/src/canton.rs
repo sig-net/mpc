@@ -8,12 +8,13 @@ use mpc_node::indexer_canton::ledger_api::{
     self, AllocatePartyRequest, AllocatePartyResponse, ContractEntry, CreateUserRequest,
     DisclosedContract, JsCommands, SubmitAndWaitForTransactionResponse, UserInfo,
 };
-use mpc_node::indexer_canton::{CantonConfig, CantonConn};
+use mpc_node::indexer_canton::CantonConfig;
 use mpc_node::protocol::Chain;
+use mpc_node::rpc::CantonClient;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Mirror of Daml `computeOperatorsHash` (Signer.daml → RequestId.daml):
@@ -110,7 +111,6 @@ pub struct CantonSandbox {
     auth_conf_path: PathBuf,
     pub json_api_url: String,
     pub json_api_ws_url: String,
-    pub jwt_private_key_pem: String,
     pub jwt_subject: String,
     pub party_id: String,
     pub operator_party: String,
@@ -178,7 +178,6 @@ impl CantonSandbox {
             .context("openssl not found — needed to generate JWT cert")?;
         anyhow::ensure!(output.status.success(), "openssl cert generation failed");
 
-        let jwt_private_key_pem = std::fs::read_to_string(&jwt_key_path)?;
         std::fs::write(
             &auth_conf_path,
             format!(
@@ -212,8 +211,13 @@ canton.participants.sandbox.ledger-api {{
         let ws_url = format!("ws://127.0.0.1:{CANTON_JSON_API_PORT}");
 
         // Wait for synchronizer readiness (covers HTTP not up + auth loading + synchronizer).
-        let admin_client =
-            CantonTestClient::new(&base_url, "participant_admin", &jwt_private_key_pem)?;
+        let admin_client = CantonTestClient::new(canton_test_client_config(
+            &base_url,
+            &ws_url,
+            &jwt_key_path,
+            "participant_admin",
+        ))
+        .await?;
         let probe_url = format!("{base_url}/v2/parties");
         let probe = AllocatePartyRequest {
             party_id_hint: "_readiness_probe".to_string(),
@@ -274,7 +278,13 @@ canton.participants.sandbox.ledger-api {{
             .await?
             .error_for_status()?;
 
-        let client = CantonTestClient::new(&base_url, &user_id, &jwt_private_key_pem)?;
+        let client = CantonTestClient::new(canton_test_client_config(
+            &base_url,
+            &ws_url,
+            &jwt_key_path,
+            &user_id,
+        ))
+        .await?;
 
         let signer_result = client
             .create_contract(
@@ -296,7 +306,6 @@ canton.participants.sandbox.ledger-api {{
             auth_conf_path,
             json_api_url: base_url,
             json_api_ws_url: ws_url,
-            jwt_private_key_pem,
             jwt_subject: user_id,
             party_id: sig_network,
             operator_party: operator,
@@ -388,29 +397,23 @@ impl Drop for CantonSandbox {
 
 #[derive(Clone)]
 pub struct CantonTestClient {
-    http: reqwest::Client,
-    base_url: String,
-    user_id: String,
-    encoding_key: jsonwebtoken::EncodingKey,
+    ledger_client: CantonClient,
 }
 
 impl CantonTestClient {
-    pub fn new(base_url: &str, user_id: &str, jwt_private_key_pem: &str) -> Result<Self> {
+    pub async fn new(config: CantonConfig) -> Result<Self> {
         Ok(Self {
-            http: reqwest::Client::new(),
-            base_url: base_url.to_string(),
-            user_id: user_id.to_string(),
-            encoding_key: jsonwebtoken::EncodingKey::from_ec_pem(jwt_private_key_pem.as_bytes())?,
+            ledger_client: CantonClient::new(&config).await?,
         })
     }
 
     fn auth_post(&self, url: &str) -> Result<reqwest::RequestBuilder> {
-        Ok(self.http.post(url).bearer_auth(self.generate_jwt()?))
+        self.ledger_client.auth_post(url)
     }
 
     pub async fn allocate_party(&self, hint: &str) -> Result<String> {
         let body: AllocatePartyResponse = self
-            .auth_post(&format!("{}/v2/parties", self.base_url))?
+            .auth_post(&format!("{}/v2/parties", self.ledger_client.json_api_url()))?
             .json(&AllocatePartyRequest {
                 party_id_hint: hint.to_string(),
                 identity_provider_id: None,
@@ -490,13 +493,15 @@ impl CantonTestClient {
         let parties: Vec<String> = act_as.iter().map(|s| s.to_string()).collect();
         let commands = JsCommands {
             command_id: uuid::Uuid::new_v4().to_string(),
-            user_id: self.user_id.clone(),
+            user_id: self.ledger_client.jwt_subject().to_string(),
             act_as: parties.clone(),
             read_as: parties,
             commands: vec![command],
             disclosed_contracts,
         };
-        self.submit_and_wait(commands, "command").await
+        self.ledger_client
+            .submit_and_wait(commands, "command")
+            .await
     }
 
     pub async fn get_disclosed_contract(
@@ -506,6 +511,7 @@ impl CantonTestClient {
         contract_id: &str,
     ) -> Result<DisclosedContract> {
         let entries = self
+            .ledger_client
             .fetch_active_contracts(parties, Some(template_id), true)
             .await?;
         for entry in &entries {
@@ -547,6 +553,7 @@ impl CantonTestClient {
                 anyhow::bail!("timeout waiting for {template_id} after {timeout:?}");
             }
             let entries = self
+                .ledger_client
                 .fetch_active_contracts(parties, Some(template_id), false)
                 .await?;
             for entry in &entries {
@@ -565,27 +572,29 @@ impl CantonTestClient {
     }
 }
 
-impl CantonConn for CantonTestClient {
-    fn http(&self) -> &reqwest::Client {
-        &self.http
-    }
-    fn json_api_url(&self) -> &str {
-        &self.base_url
-    }
-    fn jwt_encoding_key(&self) -> &jsonwebtoken::EncodingKey {
-        &self.encoding_key
-    }
-    fn jwt_subject(&self) -> &str {
-        &self.user_id
-    }
-}
-
 fn is_package_not_ready(e: &anyhow::Error) -> bool {
     let msg = e.to_string();
     msg.contains("PACKAGE_SELECTION_FAILED")
         || msg.contains("JSON_API_PACKAGE_SELECTION_FAILED")
         || msg.contains("PACKAGE_NAMES_NOT_FOUND")
         || msg.contains("TEMPLATES_OR_INTERFACES_NOT_FOUND")
+}
+
+fn canton_test_client_config(
+    base_url: &str,
+    ws_url: &str,
+    jwt_private_key_path: &Path,
+    jwt_subject: &str,
+) -> CantonConfig {
+    CantonConfig {
+        json_api_url: base_url.to_string(),
+        json_api_ws_url: ws_url.to_string(),
+        jwt_private_key_path: jwt_private_key_path.to_string_lossy().to_string(),
+        jwt_subject: jwt_subject.to_string(),
+        party_id: jwt_subject.to_string(),
+        signer_contract_id: String::new(),
+        signer_template_id: String::new(),
+    }
 }
 
 pub fn find_created_contract(

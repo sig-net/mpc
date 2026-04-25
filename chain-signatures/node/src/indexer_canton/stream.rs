@@ -16,7 +16,7 @@ use tokio_tungstenite::tungstenite::http::header;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::{
-    contracts, ledger_api, CantonConfig, CantonConn, CantonRespondBidirectionalEvent,
+    contracts, ledger_api, CantonConfig, CantonRespondBidirectionalEvent,
     CantonSignBidirectionalRequestedEvent, CantonSignatureRespondedEvent,
 };
 

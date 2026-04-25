@@ -43,7 +43,12 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
-use crate::indexer_canton::{CantonConfig, CantonConn};
+use crate::indexer_canton::ledger_api::{
+    ActiveContractEntry, CumulativeFilter, EventFormat, GetActiveContractsRequest,
+    IdentifierFilter, JsCommands, LedgerEndResponse, PartyFilter,
+    SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse, TemplateFilterValue,
+};
+use crate::indexer_canton::{generate_jwt_with_key, CantonConfig};
 use crate::indexer_hydration::HydrationConfig;
 use parity_scale_codec::{Decode, Encode};
 use subxt::config::substrate::{
@@ -939,17 +944,112 @@ impl CantonClient {
         let jwt_pem = tokio::fs::read(&config.jwt_private_key_path).await?;
         let encoding_key = jsonwebtoken::EncodingKey::from_ec_pem(&jwt_pem)?;
 
-        tracing::info!(
-            signer_cid = %config.signer_contract_id,
-            signer_template_id = %config.signer_template_id,
-            "canton Signer contract configured"
-        );
+        if !config.signer_contract_id.is_empty() || !config.signer_template_id.is_empty() {
+            tracing::info!(
+                signer_cid = %config.signer_contract_id,
+                signer_template_id = %config.signer_template_id,
+                "canton Signer contract configured"
+            );
+        }
 
         Ok(Self {
             config: config.clone(),
             http_client,
             encoding_key,
         })
+    }
+
+    pub fn json_api_url(&self) -> &str {
+        &self.config.json_api_url
+    }
+
+    pub fn jwt_subject(&self) -> &str {
+        &self.config.jwt_subject
+    }
+
+    pub fn generate_jwt(&self) -> anyhow::Result<String> {
+        generate_jwt_with_key(&self.encoding_key, &self.config.jwt_subject)
+    }
+
+    pub fn auth_post(&self, url: &str) -> anyhow::Result<reqwest::RequestBuilder> {
+        Ok(self.http_client.post(url).bearer_auth(self.generate_jwt()?))
+    }
+
+    pub async fn fetch_ledger_end(&self) -> anyhow::Result<u64> {
+        let resp = self
+            .http_client
+            .get(format!("{}/v2/state/ledger-end", self.json_api_url()))
+            .bearer_auth(self.generate_jwt()?)
+            .send()
+            .await?;
+        let resp = check_response(resp, "ledger-end").await?;
+        let body: LedgerEndResponse = resp.json().await?;
+        Ok(body.offset)
+    }
+
+    pub async fn fetch_active_contracts(
+        &self,
+        parties: &[&str],
+        template_id: Option<&str>,
+        include_blob: bool,
+    ) -> anyhow::Result<Vec<ActiveContractEntry>> {
+        let offset = self.fetch_ledger_end().await?;
+
+        let mut filters = serde_json::Map::new();
+        for party in parties {
+            let value = match template_id {
+                Some(tid) => serde_json::to_value(PartyFilter {
+                    cumulative: vec![CumulativeFilter {
+                        identifier_filter: IdentifierFilter::TemplateFilter {
+                            value: TemplateFilterValue {
+                                template_id: tid.to_string(),
+                                include_created_event_blob: include_blob,
+                            },
+                        },
+                    }],
+                })?,
+                None => serde_json::json!({}),
+            };
+            filters.insert(party.to_string(), value);
+        }
+
+        let req = GetActiveContractsRequest {
+            active_at_offset: offset,
+            event_format: EventFormat {
+                filters_by_party: filters,
+                verbose: true,
+            },
+        };
+
+        let resp = self
+            .http_client
+            .post(format!("{}/v2/state/active-contracts", self.json_api_url()))
+            .bearer_auth(self.generate_jwt()?)
+            .json(&req)
+            .send()
+            .await?;
+
+        let resp = check_response(resp, "active-contracts query").await?;
+        Ok(resp.json().await?)
+    }
+
+    pub async fn submit_and_wait(
+        &self,
+        commands: JsCommands,
+        context: &str,
+    ) -> anyhow::Result<SubmitAndWaitForTransactionResponse> {
+        let resp = self
+            .http_client
+            .post(format!(
+                "{}/v2/commands/submit-and-wait-for-transaction",
+                self.json_api_url()
+            ))
+            .bearer_auth(self.generate_jwt()?)
+            .json(&SubmitAndWaitForTransactionRequest { commands })
+            .send()
+            .await?;
+        let resp = check_response(resp, context).await?;
+        Ok(resp.json().await?)
     }
 
     pub async fn exercise_choice(
@@ -978,19 +1078,16 @@ impl CantonClient {
     }
 }
 
-impl crate::indexer_canton::CantonConn for CantonClient {
-    fn http(&self) -> &reqwest::Client {
-        &self.http_client
+async fn check_response(
+    resp: reqwest::Response,
+    context: &str,
+) -> anyhow::Result<reqwest::Response> {
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("{context} failed: {status} {text}");
     }
-    fn json_api_url(&self) -> &str {
-        &self.config.json_api_url
-    }
-    fn jwt_encoding_key(&self) -> &jsonwebtoken::EncodingKey {
-        &self.encoding_key
-    }
-    fn jwt_subject(&self) -> &str {
-        &self.config.jwt_subject
-    }
+    Ok(resp)
 }
 
 /// Client related to a specific chain

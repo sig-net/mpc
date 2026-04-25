@@ -1,12 +1,12 @@
 mod calldata;
-mod conn;
 pub mod contracts;
+mod jwt;
 pub mod ledger_api;
 mod request_id;
 mod signature;
 mod stream;
 
-pub use conn::{generate_jwt_with_key, CantonConn};
+pub use jwt::generate_jwt_with_key;
 pub use request_id::compute_request_id;
 pub use signature::der_encode_signature;
 pub use stream::{parse_canton_signature, CantonStream};
