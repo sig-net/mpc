@@ -187,3 +187,81 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     block_pumper.abort();
     Ok(())
 }
+
+// These are auth wiring smoke tests for our Canton sandbox setup, not Canton
+// auth implementation tests. They verify the sandbox is actually enforcing the
+// JWT key/cert configuration that the MPC integration relies on.
+#[ignore] // requires dpm
+#[serial]
+#[test(tokio::test)]
+async fn test_canton_rejects_unauthenticated_requests() -> Result<()> {
+    let sandbox = integration_tests::canton::CantonSandbox::run().await?;
+    let http = reqwest::Client::new();
+    let url = format!("{}/v2/state/ledger-end", sandbox.json_api_url);
+
+    // No Authorization header at all.
+    let status = http.get(&url).send().await?.status();
+    assert_eq!(status, 401, "missing JWT should be rejected, got {status}");
+
+    // Malformed Bearer token.
+    let status = http
+        .get(&url)
+        .bearer_auth("not-a-valid-jwt")
+        .send()
+        .await?
+        .status();
+    assert_eq!(status, 401, "invalid JWT should be rejected, got {status}");
+
+    Ok(())
+}
+
+#[ignore] // requires dpm + openssl
+#[serial]
+#[test(tokio::test)]
+async fn test_canton_rejects_jwt_signed_by_unconfigured_key() -> Result<()> {
+    use mpc_node::indexer_canton::generate_jwt_with_key;
+
+    let sandbox = integration_tests::canton::CantonSandbox::run().await?;
+
+    // Generate a fresh EC P-256 keypair NOT configured in Canton's auth-services.
+    // Use genpkey (PKCS#8 output) instead of ecparam (SEC1 output) for jsonwebtoken compatibility.
+    let tmp = std::env::temp_dir();
+    let rogue_key_path = tmp.join(format!("rogue-jwt-{}.key", uuid::Uuid::new_v4()));
+    let output = std::process::Command::new("openssl")
+        .args([
+            "genpkey",
+            "-algorithm",
+            "EC",
+            "-pkeyopt",
+            "ec_paramgen_curve:prime256v1",
+            "-out",
+            &rogue_key_path.to_string_lossy(),
+        ])
+        .output()
+        .context("openssl not found")?;
+    anyhow::ensure!(output.status.success(), "openssl genpkey failed");
+
+    let rogue_pem = std::fs::read_to_string(&rogue_key_path)?;
+    let _ = std::fs::remove_file(&rogue_key_path);
+
+    let rogue_encoding_key = jsonwebtoken::EncodingKey::from_ec_pem(rogue_pem.as_bytes())?;
+
+    // Mint a structurally valid JWT with correct claims, but signed by the wrong key.
+    let rogue_jwt = generate_jwt_with_key(&rogue_encoding_key, &sandbox.jwt_subject)?;
+
+    // Canton should reject it — signature doesn't match any configured certificate.
+    let http = reqwest::Client::new();
+    let url = format!("{}/v2/state/ledger-end", sandbox.json_api_url);
+    let status = http
+        .get(&url)
+        .bearer_auth(&rogue_jwt)
+        .send()
+        .await?
+        .status();
+    assert_eq!(
+        status, 401,
+        "JWT signed by unconfigured key should be rejected, got {status}"
+    );
+
+    Ok(())
+}
