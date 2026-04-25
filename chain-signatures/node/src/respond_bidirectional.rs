@@ -6,29 +6,15 @@ use alloy::consensus::Transaction;
 use alloy::primitives::Bytes;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
-use mpc_primitives::{SignArgs, SignId};
+use mpc_primitives::{SerDeserFormat, SignArgs, SignId};
 use std::sync::Arc;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
 const HYDRATION_RESPOND_BIDIRECTIONAL_PATH: &str = "hydration response key";
-const CANTON_RESPOND_BIDIRECTIONAL_PATH: &str = "canton response key";
+pub const CANTON_RESPOND_BIDIRECTIONAL_PATH: &str = "canton response key";
 // Use Abi as this is what we are using for ethereum
 pub(crate) const OUTPUT_DESERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Abi;
-
-#[derive(PartialEq)]
-pub enum SerDeserFormat {
-    Borsh,
-    Abi,
-}
-
-fn respond_serialization_format(chain: Chain) -> SerDeserFormat {
-    match chain {
-        Chain::Canton => SerDeserFormat::Abi,
-        // Solana, Hydration use Borsh
-        _ => SerDeserFormat::Borsh,
-    }
-}
 
 pub struct CompletedTx {
     tx: BidirectionalTx,
@@ -68,7 +54,7 @@ impl CompletedTx {
     async fn process_failed_tx(&self, chain: Chain) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("Tx failed: {:?}", self.tx.id);
 
-        let respond_serialization_format = respond_serialization_format(chain);
+        let respond_serialization_format = chain.respond_serialization_format();
         let mut output = Vec::new();
         output.extend_from_slice(&MAGIC_ERROR_PREFIX);
         let serialized_output: Vec<u8> = match respond_serialization_format {
@@ -167,7 +153,7 @@ impl CompletedTx {
             _ => TransactionOutput::non_function_call_output(),
         };
 
-        let respond_serialization_format = respond_serialization_format(tx.source_chain);
+        let respond_serialization_format = tx.source_chain.respond_serialization_format();
         let respond_serialization_schema = &tx.respond_serialization_schema;
         let serialized_output = transaction_output
             .output

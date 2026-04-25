@@ -1,12 +1,11 @@
 use crate::protocol::{Chain, IndexedSignRequest};
-use crate::respond_bidirectional::SerDeserFormat;
 use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
 use borsh::BorshSerialize;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
-use mpc_primitives::Signature;
+use mpc_primitives::{SerDeserFormat, Signature};
 use rlp::{Rlp, RlpStream};
 use serde_json::Value;
 use sha3::{Digest, Keccak256};

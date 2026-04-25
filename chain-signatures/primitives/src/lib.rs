@@ -145,6 +145,12 @@ impl Signature {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SerDeserFormat {
+    Borsh,
+    Abi,
+}
+
 /// Supported blockchain networks for checkpoints.
 #[derive(
     BorshDeserialize,
@@ -265,6 +271,14 @@ impl Chain {
     pub fn expected_response_time_secs(&self) -> u64 {
         // finality time * 2 = finality time of sign/sign_bidirectional event + finality time of respond event
         self.expected_finality_time_secs() * 2 + 5 // + Buffer time
+    }
+
+    pub fn respond_serialization_format(&self) -> SerDeserFormat {
+        match self {
+            Chain::Canton => SerDeserFormat::Abi,
+            // Solana and Hydration use Borsh for bidirectional responses.
+            _ => SerDeserFormat::Borsh,
+        }
     }
 
     pub fn from_caip2_chain_id(chain_id: &str) -> Result<Self, ChainFromError> {

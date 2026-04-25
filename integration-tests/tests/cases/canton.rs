@@ -12,6 +12,7 @@ use mpc_node::indexer_canton::contracts::{
     RespondBidirectionalEventPayload, SignatureRespondedEventPayload,
 };
 use mpc_node::indexer_canton::{compute_request_id, parse_canton_signature};
+use mpc_node::respond_bidirectional::CANTON_RESPOND_BIDIRECTIONAL_PATH;
 use mpc_node::sign_bidirectional::derive_user_address;
 use mpc_node::util::NearPublicKeyExt;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
@@ -165,7 +166,7 @@ async fn test_canton_eth_bidirectional_flow() -> Result<()> {
     let respond_epsilon = mpc_crypto::derive_epsilon_canton(
         LATEST_MPC_KEY_VERSION,
         &expected_event.sender,
-        "canton response key",
+        CANTON_RESPOND_BIDIRECTIONAL_PATH,
     );
     let respond_derived_pk = mpc_crypto::derive_key(root_pk, respond_epsilon);
 
