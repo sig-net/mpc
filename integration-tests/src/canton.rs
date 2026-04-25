@@ -218,7 +218,6 @@ canton.participants.sandbox.ledger-api {{
             "participant_admin",
         ))
         .await?;
-        let probe_url = format!("{base_url}/v2/parties");
         let probe = AllocatePartyRequest {
             party_id_hint: "_readiness_probe".to_string(),
             identity_provider_id: Some(String::new()),
@@ -230,7 +229,7 @@ canton.participants.sandbox.ledger-api {{
             // Everything else (401 auth loading, 403 admin not ready, 400
             // synchronizer not connected, connection refused) = retry.
             let ready = match admin_client
-                .auth_post(&probe_url)?
+                .auth_post("/v2/parties")?
                 .json(&probe)
                 .send()
                 .await
@@ -264,19 +263,8 @@ canton.participants.sandbox.ledger-api {{
             rights.push(ledger_api::can_read_as(party));
         }
         admin_client
-            .auth_post(&format!("{base_url}/v2/users"))?
-            .json(&CreateUserRequest {
-                user: UserInfo {
-                    id: user_id.clone(),
-                    primary_party: sig_network.clone(),
-                    is_deactivated: false,
-                    identity_provider_id: String::new(),
-                },
-                rights,
-            })
-            .send()
-            .await?
-            .error_for_status()?;
+            .create_user(&user_id, &sig_network, rights)
+            .await?;
 
         let client = CantonTestClient::new(canton_test_client_config(
             &base_url,
@@ -407,13 +395,13 @@ impl CantonTestClient {
         })
     }
 
-    fn auth_post(&self, url: &str) -> Result<reqwest::RequestBuilder> {
-        self.ledger_client.auth_post(url)
+    fn auth_post(&self, path: &str) -> Result<reqwest::RequestBuilder> {
+        self.ledger_client.auth_post(path)
     }
 
     pub async fn allocate_party(&self, hint: &str) -> Result<String> {
         let body: AllocatePartyResponse = self
-            .auth_post(&format!("{}/v2/parties", self.ledger_client.json_api_url()))?
+            .auth_post("/v2/parties")?
             .json(&AllocatePartyRequest {
                 party_id_hint: hint.to_string(),
                 identity_provider_id: None,
@@ -426,6 +414,28 @@ impl CantonTestClient {
             .json()
             .await?;
         Ok(body.party_details.party)
+    }
+
+    pub async fn create_user(
+        &self,
+        user_id: &str,
+        primary_party: &str,
+        rights: Vec<ledger_api::UserRight>,
+    ) -> Result<()> {
+        self.auth_post("/v2/users")?
+            .json(&CreateUserRequest {
+                user: UserInfo {
+                    id: user_id.to_string(),
+                    primary_party: primary_party.to_string(),
+                    is_deactivated: false,
+                    identity_provider_id: String::new(),
+                },
+                rights,
+            })
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
     }
 
     pub async fn create_contract(
@@ -443,7 +453,7 @@ impl CantonTestClient {
                         template_id: template_id.to_string(),
                         create_arguments: args.clone(),
                     },
-                    vec![],
+                    &[],
                 )
                 .await
             {
@@ -479,7 +489,7 @@ impl CantonTestClient {
                 choice: choice.to_string(),
                 choice_argument,
             },
-            disclosed_contracts.to_vec(),
+            disclosed_contracts,
         )
         .await
     }
@@ -488,7 +498,7 @@ impl CantonTestClient {
         &self,
         act_as: &[&str],
         command: ledger_api::Command,
-        disclosed_contracts: Vec<DisclosedContract>,
+        disclosed_contracts: &[DisclosedContract],
     ) -> Result<SubmitAndWaitForTransactionResponse> {
         let parties: Vec<String> = act_as.iter().map(|s| s.to_string()).collect();
         let commands = JsCommands {
@@ -497,7 +507,7 @@ impl CantonTestClient {
             act_as: parties.clone(),
             read_as: parties,
             commands: vec![command],
-            disclosed_contracts,
+            disclosed_contracts: disclosed_contracts.to_vec(),
         };
         self.ledger_client
             .submit_and_wait(commands, "command")

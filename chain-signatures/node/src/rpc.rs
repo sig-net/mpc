@@ -959,10 +959,6 @@ impl CantonClient {
         })
     }
 
-    pub fn json_api_url(&self) -> &str {
-        &self.config.json_api_url
-    }
-
     pub fn jwt_subject(&self) -> &str {
         &self.config.jwt_subject
     }
@@ -971,14 +967,21 @@ impl CantonClient {
         generate_jwt_with_key(&self.encoding_key, &self.config.jwt_subject)
     }
 
-    pub fn auth_post(&self, url: &str) -> anyhow::Result<reqwest::RequestBuilder> {
-        Ok(self.http_client.post(url).bearer_auth(self.generate_jwt()?))
+    fn json_api_endpoint(&self, path: &str) -> String {
+        format!("{}{}", self.config.json_api_url, path)
+    }
+
+    pub fn auth_post(&self, path: &str) -> anyhow::Result<reqwest::RequestBuilder> {
+        Ok(self
+            .http_client
+            .post(self.json_api_endpoint(path))
+            .bearer_auth(self.generate_jwt()?))
     }
 
     pub async fn fetch_ledger_end(&self) -> anyhow::Result<u64> {
         let resp = self
             .http_client
-            .get(format!("{}/v2/state/ledger-end", self.json_api_url()))
+            .get(self.json_api_endpoint("/v2/state/ledger-end"))
             .bearer_auth(self.generate_jwt()?)
             .send()
             .await?;
@@ -1023,7 +1026,7 @@ impl CantonClient {
 
         let resp = self
             .http_client
-            .post(format!("{}/v2/state/active-contracts", self.json_api_url()))
+            .post(self.json_api_endpoint("/v2/state/active-contracts"))
             .bearer_auth(self.generate_jwt()?)
             .json(&req)
             .send()
@@ -1040,10 +1043,7 @@ impl CantonClient {
     ) -> anyhow::Result<SubmitAndWaitForTransactionResponse> {
         let resp = self
             .http_client
-            .post(format!(
-                "{}/v2/commands/submit-and-wait-for-transaction",
-                self.json_api_url()
-            ))
+            .post(self.json_api_endpoint("/v2/commands/submit-and-wait-for-transaction"))
             .bearer_auth(self.generate_jwt()?)
             .json(&SubmitAndWaitForTransactionRequest { commands })
             .send()
