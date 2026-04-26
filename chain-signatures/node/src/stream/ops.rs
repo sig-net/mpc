@@ -13,7 +13,7 @@ use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignKind};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::ContractStateWatcher;
-use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, ChainContext, SignStatus};
+use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, SignStatus};
 use crate::stream::ExecutionOutcome;
 
 use alloy::primitives::keccak256;
@@ -35,15 +35,13 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.sender.to_bytes(),
             SignBidirectionalEvent::Hydration(event) => event.sender,
-            // Canton party IDs are variable-length strings; hash fits them into [u8; 32].
-            SignBidirectionalEvent::Canton(event) => keccak256(event.sender.as_bytes()).into(),
+            SignBidirectionalEvent::Canton(event) => event.sender,
         }
     }
 
     pub(crate) fn sender_string(&self) -> anyhow::Result<String> {
-        // Canton's [u8; 32] sender is an irreversible hash; read the original party ID from the Canton variant.
         match self {
-            SignBidirectionalEvent::Canton(event) => Ok(event.sender.clone()),
+            SignBidirectionalEvent::Canton(event) => Ok(hex::encode(event.sender)),
             _ => sender_string(self.sender(), self.source_chain()),
         }
     }
@@ -53,6 +51,13 @@ impl SignBidirectionalEvent {
             SignBidirectionalEvent::Solana(_) => Chain::Solana,
             SignBidirectionalEvent::Hydration(_) => Chain::Hydration,
             SignBidirectionalEvent::Canton(_) => Chain::Canton,
+        }
+    }
+
+    pub(crate) fn source_event_id(&self) -> Option<String> {
+        match self {
+            SignBidirectionalEvent::Canton(event) => Some(event.sign_event_contract_id.clone()),
+            _ => None,
         }
     }
 
@@ -445,14 +450,6 @@ pub(crate) async fn process_respond_event(
         request_id: respond_event.request_id(),
         from_address,
         nonce,
-        chain_ctx: match &event {
-            SignBidirectionalEvent::Canton(e) => ChainContext::Canton {
-                operators: e.operators.clone(),
-                requester: e.requester.clone(),
-                sender: e.sender.clone(),
-            },
-            _ => ChainContext::None,
-        },
     };
 
     tracing::info!(
@@ -551,15 +548,25 @@ pub async fn process_execution_confirmed(
         tracing::warn!(?tx_id, expected = ?unwatched_sign_id, actual = ?sign_id, "sign_id mismatch between event and watcher");
     }
 
+    let source_event_id = backlog
+        .get(pending_tx.source_chain, &unwatched_sign_id)
+        .await
+        .and_then(|entry| match entry.request.kind {
+            SignKind::SignBidirectional(event) => event.source_event_id(),
+            _ => None,
+        });
+    if pending_tx.source_chain == Chain::Canton && source_event_id.is_none() {
+        anyhow::bail!("missing source event id on Canton response");
+    }
+
     let completed_tx = CompletedTx::new(pending_tx.clone(), block_height);
 
     let sign_request = match result {
-        ExecutionOutcome::Success { output } => {
-            completed_tx.create_sign_request_from_serialized_output(source_chain, output)?
-        }
+        ExecutionOutcome::Success { output } => completed_tx
+            .create_sign_request_from_serialized_output(source_chain, output, source_event_id)?,
         ExecutionOutcome::Failed => {
             completed_tx
-                .create_failed_sign_request(source_chain)
+                .create_failed_sign_request(source_chain, source_event_id)
                 .await?
         }
     };
@@ -673,7 +680,6 @@ mod tests {
             request_id: [id; 32],
             from_address: Address::ZERO,
             nonce: 0,
-            chain_ctx: ChainContext::None,
         }
     }
 
@@ -1153,7 +1159,7 @@ mod tests {
             RespondBidirectionalTx {
                 tx_id: BidirectionalTxId(B256::from([12u8; 32])),
                 output: vec![],
-                chain_ctx: ChainContext::None,
+                source_event_id: None,
             },
         );
 
@@ -1185,7 +1191,7 @@ mod tests {
                 RespondBidirectionalTx {
                     tx_id: BidirectionalTxId(B256::from([13u8; 32])),
                     output: vec![1, 2, 3],
-                    chain_ctx: ChainContext::None,
+                    source_event_id: None,
                 },
             ))
             .await;
@@ -1314,7 +1320,6 @@ mod tests {
             request_id: [2u8; 32],
             from_address: Address::ZERO,
             nonce: 0,
-            chain_ctx: ChainContext::None,
         };
         let sign_id = SignId::new(tx.request_id);
 
@@ -1389,6 +1394,143 @@ mod tests {
             }
             _ => panic!("Expected Sign::Request"),
         }
+    }
+
+    #[tokio::test]
+    async fn process_execution_confirmed_carries_canton_source_event_id_to_final_request() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([24u8; 32]);
+        let source_event_id = "#sign-event-cid";
+
+        let args = SignArgs {
+            entropy: [24u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+        backlog
+            .insert(IndexedSignRequest::sign_bidirectional(
+                sign_id,
+                args,
+                Chain::Canton,
+                current_unix_timestamp(),
+                SignBidirectionalEvent::Canton(CantonSignBidirectionalRequestedEvent {
+                    sign_event_contract_id: source_event_id.to_string(),
+                    sender: [7u8; 32],
+                    request_id: sign_id.request_id,
+                    serialized_transaction: vec![1, 2, 3],
+                    caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
+                    key_version: 1,
+                    path: "test_path".to_string(),
+                    algo: "ECDSA".to_string(),
+                    dest: "0x1234567890123456789012345678901234567890".to_string(),
+                    params: "{}".to_string(),
+                    output_deserialization_schema: vec![],
+                    respond_serialization_schema: vec![],
+                }),
+            ))
+            .await;
+
+        let tx = BidirectionalTx {
+            id: BidirectionalTxId(B256::from([24u8; 32])),
+            sender: [7u8; 32],
+            serialized_transaction: vec![1, 2, 3],
+            source_chain: Chain::Canton,
+            target_chain: Chain::Ethereum,
+            caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
+            key_version: 1,
+            deposit: 0,
+            path: "test_path".to_string(),
+            algo: "ECDSA".to_string(),
+            dest: "0x1234567890123456789012345678901234567890".to_string(),
+            params: "{}".to_string(),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+            request_id: sign_id.request_id,
+            from_address: Address::ZERO,
+            nonce: 0,
+        };
+        backlog
+            .watch_execution(tx.target_chain, sign_id, tx.clone())
+            .await;
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        process_execution_confirmed(
+            tx.id,
+            sign_id,
+            tx.source_chain,
+            456u64,
+            ExecutionOutcome::Success { output: vec![1] },
+            &backlog,
+            sign_tx,
+            tx.target_chain,
+        )
+        .await
+        .unwrap();
+
+        let msg = timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match msg {
+            Sign::Request(req) => {
+                if let SignKind::RespondBidirectional(res) = req.kind {
+                    assert_eq!(res.source_event_id.as_deref(), Some(source_event_id));
+                } else {
+                    panic!("Expected RespondBidirectional request");
+                }
+            }
+            Sign::Completion(_) => panic!("Expected request"),
+        }
+    }
+
+    #[tokio::test]
+    async fn process_execution_confirmed_rejects_canton_without_source_event_id() {
+        let backlog = Backlog::new();
+        let tx = test_bidirectional_tx(25, Chain::Canton, Chain::Ethereum);
+        let sign_id = SignId::new(tx.request_id);
+        let args = SignArgs {
+            entropy: [25u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+
+        backlog
+            .insert(test_indexed_request(
+                sign_id,
+                tx.source_chain,
+                args,
+                current_unix_timestamp(),
+                SignKind::Sign,
+            ))
+            .await;
+        backlog
+            .watch_execution(tx.target_chain, sign_id, tx.clone())
+            .await;
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        let err = process_execution_confirmed(
+            tx.id,
+            sign_id,
+            tx.source_chain,
+            456u64,
+            ExecutionOutcome::Success { output: vec![1] },
+            &backlog,
+            sign_tx,
+            tx.target_chain,
+        )
+        .await
+        .expect_err("Canton final response needs the original SignBidirectionalEvent CID");
+
+        assert!(
+            err.to_string().contains("missing source event id"),
+            "unexpected error: {err:#}"
+        );
+        let no_msg = timeout(Duration::from_millis(100), sign_rx.recv()).await;
+        assert!(matches!(no_msg, Err(_) | Ok(None)));
     }
 
     fn respond_event(sign_id: SignId) -> RespondBidirectionalEvent {

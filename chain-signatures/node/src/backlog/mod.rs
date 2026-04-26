@@ -908,7 +908,7 @@ mod tests {
     use crate::{
         protocol::SignKind,
         respond_bidirectional::RespondBidirectionalTx,
-        sign_bidirectional::{BidirectionalTx, BidirectionalTxId, ChainContext, SignStatus},
+        sign_bidirectional::{BidirectionalTx, BidirectionalTxId, SignStatus},
         stream::ops::SignBidirectionalEvent,
     };
     use alloy::primitives::{Address, B256};
@@ -934,7 +934,6 @@ mod tests {
             request_id: [id; 32],
             from_address: Address::ZERO,
             nonce: 0,
-            chain_ctx: ChainContext::None,
         }
     }
 
@@ -1034,7 +1033,7 @@ mod tests {
                     RespondBidirectionalTx {
                         tx_id: tx.id,
                         output: vec![],
-                        chain_ctx: ChainContext::None,
+                        source_event_id: None,
                     },
                 );
                 backlog
@@ -1491,7 +1490,7 @@ mod tests {
                 RespondBidirectionalTx {
                     tx_id: tx.id,
                     output: vec![],
-                    chain_ctx: ChainContext::None,
+                    source_event_id: None,
                 },
             );
             recovered
@@ -1536,7 +1535,7 @@ mod tests {
             RespondBidirectionalTx {
                 tx_id: tx.id,
                 output: vec![1, 2, 3],
-                chain_ctx: ChainContext::None,
+                source_event_id: None,
             },
         );
 

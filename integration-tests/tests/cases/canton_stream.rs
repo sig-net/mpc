@@ -357,6 +357,12 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     let sign_event = wait_for_sign_request(&mut stream, 30).await?;
     assert_eq!(sign_event.chain, Chain::Canton);
     let request_id = hex::encode(sign_event.id.request_id);
+    let sign_event_cid = match &sign_event.kind {
+        SignKind::SignBidirectional(mpc_node::stream::ops::SignBidirectionalEvent::Canton(
+            canton_event,
+        )) => canton_event.sign_event_contract_id.clone(),
+        _ => panic!("expected Canton SignBidirectional event"),
+    };
 
     // Build a valid on-curve signature using the secp256k1 generator point,
     // then DER-encode it — this mirrors how the real MPC respond path works.
@@ -376,9 +382,7 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
             &sandbox.signer_cid,
             "Respond",
             json!({
-                "operators": [&sandbox.operator_party],
-                "requester": &sandbox.requester_party,
-                "requestId": &request_id,
+                "signEventCid": &sign_event_cid,
                 "signature": {
                     "tag": "EcdsaSig",
                     "value": {
@@ -436,6 +440,11 @@ async fn test_canton_stream_parse_sign_bidirectional_fields() -> Result<()> {
     assert_eq!(bidir.dest(), expected_event.dest);
     assert_eq!(bidir.path(), expected_event.path);
     assert_eq!(bidir.key_version(), expected_event.key_version);
+    let expected_sender = hex::decode(&expected_event.sender)?;
+    assert_eq!(
+        bidir.sender(),
+        <[u8; 32]>::try_from(expected_sender.as_slice())?
+    );
     assert!(
         matches!(
             bidir,

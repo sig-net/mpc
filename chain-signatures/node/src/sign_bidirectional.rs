@@ -43,18 +43,6 @@ pub enum SignStatus {
     AwaitingResponseBidirectional,
 }
 
-/// Chain-specific context carried through the bidirectional signing flow.
-#[derive(Debug, Clone, Hash, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
-pub enum ChainContext {
-    #[default]
-    None,
-    Canton {
-        operators: Vec<String>,
-        requester: String,
-        sender: String,
-    },
-}
-
 #[derive(Debug, Clone, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BidirectionalTx {
     pub id: BidirectionalTxId,
@@ -76,15 +64,12 @@ pub struct BidirectionalTx {
     pub request_id: [u8; 32],
     pub from_address: Address,
     pub nonce: u64,
-    #[serde(default)]
-    pub chain_ctx: ChainContext,
 }
 
 impl BidirectionalTx {
     pub(crate) fn sender_string(&self) -> anyhow::Result<String> {
-        // Canton's [u8; 32] sender is an irreversible hash; read the original party ID from the Canton chain context.
-        if let ChainContext::Canton { sender, .. } = &self.chain_ctx {
-            return Ok(sender.clone());
+        if self.source_chain == Chain::Canton {
+            return Ok(hex::encode(self.sender));
         }
         crate::stream::ops::sender_string(self.sender, self.source_chain)
     }

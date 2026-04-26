@@ -34,10 +34,8 @@ use contracts::{EvmTransactionParams as CantonEvmTransactionParams, TxParams as 
 /// treats Canton deposit as zero.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CantonSignBidirectionalRequestedEvent {
-    pub operators: Vec<String>,
-    pub sender: String,
-    pub requester: String,
-    pub sig_network: String,
+    pub sign_event_contract_id: String,
+    pub sender: [u8; 32],
     pub request_id: [u8; 32],
     pub serialized_transaction: Vec<u8>,
     pub caip2_id: String,
@@ -50,20 +48,20 @@ pub struct CantonSignBidirectionalRequestedEvent {
     pub respond_serialization_schema: Vec<u8>,
 }
 
-impl TryFrom<contracts::SignBidirectionalRequestedEvent> for CantonSignBidirectionalRequestedEvent {
-    type Error = anyhow::Error;
-
-    fn try_from(raw: contracts::SignBidirectionalRequestedEvent) -> anyhow::Result<Self> {
+impl CantonSignBidirectionalRequestedEvent {
+    pub fn from_created(
+        contract_id: String,
+        raw: contracts::SignBidirectionalRequestedEvent,
+    ) -> anyhow::Result<Self> {
         let request_id = compute_request_id(&raw)?;
         let serialized_transaction = match &raw.tx_params {
             CantonTxParams::EvmTxParams(params) => encode_unsigned_eip1559(params)?,
         };
+        let sender = parse_canton_bytes32_hex("sender", &raw.sender)?;
 
         Ok(Self {
-            operators: raw.operators,
-            sender: raw.sender,
-            requester: raw.requester,
-            sig_network: raw.sig_network,
+            sign_event_contract_id: contract_id,
+            sender,
             request_id,
             serialized_transaction,
             caip2_id: raw.caip2_id,
@@ -104,6 +102,13 @@ fn encode_unsigned_eip1559(params: &CantonEvmTransactionParams) -> anyhow::Resul
     Ok(out)
 }
 
+fn parse_canton_bytes32_hex(field: &str, value: &str) -> anyhow::Result<[u8; 32]> {
+    let raw = value.strip_prefix("0x").unwrap_or(value);
+    let bytes = hex::decode(raw).map_err(|e| anyhow::anyhow!("invalid hex in {field}: {e}"))?;
+    <[u8; 32]>::try_from(bytes.as_slice())
+        .map_err(|_| anyhow::anyhow!("{field} must be 32 bytes, got {}", bytes.len()))
+}
+
 impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
         self.request_id
@@ -122,8 +127,11 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
 
         let request_id = self.request_id;
 
-        let epsilon =
-            mpc_crypto::kdf::derive_epsilon_canton(self.key_version, &self.sender, &self.path);
+        let epsilon = mpc_crypto::kdf::derive_epsilon_canton(
+            self.key_version,
+            &self.sender_string(),
+            &self.path,
+        );
 
         let unsigned_tx_hash = hash_rlp_data(self.serialized_transaction.clone());
 
@@ -154,7 +162,7 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
     }
 
     fn sender_string(&self) -> String {
-        self.sender.clone()
+        hex::encode(self.sender)
     }
 }
 

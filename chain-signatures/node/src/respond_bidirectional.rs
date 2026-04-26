@@ -1,7 +1,7 @@
 use crate::indexer_eth::EthereumClient;
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::TransactionOutput;
-use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, ChainContext};
+use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId};
 use alloy::consensus::Transaction;
 use alloy::primitives::Bytes;
 use k256::Scalar;
@@ -25,8 +25,12 @@ pub struct CompletedTx {
 pub struct RespondBidirectionalTx {
     pub tx_id: BidirectionalTxId,
     pub output: RespondBidirectionalSerializedOutput,
-    #[serde(default)]
-    pub chain_ctx: ChainContext,
+    /// Chain-agnostic identifier for the source-chain sign event that produced
+    /// this response. Chains that need source-event visibility for final
+    /// response publication can store a contract id, tx hash, log id, or
+    /// equivalent event reference here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_event_id: Option<String>,
 }
 
 pub type RespondBidirectionalSerializedOutput = Vec<u8>;
@@ -39,19 +43,25 @@ impl CompletedTx {
     pub(crate) async fn create_failed_sign_request(
         &self,
         chain: Chain,
+        source_event_id: Option<String>,
     ) -> anyhow::Result<IndexedSignRequest> {
-        self.process_failed_tx(chain).await
+        self.process_failed_tx(chain, source_event_id).await
     }
 
     pub(crate) fn create_sign_request_from_serialized_output(
         &self,
         chain: Chain,
         serialized_output: RespondBidirectionalSerializedOutput,
+        source_event_id: Option<String>,
     ) -> anyhow::Result<IndexedSignRequest> {
-        self.create_respond_bidirectional_sign_request(chain, serialized_output)
+        self.create_respond_bidirectional_sign_request(chain, serialized_output, source_event_id)
     }
 
-    async fn process_failed_tx(&self, chain: Chain) -> anyhow::Result<IndexedSignRequest> {
+    async fn process_failed_tx(
+        &self,
+        chain: Chain,
+        source_event_id: Option<String>,
+    ) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("Tx failed: {:?}", self.tx.id);
 
         let respond_serialization_format = chain.respond_serialization_format();
@@ -72,8 +82,11 @@ impl CompletedTx {
                 Bytes::from(output).into()
             }
         };
-        let sign_request =
-            self.create_respond_bidirectional_sign_request(chain, serialized_output)?;
+        let sign_request = self.create_respond_bidirectional_sign_request(
+            chain,
+            serialized_output,
+            source_event_id,
+        )?;
         Ok(sign_request)
     }
 
@@ -81,6 +94,7 @@ impl CompletedTx {
         &self,
         chain: Chain,
         serialized_output: RespondBidirectionalSerializedOutput,
+        source_event_id: Option<String>,
     ) -> anyhow::Result<IndexedSignRequest> {
         let request_id_bytes = self.tx.request_id;
         tracing::info!(
@@ -118,7 +132,7 @@ impl CompletedTx {
             RespondBidirectionalTx {
                 tx_id: self.tx.id,
                 output: serialized_output,
-                chain_ctx: self.tx.chain_ctx.clone(),
+                source_event_id,
             },
         ))
     }

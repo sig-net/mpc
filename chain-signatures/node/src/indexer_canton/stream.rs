@@ -336,15 +336,25 @@ async fn process_canton_event(
         template_id,
         ledger_api::templates::SIGN_BIDIRECTIONAL_EVENT,
     ) {
-        match parse_sign_bidirectional_event(created) {
-            Ok(canton_event) => {
-                if let Err(e) =
-                    verify_sign_event(&canton_event, created, tx_events, signer_contract_id)
-                {
+        match serde_json::from_value::<contracts::SignBidirectionalRequestedEvent>(
+            created.payload.clone(),
+        ) {
+            Ok(raw) => {
+                if let Err(e) = verify_sign_event(&raw, created, tx_events, signer_contract_id) {
                     tracing::warn!(%e, "canton SignBidirectionalEvent failed verification — dropping");
                     return;
                 }
 
+                let canton_event = match CantonSignBidirectionalRequestedEvent::from_created(
+                    created.contract_id.clone(),
+                    raw,
+                ) {
+                    Ok(event) => event,
+                    Err(e) => {
+                        tracing::warn!(%e, "failed to parse SignBidirectionalEvent");
+                        return;
+                    }
+                };
                 let request_id = canton_event.generate_request_id();
                 let entropy: [u8; 32] = keccak256(request_id).into();
                 let boxed: crate::stream::ops::SignatureEventBox = Box::new(canton_event);
@@ -413,7 +423,7 @@ async fn process_canton_event(
 ///    exist in the same transaction — proves the event was created through the
 ///    correct Daml code path, not fabricated
 fn verify_sign_event(
-    event: &CantonSignBidirectionalRequestedEvent,
+    event: &contracts::SignBidirectionalRequestedEvent,
     created: &ledger_api::CreatedEvent,
     tx_events: &[ledger_api::Event],
     signer_contract_id: &str,
@@ -464,14 +474,6 @@ fn parse_request_id_hex(s: &str) -> anyhow::Result<[u8; 32]> {
     s.parse::<B256>()
         .map_err(|e| anyhow::anyhow!("invalid request_id hex: {e}"))
         .map(|b| b.0)
-}
-
-fn parse_sign_bidirectional_event(
-    created: &ledger_api::CreatedEvent,
-) -> anyhow::Result<CantonSignBidirectionalRequestedEvent> {
-    let raw: contracts::SignBidirectionalRequestedEvent =
-        serde_json::from_value(created.payload.clone())?;
-    raw.try_into()
 }
 
 fn parse_signature_responded_event(

@@ -71,7 +71,6 @@ const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
 const ETH_RESPOND_BATCH_SIZE: usize = 10;
 /// The maximum number of attempts to fetch eth tx and its receipt
 const ETH_TX_RECEIPT_MAX_ATTEMPTS: usize = 6;
-
 type EthContractFillProvider = FillProvider<
     JoinFill<
         JoinFill<
@@ -1990,38 +1989,36 @@ async fn try_publish_canton(
 
     use crate::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
     let der_sig = hex::encode(crate::indexer_canton::der_encode_signature(signature)?);
-    let (operators, requester) = extract_canton_operators_requester(action)?;
-
     let canton_signature = serde_json::to_value(CantonSignature::EcdsaSig(EcdsaSigData {
         der: der_sig,
         recovery_id: signature.recovery_id,
     }))?;
 
     let (choice, command_id, choice_argument) = match &action.indexed.kind {
-        SignKind::SignBidirectional(_) => (
+        SignKind::SignBidirectional(crate::stream::ops::SignBidirectionalEvent::Canton(event)) => (
             "Respond",
             format!("mpc-respond-{request_id_hex}"),
             serde_json::json!({
-                "operators": operators,
-                "requester": requester,
-                "requestId": request_id_hex,
+                "signEventCid": &event.sign_event_contract_id,
                 "signature": canton_signature,
             }),
         ),
-        SignKind::RespondBidirectional(respond_tx) => (
-            "RespondBidirectional",
-            format!("mpc-respond-bidir-{request_id_hex}"),
-            serde_json::json!({
-                "operators": operators,
-                "requester": requester,
-                "requestId": request_id_hex,
-                "serializedOutput": hex::encode(&respond_tx.output),
-                "signature": canton_signature,
-            }),
-        ),
-        SignKind::Sign => {
-            anyhow::bail!("Canton does not support SignKind::Sign — only SignBidirectional");
+        SignKind::RespondBidirectional(respond_tx) => {
+            let sign_event_cid = respond_tx
+                .source_event_id
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("missing source event id on Canton response"))?;
+            (
+                "RespondBidirectional",
+                format!("mpc-respond-bidir-{request_id_hex}"),
+                serde_json::json!({
+                    "signEventCid": sign_event_cid,
+                    "serializedOutput": hex::encode(&respond_tx.output),
+                    "signature": canton_signature,
+                }),
+            )
         }
+        _ => anyhow::bail!("Canton supports only Canton SignBidirectional or RespondBidirectional"),
     };
 
     canton
@@ -2036,33 +2033,6 @@ async fn try_publish_canton(
     );
 
     Ok(())
-}
-
-/// Extract operators and requester (sender) from a Canton publish action.
-/// Phase 1 (Respond): reads from the CantonSignBidirectionalRequestedEvent on SignKind.
-/// Phase 2 (RespondBidirectional): reads from the BidirectionalTx fields populated
-/// when the tx was first created from the Canton sign event.
-fn extract_canton_operators_requester(
-    action: &PublishAction,
-) -> anyhow::Result<(Vec<String>, String)> {
-    use crate::sign_bidirectional::ChainContext;
-    match &action.indexed.kind {
-        SignKind::SignBidirectional(crate::stream::ops::SignBidirectionalEvent::Canton(event)) => {
-            Ok((event.operators.clone(), event.requester.clone()))
-        }
-        SignKind::RespondBidirectional(respond_tx) => {
-            let ChainContext::Canton {
-                ref operators,
-                ref requester,
-                ..
-            } = respond_tx.chain_ctx
-            else {
-                anyhow::bail!("missing ChainContext on RespondBidirectionalTx");
-            };
-            Ok((operators.clone(), requester.clone()))
-        }
-        _ => anyhow::bail!("expected Canton event variant"),
-    }
 }
 
 #[cfg(test)]
