@@ -57,7 +57,9 @@ impl CantonSignBidirectionalRequestedEvent {
         let serialized_transaction = match &raw.tx_params {
             CantonTxParams::EvmTxParams(params) => encode_unsigned_eip1559(params)?,
         };
-        let sender = parse_canton_bytes32_hex("sender", &raw.sender)?;
+        let mut sender = [0u8; 32];
+        hex::decode_to_slice(&raw.sender, &mut sender)
+            .map_err(|e| anyhow::anyhow!("invalid hex in sender: {e}"))?;
 
         Ok(Self {
             sign_event_contract_id: contract_id,
@@ -100,13 +102,6 @@ fn encode_unsigned_eip1559(params: &CantonEvmTransactionParams) -> anyhow::Resul
     let mut out = Vec::new();
     tx.encode_for_signing(&mut out);
     Ok(out)
-}
-
-fn parse_canton_bytes32_hex(field: &str, value: &str) -> anyhow::Result<[u8; 32]> {
-    let raw = value.strip_prefix("0x").unwrap_or(value);
-    let bytes = hex::decode(raw).map_err(|e| anyhow::anyhow!("invalid hex in {field}: {e}"))?;
-    <[u8; 32]>::try_from(bytes.as_slice())
-        .map_err(|_| anyhow::anyhow!("{field} must be 32 bytes, got {}", bytes.len()))
 }
 
 impl SignatureEvent for CantonSignBidirectionalRequestedEvent {

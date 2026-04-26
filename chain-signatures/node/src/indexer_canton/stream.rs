@@ -4,7 +4,7 @@ use crate::rpc::CantonClient;
 use crate::stream::ops::{RespondBidirectionalEvent, SignatureEvent, SignatureRespondedEvent};
 use crate::stream::{ChainEvent, ChainStream};
 
-use alloy::primitives::{keccak256, B256};
+use alloy::primitives::keccak256;
 
 use futures_util::{SinkExt, StreamExt};
 use mpc_primitives::{ScalarExt, Signature};
@@ -469,21 +469,17 @@ fn verify_sign_event(
     Ok(())
 }
 
-/// Parse a hex-encoded request ID into a 32-byte array.
-fn parse_request_id_hex(s: &str) -> anyhow::Result<[u8; 32]> {
-    s.parse::<B256>()
-        .map_err(|e| anyhow::anyhow!("invalid request_id hex: {e}"))
-        .map(|b| b.0)
-}
-
 fn parse_signature_responded_event(
     created: &ledger_api::CreatedEvent,
 ) -> anyhow::Result<CantonSignatureRespondedEvent> {
     let payload: contracts::SignatureRespondedEventPayload =
         serde_json::from_value(created.payload.clone())?;
+    let mut request_id = [0u8; 32];
+    hex::decode_to_slice(&payload.request_id, &mut request_id)
+        .map_err(|e| anyhow::anyhow!("invalid request_id hex: {e}"))?;
 
     Ok(CantonSignatureRespondedEvent {
-        request_id: parse_request_id_hex(&payload.request_id)?,
+        request_id,
         responder: payload.responder,
         signature: parse_canton_signature(&payload.signature)?,
     })
@@ -494,16 +490,15 @@ fn parse_respond_bidirectional_event(
 ) -> anyhow::Result<CantonRespondBidirectionalEvent> {
     let payload: contracts::RespondBidirectionalEventPayload =
         serde_json::from_value(created.payload.clone())?;
+    let mut request_id = [0u8; 32];
+    hex::decode_to_slice(&payload.request_id, &mut request_id)
+        .map_err(|e| anyhow::anyhow!("invalid request_id hex: {e}"))?;
 
-    let raw = payload
-        .serialized_output
-        .strip_prefix("0x")
-        .unwrap_or(&payload.serialized_output);
-    let serialized_output =
-        hex::decode(raw).map_err(|e| anyhow::anyhow!("invalid serializedOutput hex: {e}"))?;
+    let serialized_output = hex::decode(&payload.serialized_output)
+        .map_err(|e| anyhow::anyhow!("invalid serializedOutput hex: {e}"))?;
 
     Ok(CantonRespondBidirectionalEvent {
-        request_id: parse_request_id_hex(&payload.request_id)?,
+        request_id,
         responder: payload.responder,
         serialized_output,
         signature: parse_canton_signature(&payload.signature)?,
@@ -526,9 +521,7 @@ pub fn parse_der_signature_with_recovery(
 ) -> anyhow::Result<Signature> {
     use k256::elliptic_curve::{point::DecompressPoint, subtle::Choice};
 
-    let sig = k256::ecdsa::Signature::from_der(&hex::decode(
-        hex_str.strip_prefix("0x").unwrap_or(hex_str),
-    )?)?;
+    let sig = k256::ecdsa::Signature::from_der(&hex::decode(hex_str)?)?;
     let (r, s) = sig.split_scalars();
 
     anyhow::ensure!(

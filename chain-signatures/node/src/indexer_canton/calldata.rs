@@ -15,11 +15,9 @@ pub fn build_calldata(function_signature: &str, encoded_args_hex: &str) -> anyho
     let selector: [u8; 4] = func.selector().0;
 
     let mut calldata = selector.to_vec();
-    if !encoded_args_hex.is_empty() {
-        let bytes = hex::decode(encoded_args_hex)
-            .map_err(|e| anyhow::anyhow!("invalid hex in calldata encodedArgs: {e}"))?;
-        calldata.extend_from_slice(&bytes);
-    }
+    let bytes = hex::decode(encoded_args_hex)
+        .map_err(|e| anyhow::anyhow!("invalid hex in calldata encodedArgs: {e}"))?;
+    calldata.extend_from_slice(&bytes);
 
     Ok(calldata)
 }
