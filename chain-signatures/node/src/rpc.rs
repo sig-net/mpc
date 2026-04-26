@@ -2,9 +2,9 @@ use crate::backlog::Backlog;
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
-use crate::metrics::requests::{record_request_latency, SignRequestStep};
-use crate::protocol::contract::primitives::{ParticipantMap, Participants};
+use crate::metrics::requests::{SignRequestStep, record_request_latency};
 use crate::protocol::contract::RunningContractState;
+use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, SignKind};
 use crate::util::AffinePointExt as _;
 
@@ -16,14 +16,14 @@ use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
 use alloy::providers::{Provider, RootProvider, WalletProvider};
 use alloy::rpc::types::{Transaction, TransactionReceipt};
-use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
+use cait_sith::protocol::Participant;
 use k256::{AffinePoint, Secp256k1};
 use mpc_keys::hpke;
 use mpc_primitives::SignId;
 use mpc_primitives::Signature;
 
-use crate::util::retry::{retry_async, Backoff, RetryConfig, RetryError, RetryReason};
+use crate::util::retry::{Backoff, RetryConfig, RetryError, RetryReason, retry_async};
 use alloy::contract::{ContractInstance, Interface};
 use alloy::dyn_abi::DynSolValue;
 use alloy::network::EthereumWallet;
@@ -48,16 +48,16 @@ use crate::indexer_canton::ledger_api::{
     IdentifierFilter, JsCommands, LedgerEndResponse, PartyFilter,
     SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse, TemplateFilterValue,
 };
-use crate::indexer_canton::{generate_jwt_with_key, CantonConfig};
+use crate::indexer_canton::{CantonConfig, generate_jwt_with_key};
 use crate::indexer_hydration::HydrationConfig;
 use parity_scale_codec::{Decode, Encode};
+use subxt::Config as SubxtConfig;
+use subxt::OnlineClient;
 use subxt::config::substrate::{
     BlakeTwo256, SubstrateConfig, SubstrateExtrinsicParams, SubstrateHeader,
 };
 use subxt::tx::Payload;
-use subxt::Config as SubxtConfig;
-use subxt::OnlineClient;
-use subxt_signer::{sr25519, SecretUri};
+use subxt_signer::{SecretUri, sr25519};
 
 /// The maximum amount of times to retry publishing a signature.
 const MAX_PUBLISH_RETRY: usize = 6;
@@ -1802,12 +1802,12 @@ async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAc
     actions.clear();
 }
 
+use signet_program::AffinePoint as SolanaContractAffinePoint;
+use signet_program::Signature as SolanaContractSignature;
 use signet_program::accounts::Respond as SolanaRespondAccount;
 use signet_program::accounts::RespondBidirectional as SolanaRespondBidirectionalAccount;
 use signet_program::instruction::Respond as SolanaRespond;
 use signet_program::instruction::RespondBidirectional as SolanaRespondBidirectional;
-use signet_program::AffinePoint as SolanaContractAffinePoint;
-use signet_program::Signature as SolanaContractSignature;
 use solana_sdk::signature::Signer as SolanaSigner;
 async fn try_publish_sol(
     sol: &SolanaClient,
@@ -2000,6 +2000,7 @@ async fn try_publish_canton(
             format!("mpc-respond-{request_id_hex}"),
             serde_json::json!({
                 "signEventCid": &event.sign_event_contract_id,
+                "requestId": request_id_hex,
                 "signature": canton_signature,
             }),
         ),
@@ -2013,6 +2014,7 @@ async fn try_publish_canton(
                 format!("mpc-respond-bidir-{request_id_hex}"),
                 serde_json::json!({
                     "signEventCid": sign_event_cid,
+                    "requestId": request_id_hex,
                     "serializedOutput": hex::encode(&respond_tx.output),
                     "signature": canton_signature,
                 }),
@@ -2023,7 +2025,16 @@ async fn try_publish_canton(
 
     canton
         .exercise_choice(&command_id, choice, choice_argument)
-        .await?;
+        .await
+        .inspect_err(|err| {
+            tracing::error!(
+                ?sign_id,
+                choice,
+                request_id = %request_id_hex,
+                error = %err,
+                "canton: failed to publish signature"
+            );
+        })?;
 
     tracing::info!(
         ?sign_id,

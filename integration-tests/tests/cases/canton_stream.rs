@@ -383,6 +383,7 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
             "Respond",
             json!({
                 "signEventCid": &sign_event_cid,
+                "requestId": &request_id,
                 "signature": {
                     "tag": "EcdsaSig",
                     "value": {
