@@ -1,52 +1,73 @@
 use super::contracts::{
-    EvmTransactionParams as CantonEvmTransactionParams, SignBidirectionalRequestedEvent, TxParams,
+    EvmAccessListEntry, EvmType2TransactionParams as CantonEvmType2TransactionParams,
+    SignBidirectionalRequestedEvent, TxParams,
 };
-use alloy::primitives::{keccak256, U256};
+use alloy::primitives::{keccak256, Address, U256};
 use alloy_sol_types::SolValue;
 
-fn hex_u256(field: &'static str, hex: &str) -> anyhow::Result<U256> {
-    U256::from_str_radix(hex, 16).map_err(|e| anyhow::anyhow!("invalid hex in '{field}': {e}"))
+fn extend_eip712_u256(buf: &mut Vec<u8>, hex: &str) -> anyhow::Result<()> {
+    let value = U256::from_str_radix(hex, 16)?;
+    buf.extend_from_slice(value.eip712_data_word().as_slice());
+    Ok(())
 }
 
-fn hash_evm_params(p: &CantonEvmTransactionParams) -> anyhow::Result<[u8; 32]> {
+fn hash_storage_keys(storage_keys: &[String]) -> anyhow::Result<[u8; 32]> {
+    let mut buf = Vec::with_capacity(storage_keys.len() * 32);
+    for storage_key in storage_keys {
+        buf.extend(hex::decode(storage_key)?);
+    }
+    Ok(keccak256(&buf).into())
+}
+
+fn hash_access_list_entry(entry: &EvmAccessListEntry) -> anyhow::Result<[u8; 32]> {
+    let address: Address = format!("0x{}", entry.address).parse()?;
+
+    let mut buf = Vec::with_capacity(64);
+    buf.extend_from_slice(address.eip712_data_word().as_slice());
+    buf.extend_from_slice(&hash_storage_keys(&entry.storage_keys)?);
+    Ok(keccak256(&buf).into())
+}
+
+fn hash_access_list(access_list: &[EvmAccessListEntry]) -> anyhow::Result<[u8; 32]> {
+    let mut buf = Vec::with_capacity(access_list.len() * 32);
+    for entry in access_list {
+        buf.extend_from_slice(&hash_access_list_entry(entry)?);
+    }
+    Ok(keccak256(&buf).into())
+}
+
+fn hash_evm_type2_params(p: &CantonEvmType2TransactionParams) -> anyhow::Result<[u8; 32]> {
     let mut buf = Vec::with_capacity(9 * 32);
 
-    buf.extend_from_slice(p.parse_to_address()?.eip712_data_word().as_slice());
-    buf.extend_from_slice(p.function_signature.as_str().eip712_data_word().as_slice());
-
-    let args_bytes = hex::decode(&p.encoded_args)
-        .map_err(|e| anyhow::anyhow!("invalid hex in encodedArgs: {e}"))?;
-    buf.extend_from_slice(args_bytes.as_slice().eip712_data_word().as_slice());
-
-    buf.extend_from_slice(hex_u256("value", &p.value)?.eip712_data_word().as_slice());
-    buf.extend_from_slice(hex_u256("nonce", &p.nonce)?.eip712_data_word().as_slice());
-    buf.extend_from_slice(
-        hex_u256("gas_limit", &p.gas_limit)?
-            .eip712_data_word()
-            .as_slice(),
-    );
-    buf.extend_from_slice(
-        hex_u256("max_fee_per_gas", &p.max_fee_per_gas)?
-            .eip712_data_word()
-            .as_slice(),
-    );
-    buf.extend_from_slice(
-        hex_u256("max_priority_fee_per_gas", &p.max_priority_fee_per_gas)?
-            .eip712_data_word()
-            .as_slice(),
-    );
-    buf.extend_from_slice(
-        hex_u256("chain_id", &p.chain_id)?
-            .eip712_data_word()
-            .as_slice(),
-    );
+    for value in [
+        &p.chain_id,
+        &p.nonce,
+        &p.max_priority_fee_per_gas,
+        &p.max_fee_per_gas,
+        &p.gas_limit,
+    ] {
+        extend_eip712_u256(&mut buf, value)?;
+    }
+    match &p.to {
+        Some(address) => {
+            let address: Address = format!("0x{address}").parse()?;
+            buf.extend_from_slice(address.eip712_data_word().as_slice());
+        }
+        None => {
+            let empty_hash: [u8; 32] = keccak256([]).into();
+            buf.extend_from_slice(&empty_hash);
+        }
+    }
+    extend_eip712_u256(&mut buf, &p.value)?;
+    buf.extend_from_slice(keccak256(hex::decode(&p.calldata)?).as_slice());
+    buf.extend_from_slice(&hash_access_list(&p.access_list)?);
 
     Ok(keccak256(&buf).into())
 }
 
 fn hash_tx_params(cp: &TxParams) -> anyhow::Result<[u8; 32]> {
     match cp {
-        TxParams::EvmTxParams(p) => hash_evm_params(p),
+        TxParams::EvmType2TxParams(p) => hash_evm_type2_params(p),
     }
 }
 

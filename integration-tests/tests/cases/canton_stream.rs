@@ -1,5 +1,7 @@
 use anyhow::{Context as _, Result};
-use integration_tests::canton::{test_sign_request_event, CantonSandbox};
+use integration_tests::canton::{
+    test_evm_type2_anvil_cases, test_sign_request_event, CantonSandbox,
+};
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
 use mpc_node::protocol::{Chain, IndexedSignRequest, SignKind};
@@ -50,7 +52,8 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
     let backlog = Backlog::new();
     let mut stream = stream_canton(&sandbox, backlog).await?;
 
-    let expected_event = test_sign_request_event(&sandbox, None);
+    let expected_case = test_evm_type2_anvil_cases()[0].clone();
+    let expected_event = test_sign_request_event(&sandbox, &expected_case);
     sandbox.submit_sign_request(None).await?;
 
     let event = wait_for_sign_request(&mut stream, 30).await?;
@@ -427,7 +430,8 @@ async fn test_canton_stream_parse_sign_bidirectional_fields() -> Result<()> {
     let backlog = Backlog::new();
     let mut stream = stream_canton(&sandbox, backlog).await?;
 
-    let expected_event = test_sign_request_event(&sandbox, None);
+    let expected_case = test_evm_type2_anvil_cases()[0].clone();
+    let expected_event = test_sign_request_event(&sandbox, &expected_case);
     sandbox.submit_sign_request(None).await?;
 
     let req = wait_for_sign_request(&mut stream, 30).await?;

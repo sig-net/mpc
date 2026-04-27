@@ -1,4 +1,3 @@
-mod calldata;
 pub mod contracts;
 mod jwt;
 pub mod ledger_api;
@@ -14,12 +13,12 @@ pub use stream::{parse_canton_signature, CantonStream};
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::ops::{SignBidirectionalEvent, SignatureEvent};
-use alloy::consensus::TxEip1559;
+use alloy::consensus::{SignableTransaction, TxEip1559};
 use k256::Scalar;
 use mpc_primitives::{ScalarExt, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use std::fmt;
 
-use contracts::{EvmTransactionParams as CantonEvmTransactionParams, TxParams as CantonTxParams};
+use contracts::TxParams as CantonTxParams;
 
 /// Node-facing Canton sign event.
 ///
@@ -55,7 +54,9 @@ impl CantonSignBidirectionalRequestedEvent {
     ) -> anyhow::Result<Self> {
         let request_id = compute_request_id(&raw)?;
         let serialized_transaction = match &raw.tx_params {
-            CantonTxParams::EvmTxParams(params) => encode_unsigned_eip1559(params)?,
+            CantonTxParams::EvmType2TxParams(params) => {
+                TxEip1559::try_from(params)?.encoded_for_signing()
+            }
         };
         let mut sender = [0u8; 32];
         hex::decode_to_slice(&raw.sender, &mut sender)
@@ -94,15 +95,6 @@ pub struct CantonSignatureRespondedEvent {
     pub signature: Signature,
 }
 // NOTE: No Hash, PartialEq, Eq derives — matches HydrationSignatureRespondedEvent
-
-fn encode_unsigned_eip1559(params: &CantonEvmTransactionParams) -> anyhow::Result<Vec<u8>> {
-    use alloy::consensus::transaction::SignableTransaction;
-
-    let tx = TxEip1559::try_from(params)?;
-    let mut out = Vec::new();
-    tx.encode_for_signing(&mut out);
-    Ok(out)
-}
 
 impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {

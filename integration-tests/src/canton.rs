@@ -2,7 +2,8 @@ use alloy::primitives::keccak256;
 use anyhow::{Context as _, Result};
 use async_process::{Child, Command};
 use mpc_node::indexer_canton::contracts::{
-    EvmTransactionParams, SignBidirectionalRequestedEvent, SignRequestPayload, TxParams,
+    EvmAccessListEntry, EvmType2TransactionParams, SignBidirectionalRequestedEvent,
+    SignRequestPayload, TxParams,
 };
 use mpc_node::indexer_canton::ledger_api::{
     self, AllocatePartyRequest, AllocatePartyResponse, ContractEntry, CreateUserRequest,
@@ -34,37 +35,108 @@ pub fn compute_operators_hash(operators: &[String]) -> String {
 
 const CANTON_JSON_API_PORT: u16 = 7575;
 const DEFAULT_DAR_RELATIVE_PATH: &str = "fixtures/canton/daml-vault-0.0.1.dar";
+pub const EVM_TYPE2_TEST_CONTRACT_ADDRESS: &str = "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+const EVM_TYPE2_BOOL_OUTPUT_SCHEMA: &str = r#"[{"name":"output","type":"bool"}]"#;
 
-/// Test EVM transaction params (USDC transfer on Anvil). Callers that need
-/// distinct request_ids across submissions (e.g. concurrency tests) pass
-/// different `nonce` values.
-pub fn test_evm_params(nonce: u64) -> EvmTransactionParams {
-    EvmTransactionParams {
-        to: "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48".to_string(),
-        function_signature: "transfer(address,uint256)".to_string(),
-        encoded_args: format!(
-            "{}{}",
-            "0".repeat(64),
-            "0000000000000000000000000000000000000000000000000000000005f5e100"
-        ),
-        value: "0".repeat(64),
-        nonce: format!("{:0>64x}", nonce),
-        gas_limit: format!("{:0>64}", "186a0"),
-        max_fee_per_gas: format!("{:0>64}", "3b9aca00"),
-        max_priority_fee_per_gas: format!("{:0>64}", "3b9aca00"),
-        chain_id: format!("{:0>64}", "7a69"), // Anvil 31337
+fn evm_u256_hex(value: u128) -> String {
+    format!("{value:064x}")
+}
+
+fn evm_type2_anvil_params(
+    nonce: u64,
+    gas_limit: u64,
+    to: Option<&str>,
+    value: u128,
+    calldata: impl Into<String>,
+    access_list: Vec<EvmAccessListEntry>,
+) -> EvmType2TransactionParams {
+    EvmType2TransactionParams {
+        chain_id: evm_u256_hex(31_337),
+        nonce: evm_u256_hex(nonce as u128),
+        max_priority_fee_per_gas: evm_u256_hex(1_000_000_000),
+        max_fee_per_gas: evm_u256_hex(100_000_000_000),
+        gas_limit: evm_u256_hex(gas_limit as u128),
+        to: to.map(str::to_string),
+        value: evm_u256_hex(value),
+        calldata: calldata.into(),
+        access_list,
     }
 }
 
+#[derive(Clone)]
+pub struct EvmType2AnvilCase {
+    pub name: &'static str,
+    pub params: EvmType2TransactionParams,
+}
+
+impl EvmType2AnvilCase {
+    pub fn with_nonce(mut self, nonce: u64) -> Self {
+        self.params.nonce = evm_u256_hex(nonce as u128);
+        self
+    }
+}
+
+/// Valid EIP-1559 variants that should all pass Daml `EvmType2TransactionParams`
+/// validation, Rust `TxEip1559` construction, Anvil execution, and Canton
+/// response publication.
+pub fn test_evm_type2_anvil_cases() -> Vec<EvmType2AnvilCase> {
+    vec![
+        EvmType2AnvilCase {
+            name: "evm_type2_call_contract_erc20_transfer_calldata",
+            params: evm_type2_anvil_params(
+                0,
+                100_000,
+                Some(EVM_TYPE2_TEST_CONTRACT_ADDRESS),
+                0,
+                format!(
+                    "{}{}{}",
+                    "a9059cbb",
+                    "0".repeat(64),
+                    "0000000000000000000000000000000000000000000000000000000005f5e100"
+                ),
+                vec![],
+            ),
+        },
+        EvmType2AnvilCase {
+            name: "evm_type2_call_value_transfer_empty_calldata",
+            params: evm_type2_anvil_params(
+                1,
+                21_000,
+                Some("1111111111111111111111111111111111111111"),
+                1,
+                "",
+                vec![],
+            ),
+        },
+        EvmType2AnvilCase {
+            name: "evm_type2_call_access_list",
+            params: evm_type2_anvil_params(
+                2,
+                100_000,
+                Some("2222222222222222222222222222222222222222"),
+                0,
+                "",
+                vec![EvmAccessListEntry {
+                    address: "3333333333333333333333333333333333333333".to_string(),
+                    storage_keys: vec!["0".repeat(64), "f".repeat(64)],
+                }],
+            ),
+        },
+        EvmType2AnvilCase {
+            name: "evm_type2_create_empty_initcode",
+            params: evm_type2_anvil_params(3, 100_000, None, 0, "", vec![]),
+        },
+    ]
+}
+
 /// Build a test SignBidirectionalRequestedEvent for Canton.
-/// Uses Anvil chain ID (31337) and default test EVM params.
 ///
 /// `sender` is set to `computeOperatorsHash([operator])` — exactly what
 /// `SignRequest.Execute` will compute on-ledger, so the locally computed
 /// request_id matches the one the MPC node derives from the emitted event.
 pub fn test_sign_request_event(
     sandbox: &CantonSandbox,
-    nonce: Option<u64>,
+    case: &EvmType2AnvilCase,
 ) -> SignBidirectionalRequestedEvent {
     let operators = vec![sandbox.operator_party.clone()];
     let sender = compute_operators_hash(&operators);
@@ -73,15 +145,15 @@ pub fn test_sign_request_event(
         requester: sandbox.requester_party.clone(),
         sig_network: sandbox.party_id.clone(),
         sender,
-        tx_params: TxParams::EvmTxParams(test_evm_params(nonce.unwrap_or(0))),
+        tx_params: TxParams::EvmType2TxParams(case.params.clone()),
         caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
         key_version: LATEST_MPC_KEY_VERSION,
         path: sandbox.requester_party.clone(),
         algo: String::new(),
         dest: String::new(),
         params: String::new(),
-        output_deserialization_schema: r#"[{"name":"output","type":"bool"}]"#.to_string(),
-        respond_serialization_schema: r#"[{"name":"respond","type":"bool"}]"#.to_string(),
+        output_deserialization_schema: EVM_TYPE2_BOOL_OUTPUT_SCHEMA.to_string(),
+        respond_serialization_schema: EVM_TYPE2_BOOL_OUTPUT_SCHEMA.to_string(),
     }
 }
 
@@ -322,7 +394,10 @@ canton.participants.sandbox.ledger-api {{
     /// that need distinct request_ids across multiple submissions pass
     /// different `Some(n)` values so each submission hashes to a unique id.
     pub async fn submit_sign_request(&self, nonce: Option<u64>) -> Result<()> {
-        let event = test_sign_request_event(self, nonce);
+        let case = test_evm_type2_anvil_cases()[0]
+            .clone()
+            .with_nonce(nonce.unwrap_or(0));
+        let event = test_sign_request_event(self, &case);
         let payload = test_sign_request_payload(&event);
         let sign_request = self
             .client

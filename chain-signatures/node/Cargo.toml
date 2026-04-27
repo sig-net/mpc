@@ -96,9 +96,9 @@ mpc-keys.workspace = true
 mpc-primitives.workspace = true
 signet-program.workspace = true
 
-alloy-primitives.workspace = true
 alloy-dyn-abi.workspace = true
 alloy-json-abi.workspace = true
+alloy-primitives.workspace = true
 secp256k1.workspace = true
 rlp.workspace = true
 

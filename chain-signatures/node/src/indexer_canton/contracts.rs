@@ -1,98 +1,121 @@
 //! Typed structs for Daml contract payloads.
 //!
 //! These represent the JSON payloads inside `CreatedEvent.payload` for specific
-//! Daml templates from `daml-signer` and `daml-evm-types`. Derived from the
+//! Daml templates from `daml-signer` and `daml-vault`. Derived from the
 //! `.daml` source files in `canton-mpc-poc/daml-packages/`.
 
 use alloy::consensus::TxEip1559;
-use alloy::primitives::{Address, Bytes, TxKind, U256};
+use alloy::eips::eip2930::{AccessList, AccessListItem};
+use alloy::primitives::{Address, Bytes, TxKind, B256, U256};
 use serde::{Deserialize, Serialize};
 use serde_aux::field_attributes::deserialize_number_from_string;
+
+/// EIP-2930/EIP-1559 access-list entry from the Signer contract.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvmAccessListEntry {
+    pub address: String,
+    #[serde(default)]
+    pub storage_keys: Vec<String>,
+}
 
 /// EVM transaction parameters from the Signer contract.
 /// Address fields are 40-char hex (20 bytes); numeric fields are 64-char hex.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct EvmTransactionParams {
-    pub to: String,
-    pub function_signature: String,
-    /// ABI-encoded call arguments as a hex string (no `0x` prefix,
-    /// no 4-byte function selector — the selector is derived from
-    /// `function_signature` when building calldata). Empty for no-arg calls.
-    #[serde(default)]
-    pub encoded_args: String,
-    pub value: String,
-    pub nonce: String,
-    pub gas_limit: String,
-    pub max_fee_per_gas: String,
-    pub max_priority_fee_per_gas: String,
+pub struct EvmType2TransactionParams {
     pub chain_id: String,
+    pub nonce: String,
+    pub max_priority_fee_per_gas: String,
+    pub max_fee_per_gas: String,
+    pub gas_limit: String,
+    pub to: Option<String>,
+    pub value: String,
+    #[serde(default)]
+    pub calldata: String,
+    #[serde(default)]
+    pub access_list: Vec<EvmAccessListEntry>,
 }
 
-impl EvmTransactionParams {
-    pub fn parse_to_address(&self) -> anyhow::Result<Address> {
-        Ok(format!("0x{}", self.to).parse()?)
-    }
-
-    pub fn parse_value(&self) -> anyhow::Result<U256> {
-        U256::from_str_radix(&self.value, 16)
-            .map_err(|e| anyhow::anyhow!("invalid hex in 'value': {e}"))
-    }
-
-    pub fn parse_nonce(&self) -> anyhow::Result<u64> {
-        u64::from_str_radix(&self.nonce, 16)
-            .map_err(|e| anyhow::anyhow!("invalid hex in 'nonce': {e}"))
-    }
-
-    pub fn parse_gas_limit(&self) -> anyhow::Result<u64> {
-        u64::from_str_radix(&self.gas_limit, 16)
-            .map_err(|e| anyhow::anyhow!("invalid hex in 'gas_limit': {e}"))
-    }
-
-    pub fn parse_max_fee_per_gas(&self) -> anyhow::Result<u128> {
-        u128::from_str_radix(&self.max_fee_per_gas, 16)
-            .map_err(|e| anyhow::anyhow!("invalid hex in 'max_fee_per_gas': {e}"))
-    }
-
-    pub fn parse_max_priority_fee_per_gas(&self) -> anyhow::Result<u128> {
-        u128::from_str_radix(&self.max_priority_fee_per_gas, 16)
-            .map_err(|e| anyhow::anyhow!("invalid hex in 'max_priority_fee_per_gas': {e}"))
-    }
-
-    pub fn parse_chain_id(&self) -> anyhow::Result<u64> {
-        u64::from_str_radix(&self.chain_id, 16)
-            .map_err(|e| anyhow::anyhow!("invalid hex in 'chain_id': {e}"))
-    }
+fn parse_u256_hex(value: &str, field: &str) -> anyhow::Result<U256> {
+    U256::from_str_radix(value, 16)
+        .map_err(|e| anyhow::anyhow!("invalid hex uint256 in {field}: {e}"))
 }
 
-/// Convert Canton EvmTransactionParams to an alloy TxEip1559.
-impl TryFrom<&EvmTransactionParams> for TxEip1559 {
+fn parse_u64_hex(value: &str, field: &str) -> anyhow::Result<u64> {
+    u64::try_from(parse_u256_hex(value, field)?)
+        .map_err(|_| anyhow::anyhow!("hex uint256 in {field} exceeds u64"))
+}
+
+fn parse_u128_hex(value: &str, field: &str) -> anyhow::Result<u128> {
+    u128::try_from(parse_u256_hex(value, field)?)
+        .map_err(|_| anyhow::anyhow!("hex uint256 in {field} exceeds u128"))
+}
+
+fn decode_fixed_hex<const N: usize>(value: &str, field: &str) -> anyhow::Result<[u8; N]> {
+    let mut out = [0u8; N];
+    hex::decode_to_slice(value, &mut out)
+        .map_err(|e| anyhow::anyhow!("invalid {N}-byte hex value in {field}: {e}"))?;
+    Ok(out)
+}
+
+fn parse_access_list(entries: &[EvmAccessListEntry]) -> anyhow::Result<AccessList> {
+    entries
+        .iter()
+        .map(|entry| {
+            Ok(AccessListItem {
+                address: Address::from(decode_fixed_hex::<20>(
+                    &entry.address,
+                    "accessList.address",
+                )?),
+                storage_keys: entry
+                    .storage_keys
+                    .iter()
+                    .map(|key| {
+                        Ok(B256::from(decode_fixed_hex::<32>(
+                            key,
+                            "accessList.storageKeys",
+                        )?))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()
+        .map(AccessList)
+}
+
+impl TryFrom<&EvmType2TransactionParams> for TxEip1559 {
     type Error = anyhow::Error;
 
-    fn try_from(p: &EvmTransactionParams) -> anyhow::Result<Self> {
+    fn try_from(params: &EvmType2TransactionParams) -> anyhow::Result<Self> {
+        let to = match params.to.as_deref() {
+            Some(to) => TxKind::Call(Address::from(decode_fixed_hex::<20>(to, "to")?)),
+            None => TxKind::Create,
+        };
+
         Ok(Self {
-            chain_id: p.parse_chain_id()?,
-            nonce: p.parse_nonce()?,
-            gas_limit: p.parse_gas_limit()?,
-            max_fee_per_gas: p.parse_max_fee_per_gas()?,
-            max_priority_fee_per_gas: p.parse_max_priority_fee_per_gas()?,
-            to: TxKind::Call(p.parse_to_address()?),
-            value: p.parse_value()?,
-            input: Bytes::from(super::calldata::build_calldata(
-                &p.function_signature,
-                &p.encoded_args,
-            )?),
-            access_list: Default::default(),
+            chain_id: parse_u64_hex(&params.chain_id, "chainId")?,
+            nonce: parse_u64_hex(&params.nonce, "nonce")?,
+            gas_limit: parse_u64_hex(&params.gas_limit, "gasLimit")?,
+            max_fee_per_gas: parse_u128_hex(&params.max_fee_per_gas, "maxFeePerGas")?,
+            max_priority_fee_per_gas: parse_u128_hex(
+                &params.max_priority_fee_per_gas,
+                "maxPriorityFeePerGas",
+            )?,
+            to,
+            value: parse_u256_hex(&params.value, "value")?,
+            access_list: parse_access_list(&params.access_list)?,
+            input: Bytes::from(hex::decode(&params.calldata)?),
         })
     }
 }
 
-/// Daml variant: `data TxParams = EvmParams EvmTransactionParams`
-/// Canton JSON API serializes as `{"tag": "EvmParams", "value": {...}}`.
+/// Daml variant: `data TxParams = EvmType2TxParams EvmType2TransactionParams`
+/// Canton JSON API serializes as `{"tag": "EvmType2TxParams", "value": {...}}`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "tag", content = "value")]
 pub enum TxParams {
-    EvmTxParams(EvmTransactionParams),
+    EvmType2TxParams(EvmType2TransactionParams),
 }
 
 /// Payload of a `Signer:SignBidirectionalEvent` created event.
