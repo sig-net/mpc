@@ -555,9 +555,6 @@ pub async fn process_execution_confirmed(
             SignKind::SignBidirectional(event) => event.source_event_id(),
             _ => None,
         });
-    if pending_tx.source_chain == Chain::Canton && source_event_id.is_none() {
-        anyhow::bail!("missing source event id on Canton response");
-    }
 
     let completed_tx = CompletedTx::new(pending_tx.clone(), block_height);
 
@@ -1496,53 +1493,6 @@ mod tests {
             }
             other => panic!("Expected Sign::Request, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn process_execution_confirmed_rejects_canton_entry_without_source_event_id() {
-        let backlog = Backlog::new();
-        let tx = test_bidirectional_tx(25, Chain::Canton, Chain::Ethereum);
-        let sign_id = SignId::new(tx.request_id);
-
-        backlog
-            .insert(test_indexed_request(
-                sign_id,
-                tx.source_chain,
-                test_sign_args(25),
-                current_unix_timestamp(),
-                SignKind::Sign,
-            ))
-            .await;
-        backlog
-            .watch_execution(tx.target_chain, sign_id, tx.clone())
-            .await;
-
-        let (sign_tx, mut sign_rx) = mpsc::channel(4);
-        let err = process_execution_confirmed(
-            tx.id,
-            sign_id,
-            tx.source_chain,
-            456u64,
-            ExecutionOutcome::Success { output: vec![1] },
-            &backlog,
-            sign_tx,
-            tx.target_chain,
-        )
-        .await
-        .expect_err("Canton final response needs the original SignBidirectionalEvent CID");
-
-        assert!(
-            err.to_string().contains("missing source event id"),
-            "unexpected error: {err:#}"
-        );
-        assert!(backlog.pending_execution(tx.target_chain).await.is_empty());
-        let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
-        assert_eq!(tx_after.status(), SignStatus::AwaitingResponse);
-        assert!(matches!(tx_after.request.kind, SignKind::Sign));
-        assert!(matches!(
-            sign_rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected)
-        ));
     }
 
     fn respond_event(sign_id: SignId) -> RespondBidirectionalEvent {
