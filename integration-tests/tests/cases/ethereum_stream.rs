@@ -16,7 +16,7 @@ use mpc_node::backlog::Backlog;
 use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
-use mpc_node::protocol::{Chain, ParticipantInfo, Sign, SignKind};
+use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign, SignKind};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::ops::SignBidirectionalEvent as NodeSignBidirectionalEvent;
@@ -723,6 +723,16 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     let ctx = EthereumTestEnvironment::new().await?;
     let backlog = ctx.backlog();
 
+    let dummy_sign_id = SignId::new([0x66; 32]);
+    backlog
+        .insert(IndexedSignRequest::sign(
+            dummy_sign_id,
+            test_sign_args(0x66),
+            Chain::Ethereum,
+            current_unix_timestamp(),
+        ))
+        .await;
+
     let stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
@@ -747,16 +757,20 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         NodeClient::new(&Default::default()),
     ));
 
-    timeout(Duration::from_secs(20), async {
-        loop {
-            if backlog.processed_block(Chain::Ethereum).await.is_some() {
+    let mut saw_catchup_flush = false;
+    for _ in 0..20 {
+        match next_sign_message_within(&mut sign_rx, Duration::from_secs(10)).await? {
+            Sign::Request(req) if req.id == dummy_sign_id => {
+                saw_catchup_flush = true;
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            _ => continue,
         }
-    })
-    .await
-    .context("ethereum stream did not complete catchup")?;
+    }
+    assert!(
+        saw_catchup_flush,
+        "ethereum stream did not flush the pre-seeded request after catchup"
+    );
 
     let (tx_hash, tx_block) = submit_eth_transfer_with_block(&ctx).await?;
 
@@ -772,10 +786,8 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     .await
     .context("ethereum stream did not advance past the mined execution block")?;
 
-    // Register an execution watcher for the mined transaction after the stream has
-    // caught up to test that we correctly backfill or check past transactions so
-    // the watcher is removed on ethereum_stream processing watchers and emitting
-    // the expected follow-up request.
+    // Register the execution watcher only after catchup has completed and the
+    // transaction is already in the past relative to the stream.
     let sign_id = SignId::new([0x88; 32]);
     let tx_id =
         mpc_node::sign_bidirectional::BidirectionalTxId(B256::from_slice(tx_hash.as_bytes()));
@@ -798,7 +810,19 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         from_address: AlloyAddress::from_slice(ctx.wallet.as_bytes()),
         nonce: 0,
     };
-    backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;
+    backlog
+        .insert(IndexedSignRequest::sign_bidirectional(
+            sign_id,
+            test_sign_args(0x88),
+            Chain::Solana,
+            current_unix_timestamp(),
+            test_bidirectional_event(),
+        ))
+        .await;
+    backlog
+        .advance(Chain::Solana, sign_id, tx)
+        .await
+        .context("failed to seed late execution watcher")?;
 
     let msg = next_sign_message_within(&mut sign_rx, Duration::from_secs(20)).await?;
     match msg {
