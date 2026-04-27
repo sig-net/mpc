@@ -20,6 +20,7 @@ use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{SignArgs, SignId, Signature as MpcSignature, LATEST_MPC_KEY_VERSION};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
 use std::str::FromStr;
@@ -900,20 +901,151 @@ impl EthereumIndexer {
         ))
     }
 
+    async fn execution_confirmed_event(
+        &self,
+        tx_id: crate::sign_bidirectional::BidirectionalTxId,
+        sign_id: SignId,
+        pending_tx: &crate::sign_bidirectional::BidirectionalTx,
+        block_number: u64,
+        receipt: &alloy::rpc::types::TransactionReceipt,
+    ) -> ChainEvent {
+        let status = if receipt.status() {
+            SignStatus::Success
+        } else {
+            SignStatus::Failed
+        };
+
+        tracing::info!(
+            ?tx_id,
+            ?sign_id,
+            block_number,
+            "bidirectional execution observed via rpc"
+        );
+
+        let result = if status == SignStatus::Success {
+            let completed_tx = CompletedTx::new(pending_tx.clone(), block_number);
+            match completed_tx.extract_success_tx_output(&self.client).await {
+                Ok(serialized_output) => {
+                    tracing::info!(
+                        ?tx_id,
+                        ?sign_id,
+                        "extracted transaction output for bidirectional tx"
+                    );
+                    ExecutionOutcome::Success {
+                        output: serialized_output,
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?tx_id,
+                        ?sign_id,
+                        ?err,
+                        "Failed to extract transaction output for bidirectional tx, using empty output"
+                    );
+                    ExecutionOutcome::Success { output: vec![] }
+                }
+            }
+        } else {
+            ExecutionOutcome::Failed
+        };
+
+        ChainEvent::ExecutionConfirmed {
+            tx_id,
+            sign_id,
+            source_chain: pending_tx.source_chain,
+            block_height: block_number,
+            result,
+        }
+    }
+
+    async fn backfill_execution_confirmation(
+        &self,
+        tx_id: crate::sign_bidirectional::BidirectionalTxId,
+        sign_id: SignId,
+        pending_tx: &crate::sign_bidirectional::BidirectionalTx,
+        current_block_number: u64,
+    ) -> anyhow::Result<Option<ChainEvent>> {
+        let Some(tx) = self.client.get_transaction_by_hash(tx_id.0).await? else {
+            return Ok(None);
+        };
+
+        let Some(mined_block_number) = tx.block_number else {
+            return Ok(None);
+        };
+
+        if mined_block_number > current_block_number {
+            tracing::debug!(
+                ?tx_id,
+                ?sign_id,
+                mined_block_number,
+                current_block_number,
+                "skipping late watcher backfill for future ethereum block"
+            );
+            return Ok(None);
+        }
+
+        let Some(block_receipts) = self
+            .client
+            .get_block_receipts(mined_block_number.into())
+            .await?
+        else {
+            tracing::debug!(
+                ?tx_id,
+                ?sign_id,
+                mined_block_number,
+                "late watcher backfill found mined transaction without block receipts"
+            );
+            return Ok(None);
+        };
+
+        let Some(receipt) = block_receipts
+            .into_iter()
+            .find(|receipt| receipt.transaction_hash == tx_id.0)
+        else {
+            tracing::warn!(
+                ?tx_id,
+                ?sign_id,
+                mined_block_number,
+                "late watcher backfill could not find transaction receipt in mined block"
+            );
+            return Ok(None);
+        };
+
+        tracing::info!(
+            ?tx_id,
+            ?sign_id,
+            mined_block_number,
+            current_block_number,
+            "backfilled execution confirmation for late ethereum watcher"
+        );
+
+        Ok(Some(
+            self.execution_confirmed_event(
+                tx_id,
+                sign_id,
+                pending_tx,
+                mined_block_number,
+                &receipt,
+            )
+            .await,
+        ))
+    }
+
     async fn collect_execution_confirmations(
         &self,
         block_number: u64,
         block_receipts: Vec<alloy::rpc::types::TransactionReceipt>,
     ) -> anyhow::Result<Vec<ChainEvent>> {
-        let block_receipts: std::collections::HashMap<
+        let block_receipts: HashMap<
             alloy::primitives::B256,
             alloy::rpc::types::TransactionReceipt,
         > = block_receipts
             .into_iter()
             .map(|receipt| (receipt.transaction_hash, receipt.clone()))
-            .collect::<std::collections::HashMap<_, _>>();
+            .collect::<HashMap<_, _>>();
 
         let mut events = Vec::new();
+        let mut resolved_tx_ids = HashSet::new();
 
         let watchers = self.backlog.pending_execution(Chain::Ethereum).await;
         tracing::info!(
@@ -924,65 +1056,38 @@ impl EthereumIndexer {
 
         for (tx_id, (sign_id, pending_tx)) in watchers {
             tracing::info!(?tx_id, ?sign_id, "querying receipt for bidirectional tx");
-            let Some(receipt) = block_receipts.get(&pending_tx.id.0) else {
+            if let Some(receipt) = block_receipts.get(&pending_tx.id.0) {
+                events.push(
+                    self.execution_confirmed_event(
+                        tx_id,
+                        sign_id,
+                        &pending_tx,
+                        block_number,
+                        receipt,
+                    )
+                    .await,
+                );
+                resolved_tx_ids.insert(tx_id);
                 continue;
-            };
+            }
 
-            let status = if receipt.status() {
-                SignStatus::Success
-            } else {
-                SignStatus::Failed
-            };
-
-            tracing::info!(
-                ?tx_id,
-                ?sign_id,
-                block_number,
-                "bidirectional execution observed via rpc"
-            );
-
-            let source_chain = pending_tx.source_chain;
-
-            let result = if status == SignStatus::Success {
-                let completed_tx = CompletedTx::new(pending_tx.clone(), block_number);
-                match completed_tx.extract_success_tx_output(&self.client).await {
-                    Ok(serialized_output) => {
-                        tracing::info!(
-                            ?tx_id,
-                            ?sign_id,
-                            "extracted transaction output for bidirectional tx"
-                        );
-                        ExecutionOutcome::Success {
-                            output: serialized_output,
-                        }
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            ?tx_id,
-                            ?sign_id,
-                            ?err,
-                            "Failed to extract transaction output for bidirectional tx, using empty output"
-                        );
-                        ExecutionOutcome::Success { output: vec![] }
-                    }
-                }
-            } else {
-                ExecutionOutcome::Failed
-            };
-
-            events.push(ChainEvent::ExecutionConfirmed {
-                tx_id,
-                sign_id,
-                source_chain,
-                block_height: block_number,
-                result,
-            });
+            if let Some(event) = self
+                .backfill_execution_confirmation(tx_id, sign_id, &pending_tx, block_number)
+                .await?
+            {
+                events.push(event);
+                resolved_tx_ids.insert(tx_id);
+            }
         }
 
         // Staleness checks (nonce too low)
         let remaining_pending = self.backlog.pending_execution(Chain::Ethereum).await;
 
         for (tx_id, (sign_id, tx)) in remaining_pending {
+            if resolved_tx_ids.contains(&tx_id) {
+                continue;
+            }
+
             let current_nonce = match self
                 .client
                 .as_ref()
@@ -1249,7 +1354,17 @@ impl ChainStream for EthereumStream {
 }
 #[cfg(test)]
 mod tests {
-    use super::EthereumIndexer;
+    use super::{EthConfig, EthereumClient, EthereumIndexer};
+    use crate::backlog::Backlog;
+    use crate::protocol::Chain;
+    use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId};
+    use crate::stream::{ChainEvent, ExecutionOutcome};
+    use alloy::primitives::{address, b256, Address};
+    use mockito::{Matcher, Server};
+    use mpc_primitives::{SignId, LATEST_MPC_KEY_VERSION};
+    use serde_json::json;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Notify};
 
     #[test]
     fn catchup_starts_after_processed_height() {
@@ -1274,5 +1389,162 @@ mod tests {
             EthereumIndexer::catchup_start_block_number(Some(1), anchor_height),
             expected_oldest,
         );
+    }
+
+    #[tokio::test]
+    async fn late_watcher_backfill_uses_tx_hash_and_mined_block() {
+        let mut server = Server::new_async().await;
+
+        let tx_hash = b256!("018b2331d461a4aeedf6a1f9cc37463377578244e6a35216057a8370714e798f");
+        let block_hash = b256!("6e4e53d1de650d5a5ebed19b38321db369ef1dc357904284ecf4d89b8834969c");
+        let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+        let to_address = address!("5fbdb2315678afecb367f032d93f642f64180aa3");
+
+        let tx_response = json!({
+            "hash": format!("{tx_hash:#x}"),
+            "nonce": "0x1",
+            "blockHash": format!("{block_hash:#x}"),
+            "blockNumber": "0x2",
+            "transactionIndex": "0x0",
+            "from": format!("{from_address:#x}"),
+            "to": format!("{to_address:#x}"),
+            "value": "0x0",
+            "gasPrice": "0x3a29f0f8",
+            "gas": "0x5208",
+            "maxFeePerGas": "0xba43b7400",
+            "maxPriorityFeePerGas": "0x5f5e100",
+            "input": "0x",
+            "r": "0xd309309a59a49021281cb6bb41d164c96eab4e50f0c1bd24c03ca336e7bc2bb7",
+            "s": "0x28a7f089143d0a1355ebeb2a1b9f0e5ad9eca4303021c1400d61bc23c9ac5319",
+            "v": "0x0",
+            "yParity": "0x0",
+            "chainId": "0x7a69",
+            "accessList": [],
+            "type": "0x2"
+        });
+
+        let receipt_response = json!({
+            "transactionHash": format!("{tx_hash:#x}"),
+            "blockHash": format!("{block_hash:#x}"),
+            "blockNumber": "0x2",
+            "transactionIndex": "0x0",
+            "from": format!("{from_address:#x}"),
+            "to": format!("{to_address:#x}"),
+            "gasUsed": "0x5208",
+            "effectiveGasPrice": "0x3a29f0f8",
+            "contractAddress": null,
+            "logsBloom": format!("0x{}", "0".repeat(512)),
+            "cumulativeGasUsed": "0x5208",
+            "type": "0x2",
+            "logs": [],
+            "status": "0x0"
+        });
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionByHash",
+                "params": [format!("{tx_hash:#x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": tx_response,
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockReceipts",
+                "params": ["0x2"]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": [receipt_response],
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([0x55; 32]);
+        let tx = BidirectionalTx {
+            id: BidirectionalTxId(tx_hash),
+            sender: [0u8; 32],
+            serialized_transaction: vec![],
+            source_chain: Chain::Solana,
+            target_chain: Chain::Ethereum,
+            caip2_id: "eip155:31337".to_string(),
+            key_version: LATEST_MPC_KEY_VERSION,
+            deposit: 0,
+            path: "m/44'/60'/0'/0/0".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: Chain::Ethereum.to_string(),
+            params: "{}".to_string(),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+            request_id: sign_id.request_id,
+            from_address,
+            nonce: 0,
+        };
+        backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;
+
+        let (events_tx, _events_rx) = mpsc::channel(1);
+        let indexer = EthereumIndexer {
+            eth: EthConfig {
+                account_sk: String::new(),
+                consensus_rpc_http_url: server.url(),
+                execution_rpc_http_url: server.url(),
+                contract_address: format!("{:x}", Address::ZERO),
+                network: "sepolia".to_string(),
+                helios_data_path: "/tmp/helios-test".to_string(),
+                refresh_finalized_interval: 100,
+                optimistic_requests: true,
+                light_client: false,
+            },
+            backlog,
+            client: Arc::new(EthereumClient::DirectRpc(
+                super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
+            )),
+            events_tx,
+            contract_address: Address::ZERO,
+            catchup_complete: Arc::new(Notify::new()),
+            live_blocks_rx: None,
+        };
+
+        let events = indexer
+            .collect_execution_confirmations(5, Vec::new())
+            .await
+            .expect("late watcher backfill should succeed");
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ChainEvent::ExecutionConfirmed {
+                tx_id: event_tx_id,
+                sign_id: event_sign_id,
+                source_chain,
+                block_height,
+                result,
+            } => {
+                assert_eq!(*event_tx_id, BidirectionalTxId(tx_hash));
+                assert_eq!(*event_sign_id, sign_id);
+                assert_eq!(*source_chain, Chain::Solana);
+                assert_eq!(*block_height, 2);
+                assert!(matches!(result, ExecutionOutcome::Failed));
+            }
+            other => panic!("expected ExecutionConfirmed, got {other:?}"),
+        }
     }
 }

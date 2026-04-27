@@ -218,6 +218,28 @@ async fn submit_eth_transfer(ctx: &EthereumTestEnvironment) -> Result<H256> {
     Ok(receipt.transaction_hash)
 }
 
+async fn submit_eth_transfer_with_block(ctx: &EthereumTestEnvironment) -> Result<(H256, u64)> {
+    let pending_tx = ctx
+        .signer
+        .send_transaction(
+            TransactionRequest::new().to(ctx.wallet).value(U256::zero()),
+            None,
+        )
+        .await?;
+    let receipt = pending_tx
+        .await
+        .context("failed to mine eth transfer transaction")?
+        .context("eth transfer transaction dropped from mempool")?;
+
+    Ok((
+        receipt.transaction_hash,
+        receipt
+            .block_number
+            .context("eth transfer transaction missing block number")?
+            .as_u64(),
+    ))
+}
+
 async fn submit_respond_for_request_id<M>(
     contract: ChainSignaturesContract<Arc<M>>,
     request_id: [u8; 32],
@@ -693,6 +715,123 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
     }
 
     assert!(saw_execution, "did not observe ExecutionConfirmed event");
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -> Result<()> {
+    let ctx = EthereumTestEnvironment::new().await?;
+    let backlog = ctx.backlog();
+
+    let stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
+    let (sign_tx, mut sign_rx) = mpsc::channel(16);
+    let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
+        &"test.near".parse::<AccountId>().unwrap(),
+        k256::ProjectivePoint::GENERATOR.to_affine(),
+        1,
+        Default::default(),
+    );
+
+    let mut mesh_state = MeshState::default();
+    let mut info = ParticipantInfo::new(0);
+    info.url = "http://127.0.0.1:1".to_string();
+    mesh_state.update(Participant::from(0u32), NodeStatus::Active, info);
+    let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
+
+    let run_handle = tokio::spawn(run_stream(
+        stream,
+        sign_tx,
+        backlog.clone(),
+        contract_watcher,
+        mesh_rx,
+        NodeClient::new(&Default::default()),
+    ));
+
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if backlog.processed_block(Chain::Ethereum).await.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .context("ethereum stream did not complete catchup")?;
+
+    let (tx_hash, tx_block) = submit_eth_transfer_with_block(&ctx).await?;
+
+    timeout(Duration::from_secs(20), async {
+        loop {
+            let processed_block = backlog.processed_block(Chain::Ethereum).await.unwrap_or(0);
+            if processed_block >= tx_block {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .context("ethereum stream did not advance past the mined execution block")?;
+
+    // Register an execution watcher for the mined transaction after the stream has
+    // caught up to test that we correctly backfill or check past transactions so
+    // the watcher is removed on ethereum_stream processing watchers and emitting
+    // the expected follow-up request.
+    let sign_id = SignId::new([0x88; 32]);
+    let tx_id =
+        mpc_node::sign_bidirectional::BidirectionalTxId(B256::from_slice(tx_hash.as_bytes()));
+    let tx = mpc_node::sign_bidirectional::BidirectionalTx {
+        id: tx_id,
+        sender: [0u8; 32],
+        serialized_transaction: vec![],
+        source_chain: Chain::Solana,
+        target_chain: Chain::Ethereum,
+        caip2_id: "eip155:31337".to_string(),
+        key_version: LATEST_MPC_KEY_VERSION,
+        deposit: 0,
+        path: "m/44'/60'/0'/0/1".to_string(),
+        algo: "secp256k1".to_string(),
+        dest: Chain::Ethereum.to_string(),
+        params: "{}".to_string(),
+        output_deserialization_schema: vec![],
+        respond_serialization_schema: vec![],
+        request_id: sign_id.request_id,
+        from_address: AlloyAddress::from_slice(ctx.wallet.as_bytes()),
+        nonce: 0,
+    };
+    backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;
+
+    let msg = next_sign_message_within(&mut sign_rx, Duration::from_secs(20)).await?;
+    match msg {
+        Sign::Request(req) => {
+            assert_eq!(req.id, sign_id);
+            assert_eq!(req.chain, Chain::Solana);
+            match req.kind {
+                SignKind::RespondBidirectional(res) => {
+                    assert_eq!(res.tx_id, tx_id);
+                    assert!(
+                        !res.output.starts_with(&[0xde, 0xad, 0xbe, 0xef]),
+                        "late watcher backfill should preserve the successful execution path"
+                    );
+                }
+                other => panic!("expected RespondBidirectional request, got {other:?}"),
+            }
+        }
+        other => panic!("expected Sign::Request from late watcher backfill, got {other:?}"),
+    }
+
+    let watchers = backlog.pending_execution(Chain::Ethereum).await;
+    assert!(
+        watchers.is_empty(),
+        "late watcher should be cleared after backfill"
+    );
+
+    let no_extra_message = timeout(Duration::from_millis(1500), sign_rx.recv()).await;
+    assert!(
+        no_extra_message.is_err(),
+        "late watcher backfill emitted an unexpected duplicate follow-up"
+    );
+
+    run_handle.abort();
     Ok(())
 }
 
