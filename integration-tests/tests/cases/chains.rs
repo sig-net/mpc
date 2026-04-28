@@ -9,6 +9,7 @@ use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
 use mpc_crypto::kdf::check_ec_signature;
 use mpc_crypto::{derive_epsilon_sol, derive_key, near_public_key_to_affine_point};
+use mpc_primitives::Chain;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use reqwest::Client;
 use rlp::RlpStream;
@@ -99,7 +100,7 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
         .solana()
         .bidirectional()
         .transaction_data(unsigned_rlp.clone())
-        .caip2_id("eip155:60")
+        .caip2_id(Chain::Ethereum.caip2_chain_id())
         .output_deserialization_schema(Vec::new())
         .respond_serialization_schema(Vec::new())
         .payload(msg_hash_bytes)

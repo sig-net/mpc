@@ -90,6 +90,7 @@ pub mod signet_program {
     pub fn sign_bidirectional(
         ctx: Context<SignBidirectional>,
         serialized_transaction: Vec<u8>,
+        // the mainnet caip2_id of the target chain where the signed transaction will be sent
         caip2_id: String,
         key_version: u32,
         path: String,
@@ -218,19 +219,56 @@ pub struct SignatureRequestedEvent {
     pub fee_payer: Option<Pubkey>,
 }
 
+/// Event emitted when a bidirectional signing request is initiated
+/// via the `sign_bidirectional` instruction on the Solana program.
 #[event]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SignBidirectionalEvent {
+    /// The public key of the sender initiating the request.
     pub sender: Pubkey,
+
+    /// The serialized transaction payload to be signed.
     pub serialized_transaction: Vec<u8>,
+
+    /// mainnet CAIP-2 chain ID of the *target chain* where the signed transaction will be sent.
+    ///
+    /// Note: This is NOT the chain where `respond()` or `respond_bidirectional()` is executed.
     pub caip2_id: String,
+
+    /// Version of the key to be used for signing.
     pub key_version: u32,
+
+    /// Deposit associated with the request.
     pub deposit: u64,
+
+    /// Derivation path used for signing.
     pub path: String,
+
+    /// Signing algorithm identifier.
+    ///
+    /// If empty (`""`), ECDSA will be used by default.
     pub algo: String,
+
+    /// Destination field (currently unused).
+    ///
+    /// Should be left empty (`""`).
     pub dest: String,
+
+    /// Additional parameters encoded as a string (currently unused).
+    ///
+    /// Should be left empty (`""`).
     pub params: String,
+
+    /// The program ID of the Solana program that emitted this event.
+    ///
+    /// Used by MPC service to filter and verify events from the correct program.
+    ///
+    /// MUST match the deployed program ID.
     pub program_id: Pubkey,
+
+    /// Schema used to deserialize the output of the signed transaction.
     pub output_deserialization_schema: Vec<u8>,
+
+    /// Schema used to serialize the `respond_bidirectional` payload.
     pub respond_serialization_schema: Vec<u8>,
 }

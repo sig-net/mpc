@@ -277,8 +277,12 @@ impl Backlog {
         let mut requeueable: Vec<_> = pending
             .requests
             .values()
-            .filter(|entry| entry.status() == SignStatus::AwaitingResponse)
-            .filter(|entry| entry.execution_tx().is_none())
+            .filter(|entry| {
+                matches!(
+                    entry.status(),
+                    SignStatus::AwaitingResponse | SignStatus::AwaitingResponseBidirectional
+                ) && entry.execution_tx().is_none()
+            })
             .map(|entry| entry.request.clone())
             .collect();
 
@@ -322,6 +326,27 @@ impl Backlog {
         _success: bool,
     ) -> Result<(), BacklogError> {
         // TODO: implement
+        Ok(())
+    }
+
+    // TODO: the backlog is a bit bloated with transition functions, so we need to do a proper cleanup
+    // where we can have proper typestate on a set of types. With these types, we can easily guide
+    // ourselves into the right transitions. For now, this is used to set the request in
+    // `execution_confirmed` to transition from PendingExecution to AwaitingResponseBidirectional.
+    pub async fn set_request(
+        &self,
+        chain: Chain,
+        id: &SignId,
+        request: IndexedSignRequest,
+    ) -> Result<(), BacklogError> {
+        let mut requests = self.requests.write().await;
+        let Some(pending) = requests.get_mut(&chain) else {
+            return Err(BacklogError::ChainNotFound);
+        };
+        let Some(entry) = pending.requests.get_mut(id) else {
+            return Err(BacklogError::NotFound { chain, id: *id });
+        };
+        entry.set_request(request);
         Ok(())
     }
 
@@ -716,6 +741,10 @@ impl BacklogEntry {
         self.status = status;
     }
 
+    pub fn set_request(&mut self, request: IndexedSignRequest) {
+        self.request = request;
+    }
+
     pub fn advance_to_execution(
         &mut self,
         bidirectional_tx: BidirectionalTx,
@@ -738,7 +767,7 @@ impl BacklogEntry {
             .map(|tx| tx.target_chain)
             .or_else(|| match &self.request.kind {
                 SignKind::Sign => None,
-                SignKind::SignBidirectional(event) => event.target_chain(),
+                SignKind::SignBidirectional(event) => event.target_chain().ok(),
                 SignKind::RespondBidirectional(_) => None,
             })
     }
@@ -757,11 +786,17 @@ impl BacklogEntry {
     }
 
     pub fn typename(&self) -> &'static str {
-        match (&self.request.kind, self.execution.is_some()) {
-            (SignKind::Sign, _) => "Sign",
-            (SignKind::SignBidirectional(_), true) => "BidirectionalExecution",
-            (SignKind::SignBidirectional(_), false) => "BidirectionalPending",
-            (SignKind::RespondBidirectional(_), _) => "RespondBidirectional",
+        match (&self.request.kind, self.execution.is_some(), self.status) {
+            (SignKind::Sign, _, _) => "Sign",
+            (SignKind::SignBidirectional(_), true, _) => "BidirectionalExecution",
+            (SignKind::SignBidirectional(_), false, SignStatus::AwaitingResponse) => {
+                "BidirectionalPending"
+            }
+            (SignKind::SignBidirectional(_), false, _) => "BidirectionalPending",
+            (SignKind::RespondBidirectional(_), _, SignStatus::AwaitingResponseBidirectional) => {
+                "BidirectionalRespondPending"
+            }
+            (SignKind::RespondBidirectional(_), _, _) => "RespondBidirectional",
         }
     }
 }
@@ -795,6 +830,7 @@ mod tests {
     use super::*;
     use crate::{
         protocol::SignKind,
+        respond_bidirectional::RespondBidirectionalTx,
         sign_bidirectional::{BidirectionalTx, BidirectionalTxId, SignStatus},
         stream::ops::SignBidirectionalEvent,
     };
@@ -809,7 +845,7 @@ mod tests {
             serialized_transaction: vec![1, 2, 3],
             source_chain: Chain::Solana,
             target_chain: Chain::Ethereum,
-            caip2_id: "test_caip2_id".to_string(),
+            caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
             key_version: 1,
             deposit: 1000,
             path: "test_path".to_string(),
@@ -833,7 +869,7 @@ mod tests {
             sender: Default::default(),
             serialized_transaction: vec![],
             dest: dest.to_string(),
-            caip2_id: format!("{dest}:test"),
+            caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
             key_version: 0,
             deposit: 0,
             path: "".to_string(),
@@ -911,13 +947,29 @@ mod tests {
 
         match status {
             SignStatus::AwaitingResponse => {}
+            SignStatus::AwaitingResponseBidirectional => {
+                let completion_request = IndexedSignRequest::respond_bidirectional(
+                    sign_id,
+                    create_test_args(sign_id.request_id[0]),
+                    chain,
+                    0,
+                    RespondBidirectionalTx {
+                        tx_id: tx.id,
+                        output: vec![],
+                    },
+                );
+                backlog
+                    .set_request(chain, &sign_id, completion_request)
+                    .await
+                    .unwrap();
+            }
             SignStatus::PendingExecution => {
                 backlog.advance(chain, sign_id, tx).await.unwrap();
             }
-            SignStatus::Success | SignStatus::Failed => {
-                backlog.advance(chain, sign_id, tx).await.unwrap();
-                backlog.set_status(chain, &sign_id, status).await;
-            }
+        }
+
+        if status == SignStatus::AwaitingResponseBidirectional {
+            backlog.set_status(chain, &sign_id, status).await;
         }
     }
 
@@ -989,7 +1041,7 @@ mod tests {
             &backlog,
             Chain::Ethereum,
             tx2,
-            SignStatus::Success,
+            SignStatus::AwaitingResponseBidirectional,
             "ethereum",
         )
         .await;
@@ -1024,11 +1076,11 @@ mod tests {
             .await;
         assert_eq!(eth_awaiting.len(), 1);
 
-        // Filter Ethereum by Success
-        let eth_success = backlog
-            .get_by_status(Chain::Ethereum, SignStatus::Success)
+        // Filter Ethereum by bidirectional completion awaiting final respond
+        let eth_completion = backlog
+            .get_by_status(Chain::Ethereum, SignStatus::AwaitingResponseBidirectional)
             .await;
-        assert_eq!(eth_success.len(), 1);
+        assert_eq!(eth_completion.len(), 1);
 
         // Filter Solana by Pending
         let sol_pending = backlog
@@ -1131,7 +1183,7 @@ mod tests {
             &backlog,
             Chain::Ethereum,
             tx2.clone(),
-            SignStatus::Success,
+            SignStatus::AwaitingResponseBidirectional,
             "ethereum",
         )
         .await;
@@ -1284,7 +1336,7 @@ mod tests {
                 sender: Default::default(),
                 serialized_transaction: vec![1, 2, 3],
                 dest: "ethereum".to_string(),
-                caip2_id: "eip155:1".to_string(),
+                caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
                 key_version: 1,
                 deposit: 10,
                 path: "m/0".to_string(),
@@ -1323,6 +1375,101 @@ mod tests {
         assert!(matches!(
             recovered_entry.request.kind,
             SignKind::SignBidirectional(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_recovered_completed_bidirectional_requests_are_requeued_for_final_respond() {
+        let status = SignStatus::AwaitingResponseBidirectional;
+        for offset in 0..2 {
+            let backlog = Backlog::new();
+            let tx = create_test_tx(8 + offset as u8);
+            let sign_id = SignId::new(tx.request_id);
+
+            insert_bidirectional_with_status(
+                &backlog,
+                Chain::Solana,
+                tx.clone(),
+                status,
+                "ethereum",
+            )
+            .await;
+            backlog.set_processed_block(Chain::Solana, 10).await;
+
+            let checkpoint = backlog.checkpoint(Chain::Solana).await;
+
+            let recovered = Backlog::new();
+            recovered
+                .recover_by_checkpoint(checkpoint)
+                .await
+                .expect("failed to recover");
+
+            let completion_request = IndexedSignRequest::respond_bidirectional(
+                sign_id,
+                create_test_args(sign_id.request_id[0]),
+                Chain::Solana,
+                0,
+                RespondBidirectionalTx {
+                    tx_id: tx.id,
+                    output: vec![],
+                },
+            );
+            recovered
+                .set_request(Chain::Solana, &sign_id, completion_request)
+                .await
+                .expect("failed to store completion request");
+            recovered
+                .set_status(
+                    Chain::Solana,
+                    &sign_id,
+                    SignStatus::AwaitingResponseBidirectional,
+                )
+                .await;
+
+            let requeued = recovered.take_requeueable_requests(Chain::Solana).await;
+            assert_eq!(
+                requeued.len(),
+                1,
+                "completed bidirectional request should be requeued for final respond"
+            );
+            assert!(matches!(
+                requeued[0].kind,
+                SignKind::RespondBidirectional(_)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_awaiting_response_bidirectional_requeues() {
+        let backlog = Backlog::new();
+        let tx = create_test_tx(42);
+        let sign_id = SignId::new(tx.request_id);
+
+        let completion_request = IndexedSignRequest::respond_bidirectional(
+            sign_id,
+            create_test_args(sign_id.request_id[0]),
+            Chain::Solana,
+            0,
+            RespondBidirectionalTx {
+                tx_id: tx.id,
+                output: vec![1, 2, 3],
+            },
+        );
+
+        backlog.insert(completion_request).await;
+        backlog
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::AwaitingResponseBidirectional,
+            )
+            .await;
+
+        let requeued = backlog.take_requeueable_requests(Chain::Solana).await;
+        assert_eq!(requeued.len(), 1);
+        assert!(matches!(
+            requeued[0].kind,
+            SignKind::RespondBidirectional(_)
         ));
     }
 
@@ -1366,10 +1513,14 @@ mod tests {
 
         // set_status should update the sign request status
         backlog
-            .set_status(tx.source_chain, &sign_id, SignStatus::Success)
+            .set_status(
+                tx.source_chain,
+                &sign_id,
+                SignStatus::AwaitingResponseBidirectional,
+            )
             .await;
         let successes = backlog
-            .get_by_status(tx.source_chain, SignStatus::Success)
+            .get_by_status(tx.source_chain, SignStatus::AwaitingResponseBidirectional)
             .await;
         assert!(successes.contains_key(&sign_id));
     }

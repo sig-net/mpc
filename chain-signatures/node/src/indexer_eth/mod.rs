@@ -5,7 +5,6 @@ use crate::backlog::Backlog;
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::respond_bidirectional::CompletedTx;
-use crate::sign_bidirectional::SignStatus;
 use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
 use crate::stream::{ChainEvent, ChainIndexer, ChainStream, ExecutionOutcome};
 
@@ -914,11 +913,7 @@ impl EthereumIndexer {
         block_number: u64,
         receipt: &alloy::rpc::types::TransactionReceipt,
     ) -> ChainEvent {
-        let status = if receipt.status() {
-            SignStatus::Success
-        } else {
-            SignStatus::Failed
-        };
+        let receipt_succeeded = receipt.status();
 
         tracing::info!(
             ?tx_id,
@@ -927,7 +922,7 @@ impl EthereumIndexer {
             "bidirectional execution observed via rpc"
         );
 
-        let result = if status == SignStatus::Success {
+        let result = if receipt_succeeded {
             let completed_tx = CompletedTx::new(pending_tx.clone(), block_number);
             match completed_tx.extract_success_tx_output(&self.client).await {
                 Ok(serialized_output) => {

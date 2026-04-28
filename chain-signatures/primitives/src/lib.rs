@@ -157,6 +157,14 @@ pub enum Chain {
     Hydration,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
+pub enum ChainFromError {
+    #[error("unknown CAIP-2 chain ID: {0}")]
+    UnknownCaip2Id(String),
+    #[error("unknown deprecated chain ID: {0}")]
+    UnknownDeprecatedId(String),
+}
+
 impl Chain {
     pub const fn as_str(&self) -> &'static str {
         match self {
@@ -232,7 +240,15 @@ impl Chain {
     }
 
     pub fn expected_response_time_secs(&self) -> u64 {
-        self.expected_finality_time_secs() + 5 // + Buffer time
+        // finality time * 2 = finality time of sign/sign_bidirectional event + finality time of respond event
+        self.expected_finality_time_secs() * 2 + 5 // + Buffer time
+    }
+
+    pub fn from_caip2_chain_id(chain_id: &str) -> Result<Self, ChainFromError> {
+        Self::iter()
+            .into_iter()
+            .find(|chain| chain.caip2_chain_id() == chain_id)
+            .ok_or_else(|| ChainFromError::UnknownCaip2Id(chain_id.to_string()))
     }
 }
 
