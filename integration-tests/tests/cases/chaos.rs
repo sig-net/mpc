@@ -2,12 +2,13 @@ use anyhow::{anyhow, Context as _, Result};
 use ethers::middleware::SignerMiddleware;
 use ethers::providers::{Http, Middleware, Provider};
 use ethers::signers::{coins_bip39::English, LocalWallet, MnemonicBuilder, Signer};
-use ethers::types::{Address, H256, TransactionRequest, U256};
+use ethers::types::{Address, H256, U256};
 use futures::future::try_join_all;
 use integration_tests::cluster::Cluster;
 use integration_tests::{cluster, eth};
 use mpc_primitives::{Chain, Checkpoint, LATEST_MPC_KEY_VERSION};
 use near_workspaces::AccountId;
+use rand::thread_rng;
 use test_log::test;
 use tokio::time::{sleep, Duration, Instant};
 
@@ -19,7 +20,7 @@ const ETH_DEPOSIT_WEI: u64 = 1;
 
 const BURST_REQUEST_COUNT: usize = 3;
 const BURST_TIMEOUT: Duration = Duration::from_secs(240);
-const CHECKPOINT_WAIT_TIMEOUT: Duration = Duration::from_secs(45);
+const FULL_CLUSTER_RESTART_TIMEOUT: Duration = Duration::from_secs(180);
 const RECOVERY_TIMEOUT: Duration = Duration::from_secs(90);
 const NO_RESPONSE_WINDOW: Duration = Duration::from_secs(8);
 
@@ -29,7 +30,6 @@ static ETHEREUM_SANDBOX_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
 #[derive(Clone, Debug)]
 struct SubmittedEthRequest {
     request_id: H256,
-    requester: Address,
     receipt_block: u64,
 }
 
@@ -273,6 +273,117 @@ async fn test_ethereum_chaos_pending_request_waits_for_quorum_then_completes_aft
     Ok(())
 }
 
+#[test(tokio::test)]
+async fn test_ethereum_chaos_full_cluster_restart_recovers_pending_request_checkpoint() -> Result<()> {
+    let _sandbox_guard = ETHEREUM_SANDBOX_LOCK.lock().await;
+    configure_checkpoint_env();
+
+    let mut cluster = cluster::spawn().ethereum().await?;
+    cluster.wait().signable().await?;
+
+    let eth_ctx = cluster
+        .nodes
+        .ctx()
+        .ethereum
+        .as_ref()
+        .context("ethereum sandbox not initialized")?;
+    let endpoint = eth_ctx.sandbox.external_http_endpoint.clone();
+    let chain_id = eth_ctx.sandbox.chain_id;
+    let contract_address = eth_ctx.contract_address;
+
+    let (submit_contract, requester) =
+        build_contract_for_signer(&endpoint, chain_id, contract_address, 7)?;
+    let (watch_client, _) =
+        eth::client(&endpoint, &eth_ctx.sandbox.secret_key, eth_ctx.sandbox.chain_id)?;
+
+    let submission = submit_eth_sign_request(
+        &submit_contract,
+        requester,
+        chain_id,
+        133,
+        "chaos/full-restart",
+    )
+    .await?;
+
+    let active_account = cluster.account_id(0).clone();
+    wait_for_checkpoint_predicate(
+        &cluster,
+        &active_account,
+        submission.receipt_block,
+        FULL_CLUSTER_RESTART_TIMEOUT,
+        |checkpoint| checkpoint_contains_request(checkpoint, &submission.request_id),
+    )
+    .await?;
+
+    let node_ids = cluster
+        .account_ids()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(node_ids.len() >= 2, "chaos suite expects at least two nodes");
+
+    let mut killed = Vec::with_capacity(node_ids.len());
+    for account_id in &node_ids {
+        let config = cluster.kill_node(account_id).await;
+        killed.push((account_id.clone(), config));
+    }
+
+    for (_, config) in killed {
+        cluster.restart_node(config).await?;
+    }
+
+    cluster.wait().nodes_running().await?;
+
+    let restarted_account = node_ids[0].clone();
+    wait_for_checkpoint_predicate(
+        &cluster,
+        &restarted_account,
+        submission.receipt_block,
+        FULL_CLUSTER_RESTART_TIMEOUT,
+        |checkpoint| checkpoint_contains_request(checkpoint, &submission.request_id),
+    )
+    .await?;
+
+    let checkpoint_interval = Chain::Ethereum
+        .checkpoint_interval()
+        .context("ethereum checkpoint interval should be configured")?;
+    let restarted_checkpoint_before_cleanup =
+        current_checkpoint_or_empty(&cluster, &restarted_account).await?;
+
+    produce_empty_eth_blocks(&watch_client, checkpoint_interval).await?;
+
+    let min_cleanup_height = next_checkpoint_height(
+        restarted_checkpoint_before_cleanup.block_height,
+        checkpoint_interval,
+    );
+
+    let restarted_checkpoint = wait_for_checkpoint_predicate(
+        &cluster,
+        &restarted_account,
+        min_cleanup_height,
+        FULL_CLUSTER_RESTART_TIMEOUT,
+        |checkpoint| checkpoint_contains_no_requests(checkpoint, &[submission.request_id]),
+    )
+    .await?;
+
+    let peer_account = node_ids[1].clone();
+    let peer_checkpoint = wait_for_checkpoint_predicate(
+        &cluster,
+        &peer_account,
+        restarted_checkpoint.block_height,
+        FULL_CLUSTER_RESTART_TIMEOUT,
+        |checkpoint| checkpoint_contains_no_requests(checkpoint, &[submission.request_id]),
+    )
+    .await?;
+
+    assert_eq!(
+        restarted_checkpoint, peer_checkpoint,
+        "fully restarted cluster should converge on the same ethereum checkpoint"
+    );
+
+    Ok(())
+}
+
 fn configure_checkpoint_env() {
     for (name, value) in Chain::checkpoint_env_vars() {
         std::env::set_var(name, value);
@@ -407,7 +518,6 @@ async fn submit_eth_sign_request(
 
     Ok(SubmittedEthRequest {
         request_id,
-        requester,
         receipt_block,
     })
 }
@@ -416,19 +526,8 @@ async fn produce_empty_eth_blocks(
     client: &std::sync::Arc<eth::SandboxMiddleware>,
     block_count: u64,
 ) -> Result<()> {
-    let sink = Address::from_low_u64_be(0xdead_beef);
-
     for _ in 0..block_count {
-        let tx = TransactionRequest::new()
-            .to(sink)
-            .value(U256::zero())
-            .gas(U256::from(21_000_u64));
-
-        client
-            .send_transaction(tx, None)
-            .await?
-            .await?
-            .context("empty block-pumping transaction failed")?;
+        let _: serde_json::Value = client.provider().request("evm_mine", ()).await?;
     }
 
     Ok(())
