@@ -1042,7 +1042,10 @@ mod tests {
         match msg {
             Sign::Request(req) => {
                 assert_eq!(req.chain, Chain::Solana);
-                assert!(matches!(req.kind, crate::protocol::SignKind::RespondBidirectional(_)));
+                assert!(matches!(
+                    req.kind,
+                    crate::protocol::SignKind::RespondBidirectional(_)
+                ));
             }
             other => panic!("expected cross-chain follow-up request, got {other:?}"),
         }

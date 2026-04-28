@@ -7,6 +7,11 @@ use serde_json::json;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+// This is more than likely limited by the RPC provider, but alchemy
+// supports archive nodes, so we effectively can go as far back as needed
+// for direct RPC client.
+pub const MAX_CATCHUP_BLOCKS: u64 = u64::MAX;
+
 #[derive(Clone)]
 pub struct RpcEthereumClient {
     http: reqwest::Client,

@@ -14,6 +14,7 @@ use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::rpc::types::{Block, BlockId, Log};
 use alloy::sol_types::{sol, SolEvent};
+use anyhow::Context as _;
 use async_trait::async_trait;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
@@ -37,9 +38,6 @@ pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     )
     .unwrap()
 });
-
-// This is the maximum number of blocks that Helios can look back to
-const MAX_CATCHUP_BLOCKS: u64 = 8191;
 
 const MAX_LIVE_BLOCK_BUFFER: usize = 16384;
 
@@ -679,6 +677,39 @@ impl EthereumClient {
             .await
             .map(|block| block.header.number)
     }
+
+    fn clamp_oldest_supported(
+        &self,
+        requested_start: u64,
+        anchor_height: BlockNumber,
+    ) -> BlockNumber {
+        let max_catchup_blocks = match self {
+            EthereumClient::Helios(_) => indexer_eth_helios::MAX_CATCHUP_BLOCKS,
+            EthereumClient::DirectRpc(_) => indexer_eth_direct_rpc::MAX_CATCHUP_BLOCKS,
+        };
+        Self::clamp_oldest_supported_with(requested_start, anchor_height, max_catchup_blocks)
+    }
+
+    fn clamp_oldest_supported_with(
+        requested_start: u64,
+        anchor_height: BlockNumber,
+        max_catchup_blocks: u64,
+    ) -> BlockNumber {
+        let catchup_end = anchor_height.saturating_sub(1);
+        let oldest_supported = catchup_end.saturating_sub(max_catchup_blocks);
+
+        if requested_start < oldest_supported {
+            tracing::warn!(
+                requested_start,
+                anchor_height,
+                oldest_supported,
+                "ethereum catchup start is older than supported range; clamping"
+            );
+            oldest_supported
+        } else {
+            requested_start
+        }
+    }
 }
 
 pub struct EthereumIndexer {
@@ -699,8 +730,8 @@ impl EthereumIndexer {
     ) -> anyhow::Result<Self> {
         let client = Arc::new(EthereumClient::new(eth.clone()).await?);
         let contract_address = format!("0x{}", eth.contract_address);
-        let contract_address = Address::from_str(&contract_address).map_err(|_| {
-            anyhow::anyhow!("failed to parse ethereum contract address: {contract_address}")
+        let contract_address = Address::from_str(&contract_address).with_context(|| {
+            format!("failed to parse ethereum contract address: {contract_address}")
         })?;
 
         Ok(Self {
@@ -726,16 +757,16 @@ impl EthereumIndexer {
         catchup_complete.notified().await;
 
         let mut current_block_number = start_block_number;
+
+        // Missing ticks is what we want due to retrying on transient errors
         let mut interval = tokio::time::interval(Self::RETRY_DELAY);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
         loop {
             interval.tick().await;
             let Some(latest_block_number) = client.get_latest_block_number().await else {
                 continue;
             };
-
-            if current_block_number > latest_block_number {
-                continue;
-            }
 
             while current_block_number <= latest_block_number {
                 let Some(block) = client
@@ -762,30 +793,6 @@ impl EthereumIndexer {
 
                 current_block_number = current_block_number.saturating_add(1);
             }
-        }
-    }
-
-    fn catchup_start_block_number(
-        last_processed_block: Option<u64>,
-        anchor_height: BlockNumber,
-    ) -> BlockNumber {
-        let requested_start = last_processed_block
-            .map(|height| height.saturating_add(1))
-            .unwrap_or(anchor_height);
-
-        let catchup_end = anchor_height.saturating_sub(1);
-        let oldest_supported = catchup_end.saturating_sub(MAX_CATCHUP_BLOCKS);
-
-        if requested_start < oldest_supported {
-            tracing::warn!(
-                requested_start,
-                anchor_height,
-                oldest_supported,
-                "ethereum catchup start is older than supported range; clamping"
-            );
-            oldest_supported
-        } else {
-            requested_start
         }
     }
 
@@ -827,10 +834,8 @@ impl EthereumIndexer {
             .client
             .get_block_receipts(block_number.into())
             .await
-            .map_err(|err| {
-                anyhow::anyhow!(
-                    "Failed to get block receipts for block number {block_number}: {err:?}",
-                )
+            .with_context(|| {
+                format!("failed to get block receipts for block number {block_number}")
             })?;
 
         // Some clients return `None` for blocks with no transactions. We still want to
@@ -1163,16 +1168,17 @@ impl EthereumIndexer {
         }
 
         for event in execution_events {
-            self.events_tx.send(event).await.map_err(|err| {
-                anyhow::anyhow!("failed to emit ExecutionConfirmed event: {err:?}")
-            })?;
+            self.events_tx
+                .send(event)
+                .await
+                .context("failed to emit ExecutionConfirmed event")?;
         }
 
         for req in indexed_requests {
             self.events_tx
                 .send(ChainEvent::SignRequest(req))
                 .await
-                .map_err(|err| anyhow::anyhow!("failed to emit SignRequest event: {err:?}"))?;
+                .context("failed to emit SignRequest event")?;
         }
 
         if !respond_logs.is_empty() {
@@ -1182,7 +1188,7 @@ impl EthereumIndexer {
         self.events_tx
             .send(ChainEvent::Block(block_number))
             .await
-            .map_err(|err| anyhow::anyhow!("failed to emit block event: {err:?}"))?;
+            .context("failed to emit block event")?;
 
         Ok(())
     }
@@ -1269,10 +1275,19 @@ impl ChainIndexer for EthereumIndexer {
     }
 
     async fn catchup_range(&mut self, anchor_height: u64) -> Range<u64> {
-        let catchup_start = Self::catchup_start_block_number(
-            self.backlog.processed_block(Chain::Ethereum).await,
-            anchor_height,
-        );
+        // TODO: start from genesis block of contract deployment instead of
+        // anchor_height so that we can start from the very beginning of
+        // the history of the network in case where we do not have a checkpoint.
+        // https://github.com/sig-net/mpc/issues/777
+        let current_block = self
+            .backlog
+            .processed_block(Chain::Ethereum)
+            .await
+            .map(|n| n.saturating_add(1))
+            .unwrap_or(anchor_height);
+        let catchup_start = self
+            .client
+            .clamp_oldest_supported(current_block, anchor_height);
 
         catchup_start..anchor_height
     }
@@ -1294,7 +1309,7 @@ impl ChainIndexer for EthereumIndexer {
         self.events_tx
             .send(ChainEvent::CatchupCompleted)
             .await
-            .map_err(|_| anyhow::anyhow!("failed to send catchup completed event"))?;
+            .context("failed to send catchup completed event")?;
         self.catchup_complete.notify_one();
         Ok(())
     }
@@ -1315,9 +1330,7 @@ impl EthereumStream {
                 "ethereum indexer is disabled: no EthConfig provided \
                  (check that all --eth-* CLI flags were supplied)"
             );
-            return Err(anyhow::anyhow!(
-                "ethereum indexer is disabled: no EthConfig provided"
-            ));
+            anyhow::bail!("ethereum indexer is disabled: no EthConfig provided");
         };
         tracing::info!(
             eth_config = ?eth,
@@ -1342,7 +1355,7 @@ impl ChainStream for EthereumStream {
     async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
         self.start_state
             .take()
-            .ok_or_else(|| anyhow::anyhow!("ethereum stream already started"))
+            .context("ethereum stream already started")
     }
 
     async fn next_event(&mut self) -> Option<ChainEvent> {
@@ -1356,6 +1369,7 @@ impl ChainStream for EthereumStream {
 mod tests {
     use super::{EthConfig, EthereumClient, EthereumIndexer};
     use crate::backlog::Backlog;
+    use crate::indexer_eth::indexer_eth_helios;
     use crate::protocol::Chain;
     use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId};
     use crate::stream::{ChainEvent, ExecutionOutcome};
@@ -1367,26 +1381,14 @@ mod tests {
     use tokio::sync::{mpsc, Notify};
 
     #[test]
-    fn catchup_starts_after_processed_height() {
-        assert_eq!(
-            EthereumIndexer::catchup_start_block_number(Some(41), 50),
-            42
-        );
-    }
-
-    #[test]
-    fn catchup_without_checkpoint_starts_from_anchor() {
-        assert_eq!(EthereumIndexer::catchup_start_block_number(None, 50), 50);
-    }
-
-    #[test]
     fn catchup_start_is_clamped_to_supported_window() {
+        let max_catchup_blocks = indexer_eth_helios::MAX_CATCHUP_BLOCKS;
         let anchor_height = 10_000;
         let catchup_end = anchor_height - 1;
-        let expected_oldest = catchup_end - super::MAX_CATCHUP_BLOCKS;
+        let expected_oldest = catchup_end - max_catchup_blocks;
 
         assert_eq!(
-            EthereumIndexer::catchup_start_block_number(Some(1), anchor_height),
+            EthereumClient::clamp_oldest_supported_with(1, anchor_height, max_catchup_blocks),
             expected_oldest,
         );
     }

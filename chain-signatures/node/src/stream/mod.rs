@@ -112,6 +112,7 @@ pub trait ChainIndexer: Send + 'static {
         let _ = anchor_height;
         // TODO: this disables the catchup range, will be removed in the future once
         // all chains like solana support catchup & livestream.
+        // https://github.com/sig-net/mpc/issues/778
         0..0
     }
 
@@ -285,13 +286,9 @@ pub async fn run_stream<S: ChainStream>(
                 }
             }
             ChainEvent::RespondBidirectional(ev) => {
-                if let Err(err) = process_respond_bidirectional_event(
-                    ev,
-                    sign_tx.clone(),
-                    &backlog,
-                    caught_up,
-                )
-                .await
+                if let Err(err) =
+                    process_respond_bidirectional_event(ev, sign_tx.clone(), &backlog, caught_up)
+                        .await
                 {
                     tracing::error!(?err, %chain, "failed to process respond bidirectional event");
                 }
@@ -476,12 +473,7 @@ mod tests {
         const RETRY_DELAY: Duration = Duration::from_millis(1);
 
         async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
-            self.live_items = self
-                .control
-                .live_items
-                .clone()
-                .into_iter()
-                .collect();
+            self.live_items = self.control.live_items.clone().into_iter().collect();
             Ok(self.control.live_items.first().copied())
         }
 
