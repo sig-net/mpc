@@ -49,6 +49,11 @@ const CPI_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: SignBidirectional",
 ];
 
+const CPI_RESPOND_EVENT_HINTS: &[&str] = &[
+    "Program log: Instruction: Respond",
+    "Program log: Instruction: RespondBidirectional",
+];
+
 #[derive(Clone)]
 pub struct SolConfig {
     /// The solana account secret key used to sign solana respond txn.
@@ -597,7 +602,7 @@ where
                                     continue;
                                 }
                             }
-                        } else {
+                        } else if looks_like_respond_event(logs) {
                             let (respond_bidirectional_events, respond_events) = match parse_cpi_respond_events(tx_res, &program_id) {
                                 Ok(v) => v,
                                 Err(err) => {
@@ -643,6 +648,11 @@ where
 fn looks_like_cpi_sign_event(logs: &[String]) -> bool {
     logs.iter()
         .any(|l| CPI_EVENT_HINTS.iter().any(|h| l.contains(h)))
+}
+
+fn looks_like_respond_event(logs: &[String]) -> bool {
+    logs.iter()
+        .any(|l| CPI_RESPOND_EVENT_HINTS.iter().any(|h| l.contains(h)))
 }
 
 fn has_log_starts_with(logs: &[String], start_with: &str) -> bool {
