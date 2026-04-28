@@ -27,6 +27,7 @@ pub(super) fn test_mock_network(
 ) -> JoinHandle<()> {
     let msg_log = Arc::clone(&shared_output.msg_log);
     let rpc_actions = Arc::clone(&shared_output.rpc_actions);
+    let rpc_actions_tx = shared_output.rpc_actions_tx.clone();
 
     tokio::spawn(async move {
         tracing::debug!(target: "mock_network", "Test message executor started");
@@ -78,6 +79,7 @@ pub(super) fn test_mock_network(
                     tracing::info!(target: "mock_network", ?action_str, "Received RPC action");
                     let mut actions_log = rpc_actions.lock().await;
                     actions_log.insert(action_str);
+                    let _ = rpc_actions_tx.send(actions_log.clone());
                 }
 
                 else => {

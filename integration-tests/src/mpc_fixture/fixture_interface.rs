@@ -46,6 +46,8 @@ pub struct MpcFixtureNode {
 pub struct SharedOutput {
     pub msg_log: Arc<Mutex<dyn CollectMessages + Send>>,
     pub rpc_actions: Arc<Mutex<HashSet<String>>>,
+    pub rpc_actions_tx: watch::Sender<HashSet<String>>,
+    pub rpc_actions_rx: watch::Receiver<HashSet<String>>,
 }
 
 impl MpcFixture {
@@ -68,18 +70,13 @@ impl MpcFixture {
     }
 
     pub async fn wait_for_actions(&self, threshold: usize) -> HashSet<String> {
-        let interval = Duration::from_millis(100);
-
-        loop {
-            let actions = self.output.rpc_actions.lock().await;
-
-            if actions.len() >= threshold {
-                return actions.clone();
-            }
-
-            drop(actions);
-            tokio::time::sleep(interval).await;
-        }
+        let mut actions = self.output.rpc_actions_rx.clone();
+        let snapshot = actions
+            .wait_for(|actions| actions.len() >= threshold)
+            .await
+            .expect("rpc action watcher should stay open")
+            .clone();
+        snapshot
     }
 
     pub async fn wait_for_key_info(&self) {
@@ -263,18 +260,24 @@ impl std::ops::IndexMut<usize> for MpcFixture {
 
 impl SharedOutput {
     pub fn new<M: CollectMessages + Default + Send + 'static>() -> Self {
+        let (rpc_actions_tx, rpc_actions_rx) = watch::channel(HashSet::new());
         Self {
             msg_log: Arc::new(Mutex::new(M::default())),
             rpc_actions: Arc::new(Mutex::new(HashSet::new())),
+            rpc_actions_tx,
+            rpc_actions_rx,
         }
     }
 }
 
 impl Default for SharedOutput {
     fn default() -> Self {
+        let (rpc_actions_tx, rpc_actions_rx) = watch::channel(HashSet::new());
         Self {
             msg_log: Arc::new(Mutex::new(MessagePrinter)),
             rpc_actions: Default::default(),
+            rpc_actions_tx,
+            rpc_actions_rx,
         }
     }
 }
