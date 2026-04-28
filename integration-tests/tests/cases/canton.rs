@@ -178,7 +178,7 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
     let s_bytes: [u8; 32] = mpc_signature.s.to_bytes().into();
     let signed_bytes = encode_signed_eip1559(&evm_params, y_parity, &r_bytes, &s_bytes)?;
     let unsigned_bytes = TxEip1559::try_from(&evm_params)?.encoded_for_signing();
-    let (watched_tx_hash, _) = sign_and_hash_transaction(&unsigned_bytes, mpc_signature.clone())?;
+    let (watched_tx_hash, _) = sign_and_hash_transaction(&unsigned_bytes, mpc_signature)?;
     let watched_tx_hash = B256::from(watched_tx_hash);
 
     let pending_tx = anvil.send_raw_transaction(&signed_bytes).await?;
