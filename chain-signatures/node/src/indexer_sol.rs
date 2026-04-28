@@ -50,6 +50,11 @@ const CPI_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: SignBidirectional",
 ];
 
+const CPI_RESPOND_EVENT_HINTS: &[&str] = &[
+    "Program log: Instruction: Respond",
+    "Program log: Instruction: RespondBidirectional",
+];
+
 #[derive(Clone)]
 pub struct SolConfig {
     /// The solana account secret key used to sign solana respond txn.
@@ -351,22 +356,13 @@ impl ChainStream for SolanaStream {
             anyhow::bail!("solana stream already started");
         };
 
-        let events_tx = start_state.tx;
-
-        self.tasks.push(spawn_cpi_sign_events(
+        self.tasks.push(spawn_events(
             start_state.program_id,
             start_state.rpc_http_url.clone(),
             start_state.rpc_ws_url.clone(),
-            events_tx.clone(),
+            start_state.tx.clone(),
         ));
-        self.tasks.push(spawn_respond_events(
-            start_state.program_id,
-            start_state.rpc_http_url,
-            start_state.rpc_ws_url,
-            events_tx.clone(),
-        ));
-
-        Ok(DisabledChainIndexer::new(events_tx))
+        Ok(DisabledChainIndexer::new(start_state.tx))
     }
 
     async fn next_event(&mut self) -> Option<ChainEvent> {
@@ -377,138 +373,18 @@ impl ChainStream for SolanaStream {
     }
 }
 
-// Version of respond subscription that pushes ChainEvent into a channel instead of calling processing directly
-async fn subscribe_to_program_respond_events(
-    program_id: Pubkey,
-    rpc_url: &str,
-    ws_url: &str,
-    events_tx: mpsc::Sender<ChainEvent>,
-) -> Result<()> {
-    let rpc_client = RpcClient::new(rpc_url.to_string());
-    let pubsub_client = PubsubClient::new(ws_url).await?;
-
-    let filter = RpcTransactionLogsFilter::Mentions(vec![program_id.to_string()]);
-    let config = RpcTransactionLogsConfig {
-        commitment: Some(CommitmentConfig::confirmed()),
-    };
-
-    let (mut stream, _unsubscriber) = pubsub_client.logs_subscribe(filter, config).await?;
-
-    // TTL cache: avoid repeated getTransaction on same sig
-    let mut seen: std::collections::HashMap<Signature, Instant> = std::collections::HashMap::new();
-    let ttl = Duration::from_secs(30);
-
-    // Watchdog
-    let stall_timeout = Duration::from_secs(60);
-    let mut last_ws_msg = Instant::now();
-    let mut watchdog = tokio::time::interval(Duration::from_secs(5));
-
-    let program_invoke_log = format!("Program {program_id} invoke [");
-
-    loop {
-        cleanup_seen_cache(&mut seen, ttl);
-
-        tokio::select! {
-            maybe = stream.next() => {
-                match maybe {
-                    Some(response) => {
-                        last_ws_msg = Instant::now();
-
-                        if response.value.err.is_some() {
-                            continue;
-                        }
-
-                        let logs = &response.value.logs;
-                        if !has_log_starts_with(logs, &program_invoke_log) {
-                            continue;
-                        }
-
-                        let Ok(signature) = Signature::from_str(&response.value.signature) else {
-                            tracing::warn!("Invalid signature format");
-                            continue;
-                        };
-
-                        if seen.contains_key(&signature) {
-                            continue;
-                        }
-
-                        let tx_res = match get_tx(&rpc_client, &signature, RetryConfig::default()).await {
-                            Ok(tx) => tx,
-                            Err(e) => {
-                                tracing::warn!("Failed to fetch transaction {}: {}", signature, e);
-                                continue;
-                            }
-                        };
-
-                        let now = Instant::now();
-                        seen.insert(signature, now);
-
-                        let (respond_bidirectional_events, respond_events) = match parse_cpi_respond_events(tx_res, &program_id) {
-                            Ok(v) => v,
-                            Err(err) => {
-                                tracing::warn!(?err, sig = %signature, "failed to parse respond events (will skip this signature)");
-                                continue;
-                            }
-                        };
-
-                        for ev in respond_bidirectional_events {
-                            let _ = events_tx.send(ChainEvent::RespondBidirectional(crate::stream::ops::RespondBidirectionalEvent::Solana(ev))).await;
-                        }
-
-                        for ev in respond_events {
-                            let _ = events_tx.send(ChainEvent::Respond(crate::stream::ops::SignatureRespondedEvent::Solana(ev))).await;
-                        }
-                    }
-                    None => {
-                        anyhow::bail!("solana respond logs stream ended (None), reconnecting");
-                    }
-                }
-            }
-
-            _ = watchdog.tick() => {
-                if last_ws_msg.elapsed() > stall_timeout {
-                    anyhow::bail!("solana respond logs subscription stalled: no ws message for {:?}", stall_timeout);
-                }
-            }
-        }
-    }
-}
-
-fn spawn_cpi_sign_events(
+fn spawn_events(
     program_id: Pubkey,
     rpc_url: String,
     ws_url: String,
     events_tx: mpsc::Sender<ChainEvent>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(subscribe_and_process_sign_events(
+    tokio::spawn(subscribe_and_process_events(
         program_id,
         rpc_url.clone(),
         ws_url.clone(),
         events_tx.clone(),
     ))
-}
-
-fn spawn_respond_events(
-    program_id: Pubkey,
-    rpc_url: String,
-    ws_url: String,
-    events_tx: mpsc::Sender<ChainEvent>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            if let Err(err) = subscribe_to_program_respond_events(
-                program_id,
-                &rpc_url,
-                &ws_url,
-                events_tx.clone(),
-            )
-            .await
-            {
-                tracing::warn!("Failed to subscribe to solana respond events: {:?}", err);
-            }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    })
 }
 
 fn build_sign_request(
@@ -521,7 +397,7 @@ fn build_sign_request(
 }
 
 // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L31
-async fn subscribe_and_process_sign_events(
+async fn subscribe_and_process_events(
     program_id: Pubkey,
     rpc_url: String,
     ws_url: String,
@@ -529,7 +405,7 @@ async fn subscribe_and_process_sign_events(
 ) {
     loop {
         let events_tx_clone = events_tx.clone();
-        let result = subscribe_to_program_cpi_events(
+        let result = subscribe_to_program_events(
             program_id,
             &rpc_url,
             &ws_url,
@@ -651,13 +527,12 @@ fn parse_cpi_events(
     Ok(out)
 }
 
-// Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L311
-async fn subscribe_to_program_cpi_events<F>(
+async fn subscribe_to_program_events<F>(
     program_id: Pubkey,
     rpc_url: &str,
     ws_url: &str,
     events_tx: mpsc::Sender<ChainEvent>,
-    mut event_handler: F,
+    mut sign_event_handler: F,
 ) -> Result<()>
 where
     F: FnMut(SignatureEventBox, Signature, u64) + Send,
@@ -681,8 +556,7 @@ where
     let mut seen: HashMap<Signature, Instant> = HashMap::new();
     let ttl = Duration::from_secs(30);
 
-    let target_program_str = program_id.to_string();
-    let program_invoke_str = format!("Program {} invoke [", target_program_str);
+    let program_invoke_log = format!("Program {program_id} invoke [");
 
     loop {
         cleanup_seen_cache(&mut seen, ttl);
@@ -698,7 +572,7 @@ where
                         }
 
                         let logs = &response.value.logs;
-                        if !looks_like_cpi_sign_event(logs) || !has_log_starts_with(logs, &program_invoke_str) {
+                        if !has_log_starts_with(logs, &program_invoke_log) {
                             continue;
                         }
 
@@ -711,7 +585,7 @@ where
                             continue;
                         }
 
-                        let tx_req = match get_tx(&rpc_client, &signature, RetryConfig::default()).await {
+                        let tx_res = match get_tx(&rpc_client, &signature, RetryConfig::default()).await {
                             Ok(tx) => tx,
                             Err(e) => {
                                 tracing::warn!("Failed to fetch transaction {}: {}", signature, e);
@@ -722,15 +596,34 @@ where
                         let now = Instant::now();
                         seen.insert(signature, now);
 
-                        match parse_cpi_events(tx_req, &program_id) {
-                            Ok(events) => {
-                                for ev in events {
-                                    event_handler(ev, signature, response.context.slot);
+                        // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L311
+                        if looks_like_cpi_sign_event(logs) {
+                            match parse_cpi_events(tx_res, &program_id) {
+                                Ok(events) => {
+                                    for ev in events {
+                                        sign_event_handler(ev, signature, response.context.slot);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to parse cpi events for {}: {}", signature, e);
+                                    continue;
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!("Failed to parse cpi events for {}: {}", signature, e);
-                                continue;
+                        } else if looks_like_respond_event(logs) {
+                            let (respond_bidirectional_events, respond_events) = match parse_cpi_respond_events(tx_res, &program_id) {
+                                Ok(v) => v,
+                                Err(err) => {
+                                    tracing::warn!(?err, sig = %signature, "failed to parse respond events (will skip this signature)");
+                                    continue;
+                                }
+                            };
+
+                            for ev in respond_bidirectional_events {
+                                let _ = events_tx.send(ChainEvent::RespondBidirectional(crate::stream::ops::RespondBidirectionalEvent::Solana(ev))).await;
+                            }
+
+                            for ev in respond_events {
+                                let _ = events_tx.send(ChainEvent::Respond(crate::stream::ops::SignatureRespondedEvent::Solana(ev))).await;
                             }
                         }
 
@@ -762,6 +655,11 @@ where
 fn looks_like_cpi_sign_event(logs: &[String]) -> bool {
     logs.iter()
         .any(|l| CPI_EVENT_HINTS.iter().any(|h| l.contains(h)))
+}
+
+fn looks_like_respond_event(logs: &[String]) -> bool {
+    logs.iter()
+        .any(|l| CPI_RESPOND_EVENT_HINTS.iter().any(|h| l.contains(h)))
 }
 
 fn has_log_starts_with(logs: &[String], start_with: &str) -> bool {
