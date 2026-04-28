@@ -337,6 +337,9 @@ impl MessageInbox {
     }
 
     pub async fn run(mut self, config: watch::Receiver<Config>, contract: ContractStateWatcher) {
+        let mut cached_contract_state = contract.state();
+        let mut participants = contract.participant_map().await;
+
         loop {
             tokio::select! {
                 _ = self.filter.update() => {}
@@ -346,8 +349,13 @@ impl MessageInbox {
                 Some(encrypted) = self.inbox_rx.recv() => {
                     let config = config.borrow().clone();
                     let expiration = Duration::from_millis(config.protocol.message_timeout);
-                    let participants = contract.participant_map().await;
                     let cipher_sk = config.local.network.cipher_sk;
+
+                    let current_contract_state = contract.state();
+                    if current_contract_state != cached_contract_state {
+                        cached_contract_state = current_contract_state;
+                        participants = contract.participant_map().await;
+                    }
 
                     self.expire(expiration);
                     self.try_decrypt.push_back((encrypted, Instant::now()));

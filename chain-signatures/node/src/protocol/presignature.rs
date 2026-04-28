@@ -173,7 +173,7 @@ impl PresignatureGenerator {
 
         loop {
             let poke_start_time = Instant::now();
-            let action = match self.protocol.poke() {
+            let action = match tokio::task::block_in_place(|| self.protocol.poke()) {
                 Ok(action) => action,
                 Err(err) => {
                     crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES.inc();

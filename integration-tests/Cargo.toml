@@ -92,6 +92,16 @@ name = "store"
 path = "benches/store.rs"
 harness = false
 
+[[bench]]
+name = "micro"
+path = "benches/micro.rs"
+harness = false
+
+[[bench]]
+name = "async_stress"
+path = "benches/async_stress.rs"
+harness = false
+
 [features]
 default = []
 docker-test = []

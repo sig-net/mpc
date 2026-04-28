@@ -7,7 +7,14 @@ use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
-pub const SIGNATURE_AMOUNT: usize = 30;
+/// Current baseline benchmark contract.
+///
+/// This benchmark intentionally measures both warm- and cold-stockpile local
+/// clusters so the reported `sig(e2e) latency` can separate steady-state sign
+/// latency from stockpile replenishment effects.
+const BENCHMARK_NODES: usize = 3;
+const BENCHMARK_THRESHOLD: usize = 2;
+const SIGNATURE_AMOUNT: usize = 30;
 
 struct NodeTimeMeasurement {
     name: &'static str,
@@ -69,57 +76,92 @@ fn bench_on_metrics(measurement: NodeTimeMeasurement) {
     group.finish();
 }
 
-fn main() {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+async fn spawn_cluster(cold_stockpile: bool) -> (Arc<Cluster>, Vec<near_workspaces::Account>) {
+    let mut spawner = cluster::spawn()
+        .nodes(BENCHMARK_NODES)
+        .threshold(BENCHMARK_THRESHOLD)
+        .with_config(|cfg| {
+            cfg.protocol.triple.min_triples = SIGNATURE_AMOUNT as u32 * 4;
+            cfg.protocol.triple.max_triples = SIGNATURE_AMOUNT as u32 * 16;
+            cfg.protocol.presignature.min_presignatures = SIGNATURE_AMOUNT as u32;
+            cfg.protocol.presignature.max_presignatures = SIGNATURE_AMOUNT as u32 * 4;
+        });
+
+    if cold_stockpile {
+        spawner = spawner.disable_prestockpile();
+    }
+
+    let nodes = spawner.await.unwrap();
+
+    let worker = nodes.worker();
+    let mut accounts = Vec::with_capacity(SIGNATURE_AMOUNT * 2);
+    for _ in 0..SIGNATURE_AMOUNT * 2 {
+        accounts.push(worker.dev_create_account().await.unwrap());
+    }
+
+    (Arc::new(nodes), accounts)
+}
+
+fn run_sign_scenario(rt: &tokio::runtime::Runtime, cold_stockpile: bool) {
+    let scenario_name = if cold_stockpile {
+        "sig(e2e) latency - cold stockpile"
+    } else {
+        "sig(e2e) latency - warm stockpile"
+    };
+
     let started = Instant::now();
-    let (nodes, accounts) = rt.block_on(async {
-        let nodes = cluster::spawn()
-            .with_config(|cfg| {
-                cfg.protocol.triple.min_triples = SIGNATURE_AMOUNT as u32 * 4;
-                cfg.protocol.triple.max_triples = SIGNATURE_AMOUNT as u32 * 16;
-                cfg.protocol.presignature.min_presignatures = SIGNATURE_AMOUNT as u32;
-                cfg.protocol.presignature.max_presignatures = SIGNATURE_AMOUNT as u32 * 4;
-            })
-            .await
-            .unwrap();
-
-        let worker = nodes.worker();
-        let mut accounts = Vec::with_capacity(SIGNATURE_AMOUNT * 2);
-        for _ in 0..SIGNATURE_AMOUNT * 2 {
-            accounts.push(worker.dev_create_account().await.unwrap());
-        }
-
-        (Arc::new(nodes), accounts)
-    });
+    let (nodes, accounts) = rt.block_on(spawn_cluster(cold_stockpile));
 
     let mut accounts = accounts.into_iter();
     let mut c = Criterion::default()
         .sample_size(SIGNATURE_AMOUNT)
         .warm_up_time(Duration::from_nanos(1))
         .measurement_time(Duration::from_millis(1));
-    c.bench_function("sig(e2e) latency", |b| {
-        let sign =
-            |nodes: Arc<Cluster>, account| async move { nodes.sign().account(account).await };
+    c.bench_function(scenario_name, |b| {
+        let sign = |nodes: Arc<Cluster>, account| async move { nodes.sign().account(account).await };
         b.iter(|| rt.block_on(sign(nodes.clone(), accounts.next().unwrap())))
     });
 
-    // cleanup and drop everything within the runtime so that async-drops work:
     let metrics = rt.block_on(async move { nodes.fetch_bench_metrics(0).await.unwrap() });
 
     bench_on_metrics(NodeTimeMeasurement {
-        name: "sig(metrics) generation latency",
+        name: if cold_stockpile {
+            "sig(metrics) generation latency - cold stockpile"
+        } else {
+            "sig(metrics) generation latency - warm stockpile"
+        },
         data: metrics.sig_gen,
         at: Mutex::new(0),
     });
     bench_on_metrics(NodeTimeMeasurement {
-        name: "presig(metrics) generation latency",
+        name: if cold_stockpile {
+            "presig(metrics) generation latency - cold stockpile"
+        } else {
+            "presig(metrics) generation latency - warm stockpile"
+        },
         data: metrics.presig_gen,
         at: Mutex::new(0),
     });
-    println!("bench total time: {:?}", started.elapsed());
+
+    println!(
+        "benchmark scenario: local {} cluster (nodes={}, threshold={}, requests={})",
+        if cold_stockpile { "cold-stockpile" } else { "warm-stockpile" },
+        BENCHMARK_NODES,
+        BENCHMARK_THRESHOLD,
+        SIGNATURE_AMOUNT
+    );
+    println!("benchmark scenario runtime: {:?}", started.elapsed());
+}
+
+fn main() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let total_started = Instant::now();
+    run_sign_scenario(&rt, false);
+    run_sign_scenario(&rt, true);
+    println!("bench total time: {:?}", total_started.elapsed());
 }
 
 // Code pulled from criterion crate due to it not exposing `DurationFormatter`

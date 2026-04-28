@@ -932,7 +932,7 @@ impl SignGenerator {
 
         loop {
             let poke_start_time = Instant::now();
-            let action = match self.protocol.poke() {
+            let action = match tokio::task::block_in_place(|| self.protocol.poke()) {
                 Ok(action) => action,
                 Err(err) => {
                     crate::metrics::protocols::SIGNATURE_GENERATOR_FAILURES.inc();
@@ -1471,13 +1471,12 @@ impl PendingPresignature {
         };
 
         let presignature = tokio::time::timeout(timeout, async {
-            // TODO: we can make storage wait for presignature to be available instead of here
-            let mut interval = tokio::time::interval(Duration::from_millis(250));
             loop {
-                interval.tick().await;
                 if let Some(presignature) = storage.take(id, owner).await {
                     break presignature;
                 };
+
+                storage.wait_for_change().await;
             }
         })
         .await;

@@ -56,6 +56,58 @@ To run benchmarks, simply run the `bench.sh` script in the root:
 ./bench.sh
 ```
 
+### Benchmark contract
+
+The current local performance baseline is defined around a small, reproducible
+scenario so future optimizations can be compared against the same workload.
+
+- Build mode: release
+- Baseline cluster: 3 nodes, threshold 2
+- Key setup: pregenerated keys enabled
+- Stockpile mode: warm stockpile
+- Request volume: 30 end-to-end sign requests
+- Primary KPI: sign latency
+- Supporting metrics:
+    - `sig(e2e) latency` from [benches/sign.rs](benches/sign.rs)
+    - `sig(metrics) generation latency` from `/bench/metrics`
+    - `presig(metrics) generation latency` from `/bench/metrics`
+    - request stage latency from [../chain-signatures/node/src/metrics/requests.rs](../chain-signatures/node/src/metrics/requests.rs)
+
+This baseline is intentionally warm-stockpile. It isolates the steady-state sign
+path and avoids mixing sign latency with initial key generation and stockpile
+ramp-up costs.
+
+### Benchmark matrix
+
+The work should proceed using the following benchmark matrix, in order:
+
+| Priority | Scenario | Purpose | Status |
+| --- | --- | --- | --- |
+| 1 | Local, 3 nodes, warm stockpile | Baseline steady-state sign latency | Implemented |
+| 2 | Local, 3 nodes, cold stockpile | Measure stockpile depletion and replenishment cost | Implemented |
+| 3 | Local, 5 nodes, warm stockpile | Compare scaling with pregenerated keys | Planned |
+| 4 | Local, 5 nodes, cold stockpile | Measure steady-state vs recovery under higher quorum | Planned |
+| 5 | Local chain-specific flows: Solana | Separate indexer ingress latency from MPC latency | Planned |
+| 6 | Local chain-specific flows: Ethereum | Separate finality / optimistic path cost from MPC latency | Planned |
+| 7 | Local chain-specific flows: Hydration | Measure request ingestion and response publication cost | Planned |
+| 8 | Integration-only NEAR path | Quantify poll-based request admission overhead | Planned |
+
+### Implemented suites
+
+- [benches/sign.rs](benches/sign.rs): warm and cold end-to-end sign latency
+- [benches/micro.rs](benches/micro.rs): serialization and cryptographic micro-benchmarks
+- [benches/async_stress.rs](benches/async_stress.rs): Tokio task, channel, and lock stress benchmarks
+
+### Interpreting benchmark results
+
+- Warm-stockpile runs answer: "How fast is the steady-state sign path?"
+- Cold-stockpile runs answer: "How much latency is hidden by prestockpiling?"
+- Chain-specific runs answer: "How much latency comes from indexing and publish paths instead of MPC generation?"
+
+When comparing results, keep node count, threshold, stockpile mode, and chain
+path fixed. Do not compare a warm-stockpile Solana run directly against a cold
+stockpile Ethereum run.
+
 ## Production compatibility tests
 
 Historical compatibility tests boot one node from the latest code and one node

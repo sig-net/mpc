@@ -5,7 +5,7 @@ use redis::{AsyncCommands, FromRedisValue, ToRedisArgs};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::{fmt, time::Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tokio::task::JoinHandle;
 use tracing;
 
@@ -145,6 +145,7 @@ pub struct ProtocolStorage<A: ProtocolArtifact> {
     artifact_key: String,
     used: Arc<RwLock<HashSet<A::Id>>>,
     reserved: Arc<RwLock<HashSet<A::Id>>>,
+    notify: Arc<Notify>,
     owner_keys: String,
     account_id: AccountId,
     _phantom: std::marker::PhantomData<A>,
@@ -157,6 +158,7 @@ impl<A: ProtocolArtifact> Clone for ProtocolStorage<A> {
             artifact_key: self.artifact_key.clone(),
             used: self.used.clone(),
             reserved: self.reserved.clone(),
+            notify: self.notify.clone(),
             owner_keys: self.owner_keys.clone(),
             account_id: self.account_id.clone(),
             _phantom: std::marker::PhantomData,
@@ -169,6 +171,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         let artifact_key = format!("{base_prefix}:{STORAGE_VERSION}:{account_id}");
         let used = Arc::new(RwLock::new(HashSet::new()));
         let reserved = Arc::new(RwLock::new(HashSet::new()));
+        let notify = Arc::new(Notify::new());
         let owner_keys = format!("{base_prefix}_owners:{STORAGE_VERSION}:{account_id}");
 
         Self {
@@ -176,6 +179,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             artifact_key,
             used,
             reserved,
+            notify,
             owner_keys,
             account_id: account_id.clone(),
             _phantom: std::marker::PhantomData,
@@ -255,6 +259,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
     async fn unreserve(&self, id: A::Id) -> bool {
         self.reserved.write().await.remove(&id)
+    }
+
+    pub async fn wait_for_change(&self) {
+        self.notify.notified().await;
     }
 
     pub async fn remove_outdated(
@@ -349,6 +357,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                     for id in outdated.iter() {
                         used.remove(id);
                     }
+                    self.notify.notify_waiters();
                 }
                 Ok(RemoveOutdatedResult::new(outdated, not_found))
             }
@@ -422,6 +431,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         match outcome {
             Ok(()) => {
                 self.reserved.write().await.remove(&id);
+                self.notify.notify_waiters();
                 true
             }
             Err(err) => {
@@ -518,6 +528,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 let holders = holders.into_iter().map(Participant::from).collect();
                 artifact.set_holders(holders);
                 tracing::info!(id, ?elapsed, "took artifact");
+                self.notify.notify_waiters();
                 Some(ArtifactTaken::new(artifact, self.clone()))
             }
             Err(err) => {

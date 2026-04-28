@@ -130,13 +130,11 @@ async fn msg(
     WithRejection(Cbor(encrypted), _): WithRejection<Cbor<Vec<Ciphered>>, Error>,
 ) {
     let start = Instant::now();
-    for encrypted in encrypted.into_iter() {
-        let msg_channel = state.msg_channel.clone();
-        tokio::spawn(async move {
-            if let Err(err) = msg_channel.inbox.send(encrypted).await {
-                tracing::error!(?err, "failed to forward an encrypted protocol message");
-            }
-        });
+    for encrypted in encrypted {
+        if let Err(err) = state.msg_channel.inbox.send(encrypted).await {
+            tracing::error!(?err, "failed to forward an encrypted protocol message");
+            break;
+        }
     }
     WEB_ENDPOINT_LATENCY
         .with_label_values(&["msg"])
