@@ -34,6 +34,7 @@ use near_workspaces::Account;
 use reqwest::Client;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use solana_client::nonblocking::pubsub_client::PubsubClient as SolanaPubsubClient;
 use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
 use solana_sdk::instruction::AccountMeta;
 use solana_sdk::pubkey::Pubkey as SolanaPubkey;
@@ -686,7 +687,7 @@ impl Solana {
             rpc_address.clone(),
             solana_sdk::commitment_config::CommitmentConfig::confirmed(),
         );
-        Self::wait_for_validator_ready(&rpc_client, &payer_keypair.pubkey()).await;
+        Self::wait_for_validator_ready(&rpc_client, &ws_address, &payer_keypair.pubkey()).await;
 
         tracing::info!(
             rpc_address,
@@ -708,19 +709,24 @@ impl Solana {
         }
     }
 
-    async fn wait_for_validator_ready(rpc_client: &SolanaRpcClient, payer: &SolanaPubkey) {
+    async fn wait_for_validator_ready(
+        rpc_client: &SolanaRpcClient,
+        ws_address: &str,
+        payer: &SolanaPubkey,
+    ) {
         const MAX_ATTEMPTS: usize = 60;
 
         for attempt in 1..=MAX_ATTEMPTS {
             let version_ready = rpc_client.get_version().await.is_ok();
             let blockhash_ready = rpc_client.get_latest_blockhash().await.is_ok();
+            let ws_ready = SolanaPubsubClient::new(ws_address).await.is_ok();
             let funded = rpc_client
                 .get_balance(payer)
                 .await
                 .ok()
                 .is_some_and(|balance| balance > 0);
 
-            if version_ready && blockhash_ready {
+            if version_ready && blockhash_ready && ws_ready {
                 if !funded {
                     tracing::warn!(
                         attempt,
@@ -734,6 +740,7 @@ impl Solana {
                 attempt,
                 version_ready,
                 blockhash_ready,
+                ws_ready,
                 funded,
                 "waiting for solana-test-validator readiness"
             );
