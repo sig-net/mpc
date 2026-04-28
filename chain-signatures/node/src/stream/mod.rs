@@ -360,15 +360,19 @@ mod tests {
 
     struct VecEventStreamState {
         started: bool,
-        events: Vec<Option<ChainEvent>>,
+        rx: mpsc::Receiver<ChainEvent>,
     }
 
     impl VecEventStreamState {
-        fn new(events: Vec<Option<ChainEvent>>) -> Self {
-            Self {
-                started: false,
-                events,
-            }
+        fn new() -> (Self, mpsc::Sender<ChainEvent>) {
+            let (tx, rx) = mpsc::channel(CHAIN_EVENT_STREAM_SIZE);
+            (
+                Self {
+                    started: false,
+                    rx,
+                },
+                tx,
+            )
         }
     }
 
@@ -377,8 +381,9 @@ mod tests {
             struct $name(VecEventStreamState);
 
             impl $name {
-                pub fn new(events: Vec<Option<ChainEvent>>) -> Self {
-                    Self(VecEventStreamState::new(events))
+                pub fn new() -> (Self, mpsc::Sender<ChainEvent>) {
+                    let (state, tx) = VecEventStreamState::new();
+                    (Self(state), tx)
                 }
             }
 
@@ -394,10 +399,7 @@ mod tests {
                 }
 
                 async fn next_event(&mut self) -> Option<ChainEvent> {
-                    if self.0.events.is_empty() {
-                        return None;
-                    }
-                    self.0.events.remove(0)
+                    self.0.rx.recv().await
                 }
             }
         };
@@ -415,25 +417,6 @@ mod tests {
     }
 
     impl TestLinearControl {
-        fn new(persisted_height: Option<u64>, live_items: Vec<u64>) -> Self {
-            Self {
-                persisted_height,
-                live_items,
-                catchup_failures: Arc::new(Mutex::new(HashMap::new())),
-                live_failures: Arc::new(Mutex::new(HashMap::new())),
-            }
-        }
-
-        fn fail_catchup_once(self, height: u64) -> Self {
-            self.catchup_failures.lock().unwrap().insert(height, 1);
-            self
-        }
-
-        fn fail_live_once(self, height: u64) -> Self {
-            self.live_failures.lock().unwrap().insert(height, 1);
-            self
-        }
-
         fn consume_failure(map: &Mutex<HashMap<u64, usize>>, height: u64) -> bool {
             let mut failures = map.lock().unwrap();
             let Some(remaining) = failures.get_mut(&height) else {
@@ -479,7 +462,6 @@ mod tests {
                 .live_items
                 .clone()
                 .into_iter()
-                .skip(1)
                 .collect();
             Ok(self.control.live_items.first().copied())
         }
@@ -543,50 +525,302 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct LinearHarness {
+        persisted_height: Option<u64>,
+        live_items: Vec<u64>,
+        catchup_failures: HashMap<u64, usize>,
+        live_failures: HashMap<u64, usize>,
+        stream: Option<TestLinearStream>,
+    }
+
+    #[derive(Debug)]
+    enum LinearOp {
+        SetPersistedHeight(Option<u64>),
+        SetLiveItems(Vec<u64>),
+        FailCatchupOnce(u64),
+        FailLiveOnce(u64),
+        Run,
+        ExpectBlocks(Vec<u64>),
+    }
+
+    impl LinearOp {
+        async fn apply(self, harness: &mut LinearHarness) {
+            match self {
+                LinearOp::SetPersistedHeight(persisted_height) => {
+                    harness.persisted_height = persisted_height;
+                }
+                LinearOp::SetLiveItems(live_items) => {
+                    harness.live_items = live_items;
+                }
+                LinearOp::FailCatchupOnce(height) => {
+                    *harness.catchup_failures.entry(height).or_insert(0) += 1;
+                }
+                LinearOp::FailLiveOnce(height) => {
+                    *harness.live_failures.entry(height).or_insert(0) += 1;
+                }
+                LinearOp::Run => {
+                    let control = TestLinearControl {
+                        persisted_height: harness.persisted_height,
+                        live_items: std::mem::take(&mut harness.live_items),
+                        catchup_failures: Arc::new(Mutex::new(std::mem::take(
+                            &mut harness.catchup_failures,
+                        ))),
+                        live_failures: Arc::new(Mutex::new(std::mem::take(
+                            &mut harness.live_failures,
+                        ))),
+                    };
+                    let mut stream = TestLinearStream::new(control);
+                    let indexer = stream.start().await.unwrap();
+                    catchup_then_livestream(Chain::Ethereum, indexer).await;
+                    harness.stream = Some(stream);
+                }
+                LinearOp::ExpectBlocks(expected_blocks) => {
+                    let stream = harness
+                        .stream
+                        .as_mut()
+                        .expect("run must happen before expectations");
+                    let mut observed_blocks = Vec::new();
+                    while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
+                        .await
+                        .ok()
+                        .flatten()
+                    {
+                        match event {
+                            ChainEvent::Block(block) => observed_blocks.push(block),
+                            other => panic!("unexpected event: {other:?}"),
+                        }
+                    }
+                    assert_eq!(observed_blocks, expected_blocks);
+                }
+            }
+        }
+    }
+
+    async fn run_linear_case(ops: Vec<LinearOp>) {
+        let mut harness = LinearHarness::default();
+        for op in ops {
+            op.apply(&mut harness).await;
+        }
+    }
+
+    #[derive(Debug)]
+    enum RunOp {
+        Send(ChainEvent),
+        Start,
+        ExpectRequest(SignId),
+        ExpectCompletion(SignId),
+        ExpectNoSign(Duration),
+        WaitForWatcher {
+            chain: Chain,
+            sign_id: SignId,
+        },
+        SetStatus {
+            chain: Chain,
+            sign_id: SignId,
+            status: crate::sign_bidirectional::SignStatus,
+        },
+        Sleep(Duration),
+        CaptureCheckpoint(Chain),
+        RecoverBacklog,
+        AssertRecoveredWatchers(Chain),
+        AssertBacklogMissing {
+            chain: Chain,
+            sign_id: SignId,
+        },
+        AssertBacklogTimestamp {
+            chain: Chain,
+            sign_id: SignId,
+            timestamp: u64,
+        },
+        CloseEvents,
+        AwaitRun,
+    }
+
+    struct RunHarness<S: ChainStream> {
+        stream: Option<S>,
+        events_tx: Option<mpsc::Sender<ChainEvent>>,
+        backlog: Backlog,
+        sign_tx: Option<mpsc::Sender<Sign>>,
+        sign_rx: mpsc::Receiver<Sign>,
+        contract_watcher: Option<ContractStateWatcher>,
+        mesh_state_rx: Option<watch::Receiver<MeshState>>,
+        node_client: Option<NodeClient>,
+        run_handle: Option<tokio::task::JoinHandle<()>>,
+        storage: Option<CheckpointStorage>,
+        checkpoint: Option<crate::backlog::Checkpoint>,
+        recovered_backlog: Option<Backlog>,
+    }
+
+    impl<S: ChainStream> RunHarness<S> {
+        async fn apply(&mut self, op: RunOp) {
+            match op {
+                RunOp::Send(event) => {
+                    let events_tx = self.events_tx.as_ref().expect("events sender not available");
+                    events_tx.send(event).await.unwrap();
+                }
+                RunOp::Start => {
+                    let stream = self.stream.take().expect("stream already started");
+                    let sign_tx = self.sign_tx.take().expect("sign tx not available");
+                    let contract_watcher = self
+                        .contract_watcher
+                        .take()
+                        .expect("contract watcher not available");
+                    let mesh_state_rx = self
+                        .mesh_state_rx
+                        .take()
+                        .expect("mesh state receiver not available");
+                    let node_client = self.node_client.take().expect("node client not available");
+                    let backlog = self.backlog.clone();
+                    self.run_handle = Some(tokio::spawn(async move {
+                        run_stream(
+                            stream,
+                            sign_tx,
+                            backlog,
+                            contract_watcher,
+                            mesh_state_rx,
+                            node_client,
+                        )
+                        .await;
+                    }));
+                }
+                RunOp::ExpectRequest(sign_id) => {
+                    let message = timeout(Duration::from_secs(1), self.sign_rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    match message {
+                        Sign::Request(request) => assert_eq!(request.id, sign_id),
+                        other => panic!("expected request, got {other:?}"),
+                    }
+                }
+                RunOp::ExpectCompletion(sign_id) => {
+                    let message = timeout(Duration::from_secs(1), self.sign_rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    match message {
+                        Sign::Completion(completed_id) => assert_eq!(completed_id, sign_id),
+                        other => panic!("expected completion, got {other:?}"),
+                    }
+                }
+                RunOp::ExpectNoSign(duration) => {
+                    match timeout(duration, self.sign_rx.recv()).await {
+                        Err(_) | Ok(None) => {}
+                        Ok(Some(message)) => panic!("unexpected sign message: {message:?}"),
+                    }
+                }
+                RunOp::WaitForWatcher { chain, sign_id } => {
+                    timeout(Duration::from_secs(1), async {
+                        loop {
+                            let watchers = self.backlog.pending_execution(chain).await;
+                            if watchers.values().any(|(existing, _)| *existing == sign_id) {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .unwrap();
+                }
+                RunOp::SetStatus {
+                    chain,
+                    sign_id,
+                    status,
+                } => {
+                    self.backlog.set_status(chain, &sign_id, status).await;
+                }
+                RunOp::Sleep(duration) => {
+                    tokio::time::sleep(duration).await;
+                }
+                RunOp::CaptureCheckpoint(chain) => {
+                    let checkpoint = self
+                        .backlog
+                        .latest_checkpoint(chain)
+                        .await
+                        .expect("checkpoint should exist");
+                    self.checkpoint = Some(checkpoint);
+                }
+                RunOp::RecoverBacklog => {
+                    let storage = self.storage.as_ref().expect("storage not available").clone();
+                    let checkpoint = self.checkpoint.as_ref().expect("checkpoint not captured");
+                    let recovered = Backlog::persisted(storage);
+                    recovered
+                        .recover_by_checkpoint(checkpoint.clone())
+                        .await
+                        .expect("recovery failed");
+                    self.recovered_backlog = Some(recovered);
+                }
+                RunOp::AssertRecoveredWatchers(chain) => {
+                    let recovered = self
+                        .recovered_backlog
+                        .as_ref()
+                        .expect("recovered backlog not available");
+                    let original_watchers = self.backlog.pending_execution(chain).await;
+                    let recovered_watchers = recovered.pending_execution(chain).await;
+                    assert_eq!(original_watchers.len(), recovered_watchers.len());
+                    for (tx_id, (status, _)) in original_watchers {
+                        assert!(recovered_watchers.contains_key(&tx_id));
+                        assert_eq!(recovered_watchers.get(&tx_id).unwrap().0, status);
+                    }
+                }
+                RunOp::AssertBacklogMissing { chain, sign_id } => {
+                    assert!(self.backlog.get(chain, &sign_id).await.is_none());
+                }
+                RunOp::AssertBacklogTimestamp {
+                    chain,
+                    sign_id,
+                    timestamp,
+                } => {
+                    let entry = self
+                        .backlog
+                        .get(chain, &sign_id)
+                        .await
+                        .expect("backlog entry should exist");
+                    assert_eq!(entry.request.unix_timestamp_indexed, timestamp);
+                }
+                RunOp::CloseEvents => {
+                    self.events_tx.take();
+                }
+                RunOp::AwaitRun => {
+                    self.run_handle
+                        .take()
+                        .expect("run handle not available")
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    async fn run_script<S: ChainStream>(mut harness: RunHarness<S>, ops: Vec<RunOp>) {
+        for op in ops {
+            harness.apply(op).await;
+        }
+    }
+
     #[tokio::test]
     async fn test_run_linearized_source_orders_catchup_before_live() {
-        let mut stream = TestLinearStream::new(TestLinearControl::new(Some(1), vec![4, 5]));
-        let indexer = stream.start().await.unwrap();
-        catchup_then_livestream(Chain::Ethereum, indexer).await;
-
-        let mut observed = Vec::new();
-        while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
-            .await
-            .ok()
-            .flatten()
-        {
-            observed.push(event);
-        }
-
-        assert!(matches!(observed[0], ChainEvent::Block(2)));
-        assert!(matches!(observed[1], ChainEvent::Block(3)));
-        assert!(matches!(observed[2], ChainEvent::Block(4)));
-        assert!(matches!(observed[3], ChainEvent::Block(5)));
+        run_linear_case(vec![
+            LinearOp::SetPersistedHeight(Some(1)),
+            LinearOp::SetLiveItems(vec![4, 5]),
+            LinearOp::Run,
+            LinearOp::ExpectBlocks(vec![2, 3, 4, 5]),
+        ])
+        .await;
     }
 
     #[tokio::test]
     async fn test_run_linearized_source_retries_without_reordering() {
-        let mut stream = TestLinearStream::new(
-            TestLinearControl::new(Some(1), vec![4, 5])
-                .fail_catchup_once(3)
-                .fail_live_once(4),
-        );
-        let indexer = stream.start().await.unwrap();
-        catchup_then_livestream(Chain::Ethereum, indexer).await;
-
-        let mut observed = Vec::new();
-        while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
-            .await
-            .ok()
-            .flatten()
-        {
-            observed.push(event);
-        }
-
-        assert!(matches!(observed[0], ChainEvent::Block(2)));
-        assert!(matches!(observed[1], ChainEvent::Block(3)));
-        assert!(matches!(observed[2], ChainEvent::Block(4)));
-        assert!(matches!(observed[3], ChainEvent::Block(5)));
+        run_linear_case(vec![
+            LinearOp::SetPersistedHeight(Some(1)),
+            LinearOp::SetLiveItems(vec![4, 5]),
+            LinearOp::FailCatchupOnce(3),
+            LinearOp::FailLiveOnce(4),
+            LinearOp::Run,
+            LinearOp::ExpectBlocks(vec![2, 3, 4, 5]),
+        ])
+        .await;
     }
 
     #[tokio::test]
@@ -624,14 +858,7 @@ mod tests {
                     recovery_id: 0,
                 },
             });
-        let client = SolanaTestStream::new(vec![
-            Some(ChainEvent::CatchupCompleted),
-            Some(ChainEvent::SignRequest(indexed.clone())),
-            Some(ChainEvent::Respond(sig_responded)),
-            None,
-        ]);
-
-        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        let (sign_tx, sign_rx) = mpsc::channel(4);
 
         let (contract_watcher, _tx) = ContractStateWatcher::with_running(
             &"test.near".parse::<AccountId>().unwrap(),
@@ -642,72 +869,49 @@ mod tests {
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
         let node_client = NodeClient::new(&Default::default());
 
-        // Run the indexer
-        run_stream(
-            client,
-            sign_tx.clone(),
-            backlog.clone(),
-            contract_watcher,
-            mesh_state_rx,
-            node_client,
+        let (client, events_tx) = SolanaTestStream::new();
+        let harness = RunHarness {
+            stream: Some(client),
+            events_tx: Some(events_tx),
+            backlog,
+            sign_tx: Some(sign_tx),
+            sign_rx,
+            contract_watcher: Some(contract_watcher),
+            mesh_state_rx: Some(mesh_state_rx),
+            node_client: Some(node_client),
+            run_handle: None,
+            storage: None,
+            checkpoint: None,
+            recovered_backlog: None,
+        };
+
+        run_script(
+            harness,
+            vec![
+                RunOp::Send(ChainEvent::CatchupCompleted),
+                RunOp::Send(ChainEvent::SignRequest(indexed.clone())),
+                RunOp::Send(ChainEvent::Respond(sig_responded)),
+                RunOp::Start,
+                RunOp::ExpectRequest(sign_id),
+                RunOp::ExpectCompletion(sign_id),
+                RunOp::CloseEvents,
+                RunOp::AwaitRun,
+            ],
         )
         .await;
-
-        // We should have received the Request then Completion
-        let msg1 = timeout(Duration::from_secs(1), sign_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        match msg1 {
-            Sign::Request(req) => assert_eq!(req.id, sign_id),
-            _ => panic!("expected request"),
-        }
-
-        let msg2 = timeout(Duration::from_secs(1), sign_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        match msg2 {
-            Sign::Completion(id) => assert_eq!(id, sign_id),
-            _ => panic!("expected completion"),
-        }
     }
 
     #[tokio::test]
     async fn test_stream_handles_sign_bidirectional_block_and_recover() {
-        use crate::sign_bidirectional::SignStatus;
         use crate::stream::ops::RespondBidirectionalEvent as RBE;
         use crate::stream::ops::SignBidirectionalEvent as SBE;
         use crate::stream::ops::SignatureRespondedEvent as SRE;
         use signet_program::SignBidirectionalEvent;
 
-        // shared storage so checkpoint persistence is visible to recovered backlog
         let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
         let backlog = Backlog::persisted(storage.clone());
 
-        // client implemented with a channel so the test can control pacing
-        struct LocalStream {
-            rx: mpsc::Receiver<ChainEvent>,
-        }
-
-        #[async_trait]
-        impl ChainStream for LocalStream {
-            const CHAIN: Chain = Chain::Solana;
-            type Indexer = DisabledChainIndexer;
-
-            async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-                Ok(DisabledChainIndexer::silent())
-            }
-
-            async fn next_event(&mut self) -> Option<ChainEvent> {
-                self.rx.recv().await
-            }
-        }
-
-        let (events_tx, rx) = mpsc::channel(8);
-        let client = LocalStream { rx };
-
-        let (sign_tx, mut sign_rx) = mpsc::channel(8);
+        let (sign_tx, sign_rx) = mpsc::channel(8);
 
         let (contract_watcher, _tx) = ContractStateWatcher::with_running(
             &"test.near".parse::<AccountId>().unwrap(),
@@ -718,21 +922,22 @@ mod tests {
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
         let node_client = NodeClient::new(&Default::default());
 
-        // Start indexer in background (clone backlog so the test retains ownership)
-        let backlog_for_run = backlog.clone();
-        let run_handle = tokio::spawn(async move {
-            run_stream(
-                client,
-                sign_tx,
-                backlog_for_run,
-                contract_watcher,
-                mesh_state_rx,
-                node_client,
-            )
-            .await;
-        });
+        let (client, events_tx) = SolanaTestStream::new();
+        let harness = RunHarness {
+            stream: Some(client),
+            events_tx: Some(events_tx),
+            backlog,
+            sign_tx: Some(sign_tx),
+            sign_rx,
+            contract_watcher: Some(contract_watcher),
+            mesh_state_rx: Some(mesh_state_rx),
+            node_client: Some(node_client),
+            run_handle: None,
+            storage: Some(storage),
+            checkpoint: None,
+            recovered_backlog: None,
+        };
 
-        // prepare a SignBidirectional request
         let sign_id = SignId::new([42u8; 32]);
         let args = SignArgs {
             entropy: [0u8; 32],
@@ -742,15 +947,14 @@ mod tests {
             key_version: 1,
         };
         let program_id = solana_sdk::pubkey::Pubkey::new_unique();
-        // Minimal legacy unsigned Ethereum tx encoded as RLP so sign_and_hash can parse it
         let mut rlp_s = rlp::RlpStream::new_list(9);
-        rlp_s.append(&0u64); // nonce
-        rlp_s.append(&0u64); // gasPrice
-        rlp_s.append(&0u64); // gasLimit
-        rlp_s.append(&Vec::<u8>::new()); // to
-        rlp_s.append(&0u64); // value
-        rlp_s.append(&Vec::<u8>::new()); // data
-        rlp_s.append(&1u64); // chain_id
+        rlp_s.append(&0u64);
+        rlp_s.append(&0u64);
+        rlp_s.append(&0u64);
+        rlp_s.append(&Vec::<u8>::new());
+        rlp_s.append(&0u64);
+        rlp_s.append(&Vec::<u8>::new());
+        rlp_s.append(&1u64);
         rlp_s.append(&0u64);
         rlp_s.append(&0u64);
         let unsigned_rlp = rlp_s.out().to_vec();
@@ -778,26 +982,6 @@ mod tests {
             SBE::Solana(sign_bidir.clone()),
         );
 
-        events_tx.send(ChainEvent::CatchupCompleted).await.unwrap();
-
-        // push SignRequest
-        events_tx
-            .send(ChainEvent::SignRequest(indexed.clone()))
-            .await
-            .unwrap();
-
-        // we should receive a Sign::Request
-        let msg = timeout(Duration::from_secs(1), sign_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        match msg {
-            Sign::Request(req) => assert_eq!(req.id, sign_id),
-            _ => panic!("expected sign request"),
-        }
-
-        // Prepare a SignatureRespondedEvent that will advance to bidirectional and register watcher
-        // Construct a valid signature (use generator point for big_r and small s)
         use k256::elliptic_curve::sec1::ToEncodedPoint;
         let enc = k256::ProjectivePoint::GENERATOR.to_encoded_point(false);
         let x_bytes = enc.x().unwrap().as_slice();
@@ -822,58 +1006,6 @@ mod tests {
                 recovery_id: 0,
             },
         });
-        events_tx
-            .send(ChainEvent::Respond(sig_responded))
-            .await
-            .unwrap();
-
-        // wait for the indexer to register an execution watcher for the target chain
-        let target_chain = Chain::Ethereum;
-        timeout(Duration::from_secs(1), async {
-            loop {
-                let watchers = backlog.pending_execution(target_chain).await;
-                if watchers.values().any(|(s, _)| *s == sign_id) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-
-        // mark status as PendingExecution so it will be included in checkpoints
-        backlog
-            .set_status(Chain::Solana, &sign_id, SignStatus::PendingExecution)
-            .await;
-
-        // send a block event for this chain and ensure checkpoint is persisted
-        let block = Chain::Solana.checkpoint_interval().unwrap_or(1);
-        events_tx.send(ChainEvent::Block(block)).await.unwrap();
-
-        // give the indexer a brief moment to persist the checkpoint
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let checkpoint = backlog
-            .latest_checkpoint(Chain::Solana)
-            .await
-            .expect("checkpoint should exist");
-
-        // recover into a new backlog and verify watchers restored
-        let recovered = Backlog::persisted(storage.clone());
-        recovered
-            .recover_by_checkpoint(checkpoint.clone())
-            .await
-            .expect("recovery failed");
-
-        let old_watchers = backlog.pending_execution(target_chain).await;
-        let new_watchers = recovered.pending_execution(target_chain).await;
-        assert_eq!(old_watchers.len(), new_watchers.len());
-        for (tx_id, (s, _)) in old_watchers {
-            assert!(new_watchers.contains_key(&tx_id));
-            assert_eq!(new_watchers.get(&tx_id).unwrap().0, s);
-        }
-
-        // now send a RespondBidirectional event to complete the request
-        // RespondBidirectional should also carry a valid signature
         let respond_bidirectional = RBE::Solana(signet_program::RespondBidirectionalEvent {
             request_id: sign_id.request_id,
             responder: solana_sdk::pubkey::Pubkey::new_unique(),
@@ -887,27 +1019,40 @@ mod tests {
                 recovery_id: 0,
             },
         });
-        events_tx
-            .send(ChainEvent::RespondBidirectional(respond_bidirectional))
-            .await
-            .unwrap();
 
-        // we should receive completion
-        let msg2 = timeout(Duration::from_secs(1), sign_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        match msg2 {
-            Sign::Completion(id) => assert_eq!(id, sign_id),
-            _ => panic!("expected completion"),
-        }
-
-        // backlog entry should be removed
-        assert!(backlog.get(Chain::Solana, &sign_id).await.is_none());
-
-        // stop the client and wait for the indexer to finish
-        drop(events_tx);
-        run_handle.await.unwrap();
+        run_script(
+            harness,
+            vec![
+                RunOp::Start,
+                RunOp::Send(ChainEvent::CatchupCompleted),
+                RunOp::Send(ChainEvent::SignRequest(indexed.clone())),
+                RunOp::ExpectRequest(sign_id),
+                RunOp::Send(ChainEvent::Respond(sig_responded)),
+                RunOp::WaitForWatcher {
+                    chain: Chain::Ethereum,
+                    sign_id,
+                },
+                RunOp::SetStatus {
+                    chain: Chain::Solana,
+                    sign_id,
+                    status: crate::sign_bidirectional::SignStatus::PendingExecution,
+                },
+                RunOp::Send(ChainEvent::Block(Chain::Solana.checkpoint_interval().unwrap_or(1))),
+                RunOp::Sleep(Duration::from_millis(50)),
+                RunOp::CaptureCheckpoint(Chain::Solana),
+                RunOp::RecoverBacklog,
+                RunOp::AssertRecoveredWatchers(Chain::Ethereum),
+                RunOp::Send(ChainEvent::RespondBidirectional(respond_bidirectional)),
+                RunOp::ExpectCompletion(sign_id),
+                RunOp::AssertBacklogMissing {
+                    chain: Chain::Solana,
+                    sign_id,
+                },
+                RunOp::CloseEvents,
+                RunOp::AwaitRun,
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -942,14 +1087,8 @@ mod tests {
             signature: Signature::new(k256::ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
         });
 
-        let client = EthereumTestStream::new(vec![
-            Some(ChainEvent::Respond(respond)),
-            Some(ChainEvent::CatchupCompleted),
-            None,
-        ]);
-
-        let backlog = Backlog::persisted(storage);
-        let (sign_tx, mut sign_rx) = mpsc::channel(8);
+        let (client, events_tx) = EthereumTestStream::new();
+        let (sign_tx, sign_rx) = mpsc::channel(8);
 
         let (contract_watcher, _tx) = ContractStateWatcher::with_running(
             &"test.near".parse::<AccountId>().unwrap(),
@@ -989,21 +1128,37 @@ mod tests {
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(mesh_state);
         let node_client = NodeClient::new(&Default::default());
 
-        run_stream(
-            client,
-            sign_tx,
-            backlog.clone(),
-            contract_watcher,
-            mesh_state_rx,
-            node_client,
+        let harness = RunHarness {
+            stream: Some(client),
+            events_tx: Some(events_tx),
+            backlog: Backlog::persisted(storage),
+            sign_tx: Some(sign_tx),
+            sign_rx,
+            contract_watcher: Some(contract_watcher),
+            mesh_state_rx: Some(mesh_state_rx),
+            node_client: Some(node_client),
+            run_handle: None,
+            storage: None,
+            checkpoint: None,
+            recovered_backlog: None,
+        };
+
+        run_script(
+            harness,
+            vec![
+                RunOp::Send(ChainEvent::Respond(respond)),
+                RunOp::Send(ChainEvent::CatchupCompleted),
+                RunOp::Start,
+                RunOp::ExpectNoSign(Duration::from_millis(100)),
+                RunOp::AssertBacklogMissing {
+                    chain: Chain::Ethereum,
+                    sign_id,
+                },
+                RunOp::CloseEvents,
+                RunOp::AwaitRun,
+            ],
         )
         .await;
-
-        match timeout(Duration::from_millis(100), sign_rx.recv()).await {
-            Err(_) | Ok(None) => {}
-            Ok(Some(msg)) => panic!("unexpected sign message during catchup: {msg:?}"),
-        }
-        assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_none());
     }
 
     #[tokio::test]
@@ -1036,14 +1191,8 @@ mod tests {
 
         let replacement =
             IndexedSignRequest::sign(sign_id, args.clone(), Chain::Ethereum, replayed_timestamp);
-        let client = EthereumTestStream::new(vec![
-            Some(ChainEvent::SignRequest(replacement)),
-            Some(ChainEvent::CatchupCompleted),
-            None,
-        ]);
-
-        let backlog = Backlog::persisted(storage);
-        let (sign_tx, mut sign_rx) = mpsc::channel(8);
+        let (client, events_tx) = EthereumTestStream::new();
+        let (sign_tx, sign_rx) = mpsc::channel(8);
 
         let (contract_watcher, _tx) = ContractStateWatcher::with_running(
             &"test.near".parse::<AccountId>().unwrap(),
@@ -1083,25 +1232,37 @@ mod tests {
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(mesh_state);
         let node_client = NodeClient::new(&Default::default());
 
-        run_stream(
-            client,
-            sign_tx,
-            backlog.clone(),
-            contract_watcher,
-            mesh_state_rx,
-            node_client,
+        let harness = RunHarness {
+            stream: Some(client),
+            events_tx: Some(events_tx),
+            backlog: Backlog::persisted(storage),
+            sign_tx: Some(sign_tx),
+            sign_rx,
+            contract_watcher: Some(contract_watcher),
+            mesh_state_rx: Some(mesh_state_rx),
+            node_client: Some(node_client),
+            run_handle: None,
+            storage: None,
+            checkpoint: None,
+            recovered_backlog: None,
+        };
+
+        run_script(
+            harness,
+            vec![
+                RunOp::Send(ChainEvent::SignRequest(replacement)),
+                RunOp::Send(ChainEvent::CatchupCompleted),
+                RunOp::Start,
+                RunOp::ExpectNoSign(Duration::from_millis(100)),
+                RunOp::AssertBacklogTimestamp {
+                    chain: Chain::Ethereum,
+                    sign_id,
+                    timestamp: replayed_timestamp,
+                },
+                RunOp::CloseEvents,
+                RunOp::AwaitRun,
+            ],
         )
         .await;
-
-        match timeout(Duration::from_millis(100), sign_rx.recv()).await {
-            Err(_) | Ok(None) => {}
-            Ok(Some(msg)) => panic!("unexpected extra sign message after catchup: {msg:?}"),
-        }
-
-        let entry = backlog
-            .get(Chain::Ethereum, &sign_id)
-            .await
-            .expect("replayed entry should remain in backlog");
-        assert_eq!(entry.request.unix_timestamp_indexed, replayed_timestamp);
     }
 }

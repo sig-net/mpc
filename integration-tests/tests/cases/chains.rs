@@ -29,8 +29,7 @@ const FUNDING_MAX_ATTEMPTS: usize = 20;
 const TX_RECEIPT_POLL_INTERVAL_SECS: u64 = 6;
 const TX_RECEIPT_MAX_ATTEMPTS: usize = 40;
 
-#[test(tokio::test)]
-async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
+#[test(tokio::test)]async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
     let key_version = LATEST_MPC_KEY_VERSION;
     let nodes = cluster::spawn().solana().ethereum().await?;
 
