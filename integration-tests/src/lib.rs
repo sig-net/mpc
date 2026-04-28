@@ -98,7 +98,7 @@ pub enum Nodes {
     },
     Docker {
         next_id: usize,
-        ctx: Context,
+        ctx: Option<Context>,
         nodes: Vec<containers::Node>,
     },
 }
@@ -118,7 +118,9 @@ impl Nodes {
     pub fn ctx(&self) -> &Context {
         match self {
             Nodes::Local { ctx, .. } => ctx,
-            Nodes::Docker { ctx, .. } => ctx,
+            Nodes::Docker { ctx, .. } => ctx
+                .as_ref()
+                .expect("Docker context should always be present"),
         }
     }
 
@@ -164,6 +166,9 @@ impl Nodes {
                 ctx,
                 nodes,
             } => {
+                let ctx = ctx
+                    .as_ref()
+                    .expect("Docker context should always be present");
                 nodes.push(containers::Node::run(ctx, cfg, new_account).await?);
                 *next_id += 1;
                 Ok(nodes.len() - 1)
@@ -203,9 +208,18 @@ impl Nodes {
                 }
             }
             Nodes::Docker { nodes, .. } => {
-                for node in nodes.drain(..) {
-                    tokio::spawn(node.kill());
-                }
+                let nodes = std::mem::take(nodes);
+                let cleanup = std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Runtime::new()
+                        .expect("failed to create tokio runtime for docker cleanup");
+                    runtime.block_on(async {
+                        for node in nodes {
+                            node.kill().await;
+                        }
+                    });
+                });
+
+                cleanup.join().expect("docker cleanup thread panicked");
             }
         }
     }
@@ -226,6 +240,9 @@ impl Nodes {
                 ctx,
                 nodes,
             } => {
+                let ctx = ctx
+                    .as_ref()
+                    .expect("Docker context should always be present");
                 nodes.push(containers::Node::spawn(ctx, config).await?);
                 *next_id += 1;
             }
@@ -302,6 +319,17 @@ impl Nodes {
 impl Drop for Nodes {
     fn drop(&mut self) {
         self.kill_all();
+
+        if let Nodes::Docker { ctx, .. } = self {
+            if let Some(ctx) = ctx.take() {
+                let network = ctx.docker_network.clone();
+                let docker_client = ctx.docker_client.clone();
+                drop(ctx);
+                if let Err(err) = docker_client.remove_network_sync(&network) {
+                    tracing::warn!(network = %network, error = ?err, "failed to remove docker network on Nodes drop");
+                }
+            }
+        }
     }
 }
 
@@ -364,13 +392,17 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
         };
 
         let contract_address_hex = hex::encode(contract_address);
+        let helios_dir = spawner
+            .tmp_dir
+            .join(format!("helios-{}", contract_address_hex));
+        let helios_data_path = helios_dir.to_string_lossy().to_string();
         spawner.cfg.eth = Some(EthConfig {
             account_sk: sandbox.secret_key.clone(),
             consensus_rpc_http_url: rpc_endpoint.clone(),
             execution_rpc_http_url: rpc_endpoint,
             contract_address: contract_address_hex.clone(),
             network: "sepolia".to_string(),
-            helios_data_path: format!("/tmp/helios-{}", contract_address_hex),
+            helios_data_path,
             refresh_finalized_interval: 1_000,
             optimistic_requests: true,
             light_client: false,
@@ -516,7 +548,7 @@ pub async fn docker(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
 
     Ok(Nodes::Docker {
         next_id: nodes.len(),
-        ctx,
+        ctx: Some(ctx),
         nodes,
     })
 }

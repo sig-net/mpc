@@ -1,0 +1,9 @@
+[profile.default]
+fail-fast = false
+
+[profile.ci]
+fail-fast = false
+
+[profile.integration]
+fail-fast = false
+test-threads = 1

@@ -117,13 +117,14 @@ impl EthereumTestEnvironment {
     }
 
     fn config(&self, optimistic_requests: bool) -> EthConfig {
+        let helios_dir = self._spawner.tmp_dir.join("helios");
         EthConfig {
             account_sk: self.sandbox.secret_key.clone(),
             consensus_rpc_http_url: self.sandbox.external_http_endpoint.clone(),
             execution_rpc_http_url: self.sandbox.external_http_endpoint.clone(),
             contract_address: format!("{:x}", self.contract_address),
             network: "sepolia".to_string(),
-            helios_data_path: "/tmp/helios".to_string(),
+            helios_data_path: helios_dir.to_string_lossy().to_string(),
             refresh_finalized_interval: 500,
             optimistic_requests,
             light_client: false,

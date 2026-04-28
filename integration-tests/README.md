@@ -13,9 +13,9 @@ In case of authorization issues make sure you have logged into docker using your
 Then run the integration tests:
 
 ```BASH
-cargo test -p integration-tests --jobs 1 -- --test-threads 1
+cargo test -p integration-tests -- --show-output
 # or if you want to run tests in docker
-cargo test -p integration-tests --features docker-test
+cargo test -p integration-tests --features docker-test -- --show-output
 ```
 
 ## Logging and Tracing
@@ -83,7 +83,7 @@ artifacts into git.
 You can pass environment variable `TESTCONTAINERS=keep` to keep all of the docker containers. For example:
 
 ```bash
-$ TESTCONTAINERS=keep cargo test -p integration-tests --jobs 1 -- --test-threads 1
+$ TESTCONTAINERS=keep cargo test -p integration-tests -- --show-output
 ```
 
 ### There are no logs anymore, how do I debug?

@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
 
+use uuid::Uuid;
+
 use crate::containers::{self, DockerClient};
 use crate::utils::dev_gen_indexed;
 use crate::{execute, NodeBinarySource, NodeConfig, Nodes};
@@ -113,10 +115,13 @@ pub struct ClusterSpawner {
     pub release: bool,
     pub env: String,
     pub gcp_project_id: String,
+    pub run_id: String,
+    pub network_prefix: String,
     pub network: String,
     pub accounts: Vec<Account>,
     pub participants: Vec<Participant>,
     pub tmp_dir: PathBuf,
+    pub network_created: bool,
 
     pub cfg: NodeConfig,
     pub wait_for_running: bool,
@@ -133,8 +138,11 @@ pub struct ClusterSpawner {
 
 impl Default for ClusterSpawner {
     fn default() -> Self {
+        let run_id = Uuid::new_v4().simple().to_string();
+
         let mut tmp_dir = execute::target_dir().expect("unable to locate target dir");
         tmp_dir.push("tmp");
+        tmp_dir.push(&run_id);
 
         let nodes = 3;
         let threshold = 2;
@@ -148,7 +156,9 @@ impl Default for ClusterSpawner {
             release: true,
             env: ENV.to_string(),
             gcp_project_id: GCP_PROJECT_ID.to_string(),
-            network: DOCKER_NETWORK.to_string(),
+            run_id: run_id.clone(),
+            network_prefix: DOCKER_NETWORK.to_string(),
+            network: Self::make_network_name(DOCKER_NETWORK, &run_id),
             accounts: Vec::with_capacity(cfg.nodes),
             participants: Vec::with_capacity(cfg.nodes),
             tmp_dir,
@@ -163,13 +173,24 @@ impl Default for ClusterSpawner {
             pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
             use_ethereum: false,
             node_binary_sources: vec![NodeBinarySource::CurrentCode; nodes],
+            network_created: false,
         }
     }
 }
 
 impl ClusterSpawner {
-    pub async fn init_network(self) -> anyhow::Result<Self> {
-        self.docker.create_network(&self.network).await?;
+    fn make_network_name(name: &str, run_id: &str) -> String {
+        format!("{name}-{run_id}")
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+}
+
+impl ClusterSpawner {
+    pub async fn init_network(mut self) -> anyhow::Result<Self> {
+        self.ensure_network_created().await?;
         Ok(self)
     }
 
@@ -282,7 +303,8 @@ impl ClusterSpawner {
     }
 
     pub fn network(mut self, network: &str) -> Self {
-        self.network = network.to_string();
+        self.network_prefix = network.to_string();
+        self.network = Self::make_network_name(network, &self.run_id);
         self
     }
 
@@ -318,7 +340,34 @@ impl ClusterSpawner {
             .extend((0..self.accounts.len() as u32).map(Participant::from));
     }
 
-    pub async fn spawn_redis(&self) -> containers::Redis {
+    async fn ensure_network_created(&mut self) -> anyhow::Result<()> {
+        if self.network_created {
+            return Ok(());
+        }
+
+        self.docker
+            .cleanup_unused_networks(
+                &[
+                    self.network_prefix.as_str(),
+                    DOCKER_NETWORK,
+                    "mpc-test",
+                    "eth-client-tests",
+                    "test-presignature-persistence",
+                    "test-triple-persistence",
+                    "bench-protocol-sync",
+                ],
+                Some(&self.network),
+            )
+            .await?;
+        self.docker.create_network(&self.network).await?;
+        self.network_created = true;
+        Ok(())
+    }
+
+    pub async fn spawn_redis(&mut self) -> containers::Redis {
+        self.ensure_network_created()
+            .await
+            .expect("failed to ensure Docker network before spawning redis");
         containers::Redis::run(self).await
     }
 
@@ -384,6 +433,16 @@ impl ClusterSpawner {
     }
 }
 
+impl Drop for ClusterSpawner {
+    fn drop(&mut self) {
+        if self.network_created {
+            if let Err(err) = self.docker.remove_network_sync(&self.network) {
+                tracing::warn!(network = %self.network, error = ?err, "failed to remove docker network on ClusterSpawner drop");
+            }
+        }
+    }
+}
+
 impl IntoFuture for ClusterSpawner {
     type Output = anyhow::Result<Cluster>;
     type IntoFuture = std::pin::Pin<Box<dyn Future<Output = Self::Output> + Send>>;
@@ -418,25 +477,56 @@ impl IntoFuture for ClusterSpawner {
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
             let rpc_client = near_fetch::Client::from_client(jsonrpc_client);
 
+            let cfg = std::mem::take(&mut self.cfg);
+            let docker_client = std::mem::replace(&mut self.docker, DockerClient::default());
+            let solana = self.solana.take();
+            let prestockpile = self.prestockpile.take();
+            let wait_for_running = self.wait_for_running;
+
             let cluster = Cluster {
-                cfg: self.cfg,
+                cfg,
                 rpc_client,
                 http_client: reqwest::Client::default(),
-                docker_client: self.docker,
+                docker_client,
                 account_idx: nodes.len(),
-                solana: self.solana.take(),
+                solana,
                 nodes,
             };
 
-            if self.wait_for_running {
+            // Transfer cleanup responsibility to the returned Cluster / Nodes.
+            self.network_created = false;
+
+            if wait_for_running {
                 cluster.wait().running().nodes_running().await?;
 
-                if let Some(prestockpile) = self.prestockpile {
+                if let Some(prestockpile) = prestockpile {
                     cluster.prestockpile(prestockpile).await;
                 }
             }
 
             Ok(cluster)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_spawner_generates_unique_network_and_tmp_dir() {
+        let spawner = ClusterSpawner::default();
+        assert!(spawner.network.starts_with("mpc_it_network-"));
+        assert_eq!(
+            spawner.tmp_dir.file_name().unwrap().to_string_lossy(),
+            spawner.run_id()
+        );
+    }
+
+    #[test]
+    fn custom_network_label_is_namespaced_with_run_id() {
+        let spawner = ClusterSpawner::default().network("test-triple-persistence");
+        assert!(spawner.network.starts_with("test-triple-persistence-"));
+        assert!(spawner.network.ends_with(spawner.run_id()));
     }
 }

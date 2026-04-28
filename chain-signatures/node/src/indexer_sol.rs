@@ -32,7 +32,7 @@ use solana_client::{
     rpc_config::{RpcTransactionLogsConfig, RpcTransactionLogsFilter},
 };
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     Scalar::from_bytes(
@@ -303,6 +303,10 @@ struct SolanaStreamStartState {
     rpc_http_url: String,
     rpc_ws_url: String,
     tx: mpsc::Sender<ChainEvent>,
+    cpi_ready_tx: oneshot::Sender<()>,
+    cpi_ready_rx: oneshot::Receiver<()>,
+    respond_ready_tx: oneshot::Sender<()>,
+    respond_ready_rx: oneshot::Receiver<()>,
 }
 
 impl Drop for SolanaStream {
@@ -326,6 +330,8 @@ impl SolanaStream {
         };
 
         let (tx, rx) = crate::stream::channel();
+        let (cpi_ready_tx, cpi_ready_rx) = oneshot::channel();
+        let (respond_ready_tx, respond_ready_rx) = oneshot::channel();
 
         Some(SolanaStream {
             rx,
@@ -334,6 +340,10 @@ impl SolanaStream {
                 rpc_http_url: sol.rpc_http_url.clone(),
                 rpc_ws_url: sol.rpc_ws_url.clone(),
                 tx,
+                cpi_ready_tx,
+                cpi_ready_rx,
+                respond_ready_tx,
+                respond_ready_rx,
             }),
             tasks: Vec::new(),
         })
@@ -353,13 +363,25 @@ impl ChainStream for SolanaStream {
             start_state.rpc_http_url.clone(),
             start_state.rpc_ws_url.clone(),
             start_state.tx.clone(),
+            Some(start_state.cpi_ready_tx),
         ));
         self.tasks.push(spawn_respond_events(
             start_state.program_id,
-            start_state.rpc_http_url,
-            start_state.rpc_ws_url,
-            start_state.tx,
+            start_state.rpc_http_url.clone(),
+            start_state.rpc_ws_url.clone(),
+            start_state.tx.clone(),
+            start_state.respond_ready_tx,
         ));
+
+        if tokio::time::timeout(Duration::from_secs(15), async {
+            let _ = start_state.cpi_ready_rx.await;
+            let _ = start_state.respond_ready_rx.await;
+        })
+        .await
+        .is_err()
+        {
+            tracing::warn!("solana stream subscriptions did not become ready before timeout");
+        }
     }
 
     async fn next_event(&mut self) -> Option<ChainEvent> {
@@ -373,6 +395,7 @@ async fn subscribe_to_program_respond_events(
     rpc_url: &str,
     ws_url: &str,
     events_tx: mpsc::Sender<ChainEvent>,
+    ready: Option<oneshot::Sender<()>>,
 ) -> Result<()> {
     let rpc_client = RpcClient::new(rpc_url.to_string());
     let pubsub_client = PubsubClient::new(ws_url).await?;
@@ -383,6 +406,9 @@ async fn subscribe_to_program_respond_events(
     };
 
     let (mut stream, _unsubscriber) = pubsub_client.logs_subscribe(filter, config).await?;
+    if let Some(ready) = ready {
+        let _ = ready.send(());
+    }
 
     // TTL cache: avoid repeated getTransaction on same sig
     let mut seen: std::collections::HashMap<Signature, Instant> = std::collections::HashMap::new();
@@ -469,12 +495,14 @@ fn spawn_cpi_sign_events(
     rpc_url: String,
     ws_url: String,
     events_tx: mpsc::Sender<ChainEvent>,
+    ready: Option<oneshot::Sender<()>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(subscribe_and_process_sign_events(
         program_id,
         rpc_url.clone(),
         ws_url.clone(),
         events_tx.clone(),
+        ready,
     ))
 }
 
@@ -483,14 +511,17 @@ fn spawn_respond_events(
     rpc_url: String,
     ws_url: String,
     events_tx: mpsc::Sender<ChainEvent>,
+    ready: oneshot::Sender<()>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let mut ready = Some(ready);
         loop {
             if let Err(err) = subscribe_to_program_respond_events(
                 program_id,
                 &rpc_url,
                 &ws_url,
                 events_tx.clone(),
+                ready.take(),
             )
             .await
             {
@@ -516,6 +547,7 @@ async fn subscribe_and_process_sign_events(
     rpc_url: String,
     ws_url: String,
     events_tx: mpsc::Sender<ChainEvent>,
+    mut ready: Option<oneshot::Sender<()>>,
 ) {
     loop {
         let events_tx_clone = events_tx.clone();
@@ -524,6 +556,7 @@ async fn subscribe_and_process_sign_events(
             &rpc_url,
             &ws_url,
             events_tx.clone(),
+            ready.take(),
             move |event, signature: solana_sdk::signature::Signature, _slot| {
                 tracing::info!("got event: {:?}", event);
                 let tx_sig: Vec<u8> = signature.as_ref().to_vec();
@@ -639,6 +672,7 @@ async fn subscribe_to_program_cpi_events<F>(
     rpc_url: &str,
     ws_url: &str,
     events_tx: mpsc::Sender<ChainEvent>,
+    mut ready: Option<oneshot::Sender<()>>,
     mut event_handler: F,
 ) -> Result<()>
 where
@@ -653,6 +687,9 @@ where
     };
 
     let (mut stream, _unsubscriber) = pubsub_client.logs_subscribe(filter, config).await?;
+    if let Some(ready) = ready.take() {
+        let _ = ready.send(());
+    }
 
     // stall watchdog
     let stall_timeout = Duration::from_secs(60);

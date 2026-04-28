@@ -98,6 +98,7 @@ impl Node {
         // Give the container a brief moment to clean up connections gracefully
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         self.container.stop().await.unwrap();
+        self.container.rm().await.unwrap();
         NodeEnvConfig {
             web_port: Self::CONTAINER_PORT,
             account: self.account,
@@ -233,6 +234,54 @@ impl DockerClient {
         Ok(ip_address)
     }
 
+    pub async fn cleanup_unused_networks(
+        &self,
+        prefixes: &[&str],
+        keep_network: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let networks = self.docker.list_networks::<&str>(None).await?;
+
+        for network in networks {
+            let network_name = match network.name.as_deref() {
+                Some(name) => name,
+                None => continue,
+            };
+
+            let is_test_network = prefixes.iter().any(|prefix| {
+                network_name == *prefix || network_name.starts_with(&format!("{prefix}-"))
+            });
+            if !is_test_network {
+                continue;
+            }
+
+            if keep_network.map_or(false, |keep| keep == network_name) {
+                continue;
+            }
+
+            let container_count = match network.containers.as_ref() {
+                Some(containers) => containers.len(),
+                None => {
+                    tracing::debug!(network = %network_name, "network metadata unavailable, attempting removal if unused");
+                    0
+                }
+            };
+            if container_count != 0 {
+                continue;
+            }
+
+            match self.docker.remove_network(network_name).await {
+                Ok(()) => {
+                    tracing::info!(network = %network_name, "removed stale unused docker network")
+                }
+                Err(err) => {
+                    tracing::warn!(network = %network_name, error = ?err, "failed to remove stale unused docker network")
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn create_network(&self, network: &str) -> anyhow::Result<()> {
         let list = self.docker.list_networks::<&str>(None).await?;
         if list.iter().any(|n| n.name == Some(network.to_string())) {
@@ -254,6 +303,46 @@ impl DockerClient {
             ..Default::default()
         };
         let _response = &self.docker.create_network(create_network_options).await?;
+
+        Ok(())
+    }
+
+    pub async fn remove_network(&self, network: &str) -> anyhow::Result<()> {
+        self.docker.remove_network(network).await?;
+        Ok(())
+    }
+
+    pub fn remove_network_sync(&self, network: &str) -> anyhow::Result<()> {
+        let docker = self.clone();
+        let network = network.to_string();
+
+        for attempt in 1..=20 {
+            let handle = std::thread::spawn({
+                let docker = docker.clone();
+                let network = network.clone();
+                move || {
+                    let runtime = tokio::runtime::Runtime::new()
+                        .context("failed to create tokio runtime for docker network removal")?;
+                    runtime.block_on(async move { docker.remove_network(&network).await })
+                }
+            });
+
+            match handle.join() {
+                Ok(result) => match result {
+                    Ok(()) => return Ok(()),
+                    Err(err) => {
+                        if attempt == 20 {
+                            return Err(err);
+                        }
+                    }
+                },
+                Err(err) => {
+                    return Err(anyhow!("docker network removal thread panicked: {err:?}"));
+                }
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
 
         Ok(())
     }
@@ -353,7 +442,7 @@ impl Redis {
             .with_network(&spawner.network)
             .start()
             .await
-            .unwrap();
+            .expect("failed to start Redis container");
         let network_ip = spawner
             .docker
             .get_network_ip_address(&container, &spawner.network)
@@ -365,7 +454,7 @@ impl Redis {
         let host_port = container
             .get_host_port_ipv4(Self::DEFAULT_REDIS_PORT)
             .await
-            .unwrap();
+            .expect("failed to get Redis host port");
         let internal_address = format!("redis://127.0.0.1:{host_port}");
 
         tracing::info!(
@@ -644,13 +733,14 @@ impl Solana {
         let program_keypair = Solana::program_keypair();
         let payer_keypair = SolanaKeypair::from_seed(&[102u8; 32]).unwrap();
 
-        // Find available ports for RPC and WebSocket
-        // Find available ports (websocket is automatically rpc_port + 1)
-        let rpc_port = pick_preferred_or_unused_port(8899).await;
+        // Find available ports for RPC, WebSocket and validator networking.
+        // The Solana validator uses rpc_port and rpc_port + 1 for ws, plus a dynamic port range.
+        let rpc_port = crate::utils::pick_preferred_or_unused_port_range(8899, 2).await;
         let ws_port = rpc_port + 1;
         let faucet_port = pick_preferred_or_unused_port(9900).await;
         let gossip_port = pick_preferred_or_unused_port(8000).await;
-        let dynamic_port_start = pick_preferred_or_unused_port(gossip_port + 1).await;
+        let dynamic_port_start =
+            crate::utils::pick_preferred_or_unused_port_range(gossip_port + 1, 32).await;
         let dynamic_port_end = dynamic_port_start + 32;
 
         let rpc_address = format!("http://127.0.0.1:{}", rpc_port);
@@ -769,15 +859,63 @@ impl Solana {
             }
         };
 
-        // Wait a bit for deployment to be fully processed
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        // Wait for the program account to be visible and executable before initialization.
+        self.wait_for_program_deployed(&program_address).await?;
 
-        // Initialize the program after deployment
-        if let Err(e) = self.initialize_program().await {
-            anyhow::bail!("program initialization failed: {e}");
+        // Initialize the program after deployment. On heavily loaded systems, initialization can
+        // race with the final program deploy state, so retry transient "Unsupported program id"
+        // failures a few times.
+        let mut attempts = 0;
+        let max_attempts = 8;
+        loop {
+            match self.initialize_program().await {
+                Ok(()) => break,
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if attempts < max_attempts && err_str.contains("Unsupported program id") {
+                        attempts += 1;
+                        tracing::warn!(
+                            attempt = attempts,
+                            "retrying solana program initialization due to transient unsupported program id"
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                        continue;
+                    }
+                    anyhow::bail!("program initialization failed: {e}");
+                }
+            }
         }
 
         Ok(program_address)
+    }
+
+    async fn wait_for_program_deployed(&self, program_address: &str) -> anyhow::Result<()> {
+        let program_pubkey: SolanaPubkey = program_address.parse()?;
+        let mut attempts = 0;
+        let max_attempts = 20;
+        while attempts < max_attempts {
+            match self.rpc_client.get_account(&program_pubkey).await {
+                Ok(account) if account.executable => return Ok(()),
+                Ok(_) => {
+                    tracing::debug!(
+                        program_address,
+                        attempt = attempts,
+                        "program account exists but is not executable yet"
+                    );
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        program_address,
+                        attempt = attempts,
+                        ?err,
+                        "program account not available yet"
+                    );
+                }
+            }
+            attempts += 1;
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
+        anyhow::bail!("solana program account was not ready after {max_attempts} attempts")
     }
 
     /// Perform real contract deployment using Solana CLI
@@ -914,6 +1052,15 @@ impl Solana {
             ],
             data,
         };
+
+        let account = self.rpc_client.get_account(&program_id).await?;
+        tracing::debug!(
+            program_id = %program_id,
+            executable = account.executable,
+            lamports = account.lamports,
+            data_len = account.data.len(),
+            "program account state before initialize"
+        );
 
         let recent_blockhash = self.rpc_client.get_latest_blockhash().await?;
         let transaction = solana_sdk::transaction::Transaction::new_signed_with_payer(

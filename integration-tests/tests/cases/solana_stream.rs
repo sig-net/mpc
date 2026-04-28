@@ -247,16 +247,21 @@ async fn test_solana_stream_concurrent_events() -> Result<()> {
             .await?;
     }
 
-    // Collect all sign request events
+    // Collect all sign request events. Use an overall deadline because the stream may return
+    // block markers or other intermediate events under load.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let mut sign_events = Vec::new();
-    for _ in 0..num_requests * 2 {
-        if let Ok(Some(ChainEvent::SignRequest(req))) =
-            timeout(Duration::from_secs(5), stream.next_event()).await
-        {
+
+    while sign_events.len() < num_requests {
+        let remaining = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .min(Duration::from_secs(10));
+        let event = timeout(remaining, stream.next_event())
+            .await
+            .context("timeout waiting for event")?;
+
+        if let Some(ChainEvent::SignRequest(req)) = event {
             sign_events.push(req);
-            if sign_events.len() == num_requests {
-                break;
-            }
         }
     }
 
@@ -331,7 +336,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
         .await?;
 
     // New client should pick up new events
-    let event = timeout(Duration::from_secs(5), stream2.next_event())
+    let event = timeout(Duration::from_secs(15), stream2.next_event())
         .await
         .context("timeout waiting for event")?
         .context("client returned None")?;
