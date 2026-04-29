@@ -2005,15 +2005,17 @@ async fn try_publish_canton(
             }),
         ),
         SignKind::RespondBidirectional(respond_tx) => {
-            let sign_event_cid = respond_tx
-                .source_event_id
+            let chain_ctx_bytes = respond_tx
+                .chain_ctx
                 .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("missing source event id on Canton response"))?;
+                .ok_or_else(|| anyhow::anyhow!("missing chain_ctx on Canton response"))?;
+            let ctx: crate::indexer_canton::CantonChainCtx = borsh::from_slice(chain_ctx_bytes)
+                .map_err(|e| anyhow::anyhow!("failed to deserialize CantonChainCtx: {e}"))?;
             (
                 "RespondBidirectional",
                 format!("mpc-respond-bidir-{request_id_hex}"),
                 serde_json::json!({
-                    "signEventCid": sign_event_cid,
+                    "signEventCid": ctx.sign_event_contract_id,
                     "requestId": request_id_hex,
                     "serializedOutput": hex::encode(&respond_tx.output),
                     "signature": canton_signature,

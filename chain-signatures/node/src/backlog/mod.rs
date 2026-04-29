@@ -1033,7 +1033,7 @@ mod tests {
                     RespondBidirectionalTx {
                         tx_id: tx.id,
                         output: vec![],
-                        source_event_id: None,
+                        chain_ctx: None,
                     },
                 );
                 backlog
@@ -1490,7 +1490,7 @@ mod tests {
                 RespondBidirectionalTx {
                     tx_id: tx.id,
                     output: vec![],
-                    source_event_id: None,
+                    chain_ctx: None,
                 },
             );
             recovered
@@ -1535,7 +1535,7 @@ mod tests {
             RespondBidirectionalTx {
                 tx_id: tx.id,
                 output: vec![1, 2, 3],
-                source_event_id: None,
+                chain_ctx: None,
             },
         );
 
