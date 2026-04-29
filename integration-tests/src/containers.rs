@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cluster::spawner::ClusterSpawner;
 use crate::local::NodeEnvConfig;
-use crate::utils::pick_preferred_or_unused_port;
+use crate::utils::{pick_preferred_or_unused_port, pick_preferred_or_unused_port_block};
 use crate::NodeConfig;
 
 use anyhow::{anyhow, Context};
@@ -645,13 +645,12 @@ impl Solana {
         let program_keypair = Solana::program_keypair();
         let payer_keypair = SolanaKeypair::from_seed(&[102u8; 32]).unwrap();
 
-        // Find available ports for RPC and WebSocket
-        // Find available ports (websocket is automatically rpc_port + 1)
-        let rpc_port = pick_preferred_or_unused_port(8899).await;
+        // Reserve rpc/ws as one contiguous block so parallel Solana validators do not overlap.
+        let rpc_port = pick_preferred_or_unused_port_block(8899, 2).await;
         let ws_port = rpc_port + 1;
         let faucet_port = pick_preferred_or_unused_port(9900).await;
         let gossip_port = pick_preferred_or_unused_port(8000).await;
-        let dynamic_port_start = pick_preferred_or_unused_port(gossip_port + 1).await;
+        let dynamic_port_start = pick_preferred_or_unused_port_block(gossip_port + 1, 33).await;
         let dynamic_port_end = dynamic_port_start + 32;
 
         let rpc_address = format!("http://127.0.0.1:{}", rpc_port);

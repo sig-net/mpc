@@ -14,8 +14,8 @@ use crate::utils::dev_gen_indexed;
 use crate::{execute, NodeBinarySource, NodeConfig, Nodes};
 
 use crate::cluster::Cluster;
+use uuid::Uuid;
 
-const DOCKER_NETWORK: &str = "mpc_it_network";
 const GCP_PROJECT_ID: &str = "multichain-integration";
 const ENV: &str = "integration-tests";
 
@@ -148,7 +148,7 @@ impl Default for ClusterSpawner {
             release: true,
             env: ENV.to_string(),
             gcp_project_id: GCP_PROJECT_ID.to_string(),
-            network: DOCKER_NETWORK.to_string(),
+            network: format!("mpc_it_{}", Uuid::new_v4().simple()),
             accounts: Vec::with_capacity(cfg.nodes),
             participants: Vec::with_capacity(cfg.nodes),
             tmp_dir,
