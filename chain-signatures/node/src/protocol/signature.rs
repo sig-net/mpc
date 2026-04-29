@@ -1,4 +1,3 @@
-use super::MpcSignProtocol;
 use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::kdf::derive_delta;
@@ -895,7 +894,7 @@ impl SignGenerator {
         indexed: IndexedSignRequest,
         presignature: PendingPresignature,
         participants: Vec<Participant>,
-        _node_account_id: &str,
+        _node_account_id: &near_account_id::AccountId,
     ) -> Result<Self, InitializationError> {
         #[cfg(feature = "debug-page")]
         let node_account_id = _node_account_id;
@@ -1161,22 +1160,49 @@ struct SignTask {
     cfg: ProtocolConfig,
     contract: ContractStateWatcher,
     is_proposer: Arc<AtomicBool>,
-    node_account_id: String,
+    node_account_id: near_account_id::AccountId,
+}
+
+impl SignTask {
+    fn refresh_from_contract(&mut self, contract_state: &crate::protocol::ProtocolState) -> bool {
+        match contract_state {
+            crate::protocol::ProtocolState::Running(running) => {
+                if running.epoch == self.epoch {
+                    return true;
+                }
+                if let Some(me) = running.participants.find_participant(&self.node_account_id) {
+                    self.me = *me;
+                    self.participants = running.participants.keys().copied().collect();
+                    self.threshold = running.threshold;
+                    self.public_key = running.public_key;
+                    self.epoch = running.epoch;
+                    return true;
+                }
+                false
+            }
+            crate::protocol::ProtocolState::Resharing(state) => {
+                self.participants = state.new_participants.keys().copied().collect();
+                self.threshold = state.threshold;
+                self.public_key = state.public_key;
+                false
+            }
+            crate::protocol::ProtocolState::Initializing(_) => false,
+        }
+    }
 }
 
 impl SignTask {
     async fn run(
-        self,
+        mut self,
         indexed: IndexedSignRequest,
         mesh_state: watch::Receiver<MeshState>,
         mut task_rx: mpsc::Receiver<SignTaskMessage>,
     ) -> Result<(), SignError> {
         let sign_id = self.sign_id;
-        let task_epoch = self.epoch;
         tracing::info!(
             ?sign_id,
             me = ?self.me,
-            epoch = task_epoch,
+            epoch = self.epoch,
             "signature task starting with organizing loop"
         );
 
@@ -1184,29 +1210,20 @@ impl SignTask {
         let mut phase = SignPhase::Organizing(SignOrganizer);
 
         loop {
-            // Check if we should abort due to resharing or epoch change
             if let Some(contract_state) = self.contract.state() {
-                match contract_state {
-                    crate::protocol::ProtocolState::Resharing(_) => {
-                        tracing::info!(
-                            ?sign_id,
-                            epoch = task_epoch,
-                            "signature task interrupted: contract is resharing"
-                        );
-                        return Err(SignError::Aborted);
-                    }
-                    crate::protocol::ProtocolState::Running(running)
-                        if running.epoch != task_epoch =>
-                    {
-                        tracing::info!(
-                            ?sign_id,
-                            old_epoch = task_epoch,
-                            new_epoch = running.epoch,
-                            "signature task interrupted: epoch changed"
-                        );
-                        return Err(SignError::Aborted);
-                    }
-                    _ => {}
+                if !self.refresh_from_contract(&contract_state) {
+                    tracing::info!(
+                        ?sign_id,
+                        epoch = self.epoch,
+                        "signature task paused waiting for running governance"
+                    );
+                    let mut contract = self.contract.clone();
+                    let governance = contract.wait_governance().await;
+                    self.me = governance.me;
+                    self.participants = governance.participants.into_iter().collect();
+                    self.threshold = governance.threshold;
+                    self.public_key = governance.public_key;
+                    self.epoch = governance.epoch;
                 }
             }
 
@@ -1246,7 +1263,7 @@ pub struct SignatureSpawner {
     msg: MessageChannel,
     rpc: RpcChannel,
     backlog: Backlog,
-    node_account_id: String,
+    node_account_id: near_account_id::AccountId,
 }
 
 impl SignatureSpawner {
@@ -1395,7 +1412,6 @@ impl SignatureSpawner {
         &mut self,
         sign: Sign,
         cfg: &ProtocolConfig,
-        participants: &BTreeSet<Participant>,
         contract: &ContractStateWatcher,
     ) {
         match sign {
@@ -1421,7 +1437,11 @@ impl SignatureSpawner {
                     request.unix_timestamp_indexed,
                 );
 
-                self.spawn_task(request, participants.clone(), contract.clone(), cfg.clone());
+                let participants = contract
+                    .participants()
+                    .map(|participants| participants.keys().copied().collect())
+                    .unwrap_or_default();
+                self.spawn_task(request, participants, contract.clone(), cfg.clone());
             }
         }
 
@@ -1436,8 +1456,6 @@ impl SignatureSpawner {
     ) {
         let mut posits = self.msg.subscribe_signature_posit().await;
 
-        let running = contract.wait_running().await;
-        let all_participants = running.participants.keys().copied().collect();
         let mut protocol = cfg.borrow().protocol.clone();
 
         // we acquire the lock but since this is a tokio lock, aborting the task while holding
@@ -1451,7 +1469,7 @@ impl SignatureSpawner {
                         tracing::warn!("signature spawner sign_rx closed, terminating");
                         break;
                     };
-                    self.handle_request(sign, &protocol, &all_participants, &contract);
+                    self.handle_request(sign, &protocol, &contract);
                 }
                 Some((sign_id, presignature_id, round, from, action)) = posits.recv() => {
                     self.handle_posit(sign_id, presignature_id, round, from, action).await;
@@ -1461,6 +1479,18 @@ impl SignatureSpawner {
                 }
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();
+                }
+                _ = contract.next_state() => {
+                    if let Some(state) = contract.state() {
+                        if let Some(governance) = contract.governance() {
+                            self.me = governance.me;
+                            self.threshold = governance.threshold;
+                            self.public_key = governance.public_key;
+                            self.epoch = governance.epoch;
+                        } else if matches!(state, crate::protocol::ProtocolState::Resharing(_)) {
+                            tracing::info!("signature spawner paused during resharing");
+                        }
+                    }
                 }
             }
         }
@@ -1480,34 +1510,37 @@ pub struct SignatureSpawnerTask {
 
 impl SignatureSpawnerTask {
     pub fn run(
-        me: Participant,
-        threshold: usize,
-        epoch: u64,
-        ctx: &MpcSignProtocol,
-        public_key: PublicKey,
+        my_account_id: near_account_id::AccountId,
+        sign_rx: Arc<RwLock<mpsc::Receiver<Sign>>>,
+        contract: ContractStateWatcher,
+        config: watch::Receiver<Config>,
+        presignature_storage: PresignatureStorage,
+        mesh_state: watch::Receiver<MeshState>,
+        msg_channel: MessageChannel,
+        rpc_channel: RpcChannel,
+        backlog: Backlog,
     ) -> Self {
+        let governance = contract
+            .governance()
+            .unwrap_or_else(|| panic!("signature spawner requires running governance at startup"));
         let spawner = SignatureSpawner {
-            me,
+            me: governance.me,
             tasks: JoinMap::new(),
             inboxes: HashMap::new(),
             delayed_watchers: HashMap::new(),
-            threshold,
-            public_key,
-            epoch,
-            presignatures: ctx.presignature_storage.clone(),
-            mesh_state: ctx.mesh_state.clone(),
-            msg: ctx.msg_channel.clone(),
-            rpc: ctx.rpc_channel.clone(),
-            backlog: ctx.backlog.clone(),
-            node_account_id: ctx.my_account_id.to_string(),
+            threshold: governance.threshold,
+            public_key: governance.public_key,
+            epoch: governance.epoch,
+            presignatures: presignature_storage,
+            mesh_state,
+            msg: msg_channel,
+            rpc: rpc_channel,
+            backlog,
+            node_account_id: my_account_id,
         };
 
         Self {
-            handle: tokio::spawn(spawner.run(
-                ctx.sign_rx.clone(),
-                ctx.contract.clone(),
-                ctx.config.clone(),
-            )),
+            handle: tokio::spawn(spawner.run(sign_rx, contract, config)),
         }
     }
 

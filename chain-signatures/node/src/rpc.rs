@@ -126,6 +126,15 @@ pub enum RpcAction {
     Publish(PublishAction),
 }
 
+#[derive(Debug, Clone)]
+pub struct GovernanceInfo {
+    pub me: Participant,
+    pub threshold: usize,
+    pub epoch: u64,
+    pub public_key: mpc_crypto::PublicKey,
+    pub participants: Vec<Participant>,
+}
+
 #[derive(Clone)]
 pub struct RpcChannel {
     pub tx: mpsc::Sender<RpcAction>,
@@ -220,6 +229,35 @@ impl ContractStateWatcher {
 
     pub fn state(&self) -> Option<ProtocolState> {
         self.borrow_state().clone()
+    }
+
+    pub fn governance(&self) -> Option<GovernanceInfo> {
+        match self.state()? {
+            ProtocolState::Running(state) => Some(GovernanceInfo {
+                me: *state.participants.find_participant(&self.account_id)?,
+                threshold: state.threshold,
+                epoch: state.epoch,
+                public_key: state.public_key.into(),
+                participants: state.participants.keys().copied().collect(),
+            }),
+            ProtocolState::Resharing(state) => Some(GovernanceInfo {
+                me: *state.new_participants.find_participant(&self.account_id)?,
+                threshold: state.threshold,
+                epoch: state.old_epoch + 1,
+                public_key: state.public_key.into(),
+                participants: state.new_participants.keys().copied().collect(),
+            }),
+            ProtocolState::Initializing(_) => None,
+        }
+    }
+
+    pub async fn wait_governance(&mut self) -> GovernanceInfo {
+        loop {
+            if let Some(governance) = self.governance() {
+                return governance;
+            }
+            let _ = self.contract_state.changed().await;
+        }
     }
 
     pub async fn next_state(&mut self) -> Option<ProtocolState> {

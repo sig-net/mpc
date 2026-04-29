@@ -4,6 +4,7 @@ use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::{MessageChannel, MpcSignProtocol, Sign};
+use crate::protocol::signature::SignatureSpawnerTask;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::{PresignatureStorage, TripleStorage};
@@ -34,21 +35,29 @@ impl MpcSignProtocol {
         let generating = channels.msg_channel.subscribe_generation().await;
         let resharing = channels.msg_channel.subscribe_resharing().await;
         let ready = channels.msg_channel.subscribe_ready().await;
+        let sign_task = SignatureSpawnerTask::run(
+            my_account_id.clone(),
+            channels.sign_rx,
+            contract.clone(),
+            channels.config.clone(),
+            storage.presignature_storage.clone(),
+            channels.mesh_state.clone(),
+            channels.msg_channel.clone(),
+            channels.rpc_channel.clone(),
+            Backlog::new(),
+        );
         Self {
             my_account_id,
             secret_storage: storage.secret_storage,
             triple_storage: storage.triple_storage,
             presignature_storage: storage.presignature_storage,
-            sign_rx: channels.sign_rx,
+            sign_task,
             msg_channel: channels.msg_channel,
             generating,
             resharing,
             ready,
-            rpc_channel: channels.rpc_channel,
-            contract,
             config: channels.config,
             mesh_state: channels.mesh_state,
-            backlog: Backlog::new(),
         }
     }
 }
