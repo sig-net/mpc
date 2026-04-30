@@ -6,7 +6,6 @@ use super::state::{
 use super::MpcSignProtocol;
 use crate::protocol::contract::primitives::Participants;
 use crate::protocol::presignature::PresignatureSpawnerTask;
-use crate::protocol::signature::SignatureSpawnerTask;
 use crate::protocol::state::GeneratingState;
 use crate::protocol::triple::TripleSpawnerTask;
 use crate::protocol::Governance;
@@ -110,14 +109,6 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                                 &public_key,
                             );
 
-                            let sign_task = SignatureSpawnerTask::run(
-                                me,
-                                contract_state.threshold,
-                                epoch,
-                                ctx,
-                                public_key,
-                            );
-
                             NodeState::Running(RunningState {
                                 epoch,
                                 me,
@@ -127,7 +118,6 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                                 public_key,
                                 triple_task,
                                 presign_task,
-                                sign_task,
                             })
                         }
                     }
@@ -414,14 +404,6 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                         &self.private_share,
                         &self.public_key,
                     );
-                    let sign_task = SignatureSpawnerTask::run(
-                        me,
-                        self.threshold,
-                        self.epoch,
-                        ctx,
-                        self.public_key,
-                    );
-
                     NodeState::Running(RunningState {
                         epoch: self.epoch,
                         me,
@@ -431,7 +413,6 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                         public_key: self.public_key,
                         triple_task,
                         presign_task,
-                        sign_task,
                     })
                 }
             },

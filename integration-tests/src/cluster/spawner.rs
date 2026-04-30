@@ -123,6 +123,7 @@ pub struct ClusterSpawner {
     pub redis: Option<containers::Redis>,
     pub worker: Option<Worker<Sandbox>>,
     pub solana: Option<containers::Solana>,
+    pub canton: Option<crate::canton::CantonSandbox>,
     pub program_address: Option<String>,
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
@@ -158,6 +159,7 @@ impl Default for ClusterSpawner {
             redis: None,
             worker: None,
             solana: None,
+            canton: None,
             program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
             pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
@@ -291,6 +293,21 @@ impl ClusterSpawner {
         self
     }
 
+    pub fn canton(mut self) -> Self {
+        if self.cfg.canton.is_none() {
+            self.cfg.canton = Some(mpc_node::indexer_canton::CantonConfig {
+                json_api_url: String::new(),
+                json_api_ws_url: String::new(),
+                jwt_private_key_path: String::new(),
+                jwt_subject: String::new(),
+                party_id: String::new(),
+                signer_contract_id: String::new(),
+                signer_template_id: String::new(),
+            });
+        }
+        self
+    }
+
     pub fn debug_node(&mut self) -> &mut Self {
         self.release = false;
         self
@@ -413,6 +430,12 @@ impl IntoFuture for ClusterSpawner {
                 self.solana = Some(solana);
             }
 
+            if self.cfg.canton.is_some() && self.canton.is_none() {
+                let sandbox = crate::canton::CantonSandbox::run().await?;
+                self.cfg.canton = Some(sandbox.get_config());
+                self.canton = Some(sandbox);
+            }
+
             let nodes = self.run().await?;
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
@@ -425,6 +448,7 @@ impl IntoFuture for ClusterSpawner {
                 docker_client: self.docker,
                 account_idx: nodes.len(),
                 solana: self.solana.take(),
+                canton: self.canton.take(),
                 nodes,
             };
 

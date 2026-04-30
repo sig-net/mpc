@@ -7,6 +7,7 @@ use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
+use crate::protocol::signature::SignatureSpawnerTask;
 use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
@@ -14,7 +15,9 @@ use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::triple_storage::TriplePair;
 use crate::stream::run_stream;
-use crate::{indexer, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, storage, web};
+use crate::{
+    indexer, indexer_canton, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, storage, web,
+};
 
 use clap::Parser;
 use deadpool_redis::Runtime;
@@ -24,8 +27,7 @@ use mpc_keys::hpke;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
-use std::sync::Arc;
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{mpsc, watch};
 use url::Url;
 
 const DEFAULT_WEB_PORT: u16 = 3000;
@@ -69,6 +71,9 @@ pub enum Cli {
         /// Hydration Indexer options
         #[clap(flatten)]
         hydration: indexer_hydration::HydrationArgs,
+        /// Canton Indexer options
+        #[clap(flatten)]
+        canton: indexer_canton::CantonArgs,
         /// NEAR requests options
         #[clap(flatten)]
         indexer_options: indexer::Options,
@@ -112,6 +117,7 @@ impl Cli {
                 eth,
                 sol,
                 hydration,
+                canton,
                 indexer_options,
                 my_address,
                 storage_options,
@@ -159,6 +165,7 @@ impl Cli {
                 args.extend(eth.into_str_args());
                 args.extend(sol.into_str_args());
                 args.extend(hydration.into_str_args());
+                args.extend(canton.into_str_args());
                 args.extend(indexer_options.into_str_args());
                 args.extend(storage_options.into_str_args());
                 args.extend(log_options.into_str_args());
@@ -183,6 +190,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             eth,
             sol,
             hydration,
+            canton,
             indexer_options,
             my_address,
             storage_options,
@@ -292,12 +300,20 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let eth = eth.into_config();
             let sol = sol.into_config();
             let hydration = hydration.into_config();
+            let canton = canton.into_config();
             let network = NetworkConfig { cipher_sk, sign_sk };
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
 
-            let (rpc_channel, rpc) =
-                RpcExecutor::new(&near_client, &eth, &sol, &hydration, backlog.clone()).await;
+            let (rpc_channel, rpc) = RpcExecutor::new(
+                &near_client,
+                &eth,
+                &sol,
+                &hydration,
+                &canton,
+                backlog.clone(),
+            )
+            .await;
 
             let (sync_channel, sync) = SyncTask::new(
                 &client,
@@ -325,6 +341,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 sol_signer_address = %sol_payer_address.as_deref().unwrap_or("None"),
                 hydration_rpc_url = %hydration.as_ref().map(|h| h.rpc_ws_url.as_str()).unwrap_or("None"),
                 hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
+                canton_json_api_url = %canton.as_ref().map(|c| c.json_api_url.as_str()).unwrap_or("None"),
                 "starting node",
             );
 
@@ -340,21 +357,29 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let msg_channel =
                 MessageChannel::spawn(client.clone(), config_rx.clone(), contract_watcher.clone())
                     .await;
+            let sign_task = SignatureSpawnerTask::run(
+                account_id.clone(),
+                sign_rx,
+                contract_watcher.clone(),
+                config_rx.clone(),
+                presignature_storage.clone(),
+                mesh_state.clone(),
+                msg_channel.clone(),
+                rpc_channel.clone(),
+                backlog.clone(),
+            );
             let protocol = MpcSignProtocol {
                 my_account_id: account_id.clone(),
-                rpc_channel,
                 msg_channel: msg_channel.clone(),
                 generating: msg_channel.subscribe_generation().await,
                 resharing: msg_channel.subscribe_resharing().await,
                 ready: msg_channel.subscribe_ready().await,
-                sign_rx: Arc::new(RwLock::new(sign_rx)),
+                sign_task,
                 secret_storage: key_storage,
                 triple_storage: triple_storage.clone(),
                 presignature_storage: presignature_storage.clone(),
-                contract: contract_watcher.clone(),
                 config: config_rx,
                 mesh_state: mesh_state.clone(),
-                backlog: backlog.clone(),
             };
 
             tracing::info!("protocol initialized");
@@ -414,12 +439,23 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             }
             tokio::spawn(indexer_hydration::run(
                 hydration,
-                sign_tx,
-                backlog,
-                contract_watcher,
-                mesh_state,
-                client,
+                sign_tx.clone(),
+                backlog.clone(),
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                client.clone(),
             ));
+            if let Some(canton_stream) = indexer_canton::CantonStream::new(canton, backlog.clone())
+            {
+                tokio::spawn(run_stream(
+                    canton_stream,
+                    sign_tx.clone(),
+                    backlog.clone(),
+                    contract_watcher.clone(),
+                    mesh_state.clone(),
+                    client.clone(),
+                ));
+            }
             tracing::info!("protocol http server spawned");
             protocol_handle.await?;
             web_handle.await?;

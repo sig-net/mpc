@@ -1,7 +1,6 @@
 use super::contract::{primitives::Participants, ResharingContractState};
 use super::triple::TripleSpawnerTask;
 use crate::protocol::presignature::PresignatureSpawnerTask;
-use crate::protocol::signature::SignatureSpawnerTask;
 use crate::types::{KeygenProtocol, ReshareProtocol, SecretKeyShare};
 
 use cait_sith::protocol::Participant;
@@ -77,7 +76,6 @@ pub struct RunningState {
     pub public_key: PublicKey,
     pub triple_task: TripleSpawnerTask,
     pub presign_task: PresignatureSpawnerTask,
-    pub sign_task: SignatureSpawnerTask,
 }
 
 pub struct ResharingState {

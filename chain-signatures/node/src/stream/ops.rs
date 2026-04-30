@@ -1,4 +1,8 @@
 use crate::backlog::Backlog;
+use crate::indexer_canton::{
+    CantonRespondBidirectionalEvent, CantonSignBidirectionalRequestedEvent,
+    CantonSignatureRespondedEvent,
+};
 use crate::indexer_hydration::{
     HydrationRespondBidirectionalEvent, HydrationSignBidirectionalRequestedEvent,
     HydrationSignatureRespondedEvent,
@@ -12,15 +16,18 @@ use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, SignStatus};
 use crate::stream::ExecutionOutcome;
 
+use alloy::primitives::keccak256;
 use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
 use mpc_primitives::{SignId, Signature};
 use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum SignBidirectionalEvent {
     Solana(signet_program::SignBidirectionalEvent),
     Hydration(HydrationSignBidirectionalRequestedEvent),
+    Canton(CantonSignBidirectionalRequestedEvent),
 }
 
 impl SignBidirectionalEvent {
@@ -28,17 +35,34 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.sender.to_bytes(),
             SignBidirectionalEvent::Hydration(event) => event.sender,
+            SignBidirectionalEvent::Canton(event) => event.sender,
         }
     }
 
     pub(crate) fn sender_string(&self) -> anyhow::Result<String> {
-        sender_string(self.sender(), self.source_chain())
+        match self {
+            SignBidirectionalEvent::Canton(event) => Ok(hex::encode(event.sender)),
+            _ => sender_string(self.sender(), self.source_chain()),
+        }
     }
 
     pub(crate) fn source_chain(&self) -> Chain {
         match self {
             SignBidirectionalEvent::Solana(_) => Chain::Solana,
             SignBidirectionalEvent::Hydration(_) => Chain::Hydration,
+            SignBidirectionalEvent::Canton(_) => Chain::Canton,
+        }
+    }
+
+    pub(crate) fn chain_ctx(&self) -> Option<Vec<u8>> {
+        match self {
+            SignBidirectionalEvent::Canton(event) => {
+                let ctx = crate::indexer_canton::CantonChainCtx {
+                    sign_event_contract_id: event.sign_event_contract_id.clone(),
+                };
+                Some(borsh::to_vec(&ctx).expect("CantonChainCtx Borsh serialization is infallible"))
+            }
+            _ => None,
         }
     }
 
@@ -46,6 +70,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.path.clone(),
             SignBidirectionalEvent::Hydration(event) => event.path.clone(),
+            SignBidirectionalEvent::Canton(event) => event.path.clone(),
         }
     }
 
@@ -53,6 +78,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.dest.clone(),
             SignBidirectionalEvent::Hydration(event) => event.dest.clone(),
+            SignBidirectionalEvent::Canton(event) => event.dest.clone(),
         }
     }
 
@@ -60,6 +86,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.algo.clone(),
             SignBidirectionalEvent::Hydration(event) => event.algo.clone(),
+            SignBidirectionalEvent::Canton(event) => event.algo.clone(),
         }
     }
 
@@ -67,6 +94,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.params.clone(),
             SignBidirectionalEvent::Hydration(event) => event.params.clone(),
+            SignBidirectionalEvent::Canton(event) => event.params.clone(),
         }
     }
 
@@ -74,6 +102,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.output_deserialization_schema.clone(),
             SignBidirectionalEvent::Hydration(event) => event.output_deserialization_schema.clone(),
+            SignBidirectionalEvent::Canton(event) => event.output_deserialization_schema.clone(),
         }
     }
 
@@ -81,6 +110,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.respond_serialization_schema.clone(),
             SignBidirectionalEvent::Hydration(event) => event.respond_serialization_schema.clone(),
+            SignBidirectionalEvent::Canton(event) => event.respond_serialization_schema.clone(),
         }
     }
 
@@ -88,6 +118,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.key_version,
             SignBidirectionalEvent::Hydration(event) => event.key_version,
+            SignBidirectionalEvent::Canton(event) => event.key_version,
         }
     }
 
@@ -95,6 +126,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.deposit,
             SignBidirectionalEvent::Hydration(event) => event.deposit,
+            SignBidirectionalEvent::Canton(_) => 0,
         }
     }
 
@@ -102,6 +134,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.serialized_transaction.clone(),
             SignBidirectionalEvent::Hydration(event) => event.serialized_transaction.clone(),
+            SignBidirectionalEvent::Canton(event) => event.serialized_transaction.clone(),
         }
     }
 
@@ -109,6 +142,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.caip2_id.clone(),
             SignBidirectionalEvent::Hydration(event) => event.caip2_id.clone(),
+            SignBidirectionalEvent::Canton(event) => event.caip2_id.clone(),
         }
     }
 
@@ -124,6 +158,11 @@ impl SignBidirectionalEvent {
                 &self.sender_string()?,
                 &self.path(),
             )),
+            SignBidirectionalEvent::Canton(_) => Ok(mpc_crypto::kdf::derive_epsilon_canton(
+                self.key_version(),
+                &self.sender_string()?,
+                &self.path(),
+            )),
         }
     }
 
@@ -135,6 +174,7 @@ impl SignBidirectionalEvent {
 pub enum RespondBidirectionalEvent {
     Solana(signet_program::RespondBidirectionalEvent),
     Hydration(HydrationRespondBidirectionalEvent),
+    Canton(CantonRespondBidirectionalEvent),
 }
 
 impl RespondBidirectionalEvent {
@@ -142,6 +182,7 @@ impl RespondBidirectionalEvent {
         match self {
             RespondBidirectionalEvent::Solana(event) => event.request_id,
             RespondBidirectionalEvent::Hydration(event) => event.request_id,
+            RespondBidirectionalEvent::Canton(event) => event.request_id,
         }
     }
 
@@ -149,6 +190,10 @@ impl RespondBidirectionalEvent {
         match self {
             RespondBidirectionalEvent::Solana(event) => event.responder.to_bytes(),
             RespondBidirectionalEvent::Hydration(event) => event.responder,
+            // Canton party IDs are variable-length strings; hash fits them into [u8; 32].
+            RespondBidirectionalEvent::Canton(event) => {
+                keccak256(event.responder.as_bytes()).into()
+            }
         }
     }
 
@@ -156,6 +201,7 @@ impl RespondBidirectionalEvent {
         match self {
             RespondBidirectionalEvent::Solana(event) => event.serialized_output.clone(),
             RespondBidirectionalEvent::Hydration(event) => event.serialized_output.clone(),
+            RespondBidirectionalEvent::Canton(event) => event.serialized_output.clone(),
         }
     }
 
@@ -165,6 +211,7 @@ impl RespondBidirectionalEvent {
                 crate::indexer_sol::to_mpc_signature(event.signature.clone()).unwrap()
             }
             RespondBidirectionalEvent::Hydration(event) => event.signature,
+            RespondBidirectionalEvent::Canton(event) => event.signature,
         }
     }
 
@@ -172,6 +219,7 @@ impl RespondBidirectionalEvent {
         match self {
             RespondBidirectionalEvent::Solana(_) => Chain::Solana,
             RespondBidirectionalEvent::Hydration(_) => Chain::Hydration,
+            RespondBidirectionalEvent::Canton(_) => Chain::Canton,
         }
     }
 }
@@ -191,6 +239,7 @@ pub enum SignatureRespondedEvent {
     /// Minimal Ethereum respond event representation (used to emit Respond events
     /// from the Ethereum indexer without performing backlog mutations in the client).
     Ethereum(EthereumSignatureRespondedEvent),
+    Canton(CantonSignatureRespondedEvent),
 }
 
 impl SignatureRespondedEvent {
@@ -199,6 +248,7 @@ impl SignatureRespondedEvent {
             SignatureRespondedEvent::Solana(_) => Chain::Solana,
             SignatureRespondedEvent::Hydration(_) => Chain::Hydration,
             SignatureRespondedEvent::Ethereum(_) => Chain::Ethereum,
+            SignatureRespondedEvent::Canton(_) => Chain::Canton,
         }
     }
 
@@ -207,6 +257,7 @@ impl SignatureRespondedEvent {
             SignatureRespondedEvent::Solana(event) => event.request_id,
             SignatureRespondedEvent::Hydration(event) => event.request_id,
             SignatureRespondedEvent::Ethereum(event) => event.request_id,
+            SignatureRespondedEvent::Canton(event) => event.request_id,
         }
     }
 
@@ -218,6 +269,7 @@ impl SignatureRespondedEvent {
             }
             SignatureRespondedEvent::Hydration(event) => event.signature,
             SignatureRespondedEvent::Ethereum(event) => event.signature,
+            SignatureRespondedEvent::Canton(event) => event.signature,
         }
     }
 }
@@ -373,6 +425,11 @@ pub(crate) async fn process_respond_event(
         anyhow::anyhow!("failed to process respond event: {err:?} for sign id: {sign_id:?}")
     })?;
 
+    // Get the MPC public key and derive the from_address.
+    let root_public_key = contract_watcher.wait_public_key().await;
+    let epsilon = event.epsilon()?;
+    let from_address = crate::sign_bidirectional::derive_user_address(root_public_key, epsilon);
+
     let mpc_sig = respond_event.signature();
 
     // Sign and hash the transaction to get the correct tx_id and nonce
@@ -382,11 +439,6 @@ pub(crate) async fn process_respond_event(
     )?;
 
     let tx_id = BidirectionalTxId(signed_tx_hash.into());
-
-    // Get the MPC public key and derive the from_address
-    let root_public_key = contract_watcher.wait_public_key().await;
-    let epsilon = event.epsilon()?;
-    let from_address = crate::sign_bidirectional::derive_user_address(root_public_key, epsilon);
 
     let bidirectional_tx = BidirectionalTx {
         id: tx_id,
@@ -508,15 +560,22 @@ pub async fn process_execution_confirmed(
         tracing::warn!(?tx_id, expected = ?unwatched_sign_id, actual = ?sign_id, "sign_id mismatch between event and watcher");
     }
 
+    let chain_ctx = backlog
+        .get(pending_tx.source_chain, &unwatched_sign_id)
+        .await
+        .and_then(|entry| match entry.request.kind {
+            SignKind::SignBidirectional(event) => event.chain_ctx(),
+            _ => None,
+        });
+
     let completed_tx = CompletedTx::new(pending_tx.clone(), block_height);
 
     let sign_request = match result {
-        ExecutionOutcome::Success { output } => {
-            completed_tx.create_sign_request_from_serialized_output(source_chain, output)?
-        }
+        ExecutionOutcome::Success { output } => completed_tx
+            .create_sign_request_from_serialized_output(source_chain, output, chain_ctx)?,
         ExecutionOutcome::Failed => {
             completed_tx
-                .create_failed_sign_request(source_chain)
+                .create_failed_sign_request(source_chain, chain_ctx)
                 .await?
         }
     };
@@ -568,6 +627,11 @@ pub async fn process_execution_confirmed(
     Ok(())
 }
 
+/// Decode a [u8; 32] sender into its canonical on-chain address string.
+/// Canton is intentionally absent: its sender is a variable-length party ID
+/// hashed irreversibly into the [u8; 32] slot, so callers with access to the
+/// original party string must short-circuit before reaching here (see
+/// `SignBidirectionalEvent::sender_string` / `BidirectionalTx::sender_string`).
 pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Result<String> {
     match source_chain {
         Chain::Solana => Ok(Pubkey::new_from_array(sender).to_string()),
@@ -631,6 +695,42 @@ mod tests {
             from_address: Address::ZERO,
             nonce: 0,
         }
+    }
+
+    fn test_sign_args(id: u8) -> SignArgs {
+        SignArgs {
+            entropy: [id; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        }
+    }
+
+    fn test_canton_sign_bidirectional_request(
+        sign_id: SignId,
+        sign_event_contract_id: &str,
+    ) -> IndexedSignRequest {
+        IndexedSignRequest::sign_bidirectional(
+            sign_id,
+            test_sign_args(sign_id.request_id[0]),
+            Chain::Canton,
+            current_unix_timestamp(),
+            SignBidirectionalEvent::Canton(CantonSignBidirectionalRequestedEvent {
+                sign_event_contract_id: sign_event_contract_id.to_string(),
+                sender: [7u8; 32],
+                request_id: sign_id.request_id,
+                serialized_transaction: vec![1, 2, 3],
+                caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
+                key_version: 1,
+                path: "test_path".to_string(),
+                algo: "ECDSA".to_string(),
+                dest: "0x1234567890123456789012345678901234567890".to_string(),
+                params: "{}".to_string(),
+                output_deserialization_schema: vec![],
+                respond_serialization_schema: vec![],
+            }),
+        )
     }
 
     #[test]
@@ -1116,6 +1216,7 @@ mod tests {
             RespondBidirectionalTx {
                 tx_id: BidirectionalTxId(B256::from([12u8; 32])),
                 output: vec![],
+                chain_ctx: None,
             },
         );
 
@@ -1147,6 +1248,7 @@ mod tests {
                 RespondBidirectionalTx {
                     tx_id: BidirectionalTxId(B256::from([13u8; 32])),
                     output: vec![1, 2, 3],
+                    chain_ctx: None,
                 },
             ))
             .await;
@@ -1387,6 +1489,7 @@ mod tests {
             path: "test".to_string(),
             key_version: 1,
         };
+
         backlog
             .insert(test_indexed_request(
                 sign_id,
@@ -1402,7 +1505,6 @@ mod tests {
             .await;
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
-
         process_execution_confirmed(
             tx.id,
             sign_id,
@@ -1430,6 +1532,81 @@ mod tests {
                 ));
             }
             other => panic!("expected cross-chain follow-up request, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request() {
+        let backlog = Backlog::new();
+        let mut tx = test_bidirectional_tx(24, Chain::Canton, Chain::Ethereum);
+        tx.sender = [7u8; 32];
+        let sign_id = SignId::new(tx.request_id);
+        let sign_event_contract_id = "#sign-event-cid";
+
+        backlog
+            .insert(test_canton_sign_bidirectional_request(
+                sign_id,
+                sign_event_contract_id,
+            ))
+            .await;
+
+        backlog
+            .watch_execution(tx.target_chain, sign_id, tx.clone())
+            .await;
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+
+        process_execution_confirmed(
+            tx.id,
+            sign_id,
+            tx.source_chain,
+            456u64,
+            ExecutionOutcome::Success { output: vec![1] },
+            &backlog,
+            sign_tx,
+            tx.target_chain,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let assert_canton_ctx = |ctx_bytes: Option<&[u8]>| {
+            let bytes = ctx_bytes.expect("chain_ctx present");
+            let decoded: crate::indexer_canton::CantonChainCtx =
+                borsh::from_slice(bytes).expect("CantonChainCtx decodes");
+            assert_eq!(decoded.sign_event_contract_id, sign_event_contract_id);
+        };
+
+        assert!(backlog.pending_execution(tx.target_chain).await.is_empty());
+        let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
+        assert_eq!(tx_after.status(), SignStatus::AwaitingResponseBidirectional);
+        match &tx_after.request.kind {
+            SignKind::RespondBidirectional(res) => {
+                assert_eq!(res.tx_id, tx.id);
+                assert_eq!(res.output, vec![1]);
+                assert_canton_ctx(res.chain_ctx.as_deref());
+            }
+            other => panic!("Expected RespondBidirectional request, got {other:?}"),
+        }
+
+        let msg = timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match msg {
+            Sign::Request(req) => {
+                assert_eq!(req.id, sign_id);
+                assert_eq!(req.chain, tx.source_chain);
+                match req.kind {
+                    SignKind::RespondBidirectional(res) => {
+                        assert_eq!(res.tx_id, tx.id);
+                        assert_eq!(res.output, vec![1]);
+                        assert_canton_ctx(res.chain_ctx.as_deref());
+                    }
+                    other => panic!("Expected RespondBidirectional request, got {other:?}"),
+                }
+            }
+            other => panic!("Expected Sign::Request, got {other:?}"),
         }
     }
 
