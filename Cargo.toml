@@ -24,7 +24,7 @@ clap = { version = "4.5.4", features = ["derive", "env"] }
 deadpool-redis = "0.18.0"
 hex = "0.4.3"
 hyper = { version = "0.14", features = ["full"] }
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "p256", "sha2"] }
 k256 = { version = "0.13.1", features = [
     "sha256",
     "ecdsa",
