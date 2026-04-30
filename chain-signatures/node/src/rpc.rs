@@ -134,6 +134,7 @@ pub struct GovernanceInfo {
     pub epoch: u64,
     pub public_key: mpc_crypto::PublicKey,
     pub participants: BTreeSet<Participant>,
+    pub is_running: bool,
 }
 
 #[derive(Clone)]

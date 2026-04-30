@@ -1164,34 +1164,6 @@ struct SignTask {
 }
 
 impl SignTask {
-    /// Refresh the governance info from the contract state, returning whether we are
-    /// in a running state with valid governance info after the refresh.
-    fn refresh_governance(&mut self, contract_state: &ProtocolState) -> bool {
-        match contract_state {
-            ProtocolState::Initializing(_) | ProtocolState::Resharing(_) => false,
-            ProtocolState::Running(running) if running.epoch != self.governance.epoch => {
-                let me = if let Some(me) =
-                    running.participants.find_participant(&self.node_account_id)
-                {
-                    *me
-                } else {
-                    return false;
-                };
-                self.governance = GovernanceInfo {
-                    me,
-                    participants: running.participants.keys().copied().collect(),
-                    threshold: running.threshold,
-                    public_key: running.public_key,
-                    epoch: running.epoch,
-                };
-                true
-            }
-            ProtocolState::Running(_) => true,
-        }
-    }
-}
-
-impl SignTask {
     async fn run(
         mut self,
         indexed: IndexedSignRequest,
@@ -1199,17 +1171,15 @@ impl SignTask {
         mut task_rx: mpsc::Receiver<SignTaskMessage>,
     ) -> Result<(), SignError> {
         let sign_id = self.sign_id;
-        tracing::info!(
-            ?sign_id,
-            me = ?self.governance.me,
-            epoch = self.governance.epoch,
-            "signature task starting with organizing loop"
-        );
+        tracing::info!(?sign_id, governance = ?self.governance, "signature task starting...");
 
         let mut state = SignState::new(indexed, mesh_state);
         let mut phase = SignPhase::Organizing(SignOrganizer);
         let mut contract_watcher = self.contract.clone();
-        let mut is_running = true;
+
+        // NOTE: even if we start the SignTask while in resharing, we will not advance
+        // since we won't in the running state
+        let mut is_running = self.governance.is_running;
 
         loop {
             tokio::select! {
@@ -1236,6 +1206,17 @@ impl SignTask {
             };
         }
     }
+
+    /// Refresh the governance info from the contract state, returning whether we are
+    /// in a running state with valid governance info after the refresh.
+    fn refresh_governance(&mut self, contract_state: &ProtocolState) -> bool {
+        if let Some(governance) = contract_state.governance(&self.node_account_id) {
+            self.governance = governance;
+        } else {
+            self.governance.is_running = false;
+        }
+        self.governance.is_running
+    }
 }
 
 /// Message types that can be sent to a running signature task
@@ -1249,6 +1230,7 @@ enum SignTaskMessage {
 }
 
 pub struct SignatureSpawner {
+    contract: ContractStateWatcher,
     /// Presignature storage that maintains all presignatures.
     presignatures: PresignatureStorage,
     /// Consolidated signature tasks - one per sign_id, each task is an async task handling complete lifecycle
@@ -1259,7 +1241,6 @@ pub struct SignatureSpawner {
     delayed_watchers: HashMap<SignId, JoinHandle<()>>,
     mesh_state: watch::Receiver<MeshState>,
 
-    governance: GovernanceInfo,
     msg: MessageChannel,
     rpc: RpcChannel,
     backlog: Backlog,
@@ -1275,8 +1256,8 @@ impl SignatureSpawner {
     /// The task will handle organizing, posit, and generation internally
     fn spawn_task(
         &mut self,
+        governance: &GovernanceInfo,
         indexed: IndexedSignRequest,
-        contract: ContractStateWatcher,
         cfg: ProtocolConfig,
     ) {
         let sign_id = indexed.id;
@@ -1317,14 +1298,14 @@ impl SignatureSpawner {
         // Subscribe to (or create) the posit inbox for this sign request
         let rx = self.inboxes.entry(sign_id).or_default().subscribe();
         let task = SignTask {
-            governance: self.governance.clone(),
+            governance: governance.clone(),
             sign_id,
             presignatures: self.presignatures.clone(),
             msg: self.msg.clone(),
             rpc: self.rpc.clone(),
             backlog: self.backlog.clone(),
             cfg,
-            contract,
+            contract: self.contract.clone(),
             is_proposer,
             node_account_id: self.node_account_id.clone(),
         };
@@ -1337,6 +1318,7 @@ impl SignatureSpawner {
     /// Handle a posit message - routes to existing task or buffers if task not yet created
     async fn handle_posit(
         &mut self,
+        me: Participant,
         sign_id: SignId,
         presignature_id: PresignatureId,
         round: usize,
@@ -1344,7 +1326,7 @@ impl SignatureSpawner {
         action: PositAction,
     ) {
         // Ignore messages from ourselves
-        if from == self.governance.me {
+        if from == me {
             return;
         }
         let _ = self
@@ -1403,12 +1385,7 @@ impl SignatureSpawner {
         }
     }
 
-    fn handle_request(
-        &mut self,
-        sign: Sign,
-        cfg: &ProtocolConfig,
-        contract: &ContractStateWatcher,
-    ) {
+    fn handle_request(&mut self, governance: &GovernanceInfo, sign: Sign, cfg: &ProtocolConfig) {
         match sign {
             Sign::Completion(sign_id) => {
                 self.handle_completion(sign_id);
@@ -1432,21 +1409,22 @@ impl SignatureSpawner {
                     request.unix_timestamp_indexed,
                 );
 
-                self.spawn_task(request, contract.clone(), cfg.clone());
+                self.spawn_task(governance, request, cfg.clone());
             }
         }
 
         self.observe_queue_size();
     }
 
-    async fn run(
-        mut self,
-        mut sign_rx: mpsc::Receiver<Sign>,
-        mut contract: ContractStateWatcher,
-        mut cfg: watch::Receiver<Config>,
-    ) {
+    async fn run(mut self, mut sign_rx: mpsc::Receiver<Sign>, mut cfg: watch::Receiver<Config>) {
         let mut posits = self.msg.subscribe_signature_posit().await;
         let mut protocol = cfg.borrow().protocol.clone();
+
+        let mut contract_watcher = self.contract.clone();
+
+        // GUARANTEE: contract is in a running state with valid governance info
+        // before we start processing any messages
+        let mut governance = contract_watcher.wait_governance().await;
 
         loop {
             tokio::select! {
@@ -1455,10 +1433,10 @@ impl SignatureSpawner {
                         tracing::warn!("signature spawner sign_rx closed, terminating");
                         break;
                     };
-                    self.handle_request(sign, &protocol, &contract);
+                    self.handle_request(&governance, sign, &protocol);
                 }
                 Some((sign_id, presignature_id, round, from, action)) = posits.recv() => {
-                    self.handle_posit(sign_id, presignature_id, round, from, action).await;
+                    self.handle_posit(governance.me, sign_id, presignature_id, round, from, action).await;
                 }
                 Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     self.handle_task_exit(result);
@@ -1466,9 +1444,9 @@ impl SignatureSpawner {
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();
                 }
-                Some(state) = contract.next_state() => {
-                    if let Some(governance) = state.governance(&self.node_account_id) {
-                        self.governance = governance;
+                Some(state) = contract_watcher.next_state() => {
+                    if let Some(new_governance) = state.governance(&self.node_account_id) {
+                        governance = new_governance;
                     }
                 }
             }
@@ -1500,11 +1478,8 @@ impl SignatureSpawnerTask {
         rpc_channel: RpcChannel,
         backlog: Backlog,
     ) -> Self {
-        let governance = contract
-            .governance()
-            .unwrap_or_else(|| panic!("signature spawner requires running governance at startup"));
         let spawner = SignatureSpawner {
-            governance,
+            contract,
             tasks: JoinMap::new(),
             inboxes: HashMap::new(),
             delayed_watchers: HashMap::new(),
@@ -1517,7 +1492,7 @@ impl SignatureSpawnerTask {
         };
 
         Self {
-            handle: tokio::spawn(spawner.run(sign_rx, contract, config)),
+            handle: tokio::spawn(spawner.run(sign_rx, config)),
         }
     }
 
@@ -1597,11 +1572,6 @@ mod tests {
         let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
         let mut participants = Participants::default();
         participants.insert(&Participant::from(0), ParticipantInfo::new(0));
-        participants.insert(&Participant::from(1), ParticipantInfo::new(1));
-        participants.insert(&Participant::from(2), ParticipantInfo::new(2));
-
-        let mut participants = Participants::default();
-        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
 
         let governance = GovernanceInfo {
             me: Participant::from(0),
@@ -1609,6 +1579,7 @@ mod tests {
             epoch: 0,
             public_key: k256::AffinePoint::default(),
             participants: [Participant::from(0)].into_iter().collect(),
+            is_running: true,
         };
 
         let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");

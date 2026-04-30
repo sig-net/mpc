@@ -116,6 +116,7 @@ impl ProtocolState {
                 epoch: state.epoch,
                 public_key: state.public_key,
                 participants: state.participants.keys().copied().collect(),
+                is_running: true,
             }),
             ProtocolState::Resharing(state) => Some(GovernanceInfo {
                 me: *state.new_participants.find_participant(account_id)?,
@@ -123,6 +124,7 @@ impl ProtocolState {
                 epoch: state.old_epoch + 1,
                 public_key: state.public_key,
                 participants: state.new_participants.keys().copied().collect(),
+                is_running: false,
             }),
             ProtocolState::Initializing(_) => None,
         }
