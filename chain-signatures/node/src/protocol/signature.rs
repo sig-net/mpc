@@ -231,8 +231,8 @@ enum SignPhase {
 
 impl SignPhase {
     async fn advance(
-        self,
-        ctx: &SignTask,
+        &mut self,
+        ctx: &mut SignTask,
         state: &mut SignState,
         task_rx: &mut mpsc::Receiver<SignTaskMessage>,
     ) -> SignPhase {
@@ -240,7 +240,7 @@ impl SignPhase {
             SignPhase::Organizing(phase) => phase.advance(ctx, state).await,
             SignPhase::Posit(phase) => phase.advance(ctx, state, task_rx).await,
             SignPhase::Generating(phase) => phase.advance(ctx, state).await,
-            SignPhase::Complete(result) => SignPhase::Complete(result),
+            SignPhase::Complete(result) => SignPhase::Complete(*result),
         }
     }
 }
@@ -260,7 +260,7 @@ impl SignOrganizer {
     /// Waits for threshold active participants to be present.
     async fn wait_active(
         &self,
-        ctx: &SignTask,
+        ctx: &mut SignTask,
         state: &mut SignState,
         threshold: usize,
     ) -> Option<BTreeSet<Participant>> {
@@ -293,7 +293,7 @@ impl SignOrganizer {
         }
     }
 
-    async fn advance(self, ctx: &SignTask, state: &mut SignState) -> SignPhase {
+    async fn advance(&mut self, ctx: &mut SignTask, state: &mut SignState) -> SignPhase {
         let sign_id = ctx.sign_id;
         let threshold = ctx.governance.threshold;
         let me = ctx.governance.me;
@@ -312,7 +312,7 @@ impl SignOrganizer {
             let Some(active) = self.wait_active(ctx, state, threshold).await else {
                 tracing::warn!(?sign_id, round = ?state.round, "no active participants, reorganizing");
                 state.bump_round();
-                return SignPhase::Organizing(self);
+                return SignPhase::Organizing(SignOrganizer);
             };
 
             let max_rounds = state.round + ROUND_INTERVAL;
@@ -389,7 +389,7 @@ impl SignOrganizer {
                         "proposer timeout waiting for presignature, reorganizing"
                     );
                     state.bump_round();
-                    return SignPhase::Organizing(self);
+                    return SignPhase::Organizing(SignOrganizer);
                 }
             };
 
@@ -434,7 +434,7 @@ impl SignOrganizer {
 impl SignPositor {
     /// Deliberator waits for the proposer to send a Propose message with a presignature_id.
     async fn wait_propose(
-        ctx: &SignTask,
+        ctx: &mut SignTask,
         state: &mut SignState,
         task_rx: &mut mpsc::Receiver<SignTaskMessage>,
         proposer: Participant,
@@ -544,7 +544,7 @@ impl SignPositor {
                         continue;
                     }
 
-                    break *presignature_id;
+                    break Ok(*presignature_id);
                 } else {
                     tracing::warn!(
                         ?sign_id,
@@ -574,7 +574,8 @@ impl SignPositor {
         .await;
 
         let presignature_id = match outcome {
-            Ok(id) => id,
+            Ok(Ok(id)) => id,
+            Ok(Err(phase)) => return Err(phase),
             Err(_) => {
                 tracing::warn!(
                     ?sign_id,
@@ -605,17 +606,15 @@ impl SignPositor {
     }
 
     async fn advance(
-        self,
-        ctx: &SignTask,
+        &mut self,
+        ctx: &mut SignTask,
         state: &mut SignState,
         task_rx: &mut mpsc::Receiver<SignTaskMessage>,
     ) -> SignPhase {
-        let SignPositor {
-            proposer,
-            active,
-            mut presignature_id,
-            presignature,
-        } = self;
+        let proposer = self.proposer;
+        let active = self.active.clone();
+        let mut presignature_id = self.presignature_id;
+        let presignature = self.presignature.take();
 
         let sign_id = ctx.sign_id;
         let round = state.round;
@@ -812,7 +811,7 @@ impl SignPositor {
 }
 
 impl SignGenerating {
-    async fn advance(mut self, ctx: &SignTask, state: &mut SignState) -> SignPhase {
+    async fn advance(&mut self, ctx: &SignTask, state: &mut SignState) -> SignPhase {
         let sign_id = ctx.sign_id;
         let round = state.round;
 
@@ -1165,7 +1164,9 @@ struct SignTask {
 }
 
 impl SignTask {
-    fn refresh_from_contract(&mut self, contract_state: &crate::protocol::ProtocolState) -> bool {
+    /// Refresh the governance info from the contract state, returning whether we are
+    /// in a running state with valid governance info after the refresh.
+    fn refresh_governance(&mut self, contract_state: &crate::protocol::ProtocolState) -> bool {
         match contract_state {
             crate::protocol::ProtocolState::Running(running)
                 if running.epoch != self.governance.epoch =>
@@ -1187,22 +1188,23 @@ impl SignTask {
                 true
             }
             crate::protocol::ProtocolState::Resharing(state) => {
-                let me = if let Some(me) = state
-                    .new_participants
-                    .find_participant(&self.node_account_id)
-                {
-                    *me
-                } else {
-                    return false;
-                };
-                self.governance = GovernanceInfo {
-                    me,
-                    participants: state.new_participants.keys().copied().collect(),
-                    threshold: state.threshold,
-                    public_key: state.public_key.into(),
-                    epoch: state.old_epoch + 1,
-                };
-                true
+                false
+                // let me = if let Some(me) = state
+                //     .new_participants
+                //     .find_participant(&self.node_account_id)
+                // {
+                //     *me
+                // } else {
+                //     return false;
+                // };
+                // self.governance = GovernanceInfo {
+                //     me,
+                //     participants: state.new_participants.keys().copied().collect(),
+                //     threshold: state.threshold,
+                //     public_key: state.public_key.into(),
+                //     epoch: state.old_epoch + 1,
+                // };
+                // true
             }
             crate::protocol::ProtocolState::Running(_) => true,
             crate::protocol::ProtocolState::Initializing(_) => false,
@@ -1227,23 +1229,33 @@ impl SignTask {
 
         let mut state = SignState::new(indexed, mesh_state);
         let mut phase = SignPhase::Organizing(SignOrganizer);
+        let mut contract_watcher = self.contract.clone();
+        let mut is_running = true;
 
         loop {
-            if let Some(contract_state) = self.contract.state() {
-                if !self.refresh_from_contract(&contract_state) {
-                    tracing::info!(
-                        ?sign_id,
-                        epoch = self.governance.epoch,
-                        "signature task paused waiting for running governance"
-                    );
-                    self.governance = self.contract.clone().wait_governance().await;
+            let contract_fut = contract_watcher.next_state();
+            tokio::select! {
+                Some(contract_state) = contract_fut => {
+                    is_running = self.refresh_governance(&contract_state);
+                    if is_running {
+                        // we're back into running, reset to SignOrganizer
+                        phase = SignPhase::Organizing(SignOrganizer);
+                    } else {
+                        tracing::info!(
+                            ?sign_id,
+                            gov = ?self.governance,
+                            "signature task paused waiting for running governance"
+                        );
+                    }
                 }
-            }
-
-            phase = match phase.advance(&self, &mut state, &mut task_rx).await {
-                SignPhase::Complete(result) => return result,
-                other => other,
-            }
+                // This branch in tokio::select will get cancelled since the future for next contract
+                // state is reached first. This effectively pauses this branch from executing and
+                // further advancing the signature organization/positing/generation flow.
+                new_phase = phase.advance(&mut self, &mut state, &mut task_rx), if is_running => match new_phase {
+                    SignPhase::Complete(result) => return result,
+                    new_phase => phase = new_phase,
+                }
+            };
         }
     }
 }
@@ -1669,7 +1681,7 @@ mod tests {
             leave_votes: Default::default(),
             threshold: 1,
         };
-        assert!(sign_task.refresh_from_contract(&crate::protocol::ProtocolState::Running(initial)));
+        assert!(sign_task.refresh_governance(&crate::protocol::ProtocolState::Running(initial)));
         assert_eq!(sign_task.governance.epoch, 0);
         assert_eq!(sign_task.governance.threshold, 1);
         assert_eq!(sign_task.governance.me, Participant::from(0));
@@ -1683,9 +1695,7 @@ mod tests {
             finished_votes: Default::default(),
             cancel_votes: Default::default(),
         };
-        assert!(
-            sign_task.refresh_from_contract(&crate::protocol::ProtocolState::Resharing(resharing))
-        );
+        assert!(sign_task.refresh_governance(&crate::protocol::ProtocolState::Resharing(resharing)));
         assert_eq!(sign_task.governance.epoch, 1);
         assert_eq!(sign_task.governance.threshold, 1);
         assert_eq!(sign_task.governance.me, Participant::from(0));
@@ -1699,7 +1709,7 @@ mod tests {
             leave_votes: Default::default(),
             threshold: 1,
         };
-        assert!(sign_task.refresh_from_contract(&crate::protocol::ProtocolState::Running(running)));
+        assert!(sign_task.refresh_governance(&crate::protocol::ProtocolState::Running(running)));
         assert_eq!(sign_task.governance.epoch, 1);
         assert_eq!(sign_task.governance.threshold, 1);
         assert_eq!(sign_task.governance.me, Participant::from(0));
