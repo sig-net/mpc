@@ -7,6 +7,7 @@ use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, SignKind};
 use crate::util::AffinePointExt as _;
+use std::collections::BTreeSet;
 
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
@@ -132,7 +133,7 @@ pub struct GovernanceInfo {
     pub threshold: usize,
     pub epoch: u64,
     pub public_key: mpc_crypto::PublicKey,
-    pub participants: Vec<Participant>,
+    pub participants: BTreeSet<Participant>,
 }
 
 #[derive(Clone)]
@@ -1808,10 +1809,10 @@ mod tests {
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
     use crate::protocol::ProtocolState;
+    use cait_sith::protocol::Participant;
     use k256::elliptic_curve::ops::Reduce;
     use k256::elliptic_curve::point::DecompressPoint;
     use mpc_crypto::kdf::derive_secret_key;
-    use cait_sith::protocol::Participant;
 
     fn scalar(bytes: &[u8; 32]) -> k256::Scalar {
         <k256::Scalar as Reduce<<Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(

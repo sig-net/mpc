@@ -57,7 +57,8 @@ impl MpcFixture {
     }
 
     pub fn trigger_resharing(&self) {
-        let Some(ProtocolState::Running(running)) = self.shared_contract_state.borrow().clone() else {
+        let Some(ProtocolState::Running(running)) = self.shared_contract_state.borrow().clone()
+        else {
             return;
         };
 

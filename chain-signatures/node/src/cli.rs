@@ -25,8 +25,7 @@ use mpc_keys::hpke;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
-use std::sync::Arc;
-use tokio::sync::{mpsc, watch, RwLock};
+use tokio::sync::{mpsc, watch};
 use url::Url;
 
 const DEFAULT_WEB_PORT: u16 = 3000;
@@ -341,7 +340,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let msg_channel =
                 MessageChannel::spawn(client.clone(), config_rx.clone(), contract_watcher.clone())
                     .await;
-            let sign_rx = Arc::new(RwLock::new(sign_rx));
             let sign_task = SignatureSpawnerTask::run(
                 account_id.clone(),
                 sign_rx,

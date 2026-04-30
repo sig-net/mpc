@@ -240,7 +240,10 @@ async fn test_sign_task_survives_resharing() {
 
     let actions = network.assert_actions(1, Duration::from_secs(15)).await;
     let action_str = actions.iter().next().unwrap();
-    assert!(action_str.contains("RpcAction::Publish"), "unexpected rpc action {action_str}");
+    assert!(
+        action_str.contains("RpcAction::Publish"),
+        "unexpected rpc action {action_str}"
+    );
 }
 
 #[test(tokio::test(flavor = "multi_thread"))]
@@ -267,7 +270,10 @@ async fn test_sign_request_during_resharing() {
 
     let actions = network.assert_actions(1, Duration::from_secs(15)).await;
     let action_str = actions.iter().next().unwrap();
-    assert!(action_str.contains("RpcAction::Publish"), "unexpected rpc action {action_str}");
+    assert!(
+        action_str.contains("RpcAction::Publish"),
+        "unexpected rpc action {action_str}"
+    );
 }
 
 fn sign_request(seed: u8) -> Sign {
