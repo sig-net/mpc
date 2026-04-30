@@ -1163,30 +1163,77 @@ struct SignTask {
     node_account_id: near_account_id::AccountId,
 }
 
+#[derive(Debug, Clone)]
+struct SignTaskGovernance {
+    me: Participant,
+    participants: BTreeSet<Participant>,
+    threshold: usize,
+    public_key: PublicKey,
+    epoch: u64,
+}
+
+impl SignTaskGovernance {
+    fn from_running(
+        running: &crate::protocol::contract::RunningContractState,
+        node_account_id: &near_account_id::AccountId,
+    ) -> Option<Self> {
+        let me = *running.participants.find_participant(node_account_id)?;
+        Some(Self {
+            me,
+            participants: running.participants.keys().copied().collect(),
+            threshold: running.threshold,
+            public_key: running.public_key,
+            epoch: running.epoch,
+        })
+    }
+
+    fn from_resharing(
+        resharing: &crate::protocol::contract::ResharingContractState,
+        node_account_id: &near_account_id::AccountId,
+    ) -> Option<Self> {
+        let me = *resharing.new_participants.find_participant(node_account_id)?;
+        Some(Self {
+            me,
+            participants: resharing.new_participants.keys().copied().collect(),
+            threshold: resharing.threshold,
+            public_key: resharing.public_key,
+            epoch: resharing.old_epoch + 1,
+        })
+    }
+}
+
 impl SignTask {
     fn refresh_from_contract(&mut self, contract_state: &crate::protocol::ProtocolState) -> bool {
+        let Some(governance) = self.refresh_governance(contract_state) else {
+            return false;
+        };
+        self.me = governance.me;
+        self.participants = governance.participants;
+        self.threshold = governance.threshold;
+        self.public_key = governance.public_key;
+        self.epoch = governance.epoch;
+        true
+    }
+
+    fn refresh_governance(
+        &self,
+        contract_state: &crate::protocol::ProtocolState,
+    ) -> Option<SignTaskGovernance> {
         match contract_state {
-            crate::protocol::ProtocolState::Running(running) => {
-                if running.epoch == self.epoch {
-                    return true;
-                }
-                if let Some(me) = running.participants.find_participant(&self.node_account_id) {
-                    self.me = *me;
-                    self.participants = running.participants.keys().copied().collect();
-                    self.threshold = running.threshold;
-                    self.public_key = running.public_key;
-                    self.epoch = running.epoch;
-                    return true;
-                }
-                false
+            crate::protocol::ProtocolState::Running(running) if running.epoch != self.epoch => {
+                SignTaskGovernance::from_running(running, &self.node_account_id)
             }
             crate::protocol::ProtocolState::Resharing(state) => {
-                self.participants = state.new_participants.keys().copied().collect();
-                self.threshold = state.threshold;
-                self.public_key = state.public_key;
-                false
+                SignTaskGovernance::from_resharing(state, &self.node_account_id)
             }
-            crate::protocol::ProtocolState::Initializing(_) => false,
+            crate::protocol::ProtocolState::Running(_) => Some(SignTaskGovernance {
+                me: self.me,
+                participants: self.participants.clone(),
+                threshold: self.threshold,
+                public_key: self.public_key,
+                epoch: self.epoch,
+            }),
+            crate::protocol::ProtocolState::Initializing(_) => None,
         }
     }
 }
@@ -1601,5 +1648,72 @@ impl PendingPresignature {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::contract::{ResharingContractState, RunningContractState};
+    use cait_sith::protocol::Participant;
+
+    #[test]
+    fn sign_task_refreshes_and_pauses_on_resharing() {
+        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
+        let mut participants = crate::protocol::contract::primitives::Participants::default();
+        participants.insert(
+            &Participant::from(0),
+            crate::protocol::contract::primitives::ParticipantInfo::new(0),
+        );
+        participants.insert(
+            &Participant::from(1),
+            crate::protocol::contract::primitives::ParticipantInfo::new(1),
+        );
+        participants.insert(
+            &Participant::from(2),
+            crate::protocol::contract::primitives::ParticipantInfo::new(2),
+        );
+
+        let initial = RunningContractState {
+            epoch: 0,
+            public_key: k256::AffinePoint::default(),
+            participants: participants.clone(),
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+            threshold: 2,
+        };
+        let running_governance = SignTaskGovernance::from_running(&initial, &account_id).unwrap();
+        assert_eq!(running_governance.epoch, 0);
+        assert_eq!(running_governance.threshold, 2);
+        assert_eq!(running_governance.me, Participant::from(0));
+
+        let resharing = ResharingContractState {
+            old_epoch: 0,
+            old_participants: participants.clone(),
+            new_participants: participants.clone(),
+            threshold: 2,
+            public_key: k256::AffinePoint::default(),
+            finished_votes: Default::default(),
+            cancel_votes: Default::default(),
+        };
+        let paused_governance = SignTaskGovernance::from_resharing(&resharing, &account_id).unwrap();
+        assert_eq!(paused_governance.epoch, 1);
+        assert_eq!(paused_governance.threshold, 2);
+        assert_eq!(paused_governance.me, Participant::from(0));
+
+        let running = RunningContractState {
+            epoch: 1,
+            public_key: k256::AffinePoint::default(),
+            participants,
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+            threshold: 2,
+        };
+        let resumed_governance = SignTaskGovernance::from_running(&running, &account_id).unwrap();
+        assert_eq!(resumed_governance.epoch, 1);
+        assert_eq!(resumed_governance.threshold, 2);
+        assert_eq!(resumed_governance.me, Participant::from(0));
     }
 }
