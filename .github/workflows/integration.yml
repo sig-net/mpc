@@ -50,6 +50,7 @@ jobs:
         with:
           profile: minimal
           toolchain: 1.81.0
+          target: wasm32-unknown-unknown
 
       - uses: WarpBuilds/cache@v1
         with:
