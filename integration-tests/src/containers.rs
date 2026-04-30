@@ -238,11 +238,6 @@ impl DockerClient {
     }
 
     pub async fn create_network(&self, network: &str) -> anyhow::Result<()> {
-        let list = self.docker.list_networks::<&str>(None).await?;
-        if list.iter().any(|n| n.name == Some(network.to_string())) {
-            return Ok(());
-        }
-
         let create_network_options = CreateNetworkOptions {
             name: network,
             check_duplicate: true,
@@ -257,9 +252,15 @@ impl DockerClient {
             },
             ..Default::default()
         };
-        let _response = &self.docker.create_network(create_network_options).await?;
-
-        Ok(())
+        // Concurrent test threads have a race condition on creating this!
+        // => Treat 409 Conflict (network already exists) as success and continue.
+        match self.docker.create_network(create_network_options).await {
+            Ok(_) => Ok(()),
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 409, ..
+            }) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub async fn continuously_print_logs(&self, id: &str) -> anyhow::Result<()> {
