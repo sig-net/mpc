@@ -62,17 +62,16 @@ jobs:
           key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
 
+      - name: Install cargo-nextest
+        run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.
       - name: Build Chain-Signatures Integration Tests
         run: cargo build -p integration-tests --tests
 
       - name: Test
-        # Using two separate commands for easy test selection.
-        # We could use cargo nextest to make it one clean command but this works, too.
-        run: |
-          cargo test -p integration-tests -- cases::mpc --test-threads 4
-          cargo test -p integration-tests -- cases::state_sync --test-threads 4
+        run: cargo nextest run -p integration-tests --profile fixture
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
@@ -160,13 +159,16 @@ jobs:
         working-directory: ./chain-signatures/contract-eth
         run: npm i && npx hardhat compile
 
+      - name: Install cargo-nextest
+        run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.
       - name: Build Chain-Signatures Integration Tests
         run: cargo build -p integration-tests --tests
 
       - name: Test
-        run: cargo test -p integration-tests --jobs 1 -- --test-threads 1 --skip cases::mpc --skip cases::state_sync
+        run: cargo nextest run -p integration-tests --profile cluster
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
