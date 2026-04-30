@@ -43,12 +43,6 @@ jobs:
           export PATH="$HOME/.dpm/bin:$PATH"
           dpm --version
 
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-
       - name: Install Rust (1.81.0)
         uses: actions-rs/toolchain@v1
         with:
@@ -120,12 +114,6 @@ jobs:
           echo "$HOME/.dpm/bin" >> $GITHUB_PATH
           export PATH="$HOME/.dpm/bin:$PATH"
           dpm --version
-
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
 
       - name: Install Rust (1.81.0)
         uses: actions-rs/toolchain@v1
