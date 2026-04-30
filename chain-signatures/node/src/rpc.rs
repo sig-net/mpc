@@ -233,23 +233,7 @@ impl ContractStateWatcher {
     }
 
     pub fn governance(&self) -> Option<GovernanceInfo> {
-        match self.state()? {
-            ProtocolState::Running(state) => Some(GovernanceInfo {
-                me: *state.participants.find_participant(&self.account_id)?,
-                threshold: state.threshold,
-                epoch: state.epoch,
-                public_key: state.public_key.into(),
-                participants: state.participants.keys().copied().collect(),
-            }),
-            ProtocolState::Resharing(state) => Some(GovernanceInfo {
-                me: *state.new_participants.find_participant(&self.account_id)?,
-                threshold: state.threshold,
-                epoch: state.old_epoch + 1,
-                public_key: state.public_key.into(),
-                participants: state.new_participants.keys().copied().collect(),
-            }),
-            ProtocolState::Initializing(_) => None,
-        }
+        self.state()?.governance(&self.account_id)
     }
 
     pub async fn wait_governance(&mut self) -> GovernanceInfo {

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::mesh::MeshState;
