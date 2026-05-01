@@ -656,12 +656,12 @@ mod tests {
     use crate::stream::ops::process_execution_confirmed;
     use crate::util::current_unix_timestamp;
     use alloy::primitives::{Address, B256};
-    use cait_sith::protocol::Participant;
     use k256::{ProjectivePoint, Scalar};
     use mpc_primitives::SignArgs;
     use near_primitives::types::AccountId;
     use solana_sdk::pubkey::Pubkey;
     use std::time::Duration;
+    use threshold_signatures::participants::Participant;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
 

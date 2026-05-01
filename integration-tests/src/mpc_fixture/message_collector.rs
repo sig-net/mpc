@@ -1,7 +1,7 @@
-use cait_sith::protocol::Participant;
 use mpc_node::protocol::message::{PositProtocolId, SendMessage};
 use mpc_node::protocol::Message;
 use std::collections::HashMap;
+use threshold_signatures::participants::Participant;
 
 /// Collect information about sent messages during a test.
 ///

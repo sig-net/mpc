@@ -2078,13 +2078,13 @@ mod tests {
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
     use crate::protocol::ProtocolState;
-    use cait_sith::protocol::Participant;
     use k256::elliptic_curve::ops::Reduce;
     use k256::elliptic_curve::point::DecompressPoint;
     use mpc_crypto::kdf::derive_secret_key;
+    use threshold_signatures::participants::Participant;
 
     fn scalar(bytes: &[u8; 32]) -> k256::Scalar {
-        <k256::Scalar as Reduce<<Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(
+        <k256::Scalar as Reduce<<k256::Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(
             bytes.into(),
         )
     }
@@ -2093,7 +2093,7 @@ mod tests {
         sk: &k256::SecretKey,
         epsilon: k256::Scalar,
         payload: k256::Scalar,
-    ) -> FullSignature<Secp256k1> {
+    ) -> ThresholdSignature {
         let signing_key = k256::ecdsa::SigningKey::from(&derive_secret_key(sk, epsilon));
         let (ecdsa_sig, _): (k256::ecdsa::Signature, _) =
             <k256::ecdsa::SigningKey as k256::ecdsa::signature::hazmat::PrehashSigner<_>>::sign_prehash(
@@ -2105,7 +2105,7 @@ mod tests {
         let big_r =
             AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
                 .unwrap();
-        FullSignature {
+        ThresholdSignature {
             big_r,
             s: *ecdsa_sig.s().as_ref(),
         }

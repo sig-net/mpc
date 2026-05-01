@@ -1,4 +1,4 @@
-use cait_sith::protocol::Participant;
+use threshold_signatures::participants::Participant;
 
 use crate::mesh::connection::NodeStatus;
 use crate::protocol::contract::primitives::Participants;

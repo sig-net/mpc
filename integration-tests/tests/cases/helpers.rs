@@ -1,12 +1,12 @@
-use cait_sith::protocol::Participant;
-use cait_sith::triples::{TriplePub, TripleShare};
-use cait_sith::PresignOutput;
 use elliptic_curve::CurveArithmetic;
 use k256::Secp256k1;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
+use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
+use threshold_signatures::ecdsa::ot_based_ecdsa::PresignOutput;
+use threshold_signatures::participants::Participant;
 
 pub(crate) fn dummy_presignature(id: u64) -> Presignature {
     dummy_presignature_with_holders(id, vec![Participant::from(1), Participant::from(2)])

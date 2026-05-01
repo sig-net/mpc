@@ -933,7 +933,7 @@ impl SignGenerator {
         let tweak = Tweak::new(indexed.args.epsilon);
         let participants_list = ParticipantList::new(&participants).unwrap();
         let rerand_args = RerandomizationArguments::new(
-            ctx.public_key,
+            ctx.governance.public_key,
             tweak,
             msg_hash_bytes,
             presignature.output.big_r,
@@ -1584,8 +1584,8 @@ mod tests {
     use crate::protocol::presignature::Presignature;
     use crate::protocol::ProtocolState;
 
-    use cait_sith::protocol::Participant;
     use deadpool_redis::Runtime;
+    use threshold_signatures::participants::Participant;
 
     #[test]
     fn sign_task_refreshes_and_pauses_on_resharing() {

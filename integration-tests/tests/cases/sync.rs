@@ -1,10 +1,6 @@
 use std::time::Duration;
 
-use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster;
-use k256::Secp256k1;
-use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
-use threshold_signatures::ecdsa::ot_based_ecdsa::PresignOutput;
 use threshold_signatures::participants::Participant;
 
 use super::helpers::{

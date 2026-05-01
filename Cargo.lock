@@ -17490,7 +17490,7 @@ dependencies = [
  "native-tls",
  "rand 0.9.1",
  "sha1",
- "thiserror 2.0.12",
+ "thiserror 2.0.17",
 ]
 
 [[package]]

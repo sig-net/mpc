@@ -2,6 +2,8 @@ use deadpool_redis::Pool;
 use near_sdk::AccountId;
 use redis::{FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 use serde::{Deserialize, Serialize};
+use threshold_signatures::participants::Participant;
+
 use super::protocol_storage::{
     ArtifactSlot, ArtifactTaken, ArtifactTakenDropper, ProtocolArtifact, ProtocolStorage,
 };

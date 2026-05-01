@@ -974,7 +974,7 @@ mod tests {
             let mut info = ParticipantInfo::new(index as u32);
             info.url = server.url();
             mesh_state.update(
-                cait_sith::protocol::Participant::from(index as u32),
+                threshold_signatures::participants::Participant::from(index as u32),
                 NodeStatus::Active,
                 info,
             );
@@ -1068,7 +1068,7 @@ mod tests {
             let mut info = ParticipantInfo::new(index as u32);
             info.url = server.url();
             mesh_state.update(
-                cait_sith::protocol::Participant::from(index as u32),
+                threshold_signatures::participants::Participant::from(index as u32),
                 NodeStatus::Active,
                 info,
             );

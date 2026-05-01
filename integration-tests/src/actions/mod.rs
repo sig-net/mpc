@@ -311,7 +311,7 @@ mod tests {
         let r = x_coordinate::<k256::Secp256k1>(&big_r);
 
         let signature = FullSignature { big_r, s };
-    let multichain_sig = mpc_node::kdf::into_signature(
+        let multichain_sig = mpc_node::kdf::into_signature(
             &user_pk,
             &signature.big_r,
             &signature.s,

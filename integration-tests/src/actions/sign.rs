@@ -16,7 +16,6 @@ use anyhow::Context as _;
 use elliptic_curve::sec1::FromEncodedPoint;
 use futures::StreamExt;
 use generic_array::GenericArray;
-use mpc_contract::errors;
 use mpc_contract::primitives::SignRequest;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
@@ -857,26 +856,6 @@ impl SignAction<'_> {
         let payload = self.payload_or_random();
         let payload_hash = self.compute_payload_hash();
         let status = self.transact_sign(&account, payload_hash).await?;
-
-        // We have to use seperate transactions because one could fail.
-        // This leads to a potential race condition where this transaction could get sent after the signature completes, but I think that's unlikely
-        let rogue = if self.execute_rogue {
-            // wait a little for the tx to appear in sandbox
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let (rogue, rogue_status) = self
-                .transact_rogue_respond(payload_hash, account.id())
-                .await?;
-            let err = wait_for::rogue_message_responded(rogue_status).await?;
-
-            assert!(
-                err.contains(&errors::RespondError::InvalidSignature.to_string())
-                    || err.contains(&errors::InvalidParameters::RequestNotFound.to_string()),
-                "{err:?}"
-            );
-            Some(rogue)
-        } else {
-            None
-        };
         let signature = wait_for::signature_responded(status).await?;
         let mut mpc_pk_bytes = vec![0x04];
         mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);

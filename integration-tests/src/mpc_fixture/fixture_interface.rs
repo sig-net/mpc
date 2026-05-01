@@ -222,7 +222,7 @@ impl MpcFixtureNode {
     /// Returns the SyncUpdate response (IDs missing on this node).
     pub async fn sync(
         &self,
-        from: cait_sith::protocol::Participant,
+        from: threshold_signatures::participants::Participant,
         triples: Vec<u64>,
         presignatures: Vec<u64>,
     ) -> SyncUpdate {
@@ -277,7 +277,7 @@ impl MpcFixtureNode {
     /// the peer from artifacts they don't have, pruning below threshold.
     pub async fn process_sync_response(
         &self,
-        peer: cait_sith::protocol::Participant,
+        peer: threshold_signatures::participants::Participant,
         threshold: usize,
         response: &mpc_node::protocol::sync::SyncUpdate,
     ) {

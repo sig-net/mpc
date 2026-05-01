@@ -6,8 +6,6 @@ use mpc_node::protocol::triple::TripleSpawner;
 use mpc_node::protocol::MessageChannel;
 use mpc_node::types::SecretKeyShare;
 use test_log::test;
-use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
-use threshold_signatures::ecdsa::ot_based_ecdsa::PresignOutput;
 use threshold_signatures::participants::Participant;
 
 use super::helpers::{dummy_pair, dummy_presignature};

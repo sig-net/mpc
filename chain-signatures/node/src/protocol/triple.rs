@@ -12,16 +12,12 @@ use crate::util::{AffinePointExt, JoinMap};
 use mpc_contract::config::ProtocolConfig;
 
 use chrono::Utc;
-use highway::{HighwayHash, HighwayHasher};
-use k256::elliptic_curve::group::GroupEncoding;
 use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
 use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
 use threshold_signatures::errors::InitializationError;
 use threshold_signatures::participants::Participant;
 use threshold_signatures::protocol::Action;
-// Secp256k1 is not used here; referenced in inner code if necessary from k256 directly.
-use near_account_id::AccountId;
-use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
