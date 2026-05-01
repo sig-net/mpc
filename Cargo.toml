@@ -18,7 +18,7 @@ version = "1.13.0"
 alloy = { version = "=1.0.38", features = ["contract", "json"] }
 anyhow = { version = "1.0.95", features = ["backtrace"] }
 borsh = "1.5.3"
-cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
+threshold-signatures = { git = "https://github.com/near/threshold-signatures", rev = "315a9749072fde57cdfc7496000878a3bb97400a" }
 ciborium = "0.2.2"
 clap = { version = "4.5.4", features = ["derive", "env"] }
 deadpool-redis = "0.18.0"
@@ -36,7 +36,7 @@ rand = "0.8.5"
 reqwest = { version = "0.11.16", features = ["blocking", "json"] }
 semver = "1.0.23"
 serde = { version = "1", features = ["derive"] }
-serde_bytes = "0.11.15"
+serde_bytes = "0.11.19"
 serde_json = "1"
 sha3 = "0.10.8"
 thiserror = "1"

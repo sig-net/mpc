@@ -3,7 +3,6 @@
 
 use crate::containers::Redis;
 use crate::mpc_fixture::message_collector::{CollectMessages, MessagePrinter};
-use cait_sith::protocol::Participant;
 use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
@@ -16,6 +15,7 @@ use near_sdk::AccountId;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
+use threshold_signatures::participants::Participant;
 use tokio::sync::mpsc;
 use tokio::sync::{watch, Mutex};
 
@@ -222,7 +222,7 @@ impl MpcFixtureNode {
     /// Returns the SyncUpdate response (IDs missing on this node).
     pub async fn sync(
         &self,
-        from: cait_sith::protocol::Participant,
+        from: threshold_signatures::participants::Participant,
         triples: Vec<u64>,
         presignatures: Vec<u64>,
     ) -> SyncUpdate {
@@ -277,7 +277,7 @@ impl MpcFixtureNode {
     /// the peer from artifacts they don't have, pruning below threshold.
     pub async fn process_sync_response(
         &self,
-        peer: cait_sith::protocol::Participant,
+        peer: threshold_signatures::participants::Participant,
         threshold: usize,
         response: &mpc_node::protocol::sync::SyncUpdate,
     ) {

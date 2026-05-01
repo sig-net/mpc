@@ -1,22 +1,25 @@
-use cait_sith::protocol::{Action, InitializationError, MessageData, Participant, ProtocolError};
-use cait_sith::{protocol::Protocol, KeygenOutput};
-use cait_sith::{FullSignature, PresignOutput};
-use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
+use k256::ProjectivePoint;
+use rand::rngs::OsRng;
+use threshold_signatures::ecdsa::ot_based_ecdsa::triples::{TriplePub, TripleShare};
+use threshold_signatures::ecdsa::ot_based_ecdsa::PresignOutput;
+use threshold_signatures::ecdsa::Signature as EcdsaSignature;
+use threshold_signatures::ecdsa::{KeygenOutput, Secp256K1Sha256};
+use threshold_signatures::errors::{InitializationError, ProtocolError};
+use threshold_signatures::frost_core::keys::SigningShare;
+use threshold_signatures::frost_core::{Element, VerifyingKey};
+use threshold_signatures::participants::Participant;
+use threshold_signatures::protocol::{Action, MessageData, Protocol};
 
 use crate::protocol::contract::ResharingContractState;
 
-pub type SecretKeyShare = <Secp256k1 as CurveArithmetic>::Scalar;
-pub type TripleProtocol = Box<
-    dyn Protocol<
-            Output = Vec<(
-                cait_sith::triples::TripleShare<Secp256k1>,
-                cait_sith::triples::TriplePub<Secp256k1>,
-            )>,
-        > + Send
-        + Sync,
->;
-pub type PresignatureProtocol = Box<dyn Protocol<Output = PresignOutput<Secp256k1>> + Send + Sync>;
-pub type SignatureProtocol = Box<dyn Protocol<Output = FullSignature<Secp256k1>> + Send + Sync>;
+pub type SecretKeyShare = SigningShare<Secp256K1Sha256>;
+pub type TripleProtocol = Box<dyn Protocol<Output = Vec<(TripleShare, TriplePub)>> + Send>;
+// Presignature protocol implementations from `threshold-signatures` are not
+// necessarily `Sync` across the board; make the trait object `Send` only.
+pub type PresignatureProtocol = Box<dyn Protocol<Output = PresignOutput> + Send>;
+// Signature protocols return `SignatureOption` (Option<Signature>) via
+// `threshold-signatures`. Keep the boxed trait object send + sync.
+pub type SignatureProtocol = Box<dyn Protocol<Output = Option<EcdsaSignature>> + Send>;
 
 pub type Epoch = u64;
 
@@ -24,7 +27,7 @@ pub struct KeygenProtocol {
     me: Participant,
     threshold: usize,
     participants: Vec<Participant>,
-    protocol: Box<dyn Protocol<Output = KeygenOutput<Secp256k1>> + Send + Sync>,
+    protocol: Box<dyn Protocol<Output = KeygenOutput> + Send>,
 }
 
 impl KeygenProtocol {
@@ -33,24 +36,34 @@ impl KeygenProtocol {
         me: Participant,
         threshold: usize,
     ) -> Result<Self, InitializationError> {
+        use rand::rngs::OsRng;
+
         Ok(Self {
             threshold,
             me,
             participants: participants.into(),
-            protocol: Box::new(cait_sith::keygen::<Secp256k1>(participants, me, threshold)?),
+            protocol: Box::new(threshold_signatures::keygen::<Secp256K1Sha256>(
+                participants,
+                me,
+                threshold,
+                OsRng,
+            )?),
         })
     }
 
     pub async fn refresh(&mut self) -> Result<(), InitializationError> {
-        self.protocol = Box::new(cait_sith::keygen::<Secp256k1>(
+        use rand::rngs::OsRng;
+
+        self.protocol = Box::new(threshold_signatures::keygen::<Secp256K1Sha256>(
             &self.participants,
             self.me,
             self.threshold,
+            OsRng,
         )?);
         Ok(())
     }
 
-    pub fn poke(&mut self) -> Result<Action<KeygenOutput<Secp256k1>>, ProtocolError> {
+    pub fn poke(&mut self) -> Result<Action<KeygenOutput>, ProtocolError> {
         self.protocol.poke()
     }
 
@@ -60,7 +73,7 @@ impl KeygenProtocol {
 }
 
 pub struct ReshareProtocol {
-    protocol: Box<dyn Protocol<Output = SecretKeyShare> + Send + Sync>,
+    protocol: Box<dyn Protocol<Output = KeygenOutput> + Send>,
 }
 
 impl ReshareProtocol {
@@ -77,19 +90,26 @@ impl ReshareProtocol {
             new_participants,
             me
         );
-        let protocol = Box::new(cait_sith::reshare::<Secp256k1>(
+
+        // Convert the AffinePoint public key into the ciphersuite verifying key
+        // `AffinePoint` -> `ProjectivePoint` conversion uses `ProjectivePoint::from`
+        let pk_element: Element<Secp256K1Sha256> = ProjectivePoint::from(contract_state.public_key);
+        let verifying_key = VerifyingKey::<Secp256K1Sha256>::new(pk_element);
+
+        let protocol = Box::new(threshold_signatures::reshare::<Secp256K1Sha256>(
             &old_participants,
             contract_state.threshold,
+            private_share,
+            verifying_key,
             &new_participants,
             contract_state.threshold,
             me,
-            private_share,
-            contract_state.public_key,
+            OsRng,
         )?);
         Ok(Self { protocol })
     }
 
-    pub fn poke(&mut self) -> Result<Action<SecretKeyShare>, ProtocolError> {
+    pub fn poke(&mut self) -> Result<Action<KeygenOutput>, ProtocolError> {
         self.protocol.poke()
     }
 

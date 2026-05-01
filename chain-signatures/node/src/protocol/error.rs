@@ -1,5 +1,6 @@
-use cait_sith::protocol::{InitializationError, Participant};
 use mpc_primitives::SignId;
+use threshold_signatures::errors::InitializationError;
+use threshold_signatures::participants::Participant;
 
 use super::{presignature::PresignatureId, triple::TripleId};
 
@@ -7,7 +8,7 @@ use super::{presignature::PresignatureId, triple::TripleId};
 pub enum GenerationError {
     #[error("presignature already generated")]
     AlreadyGenerated,
-    #[error("cait-sith initialization error: {0}")]
+    #[error("threshold-signatures initialization error: {0}")]
     CaitSithInitializationError(#[from] InitializationError),
     #[error("triple {0} is generating or missing")]
     TripleGeneratingOrMissing(TripleId),

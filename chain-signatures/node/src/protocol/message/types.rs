@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash as _};
 
-use cait_sith::protocol::{MessageData, Participant};
 use serde::{Deserialize, Serialize};
+use threshold_signatures::participants::Participant;
+use threshold_signatures::protocol::MessageData;
 
 use crate::protocol::posit::PositAction;
 use crate::protocol::presignature::{FullPresignatureId, PresignatureId};

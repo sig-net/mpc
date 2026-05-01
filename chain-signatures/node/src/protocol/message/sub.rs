@@ -1,5 +1,5 @@
-use cait_sith::protocol::Participant;
 use mpc_primitives::SignId;
+use threshold_signatures::participants::Participant;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::protocol::message::types::Round;

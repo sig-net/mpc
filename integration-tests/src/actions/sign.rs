@@ -13,11 +13,9 @@ use alloy::sol_types::SolEvent;
 use anchor_client::anchor_lang::{AnchorDeserialize, Discriminator};
 use anchor_client::{Client, Cluster as AnchorCluster};
 use anyhow::Context as _;
-use cait_sith::FullSignature;
 use elliptic_curve::sec1::FromEncodedPoint;
 use futures::StreamExt;
 use generic_array::GenericArray;
-use k256::Secp256k1;
 use mpc_contract::primitives::SignRequest;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
@@ -34,6 +32,7 @@ use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature as SolSignature;
 use solana_sdk::signer::Signer as _;
+use threshold_signatures::ecdsa::Signature as FullSignature;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
 
@@ -111,7 +110,7 @@ pub struct SignOutcome {
 
     pub payload: [u8; 32],
     pub payload_hash: [u8; 32],
-    pub signature: FullSignature<Secp256k1>,
+    pub signature: FullSignature,
 }
 
 impl fmt::Debug for SignOutcome {
@@ -363,7 +362,7 @@ impl<'a> IntoFuture for SolSignAction<'a> {
 
 pub struct SolSignOutcome {
     pub tx_signature: SolSignature,
-    pub signature: FullSignature<Secp256k1>,
+    pub signature: FullSignature,
     pub recovery_id: u8,
     pub signer_account: String,
     pub request_id: [u8; 32],
@@ -398,7 +397,7 @@ impl fmt::Debug for SolSignOutcome {
 
 struct SolSignatureResponse {
     request_id: [u8; 32],
-    signature: FullSignature<Secp256k1>,
+    signature: FullSignature,
     recovery_id: u8,
 }
 
@@ -406,7 +405,7 @@ pub struct SolRespondBidirectionalOutcome {
     pub request_id: [u8; 32],
     pub responder: String,
     pub serialized_output: Vec<u8>,
-    pub signature: FullSignature<Secp256k1>,
+    pub signature: FullSignature,
     pub recovery_id: u8,
 }
 
@@ -857,7 +856,6 @@ impl SignAction<'_> {
         let payload = self.payload_or_random();
         let payload_hash = self.compute_payload_hash();
         let status = self.transact_sign(&account, payload_hash).await?;
-
         let signature = wait_for::signature_responded(status).await?;
         let mut mpc_pk_bytes = vec![0x04];
         mpc_pk_bytes.extend_from_slice(&state.public_key.as_bytes()[1..]);
@@ -938,7 +936,7 @@ impl SignAction<'_> {
 /// Convert a Solana contract signature to FullSignature<Secp256k1>
 fn parse_sol_signature(
     solana_sig: &signet_program::Signature,
-) -> anyhow::Result<(FullSignature<Secp256k1>, u8)> {
+) -> anyhow::Result<(FullSignature, u8)> {
     use k256::elliptic_curve::sec1::FromEncodedPoint;
     use k256::{AffinePoint, Scalar};
 
@@ -969,7 +967,7 @@ pub struct EthSignOutcome {
     pub contract_address: String,
     pub eth_tx_hash: Option<String>,
     pub deposit_amount: u64,
-    pub signature: FullSignature<Secp256k1>,
+    pub signature: FullSignature,
     pub payload: [u8; 32],
     pub payload_hash: [u8; 32],
     pub algo: String,
@@ -1268,7 +1266,7 @@ impl EthSignAction<'_> {
                 let s = k256::Scalar::from_bytes(s_bytes.into())
                     .ok_or_else(|| anyhow::anyhow!("invalid scalar value in event {s_bytes:?}"))?;
 
-                let signature = FullSignature::<Secp256k1> { big_r, s };
+                let signature = FullSignature { big_r, s };
 
                 tracing::info!("successfully parsed signature from SignatureResponded event");
                 return Ok(EthSignOutcome {

@@ -1,8 +1,8 @@
 use deadpool_redis::Pool;
-use near_sdk::AccountId;
+use near_account_id::AccountId;
 use redis::{FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 
-use cait_sith::protocol::Participant;
+use threshold_signatures::participants::Participant;
 
 use super::protocol_storage::{ArtifactSlot, ArtifactTaken, ArtifactTakenDropper, ProtocolStorage};
 use crate::protocol::presignature::{Presignature, PresignatureId};

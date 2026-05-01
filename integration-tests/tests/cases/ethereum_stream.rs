@@ -1,6 +1,5 @@
 use alloy::primitives::{Address as AlloyAddress, B256};
 use anyhow::{Context, Result};
-use cait_sith::protocol::Participant;
 use ethers::middleware::{Middleware, SignerMiddleware};
 use ethers::providers::{Http, Provider};
 use ethers::signers::{LocalWallet, Signer};
@@ -28,6 +27,7 @@ use near_primitives::types::AccountId;
 use rand::thread_rng;
 use std::sync::Arc;
 use std::time::Duration;
+use threshold_signatures::participants::Participant;
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
 

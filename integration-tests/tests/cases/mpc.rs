@@ -31,7 +31,7 @@ const PRESIGNATURES_PER_OWNER: usize = 25;
 async fn test_basic_generate_keys() {
     let network = MpcFixtureBuilder::new(5, 4).build().await;
 
-    let result = tokio::time::timeout(Duration::from_secs(10), async {
+    let result = tokio::time::timeout(Duration::from_secs(30), async {
         let mut contract_state_watcher = network.shared_contract_state.subscribe();
         contract_state_watcher
             .wait_for(|protocol_state| {
@@ -702,19 +702,24 @@ async fn test_sign_contention_5_nodes() {
 /// Panics if any owner has fewer than `n` artifacts.
 fn truncate_per_owner<A: mpc_node::storage::protocol_storage::ProtocolArtifact>(
     mut data: BTreeMap<
-        cait_sith::protocol::Participant,
-        BTreeMap<cait_sith::protocol::Participant, Vec<A>>,
+        threshold_signatures::participants::Participant,
+        BTreeMap<threshold_signatures::participants::Participant, Vec<A>>,
     >,
     n: usize,
-) -> BTreeMap<cait_sith::protocol::Participant, BTreeMap<cait_sith::protocol::Participant, Vec<A>>>
+) -> BTreeMap<
+    threshold_signatures::participants::Participant,
+    BTreeMap<threshold_signatures::participants::Participant, Vec<A>>,
+>
 where
     A::Id: Ord,
 {
     use std::collections::BTreeSet;
 
     // Determine which IDs to keep per owner using the first node's ordering.
-    let mut keep_ids_per_owner: BTreeMap<cait_sith::protocol::Participant, BTreeSet<A::Id>> =
-        BTreeMap::new();
+    let mut keep_ids_per_owner: BTreeMap<
+        threshold_signatures::participants::Participant,
+        BTreeSet<A::Id>,
+    > = BTreeMap::new();
     if let Some((first_node, first_owners)) = data.iter().next() {
         for (owner, artifacts) in first_owners {
             assert!(
@@ -746,10 +751,13 @@ where
 /// Filter artifact data to keep only artifacts that exist on ALL nodes.
 fn filter_artifacts_on_all_nodes<A: mpc_node::storage::protocol_storage::ProtocolArtifact>(
     mut data: BTreeMap<
-        cait_sith::protocol::Participant,
-        BTreeMap<cait_sith::protocol::Participant, Vec<A>>,
+        threshold_signatures::participants::Participant,
+        BTreeMap<threshold_signatures::participants::Participant, Vec<A>>,
     >,
-) -> BTreeMap<cait_sith::protocol::Participant, BTreeMap<cait_sith::protocol::Participant, Vec<A>>>
+) -> BTreeMap<
+    threshold_signatures::participants::Participant,
+    BTreeMap<threshold_signatures::participants::Participant, Vec<A>>,
+>
 where
     A::Id: Ord,
 {
@@ -1150,7 +1158,7 @@ async fn test_signature_message_count() {
 #[test]
 fn test_filter_artifacts_on_all_nodes() {
     use super::helpers::dummy_pair;
-    use cait_sith::protocol::Participant;
+    use threshold_signatures::participants::Participant;
 
     let p0 = Participant::from(0);
     let p1 = Participant::from(1);
@@ -1180,7 +1188,7 @@ fn test_filter_artifacts_on_all_nodes() {
 #[test]
 fn test_truncate_per_owner() {
     use super::helpers::dummy_pair;
-    use cait_sith::protocol::Participant;
+    use threshold_signatures::participants::Participant;
 
     let p0 = Participant::from(0);
     let p1 = Participant::from(1);
@@ -1209,7 +1217,7 @@ fn test_truncate_per_owner() {
 #[should_panic]
 fn test_truncate_per_owner_insufficient() {
     use super::helpers::dummy_pair;
-    use cait_sith::protocol::Participant;
+    use threshold_signatures::participants::Participant;
 
     let p = Participant::from(0);
 

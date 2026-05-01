@@ -1,5 +1,5 @@
-use cait_sith::protocol::Participant;
 use serde::{Deserialize, Serialize};
+use threshold_signatures::participants::Participant;
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
@@ -458,7 +458,7 @@ impl SinglePositCounter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cait_sith::protocol::Participant;
+    use threshold_signatures::participants::Participant;
 
     type Id = u64;
 

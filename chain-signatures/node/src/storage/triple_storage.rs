@@ -2,14 +2,12 @@ use deadpool_redis::Pool;
 use near_sdk::AccountId;
 use redis::{FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 use serde::{Deserialize, Serialize};
-
-use cait_sith::protocol::Participant;
-
-use crate::protocol::triple::{Triple, TripleId};
+use threshold_signatures::participants::Participant;
 
 use super::protocol_storage::{
     ArtifactSlot, ArtifactTaken, ArtifactTakenDropper, ProtocolArtifact, ProtocolStorage,
 };
+use crate::protocol::triple::{Triple, TripleId};
 
 pub type TripleStorage = ProtocolStorage<TriplePair>;
 pub type TriplePairSlot = ArtifactSlot<TriplePair>;

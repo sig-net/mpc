@@ -8,8 +8,6 @@ use crate::mpc_fixture::input::FixtureInput;
 use crate::mpc_fixture::message_collector::CollectMessages;
 use crate::mpc_fixture::mock_governance::MockGovernance;
 use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
-
-use cait_sith::protocol::Participant;
 use mpc_contract::config::{
     min_to_ms, PresignatureConfig, ProtocolConfig, SignatureConfig, TripleConfig,
 };
@@ -35,6 +33,7 @@ use mpc_node::storage::{secret_storage, triple_storage::TriplePair, Options};
 use near_sdk::AccountId;
 use std::collections::HashMap;
 use std::sync::Arc;
+use threshold_signatures::participants::Participant;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::{watch, Mutex};
 
