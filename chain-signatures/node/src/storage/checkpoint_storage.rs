@@ -4,13 +4,12 @@ use anyhow::Context;
 use deadpool_redis::Pool;
 use mpc_primitives::Checkpoint;
 use near_account_id::AccountId;
-use redis::AsyncCommands;
 use tokio::sync::RwLock;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-const CHECKPOINT_VERSION: &str = "v4";
+use super::CHECKPOINT_VERSION;
 
 #[derive(Clone, Debug)]
 pub enum CheckpointStorage {
@@ -44,7 +43,10 @@ impl CheckpointStorage {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
                 let value = serde_json::to_string(checkpoint)
                     .context("failed to serialize checkpoint persistence")?;
-                conn.set::<_, _, ()>(self.checkpoint_key(checkpoint.chain), value)
+                redis::cmd("mpc.checkpoint.persist")
+                    .arg(self.checkpoint_key(checkpoint.chain))
+                    .arg(value)
+                    .query_async::<()>(&mut conn)
                     .await
                     .context("failed to set checkpoint in redis")?;
             }
@@ -62,8 +64,9 @@ impl CheckpointStorage {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
-                let value: Option<String> = conn
-                    .get(self.checkpoint_key(chain))
+                let value: Option<String> = redis::cmd("mpc.checkpoint.load")
+                    .arg(self.checkpoint_key(chain))
+                    .query_async(&mut conn)
                     .await
                     .context("failed to get checkpoint from redis")?;
                 match value {

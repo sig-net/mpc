@@ -6,6 +6,7 @@ members = [
     "chain-signatures/keys",
     "chain-signatures/node",
     "chain-signatures/primitives",
+    "chain-signatures/store",
     "integration-tests"
 ]
 exclude = ["infra/scripts/generate_keys"]

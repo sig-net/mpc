@@ -1,7 +1,7 @@
 use cait_sith::protocol::Participant;
 use deadpool_redis::{Connection, Pool};
 use near_sdk::AccountId;
-use redis::{AsyncCommands, FromRedisValue, ToRedisArgs};
+use redis::{FromRedisValue, ToRedisArgs};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use std::{fmt, time::Instant};
@@ -261,8 +261,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             return Err(StorageError::ConnectionFailed);
         };
 
-        let owned: HashSet<A::Id> = conn
-            .smembers(owner_key(&self.owner_keys, owner))
+        let owned: HashSet<A::Id> = redis::cmd("mpc.artifact.fetch_owned")
+            .arg(owner_key(&self.owner_keys, owner))
+            .query_async(&mut conn)
             .await
             .map_err(|err| {
                 tracing::warn!(?err, "failed to fetch my owned artifacts");
@@ -338,71 +339,16 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         owner: Participant,
         owner_shares: &[A::Id],
     ) -> Result<RemoveOutdatedResult<A::Id>, StorageError> {
-        const SCRIPT: &str = r#"
-            local artifact_key = KEYS[1]
-            local owner_key = KEYS[2]
-
-            -- convert the list of ids to a table for easy lookup
-            local owner_shares = {}
-            for _, value in ipairs(ARGV) do
-                owner_shares[value] = true
-            end
-
-            -- find all shares that the owner no longer tracks
-            local outdated = {}
-            local our_shares = redis.call("SMEMBERS", owner_key)
-            for _, id in ipairs(our_shares) do
-                if not owner_shares[id] then
-                    table.insert(outdated, id)
-                end
-
-                -- remove the outdated shares from our node if we have too many
-                -- already to be able to process them in one go.
-                if #outdated >= 4096 then
-                    redis.call("SREM", owner_key, unpack(outdated))
-                    redis.call("HDEL", artifact_key, unpack(outdated))
-                    -- also delete holders sets for each outdated artifact
-                    for _, oid in ipairs(outdated) do
-                        redis.call("DEL", artifact_key .. ':holders:' .. oid)
-                    end
-                    -- clear the outdated list for the next batch
-                    outdated = {}
-                end
-            end
-
-            -- remove the remaining outdated shares from our node
-            if #outdated > 0 then
-                redis.call("SREM", owner_key, unpack(outdated))
-                redis.call("HDEL", artifact_key, unpack(outdated))
-                -- also delete holders sets for each outdated artifact
-                for _, oid in ipairs(outdated) do
-                    redis.call("DEL", artifact_key .. ':holders:' .. oid)
-                end
-            end
-
-            -- find shares that were shared with us but not found in our storage
-            local not_found = {}
-            for _, id in ipairs(ARGV) do
-                if redis.call("HEXISTS", artifact_key, id) == 0 then
-                    table.insert(not_found, id)
-                end
-            end
-
-            -- return both outdated and not_found
-            return {outdated, not_found}
-        "#;
-
         let start = Instant::now();
         let Some(mut conn) = self.connect().await else {
             return Err(StorageError::ConnectionFailed);
         };
         type RemoveOutdatedScriptResult<T> = Result<(Vec<T>, Vec<T>), redis::RedisError>;
-        let result: RemoveOutdatedScriptResult<A::Id> = redis::Script::new(SCRIPT)
-            .key(&self.artifact_key)
-            .key(owner_key(&self.owner_keys, owner))
-            // NOTE: this encodes each entry of owner_shares as a separate ARGV[index] entry.
+        let result: RemoveOutdatedScriptResult<A::Id> = redis::cmd("mpc.artifact.remove_outdated")
+            .arg(&self.artifact_key)
+            .arg(owner_key(&self.owner_keys, owner))
             .arg(owner_shares)
-            .invoke_async(&mut conn)
+            .query_async(&mut conn)
             .await;
 
         let elapsed = start.elapsed();
@@ -434,26 +380,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     /// persisted as a dedicated Redis set for later holder-tracking.
     /// Private: callers must use `create_slot()` + `ArtifactSlot::insert()`.
     async fn insert(&self, artifact: A, owner: Participant) -> bool {
-        const SCRIPT: &str = r#"
-            local artifact_key = KEYS[1]
-            local owner_keys = KEYS[2]
-            local owner_key = KEYS[3]
-            local artifact_id = ARGV[1]
-            local artifact = ARGV[2]
-            local num_holders = tonumber(ARGV[3])
-
-            redis.call("SADD", owner_key, artifact_id)
-            redis.call("SADD", owner_keys, owner_key)
-            redis.call("HSET", artifact_key, artifact_id, artifact)
-
-            -- Store holders in a dedicated Redis set
-            local holders_key = artifact_key .. ':holders:' .. artifact_id
-            redis.call("DEL", holders_key)
-            if num_holders > 0 then
-                redis.call("SADD", holders_key, unpack(ARGV, 4, 3 + num_holders))
-            end
-        "#;
-
         let start = Instant::now();
         let id = artifact.id();
 
@@ -468,15 +394,16 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             tracing::warn!(id, "failed to insert artifact: connection failed");
             return false;
         };
-        let outcome = redis::Script::new(SCRIPT)
-            .key(&self.artifact_key)
-            .key(&self.owner_keys)
-            .key(owner_key(&self.owner_keys, owner))
+
+        let outcome: Result<(), redis::RedisError> = redis::cmd("mpc.artifact.insert")
+            .arg(&self.artifact_key)
+            .arg(&self.owner_keys)
+            .arg(owner_key(&self.owner_keys, owner))
             .arg(id)
             .arg(&artifact)
             .arg(holders.len() as i64)
             .arg(holders.as_slice())
-            .invoke_async(&mut conn)
+            .query_async(&mut conn)
             .await;
 
         let elapsed = start.elapsed();
@@ -497,7 +424,12 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         let Some(mut conn) = self.connect().await else {
             return false;
         };
-        match conn.hexists(&self.artifact_key, id).await {
+        match redis::cmd("mpc.artifact.contains")
+            .arg(&self.artifact_key)
+            .arg(id)
+            .query_async(&mut conn)
+            .await
+        {
             Ok(exists) => exists,
             Err(err) => {
                 tracing::warn!(id, ?err, "failed to check if artifact is stored");
@@ -510,7 +442,12 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         let Some(mut conn) = self.connect().await else {
             return false;
         };
-        match conn.sismember(owner_key(&self.owner_keys, owner), id).await {
+        match redis::cmd("mpc.artifact.contains_by_owner")
+            .arg(owner_key(&self.owner_keys, owner))
+            .arg(id)
+            .query_async(&mut conn)
+            .await
+        {
             Ok(exists) => exists,
             Err(err) => {
                 tracing::warn!(
@@ -535,29 +472,6 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     }
 
     pub async fn take(&self, id: A::Id, owner: Participant) -> Option<ArtifactTaken<A>> {
-        const SCRIPT: &str = r#"
-            local artifact_key = KEYS[1]
-            local owner_key = KEYS[2]
-            local artifact_id = ARGV[1]
-
-            if redis.call("SREM", owner_key, artifact_id) == 0 then
-                return {err = "WARN artifact " .. artifact_id .. " is not owned by this owner"}
-            end
-
-            local artifact = redis.call("HGET", artifact_key, artifact_id)
-            if not artifact then
-                return {err = "WARN artifact " .. artifact_id .. " not found"}
-            end
-            redis.call("HDEL", artifact_key, artifact_id)
-
-            -- Read and delete the holders set
-            local holders_key = artifact_key .. ':holders:' .. artifact_id
-            local holders = redis.call("SMEMBERS", holders_key)
-            redis.call("DEL", holders_key)
-
-            return {artifact, holders}
-        "#;
-
         let start = Instant::now();
         let mine = owner == self.me().ok()?;
         if self.reserved.write().await.using.insert(id, mine).is_some() {
@@ -570,11 +484,11 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             self.reserved.write().await.using.remove(&id);
             return None;
         };
-        let result: Result<(A, Vec<u32>), _> = redis::Script::new(SCRIPT)
-            .key(&self.artifact_key)
-            .key(owner_key(&self.owner_keys, owner))
+        let result: Result<(A, Vec<u32>), _> = redis::cmd("mpc.artifact.take")
+            .arg(&self.artifact_key)
+            .arg(owner_key(&self.owner_keys, owner))
             .arg(id)
-            .invoke_async(&mut conn)
+            .query_async(&mut conn)
             .await;
 
         let elapsed = start.elapsed();
@@ -602,7 +516,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         let Some(mut conn) = self.connect().await else {
             return 0;
         };
-        conn.hlen(&self.artifact_key)
+        redis::cmd("mpc.artifact.len_generated")
+            .arg(&self.artifact_key)
+            .query_async(&mut conn)
             .await
             .inspect_err(|err| {
                 tracing::warn!(?err, "failed to get length of generated artifacts");
@@ -615,7 +531,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         let Some(mut conn) = self.connect().await else {
             return 0;
         };
-        conn.scard(owner_key(&self.owner_keys, owner))
+        redis::cmd("mpc.artifact.len_by_owner")
+            .arg(owner_key(&self.owner_keys, owner))
+            .query_async(&mut conn)
             .await
             .inspect_err(|err| {
                 tracing::warn!(?err, "failed to get length of my artifacts");
@@ -631,34 +549,14 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     /// Clear all artifact storage, including used, reserved, and owned keys.
     /// Return true if successful, false otherwise.
     pub async fn clear(&self) -> bool {
-        const SCRIPT: &str = r#"
-            local artifact_key = KEYS[2]
-            local owner_keys = redis.call("SMEMBERS", KEYS[1])
-            local del = {}
-            for _, key in ipairs(KEYS) do
-                table.insert(del, key)
-            end
-            for _, key in ipairs(owner_keys) do
-                table.insert(del, key)
-            end
-
-            -- Also delete all holders sets for artifacts in the hash
-            local artifact_ids = redis.call("HKEYS", artifact_key)
-            for _, id in ipairs(artifact_ids) do
-                table.insert(del, artifact_key .. ':holders:' .. id)
-            end
-
-            redis.call("DEL", unpack(del))
-        "#;
-
         let start = Instant::now();
         let Some(mut conn) = self.connect().await else {
             return false;
         };
-        let outcome: Option<()> = redis::Script::new(SCRIPT)
-            .key(&self.owner_keys)
-            .key(&self.artifact_key)
-            .invoke_async(&mut conn)
+        let outcome: Option<()> = redis::cmd("mpc.artifact.clear")
+            .arg(&self.owner_keys)
+            .arg(&self.artifact_key)
+            .query_async(&mut conn)
             .await
             .inspect_err(|err| {
                 let elapsed = start.elapsed();
@@ -683,42 +581,13 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     /// It is very important to NOT reuse the same artifact twice for two different
     /// protocols.
     pub async fn take_mine(&self) -> Option<ArtifactTaken<A>> {
-        const SCRIPT: &str = r#"
-            local artifact_key = KEYS[1]
-            local mine_key = KEYS[2]
-
-            if redis.call("SCARD", mine_key) < 1 then
-                return nil
-            end
-
-            -- pop one artifact from the self owner set and delete it once successfully fetched
-            local id = redis.call("SPOP", mine_key)
-            local artifact = redis.call("HGET", artifact_key, id)
-            if not artifact then
-                return {err = "WARN unexpected, artifact " .. id .. " is missing"}
-            end
-
-            -- Delete the artifact from the hash map
-            redis.call("HDEL", artifact_key, id)
-            -- delete the artifact from our self owner set
-            redis.call("SREM", mine_key, id)
-
-            -- Read and delete the holders set
-            local holders_key = artifact_key .. ':holders:' .. id
-            local holders = redis.call("SMEMBERS", holders_key)
-            redis.call("DEL", holders_key)
-
-            -- Return the artifact and holders
-            return {artifact, holders}
-        "#;
-
         let start = Instant::now();
         let mut conn = self.connect().await?;
         let me = self.me().ok()?;
-        let result: Result<Option<(A, Vec<u32>)>, _> = redis::Script::new(SCRIPT)
-            .key(&self.artifact_key)
-            .key(owner_key(&self.owner_keys, me))
-            .invoke_async(&mut conn)
+        let result: Result<Option<(A, Vec<u32>)>, _> = redis::cmd("mpc.artifact.take_mine")
+            .arg(&self.artifact_key)
+            .arg(owner_key(&self.owner_keys, me))
+            .query_async(&mut conn)
             .await;
 
         let elapsed = start.elapsed();
@@ -764,46 +633,17 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
         // Lua script expects: KEYS[1]=artifact_key, KEYS[2]=owner_key,
         // ARGV[1]=peer, ARGV[2]=threshold, ARGV[3...]=ids
-        const SCRIPT: &str = r#"
-            local artifact_key = KEYS[1]
-            local owner_key = KEYS[2]
-            local peer = ARGV[1]
-            local threshold = tonumber(ARGV[2])
-            local removed = {}
-            local updated = {}
-            for i = 3, #ARGV do
-                local id = ARGV[i]
-                -- Skip if not owned by me (defense against malicious/buggy peer responses)
-                if redis.call('SISMEMBER', owner_key, id) == 0 then
-                    -- noop: not our artifact
-                elseif redis.call('EXISTS', artifact_key .. ':holders:' .. id) == 1 then
-                    local holders_key = artifact_key .. ':holders:' .. id
-                    redis.call('SREM', holders_key, peer)
-                    local count = redis.call('SCARD', holders_key)
-                    if count < threshold then
-                        redis.call('HDEL', artifact_key, id)
-                        redis.call('DEL', holders_key)
-                        redis.call('SREM', owner_key, id)
-                        table.insert(removed, id)
-                    else
-                        table.insert(updated, id)
-                    end
-                end
-            end
-            return {removed, updated}
-        "#;
-
         let Some(mut conn) = self.connect().await else {
             return Err(StorageError::ConnectionFailed);
         };
         type SyncResult<Id> = Result<(Vec<Id>, Vec<Id>), redis::RedisError>;
-        let result: SyncResult<A::Id> = redis::Script::new(SCRIPT)
-            .key(&self.artifact_key)
-            .key(owner_key(&self.owner_keys, self.me()?))
+        let result: SyncResult<A::Id> = redis::cmd("mpc.artifact.remove_holder_and_prune")
+            .arg(&self.artifact_key)
+            .arg(owner_key(&self.owner_keys, self.me()?))
             .arg(Into::<u32>::into(peer))
             .arg(threshold as i64)
             .arg(ids)
-            .invoke_async(&mut conn)
+            .query_async(&mut conn)
             .await;
         match result {
             Ok((removed, updated)) => Ok((removed, updated)),
