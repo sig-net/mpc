@@ -1,6 +1,6 @@
 use deadpool_redis::redis;
 use integration_tests::cluster::spawner::ClusterSpawner;
-use integration_tests::containers::{self, Redis};
+use integration_tests::containers;
 use test_log::test;
 
 #[test(tokio::test)]

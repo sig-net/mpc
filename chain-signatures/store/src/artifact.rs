@@ -20,8 +20,8 @@ pub fn artifact_insert(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
     let holders_key = crate::keys::holders_key(&artifact_key, &artifact_id);
     ctx.call("DEL", &[&holders_key])?;
 
-    for i in 6..args.len() {
-        let holder = args[i].to_string_lossy();
+    for holder_arg in args.iter().skip(6) {
+        let holder = holder_arg.to_string_lossy();
         ctx.call("SADD", &[&holders_key, &holder])?;
     }
 
@@ -47,14 +47,11 @@ pub fn artifact_take(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
     }
 
     let artifact = ctx.call("HGET", &[&artifact_key, &artifact_id])?;
-    match artifact {
-        RedisValue::Null => {
-            return Err(RedisError::String(format!(
-                "WARN artifact {} not found",
-                artifact_id
-            )))
-        }
-        _ => {}
+    if let RedisValue::Null = artifact {
+        return Err(RedisError::String(format!(
+            "WARN artifact {} not found",
+            artifact_id
+        )));
     }
 
     ctx.call("HDEL", &[&artifact_key, &artifact_id])?;
