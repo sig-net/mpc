@@ -95,54 +95,24 @@ pub async fn batch_signature_responded(
             ))));
         }
 
-        let receipt_outcomes = outcome.details.receipt_outcomes();
-        let mut result_receipts: HashMap<CryptoHash, Vec<CryptoHash>> = HashMap::new();
-        for receipt_outcome in receipt_outcomes {
-            result_receipts
-                .entry(receipt_outcome.id)
-                .or_insert(receipt_outcome.outcome.receipt_ids.clone());
-        }
-        let mut receipt_outcomes_keyed: HashMap<CryptoHash, &ExecutionOutcomeWithIdView> =
-            HashMap::new();
-        for receipt_outcome in receipt_outcomes {
-            receipt_outcomes_keyed
-                .entry(receipt_outcome.id)
-                .or_insert(receipt_outcome);
-        }
-
-        let starting_receipts = &receipt_outcomes.first().unwrap().outcome.receipt_ids;
-
         let mut signatures: Vec<FullSignature<Secp256k1>> = vec![];
-        for receipt_id in starting_receipts {
-            if !result_receipts.contains_key(receipt_id) {
-                break;
-            }
-            let sign_receipt_id = receipt_id;
-            for receipt_id in result_receipts.get(sign_receipt_id).unwrap() {
-                let receipt_outcome = receipt_outcomes_keyed
-                    .get(receipt_id)
-                    .unwrap()
-                    .outcome
-                    .clone();
-                if receipt_outcome
-                    .logs
-                    .contains(&"Signature is ready.".to_string())
-                {
-                    match receipt_outcome.status {
-                        ExecutionStatusView::SuccessValue(value) => {
-                            let result: Signature = serde_json::from_slice(&value)
-                                .map_err(|err| WaitForError::SerdeJson(format!("{err:?}")))?;
-                            let signature = cait_sith::FullSignature::<Secp256k1> {
-                                big_r: result.big_r,
-                                s: result.s,
-                            };
-                            signatures.push(signature);
-                        }
-                        _ => {
-                            return Err(WaitForError::Signature(SignatureError::Failed(
-                                "one signature not done.".to_string(),
-                            )))
-                        }
+        for receipt_outcome in outcome.details.receipt_outcomes() {
+            let outcome = &receipt_outcome.outcome;
+            if outcome.logs.contains(&"Signature is ready.".to_string()) {
+                match &outcome.status {
+                    ExecutionStatusView::SuccessValue(value) => {
+                        let result: Signature = serde_json::from_slice(value)
+                            .map_err(|err| WaitForError::SerdeJson(format!("{err:?}")))?;
+                        let signature = cait_sith::FullSignature::<Secp256k1> {
+                            big_r: result.big_r,
+                            s: result.s,
+                        };
+                        signatures.push(signature);
+                    }
+                    _ => {
+                        return Err(WaitForError::Signature(SignatureError::Failed(
+                            "one signature not done.".to_string(),
+                        )))
                     }
                 }
             }
