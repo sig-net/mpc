@@ -570,7 +570,7 @@ impl MpcFixtureNodeBuilder {
             web_handle: None,
         };
 
-        node.start_web_interface(self.participant_info.account_id);
+        node.start_web_interface(self.participant_info.account_id).await;
 
         node
     }

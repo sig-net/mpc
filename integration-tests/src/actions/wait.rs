@@ -252,8 +252,8 @@ async fn require_node_state(nodes: &Cluster, state: NodeState, id: usize) -> any
     };
 
     let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_millis(500))
-        .with_max_times(30);
+        .with_delay(std::time::Duration::from_millis(300))
+        .with_max_times(300);
 
     let state = is_ready
         .retry(&strategy)
@@ -289,8 +289,8 @@ async fn require_contract_state(nodes: &Cluster, state: ContractState) -> anyhow
     };
 
     let strategy = ConstantBuilder::default()
-        .with_delay(std::time::Duration::from_millis(500))
-        .with_max_times(30);
+        .with_delay(std::time::Duration::from_millis(300))
+        .with_max_times(300);
 
     is_ready
         .retry(&strategy)

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
-use std::time::Duration as StdDuration;
+use std::time::Duration;
 
 use crate::cluster::spawner::ClusterSpawner;
 use crate::local::NodeEnvConfig;
@@ -50,7 +50,7 @@ use testcontainers::{
 };
 use tokio::io::AsyncWriteExt;
 use tokio::runtime::Builder;
-use tokio::time::{sleep, Duration};
+use tokio::time::sleep;
 use tracing;
 
 pub type Container = ContainerAsync<GenericImage>;
@@ -99,7 +99,7 @@ impl Node {
 
     pub async fn kill(self) -> NodeEnvConfig {
         // Give the container a brief moment to clean up connections gracefully
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         if let Err(e) = self.container.stop().await {
             tracing::warn!(node_account_id = %self.account.id(), "failed to stop node container: {e}");
         }
@@ -331,7 +331,7 @@ impl DockerClient {
                     Err(e) => {
                         tracing::debug!(network = %network_for_log, attempt, "failed to remove docker network: {e}");
                         if attempt < 3 {
-                            std::thread::sleep(StdDuration::from_millis(100));
+                            std::thread::sleep(Duration::from_millis(100));
                         }
                     }
                 }
@@ -806,7 +806,7 @@ impl Solana {
         };
 
         // Wait a bit for deployment to be fully processed
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         self.wait_for_program_ready(self.program_keypair.pubkey()).await?;
 
@@ -822,7 +822,7 @@ impl Solana {
                     {
                         tracing::warn!(attempt, error = %error_message, "solana initialize not ready yet, retrying");
                         last_error = Some(e);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                         continue;
                     }
 
@@ -856,7 +856,7 @@ impl Solana {
                 }
             }
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
         anyhow::bail!("solana program {program_id} did not become executable in time")
