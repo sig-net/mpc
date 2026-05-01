@@ -6,15 +6,55 @@ use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, Worker};
 
 use std::collections::BTreeMap;
+use std::cell::RefCell;
 use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::containers::{self, DockerClient};
 use crate::utils::dev_gen_indexed;
 use crate::{execute, NodeBinarySource, NodeConfig, Nodes};
 
 use crate::cluster::Cluster;
-use uuid::Uuid;
+
+thread_local! {
+    static THREAD_NETWORK_NAME: RefCell<Option<String>> = const { RefCell::new(None) };
+    static THREAD_NETWORK_CLEANUP: RefCell<Option<ThreadNetworkCleanup>> = const { RefCell::new(None) };
+}
+
+static NEXT_NETWORK_SLOT: AtomicUsize = AtomicUsize::new(0);
+
+struct ThreadNetworkCleanup {
+    docker: DockerClient,
+    network: String,
+}
+
+impl Drop for ThreadNetworkCleanup {
+    fn drop(&mut self) {
+        self.docker
+            .best_effort_remove_network(self.network.clone());
+    }
+}
+
+fn thread_network_name(docker: &DockerClient) -> String {
+    THREAD_NETWORK_NAME.with(|name_cell| {
+        let mut name = name_cell.borrow_mut();
+        if let Some(name) = name.as_ref() {
+            return name.clone();
+        }
+
+        let slot = NEXT_NETWORK_SLOT.fetch_add(1, Ordering::Relaxed);
+        let network = format!("mpc_it_{}", slot);
+        THREAD_NETWORK_CLEANUP.with(|cleanup_cell| {
+            *cleanup_cell.borrow_mut() = Some(ThreadNetworkCleanup {
+                docker: docker.clone(),
+                network: network.clone(),
+            });
+        });
+        *name = Some(network.clone());
+        network
+    })
+}
 
 const GCP_PROJECT_ID: &str = "multichain-integration";
 const ENV: &str = "integration-tests";
@@ -108,6 +148,26 @@ pub struct Prestockpile {
     pub multiplier: u32,
 }
 
+struct NetworkCleanupGuard {
+    armed: bool,
+}
+
+impl NetworkCleanupGuard {
+    fn new() -> Self {
+        Self { armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for NetworkCleanupGuard {
+    fn drop(&mut self) {
+        let _ = self.armed;
+    }
+}
+
 pub struct ClusterSpawner {
     pub docker: DockerClient,
     pub release: bool,
@@ -143,12 +203,14 @@ impl Default for ClusterSpawner {
             threshold,
             ..Default::default()
         };
+        let docker = DockerClient::default();
+        let network = thread_network_name(&docker);
         Self {
-            docker: DockerClient::default(),
+            docker,
             release: true,
             env: ENV.to_string(),
             gcp_project_id: GCP_PROJECT_ID.to_string(),
-            network: format!("mpc_it_{}", Uuid::new_v4().simple()),
+            network,
             accounts: Vec::with_capacity(cfg.nodes),
             participants: Vec::with_capacity(cfg.nodes),
             tmp_dir,
@@ -390,6 +452,8 @@ impl IntoFuture for ClusterSpawner {
 
     fn into_future(mut self) -> Self::IntoFuture {
         Box::pin(async move {
+            let mut network_cleanup = NetworkCleanupGuard::new();
+
             self = self.load_pregenerated_keys().init_network().await?;
 
             // Check if Solana is enabled and spawn if needed
@@ -435,6 +499,8 @@ impl IntoFuture for ClusterSpawner {
                     cluster.prestockpile(prestockpile).await;
                 }
             }
+
+            network_cleanup.disarm();
 
             Ok(cluster)
         })

@@ -203,8 +203,22 @@ impl Nodes {
                 }
             }
             Nodes::Docker { nodes, .. } => {
-                for node in nodes.drain(..) {
-                    tokio::spawn(node.kill());
+                let handles = nodes
+                    .drain(..)
+                    .map(|node| {
+                        std::thread::spawn(move || {
+                            let runtime = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .expect("failed to build runtime for docker node cleanup");
+
+                            let _ = runtime.block_on(node.kill());
+                        })
+                    })
+                    .collect::<Vec<_>>();
+
+                for handle in handles {
+                    let _ = handle.join();
                 }
             }
         }
@@ -324,6 +338,12 @@ pub struct Context {
     pub mesh_options: mesh::Options,
     pub message_options: node_client::Options,
     pub ethereum: Option<EthereumContext>,
+}
+
+impl Drop for Context {
+    fn drop(&mut self) {
+        let _ = (&self.docker_client, &self.docker_network);
+    }
 }
 
 pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {

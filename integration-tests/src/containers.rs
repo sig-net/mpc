@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::time::Duration as StdDuration;
 
 use crate::cluster::spawner::ClusterSpawner;
 use crate::local::NodeEnvConfig;
@@ -48,6 +49,7 @@ use testcontainers::{
     GenericImage, ImageExt,
 };
 use tokio::io::AsyncWriteExt;
+use tokio::runtime::Builder;
 use tokio::time::{sleep, Duration};
 use tracing;
 
@@ -98,7 +100,9 @@ impl Node {
     pub async fn kill(self) -> NodeEnvConfig {
         // Give the container a brief moment to clean up connections gracefully
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        self.container.stop().await.unwrap();
+        if let Err(e) = self.container.stop().await {
+            tracing::warn!(node_account_id = %self.account.id(), "failed to stop node container: {e}");
+        }
         NodeEnvConfig {
             web_port: Self::CONTAINER_PORT,
             account: self.account,
@@ -306,6 +310,38 @@ impl DockerClient {
         });
 
         Ok(())
+    }
+
+    pub fn best_effort_remove_network(&self, network: String) {
+        let docker = self.docker.clone();
+        let network_for_join_log = network.clone();
+        let network_for_log = network.clone();
+        let join_result = std::thread::spawn(move || {
+            let runtime = match Builder::new_current_thread().enable_all().build() {
+                Ok(runtime) => runtime,
+                Err(e) => {
+                    tracing::debug!(network = %network_for_log, "failed to build runtime for network cleanup: {e}");
+                    return;
+                }
+            };
+
+            for attempt in 1..=3 {
+                match runtime.block_on(async { docker.remove_network(&network).await }) {
+                    Ok(_) => return,
+                    Err(e) => {
+                        tracing::debug!(network = %network_for_log, attempt, "failed to remove docker network: {e}");
+                        if attempt < 3 {
+                            std::thread::sleep(StdDuration::from_millis(100));
+                        }
+                    }
+                }
+            }
+        })
+        .join();
+
+        if join_result.is_err() {
+            tracing::debug!(network = %network_for_join_log, "network cleanup thread panicked");
+        }
     }
 }
 
@@ -772,12 +808,58 @@ impl Solana {
         // Wait a bit for deployment to be fully processed
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-        // Initialize the program after deployment
-        if let Err(e) = self.initialize_program().await {
-            anyhow::bail!("program initialization failed: {e}");
+        self.wait_for_program_ready(self.program_keypair.pubkey()).await?;
+
+        // Initialize the program after deployment, retrying transient loader races.
+        let mut last_error = None;
+        for attempt in 1..=5 {
+            match self.initialize_program().await {
+                Ok(_) => return Ok(program_address),
+                Err(e) => {
+                    let error_message = e.to_string();
+                    if error_message.contains("Program is not deployed")
+                        || error_message.contains("Unsupported program id")
+                    {
+                        tracing::warn!(attempt, error = %error_message, "solana initialize not ready yet, retrying");
+                        last_error = Some(e);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        continue;
+                    }
+
+                    anyhow::bail!("program initialization failed: {e}");
+                }
+            }
         }
 
-        Ok(program_address)
+        Err(anyhow::anyhow!(
+            "program initialization failed after retries: {}",
+            last_error
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "unknown error".to_string())
+        ))
+    }
+
+    async fn wait_for_program_ready(&self, program_id: SolanaPubkey) -> anyhow::Result<()> {
+        const MAX_ATTEMPTS: usize = 60;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.rpc_client.get_account(&program_id).await {
+                Ok(account) if account.executable => {
+                    tracing::info!(attempt, program_id = %program_id, "solana program is executable");
+                    return Ok(());
+                }
+                Ok(_) => {
+                    tracing::debug!(attempt, program_id = %program_id, "waiting for solana program to become executable");
+                }
+                Err(err) => {
+                    tracing::debug!(attempt, program_id = %program_id, error = %err, "waiting for solana program account");
+                }
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
+
+        anyhow::bail!("solana program {program_id} did not become executable in time")
     }
 
     /// Perform real contract deployment using Solana CLI
