@@ -257,7 +257,8 @@ async fn test_solana_stream_concurrent_events() -> Result<()> {
             break;
         }
 
-        if let Ok(Some(ChainEvent::SignRequest(req))) = timeout(remaining, stream.next_event()).await
+        if let Ok(Some(ChainEvent::SignRequest(req))) =
+            timeout(remaining, stream.next_event()).await
         {
             sign_events.push(req);
         }

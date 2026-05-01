@@ -312,6 +312,7 @@ impl DockerClient {
         Ok(())
     }
 
+    /// Try and remove the docker network
     pub fn best_effort_remove_network(&self, network: String) {
         let docker = self.docker.clone();
         let network_for_join_log = network.clone();
@@ -808,7 +809,8 @@ impl Solana {
         // Wait a bit for deployment to be fully processed
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        self.wait_for_program_ready(self.program_keypair.pubkey()).await?;
+        self.wait_for_program_ready(self.program_keypair.pubkey())
+            .await?;
 
         // Initialize the program after deployment, retrying transient loader races.
         let mut last_error = None;
@@ -845,14 +847,14 @@ impl Solana {
         for attempt in 1..=MAX_ATTEMPTS {
             match self.rpc_client.get_account(&program_id).await {
                 Ok(account) if account.executable => {
-                    tracing::info!(attempt, program_id = %program_id, "solana program is executable");
+                    tracing::info!(attempt, %program_id, "solana program is executable");
                     return Ok(());
                 }
                 Ok(_) => {
-                    tracing::debug!(attempt, program_id = %program_id, "waiting for solana program to become executable");
+                    tracing::debug!(attempt, %program_id, "waiting for solana program to become executable");
                 }
                 Err(err) => {
-                    tracing::debug!(attempt, program_id = %program_id, error = %err, "waiting for solana program account");
+                    tracing::debug!(attempt, %program_id, %err, "waiting for solana program account");
                 }
             }
 

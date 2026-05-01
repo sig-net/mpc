@@ -5,8 +5,8 @@ use near_account_id::AccountId;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, Worker};
 
-use std::collections::BTreeMap;
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -31,8 +31,7 @@ struct ThreadNetworkCleanup {
 
 impl Drop for ThreadNetworkCleanup {
     fn drop(&mut self) {
-        self.docker
-            .best_effort_remove_network(self.network.clone());
+        self.docker.best_effort_remove_network(self.network.clone());
     }
 }
 
