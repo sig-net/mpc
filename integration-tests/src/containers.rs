@@ -354,35 +354,18 @@ impl Redis {
     pub async fn run(spawner: &ClusterSpawner) -> Self {
         tracing::info!("Running Redis container...");
 
-        let mut module_path = std::env::current_dir()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("target")
-            .join("release")
-            .join("libmpc_store.so");
-
-        // Fallback for when current_dir is the workspace root
-        if !module_path.exists() {
-            module_path = std::env::current_dir()
-                .unwrap()
-                .join("target")
-                .join("release")
-                .join("libmpc_store.so");
-        }
-
-        // On macOS, if we don't have the .so yet, we might have a .dylib from a local build,
-        // but it won't work in the Linux container. We check for it only to provide a better error.
-        if !module_path.exists() {
+        let module_path = crate::execute::redis_module_path().unwrap_or_else(|| {
+            let target_dir = crate::execute::target_dir().expect("target dir should exist");
+            let module_path = target_dir.join("release").join("libmpc_store.so");
             let dylib_path = module_path.with_extension("dylib");
             if dylib_path.exists() {
                 tracing::warn!("Found macOS .dylib module, but Linux .so is required for Docker. Ensure setup.sh has run.");
             }
             panic!(
-                "Redis module (Linux .so) not found at: {}",
+                "Redis module (Linux .so) not found at: {}. Run setup.sh to build it.",
                 module_path.display()
             );
-        }
+        });
 
         let container: Container = GenericImage::new("redis", "7.4.2")
             .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())

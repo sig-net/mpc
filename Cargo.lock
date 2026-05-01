@@ -8177,6 +8177,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.29.0",
+ "toml 0.8.22",
  "tracing",
  "tracing-opentelemetry",
  "tracing-stackdriver",

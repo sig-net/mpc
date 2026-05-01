@@ -51,18 +51,14 @@ cargo build -p mpc-store --release
 # On macOS, the host build produces a .dylib which cannot be loaded by the Linux Redis container.
 # We build a Linux .so using Docker to satisfy the integration test requirements.
 if [ "$(uname)" = "Darwin" ]; then
-    echo "${CARGO_BUILD_INDENT} detected macOS, building Linux Redis module using Docker..."
-    docker build -t mpc-store-builder -f - "$ROOT_DIR" <<EOF
-FROM rust:latest
-RUN apt-get update && apt-get install -y clang llvm libclang-dev
-WORKDIR /usr/src/app
-COPY chain-signatures/ ./chain-signatures
-COPY integration-tests/ ./integration-tests
-COPY Cargo.toml Cargo.lock ./
-RUN cargo build --release --package mpc-store
-EOF
+    echo "${CARGO_BUILD_INDENT} detected macOS, building Linux Redis module using cross..."
+    # We use x86_64-unknown-linux-gnu as the target because the Redis container is Linux-based.
+    # cross handles the Docker container and toolchain setup for us.
+    cross build -p mpc-store --target x86_64-unknown-linux-gnu --release
+    
     mkdir -p "$TARGET_DIR/release"
-    docker run --rm mpc-store-builder cat /usr/src/app/target/release/libmpc_store.so > "$TARGET_DIR/release/libmpc_store.so"
+    # Copy the Linux .so to the expected release directory so integration tests can find it.
+    cp "$TARGET_DIR/x86_64-unknown-linux-gnu/release/libmpc_store.so" "$TARGET_DIR/release/libmpc_store.so"
     chmod +x "$TARGET_DIR/release/libmpc_store.so"
 fi
 

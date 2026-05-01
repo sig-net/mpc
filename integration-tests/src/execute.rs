@@ -106,3 +106,13 @@ pub fn spawn_node_with_binary(
         .spawn()
         .with_context(|| format!("failed to run {node} node: {}", executable.display()))
 }
+
+pub fn redis_module_path() -> Option<PathBuf> {
+    let target_dir = target_dir()?;
+    let module_path = target_dir.join("release").join("libmpc_store.so");
+    if module_path.exists() {
+        Some(module_path)
+    } else {
+        None
+    }
+}
