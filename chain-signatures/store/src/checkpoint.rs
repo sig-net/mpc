@@ -3,7 +3,7 @@ use redis_module::{Context, RedisError, RedisResult, RedisString, RedisValue};
 /// Command: mpc.checkpoint.persist
 /// Arguments: checkpoint_key checkpoint_json
 /// Returns: OK
-pub fn checkpoint_persist(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
+pub fn persist(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
     if args.len() != 3 {
         return Err(RedisError::WrongArity);
     }
@@ -20,7 +20,7 @@ pub fn checkpoint_persist(ctx: &Context, args: Vec<RedisString>) -> RedisResult 
 /// Command: mpc.checkpoint.load
 /// Arguments: checkpoint_key
 /// Returns: Bulk string or nil
-pub fn checkpoint_load(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
+pub fn load(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
     if args.len() != 2 {
         return Err(RedisError::WrongArity);
     }

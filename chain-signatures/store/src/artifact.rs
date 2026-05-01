@@ -2,7 +2,7 @@ use redis_module::{Context, RedisError, RedisResult, RedisString, RedisValue};
 
 /// Command: mpc.artifact.insert
 /// Arguments: artifact_key owner_keys owner_key artifact_id artifact num_holders [holder...]
-pub fn artifact_insert(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
+pub fn insert(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
     if args.len() < 6 {
         return Err(RedisError::WrongArity);
     }
@@ -29,7 +29,7 @@ pub fn artifact_insert(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
 }
 
 /// Command: mpc.artifact.take
-pub fn artifact_take(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
+pub fn take(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
     if args.len() != 4 {
         return Err(RedisError::WrongArity);
     }
@@ -76,7 +76,7 @@ pub fn artifact_take(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
 }
 
 /// Command: mpc.artifact.take_mine
-pub fn artifact_take_mine(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
+pub fn take_mine(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
     if args.len() != 3 {
         return Err(RedisError::WrongArity);
     }
@@ -125,7 +125,7 @@ pub fn artifact_take_mine(ctx: &Context, args: Vec<RedisString>) -> RedisResult 
 }
 
 /// Command: mpc.artifact.contains
-pub fn artifact_contains(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
+pub fn contains(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
     if args.len() != 3 {
         return Err(RedisError::WrongArity);
     }
@@ -138,7 +138,7 @@ pub fn artifact_contains(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
 }
 
 /// Command: mpc.artifact.contains_by_owner
-pub fn artifact_contains_by_owner(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
+pub fn contains_by_owner(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
     if args.len() != 3 {
         return Err(RedisError::WrongArity);
     }
@@ -151,7 +151,7 @@ pub fn artifact_contains_by_owner(ctx: &Context, args: Vec<RedisString>) -> Redi
 }
 
 /// Command: mpc.artifact.fetch_owned
-pub fn artifact_fetch_owned(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
+pub fn fetch_owned(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
     if args.len() != 2 {
         return Err(RedisError::WrongArity);
     }
@@ -162,7 +162,7 @@ pub fn artifact_fetch_owned(ctx: &Context, args: Vec<RedisString>) -> RedisResul
 }
 
 /// Command: mpc.artifact.len_generated
-pub fn artifact_len_generated(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
+pub fn len_generated(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
     if args.len() != 2 {
         return Err(RedisError::WrongArity);
     }
@@ -173,7 +173,7 @@ pub fn artifact_len_generated(ctx: &Context, args: Vec<RedisString>) -> RedisRes
 }
 
 /// Command: mpc.artifact.len_by_owner
-pub fn artifact_len_by_owner(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
+pub fn len_by_owner(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
     if args.len() != 2 {
         return Err(RedisError::WrongArity);
     }
@@ -184,7 +184,7 @@ pub fn artifact_len_by_owner(ctx: &Context, args: Vec<RedisString>) -> RedisResu
 }
 
 /// Command: mpc.artifact.remove_outdated
-pub fn artifact_remove_outdated(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
+pub fn remove_outdated(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
     if args.len() < 3 {
         return Err(RedisError::WrongArity);
     }
@@ -235,7 +235,7 @@ pub fn artifact_remove_outdated(ctx: &Context, args: Vec<RedisString>) -> RedisR
 }
 
 /// Command: mpc.artifact.remove_holder_and_prune
-pub fn artifact_remove_holder_and_prune(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
+pub fn remove_holder_and_prune(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
     if args.len() < 5 {
         return Err(RedisError::WrongArity);
     }
@@ -285,7 +285,7 @@ pub fn artifact_remove_holder_and_prune(ctx: &Context, args: Vec<RedisString>) -
 }
 
 /// Command: mpc.artifact.clear
-pub fn artifact_clear(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
+pub fn clear(ctx: &Context, args: Vec<RedisString>) -> RedisResult {
     if args.len() != 3 {
         return Err(RedisError::WrongArity);
     }
