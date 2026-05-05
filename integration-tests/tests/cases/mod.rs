@@ -15,6 +15,8 @@ use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use std::time::{Duration, Instant};
 use test_log::test;
 
+pub mod canton;
+pub mod canton_stream;
 pub mod chains;
 pub mod compat;
 pub mod ethereum;

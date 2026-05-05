@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod canton;
 pub mod cluster;
 pub mod containers;
 pub mod eth;
@@ -61,6 +62,7 @@ pub struct NodeConfig {
     pub eth: Option<EthConfig>,
     pub sol: Option<SolConfig>,
     pub hydration: Option<HydrationConfig>,
+    pub canton: Option<mpc_node::indexer_canton::CantonConfig>,
 }
 
 impl Default for NodeConfig {
@@ -86,6 +88,7 @@ impl Default for NodeConfig {
             eth: None,
             sol: None,
             hydration: None,
+            canton: None,
         }
     }
 }

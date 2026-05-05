@@ -63,6 +63,7 @@ rand.workspace = true
 reqwest.workspace = true
 semver.workspace = true
 serde.workspace = true
+serde-aux = { version = "4", default-features = false }
 serde_bytes.workspace = true
 serde_json.workspace = true
 sha3.workspace = true
@@ -78,7 +79,10 @@ solana-sdk.workspace = true
 solana-transaction-status.workspace = true
 solana-client.workspace = true
 futures-util.workspace = true
+jsonwebtoken.workspace = true
+p256.workspace = true
 parity-scale-codec.workspace = true
+tokio-tungstenite.workspace = true
 
 near-account-id.workspace = true
 near-crypto = "0.26.0"
@@ -92,8 +96,9 @@ mpc-keys.workspace = true
 mpc-primitives.workspace = true
 signet-program.workspace = true
 
-alloy-primitives.workspace = true
 alloy-dyn-abi.workspace = true
+alloy-json-abi.workspace = true
+alloy-primitives.workspace = true
 secp256k1.workspace = true
 rlp.workspace = true
 

@@ -1,13 +1,13 @@
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::ops::{SignatureEvent, SignatureEventBox};
-use crate::stream::{ChainEvent, ChainStream};
+use crate::stream::{ChainEvent, ChainStream, DisabledChainIndexer};
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
-use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use alloy_sol_types::SolValue;
@@ -20,7 +20,7 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
-use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use signet_program::{
@@ -33,16 +33,6 @@ use solana_client::{
 };
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
 use tokio::sync::mpsc;
-
-pub(crate) static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
-    Scalar::from_bytes(
-        hex::decode("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364140")
-            .unwrap()
-            .try_into()
-            .unwrap(),
-    )
-    .unwrap()
-});
 
 const CPI_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: Sign",
@@ -298,7 +288,7 @@ type Result<T> = anyhow::Result<T>;
 
 /// Solana stream that implements the new ChainStream abstraction
 pub struct SolanaStream {
-    rx: mpsc::Receiver<ChainEvent>,
+    rx: Option<mpsc::Receiver<ChainEvent>>,
     start_state: Option<SolanaStreamStartState>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -333,7 +323,7 @@ impl SolanaStream {
         let (tx, rx) = crate::stream::channel();
 
         Some(SolanaStream {
-            rx,
+            rx: Some(rx),
             start_state: Some(SolanaStreamStartState {
                 program_id,
                 rpc_http_url: sol.rpc_http_url.clone(),
@@ -345,12 +335,14 @@ impl SolanaStream {
     }
 }
 
+#[async_trait]
 impl ChainStream for SolanaStream {
     const CHAIN: Chain = Chain::Solana;
+    type Indexer = DisabledChainIndexer;
 
-    async fn start(&mut self) {
+    async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
         let Some(start_state) = self.start_state.take() else {
-            return;
+            anyhow::bail!("solana stream already started");
         };
 
         self.tasks.push(spawn_events(
@@ -359,10 +351,14 @@ impl ChainStream for SolanaStream {
             start_state.rpc_ws_url.clone(),
             start_state.tx.clone(),
         ));
+        Ok(DisabledChainIndexer::new(start_state.tx))
     }
 
     async fn next_event(&mut self) -> Option<ChainEvent> {
-        self.rx.recv().await
+        match self.rx.as_mut() {
+            Some(rx) => rx.recv().await,
+            None => None,
+        }
     }
 }
 

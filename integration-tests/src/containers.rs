@@ -35,6 +35,7 @@ use near_workspaces::Account;
 use reqwest::Client;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use solana_client::nonblocking::pubsub_client::PubsubClient as SolanaPubsubClient;
 use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
 use solana_sdk::instruction::AccountMeta;
 use solana_sdk::pubkey::Pubkey as SolanaPubkey;
@@ -122,6 +123,8 @@ impl Node {
         let sol_args = mpc_node::indexer_sol::SolArgs::from_config(config.cfg.sol.clone());
         let hydration_args =
             mpc_node::indexer_hydration::HydrationArgs::from_config(config.cfg.hydration.clone());
+        let canton_args =
+            mpc_node::indexer_canton::CantonArgs::from_config(config.cfg.canton.clone());
         let args = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
@@ -133,6 +136,7 @@ impl Node {
             eth: eth_args,
             sol: sol_args,
             hydration: hydration_args,
+            canton: canton_args,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),
@@ -239,11 +243,6 @@ impl DockerClient {
     }
 
     pub async fn create_network(&self, network: &str) -> anyhow::Result<()> {
-        let list = self.docker.list_networks::<&str>(None).await?;
-        if list.iter().any(|n| n.name == Some(network.to_string())) {
-            return Ok(());
-        }
-
         let create_network_options = CreateNetworkOptions {
             name: network,
             check_duplicate: true,
@@ -258,9 +257,15 @@ impl DockerClient {
             },
             ..Default::default()
         };
-        let _response = &self.docker.create_network(create_network_options).await?;
-
-        Ok(())
+        // Concurrent test threads have a race condition on creating this!
+        // => Treat 409 Conflict (network already exists) as success and continue.
+        match self.docker.create_network(create_network_options).await {
+            Ok(_) => Ok(()),
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 409, ..
+            }) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub async fn continuously_print_logs(&self, id: &str) -> anyhow::Result<()> {
@@ -722,7 +727,7 @@ impl Solana {
             rpc_address.clone(),
             solana_sdk::commitment_config::CommitmentConfig::confirmed(),
         );
-        Self::wait_for_validator_ready(&rpc_client, &payer_keypair.pubkey()).await;
+        Self::wait_for_validator_ready(&rpc_client, &ws_address, &payer_keypair.pubkey()).await;
 
         tracing::info!(
             rpc_address,
@@ -744,19 +749,24 @@ impl Solana {
         }
     }
 
-    async fn wait_for_validator_ready(rpc_client: &SolanaRpcClient, payer: &SolanaPubkey) {
+    async fn wait_for_validator_ready(
+        rpc_client: &SolanaRpcClient,
+        ws_address: &str,
+        payer: &SolanaPubkey,
+    ) {
         const MAX_ATTEMPTS: usize = 60;
 
         for attempt in 1..=MAX_ATTEMPTS {
             let version_ready = rpc_client.get_version().await.is_ok();
             let blockhash_ready = rpc_client.get_latest_blockhash().await.is_ok();
+            let ws_ready = SolanaPubsubClient::new(ws_address).await.is_ok();
             let funded = rpc_client
                 .get_balance(payer)
                 .await
                 .ok()
                 .is_some_and(|balance| balance > 0);
 
-            if version_ready && blockhash_ready {
+            if version_ready && blockhash_ready && ws_ready {
                 if !funded {
                     tracing::warn!(
                         attempt,
@@ -770,6 +780,7 @@ impl Solana {
                 attempt,
                 version_ready,
                 blockhash_ready,
+                ws_ready,
                 funded,
                 "waiting for solana-test-validator readiness"
             );

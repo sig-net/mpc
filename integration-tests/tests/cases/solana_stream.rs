@@ -30,7 +30,7 @@ fn test_dependencies() -> (Backlog, watch::Receiver<MeshState>, NodeClient) {
 
 async fn stream_solana(config: SolConfig) -> Result<SolanaStream> {
     let mut stream = SolanaStream::new(Some(config)).context("failed to create SolanaStream")?;
-    ChainStream::start(&mut stream).await;
+    let _ = ChainStream::start(&mut stream).await?;
     Ok(stream)
 }
 

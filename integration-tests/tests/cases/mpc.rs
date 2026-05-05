@@ -214,6 +214,68 @@ async fn test_basic_sign() {
     );
 }
 
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sign_task_survives_resharing() {
+    let network = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    tokio::time::timeout(Duration::from_secs(5), network.wait_for_running())
+        .await
+        .expect("nodes should reach running state");
+
+    network
+        .assert_presignatures(1, Duration::from_secs(5))
+        .await;
+
+    let request = sign_request(7);
+    for node in &network.nodes {
+        node.sign_tx.send(request.clone()).await.unwrap();
+    }
+
+    network.trigger_resharing();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    network.complete_resharing();
+
+    let actions = network.assert_actions(1, Duration::from_secs(15)).await;
+    let action_str = actions.iter().next().unwrap();
+    assert!(
+        action_str.contains("RpcAction::Publish"),
+        "unexpected rpc action {action_str}"
+    );
+}
+
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sign_request_during_resharing() {
+    let network = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    tokio::time::timeout(Duration::from_secs(5), network.wait_for_running())
+        .await
+        .expect("nodes should reach running state");
+
+    network.trigger_resharing();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let request = sign_request(8);
+    for node in &network.nodes {
+        node.sign_tx.send(request.clone()).await.unwrap();
+    }
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    network.complete_resharing();
+
+    let actions = network.assert_actions(1, Duration::from_secs(15)).await;
+    let action_str = actions.iter().next().unwrap();
+    assert!(
+        action_str.contains("RpcAction::Publish"),
+        "unexpected rpc action {action_str}"
+    );
+}
+
 fn sign_request(seed: u8) -> Sign {
     Sign::Request(IndexedSignRequest::sign(
         SignId::new([seed; 32]),

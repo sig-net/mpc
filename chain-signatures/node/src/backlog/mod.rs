@@ -9,7 +9,7 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use anyhow::Context;
 use mpc_primitives::{PendingTx, SignId};
-use std::collections::{hash_map, HashMap, HashSet};
+use std::collections::{hash_map, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -185,17 +185,9 @@ struct HistoricalCheckpoint {
 pub struct Backlog {
     storage: CheckpointStorage,
     requests: Arc<RwLock<HashMap<Chain, PendingRequests>>>,
-    recovered_requests: Arc<RwLock<HashMap<Chain, HashSet<SignId>>>>,
     execution_watchers: Arc<RwLock<HashMap<Chain, ExecutionWatchers>>>,
     /// Historical checkpoints kept for 30 minutes, indexed by chain
     historical_checkpoints: Arc<RwLock<HashMap<Chain, Vec<HistoricalCheckpoint>>>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RecoveryRequeueMode {
-    #[default]
-    Immediate,
-    AfterCatchup,
 }
 
 impl Default for Backlog {
@@ -213,7 +205,6 @@ impl Backlog {
         Self {
             storage,
             requests: Arc::new(RwLock::new(HashMap::new())),
-            recovered_requests: Arc::new(RwLock::new(HashMap::new())),
             execution_watchers: Arc::new(RwLock::new(HashMap::new())),
             historical_checkpoints: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -231,7 +222,6 @@ impl Backlog {
         };
 
         self.observe_backlog_size(chain, len);
-        self.unmark_recovered_request(chain, &id).await;
         prev
     }
 
@@ -244,7 +234,6 @@ impl Backlog {
         };
 
         self.observe_backlog_size(chain, len);
-        self.unmark_recovered_request(chain, id).await;
         removed
     }
 
@@ -277,65 +266,33 @@ impl Backlog {
             .set(len as i64);
     }
 
-    async fn unmark_recovered_request(&self, chain: Chain, id: &SignId) {
-        let mut recovered_requests = self.recovered_requests.write().await;
-        let Some(recovered) = recovered_requests.get_mut(&chain) else {
-            return;
-        };
-
-        recovered.remove(id);
-        if recovered.is_empty() {
-            recovered_requests.remove(&chain);
-        }
-    }
-
-    async fn set_recovered_requests(&self, chain: Chain, sign_ids: HashSet<SignId>) {
-        let mut recovered_requests = self.recovered_requests.write().await;
-        match recovered_requests.entry(chain) {
-            hash_map::Entry::Vacant(entry) => {
-                entry.insert(sign_ids);
-            }
-            hash_map::Entry::Occupied(entry) => {
-                tracing::error!(
-                    %chain,
-                    new_requests_len = sign_ids.len(),
-                    old_requests_len = entry.get().len(),
-                    "attempting to set recovered requests but it already has an entry",
-                );
-            }
-        }
-    }
-
-    /// Removes recovered requests for a chain and returns a list of them filtered
-    /// to only those that should be enqueued for processing.
+    /// Returns backlog requests for a chain that are still eligible to be
+    /// enqueued for processing after catchup completes.
     pub async fn take_requeueable_requests(&self, chain: Chain) -> Vec<IndexedSignRequest> {
-        let recovered_sign_ids = {
-            let mut recovered_requests = self.recovered_requests.write().await;
-            let Some(recovered) = recovered_requests.remove(&chain) else {
-                return Vec::new();
-            };
-            recovered
-        };
-
         let requests = self.requests.read().await;
         let Some(pending) = requests.get(&chain) else {
             return Vec::new();
         };
 
-        recovered_sign_ids
-            .into_iter()
-            .filter_map(|sign_id| pending.get(&sign_id))
-            .filter_map(|entry| {
-                if entry.status() == SignStatus::AwaitingResponseBidirectional
-                    || (entry.status() == SignStatus::AwaitingResponse
-                        && entry.execution_tx().is_none())
-                {
-                    Some(entry.request.clone())
-                } else {
-                    None
-                }
+        let mut requeueable: Vec<_> = pending
+            .requests
+            .values()
+            .filter(|entry| {
+                matches!(
+                    entry.status(),
+                    SignStatus::AwaitingResponse | SignStatus::AwaitingResponseBidirectional
+                ) && entry.execution_tx().is_none()
             })
-            .collect()
+            .map(|entry| entry.request.clone())
+            .collect();
+
+        requeueable.sort_by(|left, right| {
+            left.unix_timestamp_indexed
+                .cmp(&right.unix_timestamp_indexed)
+                .then_with(|| left.id.request_id.cmp(&right.id.request_id))
+        });
+
+        requeueable
     }
 
     /// Returns all sign-respond transactions with a specific status
@@ -651,7 +608,7 @@ impl Backlog {
         node_client: &NodeClient,
         threshold: usize,
         chains: &[Chain],
-    ) -> HashMap<Chain, RecoveryRequeueMode> {
+    ) {
         tracing::info!("attempting to recover from latest checkpoints via node selection");
 
         // Load local checkpoints first
@@ -684,23 +641,21 @@ impl Backlog {
 
         if local_checkpoints.is_empty() && remote_checkpoints.is_empty() {
             tracing::info!("no selected checkpoints found, starting with empty state");
-            return HashMap::new();
+            return;
         }
 
-        let mut recovered_modes = HashMap::new();
         for &chain in chains {
             let local_checkpoint = local_checkpoints.remove(&chain);
             let remote_checkpoint = remote_checkpoints.remove(&chain);
 
-            let Some((checkpoint, requeue_mode)) =
-                select_recovery_checkpoint(chain, local_checkpoint, remote_checkpoint).await
+            let Some(checkpoint) =
+                select_recovery_checkpoint(chain, local_checkpoint, remote_checkpoint)
             else {
                 continue;
             };
             tracing::info!(
                 ?chain,
                 block_height = checkpoint.block_height,
-                ?requeue_mode,
                 "found selected checkpoint, attempting recovery"
             );
             if let Err(err) = self.recover_by_checkpoint(checkpoint).await {
@@ -711,24 +666,7 @@ impl Backlog {
                 );
                 continue;
             }
-
-            recovered_modes.insert(chain, requeue_mode);
         }
-
-        // Mark the following sign_ids as recovered to requeue them after catchup.
-        // If they're removed before catchup completes, they're unmarked from recovery
-        // and will not be requeued
-        let requests = self.requests.read().await;
-        for &chain in chains {
-            if let Some(pending) = requests.get(&chain) {
-                let sign_ids: HashSet<_> = pending.requests.keys().copied().collect();
-                if !sign_ids.is_empty() {
-                    self.set_recovered_requests(chain, sign_ids).await;
-                }
-            }
-        }
-
-        recovered_modes
     }
 }
 
@@ -863,15 +801,11 @@ impl BacklogEntry {
     }
 }
 
-fn chain_supports_catchup(chain: Chain) -> bool {
-    matches!(chain, Chain::Ethereum)
-}
-
-async fn select_recovery_checkpoint(
+fn select_recovery_checkpoint(
     chain: Chain,
     local_checkpoint: Option<Checkpoint>,
     remote_checkpoint: Option<Checkpoint>,
-) -> Option<(Checkpoint, RecoveryRequeueMode)> {
+) -> Option<Checkpoint> {
     let checkpoint = match (local_checkpoint, remote_checkpoint) {
         (Some(local), None) => local,
         (None, Some(remote)) => remote,
@@ -888,18 +822,7 @@ async fn select_recovery_checkpoint(
         }
     };
 
-    let requeue_mode = if chain_supports_catchup(chain) {
-        tracing::info!(
-            ?chain,
-            block_height = checkpoint.block_height,
-            "recovering from local checkpoint; requeue deferred until catchup"
-        );
-        RecoveryRequeueMode::AfterCatchup
-    } else {
-        RecoveryRequeueMode::Immediate
-    };
-
-    Some((checkpoint, requeue_mode))
+    Some(checkpoint)
 }
 
 #[cfg(test)]
@@ -1033,6 +956,7 @@ mod tests {
                     RespondBidirectionalTx {
                         tx_id: tx.id,
                         output: vec![],
+                        chain_ctx: None,
                     },
                 );
                 backlog
@@ -1489,6 +1413,7 @@ mod tests {
                 RespondBidirectionalTx {
                     tx_id: tx.id,
                     output: vec![],
+                    chain_ctx: None,
                 },
             );
             recovered
@@ -1501,9 +1426,6 @@ mod tests {
                     &sign_id,
                     SignStatus::AwaitingResponseBidirectional,
                 )
-                .await;
-            recovered
-                .set_recovered_requests(Chain::Solana, HashSet::from([sign_id]))
                 .await;
 
             let requeued = recovered.take_requeueable_requests(Chain::Solana).await;
@@ -1533,6 +1455,7 @@ mod tests {
             RespondBidirectionalTx {
                 tx_id: tx.id,
                 output: vec![1, 2, 3],
+                chain_ctx: None,
             },
         );
 
@@ -1543,9 +1466,6 @@ mod tests {
                 &sign_id,
                 SignStatus::AwaitingResponseBidirectional,
             )
-            .await;
-        backlog
-            .set_recovered_requests(Chain::Solana, HashSet::from([sign_id]))
             .await;
 
         let requeued = backlog.take_requeueable_requests(Chain::Solana).await;

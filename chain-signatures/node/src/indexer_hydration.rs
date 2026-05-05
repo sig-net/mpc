@@ -1,5 +1,4 @@
 use crate::backlog::Backlog;
-use crate::indexer_sol::MAX_SECP256K1_SCALAR;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign};
@@ -13,7 +12,7 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::Signature;
-use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR};
 use sha3::{Digest, Keccak256};
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{twox_128, H256};
@@ -416,7 +415,6 @@ pub async fn run(
         &mut mesh_state,
         &node_client,
         Chain::Hydration,
-        sign_tx.clone(),
     )
     .await;
 
@@ -516,6 +514,7 @@ pub async fn run(
                     entropy,
                     sign_tx.clone(),
                     backlog.clone(),
+                    true,
                 )
                 .await
                 {
@@ -540,6 +539,7 @@ pub async fn run(
                     sign_tx.clone(),
                     &mut contract_watcher,
                     &backlog,
+                    true,
                 )
                 .await
                 {
@@ -570,6 +570,7 @@ pub async fn run(
                     entropy,
                     sign_tx.clone(),
                     backlog.clone(),
+                    true,
                 )
                 .await
                 {
@@ -595,6 +596,7 @@ pub async fn run(
                     crate::stream::ops::RespondBidirectionalEvent::Hydration(event),
                     sign_tx.clone(),
                     &backlog,
+                    true,
                 )
                 .await
                 {

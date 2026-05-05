@@ -38,6 +38,7 @@ pub struct Cluster {
     pub nodes: Nodes,
     pub account_idx: usize,
     pub solana: Option<containers::Solana>,
+    pub canton: Option<crate::canton::CantonSandbox>,
 }
 
 impl Cluster {

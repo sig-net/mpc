@@ -6,6 +6,7 @@ use near_account_id::AccountId;
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use sha3::Digest;
+use std::sync::LazyLock;
 use std::{fmt, str::FromStr};
 
 use crate::bytes::cbor_scalar;
@@ -34,6 +35,17 @@ impl ScalarExt for Scalar {
         Scalar::from_bytes(hash).expect("Derived epsilon value falls outside of the field")
     }
 }
+
+/// The maximum valid scalar for the secp256k1 curve (group order minus one).
+pub static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
+    Scalar::from_bytes(
+        hex::decode("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364140")
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    )
+    .unwrap()
+});
 
 pub const LATEST_MPC_KEY_VERSION: u32 = 1;
 pub const LEGACY_MPC_KEY_VERSION_0: u32 = 0;
@@ -133,6 +145,12 @@ impl Signature {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SerDeserFormat {
+    Borsh,
+    Abi,
+}
+
 /// Supported blockchain networks for checkpoints.
 #[derive(
     BorshDeserialize,
@@ -155,6 +173,7 @@ pub enum Chain {
     Solana,
     Bitcoin,
     Hydration,
+    Canton,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
@@ -173,16 +192,18 @@ impl Chain {
             Chain::Solana => "Solana",
             Chain::Bitcoin => "Bitcoin",
             Chain::Hydration => "Hydration",
+            Chain::Canton => "Canton",
         }
     }
 
-    pub const fn iter() -> [Chain; 5] {
+    pub const fn iter() -> [Chain; 6] {
         [
             Chain::NEAR,
             Chain::Ethereum,
             Chain::Solana,
             Chain::Bitcoin,
             Chain::Hydration,
+            Chain::Canton,
         ]
     }
 
@@ -193,6 +214,7 @@ impl Chain {
             Chain::Solana => "0x800001f5",
             Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
             Chain::Hydration => "polkadot:2034",
+            Chain::Canton => "canton:global",
         }
     }
 
@@ -203,6 +225,10 @@ impl Chain {
             Chain::Solana => "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
             Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
             Chain::Hydration => "polkadot:2034",
+            // Synthetic — Canton has no registered CAIP-2 namespace in
+            // ChainAgnostic/namespaces. "canton:global" follows the
+            // namespace:reference format as a project-local identifier.
+            Chain::Canton => "canton:global",
         }
     }
 
@@ -212,6 +238,7 @@ impl Chain {
             Chain::Ethereum => ("CHECKPOINT_INTERVAL_ETHEREUM", 20),
             Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 120),
             Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 240),
+            Chain::Canton => ("CHECKPOINT_INTERVAL_CANTON", 50),
         };
 
         let interval = std::env::var(key)
@@ -226,6 +253,7 @@ impl Chain {
             ("CHECKPOINT_INTERVAL_ETHEREUM", "2"),
             ("CHECKPOINT_INTERVAL_SOLANA", "5"),
             ("CHECKPOINT_INTERVAL_HYDRATION", "5"),
+            ("CHECKPOINT_INTERVAL_CANTON", "5"),
         ]
     }
 
@@ -236,12 +264,21 @@ impl Chain {
             Chain::Solana => 3,
             Chain::Bitcoin => 60 * 60 + 20 * 60, // 6 confirmations at 10 minutes each, plus some buffer
             Chain::Hydration => 12,
+            Chain::Canton => 15,
         }
     }
 
     pub fn expected_response_time_secs(&self) -> u64 {
         // finality time * 2 = finality time of sign/sign_bidirectional event + finality time of respond event
         self.expected_finality_time_secs() * 2 + 5 // + Buffer time
+    }
+
+    pub fn respond_serialization_format(&self) -> SerDeserFormat {
+        match self {
+            Chain::Canton => SerDeserFormat::Abi,
+            // Solana and Hydration use Borsh for bidirectional responses.
+            _ => SerDeserFormat::Borsh,
+        }
     }
 
     pub fn from_caip2_chain_id(chain_id: &str) -> Result<Self, ChainFromError> {
@@ -268,6 +305,7 @@ impl FromStr for Chain {
             "solana" | "sol" => Ok(Chain::Solana),
             "bitcoin" | "btc" => Ok(Chain::Bitcoin),
             "hydration" | "hyd" => Ok(Chain::Hydration),
+            "canton" | "ctn" => Ok(Chain::Canton),
             other => Err(format!("unknown or unsupported chain {other}")),
         }
     }

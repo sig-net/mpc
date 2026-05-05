@@ -8,6 +8,7 @@ use crate::mpc_fixture::input::FixtureInput;
 use crate::mpc_fixture::message_collector::CollectMessages;
 use crate::mpc_fixture::mock_governance::MockGovernance;
 use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
+
 use cait_sith::protocol::Participant;
 use mpc_contract::config::{
     min_to_ms, PresignatureConfig, ProtocolConfig, SignatureConfig, TripleConfig,
@@ -35,7 +36,7 @@ use near_sdk::AccountId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, Sender};
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{watch, Mutex};
 
 pub struct MpcFixtureBuilder {
     prepared_nodes: Vec<MpcFixtureNodeBuilder>,
@@ -494,7 +495,7 @@ impl MpcFixtureNodeBuilder {
         let (config_tx, config_rx) = watch::channel(self.config);
 
         let channels = protocol::test_setup::TestProtocolChannels {
-            sign_rx: Arc::new(RwLock::new(sign_rx)),
+            sign_rx,
             msg_channel: self.messaging.channel.clone(),
             rpc_channel,
             config: config_rx.clone(),

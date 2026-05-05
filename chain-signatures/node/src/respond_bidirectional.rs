@@ -1,28 +1,20 @@
 use crate::indexer_eth::EthereumClient;
 use crate::protocol::{Chain, IndexedSignRequest};
-use crate::sign_bidirectional::BidirectionalTx;
-use crate::sign_bidirectional::BidirectionalTxId;
 use crate::sign_bidirectional::TransactionOutput;
+use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId};
 use alloy::consensus::Transaction;
 use alloy::primitives::Bytes;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
-use mpc_primitives::{SignArgs, SignId};
+use mpc_primitives::{SerDeserFormat, SignArgs, SignId};
 use std::sync::Arc;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
 const HYDRATION_RESPOND_BIDIRECTIONAL_PATH: &str = "hydration response key";
-// Use Borsh as this is what we are using for solana
-pub(crate) const RESPOND_SERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Borsh;
+pub const CANTON_RESPOND_BIDIRECTIONAL_PATH: &str = "canton response key";
 // Use Abi as this is what we are using for ethereum
 pub(crate) const OUTPUT_DESERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Abi;
-
-#[derive(PartialEq)]
-pub enum SerDeserFormat {
-    Borsh,
-    Abi,
-}
 
 pub struct CompletedTx {
     tx: BidirectionalTx,
@@ -33,6 +25,12 @@ pub struct CompletedTx {
 pub struct RespondBidirectionalTx {
     pub tx_id: BidirectionalTxId,
     pub output: RespondBidirectionalSerializedOutput,
+    /// Opaque per-chain context blob. The producing indexer serializes its own
+    /// struct (see e.g. `indexer_canton::CantonChainCtx`) into bytes; the
+    /// consuming publisher deserializes it back. Backlog and protocol layers
+    /// treat this as opaque bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_ctx: Option<Vec<u8>>,
 }
 
 pub type RespondBidirectionalSerializedOutput = Vec<u8>;
@@ -45,22 +43,28 @@ impl CompletedTx {
     pub(crate) async fn create_failed_sign_request(
         &self,
         chain: Chain,
+        chain_ctx: Option<Vec<u8>>,
     ) -> anyhow::Result<IndexedSignRequest> {
-        self.process_failed_tx(chain).await
+        self.process_failed_tx(chain, chain_ctx).await
     }
 
     pub(crate) fn create_sign_request_from_serialized_output(
         &self,
         chain: Chain,
         serialized_output: RespondBidirectionalSerializedOutput,
+        chain_ctx: Option<Vec<u8>>,
     ) -> anyhow::Result<IndexedSignRequest> {
-        self.create_respond_bidirectional_sign_request(chain, serialized_output)
+        self.create_respond_bidirectional_sign_request(chain, serialized_output, chain_ctx)
     }
 
-    async fn process_failed_tx(&self, chain: Chain) -> anyhow::Result<IndexedSignRequest> {
+    async fn process_failed_tx(
+        &self,
+        chain: Chain,
+        chain_ctx: Option<Vec<u8>>,
+    ) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("Tx failed: {:?}", self.tx.id);
 
-        let respond_serialization_format = RESPOND_SERIALIZATION_FORMAT;
+        let respond_serialization_format = chain.respond_serialization_format();
         let mut output = Vec::new();
         output.extend_from_slice(&MAGIC_ERROR_PREFIX);
         let serialized_output: Vec<u8> = match respond_serialization_format {
@@ -79,7 +83,7 @@ impl CompletedTx {
             }
         };
         let sign_request =
-            self.create_respond_bidirectional_sign_request(chain, serialized_output)?;
+            self.create_respond_bidirectional_sign_request(chain, serialized_output, chain_ctx)?;
         Ok(sign_request)
     }
 
@@ -87,6 +91,7 @@ impl CompletedTx {
         &self,
         chain: Chain,
         serialized_output: RespondBidirectionalSerializedOutput,
+        chain_ctx: Option<Vec<u8>>,
     ) -> anyhow::Result<IndexedSignRequest> {
         let request_id_bytes = self.tx.request_id;
         tracing::info!(
@@ -105,6 +110,7 @@ impl CompletedTx {
         let path = match chain {
             Chain::Solana => SOLANA_RESPOND_BIDIRECTIONAL_PATH.to_string(),
             Chain::Hydration => HYDRATION_RESPOND_BIDIRECTIONAL_PATH.to_string(),
+            Chain::Canton => CANTON_RESPOND_BIDIRECTIONAL_PATH.to_string(),
             _ => anyhow::bail!("Unsupported chain: {}", chain),
         };
         let epsilon = self.tx.epsilon(&path)?;
@@ -123,6 +129,7 @@ impl CompletedTx {
             RespondBidirectionalTx {
                 tx_id: self.tx.id,
                 output: serialized_output,
+                chain_ctx,
             },
         ))
     }
@@ -157,7 +164,7 @@ impl CompletedTx {
             _ => TransactionOutput::non_function_call_output(),
         };
 
-        let respond_serialization_format = RESPOND_SERIALIZATION_FORMAT;
+        let respond_serialization_format = tx.source_chain.respond_serialization_format();
         let respond_serialization_schema = &tx.respond_serialization_schema;
         let serialized_output = transaction_output
             .output
@@ -166,7 +173,7 @@ impl CompletedTx {
     }
 }
 
-fn calculate_respond_bidirectional_hash_message(
+pub fn calculate_respond_bidirectional_hash_message(
     request_id: &[u8],
     serialized_output: &[u8],
 ) -> [u8; 32] {
