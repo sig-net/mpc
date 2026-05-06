@@ -41,10 +41,7 @@ pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
 
 fn report_channel_queue_len<T>(name: &'static str, tx: &mpsc::Sender<T>) {
-    crate::metrics::messaging::set_channel_queue_size(
-        name,
-        tx.max_capacity() - tx.capacity(),
-    );
+    crate::metrics::messaging::set_channel_queue_size(name, tx.max_capacity() - tx.capacity());
 }
 
 pub struct MessageInbox {
@@ -1116,15 +1113,12 @@ mod tests {
     use mpc_keys::hpke::{self, Ciphered};
     use mpc_primitives::SignId;
     use serde::{de::DeserializeOwned, Deserialize, Serialize};
-    use tokio::sync::mpsc;
 
     use crate::{
         config::{Config, LocalConfig, NetworkConfig, OverrideConfig},
         protocol::{
             contract::primitives::{ParticipantMap, Participants},
-            message::{
-                GeneratingMessage, Message, SignatureMessage, SignedMessage, TripleMessage,
-            },
+            message::{GeneratingMessage, Message, SignatureMessage, SignedMessage, TripleMessage},
             ParticipantInfo,
         },
         rpc::ContractStateWatcher,

@@ -37,13 +37,13 @@ pub enum PregeneratedKeys {
 }
 
 impl PregeneratedKeys {
-    /// Load pregenerated keys for the given number of nodes from fixture data
-    pub fn load(num_nodes: usize) -> Option<Self> {
-        let data = match num_nodes {
-            3 => include_str!("../mpc_fixture/3_nodes.json"),
-            5 => include_str!("../mpc_fixture/5_nodes.json"),
-            other => {
-                tracing::warn!("No pregenerated keys for {other} nodes available");
+    /// Load pregenerated keys for the given number of nodes and threshold from fixture data.
+    pub fn load(num_nodes: usize, threshold: usize) -> Option<Self> {
+        let data = match (num_nodes, threshold) {
+            (3, 2) => include_str!("../mpc_fixture/3_nodes_2_threshold.json"),
+            (5, 4) => include_str!("../mpc_fixture/5_nodes_4_threshold.json"),
+            _ => {
+                tracing::warn!("No pregenerated keys for {num_nodes} nodes, threshold {threshold}");
                 return None;
             }
         };
@@ -123,6 +123,7 @@ pub struct ClusterSpawner {
     pub redis: Option<containers::Redis>,
     pub worker: Option<Worker<Sandbox>>,
     pub solana: Option<containers::Solana>,
+    pub canton: Option<crate::canton::CantonSandbox>,
     pub program_address: Option<String>,
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
@@ -137,9 +138,10 @@ impl Default for ClusterSpawner {
         tmp_dir.push("tmp");
 
         let nodes = 3;
+        let threshold = 2;
         let cfg = NodeConfig {
             nodes,
-            threshold: 2,
+            threshold,
             ..Default::default()
         };
         Self {
@@ -157,9 +159,10 @@ impl Default for ClusterSpawner {
             redis: None,
             worker: None,
             solana: None,
+            canton: None,
             program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
-            pregenerated_keys: PregeneratedKeys::load(nodes).unwrap(),
+            pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
             use_ethereum: false,
             node_binary_sources: vec![NodeBinarySource::CurrentCode; nodes],
         }
@@ -243,8 +246,8 @@ impl ClusterSpawner {
 
     fn load_pregenerated_keys(mut self) -> Self {
         if self.pregenerated_keys.is_enabled() && self.pregenerated_keys.len() != self.cfg.nodes {
-            self.pregenerated_keys =
-                PregeneratedKeys::load(self.cfg.nodes).unwrap_or(PregeneratedKeys::Disabled);
+            self.pregenerated_keys = PregeneratedKeys::load(self.cfg.nodes, self.cfg.threshold)
+                .unwrap_or(PregeneratedKeys::Disabled);
         }
         self
     }
@@ -287,6 +290,21 @@ impl ClusterSpawner {
 
     pub fn ethereum(mut self) -> Self {
         self.use_ethereum = true;
+        self
+    }
+
+    pub fn canton(mut self) -> Self {
+        if self.cfg.canton.is_none() {
+            self.cfg.canton = Some(mpc_node::indexer_canton::CantonConfig {
+                json_api_url: String::new(),
+                json_api_ws_url: String::new(),
+                jwt_private_key_path: String::new(),
+                jwt_subject: String::new(),
+                party_id: String::new(),
+                signer_contract_id: String::new(),
+                signer_template_id: String::new(),
+            });
+        }
         self
     }
 
@@ -412,6 +430,12 @@ impl IntoFuture for ClusterSpawner {
                 self.solana = Some(solana);
             }
 
+            if self.cfg.canton.is_some() && self.canton.is_none() {
+                let sandbox = crate::canton::CantonSandbox::run().await?;
+                self.cfg.canton = Some(sandbox.get_config());
+                self.canton = Some(sandbox);
+            }
+
             let nodes = self.run().await?;
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
@@ -424,6 +448,7 @@ impl IntoFuture for ClusterSpawner {
                 docker_client: self.docker,
                 account_idx: nodes.len(),
                 solana: self.solana.take(),
+                canton: self.canton.take(),
                 nodes,
             };
 

@@ -109,7 +109,7 @@ export default function () {
   let response = http.post(PINGER_URL, params, {
     headers: {
       'Content-Type': 'application/json',
-      'x-api-secret': __ENV.LT_PINGER_API_KEY || 'default-secret-key',
+      'x-api-secret': __ENV.LT_PINGER_API_KEY,
     },
   });
 

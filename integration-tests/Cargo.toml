@@ -6,7 +6,7 @@ publish = false
 
 
 [dependencies]
-alloy.workspace = true
+alloy = { workspace = true, features = ["provider-anvil-api"] }
 anyhow.workspace = true
 async-process = "1"
 backon = "0.4"
@@ -36,6 +36,7 @@ uuid = { version = "1.0", features = ["v4"] }
 sha3.workspace = true
 sha2 = "0.10"
 rlp = "0.5"
+jsonwebtoken = { workspace = true }
 
 # solana dependencies
 anchor-client.workspace = true
@@ -74,6 +75,7 @@ mpc-primitives.workspace = true
 
 [dev-dependencies]
 criterion = "0.5.1"
+serial_test = "3"
 test-log = { version = "0.2.12", features = ["log", "trace"] }
 
 [build-dependencies]

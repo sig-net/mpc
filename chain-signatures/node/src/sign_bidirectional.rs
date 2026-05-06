@@ -1,15 +1,15 @@
 use crate::protocol::{Chain, IndexedSignRequest};
-use crate::respond_bidirectional::SerDeserFormat;
 use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
 use borsh::BorshSerialize;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
-use mpc_primitives::Signature;
+use mpc_primitives::{SerDeserFormat, Signature};
 use rlp::{Rlp, RlpStream};
 use serde_json::Value;
 use sha3::{Digest, Keccak256};
+
 use std::collections::HashMap;
 use std::io::Write;
 
@@ -39,8 +39,8 @@ pub enum SignStatus {
     /// Request has been responded to and the derived transaction is now waiting to
     /// execute on the destination chain.
     PendingExecution,
-    Failed,
-    Success,
+    /// Execution was confirmed and final respond request is waiting to be signed.
+    AwaitingResponseBidirectional,
 }
 
 #[derive(Debug, Clone, Hash, serde::Serialize, serde::Deserialize)]
@@ -50,6 +50,8 @@ pub struct BidirectionalTx {
     pub serialized_transaction: Vec<u8>,
     pub source_chain: Chain,
     pub target_chain: Chain,
+    // mainnet caip2_id of the target chain where the signed transaction will be sent
+    // This must be a supported chain in the Chain enum in primitives.
     pub caip2_id: String,
     pub key_version: u32,
     pub deposit: u64,
@@ -62,11 +64,13 @@ pub struct BidirectionalTx {
     pub request_id: [u8; 32],
     pub from_address: Address,
     pub nonce: u64,
-    pub status: SignStatus,
 }
 
 impl BidirectionalTx {
     pub(crate) fn sender_string(&self) -> anyhow::Result<String> {
+        if self.source_chain == Chain::Canton {
+            return Ok(hex::encode(self.sender));
+        }
         crate::stream::ops::sender_string(self.sender, self.source_chain)
     }
 
@@ -78,6 +82,11 @@ impl BidirectionalTx {
                 path,
             )),
             Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
+                self.key_version,
+                &self.sender_string()?,
+                path,
+            )),
+            Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
                 self.key_version,
                 &self.sender_string()?,
                 path,
@@ -184,7 +193,7 @@ impl TransactionOutput {
 
         // Map to named output
         let mut output_map = HashMap::new();
-        for (field, value) in schema.into_iter().zip(values.into_iter()) {
+        for (field, value) in schema.into_iter().zip(values) {
             output_map.insert(field.name, value);
         }
 

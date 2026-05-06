@@ -97,7 +97,7 @@ async fn test_basic_generate_triples() {
         for node in &network.nodes {
             let mut nodes_shares = BTreeMap::new();
             for peer in &network.nodes {
-                let triple_ids = node.triple_storage.fetch_owned(peer.me).await.unwrap();
+                let triple_ids = node.triple_storage.fetch_owned_by(peer.me).await.unwrap();
                 let mut peer_triples = Vec::with_capacity(triple_ids.len());
                 for triple_id in triple_ids {
                     let pair = conn
@@ -151,7 +151,7 @@ async fn test_basic_generate_presignature() {
             for peer in &network.nodes {
                 let presignature_ids = node
                     .presignature_storage
-                    .fetch_owned(peer.me)
+                    .fetch_owned_by(peer.me)
                     .await
                     .unwrap();
                 let mut peer_presignatures = Vec::with_capacity(presignature_ids.len());
@@ -207,6 +207,68 @@ async fn test_basic_sign() {
     let actions = network.assert_actions(1, timeout).await;
 
     assert_eq!(actions.len(), 1);
+    let action_str = actions.iter().next().unwrap();
+    assert!(
+        action_str.contains("RpcAction::Publish"),
+        "unexpected rpc action {action_str}"
+    );
+}
+
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sign_task_survives_resharing() {
+    let network = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    tokio::time::timeout(Duration::from_secs(5), network.wait_for_running())
+        .await
+        .expect("nodes should reach running state");
+
+    network
+        .assert_presignatures(1, Duration::from_secs(5))
+        .await;
+
+    let request = sign_request(7);
+    for node in &network.nodes {
+        node.sign_tx.send(request.clone()).await.unwrap();
+    }
+
+    network.trigger_resharing();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    network.complete_resharing();
+
+    let actions = network.assert_actions(1, Duration::from_secs(15)).await;
+    let action_str = actions.iter().next().unwrap();
+    assert!(
+        action_str.contains("RpcAction::Publish"),
+        "unexpected rpc action {action_str}"
+    );
+}
+
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sign_request_during_resharing() {
+    let network = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    tokio::time::timeout(Duration::from_secs(5), network.wait_for_running())
+        .await
+        .expect("nodes should reach running state");
+
+    network.trigger_resharing();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let request = sign_request(8);
+    for node in &network.nodes {
+        node.sign_tx.send(request.clone()).await.unwrap();
+    }
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    network.complete_resharing();
+
+    let actions = network.assert_actions(1, Duration::from_secs(15)).await;
     let action_str = actions.iter().next().unwrap();
     assert!(
         action_str.contains("RpcAction::Publish"),
@@ -448,7 +510,7 @@ async fn test_sign_requests_wait_for_presignatures() {
     let network = MpcFixtureBuilder::default()
         .with_preshared_key()
         .with_preshared_triples()
-        .with_presignature_stockpile()
+        .with_preshared_presignatures()
         // Disable triple generation since we're using preshared triples
         .with_node_min_triples(0)
         // Enable presignature generation for second batch
@@ -556,11 +618,14 @@ async fn test_sign_contention_5_nodes() {
         "starting 5-node contention test with on-the-fly generation"
     );
 
-    // Build network with pre-shared keys, generate triples/presignatures on the fly
+    // Build network with pre-shared keys, generate triples/presignatures on the fly.
+    // Use low concurrency limits to stress contention with 5 nodes.
     let network = MpcFixtureBuilder::new(NUM_NODES, THRESHOLD)
         .with_preshared_key()
         .with_node_min_triples(NODE_MIN_ARTIFACTS)
         .with_node_min_presignatures(NODE_MIN_ARTIFACTS)
+        .with_max_concurrent_introduction(8)
+        .with_max_concurrent_generation(8 * NUM_NODES * 4)
         .build()
         .await;
 

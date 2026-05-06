@@ -1,4 +1,8 @@
 use crate::backlog::Backlog;
+use crate::indexer_canton::{
+    CantonRespondBidirectionalEvent, CantonSignBidirectionalRequestedEvent,
+    CantonSignatureRespondedEvent,
+};
 use crate::indexer_hydration::{
     HydrationRespondBidirectionalEvent, HydrationSignBidirectionalRequestedEvent,
     HydrationSignatureRespondedEvent,
@@ -12,16 +16,18 @@ use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, SignStatus};
 use crate::stream::ExecutionOutcome;
 
+use alloy::primitives::keccak256;
 use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
 use mpc_primitives::{SignId, Signature};
-use std::str::FromStr;
 use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum SignBidirectionalEvent {
     Solana(signet_program::SignBidirectionalEvent),
     Hydration(HydrationSignBidirectionalRequestedEvent),
+    Canton(CantonSignBidirectionalRequestedEvent),
 }
 
 impl SignBidirectionalEvent {
@@ -29,24 +35,34 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.sender.to_bytes(),
             SignBidirectionalEvent::Hydration(event) => event.sender,
+            SignBidirectionalEvent::Canton(event) => event.sender,
         }
     }
 
     pub(crate) fn sender_string(&self) -> anyhow::Result<String> {
-        sender_string(self.sender(), self.source_chain())
+        match self {
+            SignBidirectionalEvent::Canton(event) => Ok(hex::encode(event.sender)),
+            _ => sender_string(self.sender(), self.source_chain()),
+        }
     }
 
     pub(crate) fn source_chain(&self) -> Chain {
         match self {
             SignBidirectionalEvent::Solana(_) => Chain::Solana,
             SignBidirectionalEvent::Hydration(_) => Chain::Hydration,
+            SignBidirectionalEvent::Canton(_) => Chain::Canton,
         }
     }
 
-    pub fn target_chain(&self) -> Option<Chain> {
+    pub(crate) fn chain_ctx(&self) -> Option<Vec<u8>> {
         match self {
-            SignBidirectionalEvent::Solana(event) => Chain::from_str(&event.dest).ok(),
-            SignBidirectionalEvent::Hydration(event) => Chain::from_str(&event.dest).ok(),
+            SignBidirectionalEvent::Canton(event) => {
+                let ctx = crate::indexer_canton::CantonChainCtx {
+                    sign_event_contract_id: event.sign_event_contract_id.clone(),
+                };
+                Some(borsh::to_vec(&ctx).expect("CantonChainCtx Borsh serialization is infallible"))
+            }
+            _ => None,
         }
     }
 
@@ -54,6 +70,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.path.clone(),
             SignBidirectionalEvent::Hydration(event) => event.path.clone(),
+            SignBidirectionalEvent::Canton(event) => event.path.clone(),
         }
     }
 
@@ -61,6 +78,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.dest.clone(),
             SignBidirectionalEvent::Hydration(event) => event.dest.clone(),
+            SignBidirectionalEvent::Canton(event) => event.dest.clone(),
         }
     }
 
@@ -68,6 +86,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.algo.clone(),
             SignBidirectionalEvent::Hydration(event) => event.algo.clone(),
+            SignBidirectionalEvent::Canton(event) => event.algo.clone(),
         }
     }
 
@@ -75,6 +94,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.params.clone(),
             SignBidirectionalEvent::Hydration(event) => event.params.clone(),
+            SignBidirectionalEvent::Canton(event) => event.params.clone(),
         }
     }
 
@@ -82,6 +102,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.output_deserialization_schema.clone(),
             SignBidirectionalEvent::Hydration(event) => event.output_deserialization_schema.clone(),
+            SignBidirectionalEvent::Canton(event) => event.output_deserialization_schema.clone(),
         }
     }
 
@@ -89,6 +110,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.respond_serialization_schema.clone(),
             SignBidirectionalEvent::Hydration(event) => event.respond_serialization_schema.clone(),
+            SignBidirectionalEvent::Canton(event) => event.respond_serialization_schema.clone(),
         }
     }
 
@@ -96,6 +118,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.key_version,
             SignBidirectionalEvent::Hydration(event) => event.key_version,
+            SignBidirectionalEvent::Canton(event) => event.key_version,
         }
     }
 
@@ -103,6 +126,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.deposit,
             SignBidirectionalEvent::Hydration(event) => event.deposit,
+            SignBidirectionalEvent::Canton(_) => 0,
         }
     }
 
@@ -110,6 +134,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.serialized_transaction.clone(),
             SignBidirectionalEvent::Hydration(event) => event.serialized_transaction.clone(),
+            SignBidirectionalEvent::Canton(event) => event.serialized_transaction.clone(),
         }
     }
 
@@ -117,6 +142,7 @@ impl SignBidirectionalEvent {
         match self {
             SignBidirectionalEvent::Solana(event) => event.caip2_id.clone(),
             SignBidirectionalEvent::Hydration(event) => event.caip2_id.clone(),
+            SignBidirectionalEvent::Canton(event) => event.caip2_id.clone(),
         }
     }
 
@@ -132,13 +158,23 @@ impl SignBidirectionalEvent {
                 &self.sender_string()?,
                 &self.path(),
             )),
+            SignBidirectionalEvent::Canton(_) => Ok(mpc_crypto::kdf::derive_epsilon_canton(
+                self.key_version(),
+                &self.sender_string()?,
+                &self.path(),
+            )),
         }
+    }
+
+    pub fn target_chain(&self) -> Result<Chain, mpc_primitives::ChainFromError> {
+        Chain::from_caip2_chain_id(&self.caip2_id())
     }
 }
 
 pub enum RespondBidirectionalEvent {
     Solana(signet_program::RespondBidirectionalEvent),
     Hydration(HydrationRespondBidirectionalEvent),
+    Canton(CantonRespondBidirectionalEvent),
 }
 
 impl RespondBidirectionalEvent {
@@ -146,6 +182,7 @@ impl RespondBidirectionalEvent {
         match self {
             RespondBidirectionalEvent::Solana(event) => event.request_id,
             RespondBidirectionalEvent::Hydration(event) => event.request_id,
+            RespondBidirectionalEvent::Canton(event) => event.request_id,
         }
     }
 
@@ -153,6 +190,10 @@ impl RespondBidirectionalEvent {
         match self {
             RespondBidirectionalEvent::Solana(event) => event.responder.to_bytes(),
             RespondBidirectionalEvent::Hydration(event) => event.responder,
+            // Canton party IDs are variable-length strings; hash fits them into [u8; 32].
+            RespondBidirectionalEvent::Canton(event) => {
+                keccak256(event.responder.as_bytes()).into()
+            }
         }
     }
 
@@ -160,6 +201,7 @@ impl RespondBidirectionalEvent {
         match self {
             RespondBidirectionalEvent::Solana(event) => event.serialized_output.clone(),
             RespondBidirectionalEvent::Hydration(event) => event.serialized_output.clone(),
+            RespondBidirectionalEvent::Canton(event) => event.serialized_output.clone(),
         }
     }
 
@@ -169,6 +211,7 @@ impl RespondBidirectionalEvent {
                 crate::indexer_sol::to_mpc_signature(event.signature.clone()).unwrap()
             }
             RespondBidirectionalEvent::Hydration(event) => event.signature,
+            RespondBidirectionalEvent::Canton(event) => event.signature,
         }
     }
 
@@ -176,6 +219,7 @@ impl RespondBidirectionalEvent {
         match self {
             RespondBidirectionalEvent::Solana(_) => Chain::Solana,
             RespondBidirectionalEvent::Hydration(_) => Chain::Hydration,
+            RespondBidirectionalEvent::Canton(_) => Chain::Canton,
         }
     }
 }
@@ -195,6 +239,7 @@ pub enum SignatureRespondedEvent {
     /// Minimal Ethereum respond event representation (used to emit Respond events
     /// from the Ethereum indexer without performing backlog mutations in the client).
     Ethereum(EthereumSignatureRespondedEvent),
+    Canton(CantonSignatureRespondedEvent),
 }
 
 impl SignatureRespondedEvent {
@@ -203,6 +248,7 @@ impl SignatureRespondedEvent {
             SignatureRespondedEvent::Solana(_) => Chain::Solana,
             SignatureRespondedEvent::Hydration(_) => Chain::Hydration,
             SignatureRespondedEvent::Ethereum(_) => Chain::Ethereum,
+            SignatureRespondedEvent::Canton(_) => Chain::Canton,
         }
     }
 
@@ -211,6 +257,7 @@ impl SignatureRespondedEvent {
             SignatureRespondedEvent::Solana(event) => event.request_id,
             SignatureRespondedEvent::Hydration(event) => event.request_id,
             SignatureRespondedEvent::Ethereum(event) => event.request_id,
+            SignatureRespondedEvent::Canton(event) => event.request_id,
         }
     }
 
@@ -222,6 +269,7 @@ impl SignatureRespondedEvent {
             }
             SignatureRespondedEvent::Hydration(event) => event.signature,
             SignatureRespondedEvent::Ethereum(event) => event.signature,
+            SignatureRespondedEvent::Canton(event) => event.signature,
         }
     }
 }
@@ -240,6 +288,7 @@ pub(crate) async fn process_sign_event(
     entropy: [u8; 32],
     sign_tx: mpsc::Sender<Sign>,
     backlog: Backlog,
+    caught_up: bool,
 ) -> anyhow::Result<()> {
     let sign_request = sign_event.generate_sign_request(entropy)?;
     record_indexing_step_reached(sign_event.source_chain());
@@ -252,9 +301,11 @@ pub(crate) async fn process_sign_event(
 
     backlog.insert(sign_request.clone()).await;
 
-    if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
-        let chain = sign_event.source_chain();
-        tracing::error!(?err, %chain, "failed to send sign request into queue");
+    if caught_up {
+        if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
+            let chain = sign_event.source_chain();
+            tracing::error!(?err, %chain, "failed to send sign request into queue");
+        }
     }
 
     Ok(())
@@ -264,6 +315,7 @@ pub(crate) async fn process_sign_request(
     sign_request: IndexedSignRequest,
     sign_tx: mpsc::Sender<Sign>,
     backlog: Backlog,
+    caught_up: bool,
 ) -> anyhow::Result<()> {
     record_indexing_step_reached(sign_request.chain);
 
@@ -274,8 +326,10 @@ pub(crate) async fn process_sign_request(
     backlog.insert(sign_request.clone()).await;
 
     let chain = sign_request.chain;
-    if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
-        tracing::error!(?err, %chain, "failed to send sign request into queue");
+    if caught_up {
+        if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
+            tracing::error!(?err, %chain, "failed to send sign request into queue");
+        }
     }
 
     Ok(())
@@ -287,7 +341,6 @@ pub(crate) async fn recover_backlog(
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
     source_chain: Chain,
-    sign_tx: mpsc::Sender<Sign>,
 ) {
     // Recover backlog before doing anything.
     // Wait for threshold to be available
@@ -298,25 +351,25 @@ pub(crate) async fn recover_backlog(
     wait_threshold_active(mesh_state, threshold).await;
 
     let mesh_state = mesh_state.borrow().clone();
-    let mut pending = backlog
+    backlog
         .recover(&mesh_state, node_client, threshold, &[source_chain])
         .await;
+}
 
-    // Re-enqueue any pending sign requests so the node processes them after recovery
-    let pending = pending.remove(&source_chain).unwrap_or_default();
-
-    for (sign_id, entry) in pending
-        .into_iter()
-        .filter(|(_, entry)| matches!(entry.status(), SignStatus::AwaitingResponse))
-    {
-        let sign_request = entry.request;
-
+pub(crate) async fn requeue_pending_sign_requests(
+    backlog: &Backlog,
+    source_chain: Chain,
+    sign_tx: mpsc::Sender<Sign>,
+) {
+    for sign_request in backlog.take_requeueable_requests(source_chain).await {
+        let sign_id = sign_request.id;
+        let source_chain = sign_request.chain;
         if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
             tracing::error!(
                 ?err,
                 ?sign_id,
                 ?source_chain,
-                "failed to requeue sign request after recovery"
+                "failed to requeue sign request after catchup"
             );
         }
     }
@@ -327,6 +380,7 @@ pub(crate) async fn process_respond_event(
     sign_tx: mpsc::Sender<Sign>,
     contract_watcher: &mut ContractStateWatcher,
     backlog: &Backlog,
+    caught_up: bool,
 ) -> anyhow::Result<()> {
     let sign_id = SignId::new(respond_event.request_id());
     let source_chain = respond_event.source_chain();
@@ -343,8 +397,10 @@ pub(crate) async fn process_respond_event(
         SignKind::Sign => {
             tracing::info!(?sign_id, "sign request completed successfully");
             backlog.remove(source_chain, &sign_id).await;
-            if let Err(err) = sign_tx.send(Sign::Completion(sign_id)).await {
-                anyhow::bail!("failed to send completion for respond event: {err:?}");
+            if caught_up {
+                if let Err(err) = sign_tx.send(Sign::Completion(sign_id)).await {
+                    anyhow::bail!("failed to send completion for respond event: {err:?}");
+                }
             }
             return Ok(());
         }
@@ -365,9 +421,14 @@ pub(crate) async fn process_respond_event(
     }
 
     tracing::info!(?sign_id, "bidirectional processing initial respond event");
-    let target_chain = event.target_chain().ok_or_else(|| {
-        anyhow::anyhow!("unable to parse target chain from dest: {}", event.dest())
+    let target_chain = event.target_chain().map_err(|err| {
+        anyhow::anyhow!("failed to process respond event: {err:?} for sign id: {sign_id:?}")
     })?;
+
+    // Get the MPC public key and derive the from_address.
+    let root_public_key = contract_watcher.wait_public_key().await;
+    let epsilon = event.epsilon()?;
+    let from_address = crate::sign_bidirectional::derive_user_address(root_public_key, epsilon);
 
     let mpc_sig = respond_event.signature();
 
@@ -378,11 +439,6 @@ pub(crate) async fn process_respond_event(
     )?;
 
     let tx_id = BidirectionalTxId(signed_tx_hash.into());
-
-    // Get the MPC public key and derive the from_address
-    let root_public_key = contract_watcher.wait_public_key().await;
-    let epsilon = event.epsilon()?;
-    let from_address = crate::sign_bidirectional::derive_user_address(root_public_key, epsilon);
 
     let bidirectional_tx = BidirectionalTx {
         id: tx_id,
@@ -402,7 +458,6 @@ pub(crate) async fn process_respond_event(
         request_id: respond_event.request_id(),
         from_address,
         nonce,
-        status: SignStatus::AwaitingResponse,
     };
 
     tracing::info!(
@@ -443,6 +498,7 @@ pub(crate) async fn process_respond_bidirectional_event(
     event: RespondBidirectionalEvent,
     sign_tx: mpsc::Sender<Sign>,
     backlog: &Backlog,
+    caught_up: bool,
 ) -> anyhow::Result<()> {
     let sign_id = SignId::new(event.request_id());
     tracing::info!(?sign_id, "processing RespondBidirectionalEvent");
@@ -454,12 +510,15 @@ pub(crate) async fn process_respond_bidirectional_event(
         tracing::info!(?sign_id, "bidirectional tx completed");
     } else {
         tracing::warn!(?sign_id, "bidirectional tx not found on completion");
+        return Ok(());
     }
 
-    sign_tx
-        .send(Sign::Completion(sign_id))
-        .await
-        .map_err(|err| anyhow::anyhow!("failed to send completion for respond bidirectional: {err:?} for sign id: {sign_id:?}"))?;
+    if caught_up {
+        sign_tx
+            .send(Sign::Completion(sign_id))
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to send completion for respond bidirectional: {err:?} for sign id: {sign_id:?}"))?;
+    }
 
     Ok(())
 }
@@ -476,6 +535,7 @@ pub async fn process_execution_confirmed(
     backlog: &Backlog,
     sign_tx: mpsc::Sender<Sign>,
     target_chain: Chain,
+    caught_up: bool,
 ) -> anyhow::Result<()> {
     tracing::info!(
         ?tx_id,
@@ -487,7 +547,7 @@ pub async fn process_execution_confirmed(
     );
 
     // Remove the watcher; if it's not found, it might have been processed already
-    let Some((unwatched_sign_id, mut pending_tx)) =
+    let Some((unwatched_sign_id, pending_tx)) =
         backlog.unwatch_execution(target_chain, &tx_id).await
     else {
         tracing::warn!(
@@ -500,14 +560,50 @@ pub async fn process_execution_confirmed(
         tracing::warn!(?tx_id, expected = ?unwatched_sign_id, actual = ?sign_id, "sign_id mismatch between event and watcher");
     }
 
-    // Update the status on the source chain
-    let status = match result {
-        ExecutionOutcome::Success { .. } => SignStatus::Success,
-        ExecutionOutcome::Failed => SignStatus::Failed,
+    let chain_ctx = backlog
+        .get(pending_tx.source_chain, &unwatched_sign_id)
+        .await
+        .and_then(|entry| match entry.request.kind {
+            SignKind::SignBidirectional(event) => event.chain_ctx(),
+            _ => None,
+        });
+
+    let completed_tx = CompletedTx::new(pending_tx.clone(), block_height);
+
+    let sign_request = match result {
+        ExecutionOutcome::Success { output } => completed_tx
+            .create_sign_request_from_serialized_output(source_chain, output, chain_ctx)?,
+        ExecutionOutcome::Failed => {
+            completed_tx
+                .create_failed_sign_request(source_chain, chain_ctx)
+                .await?
+        }
     };
 
+    if let Err(err) = backlog
+        .set_request(
+            pending_tx.source_chain,
+            &unwatched_sign_id,
+            sign_request.clone(),
+        )
+        .await
+    {
+        tracing::error!(
+            ?tx_id,
+            ?unwatched_sign_id,
+            ?source_chain,
+            ?err,
+            "failed to persist completion request on pending tx"
+        );
+        anyhow::bail!("failed to persist completion request for sign id: {unwatched_sign_id:?}");
+    }
+
     let set_res = backlog
-        .set_status(pending_tx.source_chain, &unwatched_sign_id, status)
+        .set_status(
+            pending_tx.source_chain,
+            &unwatched_sign_id,
+            SignStatus::AwaitingResponseBidirectional,
+        )
         .await;
     let updated_tx = match set_res {
         Some(tx) => tx,
@@ -518,28 +614,24 @@ pub async fn process_execution_confirmed(
     };
     tracing::info!(?tx_id, ?unwatched_sign_id, updated_status = ?updated_tx.status(), "set_status returned transaction");
 
-    pending_tx.status = status;
-    let completed_tx = CompletedTx::new(pending_tx, block_height);
-
-    let sign_request = match result {
-        ExecutionOutcome::Success { output } => {
-            completed_tx.create_sign_request_from_serialized_output(source_chain, output)?
-        }
-        ExecutionOutcome::Failed => {
-            completed_tx
-                .create_failed_sign_request(source_chain)
-                .await?
-        }
-    };
-
     let chain = sign_request.chain;
-    if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
-        tracing::error!(?err, %chain, "failed to send sign request into queue");
+    // Execution confirmations are observed on the target chain, but the follow-up
+    // request belongs to the source chain. Do not let the target chain's catchup
+    // barrier strand that follow-up work.
+    if caught_up || chain != target_chain {
+        if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
+            tracing::error!(?err, %chain, "failed to send sign request into queue");
+        }
     }
 
     Ok(())
 }
 
+/// Decode a [u8; 32] sender into its canonical on-chain address string.
+/// Canton is intentionally absent: its sender is a variable-length party ID
+/// hashed irreversibly into the [u8; 32] slot, so callers with access to the
+/// original party string must short-circuit before reaching here (see
+/// `SignBidirectionalEvent::sender_string` / `BidirectionalTx::sender_string`).
 pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Result<String> {
     match source_chain {
         Chain::Solana => Ok(Pubkey::new_from_array(sender).to_string()),
@@ -559,12 +651,16 @@ mod tests {
     use crate::node_client::NodeClient;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::SignKind;
+    use crate::respond_bidirectional::RespondBidirectionalTx;
+    use crate::storage::checkpoint_storage::CheckpointStorage;
     use crate::stream::ops::process_execution_confirmed;
     use crate::util::current_unix_timestamp;
+    use alloy::primitives::{Address, B256};
     use cait_sith::protocol::Participant;
     use k256::{ProjectivePoint, Scalar};
     use mpc_primitives::SignArgs;
     use near_primitives::types::AccountId;
+    use solana_sdk::pubkey::Pubkey;
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
@@ -577,6 +673,64 @@ mod tests {
         kind: SignKind,
     ) -> IndexedSignRequest {
         IndexedSignRequest::new(sign_id, args, chain, unix_timestamp_indexed, kind)
+    }
+
+    fn test_bidirectional_tx(id: u8, source_chain: Chain, target_chain: Chain) -> BidirectionalTx {
+        BidirectionalTx {
+            id: BidirectionalTxId(B256::from([id; 32])),
+            sender: [0u8; 32],
+            serialized_transaction: vec![1, 2, 3],
+            source_chain,
+            target_chain,
+            caip2_id: target_chain.caip2_chain_id().to_string(),
+            key_version: 1,
+            deposit: 1000,
+            path: "test_path".to_string(),
+            algo: "ECDSA".to_string(),
+            dest: "0x1234567890123456789012345678901234567890".to_string(),
+            params: "{}".to_string(),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+            request_id: [id; 32],
+            from_address: Address::ZERO,
+            nonce: 0,
+        }
+    }
+
+    fn test_sign_args(id: u8) -> SignArgs {
+        SignArgs {
+            entropy: [id; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        }
+    }
+
+    fn test_canton_sign_bidirectional_request(
+        sign_id: SignId,
+        sign_event_contract_id: &str,
+    ) -> IndexedSignRequest {
+        IndexedSignRequest::sign_bidirectional(
+            sign_id,
+            test_sign_args(sign_id.request_id[0]),
+            Chain::Canton,
+            current_unix_timestamp(),
+            SignBidirectionalEvent::Canton(CantonSignBidirectionalRequestedEvent {
+                sign_event_contract_id: sign_event_contract_id.to_string(),
+                sender: [7u8; 32],
+                request_id: sign_id.request_id,
+                serialized_transaction: vec![1, 2, 3],
+                caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
+                key_version: 1,
+                path: "test_path".to_string(),
+                algo: "ECDSA".to_string(),
+                dest: "0x1234567890123456789012345678901234567890".to_string(),
+                params: "{}".to_string(),
+                output_deserialization_schema: vec![],
+                respond_serialization_schema: vec![],
+            }),
+        )
     }
 
     #[test]
@@ -600,7 +754,8 @@ mod tests {
 
     #[tokio::test]
     async fn recover_backlog_requeues_pending_signs() {
-        // Prepare backlog with a single pending sign request
+        // Prepare backlog with a single pending sign request on a chain that
+        // should be marked for requeue during recovery.
         let backlog = Backlog::new();
         let sign_id = SignId::new([9u8; 32]);
         let args = SignArgs {
@@ -616,13 +771,13 @@ mod tests {
         backlog
             .insert(test_indexed_request(
                 sign_id,
-                Chain::Ethereum,
+                Chain::Solana,
                 args.clone(),
                 unix_timestamp_indexed,
                 SignKind::Sign,
             ))
             .await;
-        backlog.checkpoint(Chain::Ethereum).await;
+        backlog.checkpoint(Chain::Solana).await;
 
         let threshold = 1;
         let mut mesh_state = MeshState::default();
@@ -645,10 +800,11 @@ mod tests {
             &mut contract_watcher,
             &mut mesh_rx,
             &node_client,
-            Chain::Ethereum,
-            sign_tx,
+            Chain::Solana,
         )
         .await;
+
+        requeue_pending_sign_requests(&backlog, Chain::Solana, sign_tx).await;
 
         // We should receive the recovered sign request
         let msg = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -659,7 +815,7 @@ mod tests {
             Sign::Request(req) => {
                 assert_eq!(req.id, sign_id);
                 assert_eq!(req.args, args);
-                assert_eq!(req.chain, Chain::Ethereum);
+                assert_eq!(req.chain, Chain::Solana);
                 assert_eq!(req.kind, SignKind::Sign);
                 // Verify that the unix_timestamp_indexed is preserved from the original entry
                 assert_eq!(req.unix_timestamp_indexed, unix_timestamp_indexed);
@@ -672,29 +828,7 @@ mod tests {
     #[tokio::test]
     async fn process_execution_confirmed_success_creates_respond_request() {
         let backlog = Backlog::new();
-
-        // Create a bidirectional tx and watch it on the target chain
-        use alloy::primitives::{Address, B256};
-        let tx = BidirectionalTx {
-            id: BidirectionalTxId(B256::from([1u8; 32])),
-            sender: [0u8; 32],
-            serialized_transaction: vec![1, 2, 3],
-            source_chain: Chain::Solana,
-            target_chain: Chain::Ethereum,
-            caip2_id: "test_caip2_id".to_string(),
-            key_version: 1,
-            deposit: 1000,
-            path: "test_path".to_string(),
-            algo: "ECDSA".to_string(),
-            dest: "0x1234567890123456789012345678901234567890".to_string(),
-            params: "{}".to_string(),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
-            request_id: [1u8; 32],
-            from_address: Address::ZERO,
-            nonce: 0,
-            status: SignStatus::PendingExecution,
-        };
+        let tx = test_bidirectional_tx(1, Chain::Solana, Chain::Ethereum);
         let sign_id = SignId::new(tx.request_id);
 
         // Insert a pending Sign request on the source chain
@@ -736,6 +870,7 @@ mod tests {
             &backlog,
             sign_tx,
             tx.target_chain,
+            true,
         )
         .await
         .unwrap();
@@ -745,14 +880,21 @@ mod tests {
         tracing::info!(?watchers, "watchers after execution confirmed");
         assert!(watchers.is_empty());
 
-        // Source chain request should be marked Success
+        // Source chain request should now wait for final bidirectional response.
         // inspect the transaction to provide more debugging info on failure
         let maybe_tx = backlog.get(tx.source_chain, &sign_id).await;
         assert!(maybe_tx.is_some(), "expected sign tx to still exist");
         let tx_after = maybe_tx.unwrap();
-        if tx_after.status() != SignStatus::Success {
-            panic!("expected Success but found status: {:?}", tx_after.status());
-        }
+        assert_eq!(
+            tx_after.status(),
+            SignStatus::AwaitingResponseBidirectional,
+            "expected AwaitingResponseBidirectional but found status: {:?}",
+            tx_after.status()
+        );
+        assert!(matches!(
+            tx_after.request.kind,
+            SignKind::RespondBidirectional(_)
+        ));
 
         // A sign request should have been sent to the sign queue
         let msg = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -769,6 +911,372 @@ mod tests {
             }
             _ => panic!("Expected Sign::Request"),
         }
+    }
+
+    #[tokio::test]
+    async fn process_execution_confirmed_is_idempotent_after_first_processing() {
+        let backlog = Backlog::new();
+        let tx = test_bidirectional_tx(7, Chain::Solana, Chain::Ethereum);
+        let sign_id = SignId::new(tx.request_id);
+        let args = SignArgs {
+            entropy: [7u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+        backlog
+            .insert(test_indexed_request(
+                sign_id,
+                tx.source_chain,
+                args,
+                current_unix_timestamp(),
+                SignKind::Sign,
+            ))
+            .await;
+        backlog
+            .watch_execution(tx.target_chain, sign_id, tx.clone())
+            .await;
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+
+        process_execution_confirmed(
+            tx.id,
+            sign_id,
+            tx.source_chain,
+            123u64,
+            ExecutionOutcome::Success { output: vec![] },
+            &backlog,
+            sign_tx.clone(),
+            tx.target_chain,
+            true,
+        )
+        .await
+        .unwrap();
+
+        process_execution_confirmed(
+            tx.id,
+            sign_id,
+            tx.source_chain,
+            124u64,
+            ExecutionOutcome::Success { output: vec![] },
+            &backlog,
+            sign_tx,
+            tx.target_chain,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let first = timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match first {
+            Sign::Request(req) => assert!(matches!(req.kind, SignKind::RespondBidirectional(_))),
+            other => panic!("expected one sign request, got {other:?}"),
+        }
+
+        let no_second = timeout(Duration::from_millis(100), sign_rx.recv()).await;
+        assert!(matches!(no_second, Err(_) | Ok(None)));
+
+        assert!(backlog.pending_execution(tx.target_chain).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_execution_confirmed_warns_but_still_uses_watcher_sign_id() {
+        let backlog = Backlog::new();
+        let tx = test_bidirectional_tx(8, Chain::Solana, Chain::Ethereum);
+        let sign_id = SignId::new(tx.request_id);
+        let mismatched_sign_id = SignId::new([88u8; 32]);
+        let args = SignArgs {
+            entropy: [8u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+        backlog
+            .insert(test_indexed_request(
+                sign_id,
+                tx.source_chain,
+                args,
+                current_unix_timestamp(),
+                SignKind::Sign,
+            ))
+            .await;
+        backlog
+            .watch_execution(tx.target_chain, sign_id, tx.clone())
+            .await;
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+
+        process_execution_confirmed(
+            tx.id,
+            mismatched_sign_id,
+            tx.source_chain,
+            321u64,
+            ExecutionOutcome::Failed,
+            &backlog,
+            sign_tx,
+            tx.target_chain,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
+        assert_eq!(tx_after.status(), SignStatus::AwaitingResponseBidirectional);
+        assert!(matches!(
+            tx_after.request.kind,
+            SignKind::RespondBidirectional(_)
+        ));
+        assert!(backlog.pending_execution(tx.target_chain).await.is_empty());
+
+        let msg = timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match msg {
+            Sign::Request(req) => assert_eq!(req.id, sign_id),
+            other => panic!("expected sign request, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_failure() {
+        let storage = CheckpointStorage::in_memory();
+        let backlog = Backlog::persisted(storage.clone());
+        let tx = test_bidirectional_tx(9, Chain::Solana, Chain::Ethereum);
+        let sign_id = SignId::new(tx.request_id);
+        let args = SignArgs {
+            entropy: [9u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+        backlog
+            .insert(test_indexed_request(
+                sign_id,
+                tx.source_chain,
+                args.clone(),
+                current_unix_timestamp(),
+                SignKind::Sign,
+            ))
+            .await;
+        backlog
+            .watch_execution(tx.target_chain, sign_id, tx.clone())
+            .await;
+
+        let (sign_tx, sign_rx) = mpsc::channel(4);
+        drop(sign_rx);
+
+        process_execution_confirmed(
+            tx.id,
+            sign_id,
+            tx.source_chain,
+            444u64,
+            ExecutionOutcome::Success { output: vec![] },
+            &backlog,
+            sign_tx,
+            tx.target_chain,
+            true,
+        )
+        .await
+        .unwrap();
+
+        backlog.set_processed_block(tx.source_chain, 10).await;
+        backlog.checkpoint(tx.source_chain).await;
+
+        let threshold = 1;
+        let mut mesh_state = MeshState::default();
+        let participant = Participant::from(0u32);
+        mesh_state.update(participant, NodeStatus::Active, ParticipantInfo::new(0));
+        let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
+        wait_threshold_active(&mut mesh_rx, threshold).await;
+
+        let account_id: AccountId = "test.near".parse().unwrap();
+        let public_key = ProjectivePoint::GENERATOR.to_affine();
+        let participants = Participants::default();
+        let (mut contract_watcher, _tx) =
+            ContractStateWatcher::with_running(&account_id, public_key, threshold, participants);
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        let node_client = NodeClient::new(&Default::default());
+        let recovered = Backlog::persisted(storage.clone());
+
+        recover_backlog(
+            &recovered,
+            &mut contract_watcher,
+            &mut mesh_rx,
+            &node_client,
+            tx.source_chain,
+        )
+        .await;
+
+        requeue_pending_sign_requests(&recovered, tx.source_chain, sign_tx).await;
+
+        let msg = timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match msg {
+            Sign::Request(req) => {
+                assert_eq!(req.id, sign_id);
+                assert!(matches!(req.kind, SignKind::RespondBidirectional(_)));
+            }
+            other => panic!("expected recovered final respond request, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn process_respond_event_rejects_invalid_bidirectional_target_chain() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([11u8; 32]);
+        let args = SignArgs {
+            entropy: [11u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+
+        let mut rlp_s = rlp::RlpStream::new_list(9);
+        rlp_s.append(&0u64);
+        rlp_s.append(&0u64);
+        rlp_s.append(&0u64);
+        rlp_s.append(&Vec::<u8>::new());
+        rlp_s.append(&0u64);
+        rlp_s.append(&Vec::<u8>::new());
+        rlp_s.append(&1u64);
+        rlp_s.append(&0u64);
+        rlp_s.append(&0u64);
+        let unsigned_rlp = rlp_s.out().to_vec();
+
+        backlog
+            .insert(IndexedSignRequest::sign_bidirectional(
+                sign_id,
+                args,
+                Chain::Ethereum,
+                current_unix_timestamp(),
+                SignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
+                    sender: Default::default(),
+                    serialized_transaction: unsigned_rlp,
+                    dest: "0x1234567890123456789012345678901234567890".to_string(),
+                    caip2_id: "not-a-chain".to_string(),
+                    key_version: 0,
+                    deposit: 0,
+                    path: "m/0".to_string(),
+                    algo: "ECDSA".to_string(),
+                    params: "{}".to_string(),
+                    program_id: Pubkey::new_unique(),
+                    output_deserialization_schema: vec![],
+                    respond_serialization_schema: vec![],
+                }),
+            ))
+            .await;
+
+        let event = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
+            request_id: sign_id.request_id,
+            responder: alloy::primitives::Address::from_slice(&[0u8; 20]),
+            signature: Signature::new(ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
+        });
+
+        let account_id: AccountId = "test.near".parse().unwrap();
+        let public_key = ProjectivePoint::GENERATOR.to_affine();
+        let (mut contract_watcher, _tx) =
+            ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
+
+        let (sign_tx, _sign_rx) = mpsc::channel(4);
+
+        let err = process_respond_event(event, sign_tx, &mut contract_watcher, &backlog, true)
+            .await
+            .expect_err("invalid chain should fail");
+        assert!(err.to_string().contains("UnknownCaip2Id(\"not-a-chain\")"));
+    }
+
+    #[tokio::test]
+    async fn process_sign_request_rejects_respond_bidirectional_kind() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([12u8; 32]);
+        let args = SignArgs {
+            entropy: [12u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+
+        let request = IndexedSignRequest::respond_bidirectional(
+            sign_id,
+            args,
+            Chain::Solana,
+            current_unix_timestamp(),
+            RespondBidirectionalTx {
+                tx_id: BidirectionalTxId(B256::from([12u8; 32])),
+                output: vec![],
+                chain_ctx: None,
+            },
+        );
+
+        let (sign_tx, _sign_rx) = mpsc::channel(4);
+        let err = process_sign_request(request, sign_tx, backlog, true)
+            .await
+            .expect_err("RespondBidirectional should be rejected from the sign queue path");
+        assert!(err.to_string().contains("Unexpected sign request kind"));
+    }
+
+    #[tokio::test]
+    async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([13u8; 32]);
+        let args = SignArgs {
+            entropy: [13u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+
+        backlog
+            .insert(IndexedSignRequest::respond_bidirectional(
+                sign_id,
+                args,
+                Chain::Solana,
+                current_unix_timestamp(),
+                RespondBidirectionalTx {
+                    tx_id: BidirectionalTxId(B256::from([13u8; 32])),
+                    output: vec![1, 2, 3],
+                    chain_ctx: None,
+                },
+            ))
+            .await;
+
+        let duplicate_event0 = respond_event(sign_id);
+        let duplicate_event1 = respond_event(sign_id);
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+
+        process_respond_bidirectional_event(duplicate_event0, sign_tx.clone(), &backlog, true)
+            .await
+            .expect("first completion should succeed");
+
+        process_respond_bidirectional_event(duplicate_event1, sign_tx, &backlog, true)
+            .await
+            .expect("duplicate completion should be ignored");
+
+        let first = timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match first {
+            Sign::Completion(id) => assert_eq!(id, sign_id),
+            other => panic!("expected completion, got {other:?}"),
+        }
+
+        let no_second = timeout(Duration::from_millis(100), sign_rx.recv()).await;
+        assert!(matches!(no_second, Err(_) | Ok(None)));
     }
 
     #[tokio::test]
@@ -812,6 +1320,7 @@ mod tests {
             sign_tx.clone(),
             &mut contract_watcher,
             &backlog,
+            true,
         )
         .await
         .expect("first respond event should succeed");
@@ -834,6 +1343,7 @@ mod tests {
                 sign_tx.clone(),
                 &mut contract_watcher,
                 &backlog,
+                true,
             )
             .await
             .expect("duplicate respond event should be idempotent");
@@ -857,7 +1367,7 @@ mod tests {
             serialized_transaction: vec![1, 2, 3],
             source_chain: Chain::Solana,
             target_chain: Chain::Ethereum,
-            caip2_id: "test_caip2_id".to_string(),
+            caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
             key_version: 1,
             deposit: 1000,
             path: "test_path".to_string(),
@@ -869,7 +1379,6 @@ mod tests {
             request_id: [2u8; 32],
             from_address: Address::ZERO,
             nonce: 0,
-            status: SignStatus::PendingExecution,
         };
         let sign_id = SignId::new(tx.request_id);
 
@@ -907,6 +1416,7 @@ mod tests {
             &backlog,
             sign_tx,
             tx.target_chain,
+            true,
         )
         .await
         .unwrap();
@@ -915,11 +1425,17 @@ mod tests {
         let watchers = backlog.pending_execution(tx.target_chain).await;
         assert!(watchers.is_empty());
 
-        // Source chain should be marked Failed
-        let failed = backlog
-            .get_by_status(tx.source_chain, SignStatus::Failed)
+        // Source chain should now wait for final bidirectional response.
+        let waiting = backlog
+            .get_by_status(tx.source_chain, SignStatus::AwaitingResponseBidirectional)
             .await;
-        assert!(failed.contains_key(&sign_id));
+        assert!(waiting.contains_key(&sign_id));
+
+        let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
+        assert!(matches!(
+            tx_after.request.kind,
+            SignKind::RespondBidirectional(_)
+        ));
 
         // A sign request should have been sent
         let msg = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -938,5 +1454,227 @@ mod tests {
             }
             _ => panic!("Expected Sign::Request"),
         }
+    }
+
+    #[tokio::test]
+    async fn process_execution_confirmed_cross_chain_emits_before_target_catchup() {
+        let backlog = Backlog::new();
+
+        use alloy::primitives::{Address, B256};
+        let tx = BidirectionalTx {
+            id: BidirectionalTxId(B256::from([4u8; 32])),
+            sender: [0u8; 32],
+            serialized_transaction: vec![1, 2, 3],
+            source_chain: Chain::Solana,
+            target_chain: Chain::Ethereum,
+            caip2_id: "test_caip2_id".to_string(),
+            key_version: 1,
+            deposit: 1000,
+            path: "test_path".to_string(),
+            algo: "ECDSA".to_string(),
+            dest: "0x1234567890123456789012345678901234567890".to_string(),
+            params: "{}".to_string(),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+            request_id: [4u8; 32],
+            from_address: Address::ZERO,
+            nonce: 0,
+        };
+        let sign_id = SignId::new(tx.request_id);
+
+        let args = SignArgs {
+            entropy: [4u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+
+        backlog
+            .insert(test_indexed_request(
+                sign_id,
+                tx.source_chain,
+                args,
+                current_unix_timestamp(),
+                SignKind::Sign,
+            ))
+            .await;
+
+        backlog
+            .watch_execution(tx.target_chain, sign_id, tx.clone())
+            .await;
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        process_execution_confirmed(
+            tx.id,
+            sign_id,
+            tx.source_chain,
+            789u64,
+            ExecutionOutcome::Failed,
+            &backlog,
+            sign_tx,
+            tx.target_chain,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let msg = timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match msg {
+            Sign::Request(req) => {
+                assert_eq!(req.chain, Chain::Solana);
+                assert!(matches!(
+                    req.kind,
+                    crate::protocol::SignKind::RespondBidirectional(_)
+                ));
+            }
+            other => panic!("expected cross-chain follow-up request, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request() {
+        let backlog = Backlog::new();
+        let mut tx = test_bidirectional_tx(24, Chain::Canton, Chain::Ethereum);
+        tx.sender = [7u8; 32];
+        let sign_id = SignId::new(tx.request_id);
+        let sign_event_contract_id = "#sign-event-cid";
+
+        backlog
+            .insert(test_canton_sign_bidirectional_request(
+                sign_id,
+                sign_event_contract_id,
+            ))
+            .await;
+
+        backlog
+            .watch_execution(tx.target_chain, sign_id, tx.clone())
+            .await;
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+
+        process_execution_confirmed(
+            tx.id,
+            sign_id,
+            tx.source_chain,
+            456u64,
+            ExecutionOutcome::Success { output: vec![1] },
+            &backlog,
+            sign_tx,
+            tx.target_chain,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let assert_canton_ctx = |ctx_bytes: Option<&[u8]>| {
+            let bytes = ctx_bytes.expect("chain_ctx present");
+            let decoded: crate::indexer_canton::CantonChainCtx =
+                borsh::from_slice(bytes).expect("CantonChainCtx decodes");
+            assert_eq!(decoded.sign_event_contract_id, sign_event_contract_id);
+        };
+
+        assert!(backlog.pending_execution(tx.target_chain).await.is_empty());
+        let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
+        assert_eq!(tx_after.status(), SignStatus::AwaitingResponseBidirectional);
+        match &tx_after.request.kind {
+            SignKind::RespondBidirectional(res) => {
+                assert_eq!(res.tx_id, tx.id);
+                assert_eq!(res.output, vec![1]);
+                assert_canton_ctx(res.chain_ctx.as_deref());
+            }
+            other => panic!("Expected RespondBidirectional request, got {other:?}"),
+        }
+
+        let msg = timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match msg {
+            Sign::Request(req) => {
+                assert_eq!(req.id, sign_id);
+                assert_eq!(req.chain, tx.source_chain);
+                match req.kind {
+                    SignKind::RespondBidirectional(res) => {
+                        assert_eq!(res.tx_id, tx.id);
+                        assert_eq!(res.output, vec![1]);
+                        assert_canton_ctx(res.chain_ctx.as_deref());
+                    }
+                    other => panic!("Expected RespondBidirectional request, got {other:?}"),
+                }
+            }
+            other => panic!("Expected Sign::Request, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn requeue_pending_sign_requests_is_chain_scoped() {
+        let backlog = Backlog::new();
+        let solana_sign_id = SignId::new([7u8; 32]);
+        let ethereum_sign_id = SignId::new([8u8; 32]);
+        let args = SignArgs {
+            entropy: [1u8; 32],
+            epsilon: Scalar::from(1u64),
+            payload: Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+
+        backlog
+            .insert(test_indexed_request(
+                solana_sign_id,
+                Chain::Solana,
+                args.clone(),
+                current_unix_timestamp(),
+                SignKind::Sign,
+            ))
+            .await;
+        backlog
+            .insert(test_indexed_request(
+                ethereum_sign_id,
+                Chain::Ethereum,
+                args,
+                current_unix_timestamp(),
+                SignKind::Sign,
+            ))
+            .await;
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+
+        requeue_pending_sign_requests(&backlog, Chain::Solana, sign_tx).await;
+
+        let msg = timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match msg {
+            Sign::Request(req) => assert_eq!(req.id, solana_sign_id),
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        let no_extra = timeout(Duration::from_millis(100), sign_rx.recv()).await;
+        assert!(
+            matches!(no_extra, Err(_) | Ok(None)),
+            "expected no cross-chain requeue, got: {no_extra:?}"
+        );
+    }
+
+    fn respond_event(sign_id: SignId) -> RespondBidirectionalEvent {
+        RespondBidirectionalEvent::Solana(signet_program::RespondBidirectionalEvent {
+            request_id: sign_id.request_id,
+            responder: Pubkey::new_unique(),
+            serialized_output: vec![1, 2, 3],
+            signature: signet_program::Signature {
+                big_r: signet_program::AffinePoint {
+                    x: [0u8; 32],
+                    y: [0u8; 32],
+                },
+                s: [1u8; 32],
+                recovery_id: 0,
+            },
+        })
     }
 }

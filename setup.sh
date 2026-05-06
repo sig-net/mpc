@@ -15,6 +15,13 @@ if [ "${MPC_SETUP_ALWAYS:-}" != "1" ] && [ "${CARGO_PKG_NAME:-}" != "integration
     exec "$@"
 fi
 
+# Special case for cargo nextest, which needs to be able to list tests without building
+for arg in "$@"; do
+    case "$arg" in
+        --list) exec "$@" ;;
+    esac
+done
+
 CARGO_CMD_ARGS="$@"
 CARGO_BUILD_INDENT="            "
 echo "${CARGO_BUILD_INDENT} running MPC build script"

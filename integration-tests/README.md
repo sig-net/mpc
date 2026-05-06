@@ -1,5 +1,18 @@
 # Integration tests
 
+## Prerequisites
+
+Install [cargo-nextest](https://nexte.st) for race-free parallelization:
+
+```bash
+# Linux
+curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin
+# macOS:
+curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C ~/.cargo/bin
+```
+
+Alternatively, you may run all tests sequentially with `cargo test -p integration-tests --jobs 1 -- --test-threads 1`.
+
 ## Basic guide
 
 Running integration tests requires you to have redis and sandbox docker images present on your machine:
@@ -13,10 +26,23 @@ In case of authorization issues make sure you have logged into docker using your
 Then run the integration tests:
 
 ```BASH
-cargo test -p integration-tests --jobs 1 -- --test-threads 1
-# or if you want to run tests in docker
-cargo test -p integration-tests --features docker-test
+cargo nextest run -p integration-tests
 ```
+
+For a faster iteration loop during development, run only the lightweight MPC fixture tests
+(no full cluster or Docker containers needed beyond Redis):
+
+```BASH
+cargo nextest run -p integration-tests --profile fixture
+```
+
+To run only the full cluster tests:
+
+```BASH
+cargo nextest run -p integration-tests --profile cluster
+```
+
+The available profiles and their concurrency settings are defined in [`.config/nextest.toml`](../.config/nextest.toml).
 
 ## Logging and Tracing
 We have three types of logging available:
@@ -83,7 +109,7 @@ artifacts into git.
 You can pass environment variable `TESTCONTAINERS=keep` to keep all of the docker containers. For example:
 
 ```bash
-$ TESTCONTAINERS=keep cargo test -p integration-tests --jobs 1 -- --test-threads 1
+$ TESTCONTAINERS=keep cargo nextest run -p integration-tests
 ```
 
 ### There are no logs anymore, how do I debug?
@@ -91,7 +117,7 @@ $ TESTCONTAINERS=keep cargo test -p integration-tests --jobs 1 -- --test-threads
 The easiest way is to run one isolated test of your choosing while keeping the containers (see above):
 
 ```bash
-$ TESTCONTAINERS=keep cargo test -p integration-tests test_basic_action
+$ TESTCONTAINERS=keep cargo nextest run -p integration-tests -E 'test(test_basic_action)'
 ```
 
 Now, you can do `docker ps` and it should list all of containers related to your test (the most recent ones are always at the top, so lookout for those). For example:
@@ -112,7 +138,7 @@ Now, you can inspect each container's logs according to your needs using `docker
 
 ### How to see all the logs in terminal
 ```bash
-RUST_BACKTRACE=full RUST_LOG=debug cargo test test_name -- --nocapture
+RUST_BACKTRACE=full RUST_LOG=debug cargo nextest run -p integration-tests -E 'test(test_name)' --no-capture
 ```
 
 ### Re-building Docker image is way too slow, is there a way I can do a faster development feedback loop?

@@ -8,6 +8,9 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
+// This is the maximum number of blocks that Helios can look back to
+pub const MAX_CATCHUP_BLOCKS: u64 = 8191;
+
 #[derive(Clone)]
 pub struct HeliosEthereumClient {
     client: Arc<EthereumClient>,

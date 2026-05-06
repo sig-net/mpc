@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::env;
+use std::path::{Path, PathBuf};
 
 use crate::cluster::spawner::ClusterSpawner;
 use crate::local::NodeEnvConfig;
@@ -27,11 +28,13 @@ use mpc_node::indexer_eth::EthArgs;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;
+use mpc_primitives::Chain;
 use near_account_id::AccountId;
 use near_workspaces::Account;
 use reqwest::Client;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use solana_client::nonblocking::pubsub_client::PubsubClient as SolanaPubsubClient;
 use solana_client::nonblocking::rpc_client::RpcClient as SolanaRpcClient;
 use solana_sdk::instruction::AccountMeta;
 use solana_sdk::pubkey::Pubkey as SolanaPubkey;
@@ -116,6 +119,8 @@ impl Node {
         let sol_args = mpc_node::indexer_sol::SolArgs::from_config(config.cfg.sol.clone());
         let hydration_args =
             mpc_node::indexer_hydration::HydrationArgs::from_config(config.cfg.hydration.clone());
+        let canton_args =
+            mpc_node::indexer_canton::CantonArgs::from_config(config.cfg.canton.clone());
         let args = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
@@ -127,6 +132,7 @@ impl Node {
             eth: eth_args,
             sol: sol_args,
             hydration: hydration_args,
+            canton: canton_args,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),
@@ -233,11 +239,6 @@ impl DockerClient {
     }
 
     pub async fn create_network(&self, network: &str) -> anyhow::Result<()> {
-        let list = self.docker.list_networks::<&str>(None).await?;
-        if list.iter().any(|n| n.name == Some(network.to_string())) {
-            return Ok(());
-        }
-
         let create_network_options = CreateNetworkOptions {
             name: network,
             check_duplicate: true,
@@ -252,9 +253,15 @@ impl DockerClient {
             },
             ..Default::default()
         };
-        let _response = &self.docker.create_network(create_network_options).await?;
-
-        Ok(())
+        // Concurrent test threads have a race condition on creating this!
+        // => Treat 409 Conflict (network already exists) as success and continue.
+        match self.docker.create_network(create_network_options).await {
+            Ok(_) => Ok(()),
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 409, ..
+            }) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub async fn continuously_print_logs(&self, id: &str) -> anyhow::Result<()> {
@@ -309,15 +316,29 @@ impl DockerClient {
 
 impl Default for DockerClient {
     fn default() -> Self {
-        Self {
-            docker: Docker::connect_with_local(
-                "unix:///var/run/docker.sock",
-                // 10 minutes timeout for all requests in case a lot of tests are being ran in parallel.
-                600,
-                bollard::API_DEFAULT_VERSION,
-            )
-            .unwrap(),
-        }
+        let timeout = 600;
+        let api_version = bollard::API_DEFAULT_VERSION;
+
+        let docker = match bollard::Docker::connect_with_defaults() {
+            Ok(docker) => docker,
+            Err(default_err) => {
+                let home_socket = env::var("HOME")
+                    .ok()
+                    .map(|home| format!("unix://{home}/.docker/run/docker.sock"));
+                let Some(home_socket) = home_socket else {
+                    panic!("failed to connect to Docker using defaults: {default_err}");
+                };
+
+                bollard::Docker::connect_with_unix(&home_socket, timeout, api_version)
+                    .unwrap_or_else(|home_err| {
+                        panic!(
+                            "failed to connect to Docker using defaults ({default_err}) or Docker Desktop socket {home_socket} ({home_err})"
+                        )
+                    })
+            }
+        };
+
+        Self { docker }
     }
 }
 
@@ -374,12 +395,24 @@ impl Redis {
             .unwrap()
     }
 
-    pub fn triple_storage(&self, id: &AccountId) -> mpc_node::storage::TripleStorage {
-        TriplePair::storage(&self.pool(), id)
+    pub fn triple_storage(
+        &self,
+        id: &AccountId,
+        me: Participant,
+    ) -> mpc_node::storage::TripleStorage {
+        let storage = TriplePair::storage(&self.pool(), id);
+        storage.set_me(me);
+        storage
     }
 
-    pub fn presignature_storage(&self, id: &AccountId) -> mpc_node::storage::PresignatureStorage {
-        Presignature::storage(&self.pool(), id)
+    pub fn presignature_storage(
+        &self,
+        id: &AccountId,
+        me: Participant,
+    ) -> mpc_node::storage::PresignatureStorage {
+        let storage = Presignature::storage(&self.pool(), id);
+        storage.set_me(me);
+        storage
     }
 
     pub async fn stockpile_triples(&self, cfg: &NodeConfig, participants: &Participants, mul: u32) {
@@ -388,15 +421,15 @@ impl Redis {
             .participants
             .keys()
             .map(|account_id| {
-                (
-                    Participant::from(
-                        *participants
-                            .account_to_participant_id
-                            .get(account_id)
-                            .unwrap(),
-                    ),
-                    TriplePair::storage(&pool, account_id),
-                )
+                let me = Participant::from(
+                    *participants
+                        .account_to_participant_id
+                        .get(account_id)
+                        .unwrap(),
+                );
+                let storage = TriplePair::storage(&pool, account_id);
+                storage.set_me(me);
+                (me, storage)
             })
             .collect::<HashMap<_, _>>();
 
@@ -429,7 +462,7 @@ impl Redis {
                     storage
                         .get(me)
                         .unwrap()
-                        .reserve(pair_id)
+                        .create_slot(pair_id, *owner)
                         .await
                         .unwrap()
                         .insert(pair, *owner)
@@ -458,53 +491,32 @@ impl EthereumSandbox {
 
     pub async fn run(spawner: &ClusterSpawner) -> anyhow::Result<Self> {
         let chain_id_arg = Self::DEFAULT_CHAIN_ID.to_string();
-        let command = vec![
-            "anvil".to_string(),
-            "--host".to_string(),
-            "0.0.0.0".to_string(),
-            "--chain-id".to_string(),
+        let command = format!(
+            "anvil --host 0.0.0.0 --chain-id {} --mnemonic '{}' --block-time 1",
             chain_id_arg,
-            "--mnemonic".to_string(),
-            Self::DEFAULT_MNEMONIC.to_string(),
-            "--block-time".to_string(),
-            "1".to_string(),
-        ];
+            Self::DEFAULT_MNEMONIC,
+        );
 
-        let request = if cfg!(feature = "docker-test") {
-            GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
-                .with_exposed_port(Self::RPC_PORT.tcp())
-                .with_network(&spawner.network)
-                .with_cmd(command.clone())
-        } else {
-            GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
-                .with_network("host")
-                .with_cmd(command)
-        };
+        let request = GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
+            .with_exposed_port(Self::RPC_PORT.tcp())
+            .with_network(&spawner.network)
+            .with_cmd(vec![command]);
 
         let container = request.start().await?;
 
         let secret_key = derive_secret_key(Self::DEFAULT_MNEMONIC)?;
 
-        let (internal_http_endpoint, external_http_endpoint) = if cfg!(feature = "docker-test") {
-            let network_ip = spawner
-                .docker
-                .get_network_ip_address(&container, &spawner.network)
-                .await?;
+        let network_ip = spawner
+            .docker
+            .get_network_ip_address(&container, &spawner.network)
+            .await?;
+        let external_port = container
+            .get_host_port_ipv4(Self::RPC_PORT)
+            .await
+            .context("ethereum sandbox port mapping")?;
 
-            let external_port = container
-                .get_host_port_ipv4(Self::RPC_PORT)
-                .await
-                .context("ethereum sandbox port mapping")?;
-
-            let external_http_endpoint = format!("http://127.0.0.1:{external_port}");
-            (
-                format!("http://{}:{}", network_ip, Self::RPC_PORT),
-                external_http_endpoint,
-            )
-        } else {
-            let endpoint = format!("http://127.0.0.1:{}", Self::RPC_PORT);
-            (endpoint.clone(), endpoint)
-        };
+        let internal_http_endpoint = format!("http://{}:{}", network_ip, Self::RPC_PORT);
+        let external_http_endpoint = format!("http://127.0.0.1:{external_port}");
 
         wait_for_rpc(&external_http_endpoint).await?;
 
@@ -596,6 +608,7 @@ pub struct Solana {
     pub ws_port: u16,
     pub faucet_port: u16,
     pub rpc_client: SolanaRpcClient,
+    ledger_dir: PathBuf,
 }
 
 impl Solana {
@@ -635,41 +648,55 @@ impl Solana {
 
         // Generate a new keypair for the test validator
         let program_keypair = Solana::program_keypair();
+        let payer_keypair = SolanaKeypair::from_seed(&[102u8; 32]).unwrap();
 
         // Find available ports for RPC and WebSocket
         // Find available ports (websocket is automatically rpc_port + 1)
         let rpc_port = pick_preferred_or_unused_port(8899).await;
         let ws_port = rpc_port + 1;
         let faucet_port = pick_preferred_or_unused_port(9900).await;
+        let gossip_port = pick_preferred_or_unused_port(8000).await;
+        let dynamic_port_start = pick_preferred_or_unused_port(gossip_port + 1).await;
+        let dynamic_port_end = dynamic_port_start + 32;
 
         let rpc_address = format!("http://127.0.0.1:{}", rpc_port);
         let ws_address = format!("ws://127.0.0.1:{}", ws_port);
-
+        let ledger_dir =
+            std::env::temp_dir().join(format!("solana-test-ledger-{}", uuid::Uuid::new_v4()));
         // Start the solana-test-validator process
-        let process = Command::new("solana-test-validator")
+        let mut command = Command::new("solana-test-validator");
+        command
+            .arg("--ledger")
+            .arg(&ledger_dir)
             .arg("--rpc-port")
             .arg(rpc_port.to_string())
             .arg("--faucet-port")
             .arg(faucet_port.to_string())
+            .arg("--gossip-port")
+            .arg(gossip_port.to_string())
+            .arg("--dynamic-port-range")
+            .arg(format!("{dynamic_port_start}-{dynamic_port_end}"))
             .arg("--bind-address")
             .arg("127.0.0.1")
+            .arg("--mint")
+            .arg(payer_keypair.pubkey().to_string())
             .arg("--reset")
-            .arg("--quiet")
+            .arg("--quiet");
+
+        let process = command
             .spawn()
             .expect("failed to start solana-test-validator");
 
-        // Wait a bit for the validator to start up
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        let rpc_client = SolanaRpcClient::new_with_commitment(
+            rpc_address.clone(),
+            solana_sdk::commitment_config::CommitmentConfig::confirmed(),
+        );
+        Self::wait_for_validator_ready(&rpc_client, &ws_address, &payer_keypair.pubkey()).await;
+
         tracing::info!(
             rpc_address,
             ws_address,
             "solana-test-validator process is running",
-        );
-
-        let payer_keypair = SolanaKeypair::from_seed(&[102u8; 32]).unwrap();
-        let rpc_client = SolanaRpcClient::new_with_commitment(
-            rpc_address.clone(),
-            solana_sdk::commitment_config::CommitmentConfig::confirmed(),
         );
 
         Self {
@@ -682,7 +709,49 @@ impl Solana {
             ws_port,
             faucet_port,
             rpc_client,
+            ledger_dir,
         }
+    }
+
+    async fn wait_for_validator_ready(
+        rpc_client: &SolanaRpcClient,
+        ws_address: &str,
+        payer: &SolanaPubkey,
+    ) {
+        const MAX_ATTEMPTS: usize = 60;
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let version_ready = rpc_client.get_version().await.is_ok();
+            let blockhash_ready = rpc_client.get_latest_blockhash().await.is_ok();
+            let ws_ready = SolanaPubsubClient::new(ws_address).await.is_ok();
+            let funded = rpc_client
+                .get_balance(payer)
+                .await
+                .ok()
+                .is_some_and(|balance| balance > 0);
+
+            if version_ready && blockhash_ready && ws_ready {
+                if !funded {
+                    tracing::warn!(
+                        attempt,
+                        "solana validator RPC is ready but payer balance is still zero"
+                    );
+                }
+                return;
+            }
+
+            tracing::debug!(
+                attempt,
+                version_ready,
+                blockhash_ready,
+                ws_ready,
+                funded,
+                "waiting for solana-test-validator readiness"
+            );
+            sleep(Duration::from_secs(1)).await;
+        }
+
+        panic!("solana-test-validator did not become ready in time");
     }
 
     pub fn get_config(&self, program_address: String) -> mpc_node::indexer_sol::SolConfig {
@@ -746,28 +815,6 @@ impl Solana {
         self.program_keypair
             .write_to_file(&program_keypair_path)
             .unwrap();
-
-        // Request airdrop for the payer to fund deployment
-        tracing::info!(
-            ?payer_keypair_path,
-            "requesting solana airdrop for deployment..."
-        );
-        let airdrop_output = tokio::process::Command::new("solana")
-            .args([
-                "airdrop",
-                "10", // 10 SOL should be enough for whatever action
-                "--url",
-                &self.rpc_address,
-                "--keypair",
-                payer_keypair_path.to_str().unwrap(),
-            ])
-            .output()
-            .await?;
-
-        if !airdrop_output.status.success() {
-            let stderr = String::from_utf8_lossy(&airdrop_output.stderr);
-            tracing::warn!(?payer_keypair_path, "failed to airdrop SOL: {stderr}",);
-        }
 
         // Deploy the program using solana CLI
         tracing::info!("deploying solana program via CLI...");
@@ -848,7 +895,7 @@ impl Solana {
 
         // Call initialize function
         let signature_deposit = 1_000_000u64; // 0.001 SOL in lamports
-        let chain_id = "solana:localnet".to_string(); // CAIP-2 format for local testnet
+        let chain_id = Chain::Solana.caip2_chain_id().to_string(); // CAIP-2 format for local testnet
 
         tracing::info!(
             program_id = %program_id,
@@ -1143,6 +1190,10 @@ impl Drop for Solana {
             tracing::warn!("failed to kill solana-test-validator process: {e}");
         } else {
             tracing::info!("solana-test-validator process terminated");
+        }
+
+        if let Err(e) = std::fs::remove_dir_all(&self.ledger_dir) {
+            tracing::debug!(?self.ledger_dir, "failed to remove solana ledger dir: {e}");
         }
     }
 }

@@ -8,7 +8,8 @@ use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
 use mpc_node::protocol::state::NodeStateWatcher;
-use mpc_node::protocol::sync::SyncChannel;
+use mpc_node::protocol::state::NodeStatus;
+use mpc_node::protocol::sync::{SyncChannel, SyncUpdate};
 use mpc_node::protocol::{MessageChannel, ProtocolState, Sign};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
 use near_sdk::AccountId;
@@ -38,6 +39,7 @@ pub struct MpcFixtureNode {
     pub presignature_storage: PresignatureStorage,
     pub backlog: Backlog,
 
+    pub sync_channel: mpc_node::protocol::sync::SyncChannel,
     pub web_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -48,6 +50,58 @@ pub struct SharedOutput {
 }
 
 impl MpcFixture {
+    pub async fn wait_for_running(&self) {
+        for node in &self.nodes {
+            node.wait_for_running().await;
+        }
+    }
+
+    pub fn trigger_resharing(&self) {
+        let Some(ProtocolState::Running(running)) = self.shared_contract_state.borrow().clone()
+        else {
+            return;
+        };
+
+        let resharing = mpc_node::protocol::contract::ResharingContractState {
+            old_epoch: running.epoch,
+            old_participants: running.participants.clone(),
+            new_participants: running.participants.clone(),
+            threshold: running.threshold,
+            public_key: running.public_key,
+            finished_votes: Default::default(),
+            cancel_votes: Default::default(),
+        };
+        let _ = self
+            .shared_contract_state
+            .send(Some(ProtocolState::Resharing(resharing)));
+    }
+
+    pub fn complete_resharing(&self) {
+        let Some(ProtocolState::Resharing(resharing)) = self.shared_contract_state.borrow().clone()
+        else {
+            return;
+        };
+
+        let running = mpc_node::protocol::contract::RunningContractState {
+            epoch: resharing.old_epoch + 1,
+            participants: resharing.new_participants.clone(),
+            threshold: resharing.threshold,
+            public_key: resharing.public_key,
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+        };
+        let _ = self
+            .shared_contract_state
+            .send(Some(ProtocolState::Running(running)));
+    }
+
+    pub fn sorted_participants(&self) -> Vec<Participant> {
+        let mut p: Vec<_> = self.nodes.iter().map(|n| n.me).collect();
+        p.sort();
+        p
+    }
+
     pub async fn wait_for_triples(&self, threshold_per_node: usize) {
         for node in &self.nodes {
             node.wait_for_triples(threshold_per_node).await;
@@ -132,6 +186,15 @@ impl MpcFixture {
 }
 
 impl MpcFixtureNode {
+    pub async fn wait_for_running(&self) {
+        loop {
+            if matches!(self.state.status(), NodeStatus::Running { .. }) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     pub async fn wait_for_triples(&self, threshold_per_node: usize) {
         loop {
             let count = self.triple_storage.len_by_owner(self.me).await;
@@ -150,6 +213,82 @@ impl MpcFixtureNode {
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         }
+    }
+
+    /// Simulate a /sync call between this node (as receiver) and a peer (as owner).
+    ///
+    /// `from` is the owner node sending the sync update.
+    /// `triples` and `presignatures` are the lists of IDs the owner claims to hold.
+    /// Returns the SyncUpdate response (IDs missing on this node).
+    pub async fn sync(
+        &self,
+        from: cait_sith::protocol::Participant,
+        triples: Vec<u64>,
+        presignatures: Vec<u64>,
+    ) -> SyncUpdate {
+        let update = SyncUpdate {
+            from,
+            triples,
+            presignatures,
+        };
+        self.sync_channel
+            .request_update(update)
+            .await
+            .expect("sync_channel request_update failed")
+    }
+
+    /// Get the list of triple IDs this node owns in storage (sorted).
+    pub async fn owned_triples(&self) -> Vec<u64> {
+        let mut ids = self.triple_storage.fetch_owned().await.unwrap();
+        ids.sort();
+        ids
+    }
+
+    /// Get the list of presignature IDs this node owns in storage (sorted).
+    pub async fn owned_presignatures(&self) -> Vec<u64> {
+        let mut ids = self.presignature_storage.fetch_owned().await.unwrap();
+        ids.sort();
+        ids
+    }
+
+    /// Owned + owned using + owned generating, sorted.
+    pub async fn owned_triples_with_reserved(&self) -> Vec<u64> {
+        let mut ids = self
+            .triple_storage
+            .fetch_owned_with_reserved()
+            .await
+            .unwrap();
+        ids.sort();
+        ids
+    }
+
+    /// Owned + owned using + owned generating, sorted.
+    pub async fn owned_presignatures_with_reserved(&self) -> Vec<u64> {
+        let mut ids = self
+            .presignature_storage
+            .fetch_owned_with_reserved()
+            .await
+            .unwrap();
+        ids.sort();
+        ids
+    }
+
+    /// Simulate the caller side of /sync: process a peer's response by removing
+    /// the peer from artifacts they don't have, pruning below threshold.
+    pub async fn process_sync_response(
+        &self,
+        peer: cait_sith::protocol::Participant,
+        threshold: usize,
+        response: &mpc_node::protocol::sync::SyncUpdate,
+    ) {
+        self.triple_storage
+            .remove_holder_and_prune(peer, threshold, &response.triples)
+            .await
+            .expect("remove_holder_and_prune triples failed");
+        self.presignature_storage
+            .remove_holder_and_prune(peer, threshold, &response.presignatures)
+            .await
+            .expect("remove_holder_and_prune presignatures failed");
     }
 
     pub fn start_web_interface(&mut self, account_id: AccountId) {
