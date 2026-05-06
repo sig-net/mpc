@@ -1232,9 +1232,7 @@ impl SignatureSpawner {
         let rx = self
             .inboxes
             .entry(sign_id)
-            .or_insert_with(|| {
-                Subscriber::unsubscribed("sign_task_posit", hex::encode(sign_id.request_id))
-            })
+            .or_insert_with(|| Subscriber::unsubscribed("sign_task"))
             .subscribe();
         let task = SignTask {
             me: self.me,
@@ -1270,21 +1268,17 @@ impl SignatureSpawner {
         if from == self.me {
             return;
         }
-        if let Err(err) = self
+        let _ = self
             .inboxes
             .entry(sign_id)
-            .or_insert_with(|| {
-                Subscriber::unsubscribed("sign_task_posit", hex::encode(sign_id.request_id))
-            })
-            .try_send_lossy(SignTaskMessage::PositMessage {
+            .or_insert_with(|| Subscriber::unsubscribed("sign_task"))
+            .send(SignTaskMessage::PositMessage {
                 presignature_id,
                 round,
                 from,
                 action,
             })
-        {
-            tracing::error!(?err, ?sign_id, "failed to send posit message");
-        }
+            .await;
     }
 
     fn handle_completion(&mut self, sign_id: SignId) {

@@ -13,7 +13,6 @@ use crate::protocol::triple::TripleId;
 
 /// This should be enough to hold a few messages in the inbox.
 pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
-pub const MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE: usize = 1 << 24;
 
 pub enum SubscribeId {
     Generating,
@@ -87,32 +86,19 @@ pub enum SubscriberKind<T> {
 #[derive(Clone)]
 pub struct SubscriberMetrics {
     name: &'static str,
-    channel_id: String,
     capacity: usize,
 }
 
 impl<T> Subscriber<T> {
-    pub fn subscribed(
-        name: &'static str,
-        channel_id: impl Into<String>,
-    ) -> (Self, mpsc::Receiver<T>) {
-        Self::subscribed_with_capacity(name, channel_id, MAX_MESSAGE_SUB_CHANNEL_SIZE)
+    pub fn subscribed(name: &'static str) -> (Self, mpsc::Receiver<T>) {
+        Self::subscribed_with_capacity(name, MAX_MESSAGE_SUB_CHANNEL_SIZE)
     }
 
     pub fn subscribed_with_capacity(
         name: &'static str,
-        channel_id: impl Into<String>,
         capacity: usize,
     ) -> (Self, mpsc::Receiver<T>) {
-        let metrics = SubscriberMetrics {
-            name,
-            channel_id: channel_id.into(),
-            capacity,
-        };
-        Self::subscribed_with_metrics(metrics)
-    }
-
-    fn subscribed_with_metrics(metrics: SubscriberMetrics) -> (Self, mpsc::Receiver<T>) {
+        let metrics = SubscriberMetrics { name, capacity };
         let (tx, rx) = mpsc::channel(metrics.capacity);
         (
             Self {
@@ -123,24 +109,12 @@ impl<T> Subscriber<T> {
         )
     }
 
-    pub fn unsubscribed(name: &'static str, channel_id: impl Into<String>) -> Self {
-        Self::unsubscribed_with_capacity(name, channel_id, MAX_MESSAGE_SUB_CHANNEL_SIZE)
+    pub fn unsubscribed(name: &'static str) -> Self {
+        Self::unsubscribed_with_capacity(name, MAX_MESSAGE_SUB_CHANNEL_SIZE)
     }
 
-    pub fn unsubscribed_with_capacity(
-        name: &'static str,
-        channel_id: impl Into<String>,
-        capacity: usize,
-    ) -> Self {
-        let metrics = SubscriberMetrics {
-            name,
-            channel_id: channel_id.into(),
-            capacity,
-        };
-        Self::unsubscribed_with_metrics(metrics)
-    }
-
-    fn unsubscribed_with_metrics(metrics: SubscriberMetrics) -> Self {
+    pub fn unsubscribed_with_capacity(name: &'static str, capacity: usize) -> Self {
+        let metrics = SubscriberMetrics { name, capacity };
         let (tx, rx) = mpsc::channel(metrics.capacity);
         Self {
             metrics,
@@ -183,36 +157,12 @@ impl<T> Subscriber<T> {
     pub fn report_queue_len(&self) {
         crate::metrics::messaging::set_channel_queue_size(
             self.metrics.name,
-            &self.metrics.channel_id,
             self.estimated_queue_len(),
         );
     }
 
-    fn capacity(&self) -> usize {
-        self.metrics.capacity
-    }
-
-    pub fn channel_id(&self) -> &str {
-        &self.metrics.channel_id
-    }
-
     pub fn clear_queue_len_metric(&self) {
-        crate::metrics::messaging::remove_channel_queue_size(
-            self.metrics.name,
-            &self.metrics.channel_id,
-        );
-    }
-
-    pub fn subscriber_name(&self) -> &'static str {
-        self.metrics.name
-    }
-
-    fn report_after_enqueue(&self) {
-        self.report_queue_len();
-    }
-
-    pub fn is_unknown(&self) -> bool {
-        matches!(self.kind, SubscriberKind::Unknown)
+        crate::metrics::messaging::remove_channel_queue_size(self.metrics.name);
     }
 
     pub async fn send(&self, msg: T) -> Result<(), mpsc::error::SendError<T>> {
@@ -223,44 +173,20 @@ impl<T> Subscriber<T> {
             SubscriberKind::Unknown => Ok(()),
         }
     }
-
-    pub fn try_send_lossy(&self, msg: T) -> Result<(), mpsc::error::SendError<T>> {
-        let result = match &self.kind {
-            SubscriberKind::Subscribed(tx) | SubscriberKind::Unsubscribed(tx, _) => {
-                match tx.try_send(msg) {
-                    Ok(()) => Ok(()),
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        tracing::warn!(
-                            subscriber = self.metrics.name,
-                            subscriber_id = self.metrics.channel_id,
-                            capacity = self.capacity(),
-                            "dropping message because subscriber channel is full"
-                        );
-                        Ok(())
-                    }
-                    Err(mpsc::error::TrySendError::Closed(msg)) => Err(mpsc::error::SendError(msg)),
-                }
-            }
-            SubscriberKind::Unknown => Ok(()),
-        };
-
-        self.report_after_enqueue();
-        result
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Subscriber;
 
-    #[test]
-    fn estimated_queue_len_tracks_buffered_messages() {
-        let sub = Subscriber::unsubscribed_with_capacity("test", "singleton", 4);
+    #[tokio::test]
+    async fn estimated_queue_len_tracks_buffered_messages() {
+        let sub = Subscriber::unsubscribed_with_capacity("test", 4);
 
         assert_eq!(sub.estimated_queue_len(), 0);
 
-        sub.try_send_lossy(1u8).unwrap();
-        sub.try_send_lossy(2u8).unwrap();
+        sub.send(1u8).await.unwrap();
+        sub.send(2u8).await.unwrap();
 
         assert_eq!(sub.estimated_queue_len(), 2);
     }

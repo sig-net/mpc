@@ -44,7 +44,6 @@ impl MessageFilter {
         self.filter.put((msg_type, id), ());
         crate::metrics::messaging::set_channel_queue_size(
             "filter",
-            "singleton",
             self.filter_tx.max_capacity() - self.filter_tx.capacity(),
         );
     }
@@ -59,7 +58,6 @@ impl MessageFilter {
         if updated {
             crate::metrics::messaging::set_channel_queue_size(
                 "filter",
-                "singleton",
                 self.filter_tx.max_capacity() - self.filter_tx.capacity(),
             );
         }

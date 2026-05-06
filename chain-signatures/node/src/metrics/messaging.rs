@@ -83,17 +83,17 @@ pub(crate) static CHANNEL_QUEUE_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     super::try_create_int_gauge_vec_with_node_account_id(
         "multichain_message_channel_queue_size",
         "Estimated number of buffered messages queued per message channel",
-        &["channel", "channel_id"],
+        &["channel"],
     )
     .unwrap()
 });
 
-pub(crate) fn set_channel_queue_size(channel: &str, channel_id: &str, len: usize) {
+pub(crate) fn set_channel_queue_size(channel: &str, len: usize) {
     CHANNEL_QUEUE_SIZE
-        .with_label_values(&[channel, channel_id])
+        .with_label_values(&[channel])
         .set(len as i64);
 }
 
-pub(crate) fn remove_channel_queue_size(channel: &str, channel_id: &str) {
-    let _ = CHANNEL_QUEUE_SIZE.remove_label_values(&[channel, channel_id]);
+pub(crate) fn remove_channel_queue_size(channel: &str) {
+    let _ = CHANNEL_QUEUE_SIZE.remove_label_values(&[channel]);
 }
