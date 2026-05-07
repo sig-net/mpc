@@ -91,15 +91,22 @@ pub struct SignatureConfig {
     pub generation_timeout_total: u64,
     /// Garbage collection timeout in milliseconds for signatures generated.
     pub garbage_timeout: u64,
+    /// Maximum number of concurrent signature tasks where this node acts as proposer.
+    #[serde(default = "default_max_concurrent_proposers")]
+    pub max_concurrent_proposers: u32,
 
     /// The remaining entries that can be present in future forms of the configuration.
     #[serde(flatten)]
     pub other: HashMap<String, DynamicValue>,
 }
 
+pub const fn default_max_concurrent_proposers() -> u32 {
+    4
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::config::Config;
+    use crate::config::{default_max_concurrent_proposers, Config};
 
     #[test]
     fn test_load_config() {
@@ -133,6 +140,10 @@ mod tests {
 
         let config: Config = serde_json::from_value(config_macro).unwrap();
         assert_eq!(config.protocol.message_timeout, 10000);
+        assert_eq!(
+            config.protocol.signature.max_concurrent_proposers,
+            default_max_concurrent_proposers()
+        );
         assert_eq!(config.get("integer").unwrap(), serde_json::json!(20));
         assert_eq!(config.get("string").unwrap(), serde_json::json!("value2"));
     }
