@@ -10,6 +10,8 @@ near-account-id.workspace = true
 near-sdk.workspace = true
 sha3.workspace = true
 
+mpc-primitives.workspace = true
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2.12", features = ["custom"] }
 

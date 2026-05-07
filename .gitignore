@@ -2,6 +2,11 @@
 .direnv
 .DS_Store
 .idea
+.vscode
+
+.github/*
+!.github/ISSUE_TEMPLATE/
+!.github/workflows/
 
 tmp
 *.log

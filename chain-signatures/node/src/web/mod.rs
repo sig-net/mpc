@@ -8,8 +8,7 @@ pub mod debug;
 
 use self::error::Error;
 use crate::backlog::{Backlog, Checkpoint};
-use crate::indexer::NearIndexer;
-use crate::metrics::WEB_ENDPOINT_LATENCY;
+use crate::metrics::messaging::WEB_ENDPOINT_LATENCY;
 use crate::protocol::state::{NodeStateWatcher, NodeStatus, ResharingStatus};
 use crate::protocol::sync::{SyncChannel, SyncUpdate};
 use crate::protocol::{Chain, MessageChannel};
@@ -18,8 +17,11 @@ use crate::web::cbor::Cbor;
 use crate::web::error::Result;
 
 use anyhow::Context;
+use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Query};
-use axum::http::StatusCode;
+use axum::http::{HeaderName, HeaderValue, Request, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use axum_extra::extract::WithRejection;
@@ -32,14 +34,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::Instrument;
 
 struct AxumState {
     node: NodeStateWatcher,
-    indexer: Option<NearIndexer>,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
     msg_channel: MessageChannel,
+    #[allow(dead_code)] // used by debug-page
     my_account_id: AccountId,
     backlog: Backlog,
 }
@@ -49,7 +52,6 @@ pub async fn run(
     port: u16,
     msg_channel: MessageChannel,
     node: NodeStateWatcher,
-    indexer: Option<NearIndexer>,
     triple_storage: TripleStorage,
     presignature_storage: PresignatureStorage,
     sync_channel: SyncChannel,
@@ -60,7 +62,6 @@ pub async fn run(
     let axum_state = AxumState {
         msg_channel,
         node,
-        indexer,
         triple_storage,
         presignature_storage,
         sync_channel,
@@ -94,12 +95,33 @@ pub async fn run(
         router = router.route("/bench/metrics", get(bench_metrics));
     }
 
-    let app = router.layer(Extension(Arc::new(axum_state)));
+    let app = router
+        .layer(middleware::from_fn(request_id_middleware))
+        .layer(Extension(Arc::new(axum_state)));
 
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     tracing::info!(?addr, "starting http server");
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn request_id_middleware(mut req: Request<Body>, next: Next) -> Response {
+    let header_name = HeaderName::from_static("x-request-id");
+    let request_id = req
+        .headers()
+        .get(&header_name)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| hex::encode(rand::random::<u128>().to_be_bytes()));
+
+    req.extensions_mut().insert(request_id.clone());
+
+    let span = tracing::info_span!("request", %request_id);
+    let mut response = next.run(req).instrument(span).await;
+    if let Ok(value) = HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert(header_name, value);
+    }
+    response
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
@@ -117,7 +139,7 @@ async fn msg(
         });
     }
     WEB_ENDPOINT_LATENCY
-        .with_label_values(&["msg", state.my_account_id.as_str()])
+        .with_label_values(&["msg"])
         .observe(start.elapsed().as_millis() as f64);
 }
 
@@ -154,12 +176,10 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
     let start = Instant::now();
     tracing::debug!("fetching state");
 
-    // TODO: remove once we have integration tests built using other chains
-    let latest_block_height = if let Some(indexer) = &web.indexer {
-        indexer.last_processed_block().await.unwrap_or(0)
-    } else {
-        0
-    };
+    // TODO: decide whether to keep latest_block_height in /state or not. We could use it for showing
+    // whatever block height our governance chain is on but with multiple chains, it doesn't have much
+    // of a use.
+    let latest_block_height = 0;
 
     let result = match web.node.status() {
         NodeStatus::Running {
@@ -209,14 +229,24 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
         }
     };
     WEB_ENDPOINT_LATENCY
-        .with_label_values(&["state", web.my_account_id.as_str()])
+        .with_label_values(&["state"])
         .observe(start.elapsed().as_millis() as f64);
     result
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusResponse {
+    pub status: NodeStatus,
+    #[serde(default)]
+    pub protocol_version: u64,
+}
+
 #[tracing::instrument(level = "debug", skip_all)]
-async fn status(Extension(web): Extension<Arc<AxumState>>) -> Json<NodeStatus> {
-    Json(web.node.status())
+async fn status(Extension(web): Extension<Arc<AxumState>>) -> Json<StatusResponse> {
+    Json(StatusResponse {
+        status: web.node.status(),
+        protocol_version: crate::PROTOCOL_VERSION,
+    })
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
@@ -249,16 +279,14 @@ async fn metrics() -> (StatusCode, String) {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchMetrics {
     pub sig_gen: Vec<f64>,
-    pub sig_respond: Vec<f64>,
     pub presig_gen: Vec<f64>,
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
 async fn bench_metrics() -> Json<BenchMetrics> {
     Json(BenchMetrics {
-        sig_gen: crate::metrics::SIGN_GENERATION_LATENCY.exact(),
-        sig_respond: crate::metrics::SIGN_RESPOND_LATENCY.exact(),
-        presig_gen: crate::metrics::PRESIGNATURE_LATENCY.exact(),
+        sig_gen: crate::metrics::protocols::SIGN_GENERATION_LATENCY.exact(),
+        presig_gen: crate::metrics::protocols::PRESIGNATURE_LATENCY.exact(),
     })
 }
 
@@ -266,13 +294,13 @@ async fn bench_metrics() -> Json<BenchMetrics> {
 async fn sync(
     Extension(state): Extension<Arc<AxumState>>,
     WithRejection(Cbor(update), _): WithRejection<Cbor<SyncUpdate>, Error>,
-) -> Result<Json<()>> {
+) -> Result<Cbor<SyncUpdate>> {
     let start = Instant::now();
-    state.sync_channel.request_update(update).await;
+    let response = state.sync_channel.request_update(update).await?;
     WEB_ENDPOINT_LATENCY
-        .with_label_values(&["sync", state.my_account_id.as_str()])
+        .with_label_values(&["sync"])
         .observe(start.elapsed().as_millis() as f64);
-    Ok(Json(()))
+    Ok(Cbor(response))
 }
 
 #[derive(Debug, Deserialize)]
@@ -362,7 +390,7 @@ async fn checkpoint(
     }
 
     WEB_ENDPOINT_LATENCY
-        .with_label_values(&["checkpoint", state.my_account_id.as_str()])
+        .with_label_values(&["checkpoint"])
         .observe(start.elapsed().as_millis() as f64);
 
     Ok(Cbor(resp))
@@ -371,6 +399,6 @@ async fn checkpoint(
 #[cfg(not(feature = "debug-page"))]
 mod debug {
     pub async fn page() -> axum::response::Html<String> {
-        format!("<html><body>Debug page disabled. Compile the node with --features=debug-page to show useful information here.</bod></html>").into()
+        "<html><body>Debug page disabled. Compile the node with --features=debug-page to show useful information here.</bod></html>".to_string().into()
     }
 }

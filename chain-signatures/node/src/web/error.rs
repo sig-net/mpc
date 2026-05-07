@@ -2,6 +2,7 @@ use axum::extract::rejection::JsonRejection;
 use http::StatusCode;
 
 use crate::protocol::message::MessageError;
+use crate::protocol::sync::SyncError;
 use crate::protocol::CryptographicError;
 use crate::web::cbor::CborRejection;
 
@@ -21,6 +22,8 @@ pub enum Error {
     Message(#[from] MessageError),
     #[error(transparent)]
     Rpc(#[from] near_fetch::Error),
+    #[error(transparent)]
+    Sync(#[from] SyncError),
     #[error("invalid parameters: {0}")]
     InvalidParameters(String),
 }
@@ -34,6 +37,7 @@ impl Error {
             Error::Message(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Error::Rpc(_) => StatusCode::BAD_REQUEST,
             Error::InvalidParameters(_) => StatusCode::BAD_REQUEST,
+            Error::Sync(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -41,11 +45,11 @@ impl Error {
 impl axum::response::IntoResponse for Error {
     fn into_response(self) -> axum::response::Response {
         let status = self.status();
-        let message = match self {
-            Error::JsonExtractorRejection(json_rejection) => json_rejection.body_text(),
-            err => format!("{err:?}"),
-        };
 
-        (status, axum::Json(message)).into_response()
+        // Log the error server-side for debugging
+        tracing::error!(?self, "request error");
+
+        // Return generic error with request ID to the caller
+        (status, "An error occurred").into_response()
     }
 }

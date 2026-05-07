@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use crate::containers::{self, DockerClient};
 use crate::utils::dev_gen_indexed;
-use crate::{execute, NodeConfig, Nodes};
+use crate::{execute, NodeBinarySource, NodeConfig, Nodes};
 
 use crate::cluster::Cluster;
 
@@ -37,13 +37,13 @@ pub enum PregeneratedKeys {
 }
 
 impl PregeneratedKeys {
-    /// Load pregenerated keys for the given number of nodes from fixture data
-    pub fn load(num_nodes: usize) -> Option<Self> {
-        let data = match num_nodes {
-            3 => include_str!("../mpc_fixture/3_nodes.json"),
-            5 => include_str!("../mpc_fixture/5_nodes.json"),
-            other => {
-                tracing::warn!("No pregenerated keys for {other} nodes available");
+    /// Load pregenerated keys for the given number of nodes and threshold from fixture data.
+    pub fn load(num_nodes: usize, threshold: usize) -> Option<Self> {
+        let data = match (num_nodes, threshold) {
+            (3, 2) => include_str!("../mpc_fixture/3_nodes_2_threshold.json"),
+            (5, 4) => include_str!("../mpc_fixture/5_nodes_4_threshold.json"),
+            _ => {
+                tracing::warn!("No pregenerated keys for {num_nodes} nodes, threshold {threshold}");
                 return None;
             }
         };
@@ -127,6 +127,8 @@ pub struct ClusterSpawner {
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
+    /// Tracks which binary source to use for each node index
+    pub node_binary_sources: Vec<NodeBinarySource>,
 }
 
 impl Default for ClusterSpawner {
@@ -135,9 +137,10 @@ impl Default for ClusterSpawner {
         tmp_dir.push("tmp");
 
         let nodes = 3;
+        let threshold = 2;
         let cfg = NodeConfig {
             nodes,
-            threshold: 2,
+            threshold,
             ..Default::default()
         };
         Self {
@@ -157,8 +160,9 @@ impl Default for ClusterSpawner {
             solana: None,
             program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
-            pregenerated_keys: PregeneratedKeys::load(nodes).unwrap(),
+            pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
             use_ethereum: false,
+            node_binary_sources: vec![NodeBinarySource::CurrentCode; nodes],
         }
     }
 }
@@ -171,6 +175,27 @@ impl ClusterSpawner {
 
     pub fn nodes(mut self, nodes: usize) -> Self {
         self.cfg.nodes = nodes;
+        // Resize the binary sources vector to match
+        self.node_binary_sources
+            .resize(nodes, NodeBinarySource::CurrentCode);
+        self
+    }
+
+    /// Add mainnet nodes to the cluster using the tagged binary under target/compat/mainnet.
+    pub fn mainnet_nodes(mut self, count: usize) -> Self {
+        let current_len = self.node_binary_sources.len();
+        self.node_binary_sources
+            .extend((0..count).map(|_| NodeBinarySource::Mainnet));
+        self.cfg.nodes = current_len + count;
+        self
+    }
+
+    /// Add testnet nodes to the cluster using the tagged binary under target/compat/testnet.
+    pub fn testnet_nodes(mut self, count: usize) -> Self {
+        let current_len = self.node_binary_sources.len();
+        self.node_binary_sources
+            .extend((0..count).map(|_| NodeBinarySource::Testnet));
+        self.cfg.nodes = current_len + count;
         self
     }
 
@@ -219,8 +244,8 @@ impl ClusterSpawner {
 
     fn load_pregenerated_keys(mut self) -> Self {
         if self.pregenerated_keys.is_enabled() && self.pregenerated_keys.len() != self.cfg.nodes {
-            self.pregenerated_keys =
-                PregeneratedKeys::load(self.cfg.nodes).unwrap_or(PregeneratedKeys::Disabled);
+            self.pregenerated_keys = PregeneratedKeys::load(self.cfg.nodes, self.cfg.threshold)
+                .unwrap_or(PregeneratedKeys::Disabled);
         }
         self
     }
@@ -235,7 +260,6 @@ impl ClusterSpawner {
                 rpc_http_url: String::new(),    // Will be filled in later
                 rpc_ws_url: String::new(),      // Will be filled in later
                 program_address: String::new(), // Will be filled in later
-                total_timeout: 60,
             });
         }
         self

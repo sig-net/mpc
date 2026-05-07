@@ -28,6 +28,24 @@ impl<T> Positor<T> {
     }
 }
 
+impl<S> Positor<PositCounter<S>> {
+    #[cfg(feature = "debug-page")]
+    pub fn render_debug(&self, threshold: usize) -> maud::Markup {
+        match self {
+            Positor::Proposer(_id, counter) => {
+                let display = format!(
+                    "Proposer accepted={}/{}, rejected={}",
+                    counter.accepts.len(),
+                    threshold,
+                    counter.rejects.len()
+                );
+                maud::html!((display))
+            }
+            Positor::Deliberator(_id) => maud::html!("Deliberator"),
+        }
+    }
+}
+
 /// All actions that can be taken when a new posit is introduced for a protocol.
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub enum PositAction {
@@ -283,6 +301,27 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
         }
     }
 
+    #[cfg(feature = "debug-page")]
+    pub fn render_debug(&self, threshold: usize) -> maud::Markup {
+        let posits = self
+            .posits
+            .iter()
+            .map(|(id, (positor, _))| (format!("{id:?}"), positor.render_debug(threshold)));
+
+        maud::html! {
+            .posits {
+                @for (id, posit) in posits {
+                    .id {
+                        (id)
+                    }
+                    .posit {
+                        (posit)
+                    }
+                }
+            }
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.posits.len()
     }
@@ -300,14 +339,28 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
 
     /// Expire and start protocols on enough accepted votes. Abort protocols action will be returned
     /// if the posit has expired.
+    ///
+    /// Note on `deliberator_extra_time`:
+    ///   Deliberators need to wait longer than the proposer, otherwise
+    ///   they have a high chance of aborting just when the proposer
+    ///   decides to move forward.
+    ///   Once Ts and Ps are generated with a single task, the same way
+    ///   signatures are handled, this should be replaced with a round-based
+    ///   message buffer.
     pub fn expire_and_start(
         &mut self,
         threshold: usize,
         timeout: Duration,
+        deliberator_extra_time: Duration,
     ) -> Vec<(Id, PositInternalAction<S>)> {
         let mut expired = Vec::new();
-        for (id, (_, timestamp)) in &self.posits {
-            if timestamp.elapsed() > timeout {
+        for (id, (positor, timestamp)) in &self.posits {
+            let final_timeout = if positor.is_proposer() {
+                timeout
+            } else {
+                timeout + deliberator_extra_time
+            };
+            if timestamp.elapsed() > final_timeout {
                 expired.push(*id);
             }
         }
@@ -351,6 +404,54 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
             );
         }
         actions
+    }
+}
+
+/// A single posit counter that tracks participants accepting/rejecting a proposal.
+/// This is used by individual signature tasks instead of the global Posits mapping.
+pub struct SinglePositCounter {
+    participants: HashSet<Participant>,
+    rejects: HashSet<Participant>,
+    pub accepts: HashSet<Participant>,
+}
+
+impl SinglePositCounter {
+    pub fn new(me: Participant, participants: &[Participant]) -> Self {
+        let mut accepts = HashSet::new();
+        accepts.insert(me);
+        Self {
+            participants: participants.iter().copied().collect(),
+            rejects: HashSet::new(),
+            accepts,
+        }
+    }
+
+    pub fn enough_accepts(&self, threshold: usize) -> bool {
+        self.accepts.len() >= threshold
+    }
+
+    pub fn enough_rejects(&self, threshold: usize) -> bool {
+        self.rejects.len() > self.participants.len() - threshold
+    }
+
+    pub fn meets_totality(&self) -> bool {
+        self.accepts.len() + self.rejects.len() == self.participants.len()
+    }
+
+    pub fn process_action(&mut self, from: Participant, action: &PositAction) -> bool {
+        if !self.participants.contains(&from) {
+            return false;
+        }
+        match action {
+            PositAction::Accept => {
+                self.accepts.insert(from);
+            }
+            PositAction::Reject => {
+                self.rejects.insert(from);
+            }
+            _ => return false,
+        }
+        true
     }
 }
 
@@ -488,11 +589,13 @@ mod tests {
         // have proposer accept, and everyone else not reply at all.
         let id202 = 202;
         posits0.propose(id202, (), &participants);
-        // expire the posit after 1 second. Only the posit for id101 should return to start the protocol.
-        std::thread::sleep(Duration::from_millis(1100));
+        // expire the posit. Only the posit for id101 should return to start the protocol.
+        let base_delay = Duration::from_secs(1);
+        let deliberator_extra_delay = Duration::from_millis(200);
+        std::thread::sleep(base_delay + deliberator_extra_delay + Duration::from_millis(100));
         // add a posit that will not expire yet
         posits0.propose(303, (), &participants);
-        let mut actions = posits0.expire_and_start(threshold, Duration::from_secs(1));
+        let mut actions = posits0.expire_and_start(threshold, base_delay, deliberator_extra_delay);
         actions.sort_by_key(|(id, _)| *id);
         assert_eq!(posits0.len(), 1);
         assert_eq!(actions.len(), 2);
@@ -514,8 +617,9 @@ mod tests {
             threshold,
             &PositAction::Propose,
         );
-        std::thread::sleep(Duration::from_millis(1100));
-        let actions = posits1.expire_and_start(threshold, Duration::from_secs(1));
+
+        std::thread::sleep(base_delay + deliberator_extra_delay + Duration::from_millis(100));
+        let actions = posits1.expire_and_start(threshold, base_delay, deliberator_extra_delay);
         assert_eq!(actions.len(), 0);
         assert_eq!(posits1.len(), 0);
     }

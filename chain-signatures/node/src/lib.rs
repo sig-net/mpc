@@ -1,10 +1,13 @@
+pub const PROTOCOL_VERSION: u64 = 1;
+
 pub mod backlog;
-pub mod checkpoint_consensus;
 pub mod cli;
 pub mod config;
 pub mod gcp;
 pub mod indexer;
+
 pub mod indexer_eth;
+pub mod indexer_hydration;
 pub mod indexer_sol;
 pub mod kdf;
 pub mod logs;
@@ -16,6 +19,7 @@ pub mod respond_bidirectional;
 pub mod rpc;
 pub mod sign_bidirectional;
 pub mod storage;
+pub mod stream;
 pub mod types;
 pub mod util;
 pub mod web;
