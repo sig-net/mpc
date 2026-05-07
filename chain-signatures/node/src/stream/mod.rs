@@ -292,6 +292,39 @@ pub async fn run_stream<S: ChainStream>(
     indexer_task.abort();
 }
 
+/// Type used to denote a disabled stream (i.e. Solana, Hydration) that does
+/// not yet support the flow for general catchup & livestream.
+pub struct DisabledChainIndexer {
+    events_tx: Option<mpsc::Sender<ChainEvent>>,
+}
+
+impl DisabledChainIndexer {
+    pub fn silent() -> Self {
+        Self { events_tx: None }
+    }
+}
+
+#[async_trait]
+impl ChainIndexer for DisabledChainIndexer {
+    type Block = ();
+    type Iter = std::iter::Empty<Self::Block>;
+
+    async fn next(&mut self) -> Option<Self::Block> {
+        None
+    }
+
+    async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
+        std::iter::empty()
+    }
+
+    async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
+        if let Some(events_tx) = &self.events_tx {
+            events_tx.send(ChainEvent::CatchupCompleted).await?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,39 +350,6 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
-
-    /// Type used to denote a disabled stream (i.e. Solana, Hydration) that does
-    /// not yet support the flow for general catchup & livestream.
-    pub struct DisabledChainIndexer {
-        events_tx: Option<mpsc::Sender<ChainEvent>>,
-    }
-
-    impl DisabledChainIndexer {
-        pub fn silent() -> Self {
-            Self { events_tx: None }
-        }
-    }
-
-    #[async_trait]
-    impl ChainIndexer for DisabledChainIndexer {
-        type Block = ();
-        type Iter = std::iter::Empty<Self::Block>;
-
-        async fn next(&mut self) -> Option<Self::Block> {
-            None
-        }
-
-        async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-            std::iter::empty()
-        }
-
-        async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
-            if let Some(events_tx) = &self.events_tx {
-                events_tx.send(ChainEvent::CatchupCompleted).await?;
-            }
-            Ok(())
-        }
-    }
 
     struct VecEventStreamState {
         started: bool,
