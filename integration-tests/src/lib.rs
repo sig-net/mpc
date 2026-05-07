@@ -343,12 +343,6 @@ pub struct Context {
     pub ethereum: Option<EthereumContext>,
 }
 
-impl Drop for Context {
-    fn drop(&mut self) {
-        let _ = (&self.docker_client, &self.docker_network);
-    }
-}
-
 pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     let worker = spawner.take_worker().await;
     spawner.create_accounts(&worker).await;

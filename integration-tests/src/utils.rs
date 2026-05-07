@@ -201,6 +201,11 @@ pub async fn pick_unused_port() -> anyhow::Result<u16> {
 /// Request an unused contiguous port block from the OS, guaranteed unique within this process.
 pub async fn pick_preferred_or_unused_port_block(preferred: u16, len: usize) -> u16 {
     assert!(len > 0, "port block length must be greater than zero");
+    assert!(
+        len <= u16::MAX as usize + 1,
+        "port block length must be at most {}",
+        u16::MAX as usize + 1
+    );
 
     let max_start = u16::MAX as usize + 1 - len;
     let preferred_start = preferred.max(1) as usize;

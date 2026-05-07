@@ -146,27 +146,6 @@ pub struct Prestockpile {
     /// the number of triples to be lower than the stockpile limit.
     pub multiplier: u32,
 }
-
-struct NetworkCleanupGuard {
-    armed: bool,
-}
-
-impl NetworkCleanupGuard {
-    fn new() -> Self {
-        Self { armed: true }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for NetworkCleanupGuard {
-    fn drop(&mut self) {
-        let _ = self.armed;
-    }
-}
-
 pub struct ClusterSpawner {
     pub docker: DockerClient,
     pub release: bool,
@@ -468,8 +447,6 @@ impl IntoFuture for ClusterSpawner {
 
     fn into_future(mut self) -> Self::IntoFuture {
         Box::pin(async move {
-            let mut network_cleanup = NetworkCleanupGuard::new();
-
             self = self.load_pregenerated_keys().init_network().await?;
 
             // Check if Solana is enabled and spawn if needed
@@ -522,8 +499,6 @@ impl IntoFuture for ClusterSpawner {
                     cluster.prestockpile(prestockpile).await;
                 }
             }
-
-            network_cleanup.disarm();
 
             Ok(cluster)
         })
