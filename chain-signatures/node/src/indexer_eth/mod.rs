@@ -650,6 +650,16 @@ impl EthereumClient {
         }
     }
 
+    pub async fn trace_transaction_output(
+        &self,
+        tx_hash: alloy::primitives::B256,
+    ) -> anyhow::Result<alloy::primitives::Bytes> {
+        match self {
+            EthereumClient::Helios(client) => client.trace_transaction_output(tx_hash).await,
+            EthereumClient::DirectRpc(client) => client.trace_transaction_output(tx_hash).await,
+        }
+    }
+
     pub async fn call(
         &self,
         from: Address,
@@ -915,7 +925,7 @@ impl EthereumIndexer {
         );
 
         let result = if receipt_succeeded {
-            let completed_tx = CompletedTx::new(pending_tx.clone(), block_number);
+            let completed_tx = CompletedTx::new(pending_tx.clone());
             match completed_tx.extract_success_tx_output(&self.client).await {
                 Ok(serialized_output) => {
                     tracing::info!(

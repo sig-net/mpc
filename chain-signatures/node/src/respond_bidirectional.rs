@@ -18,7 +18,6 @@ pub(crate) const OUTPUT_DESERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat:
 
 pub struct CompletedTx {
     tx: BidirectionalTx,
-    block_number: u64,
 }
 
 #[derive(Hash, PartialEq, Eq, Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -36,8 +35,8 @@ pub struct RespondBidirectionalTx {
 pub type RespondBidirectionalSerializedOutput = Vec<u8>;
 
 impl CompletedTx {
-    pub fn new(tx: BidirectionalTx, block_number: u64) -> Self {
-        Self { tx, block_number }
+    pub fn new(tx: BidirectionalTx) -> Self {
+        Self { tx }
     }
 
     pub(crate) async fn create_failed_sign_request(
@@ -140,7 +139,6 @@ impl CompletedTx {
     ) -> anyhow::Result<RespondBidirectionalSerializedOutput> {
         let tx = &self.tx;
         let tx_id = self.tx.id.0;
-        let block_number = self.block_number;
         let Some(tx_info) = client.as_ref().get_transaction_by_hash(tx_id).await? else {
             anyhow::bail!("Failed to fetch transaction {tx_id:?}");
         };
@@ -152,14 +150,18 @@ impl CompletedTx {
 
         let transaction_output = match output_deserialization_format {
             SerDeserFormat::Abi if is_contract_call => {
-                let to_address = tx_info.inner.to().ok_or_else(|| {
+                tx_info.inner.to().ok_or_else(|| {
                     anyhow::anyhow!("Transaction {:?} missing destination", tx.id)
                 })?;
-                let call_block = block_number.saturating_sub(1);
-                let call_result = client
-                    .call(tx.from_address, to_address, data.clone(), call_block)
-                    .await?;
-                TransactionOutput::from_call_result(output_deserialization_schema, &call_result)?
+
+                tracing::info!(
+                    "Extracting transaction output using debug_traceTransaction for {:?}",
+                    tx.id
+                );
+
+                let trace_output = client.trace_transaction_output(tx_id).await?;
+
+                TransactionOutput::from_call_result(output_deserialization_schema, &trace_output)?
             }
             _ => TransactionOutput::non_function_call_output(),
         };

@@ -67,6 +67,30 @@ impl RpcEthereumClient {
         self.transaction_by_hash(tx_hash).await
     }
 
+    pub async fn trace_transaction_output(
+        &self,
+        tx_hash: alloy::primitives::B256,
+    ) -> anyhow::Result<Bytes> {
+        let trace: serde_json::Value = self
+            .rpc_call(
+                "debug_traceTransaction",
+                vec![
+                    json!(format!("{:#x}", tx_hash)),
+                    json!({
+                        "tracer": "callTracer",
+                        "tracerConfig": {
+                            "onlyTopCall": true
+                        },
+                        "timeout": "30s"
+                    }),
+                ],
+            )
+            .await?;
+
+        let call_frame = debug_trace_call_frame(&trace)?;
+        trace_output_to_bytes(tx_hash, call_frame)
+    }
+
     pub async fn call(
         &self,
         from: Address,
@@ -162,6 +186,86 @@ impl RpcEthereumClient {
         )
         .await
     }
+}
+
+fn debug_trace_call_frame(trace: &serde_json::Value) -> anyhow::Result<&serde_json::Value> {
+    if trace.get("output").is_some()
+        || trace.get("returnValue").is_some()
+        || trace.get("error").is_some()
+        || trace.get("failed").is_some()
+    {
+        return Ok(trace);
+    }
+
+    let Some(items) = trace.as_array() else {
+        anyhow::bail!("Unexpected debug_traceTransaction response: {:?}", trace);
+    };
+
+    let item = items
+        .iter()
+        .find(|item| {
+            item.get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(|name| name == "transaction trace")
+                .unwrap_or(false)
+        })
+        .or_else(|| items.first())
+        .ok_or_else(|| anyhow::anyhow!("debug_traceTransaction returned an empty trace array"))?;
+
+    item.get("value").ok_or_else(|| {
+        anyhow::anyhow!(
+            "debug_traceTransaction trace item is missing `value`: {:?}",
+            item
+        )
+    })
+}
+
+fn trace_output_to_bytes(
+    tx_hash: alloy::primitives::B256,
+    frame: &serde_json::Value,
+) -> anyhow::Result<Bytes> {
+    if frame
+        .get("failed")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        anyhow::bail!(
+            "debug_traceTransaction reports transaction {:#x} failed: {:?}",
+            tx_hash,
+            frame
+        );
+    }
+
+    if let Some(error) = frame
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .filter(|error| !error.is_empty())
+    {
+        anyhow::bail!(
+            "debug_traceTransaction reports transaction {:#x} errored: {}",
+            tx_hash,
+            error
+        );
+    }
+
+    let output = frame
+        .get("output")
+        .or_else(|| frame.get("returnValue"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "debug_traceTransaction response for {:#x} is missing output/returnValue: {:?}",
+                tx_hash,
+                frame
+            )
+        })?;
+
+    let stripped = output.strip_prefix("0x").unwrap_or(output);
+    if stripped.is_empty() {
+        return Ok(Bytes::default());
+    }
+
+    Ok(Bytes::from(hex::decode(stripped)?))
 }
 
 fn format_address(address: Address) -> String {

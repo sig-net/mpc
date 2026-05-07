@@ -568,7 +568,7 @@ pub async fn process_execution_confirmed(
             _ => None,
         });
 
-    let completed_tx = CompletedTx::new(pending_tx.clone(), block_height);
+    let completed_tx = CompletedTx::new(pending_tx.clone());
 
     let sign_request = match result {
         ExecutionOutcome::Success { output } => completed_tx
