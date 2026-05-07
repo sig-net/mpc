@@ -39,7 +39,7 @@ use solana_transaction_status::{
     EncodedConfirmedBlock, EncodedConfirmedTransactionWithStatusMeta, EncodedTransaction,
     EncodedTransactionWithStatusMeta, UiTransactionEncoding,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 const CPI_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: Sign",
@@ -401,7 +401,7 @@ impl ChainIndexer for SolanaIndexer {
         let rpc_ws_url = self.rpc_ws_url.clone();
 
         // Oneshot to receive the first observed slot from the live subscription.
-        let (anchor_tx, anchor_rx) = tokio::sync::oneshot::channel::<u64>();
+        let (anchor_tx, anchor_rx) = oneshot::channel::<u64>();
 
         tokio::spawn(subscribe_and_buffer_live_events(
             program_id,
@@ -459,7 +459,7 @@ impl ChainIndexer for SolanaIndexer {
         let mut mid_slot = None;
         let mut slots = BTreeSet::new();
         for sig in signatures {
-            if sig.slot < start_slot || sig.slot >= end_slot {
+            if sig.slot < start_slot || sig.slot > end_slot {
                 continue;
             }
             mid_slot = Some(mid_slot.unwrap_or(sig.slot).min(sig.slot));
@@ -607,7 +607,7 @@ async fn subscribe_and_buffer_live_events(
     rpc_url: String,
     ws_url: String,
     live_tx: mpsc::Sender<ChainEvent>,
-    anchor_tx: tokio::sync::oneshot::Sender<u64>,
+    anchor_tx: oneshot::Sender<u64>,
 ) {
     // Get anchor slot immediately so livestream() can return without waiting for an event.
     let anchor = {
@@ -1029,9 +1029,9 @@ fn extract_tx_signature(tx: &EncodedTransaction) -> anyhow::Result<Signature> {
             Signature::from_str(signature)
                 .map_err(|err| anyhow::anyhow!(err).context("failed to parse block signature"))
         }
-        other => Err(anyhow::anyhow!(
-            "unsupported encoded transaction variant in block catchup: {other:?}"
-        )),
+        other => {
+            anyhow::bail!("unsupported encoded transaction variant in block catchup: {other:?}")
+        }
     }
 }
 
