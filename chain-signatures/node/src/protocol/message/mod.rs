@@ -2,9 +2,12 @@ mod filter;
 mod sub;
 mod types;
 
+pub use sub::Subscriber;
+
 use crate::protocol::message::sub::{
-    SubscribeId, SubscribeRequest, SubscribeRequestAction, SubscribeResponse, Subscriber,
+    SubscribeId, SubscribeRequest, SubscribeRequestAction, SubscribeResponse,
 };
+use crate::protocol::message::types::Round;
 pub use crate::protocol::message::types::{
     GeneratingMessage, Message, MessageError, MessageFilterId, PositMessage, PositProtocolId,
     PresignatureMessage, Protocols, ReadyMessage, ResharingMessage, SignatureMessage,
@@ -25,7 +28,6 @@ use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
 use mpc_keys::hpke::{self, Ciphered};
 use mpc_primitives::SignId;
-use near_account_id::AccountId;
 use near_crypto::Signature;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -66,7 +68,7 @@ pub struct MessageInbox {
     presignature: HashMap<PresignatureId, Subscriber<PresignatureMessage>>,
     presignature_init: Subscriber<(FullPresignatureId, Participant, PositAction)>,
     signature: HashMap<(SignId, PresignatureId), Subscriber<SignatureMessage>>,
-    signature_init: Subscriber<(SignId, PresignatureId, Participant, PositAction)>,
+    signature_init: Subscriber<(SignId, PresignatureId, Round, Participant, PositAction)>,
 }
 
 impl MessageInbox {
@@ -108,10 +110,16 @@ impl MessageInbox {
                         .send((id, message.from, message.action))
                         .await;
                 }
-                PositProtocolId::Signature(sign_id, presignature_id) => {
+                PositProtocolId::Signature(sign_id, presignature_id, round) => {
                     let _ = self
                         .signature_init
-                        .send((sign_id, presignature_id, message.from, message.action))
+                        .send((
+                            sign_id,
+                            presignature_id,
+                            round,
+                            message.from,
+                            message.action,
+                        ))
                         .await;
                 }
             },
@@ -283,7 +291,7 @@ impl MessageInbox {
                     if self.signature.remove(&(sign_id, presignature_id)).is_none() {
                         tracing::warn!(
                             ?sign_id,
-                            presignature_id,
+                            ?presignature_id,
                             "trying to unsub from an unknown signature subscription"
                         );
                     }
@@ -349,7 +357,11 @@ impl MessageInbox {
                     self.filter.try_update();
 
                     let messages = self.filter(messages);
+                    let messages_len = messages.len();
                     self.publish(messages).await;
+
+                    crate::metrics::messaging::NUM_RECEIVED_ENCRYPTED_TOTAL
+                        .inc_by(messages_len as f64);
                 }
             }
         }
@@ -385,13 +397,12 @@ impl MessageChannel {
 
     pub async fn spawn(
         client: NodeClient,
-        id: &AccountId,
         config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
     ) -> Self {
         let (inbox, outbox, channel) = Self::new();
         tokio::spawn(inbox.run(config.clone(), contract.clone()));
-        tokio::spawn(outbox.run(id.clone(), client, config, contract));
+        tokio::spawn(outbox.run(client, config, contract));
 
         channel
     }
@@ -566,7 +577,7 @@ impl MessageChannel {
         else {
             tracing::warn!(
                 ?sign_id,
-                presignature_id,
+                ?presignature_id,
                 "failed to subscribe for signature"
             );
             return mpsc::channel(1).1;
@@ -576,7 +587,7 @@ impl MessageChannel {
             _ => {
                 tracing::warn!(
                     ?sign_id,
-                    presignature_id,
+                    ?presignature_id,
                     "received unexpected subscribe response for signature"
                 );
                 mpsc::channel(1).1
@@ -596,7 +607,7 @@ impl MessageChannel {
         {
             tracing::warn!(
                 ?sign_id,
-                presignature_id,
+                ?presignature_id,
                 "unable to send unsubscribe request for signature"
             );
         };
@@ -604,7 +615,7 @@ impl MessageChannel {
 
     pub async fn subscribe_signature_posit(
         &self,
-    ) -> mpsc::Receiver<(SignId, PresignatureId, Participant, PositAction)> {
+    ) -> mpsc::Receiver<(SignId, PresignatureId, Round, Participant, PositAction)> {
         let Some(subscription) = self.subscribe(SubscribeId::Signatures).await else {
             tracing::warn!("failed to subscribe for signature posit");
             return mpsc::channel(1).1;
@@ -835,7 +846,6 @@ impl MessageOutbox {
     /// Send the encrypted messages to other participants.
     pub async fn send(
         &mut self,
-        account_id: &AccountId,
         client: &NodeClient,
         participants: &Participants,
         cfg: &ProtocolConfig,
@@ -844,35 +854,19 @@ impl MessageOutbox {
         let start = Instant::now();
         let timeout = Duration::from_millis(cfg.message_timeout);
 
-        let msg_send_delay_metric =
-            crate::metrics::MSG_CLIENT_SEND_DELAY.with_label_values(&[account_id.as_str()]);
-        let num_send_encrypted_failure_metric =
-            crate::metrics::NUM_SEND_ENCRYPTED_FAILURE.with_label_values(&[account_id.as_str()]);
-        let send_encrypted_latency_metric =
-            crate::metrics::SEND_ENCRYPTED_LATENCY.with_label_values(&[account_id.as_str()]);
-        let failed_send_encrypted_latency_metric =
-            crate::metrics::FAILED_SEND_ENCRYPTED_LATENCY.with_label_values(&[account_id.as_str()]);
-
         for ((_from, to), encrypted) in encrypted {
             for (encrypted_partition, timestamp, message_len) in encrypted {
                 // guaranteed to unwrap due to our previous loop check:
                 let info = participants.get(&to).unwrap();
                 let url = info.url.clone();
 
-                crate::metrics::NUM_SEND_ENCRYPTED_TOTAL
-                    .with_label_values(&[account_id.as_str()])
-                    .inc_by(message_len as f64);
-
-                let msg_send_delay_metric = msg_send_delay_metric.clone();
-                let num_send_encrypted_failure_metric = num_send_encrypted_failure_metric.clone();
-                let send_encrypted_latency_metric = send_encrypted_latency_metric.clone();
-                let failed_send_encrypted_latency_metric =
-                    failed_send_encrypted_latency_metric.clone();
+                crate::metrics::messaging::NUM_SEND_ENCRYPTED_TOTAL.inc_by(message_len as f64);
 
                 let client = client.clone();
                 tokio::spawn(async move {
                     let instant = Instant::now();
-                    msg_send_delay_metric.observe((instant - timestamp).as_millis() as f64);
+                    crate::metrics::messaging::MSG_CLIENT_SEND_DELAY
+                        .observe((instant - timestamp).as_millis() as f64);
                     let payload = &[&encrypted_partition];
                     let timeout = tokio::time::sleep(timeout);
                     tokio::pin!(timeout);
@@ -889,7 +883,7 @@ impl MessageOutbox {
                             }
                             result = client.msg(&url, payload) => {
                                 let Err(err) = result else {
-                                    send_encrypted_latency_metric.observe(start.elapsed().as_millis() as f64);
+                                    crate::metrics::messaging::SEND_ENCRYPTED_LATENCY.observe(start.elapsed().as_millis() as f64);
                                     break;
                                 };
 
@@ -897,8 +891,8 @@ impl MessageOutbox {
                                     ?to, ?url, elapsed = ?attempt_timestamp.elapsed(), ?err,
                                     "outbox: failed to send messages, retrying...",
                                 );
-                                num_send_encrypted_failure_metric.inc_by(message_len as f64);
-                                failed_send_encrypted_latency_metric
+                                crate::metrics::messaging::NUM_SEND_ENCRYPTED_FAILURE.inc_by(message_len as f64);
+                                crate::metrics::messaging::FAILED_SEND_ENCRYPTED_LATENCY
                                     .observe(attempt_timestamp.elapsed().as_millis() as f64);
                             }
                         }
@@ -912,7 +906,6 @@ impl MessageOutbox {
     /// Publish messages to other nodes
     async fn publish(
         &mut self,
-        id: &AccountId,
         client: &NodeClient,
         config: &watch::Receiver<Config>,
         contract: &ContractStateWatcher,
@@ -923,13 +916,12 @@ impl MessageOutbox {
         let config = config.borrow().clone();
         let compacted = self.compact();
         let encrypted = self.encrypt(&config.local.network.sign_sk, &participants, compacted);
-        self.send(id, client, &participants, &config.protocol, encrypted)
+        self.send(client, &participants, &config.protocol, encrypted)
             .await;
     }
 
     pub async fn run(
         mut self,
-        id: AccountId,
         client: NodeClient,
         config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
@@ -943,7 +935,7 @@ impl MessageOutbox {
                     entry.push((msg, timestamp));
                 }
                 _ = interval.tick() => {
-                    self.publish(&id, &client, &config, &contract).await;
+                    self.publish(&client, &config, &contract).await;
                 }
             }
         }

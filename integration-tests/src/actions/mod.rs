@@ -311,7 +311,7 @@ mod tests {
 
         let signature = cait_sith::FullSignature::<k256::Secp256k1> { big_r, s };
 
-        let multichain_sig = mpc_node::kdf::into_eth_sig(
+        let multichain_sig = mpc_node::kdf::into_signature(
             &user_pk,
             &signature.big_r,
             &signature.s,

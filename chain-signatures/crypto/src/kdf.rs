@@ -1,10 +1,11 @@
-use crate::types::{PublicKey, ScalarExt};
+use crate::{PublicKey, ScalarExt};
 use anyhow::Context;
 use k256::{
     ecdsa::{RecoveryId, Signature, VerifyingKey},
     elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint, CurveArithmetic},
     Scalar, Secp256k1, SecretKey,
 };
+use mpc_primitives::Chain;
 use near_account_id::AccountId;
 use sha3::{Digest, Keccak256, Sha3_256};
 
@@ -12,34 +13,6 @@ use sha3::{Digest, Keccak256, Sha3_256};
 // Sig.Network with key derivation protocol vX.Y.Z.
 const EPSILON_DERIVATION_PREFIX_V1: &str = "sig.network v1.0.0 epsilon derivation";
 const EPSILON_DERIVATION_PREFIX_V2: &str = "sig.network v2.0.0 epsilon derivation";
-
-#[derive(Debug, Clone, Copy)]
-pub enum Chain {
-    Near,
-    Ethereum,
-    Solana,
-    Bitcoin,
-}
-
-impl Chain {
-    pub fn deprecated_chain_id(&self) -> &str {
-        match self {
-            Chain::Near => "0x18d",
-            Chain::Ethereum => "0x1",
-            Chain::Solana => "0x800001f5",
-            Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
-        }
-    }
-
-    pub fn caip2_chain_id(&self) -> &str {
-        match self {
-            Chain::Near => "near:mainnet",
-            Chain::Ethereum => "eip155:1",
-            Chain::Solana => "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-            Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
-        }
-    }
-}
 
 /// Creates a derivation path string using the legacy format
 fn deprecated_derivation_path(chain: Chain, sender: &str, path: &str) -> String {
@@ -76,7 +49,7 @@ fn keccak(derivation_path: impl AsRef<[u8]>) -> Scalar {
 }
 
 pub fn derive_epsilon_near(key_version: u32, predecessor_id: &AccountId, path: &str) -> Scalar {
-    let derivation_path = derivation_path(key_version, Chain::Near, predecessor_id.as_str(), path);
+    let derivation_path = derivation_path(key_version, Chain::NEAR, predecessor_id.as_str(), path);
     sha3(derivation_path)
 }
 
@@ -87,6 +60,16 @@ pub fn derive_epsilon_eth(key_version: u32, sender: &str, path: &str) -> Scalar 
 
 pub fn derive_epsilon_sol(key_version: u32, sender: &str, path: &str) -> Scalar {
     let derivation_path = derivation_path(key_version, Chain::Solana, sender, path);
+    keccak(derivation_path.as_bytes())
+}
+
+pub fn derive_epsilon_hydration(key_version: u32, sender: &str, path: &str) -> Scalar {
+    let derivation_path = derivation_path(key_version, Chain::Hydration, sender, path);
+    keccak(derivation_path.as_bytes())
+}
+
+pub fn derive_epsilon_canton(key_version: u32, sender: &str, path: &str) -> Scalar {
+    let derivation_path = derivation_path(key_version, Chain::Canton, sender, path);
     keccak(derivation_path.as_bytes())
 }
 
@@ -186,12 +169,12 @@ mod tests {
         );
 
         assert_eq!(
-            derivation_path(0, Chain::Near, "sender", "path"),
+            derivation_path(0, Chain::NEAR, "sender", "path"),
             "sig.network v1.0.0 epsilon derivation,0x18d,sender,path"
         );
 
         assert_eq!(
-            derivation_path(1, Chain::Near, "sender", "path"),
+            derivation_path(1, Chain::NEAR, "sender", "path"),
             "sig.network v2.0.0 epsilon derivation:near:mainnet:sender:path"
         );
 
@@ -203,11 +186,20 @@ mod tests {
             derivation_path(1, Chain::Bitcoin, "sender", "path"),
             "sig.network v2.0.0 epsilon derivation:bip122:000000000019d6689c085ae165831e93:sender:path"
         );
+
+        assert_eq!(
+            derivation_path(0, Chain::Canton, "sender", "path"),
+            "sig.network v1.0.0 epsilon derivation,canton:global,sender,path"
+        );
+        assert_eq!(
+            derivation_path(1, Chain::Canton, "sender", "path"),
+            "sig.network v2.0.0 epsilon derivation:canton:global:sender:path"
+        );
     }
 
     #[test]
     fn test_derive_epsilon_stays_the_same() {
-        use crate::types::ScalarExt;
+        use crate::ScalarExt;
 
         // Expected scalar values for Ethereum epsilon derivation
         let expected_eth_v0 = Scalar::from_bytes([
@@ -322,6 +314,32 @@ mod tests {
         ];
 
         assert_eq!(derived_secret_key.to_bytes().as_slice(), &expected_bytes);
+    }
+
+    #[test]
+    fn test_derive_epsilon_canton_stays_the_same() {
+        let expected_canton_v0 = Scalar::from_bytes([
+            0xA4, 0xCF, 0xD1, 0x98, 0x07, 0xD1, 0x96, 0x8D, 0xAA, 0xDA, 0x88, 0xB5, 0xB8, 0x12,
+            0xAD, 0x61, 0xC6, 0x24, 0x08, 0xB4, 0x84, 0xB5, 0x51, 0xFC, 0x37, 0x30, 0x34, 0x51,
+            0x03, 0x14, 0x61, 0x4C,
+        ])
+        .unwrap();
+
+        let expected_canton_v1 = Scalar::from_bytes([
+            0x49, 0x05, 0x93, 0xA1, 0x00, 0xEA, 0xE1, 0x26, 0x98, 0x8F, 0x3B, 0xA4, 0xEC, 0x3A,
+            0xBD, 0x75, 0x4C, 0xD2, 0x4C, 0xD9, 0xA6, 0x6B, 0x14, 0x71, 0x27, 0x6A, 0x1B, 0xC3,
+            0xE3, 0x10, 0xCA, 0xBD,
+        ])
+        .unwrap();
+
+        assert_eq!(
+            derive_epsilon_canton(0, "sender", "path"),
+            expected_canton_v0
+        );
+        assert_eq!(
+            derive_epsilon_canton(1, "sender", "path"),
+            expected_canton_v1
+        );
     }
 
     // This logic is used to determine MPC PK (address) that is set as admin in Ethereum contract

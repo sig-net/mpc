@@ -8,7 +8,9 @@ use tokio::task::{AbortHandle, JoinSet};
 use std::collections::HashMap;
 use std::future::Future;
 use std::hash::Hash;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+pub mod retry;
 
 pub trait NearPublicKeyExt {
     fn into_affine_point(self) -> PublicKey;
@@ -83,15 +85,20 @@ pub fn is_elapsed_longer_than_timeout(timestamp_sec: u64, timeout: u64) -> bool 
     }
 }
 
-pub fn duration_between_unix(from_timestamp: u64, to_timestamp: u64) -> Duration {
-    Duration::from_secs(to_timestamp - from_timestamp)
-}
-
 pub fn current_unix_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_secs()
+}
+
+/// Calculate elapsed time from a unix timestamp to now
+pub fn unix_elapsed(unix_timestamp: u64) -> Duration {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    Duration::from_secs(now.saturating_sub(unix_timestamp))
 }
 
 pub const fn first_8_bytes(input: [u8; 32]) -> [u8; 8] {
@@ -124,13 +131,7 @@ impl<T, U> JoinMap<T, U> {
             tasks: JoinSet::new(),
         }
     }
-}
 
-impl<T, U> JoinMap<T, U>
-where
-    T: Copy + Hash + Eq,
-    U: Send + 'static,
-{
     pub fn len(&self) -> usize {
         self.mapping.len()
     }
@@ -138,7 +139,13 @@ where
     pub fn is_empty(&self) -> bool {
         self.mapping.is_empty()
     }
+}
 
+impl<T, U> JoinMap<T, U>
+where
+    T: Copy + Hash + Eq,
+    U: Send + 'static,
+{
     pub fn contains_key(&self, key: &T) -> bool {
         self.mapping.contains_key(key)
     }
@@ -148,6 +155,24 @@ where
         let task_id = handle.id();
         self.mapping.insert(key, handle);
         self.mapping_id.insert(task_id, key);
+    }
+
+    pub fn abort(&mut self, key: T) -> bool {
+        if let Some(handle) = self.mapping.remove(&key) {
+            handle.abort();
+
+            if let Some(task_id) = self
+                .mapping_id
+                .iter()
+                .find_map(|(id, mapped_key)| (*mapped_key == key).then_some(*id))
+            {
+                self.mapping_id.remove(&task_id);
+            }
+
+            true
+        } else {
+            false
+        }
     }
 
     pub async fn join_next(&mut self) -> Option<Result<(T, U), T>> {
@@ -171,5 +196,37 @@ impl<T, U> Drop for JoinMap<T, U> {
         for handle in self.mapping.values() {
             handle.abort();
         }
+    }
+}
+
+/// Tracks the remaining time budget for a signature attempt.
+/// When the budget is exhausted, the attempt fails and we reorganize.
+pub struct TimeoutBudget {
+    started: Instant,
+    timeout: Duration,
+}
+
+impl TimeoutBudget {
+    pub fn new(timeout: Duration) -> Self {
+        Self {
+            started: Instant::now(),
+            timeout,
+        }
+    }
+
+    /// Returns the remaining time in the budget, or Duration::ZERO if exhausted.
+    pub fn remaining(&self) -> Duration {
+        self.timeout.saturating_sub(self.started.elapsed())
+    }
+
+    /// Returns true if the budget is exhausted.
+    pub fn is_exhausted(&self) -> bool {
+        self.started.elapsed() >= self.timeout
+    }
+
+    /// Resets the budget with a new timeout (used when starting a new attempt).
+    pub fn reset(&mut self, timeout: Duration) {
+        self.started = Instant::now();
+        self.timeout = timeout;
     }
 }

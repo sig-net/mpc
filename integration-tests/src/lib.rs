@@ -1,4 +1,5 @@
 pub mod actions;
+pub mod canton;
 pub mod cluster;
 pub mod containers;
 pub mod eth;
@@ -8,6 +9,7 @@ pub mod mpc_fixture;
 pub mod utils;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use self::local::NodeEnvConfig;
@@ -15,20 +17,42 @@ use crate::containers::DockerClient;
 
 use anyhow::Context as _;
 use cluster::spawner::ClusterSpawner;
-use deadpool_redis::Pool;
 use ethers::types::{Address, U256};
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
 use mpc_node::indexer_eth::EthConfig;
+use mpc_node::indexer_hydration::HydrationConfig;
 use mpc_node::indexer_sol::SolConfig;
-use mpc_node::storage::triple_storage::TripleStorage;
 use mpc_node::{logs, mesh, node_client, storage};
 use mpc_primitives::{Chain, Checkpoint};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{KeyType, SecretKey};
 use near_workspaces::{Account, AccountId, Contract, Worker};
 use serde_json::json;
+
+/// Specifies which binary to use when spawning a node
+#[derive(Clone, Debug)]
+pub enum NodeBinarySource {
+    /// Use the current compiled code from target/release
+    CurrentCode,
+    /// Use the tagged mainnet binary compiled under target/compat/mainnet/<version>
+    Mainnet,
+    /// Use the tagged testnet binary compiled under target/compat/testnet/<version>
+    Testnet,
+}
+
+impl NodeBinarySource {
+    /// Get the binary path for this source
+    pub fn binary_path(&self) -> anyhow::Result<Option<PathBuf>> {
+        match self {
+            // Will use default executable lookup
+            NodeBinarySource::CurrentCode => Ok(None),
+            NodeBinarySource::Mainnet => Ok(Some(execute::compatibility_binary("mainnet")?)),
+            NodeBinarySource::Testnet => Ok(Some(execute::compatibility_binary("testnet")?)),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct NodeConfig {
@@ -37,6 +61,8 @@ pub struct NodeConfig {
     pub protocol: ProtocolConfig,
     pub eth: Option<EthConfig>,
     pub sol: Option<SolConfig>,
+    pub hydration: Option<HydrationConfig>,
+    pub canton: Option<mpc_node::indexer_canton::CantonConfig>,
 }
 
 impl Default for NodeConfig {
@@ -61,6 +87,8 @@ impl Default for NodeConfig {
             },
             eth: None,
             sol: None,
+            hydration: None,
+            canton: None,
         }
     }
 }
@@ -211,10 +239,6 @@ impl Nodes {
         Ok(())
     }
 
-    pub async fn triple_storage(&self, redis_pool: &Pool, account_id: &AccountId) -> TripleStorage {
-        storage::triple_storage::init(redis_pool, account_id)
-    }
-
     pub async fn gcp_services(&self) -> anyhow::Result<Vec<GcpService>> {
         let mut gcp_services = Vec::new();
         match self {
@@ -351,8 +375,8 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             network: "sepolia".to_string(),
             helios_data_path: format!("/tmp/helios-{}", contract_address_hex),
             refresh_finalized_interval: 1_000,
-            total_timeout: 600,
-            optimistic_requests: false,
+            optimistic_requests: true,
+            light_client: false,
         });
 
         ethereum = Some(EthereumContext {
@@ -379,6 +403,7 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
     let message_options = node_client::Options {
         timeout: 1000,
         state_timeout: 1000,
+        sync_timeout: 60000,
     };
 
     // If using pregenerated keys, inject them into storage before nodes start
@@ -559,7 +584,11 @@ pub async fn host(spawner: &mut ClusterSpawner) -> anyhow::Result<Nodes> {
     let node_futures = spawner
         .accounts
         .iter()
-        .map(|account| local::Node::run(&ctx, cfg, account));
+        .zip(std::mem::take(&mut spawner.node_binary_sources))
+        .map(|(account, source)| {
+            let binary_path = source.binary_path().unwrap();
+            local::Node::run_with_binary(&ctx, cfg, account, binary_path)
+        });
     let nodes = futures::future::join_all(node_futures)
         .await
         .into_iter()

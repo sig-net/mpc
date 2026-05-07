@@ -2,9 +2,15 @@
 .direnv
 .DS_Store
 .idea
+.vscode
+
+.github/*
+!.github/ISSUE_TEMPLATE/
+!.github/workflows/
 
 tmp
 *.log
+*.log.*.gz
 
 # Artifacts that may be left over
 **/*-secret-manager-*

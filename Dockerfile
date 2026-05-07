@@ -10,11 +10,8 @@ RUN npx hardhat compile
 FROM rust:latest AS node-builder
 RUN rustc --version --verbose
 WORKDIR /usr/src/app
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive \
-    apt-get install --no-install-recommends --assume-yes \
-    protobuf-compiler libprotobuf-dev
-
+ARG GIT_COMMIT_HASH
+ENV GIT_COMMIT_HASH=$GIT_COMMIT_HASH
 COPY chain-signatures/ ./chain-signatures
 COPY integration-tests/ ./integration-tests
 COPY Cargo.toml .

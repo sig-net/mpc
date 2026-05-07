@@ -6,7 +6,7 @@ use k256::elliptic_curve::point::AffineCoordinates;
 use mpc_contract::config::Config;
 use mpc_contract::update::ProposeUpdateArgs;
 use mpc_crypto::{self, derive_epsilon_near, derive_key, x_coordinate, ScalarExt};
-use mpc_node::kdf::into_eth_sig;
+use mpc_node::kdf::into_signature;
 use mpc_node::protocol::cryptography::set_resharing_running_timeout;
 use mpc_node::protocol::state::ResharingStatus;
 use mpc_node::util::NearPublicKeyExt as _;
@@ -15,11 +15,18 @@ use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use std::time::{Duration, Instant};
 use test_log::test;
 
+pub mod canton;
+pub mod canton_stream;
 pub mod chains;
+pub mod compat;
 pub mod ethereum;
+pub mod ethereum_stream;
+pub mod helpers;
 pub mod mpc;
 pub mod nightly;
 pub mod solana;
+pub mod solana_stream;
+pub mod state_sync;
 pub mod store;
 pub mod sync;
 
@@ -64,15 +71,6 @@ async fn test_signature_basic() -> anyhow::Result<()> {
     let nodes = cluster::spawn().await?;
     nodes.wait().signable().await?;
     nodes.sign().await?;
-
-    Ok(())
-}
-
-#[test(tokio::test)]
-async fn test_signature_rogue() -> anyhow::Result<()> {
-    let nodes = cluster::spawn().await?;
-    nodes.wait().signable().await?;
-    nodes.sign().rogue_responder().await?;
 
     Ok(())
 }
@@ -127,7 +125,7 @@ async fn test_key_derivation() -> anyhow::Result<()> {
         let derivation_epsilon =
             derive_epsilon_near(LATEST_MPC_KEY_VERSION, outcome.account.id(), hd_path);
         let user_pk = derive_key(mpc_pk, derivation_epsilon);
-        let multichain_sig = into_eth_sig(
+        let multichain_sig = into_signature(
             &user_pk,
             &outcome.signature.big_r,
             &outcome.signature.s,

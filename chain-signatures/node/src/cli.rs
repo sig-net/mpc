@@ -1,27 +1,34 @@
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
+use crate::indexer_eth::EthereumStream;
+use crate::indexer_sol::SolanaStream;
 use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
+use crate::protocol::presignature::Presignature;
+use crate::protocol::signature::SignatureSpawnerTask;
 use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
-use crate::protocol::{spawn_system_metrics, MpcSignProtocol, SignQueue};
+use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
-use crate::storage::app_data_storage;
-use crate::{indexer, indexer_eth, indexer_sol, logs, mesh, storage, web};
+use crate::storage::checkpoint_storage::CheckpointStorage;
+use crate::storage::triple_storage::TriplePair;
+use crate::stream::run_stream;
+use crate::{
+    indexer, indexer_canton, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, storage, web,
+};
+
 use clap::Parser;
 use deadpool_redis::Runtime;
 use k256::sha2::Sha256;
 use local_ip_address::local_ip;
+use mpc_keys::hpke;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
-use std::sync::Arc;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{mpsc, watch};
 use url::Url;
-
-use mpc_keys::hpke;
 
 const DEFAULT_WEB_PORT: u16 = 3000;
 
@@ -61,6 +68,12 @@ pub enum Cli {
         /// Solana Indexer options
         #[clap(flatten)]
         sol: indexer_sol::SolArgs,
+        /// Hydration Indexer options
+        #[clap(flatten)]
+        hydration: indexer_hydration::HydrationArgs,
+        /// Canton Indexer options
+        #[clap(flatten)]
+        canton: indexer_canton::CantonArgs,
         /// NEAR requests options
         #[clap(flatten)]
         indexer_options: indexer::Options,
@@ -103,6 +116,8 @@ impl Cli {
                 sign_sk,
                 eth,
                 sol,
+                hydration,
+                canton,
                 indexer_options,
                 my_address,
                 storage_options,
@@ -149,6 +164,8 @@ impl Cli {
 
                 args.extend(eth.into_str_args());
                 args.extend(sol.into_str_args());
+                args.extend(hydration.into_str_args());
+                args.extend(canton.into_str_args());
                 args.extend(indexer_options.into_str_args());
                 args.extend(storage_options.into_str_args());
                 args.extend(log_options.into_str_args());
@@ -172,6 +189,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             sign_sk,
             eth,
             sol,
+            hydration,
+            canton,
             indexer_options,
             my_address,
             storage_options,
@@ -182,28 +201,30 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             message_options,
         } => {
             let _guard = logs::setup(&storage_options.env, account_id.as_str(), &log_options).await;
-
             let _span = tracing::trace_span!("cli").entered();
+            crate::metrics::init_metrics(
+                &account_id,
+                env!("CARGO_PKG_VERSION"),
+                option_env!("GIT_COMMIT_HASH"),
+            );
 
             let cipher_sk = hpke::SecretKey::try_from_bytes(&hex::decode(cipher_sk)?)?;
+
+            let cipher_pk_hex = hex::encode(cipher_sk.public_key().to_bytes());
 
             let digest = configuration_digest(
                 mpc_contract_id.clone(),
                 account_id.clone(),
                 account_sk.clone(),
-                format!("{:?}", cipher_sk.public_key()),
+                cipher_pk_hex.clone(),
                 sign_sk.clone(),
                 eth.clone(),
             );
+            crate::metrics::nodes::CONFIGURATION_DIGEST.set(digest);
 
-            crate::metrics::CONFIGURATION_DIGEST
-                .with_label_values(&[account_id.as_str()])
-                .set(digest);
-
-            let (sign_tx, sign_rx) = SignQueue::channel();
+            let (sign_tx, sign_rx) = mpsc::channel(16384);
 
             let gcp_service = GcpService::init(&account_id, &storage_options).await?;
-
             let key_storage =
                 storage::secret_storage::init(Some(&gcp_service), &storage_options, &account_id);
 
@@ -211,10 +232,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let redis_cfg = deadpool_redis::Config::from_url(redis_url);
             let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-            let triple_storage = storage::triple_storage::init(&redis_pool, &account_id);
-            let presignature_storage =
-                storage::presignature_storage::init(&redis_pool, &account_id);
-            let app_data_storage = app_data_storage::init(&redis_pool, &account_id);
+            let triple_storage = TriplePair::storage(&redis_pool, &account_id);
+            let presignature_storage = Presignature::storage(&redis_pool, &account_id);
 
             let mut rpc_client = near_fetch::Client::new(&near_rpc);
             if let Some(referer_param) = client_header_referer {
@@ -223,12 +242,15 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             }
             tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
 
-            let backlog = Backlog::new();
+            let backlog = Backlog::persisted(CheckpointStorage::Redis(
+                redis_pool.clone(),
+                account_id.clone(),
+            ));
 
             // NEAR Indexer is only used for integration tests
             // TODO: Remove this once we have integration tests built on other chains
-            let indexer = if storage_options.env == "integration-tests" {
-                let (_handle, indexer) = indexer::run(
+            if storage_options.env == "integration-tests" {
+                indexer::run(
                     &indexer_options,
                     &mpc_contract_id,
                     &account_id,
@@ -236,10 +258,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     rpc_client.clone(),
                     backlog.clone(),
                 )?;
-                Some(indexer)
-            } else {
-                None
-            };
+            }
 
             let web_port = web_port.unwrap_or(DEFAULT_WEB_PORT);
 
@@ -260,13 +279,41 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let mesh_state = mesh.watch();
             let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(&account_id);
 
+            let eth_account_address = eth.eth_account_sk.as_ref().map(|sk| {
+                let signer: alloy_signer_local::PrivateKeySigner =
+                    sk.parse().expect("cannot parse Eth account sk");
+                format!("{}", signer.address())
+            });
+            let sol_payer_address = sol.sol_account_sk.as_ref().map(|sk| {
+                use solana_sdk::signer::Signer;
+                solana_sdk::signer::keypair::Keypair::from_base58_string(sk)
+                    .pubkey()
+                    .to_string()
+            });
+            let hydration_signer_address = hydration.signer_uri.as_ref().and_then(|uri| {
+                use std::str::FromStr;
+                use subxt_signer::{sr25519, SecretUri};
+                let uri = SecretUri::from_str(uri).ok()?;
+                let kp = sr25519::Keypair::from_uri(&uri).ok()?;
+                Some(kp.public_key().to_account_id().to_string())
+            });
             let eth = eth.into_config();
             let sol = sol.into_config();
+            let hydration = hydration.into_config();
+            let canton = canton.into_config();
             let network = NetworkConfig { cipher_sk, sign_sk };
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
 
-            let (rpc_channel, rpc) = RpcExecutor::new(&near_client, &eth, &sol, backlog.clone());
+            let (rpc_channel, rpc) = RpcExecutor::new(
+                &near_client,
+                &eth,
+                &sol,
+                &hydration,
+                &canton,
+                backlog.clone(),
+            )
+            .await;
 
             let (sync_channel, sync) = SyncTask::new(
                 &client,
@@ -279,13 +326,22 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tracing::info!(
                 %digest,
-                ?mpc_contract_id,
-                ?account_id,
-                ?my_address,
-                cipher_pk = ?network.cipher_sk.public_key(),
-                sign_pk = ?network.sign_sk.public_key(),
-                near_rpc_url = ?near_client.rpc_addr(),
-                eth_contract_address = ?eth.as_ref().map(|eth| eth.contract_address.as_str()),
+                %mpc_contract_id,
+                %account_id,
+                %my_address,
+                %cipher_pk_hex,
+                version = %crate::metrics::version(),
+                git_commit_hash = %crate::metrics::git_commit_hash(),
+                sign_pk = %network.sign_sk.public_key(),
+                near_rpc_url = %near_client.rpc_addr(),
+                eth_contract_address = %eth.as_ref().map(|eth| eth.contract_address.as_str()).unwrap_or("None"),
+                eth_signer_address = %eth_account_address.as_deref().unwrap_or("None"),
+                sol_program_address = %sol.as_ref().map(|sol| sol.program_address.as_str()).unwrap_or("None"),
+                sol_rpc_url = %sol.as_ref().map(|sol| sol.rpc_http_url.as_str()).unwrap_or("None"),
+                sol_signer_address = %sol_payer_address.as_deref().unwrap_or("None"),
+                hydration_rpc_url = %hydration.as_ref().map(|h| h.rpc_ws_url.as_str()).unwrap_or("None"),
+                hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
+                canton_json_api_url = %canton.as_ref().map(|c| c.json_api_url.as_str()).unwrap_or("None"),
                 "starting node",
             );
 
@@ -298,28 +354,32 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let node = Node::new();
             let node_watcher = node.watch();
 
-            let msg_channel = MessageChannel::spawn(
-                client.clone(),
-                &account_id,
-                config_rx.clone(),
+            let msg_channel =
+                MessageChannel::spawn(client.clone(), config_rx.clone(), contract_watcher.clone())
+                    .await;
+            let sign_task = SignatureSpawnerTask::run(
+                account_id.clone(),
+                sign_rx,
                 contract_watcher.clone(),
-            )
-            .await;
+                config_rx.clone(),
+                presignature_storage.clone(),
+                mesh_state.clone(),
+                msg_channel.clone(),
+                rpc_channel.clone(),
+                backlog.clone(),
+            );
             let protocol = MpcSignProtocol {
                 my_account_id: account_id.clone(),
-                rpc_channel,
                 msg_channel: msg_channel.clone(),
                 generating: msg_channel.subscribe_generation().await,
                 resharing: msg_channel.subscribe_resharing().await,
                 ready: msg_channel.subscribe_ready().await,
-                sign_rx: Arc::new(RwLock::new(sign_rx)),
+                sign_task,
                 secret_storage: key_storage,
                 triple_storage: triple_storage.clone(),
                 presignature_storage: presignature_storage.clone(),
-                contract: contract_watcher.clone(),
                 config: config_rx,
                 mesh_state: mesh_state.clone(),
-                backlog: backlog.clone(),
             };
 
             tracing::info!("protocol initialized");
@@ -327,7 +387,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tokio::spawn(rpc.run(contract_state_tx, config_tx.clone()));
 
             tokio::spawn(mesh.run(contract_watcher.clone()));
-            let system_handle = spawn_system_metrics(account_id.as_str()).await;
+            let system_handle = spawn_system_metrics().await;
             let protocol_handle = tokio::spawn(protocol.run(
                 node,
                 near_client,
@@ -339,32 +399,63 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 web_port,
                 msg_channel,
                 node_watcher,
-                indexer,
                 triple_storage,
                 presignature_storage,
                 sync_channel,
-                account_id.clone(),
+                account_id,
                 backlog.clone(),
             ));
-            tokio::spawn(indexer_eth::run(
-                eth,
+
+            tracing::info!(
+                eth_configured = eth.is_some(),
+                "initializing ethereum indexer stream"
+            );
+            match EthereumStream::new(eth, backlog.clone()).await {
+                Ok(eth_stream) => {
+                    tracing::info!("ethereum indexer stream created successfully");
+                    tokio::spawn(run_stream(
+                        eth_stream,
+                        sign_tx.clone(),
+                        backlog.clone(),
+                        contract_watcher.clone(),
+                        mesh_state.clone(),
+                        client.clone(),
+                    ));
+                }
+                Err(err) => {
+                    tracing::error!(?err, "failed to create ethereum indexer stream");
+                }
+            };
+
+            if let Some(sol_stream) = SolanaStream::new(sol.clone()) {
+                tokio::spawn(run_stream(
+                    sol_stream,
+                    sign_tx.clone(),
+                    backlog.clone(),
+                    contract_watcher.clone(),
+                    mesh_state.clone(),
+                    client.clone(),
+                ));
+            }
+            tokio::spawn(indexer_hydration::run(
+                hydration,
                 sign_tx.clone(),
-                app_data_storage.clone(),
-                account_id.clone(),
                 backlog.clone(),
                 contract_watcher.clone(),
                 mesh_state.clone(),
                 client.clone(),
             ));
-            tokio::spawn(indexer_sol::run(
-                sol,
-                sign_tx,
-                account_id,
-                backlog,
-                contract_watcher,
-                mesh_state,
-                client,
-            ));
+            if let Some(canton_stream) = indexer_canton::CantonStream::new(canton, backlog.clone())
+            {
+                tokio::spawn(run_stream(
+                    canton_stream,
+                    sign_tx.clone(),
+                    backlog.clone(),
+                    contract_watcher.clone(),
+                    mesh_state.clone(),
+                    client.clone(),
+                ));
+            }
             tracing::info!("protocol http server spawned");
             protocol_handle.await?;
             web_handle.await?;
@@ -377,7 +468,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 }
 
 fn configuration_digest(
-    mpc_contrac_id: AccountId,
+    mpc_contract_id: AccountId,
     account_id: AccountId,
     account_sk: SecretKey,
     cipher_pk: String,
@@ -387,7 +478,7 @@ fn configuration_digest(
     let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
     let eth_contract_address = eth.eth_contract_address.unwrap_or_default();
     calculate_digest(
-        mpc_contrac_id,
+        mpc_contract_id,
         account_id,
         account_sk.public_key(),
         cipher_pk,
@@ -404,13 +495,28 @@ fn calculate_digest(
     sign_pk: PublicKey,
     eth_contract_address: String,
 ) -> i64 {
+    let mpc_contract_id_str = mpc_contract_id.to_string();
+    let account_id_str = account_id.to_string();
+    let account_pk_str = account_pk.to_string();
+    let sign_pk_str = sign_pk.to_string();
+
+    tracing::info!(
+        %mpc_contract_id_str,
+        %account_id_str,
+        %account_pk_str,
+        %cipher_pk,
+        %sign_pk_str,
+        eth_contract_address = %eth_contract_address,
+        "digest hash inputs (exact strings)"
+    );
+
     let mut hasher = Sha256::new();
-    hasher.update(mpc_contract_id.to_string());
-    hasher.update(account_id.to_string());
-    hasher.update(account_pk.to_string());
-    hasher.update(cipher_pk);
-    hasher.update(sign_pk.to_string());
-    hasher.update(eth_contract_address);
+    hasher.update(&mpc_contract_id_str);
+    hasher.update(&account_id_str);
+    hasher.update(&account_pk_str);
+    hasher.update(&cipher_pk);
+    hasher.update(&sign_pk_str);
+    hasher.update(&eth_contract_address);
 
     let result = hasher.finalize();
     // Convert the first 8 bytes of the hash to an i64
@@ -447,7 +553,6 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        // Grafana value: -1051225187120159700
         assert_eq!(digest, -1051225187120159684);
     }
 
@@ -471,7 +576,6 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        // Grafana value: --4992003418219577000
         assert_eq!(digest, -4992003418219576839);
     }
 
@@ -495,7 +599,6 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        // Grafana value --930268115875971800
         assert_eq!(digest, -930268115875971858);
     }
 
@@ -543,7 +646,6 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        // Grafana value: 695826193095166700
         assert_eq!(digest, 695826193095166746);
     }
 
@@ -567,7 +669,6 @@ mod tests {
             ETH_CONTRACT_ADDRESS.to_string(),
         );
 
-        // Grafana value: -8209029844787148000
         assert_eq!(digest, -8209029844787147492);
     }
 
@@ -590,7 +691,28 @@ mod tests {
             sign_pk,
             ETH_CONTRACT_ADDRESS.to_string(),
         );
-        // Grafana value: -4889179067099200000
         assert_eq!(digest, -4889179067099199685);
+    }
+
+    #[test]
+    fn test_digest_blacksand() {
+        let mpc_contract_id = AccountId::from_str("v1.sig-net.near").unwrap();
+        let account_id = AccountId::from_str("blacksandtech-sig.near").unwrap();
+        let account_pk =
+            PublicKey::from_str("ed25519:67w2feimgcV21ZgEegvGhHTxyd9DR4yRxguqP8MctyJE").unwrap();
+        let cipher_pk = "231f6ddc22796c076dcc11a90b92c23e54071b1673abd2743fb84d5a1fc53f61";
+        let sign_pk =
+            PublicKey::from_str("ed25519:D5Pccv8i88AuDGXuXQoNSVGAZLfuHCZw2TQmoZxi2tEM").unwrap();
+
+        let digest = calculate_digest(
+            mpc_contract_id,
+            account_id,
+            account_pk,
+            cipher_pk.to_string(),
+            sign_pk,
+            ETH_CONTRACT_ADDRESS.to_string(),
+        );
+
+        assert_eq!(digest, -6950551088322443092);
     }
 }

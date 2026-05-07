@@ -1,17 +1,14 @@
 use cait_sith::protocol::Participant;
-use cait_sith::triples::{TriplePub, TripleShare};
-use cait_sith::PresignOutput;
-use elliptic_curve::CurveArithmetic;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
-use k256::Secp256k1;
 use mpc_crypto::PublicKey;
-use mpc_node::protocol::presignature::{Presignature, PresignatureSpawner};
-use mpc_node::protocol::triple::{Triple, TripleSpawner};
+use mpc_node::protocol::presignature::PresignatureSpawner;
+use mpc_node::protocol::triple::TripleSpawner;
 use mpc_node::protocol::MessageChannel;
-use mpc_node::storage::triple_storage::TriplePair;
 use mpc_node::types::SecretKeyShare;
 use test_log::test;
+
+use super::helpers::{dummy_pair, dummy_presignature};
 
 #[test(tokio::test)]
 async fn test_triple_persistence() -> anyhow::Result<()> {
@@ -25,8 +22,9 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let (_, _, msg) = MessageChannel::new();
     let node0_id = "party0.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
-    let triple_storage = redis.triple_storage(&node0_id);
-    let triple_spawner = TripleSpawner::new(node0, 5, 123, &node0_id, &triple_storage, msg);
+    let triple_storage = redis.triple_storage(&node0_id, node0);
+    let triple_spawner =
+        TripleSpawner::new(node0, 5, 123, &triple_storage, msg, node0_id.to_string());
 
     let triple_id1: u64 = 1;
     let triple_id2: u64 = 2;
@@ -40,13 +38,13 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_spawner.len_potential().await, 0);
 
     triple_storage
-        .reserve(triple_id1)
+        .create_slot(triple_id1, node1)
         .await
         .unwrap()
         .insert(dummy_pair(triple_id1), node1)
         .await;
     triple_storage
-        .reserve(triple_id2)
+        .create_slot(triple_id2, node1)
         .await
         .unwrap()
         .insert(dummy_pair(triple_id2), node1)
@@ -61,9 +59,9 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_storage.len_by_owner(node0).await, 0);
     assert_eq!(triple_spawner.len_potential().await, 2);
 
-    // Take triple pairs and check that they are removed from the storage and added to used set
-    triple_storage.take(triple_id1, node1, node0).await.unwrap();
-    triple_storage.take(triple_id2, node1, node0).await.unwrap();
+    // Take triple pairs and check that they are removed from the storage and marked as using
+    let _taken1 = triple_storage.take(triple_id1, node1).await.unwrap();
+    let _taken2 = triple_storage.take(triple_id2, node1).await.unwrap();
     assert!(!triple_spawner.contains(triple_id1).await);
     assert!(!triple_spawner.contains(triple_id2).await);
     assert!(!triple_spawner.contains_mine(triple_id1).await);
@@ -71,31 +69,31 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_storage.len_generated().await, 0);
     assert_eq!(triple_spawner.len_mine().await, 0);
     assert_eq!(triple_spawner.len_potential().await, 0);
-    assert!(triple_storage.contains_used(triple_id1).await);
-    assert!(triple_storage.contains_used(triple_id2).await);
+    assert!(triple_storage.contains_using(triple_id1).await);
+    assert!(triple_storage.contains_using(triple_id2).await);
 
-    // Attempt to re-reserve used triples and check that it cannot be reserved since it is used.
-    assert!(triple_storage.reserve(triple_id1).await.is_none());
-    assert!(triple_storage.reserve(triple_id2).await.is_none());
-    assert!(!triple_spawner.contains(triple_id1).await);
-    assert!(!triple_spawner.contains(triple_id2).await);
+    // Attempt to re-create slot for in-use triples and check that it fails
+    assert!(triple_storage
+        .create_slot(triple_id1, node1)
+        .await
+        .is_none());
+    assert!(triple_storage
+        .create_slot(triple_id2, node1)
+        .await
+        .is_none());
 
     let id3 = 3;
     let id4: u64 = 4;
 
-    // check that reserve and unreserve works:
-    let slot = triple_storage.reserve(id3).await.unwrap();
-    slot.unreserve().await;
-
     // Add mine triple and check that it is in the storage
     triple_storage
-        .reserve(id3)
+        .create_slot(id3, node0)
         .await
         .unwrap()
         .insert(dummy_pair(id3), node0)
         .await;
     triple_storage
-        .reserve(id4)
+        .create_slot(id4, node0)
         .await
         .unwrap()
         .insert(dummy_pair(id4), node0)
@@ -108,9 +106,9 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_spawner.len_mine().await, 2);
     assert_eq!(triple_spawner.len_potential().await, 2);
 
-    // Take mine triple pairs and check that they are removed from the storage and added to used set
-    triple_storage.take_mine(node0).await.unwrap();
-    triple_storage.take_mine(node0).await.unwrap();
+    // Take mine triple pairs and check that they are removed from the storage and marked as using
+    let _taken3 = triple_storage.take_mine().await.unwrap();
+    let _taken4 = triple_storage.take_mine().await.unwrap();
     assert!(!triple_spawner.contains(id3).await);
     assert!(!triple_spawner.contains(id4).await);
     assert!(!triple_spawner.contains_mine(id3).await);
@@ -119,20 +117,18 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     assert_eq!(triple_spawner.len_mine().await, 0);
     assert!(triple_storage.is_empty().await);
     assert_eq!(triple_spawner.len_potential().await, 0);
-    assert!(triple_storage.contains_used(id3).await);
-    assert!(triple_storage.contains_used(id4).await);
+    assert!(triple_storage.contains_using(id3).await);
+    assert!(triple_storage.contains_using(id4).await);
 
-    // Attempt to re-insert used mine triples and check that it fails
-    assert!(triple_storage.reserve(id3).await.is_none());
-    assert!(triple_storage.reserve(id4).await.is_none());
-    assert!(!triple_spawner.contains(id3).await);
-    assert!(!triple_spawner.contains(id4).await);
+    // Attempt to re-create slot for in-use mine triples and check that it fails
+    assert!(triple_storage.create_slot(id3, node0).await.is_none());
+    assert!(triple_storage.create_slot(id4, node0).await.is_none());
 
     assert!(triple_storage.clear().await);
     // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
     for id in 10..=15 {
         triple_storage
-            .reserve(id)
+            .create_slot(id, node1)
             .await
             .unwrap()
             .insert(dummy_pair(id), node1)
@@ -142,17 +138,23 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     // Have our node0 own 16 to 20
     for id in 16..=20 {
         triple_storage
-            .reserve(id)
+            .create_slot(id, node0)
             .await
             .unwrap()
             .insert(dummy_pair(id), node0)
             .await;
     }
 
-    // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15
-    let mut outdated = triple_storage.remove_outdated(node1, &[13, 14, 15]).await;
+    // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15.
+    // We also include ID 99 which doesn't exist to test the not_found tracking.
+    let result = triple_storage
+        .remove_outdated(node1, &[13, 14, 15, 99])
+        .await
+        .unwrap();
+    let mut outdated = result.removed;
     outdated.sort();
     assert_eq!(outdated, vec![10, 11, 12]);
+    assert_eq!(result.not_found, vec![99]);
 
     assert_eq!(triple_storage.len_generated().await, 8);
     assert_eq!(triple_spawner.len_mine().await, 5);
@@ -173,18 +175,18 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     let (_, _, msg) = MessageChannel::new();
     let node0_id = "party0.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
-    let triple_storage = redis.triple_storage(&node0_id);
-    let presignature_storage = redis.presignature_storage(&node0_id);
+    let triple_storage = redis.triple_storage(&node0_id, node0);
+    let presignature_storage = redis.presignature_storage(&node0_id, node0);
     let presignature_spawner = PresignatureSpawner::new(
         Participant::from(0),
         5,
         123,
         &SecretKeyShare::default(),
         &PublicKey::default(),
-        &node0_id,
         &triple_storage,
         &presignature_storage,
         msg,
+        node0_id.to_string(),
     );
 
     let id = 1;
@@ -198,16 +200,10 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert!(presignature_storage.is_empty().await);
     assert_eq!(presignature_spawner.len_potential().await, 0);
 
-    // check that reserve then dropping unreserves the slot:
-    let slot = presignature_storage.reserve(presignature.id).await.unwrap();
-    if let Some(task) = slot.unreserve() {
-        task.await.unwrap();
-    }
-
     // Insert presignature owned by node1, with our node0 view being that it is a foreign presignature
     assert!(
         presignature_storage
-            .reserve(presignature.id)
+            .create_slot(presignature.id, node1)
             .await
             .unwrap()
             .insert(presignature, node1)
@@ -221,18 +217,17 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_spawner.len_mine().await, 0);
     assert_eq!(presignature_spawner.len_potential().await, 1);
 
-    // Take presignature and check that it is removed from the storage and added to used set
-    presignature_storage.take(id, node1, node0).await.unwrap();
+    // Take presignature and check that it is removed from the storage and marked as using
+    let _taken_ps1 = presignature_storage.take(id, node1).await.unwrap();
     assert!(!presignature_storage.contains(id).await);
     assert!(!presignature_spawner.contains_mine(id).await);
     assert_eq!(presignature_storage.len_generated().await, 0);
     assert_eq!(presignature_spawner.len_mine().await, 0);
     assert_eq!(presignature_spawner.len_potential().await, 0);
-    assert!(presignature_storage.contains_used(id).await);
+    assert!(presignature_storage.contains_using(id).await);
 
-    // Attempt to re-insert used presignature and check that it fails
-    assert!(presignature_storage.reserve(id).await.is_none());
-    assert!(!presignature_spawner.contains(id).await);
+    // Attempt to re-create slot for in-use presignature and check that it fails
+    assert!(presignature_storage.create_slot(id, node1).await.is_none());
 
     let id2 = 2;
     let mine_presignature = dummy_presignature(id2);
@@ -240,7 +235,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     // Add a presignature to our own node0
     assert!(
         presignature_storage
-            .reserve(id2)
+            .create_slot(id2, node0)
             .await
             .unwrap()
             .insert(mine_presignature, node0)
@@ -253,25 +248,24 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     assert_eq!(presignature_spawner.len_mine().await, 1);
     assert_eq!(presignature_spawner.len_potential().await, 1);
 
-    // Take mine presignature and check that it is removed from the storage and added to used set
-    presignature_storage.take_mine(node0).await.unwrap();
+    // Take mine presignature and check that it is removed from the storage and marked as using
+    let _taken_ps2 = presignature_storage.take_mine().await.unwrap();
     assert!(!presignature_storage.contains(id2).await);
     assert!(!presignature_spawner.contains_mine(id2).await);
     assert_eq!(presignature_storage.len_generated().await, 0);
     assert_eq!(presignature_spawner.len_mine().await, 0);
     assert!(presignature_storage.is_empty().await);
     assert_eq!(presignature_spawner.len_potential().await, 0);
-    assert!(presignature_storage.contains_used(id2).await);
+    assert!(presignature_storage.contains_using(id2).await);
 
-    // Attempt to re-insert used mine presignature and check that it fails
-    assert!(presignature_storage.reserve(id2).await.is_none());
-    assert!(!presignature_spawner.contains(id2).await);
+    // Attempt to re-create slot for in-use mine presignature and check that it fails
+    assert!(presignature_storage.create_slot(id2, node0).await.is_none());
 
     presignature_storage.clear().await;
     // Have our node0 observe shares for triples 10 to 15 where node1 is owner.
     for id in 10..=15 {
         presignature_storage
-            .reserve(id)
+            .create_slot(id, node1)
             .await
             .unwrap()
             .insert(dummy_presignature(id), node1)
@@ -281,60 +275,27 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
     // Have our node0 own 16 to 20
     for id in 16..=20 {
         presignature_storage
-            .reserve(id)
+            .create_slot(id, node0)
             .await
             .unwrap()
             .insert(dummy_presignature(id), node0)
             .await;
     }
 
-    // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15
-    let mut outdated = presignature_storage
-        .remove_outdated(node1, &[13, 14, 15])
-        .await;
+    // Let's say Node1 somehow used up triple 10, 11, 12 so we only have 13,14,15.
+    // We also include ID 99 which doesn't exist to test the not_found tracking.
+    let result = presignature_storage
+        .remove_outdated(node1, &[13, 14, 15, 99])
+        .await
+        .unwrap();
+    let mut outdated = result.removed;
     outdated.sort();
     assert_eq!(outdated, vec![10, 11, 12]);
+    assert_eq!(result.not_found, vec![99]);
 
     assert_eq!(presignature_storage.len_generated().await, 8);
     assert_eq!(presignature_spawner.len_mine().await, 5);
     assert_eq!(presignature_spawner.len_potential().await, 8);
 
     Ok(())
-}
-
-fn dummy_presignature(id: u64) -> Presignature {
-    Presignature {
-        id,
-        output: PresignOutput {
-            big_r: <Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            k: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-            sigma: <Secp256k1 as CurveArithmetic>::Scalar::ONE,
-        },
-        participants: vec![Participant::from(1), Participant::from(2)],
-    }
-}
-
-fn dummy_pair(id: u64) -> TriplePair {
-    TriplePair {
-        id,
-        triple0: dummy_triple(),
-        triple1: dummy_triple(),
-    }
-}
-
-fn dummy_triple() -> Triple {
-    Triple {
-        share: TripleShare {
-            a: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-            b: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-            c: <Secp256k1 as CurveArithmetic>::Scalar::ZERO,
-        },
-        public: TriplePub {
-            big_a: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            big_b: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            big_c: <k256::Secp256k1 as CurveArithmetic>::AffinePoint::default(),
-            participants: vec![Participant::from(1), Participant::from(2)],
-            threshold: 5,
-        },
-    }
 }

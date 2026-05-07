@@ -1,4 +1,5 @@
 use std::fmt;
+use std::path::PathBuf;
 
 use crate::{execute, utils, NodeConfig};
 
@@ -33,6 +34,8 @@ pub struct NodeEnvConfig {
     pub cfg: NodeConfig,
     // near rpc address, after proxy
     pub near_rpc: String,
+    /// Optional custom binary path to use instead of the default target/release
+    pub binary_path: Option<PathBuf>,
 }
 
 impl fmt::Debug for NodeEnvConfig {
@@ -43,6 +46,7 @@ impl fmt::Debug for NodeEnvConfig {
             .field("cipher_pk", &self.cipher_sk.public_key())
             .field("cfg", &self.cfg)
             .field("near_rpc", &self.near_rpc)
+            .field("binary_path", &self.binary_path)
             .finish()
     }
 }
@@ -65,6 +69,9 @@ impl Node {
         };
         let eth = mpc_node::indexer_eth::EthArgs::from_config(cfg.eth.clone());
         let sol = mpc_node::indexer_sol::SolArgs::from_config(cfg.sol.clone());
+        let hydration =
+            mpc_node::indexer_hydration::HydrationArgs::from_config(cfg.hydration.clone());
+        let canton = mpc_node::indexer_canton::CantonArgs::from_config(cfg.canton.clone());
         let near_rpc = ctx.worker.rpc_addr();
         let mpc_contract_id = ctx.mpc_contract.id().clone();
         let cli = mpc_node::cli::Cli::Start {
@@ -77,6 +84,8 @@ impl Node {
             sign_sk: Some(sign_sk.clone()),
             eth,
             sol,
+            hydration,
+            canton,
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
@@ -109,6 +118,7 @@ impl Node {
             sign_sk,
             cfg: cfg.clone(),
             near_rpc,
+            binary_path: None,
         };
         Ok(node_config)
     }
@@ -117,6 +127,15 @@ impl Node {
         ctx: &super::Context,
         cfg: &NodeConfig,
         account: &Account,
+    ) -> anyhow::Result<Self> {
+        Self::run_with_binary(ctx, cfg, account, None).await
+    }
+
+    pub async fn run_with_binary(
+        ctx: &super::Context,
+        cfg: &NodeConfig,
+        account: &Account,
+        binary_path: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
         let web_port = utils::pick_unused_port().await?;
         let (cipher_sk, _cipher_pk) = hpke::generate();
@@ -139,6 +158,7 @@ impl Node {
                 sign_sk,
                 cfg: cfg.clone(),
                 near_rpc,
+                binary_path,
             },
         )
         .await
@@ -152,6 +172,9 @@ impl Node {
 
         let eth = EthArgs::from_config(config.cfg.eth.clone());
         let sol = mpc_node::indexer_sol::SolArgs::from_config(config.cfg.sol.clone());
+        let hydration =
+            mpc_node::indexer_hydration::HydrationArgs::from_config(config.cfg.hydration.clone());
+        let canton = mpc_node::indexer_canton::CantonArgs::from_config(config.cfg.canton.clone());
         let cli = mpc_node::cli::Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
@@ -162,6 +185,8 @@ impl Node {
             sign_sk: Some(config.sign_sk.clone()),
             eth,
             sol,
+            hydration,
+            canton,
             indexer_options,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
@@ -175,7 +200,12 @@ impl Node {
         };
 
         let mpc_node_id = format!("multichain/{}", config.account.id());
-        let process = execute::spawn_multichain(ctx.release, &mpc_node_id, cli)?;
+        let process = execute::spawn_node_with_binary(
+            config.binary_path.clone(),
+            ctx.release,
+            &mpc_node_id,
+            cli,
+        )?;
         let address = format!("http://127.0.0.1:{web_port}");
         tracing::info!("node is starting at {address}");
         utils::ping_until_ok(&address, 60).await?;
@@ -204,6 +234,7 @@ impl Node {
             sign_sk: self.sign_sk.clone(),
             cfg: self.cfg.clone(),
             near_rpc: self.near_rpc.clone(),
+            binary_path: None, // Don't preserve binary_path on restart
         }
     }
 }

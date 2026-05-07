@@ -1,9 +1,8 @@
 use crate::backlog::Checkpoint;
 use crate::protocol::message::cbor_to_bytes;
-use crate::protocol::state::NodeStatus;
 use crate::protocol::sync::SyncUpdate;
 use crate::protocol::Chain;
-use crate::web::StateView;
+use crate::web::{StateView, StatusResponse};
 
 use hyper::StatusCode;
 use mpc_keys::hpke::Ciphered;
@@ -26,6 +25,10 @@ pub struct Options {
     /// Timeout used for fetching the state of a node.
     #[clap(long, env("MPC_NODE_STATE_TIMEOUT"), default_value = "1000")]
     pub state_timeout: u64,
+
+    /// Timeout used for sync requests to other nodes.
+    #[clap(long, env("MPC_NODE_SYNC_TIMEOUT"), default_value = "60000")]
+    pub sync_timeout: u64,
 }
 
 impl Options {
@@ -35,6 +38,8 @@ impl Options {
             self.timeout.to_string(),
             "--state-timeout".to_string(),
             self.state_timeout.to_string(),
+            "--sync-timeout".to_string(),
+            self.sync_timeout.to_string(),
         ]
     }
 }
@@ -44,6 +49,7 @@ impl Default for Options {
         Self {
             timeout: 1000,
             state_timeout: 1000,
+            sync_timeout: 60000,
         }
     }
 }
@@ -51,7 +57,7 @@ impl Default for Options {
 #[derive(Debug, thiserror::Error)]
 pub enum RequestError {
     #[error("http request was unsuccessful: {0} => {1}")]
-    Unsuccessful(StatusCode, String),
+    Unsuccessful(StatusCode, String, Option<String>),
     #[error("http client error: {0}")]
     ReqwestClient(#[from] reqwest::Error),
     #[error("http response could not be parsed: {0}")]
@@ -79,6 +85,13 @@ impl NodeClient {
         }
     }
 
+    fn extract_request_id(resp: &reqwest::Response) -> Option<String> {
+        resp.headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_string())
+    }
+
     pub async fn post_json<T: Serialize + ?Sized, R: DeserializeOwned>(
         &self,
         url: &Url,
@@ -97,10 +110,14 @@ impl NodeClient {
             Ok(resp.json::<R>().await?)
         } else {
             // TODO: parse response body and convert to mpc_node::Error type.
+            let request_id = Self::extract_request_id(&resp);
             let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
             let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
-            tracing::warn!("failed to send a message to {url} with code {status}: {resp}");
-            Err(RequestError::Unsuccessful(status, resp.into()))
+            tracing::warn!(
+                request_id = ?request_id,
+                "failed to send a message to {url} with code {status}: {resp}"
+            );
+            Err(RequestError::Unsuccessful(status, resp.into(), request_id))
         }
     }
 
@@ -122,9 +139,42 @@ impl NodeClient {
             Ok(())
         } else {
             // TODO: parse response body and convert to mpc_node::Error type.
+            let request_id = Self::extract_request_id(&resp);
             let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
             let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
-            Err(RequestError::Unsuccessful(status, resp.into()))
+            Err(RequestError::Unsuccessful(status, resp.into(), request_id))
+        }
+    }
+
+    pub async fn post_cbor_response<T: Serialize + ?Sized, R: DeserializeOwned>(
+        &self,
+        url: &Url,
+        payload: &T,
+        timeout: Duration,
+    ) -> Result<R, RequestError> {
+        let resp = self
+            .http
+            .post(url.clone())
+            .header("content-type", "application/cbor")
+            .body(cbor_to_bytes(payload).map_err(|err| RequestError::Conversion(err.to_string()))?)
+            .timeout(timeout)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if status.is_success() {
+            let body = resp.bytes().await.map_err(RequestError::MalformedBody)?;
+            ciborium::from_reader(body.as_ref())
+                .map_err(|err| RequestError::Conversion(err.to_string()))
+        } else {
+            let request_id = Self::extract_request_id(&resp);
+            let bytes = resp.bytes().await.map_err(RequestError::MalformedBody)?;
+            let resp = std::str::from_utf8(&bytes).map_err(RequestError::MalformedResponse)?;
+            tracing::warn!(
+                request_id = ?request_id,
+                "failed to send a message to {url} with code {status}: {resp}"
+            );
+            Err(RequestError::Unsuccessful(status, resp.into(), request_id))
         }
     }
 
@@ -152,7 +202,7 @@ impl NodeClient {
         Ok(resp.json::<StateView>().await?)
     }
 
-    pub async fn status(&self, base: impl IntoUrl) -> Result<NodeStatus, RequestError> {
+    pub async fn status(&self, base: impl IntoUrl) -> Result<StatusResponse, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("status");
 
@@ -166,19 +216,38 @@ impl NodeClient {
         Ok(resp.json().await?)
     }
 
-    pub async fn sync(&self, base: impl IntoUrl, update: &SyncUpdate) -> Result<(), RequestError> {
+    pub async fn sync(
+        &self,
+        base: impl IntoUrl,
+        update: &SyncUpdate,
+    ) -> Result<SyncUpdate, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("sync");
-
-        self.post_cbor(&url, update).await
+        self.post_cbor_response(
+            &url,
+            update,
+            Duration::from_millis(self.options.sync_timeout),
+        )
+        .await
     }
 
     pub async fn checkpoint(
         &self,
         base: impl IntoUrl,
+        chains: &[Chain],
     ) -> Result<HashMap<Chain, Checkpoint>, RequestError> {
         let mut url = base.into_url()?;
         url.set_path("checkpoint");
+        if !chains.is_empty() {
+            url.set_query(Some(&format!(
+                "query={}",
+                chains
+                    .iter()
+                    .map(|c| c.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )));
+        };
 
         let resp = self
             .http
@@ -188,6 +257,7 @@ impl NodeClient {
             .await?;
 
         let status = resp.status();
+        let request_id = Self::extract_request_id(&resp);
         let body = resp.bytes().await.map_err(RequestError::MalformedBody)?;
 
         if status.is_success() {
@@ -195,7 +265,7 @@ impl NodeClient {
                 .map_err(|err| RequestError::Conversion(err.to_string()))
         } else {
             let resp = std::str::from_utf8(&body).map_err(RequestError::MalformedResponse)?;
-            Err(RequestError::Unsuccessful(status, resp.into()))
+            Err(RequestError::Unsuccessful(status, resp.into(), request_id))
         }
     }
 }

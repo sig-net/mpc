@@ -1,13 +1,51 @@
 pub mod bytes;
 
-use k256::{AffinePoint, Scalar};
+use k256::elliptic_curve::{bigint::ArrayEncoding, CurveArithmetic, PrimeField};
+use k256::{AffinePoint, Scalar, Secp256k1, U256};
 use near_account_id::AccountId;
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use sha3::Digest;
+use std::sync::LazyLock;
 use std::{fmt, str::FromStr};
 
 use crate::bytes::cbor_scalar;
+
+pub type PublicKey = <Secp256k1 as CurveArithmetic>::AffinePoint;
+
+pub trait ScalarExt: Sized {
+    fn from_bytes(bytes: [u8; 32]) -> Option<Self>;
+    fn from_non_biased(bytes: [u8; 32]) -> Self;
+}
+
+impl ScalarExt for Scalar {
+    /// Returns nothing if the bytes are greater than or equal to the secp256k1 scalar field order
+    /// (n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141).
+    fn from_bytes(bytes: [u8; 32]) -> Option<Self> {
+        let bytes = U256::from_be_slice(bytes.as_slice());
+        Scalar::from_repr(bytes.to_be_byte_array()).into_option()
+    }
+
+    /// When the user can't directly select the value, this will always work
+    /// Use cases are things that we know have been hashed
+    fn from_non_biased(hash: [u8; 32]) -> Self {
+        // This should never happen.
+        // The space of inputs is 2^256, the group order is ~2^256 - 2^128.
+        // This means that you'd have to run ~2^128 hashes to find a value that causes this to fail.
+        Scalar::from_bytes(hash).expect("Derived epsilon value falls outside of the field")
+    }
+}
+
+/// The maximum valid scalar for the secp256k1 curve (group order minus one).
+pub static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
+    Scalar::from_bytes(
+        hex::decode("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364140")
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    )
+    .unwrap()
+});
 
 pub const LATEST_MPC_KEY_VERSION: u32 = 1;
 pub const LEGACY_MPC_KEY_VERSION_0: u32 = 0;
@@ -79,7 +117,9 @@ impl std::fmt::Debug for SignArgs {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct Signature {
     #[borsh(
@@ -105,6 +145,12 @@ impl Signature {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SerDeserFormat {
+    Borsh,
+    Abi,
+}
+
 /// Supported blockchain networks for checkpoints.
 #[derive(
     BorshDeserialize,
@@ -125,6 +171,17 @@ pub enum Chain {
     NEAR,
     Ethereum,
     Solana,
+    Bitcoin,
+    Hydration,
+    Canton,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
+pub enum ChainFromError {
+    #[error("unknown CAIP-2 chain ID: {0}")]
+    UnknownCaip2Id(String),
+    #[error("unknown deprecated chain ID: {0}")]
+    UnknownDeprecatedId(String),
 }
 
 impl Chain {
@@ -133,18 +190,55 @@ impl Chain {
             Chain::NEAR => "NEAR",
             Chain::Ethereum => "Ethereum",
             Chain::Solana => "Solana",
+            Chain::Bitcoin => "Bitcoin",
+            Chain::Hydration => "Hydration",
+            Chain::Canton => "Canton",
         }
     }
 
-    pub const fn iter() -> [Chain; 3] {
-        [Chain::NEAR, Chain::Ethereum, Chain::Solana]
+    pub const fn iter() -> [Chain; 6] {
+        [
+            Chain::NEAR,
+            Chain::Ethereum,
+            Chain::Solana,
+            Chain::Bitcoin,
+            Chain::Hydration,
+            Chain::Canton,
+        ]
+    }
+
+    pub fn deprecated_chain_id(&self) -> &'static str {
+        match self {
+            Chain::NEAR => "0x18d",
+            Chain::Ethereum => "0x1",
+            Chain::Solana => "0x800001f5",
+            Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
+            Chain::Hydration => "polkadot:2034",
+            Chain::Canton => "canton:global",
+        }
+    }
+
+    pub fn caip2_chain_id(&self) -> &'static str {
+        match self {
+            Chain::NEAR => "near:mainnet",
+            Chain::Ethereum => "eip155:1",
+            Chain::Solana => "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+            Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
+            Chain::Hydration => "polkadot:2034",
+            // Synthetic — Canton has no registered CAIP-2 namespace in
+            // ChainAgnostic/namespaces. "canton:global" follows the
+            // namespace:reference format as a project-local identifier.
+            Chain::Canton => "canton:global",
+        }
     }
 
     pub fn checkpoint_interval(&self) -> Option<u64> {
         let (key, default) = match self {
-            Chain::NEAR => return None,
+            Chain::NEAR | Chain::Bitcoin => return None,
             Chain::Ethereum => ("CHECKPOINT_INTERVAL_ETHEREUM", 20),
             Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 120),
+            Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 240),
+            Chain::Canton => ("CHECKPOINT_INTERVAL_CANTON", 50),
         };
 
         let interval = std::env::var(key)
@@ -158,7 +252,40 @@ impl Chain {
         vec![
             ("CHECKPOINT_INTERVAL_ETHEREUM", "2"),
             ("CHECKPOINT_INTERVAL_SOLANA", "5"),
+            ("CHECKPOINT_INTERVAL_HYDRATION", "5"),
+            ("CHECKPOINT_INTERVAL_CANTON", "5"),
         ]
+    }
+
+    pub fn expected_finality_time_secs(&self) -> u64 {
+        match self {
+            Chain::NEAR => 3,
+            Chain::Ethereum => 30 * 60,
+            Chain::Solana => 3,
+            Chain::Bitcoin => 60 * 60 + 20 * 60, // 6 confirmations at 10 minutes each, plus some buffer
+            Chain::Hydration => 12,
+            Chain::Canton => 15,
+        }
+    }
+
+    pub fn expected_response_time_secs(&self) -> u64 {
+        // finality time * 2 = finality time of sign/sign_bidirectional event + finality time of respond event
+        self.expected_finality_time_secs() * 2 + 5 // + Buffer time
+    }
+
+    pub fn respond_serialization_format(&self) -> SerDeserFormat {
+        match self {
+            Chain::Canton => SerDeserFormat::Abi,
+            // Solana and Hydration use Borsh for bidirectional responses.
+            _ => SerDeserFormat::Borsh,
+        }
+    }
+
+    pub fn from_caip2_chain_id(chain_id: &str) -> Result<Self, ChainFromError> {
+        Self::iter()
+            .into_iter()
+            .find(|chain| chain.caip2_chain_id() == chain_id)
+            .ok_or_else(|| ChainFromError::UnknownCaip2Id(chain_id.to_string()))
     }
 }
 
@@ -176,6 +303,9 @@ impl FromStr for Chain {
             "near" => Ok(Chain::NEAR),
             "ethereum" | "eth" => Ok(Chain::Ethereum),
             "solana" | "sol" => Ok(Chain::Solana),
+            "bitcoin" | "btc" => Ok(Chain::Bitcoin),
+            "hydration" | "hyd" => Ok(Chain::Hydration),
+            "canton" | "ctn" => Ok(Chain::Canton),
             other => Err(format!("unknown or unsupported chain {other}")),
         }
     }
@@ -237,5 +367,22 @@ impl Checkpoint {
             block_height: 0,
             pending_requests: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scalar_fails_as_expected() {
+        let too_high = [0xFF; 32];
+        assert!(Scalar::from_bytes(too_high).is_none());
+
+        let mut not_too_high = [0xFF; 32];
+        // Order of k256 is FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+        //                                                  [15]
+        not_too_high[15] = 0xFD;
+        assert!(Scalar::from_bytes(not_too_high).is_some());
     }
 }

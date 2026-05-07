@@ -1,13 +1,12 @@
 pub mod kdf;
-pub mod types;
 
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::EncodedPoint;
 pub use kdf::{
-    check_ec_signature, derive_epsilon_eth, derive_epsilon_near, derive_epsilon_sol, derive_key,
-    x_coordinate,
+    check_ec_signature, derive_epsilon_canton, derive_epsilon_eth, derive_epsilon_hydration,
+    derive_epsilon_near, derive_epsilon_sol, derive_key, x_coordinate,
 };
-pub use types::{PublicKey, ScalarExt};
+pub use mpc_primitives::{PublicKey, ScalarExt};
 
 // Our wasm runtime doesn't support good syncronous entropy.
 // We could use something VRF + pseudorandom here, but someone would likely shoot themselves in the foot with it.

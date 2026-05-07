@@ -12,7 +12,7 @@ exclude = ["infra/scripts/generate_keys"]
 resolver = "2"
 
 [workspace.package]
-version = "1.11.0"
+version = "1.13.0"
 
 [workspace.dependencies]
 alloy = { version = "=1.0.38", features = ["contract", "json"] }
@@ -24,6 +24,7 @@ clap = { version = "4.5.4", features = ["derive", "env"] }
 deadpool-redis = "0.18.0"
 hex = "0.4.3"
 hyper = { version = "0.14", features = ["full"] }
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 k256 = { version = "0.13.1", features = [
     "sha256",
     "ecdsa",
@@ -33,12 +34,14 @@ k256 = { version = "0.13.1", features = [
 ] }
 rand = "0.8.5"
 reqwest = { version = "0.11.16", features = ["blocking", "json"] }
+semver = "1.0.23"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11.15"
 serde_json = "1"
 sha3 = "0.10.8"
 thiserror = "1"
 tokio = { version = "1.45.1", features = ["full"] }
+tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
 tracing = "0.1.35"
 tracing-subscriber = { version = "0.3.20", default-features = false, features = [
     "env-filter",
@@ -62,6 +65,8 @@ alloy-json-abi = "1.4.1"
 alloy-rlp = "0.3.12"
 solana-client = "2.2.7"
 futures-util = "0.3.31"
+p256 = { version = "0.13.2", features = ["ecdsa"] }
+parity-scale-codec = { version = "3", features = ["derive"] }
 
 near-account-id = "1.0.0"
 near-primitives = "0.26.0"
@@ -79,6 +84,7 @@ signet-program = { path = "./chain-signatures/contract-sol" }
 # This fixes https://rustsec.org/advisories/RUSTSEC-2024-0344 by pointing to a commit that includes the fix.
 # This fix has yet to be propagated to crates.io so we will patch it instead.
 x25519-dalek = { git = "https://github.com/dalek-cryptography/curve25519-dalek", rev = "5b7082bbc8e0b2106ab0d956064f61fa0f393cdc" }
+
 
 # big optimization even in test builds for math heavy crates
 [profile.dev.package.curve25519-dalek]

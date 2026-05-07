@@ -1,13 +1,13 @@
 pub mod primitives;
 
-use crate::util::NearPublicKeyExt;
+use self::primitives::{Candidates, Participants, PkVotes, Votes};
+use crate::{rpc::GovernanceInfo, util::NearPublicKeyExt as _};
+
 use mpc_contract::ProtocolContractState;
 use mpc_crypto::PublicKey;
 use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, str::FromStr};
-
-use self::primitives::{Candidates, Participants, PkVotes, Votes};
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct InitializingContractState {
@@ -105,6 +105,28 @@ impl ProtocolState {
             ProtocolState::Initializing(InitializingContractState { threshold, .. }) => *threshold,
             ProtocolState::Running(RunningContractState { threshold, .. }) => *threshold,
             ProtocolState::Resharing(ResharingContractState { threshold, .. }) => *threshold,
+        }
+    }
+
+    pub fn governance(&self, account_id: &AccountId) -> Option<GovernanceInfo> {
+        match self {
+            ProtocolState::Running(state) => Some(GovernanceInfo {
+                me: *state.participants.find_participant(account_id)?,
+                threshold: state.threshold,
+                epoch: state.epoch,
+                public_key: state.public_key,
+                participants: state.participants.keys().copied().collect(),
+                is_running: true,
+            }),
+            ProtocolState::Resharing(state) => Some(GovernanceInfo {
+                me: *state.new_participants.find_participant(account_id)?,
+                threshold: state.threshold,
+                epoch: state.old_epoch + 1,
+                public_key: state.public_key,
+                participants: state.new_participants.keys().copied().collect(),
+                is_running: false,
+            }),
+            ProtocolState::Initializing(_) => None,
         }
     }
 }

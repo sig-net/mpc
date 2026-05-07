@@ -283,8 +283,45 @@ async fn test_vote_leave() -> anyhow::Result<()> {
                 .new_participants
                 .participants
                 .contains_key(accounts[0].id()));
+            assert!(!r
+                .new_participants
+                .account_to_participant_id
+                .contains_key(accounts[0].id()));
         }
         _ => panic!("should be in resharing state"),
+    };
+
+    // Complete resharing and verify the removed participant is fully gone
+    let execution = accounts[1]
+        .call(contract.id(), "vote_reshared")
+        .args_json(json!({ "epoch": 1 }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    let execution = accounts[2]
+        .call(contract.id(), "vote_reshared")
+        .args_json(json!({ "epoch": 1 }))
+        .transact()
+        .await?;
+    assert!(execution.is_success());
+
+    let state: mpc_contract::ProtocolContractState =
+        contract.view("state").await.unwrap().json().unwrap();
+    match state {
+        mpc_contract::ProtocolContractState::Running(r) => {
+            assert!(
+                !r.participants.contains_key(accounts[0].id()),
+                "removed participant must not be in participants"
+            );
+            assert!(
+                !r.participants
+                    .account_to_participant_id
+                    .contains_key(accounts[0].id()),
+                "removed participant must not be in account_to_participant_id"
+            );
+        }
+        _ => panic!("should be in running state after resharing"),
     };
 
     Ok(())

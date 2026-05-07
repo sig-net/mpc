@@ -9,6 +9,7 @@ use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
 use mpc_crypto::kdf::check_ec_signature;
 use mpc_crypto::{derive_epsilon_sol, derive_key, near_public_key_to_affine_point};
+use mpc_primitives::Chain;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use reqwest::Client;
 use rlp::RlpStream;
@@ -65,8 +66,13 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
     let user_address = actions::public_key_to_address(&user_secp_pk);
     let user_alloy_address = AlloyAddress::from_slice(user_address.as_bytes());
 
+    let client = Client::new();
+    // Use the live account nonce to avoid "nonce too low" errors if the address has prior sends
+    let user_hex = format_alloy_address(&user_alloy_address);
+    let sender_nonce = get_transaction_count(&client, &execution_rpc_http_url, &user_hex).await?;
+
     let legacy_tx = EthereumTransaction {
-        nonce: U256::from(0u8),
+        nonce: sender_nonce,
         gas_price: U256::from(1_500_000_000u64),
         gas_limit: U256::from(FUNDING_GAS_LIMIT),
         to: user_alloy_address,
@@ -74,7 +80,6 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
         data: Vec::new(),
     };
 
-    let client = Client::new();
     ensure_eth_signer_funded(
         &client,
         &execution_rpc_http_url,
@@ -95,7 +100,7 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
         .solana()
         .bidirectional()
         .transaction_data(unsigned_rlp.clone())
-        .caip2_id("eip155:60")
+        .caip2_id(Chain::Ethereum.caip2_chain_id())
         .output_deserialization_schema(Vec::new())
         .respond_serialization_schema(Vec::new())
         .payload(msg_hash_bytes)
@@ -156,14 +161,21 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
         .context("eth_sendRawTransaction missing result")?
         .to_string();
 
-    let receipt = wait_for_transaction_receipt(
+    let respond_future = actions::sign::wait_for_respond_bidirectional(
+        solana,
+        sol_outcome.request_id,
+        Duration::from_secs(120),
+    );
+
+    let receipt_future = wait_for_transaction_receipt(
         &client,
         &execution_rpc_http_url,
         &tx_hash,
         TX_RECEIPT_MAX_ATTEMPTS,
         Duration::from_secs(TX_RECEIPT_POLL_INTERVAL_SECS),
-    )
-    .await?;
+    );
+
+    let (read_outcome, receipt) = tokio::try_join!(respond_future, receipt_future)?;
 
     let status = receipt
         .get("status")
@@ -177,13 +189,6 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
             status
         );
     }
-
-    let read_outcome = actions::sign::wait_for_respond_bidirectional(
-        solana,
-        sol_outcome.request_id,
-        Duration::from_secs(120),
-    )
-    .await?;
 
     assert_eq!(
         read_outcome.request_id, sol_outcome.request_id,
