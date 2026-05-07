@@ -1,9 +1,11 @@
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
-use alloy::primitives::{Address, Bytes};
-use alloy::rpc::types::Transaction;
+use alloy::primitives::{Address, Bytes, B256};
+use alloy::rpc::types::{Block, BlockId, Transaction, TransactionReceipt};
 use serde::de::DeserializeOwned;
 use serde_json::json;
+
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -28,25 +30,81 @@ impl RpcEthereumClient {
         }
     }
 
-    pub async fn get_block(
-        &self,
-        block_id: alloy::rpc::types::BlockId,
-    ) -> anyhow::Result<Option<alloy::rpc::types::Block>> {
+    pub async fn get_block(&self, block_id: BlockId) -> anyhow::Result<Option<Block>> {
         self.block(block_id).await
+    }
+
+    pub async fn get_blocks(&self, block_ids: &[BlockId]) -> anyhow::Result<Vec<Option<Block>>> {
+        if block_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut request_ids = Vec::with_capacity(block_ids.len());
+        let requests = block_ids
+            .iter()
+            .map(|block_id| {
+                let request_id = self.next_id();
+                request_ids.push(request_id);
+                let params = match block_id {
+                    BlockId::Number(_) => {
+                        vec![json!(to_hex_block_id(*block_id)), json!(false)]
+                    }
+                    BlockId::Hash(hash) => {
+                        vec![json!(format!("{:#x}", hash.block_hash)), json!(false)]
+                    }
+                };
+
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": match block_id {
+                        BlockId::Number(_) => "eth_getBlockByNumber",
+                        BlockId::Hash(_) => "eth_getBlockByHash",
+                    },
+                    "params": params,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let response = self.http.post(&self.url).json(&requests).send().await?;
+        let value: serde_json::Value = response.json().await?;
+        let Some(items) = value.as_array() else {
+            anyhow::bail!("batch rpc response was not an array: {value}");
+        };
+
+        #[derive(serde::Deserialize)]
+        struct BatchResponse<T> {
+            id: u64,
+            result: Option<T>,
+            error: Option<serde_json::Value>,
+        }
+
+        let mut blocks_by_id = HashMap::new();
+        for item in items {
+            let response: BatchResponse<Block> = serde_json::from_value(item.clone())?;
+            if let Some(error) = response.error {
+                anyhow::bail!("batch rpc call failed for id {}: {error}", response.id);
+            }
+            blocks_by_id.insert(response.id, response.result);
+        }
+
+        let mut blocks = Vec::with_capacity(block_ids.len());
+        for request_id in request_ids {
+            let block = blocks_by_id.remove(&request_id).unwrap_or(None);
+            blocks.push(block);
+        }
+
+        Ok(blocks)
     }
 
     pub async fn get_block_receipts(
         &self,
-        block_id: alloy::rpc::types::BlockId,
-    ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>> {
+        block_id: BlockId,
+    ) -> anyhow::Result<Option<Vec<TransactionReceipt>>> {
         self.block_receipts(block_id).await
     }
 
-    pub async fn get_nonce(
-        &self,
-        address: Address,
-        block_id: alloy::rpc::types::BlockId,
-    ) -> anyhow::Result<u64> {
+    pub async fn get_nonce(&self, address: Address, block_id: BlockId) -> anyhow::Result<u64> {
         self.rpc_call::<String>(
             "eth_getTransactionCount",
             vec![
@@ -62,8 +120,8 @@ impl RpcEthereumClient {
 
     pub async fn get_transaction_by_hash(
         &self,
-        tx_hash: alloy::primitives::B256,
-    ) -> anyhow::Result<Option<alloy::rpc::types::Transaction>> {
+        tx_hash: B256,
+    ) -> anyhow::Result<Option<Transaction>> {
         self.transaction_by_hash(tx_hash).await
     }
 
@@ -119,19 +177,16 @@ impl RpcEthereumClient {
         Ok(serde_json::from_value(result)?)
     }
 
-    async fn block(
-        &self,
-        block_id: alloy::rpc::types::BlockId,
-    ) -> anyhow::Result<Option<alloy::rpc::types::Block>> {
+    async fn block(&self, block_id: BlockId) -> anyhow::Result<Option<Block>> {
         match block_id {
-            alloy::rpc::types::BlockId::Number(_) => {
+            BlockId::Number(_) => {
                 self.rpc_call(
                     "eth_getBlockByNumber",
                     vec![json!(to_hex_block_id(block_id)), json!(false)],
                 )
                 .await
             }
-            alloy::rpc::types::BlockId::Hash(hash) => {
+            BlockId::Hash(hash) => {
                 self.rpc_call(
                     "eth_getBlockByHash",
                     vec![json!(format!("{:#x}", hash.block_hash))],
@@ -143,8 +198,8 @@ impl RpcEthereumClient {
 
     async fn block_receipts(
         &self,
-        block_id: alloy::rpc::types::BlockId,
-    ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>> {
+        block_id: BlockId,
+    ) -> anyhow::Result<Option<Vec<TransactionReceipt>>> {
         self.rpc_call(
             "eth_getBlockReceipts",
             vec![json!(to_hex_block_id(block_id))],
@@ -152,10 +207,7 @@ impl RpcEthereumClient {
         .await
     }
 
-    async fn transaction_by_hash(
-        &self,
-        tx_hash: alloy::primitives::B256,
-    ) -> anyhow::Result<Option<Transaction>> {
+    async fn transaction_by_hash(&self, tx_hash: B256) -> anyhow::Result<Option<Transaction>> {
         self.rpc_call(
             "eth_getTransactionByHash",
             vec![json!(format!("{:#x}", tx_hash))],
@@ -189,14 +241,14 @@ fn hex_to_u64(value: &str) -> anyhow::Result<u64> {
         .map_err(|err| anyhow::anyhow!("failed to parse hex value '{value}': {err}"))
 }
 
-fn to_hex_block_id(block_id: alloy::rpc::types::BlockId) -> String {
+fn to_hex_block_id(block_id: BlockId) -> String {
     match block_id {
-        alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Number(number)) => to_hex_u64(number),
-        alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Latest) => "latest".to_string(),
-        alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Finalized) => "finalized".to_string(),
-        alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Safe) => "safe".to_string(),
-        alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Earliest) => "earliest".to_string(),
-        alloy::rpc::types::BlockId::Number(BlockNumberOrTag::Pending) => "pending".to_string(),
-        alloy::rpc::types::BlockId::Hash(hash) => format!("{:#x}", hash.block_hash),
+        BlockId::Number(BlockNumberOrTag::Number(number)) => to_hex_u64(number),
+        BlockId::Number(BlockNumberOrTag::Latest) => "latest".to_string(),
+        BlockId::Number(BlockNumberOrTag::Finalized) => "finalized".to_string(),
+        BlockId::Number(BlockNumberOrTag::Safe) => "safe".to_string(),
+        BlockId::Number(BlockNumberOrTag::Earliest) => "earliest".to_string(),
+        BlockId::Number(BlockNumberOrTag::Pending) => "pending".to_string(),
+        BlockId::Hash(hash) => format!("{:#x}", hash.block_hash),
     }
 }

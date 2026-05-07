@@ -7,6 +7,7 @@ use crate::protocol::{Chain, IndexedSignRequest};
 use crate::respond_bidirectional::CompletedTx;
 use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
 use crate::stream::{ChainEvent, ChainIndexer, ChainStream, ExecutionOutcome};
+use crate::util::retry;
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
@@ -24,13 +25,13 @@ use mpc_primitives::{
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::ops::Range;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
 use tokio::time::Duration;
 
 const MAX_LIVE_BLOCK_BUFFER: usize = 16384;
+const CATCHUP_BLOCK_BATCH_SIZE: u64 = 32;
 
 fn live_blocks_channel() -> (mpsc::Sender<Block>, mpsc::Receiver<Block>) {
     mpsc::channel(MAX_LIVE_BLOCK_BUFFER)
@@ -565,7 +566,7 @@ impl EthereumClient {
 
     async fn get_block(&self, block_id: BlockId) -> Option<Block> {
         // Configure retry behaviour and delegate to shared retry_async helper.
-        let retry_config = crate::util::retry::RetryConfig::default();
+        let retry_config = retry::RetryConfig::default();
         let get_block_op = |_attempt: usize| async {
             match self {
                 EthereumClient::Helios(client) => client.get_block(block_id).await,
@@ -573,18 +574,18 @@ impl EthereumClient {
             }
         };
 
-        let res = crate::util::retry::retry_async(
+        let res = retry::retry_async(
             retry_config,
             get_block_op,
             |_attempt, _reason| true,
             |attempt, reason, sleep_duration| match reason {
-                crate::util::retry::RetryReason::Error(e) => {
+                retry::RetryReason::Error(e) => {
                     tracing::warn!(
                         client = self.client_name(),
                         "get_block failed (attempt {attempt}) for {block_id:?}: {e:#}; retrying in {sleep_duration:?}"
                     );
                 }
-                crate::util::retry::RetryReason::Timeout(t) => {
+                retry::RetryReason::Timeout(t) => {
                     tracing::warn!(
                         client = self.client_name(),
                         "get_block timed out after {t:?} (attempt {attempt}) for {block_id:?}; retrying in {sleep_duration:?}"
@@ -600,7 +601,7 @@ impl EthereumClient {
                 tracing::warn!(client = self.client_name(), "Block {block_id:?} not found");
                 None
             }
-            Err(crate::util::retry::RetryError::Exhausted {
+            Err(retry::RetryError::Exhausted {
                 attempts,
                 last_error,
             }) => {
@@ -610,7 +611,7 @@ impl EthereumClient {
                 );
                 None
             }
-            Err(crate::util::retry::RetryError::TimeoutExhausted {
+            Err(retry::RetryError::TimeoutExhausted {
                 attempts,
                 last_timeout,
             }) => {
@@ -619,6 +620,70 @@ impl EthereumClient {
                     "get_block timed out for {block_id:?} (last timeout {last_timeout:?}); exhausted after {attempts} attempts"
                 );
                 None
+            }
+        }
+    }
+
+    async fn get_blocks(&self, block_ids: &[BlockId]) -> Vec<Option<Block>> {
+        if block_ids.is_empty() {
+            return Vec::new();
+        }
+
+        let retry_config = retry::RetryConfig::default();
+        let block_ids = block_ids.to_vec();
+        let get_blocks_op = |_attempt: usize| {
+            let block_ids = block_ids.clone();
+            async move {
+                match self {
+                    EthereumClient::Helios(client) => client.get_blocks(&block_ids).await,
+                    EthereumClient::DirectRpc(client) => client.get_blocks(&block_ids).await,
+                }
+            }
+        };
+
+        match retry::retry_async(
+            retry_config,
+            get_blocks_op,
+            |_attempt, _reason| true,
+            |attempt, reason, sleep_duration| match reason {
+                retry::RetryReason::Error(e) => {
+                    tracing::warn!(
+                        client = self.client_name(),
+                        num_blocks = block_ids.len(),
+                        "get_blocks failed (attempt {attempt}): {e:#}; retrying in {sleep_duration:?}"
+                    );
+                }
+                retry::RetryReason::Timeout(t) => {
+                    tracing::warn!(
+                        client = self.client_name(),
+                        num_blocks = block_ids.len(),
+                        "get_blocks timed out after {t:?} (attempt {attempt}); retrying in {sleep_duration:?}"
+                    );
+                }
+            },
+        )
+        .await
+        {
+            Ok(blocks) => blocks,
+            Err(retry::RetryError::Exhausted { attempts, last_error }) => {
+                tracing::warn!(
+                    client = self.client_name(),
+                    num_blocks = block_ids.len(),
+                    "get_blocks failed: {last_error:#}; exhausted after {attempts} attempts"
+                );
+                std::iter::repeat_with(|| None)
+                    .take(block_ids.len())
+                    .collect()
+            }
+            Err(retry::RetryError::TimeoutExhausted { attempts, last_timeout }) => {
+                tracing::warn!(
+                    client = self.client_name(),
+                    num_blocks = block_ids.len(),
+                    "get_blocks timed out (last timeout {last_timeout:?}); exhausted after {attempts} attempts"
+                );
+                std::iter::repeat_with(|| None)
+                    .take(block_ids.len())
+                    .collect()
             }
         }
     }
@@ -785,18 +850,6 @@ impl EthereumIndexer {
                 current_block_number = current_block_number.saturating_add(1);
             }
         }
-    }
-
-    async fn process_height(&self, block_number: u64) -> anyhow::Result<()> {
-        let Some(block) = self
-            .client
-            .get_block(BlockId::Number(BlockNumberOrTag::Number(block_number)))
-            .await
-        else {
-            anyhow::bail!("ethereum block {block_number} not found");
-        };
-
-        self.process_block(&block).await
     }
 
     /// Process the block and emit relevant ChainEvents from the block.
@@ -1235,6 +1288,7 @@ impl EthereumIndexer {
 #[async_trait]
 impl ChainIndexer for EthereumIndexer {
     type Block = Block;
+    type Iter = std::vec::IntoIter<Self::Block>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         let start_block_number = loop {
@@ -1261,7 +1315,7 @@ impl ChainIndexer for EthereumIndexer {
         rx.recv().await
     }
 
-    async fn catchup_range(&mut self, anchor_height: u64) -> Range<u64> {
+    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
         // TODO: start from genesis block of contract deployment instead of
         // anchor_height so that we can start from the very beginning of
         // the history of the network in case where we do not have a checkpoint.
@@ -1276,15 +1330,42 @@ impl ChainIndexer for EthereumIndexer {
             .client
             .clamp_oldest_supported(current_block, anchor_height);
 
-        catchup_start..anchor_height
-    }
+        let mut blocks = Vec::new();
+        let mut batch_start = catchup_start;
 
-    async fn process_catchup_on_height(&mut self, height: u64) -> anyhow::Result<()> {
-        if height.is_multiple_of(10) {
-            tracing::info!(height, "processed ethereum catchup height attempt");
+        while batch_start < anchor_height {
+            let batch_end = batch_start
+                .saturating_add(CATCHUP_BLOCK_BATCH_SIZE)
+                .min(anchor_height);
+            let batch_block_ids = (batch_start..batch_end)
+                .map(|block_number| BlockId::Number(BlockNumberOrTag::Number(block_number)))
+                .collect::<Vec<_>>();
+
+            for (block_number, block) in
+                (batch_start..batch_end).zip(self.client.get_blocks(&batch_block_ids).await)
+            {
+                match block {
+                    Some(block) => blocks.push(block),
+                    None => {
+                        tracing::warn!(block_number, "ethereum catchup block not yet available")
+                    }
+                }
+            }
+
+            batch_start = batch_end;
         }
 
-        self.process_height(height).await
+        blocks.into_iter()
+    }
+
+    async fn process_catchup(&mut self, block: &Self::Block) -> anyhow::Result<()> {
+        let height = block.header.number;
+
+        if height.is_multiple_of(10) {
+            tracing::info!(height, "processed ethereum catchup block attempt");
+        }
+
+        self.process_block(block).await
     }
 
     async fn process(&mut self, block: &Self::Block) -> anyhow::Result<()> {
@@ -1378,6 +1459,9 @@ mod tests {
             EthereumClient::clamp_oldest_supported_with(1, anchor_height, max_catchup_blocks),
             expected_oldest,
         );
+
+        let heights: Vec<u64> = vec![2, 3, 4].into_iter().collect();
+        assert_eq!(heights, vec![2, 3, 4]);
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use solana_sdk::signer::Signer;
 use tokio::sync::watch;
 use tokio::time::timeout;
+use tokio::time::Instant;
 
 use std::time::Duration;
 
@@ -29,7 +30,13 @@ fn test_dependencies() -> (Backlog, watch::Receiver<MeshState>, NodeClient) {
 }
 
 async fn stream_solana(config: SolConfig) -> Result<SolanaStream> {
-    let mut stream = SolanaStream::new(Some(config)).context("failed to create SolanaStream")?;
+    let (backlog, _, _) = test_dependencies();
+    stream_solana_with_backlog(config, backlog).await
+}
+
+async fn stream_solana_with_backlog(config: SolConfig, backlog: Backlog) -> Result<SolanaStream> {
+    let mut stream =
+        SolanaStream::new(Some(config), backlog).context("failed to create SolanaStream")?;
     let _ = ChainStream::start(&mut stream).await?;
     Ok(stream)
 }
@@ -286,7 +293,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
     let program_address = solana.program_keypair.pubkey().to_string();
     let (backlog, _, _) = test_dependencies();
     let config = solana.get_config(program_address.clone());
-    let mut stream1 = stream_solana(config.clone()).await?;
+    let mut stream1 = stream_solana_with_backlog(config.clone(), backlog.clone()).await?;
 
     // Submit request and wait for a block marker
     solana
@@ -300,23 +307,34 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
         )
         .await?;
 
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut checkpoint_block = None;
-    for _ in 0..10 {
-        if let Ok(Some(ChainEvent::Block(block))) =
-            timeout(Duration::from_secs(1), stream1.next_event()).await
-        {
-            checkpoint_block = Some(block);
-            // Set checkpoint in backlog
-            backlog.set_processed_block(Chain::Solana, block).await;
-            break;
+    while Instant::now() < deadline {
+        match timeout(Duration::from_secs(1), stream1.next_event()).await {
+            Ok(Some(ChainEvent::Block(block))) => {
+                checkpoint_block = Some(block);
+                backlog.set_processed_block(Chain::Solana, block).await;
+                break;
+            }
+            Ok(Some(_)) | Ok(None) | Err(_) => continue,
         }
     }
 
-    assert!(checkpoint_block.is_some(), "did not receive block event");
+    assert!(
+        checkpoint_block.is_some(),
+        "did not receive block event within 30 seconds"
+    );
     drop(stream1);
 
     // Create new client with same backlog - should resume from checkpoint
-    let mut stream2 = stream_solana(config).await?;
+    let mut stream2 = stream_solana_with_backlog(config, backlog.clone()).await?;
+
+    // Verify the backlog was persisted
+    let persisted_block = backlog.processed_block(Chain::Solana).await;
+    assert_eq!(
+        persisted_block, checkpoint_block,
+        "backlog did not persist the checkpoint block"
+    );
 
     // Submit new request
     solana

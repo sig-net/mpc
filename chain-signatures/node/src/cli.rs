@@ -427,7 +427,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 }
             };
 
-            if let Some(sol_stream) = SolanaStream::new(sol.clone()) {
+            if let Some(sol_stream) = SolanaStream::new(sol.clone(), backlog.clone()) {
                 tokio::spawn(run_stream(
                     sol_stream,
                     sign_tx.clone(),

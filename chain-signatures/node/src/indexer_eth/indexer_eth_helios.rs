@@ -3,6 +3,7 @@ use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::Address;
 use alloy::primitives::Bytes;
 use alloy::rpc::types::TransactionRequest;
+use futures_util::future::join_all;
 use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -28,6 +29,35 @@ impl HeliosEthereumClient {
         block_id: alloy::rpc::types::BlockId,
     ) -> anyhow::Result<Option<alloy::rpc::types::Block>> {
         self.fetch_block(block_id).await
+    }
+
+    /// Fetch multiple blocks in parallel. If any block fetch fails, it will be logged and returned as None.
+    pub async fn get_blocks(
+        &self,
+        block_ids: &[alloy::rpc::types::BlockId],
+    ) -> anyhow::Result<Vec<Option<alloy::rpc::types::Block>>> {
+        if block_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let blocks = join_all(
+            block_ids
+                .iter()
+                .copied()
+                .map(|block_id| self.get_block(block_id)),
+        )
+        .await
+        .into_iter()
+        .map(|result| match result {
+            Ok(block) => block,
+            Err(err) => {
+                tracing::warn!(?err, "helios batch block fetch failed");
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+        Ok(blocks)
     }
 
     pub async fn get_block_receipts(
