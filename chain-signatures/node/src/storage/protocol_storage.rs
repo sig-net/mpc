@@ -138,6 +138,9 @@ struct ReservedState<Id> {
     /// IDs taken from Redis and actively consumed by a protocol.
     /// Value is `true` if this node is the owner of the artifact.
     using: HashMap<Id, bool>,
+    /// Candidate IDs for a protocol where we are proposer. These are not in
+    /// `using`, yet.
+    mine_reserved: HashSet<Id>,
 }
 
 impl<Id: Eq + std::hash::Hash> ReservedState<Id> {
@@ -145,6 +148,7 @@ impl<Id: Eq + std::hash::Hash> ReservedState<Id> {
         Self {
             generating: HashMap::new(),
             using: HashMap::new(),
+            mine_reserved: HashSet::new(),
         }
     }
 
@@ -153,7 +157,49 @@ impl<Id: Eq + std::hash::Hash> ReservedState<Id> {
     }
 
     fn contains_reserved(&self, id: &Id) -> bool {
-        self.generating.contains_key(id) || self.using.contains_key(id)
+        self.generating.contains_key(id)
+            || self.using.contains_key(id)
+            || self.mine_reserved.contains(id)
+    }
+}
+
+/// A handle for a reserved artifact.
+///
+/// The mine-key has been removed but the artifact data remains in Redis
+/// unfetched. Dropping this without calling [`ArtifactReserved::commit`]
+/// restores the mine-key entry.
+pub struct ArtifactReserved<A: ProtocolArtifact> {
+    pub id: A::Id,
+    /// Participants that held this artifact at reserve time (fetched separately,
+    /// without loading the full artifact data).
+    pub holders: Vec<Participant>,
+    releaser: ArtifactReservedDropper<A>,
+}
+
+struct ArtifactReservedDropper<A: ProtocolArtifact> {
+    id: A::Id,
+    storage: Option<ProtocolStorage<A>>,
+}
+
+impl<A: ProtocolArtifact> Drop for ArtifactReservedDropper<A> {
+    fn drop(&mut self) {
+        if let Some(storage) = self.storage.take() {
+            let id = self.id;
+            tokio::spawn(async move {
+                let result = storage.release_reserved(id).await;
+                if let Err(err) = result {
+                    tracing::error!(?err, id, "failed to release reserved artifact");
+                }
+            });
+        }
+    }
+}
+
+impl<A: ProtocolArtifact> ArtifactReserved<A> {
+    /// Fetch a previously reserved artifact from Redis and delete it atomically.
+    pub async fn commit(mut self, storage: &ProtocolStorage<A>) -> Option<ArtifactTaken<A>> {
+        self.releaser.storage = None; // disarm: Drop must not call release_reserved
+        storage.commit_reserved(self.id).await
     }
 }
 
@@ -330,6 +376,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 .iter()
                 .filter_map(|(&id, &mine)| mine.then_some(id)),
         );
+        ids.extend(state.mine_reserved.iter().copied());
         Ok(ids)
     }
 
@@ -674,6 +721,7 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         let mut state = self.reserved.write().await;
         state.generating.clear();
         state.using.clear();
+        state.mine_reserved.clear();
 
         // if the outcome is None, it means the script failed or there was an error.
         outcome.is_some()
@@ -683,69 +731,124 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     /// It is very important to NOT reuse the same artifact twice for two different
     /// protocols.
     pub async fn take_mine(&self) -> Option<ArtifactTaken<A>> {
-        const SCRIPT: &str = r#"
-            local artifact_key = KEYS[1]
-            local mine_key = KEYS[2]
-
-            if redis.call("SCARD", mine_key) < 1 then
-                return nil
-            end
-
-            -- pop one artifact from the self owner set and delete it once successfully fetched
-            local id = redis.call("SPOP", mine_key)
-            local artifact = redis.call("HGET", artifact_key, id)
-            if not artifact then
-                return {err = "WARN unexpected, artifact " .. id .. " is missing"}
-            end
-
-            -- Delete the artifact from the hash map
-            redis.call("HDEL", artifact_key, id)
-            -- delete the artifact from our self owner set
-            redis.call("SREM", mine_key, id)
-
-            -- Read and delete the holders set
-            local holders_key = artifact_key .. ':holders:' .. id
-            local holders = redis.call("SMEMBERS", holders_key)
-            redis.call("DEL", holders_key)
-
-            -- Return the artifact and holders
-            return {artifact, holders}
-        "#;
-
-        let start = Instant::now();
-        let mut conn = self.connect().await?;
-        let me = self.me().ok()?;
-        let result: Result<Option<(A, Vec<u32>)>, _> = redis::Script::new(SCRIPT)
-            .key(&self.artifact_key)
-            .key(owner_key(&self.owner_keys, me))
-            .invoke_async(&mut conn)
-            .await;
-
-        let elapsed = start.elapsed();
-        crate::metrics::storage::REDIS_LATENCY
-            .with_label_values(&[A::METRIC_LABEL, "take_mine"])
-            .observe(elapsed.as_millis() as f64);
-
-        match result {
-            Ok(Some((mut artifact, holders))) => {
-                let holders = holders.into_iter().map(Participant::from).collect();
-                artifact.set_holders(holders);
-                let id = artifact.id();
-                self.reserved.write().await.using.insert(id, true);
-                let taken = ArtifactTaken::new(artifact, self.clone());
-                tracing::debug!(id, ?elapsed, "took mine artifact");
-                Some(taken)
-            }
-            Ok(None) => None,
-            Err(err) => {
-                tracing::warn!(?err, ?elapsed, "failed to take mine artifact from storage");
-                None
-            }
-        }
+        let mut reserved = self.reserve_mine().await?;
+        // removing releaser.storage stops the releasing on drop
+        let storage = reserved.releaser.storage.take()?;
+        reserved.commit(&storage).await
     }
 
     pub fn artifact_key(&self) -> &str {
         &self.artifact_key
+    }
+
+    /// Read an id but not the content of an artifact from Redis, then mark it
+    /// as used in an in-memory structure.
+    pub async fn reserve_mine(&self) -> Option<ArtifactReserved<A>> {
+        let mut conn = self.connect().await?;
+        let me = self.me().ok()?;
+        let mine_key = owner_key(&self.owner_keys, me);
+
+        let start = Instant::now();
+        let result: Result<Option<A::Id>, _> = conn.spop(&mine_key).await;
+        let elapsed = start.elapsed();
+        crate::metrics::storage::REDIS_LATENCY
+            .with_label_values(&[A::METRIC_LABEL, "reserve_mine"])
+            .observe(elapsed.as_millis() as f64);
+
+        let id = match result {
+            Ok(Some(id)) => id,
+            Ok(None) => return None,
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    ?elapsed,
+                    "failed to reserve mine artifact from storage"
+                );
+                return None;
+            }
+        };
+
+        let holders_key = format!("{}:holders:{}", self.artifact_key, id);
+        let raw_holders: Vec<u32> = conn.smembers(&holders_key).await.unwrap_or_default();
+        let holders = raw_holders.into_iter().map(Participant::from).collect();
+
+        self.reserved.write().await.mine_reserved.insert(id);
+        tracing::debug!(id, ?elapsed, "reserved mine artifact");
+        Some(ArtifactReserved {
+            id,
+            holders,
+            releaser: ArtifactReservedDropper {
+                id,
+                storage: Some(self.clone()),
+            },
+        })
+    }
+
+    /// Fetch and delete a previously reserved artifact from Redis.
+    async fn commit_reserved(&self, id: A::Id) -> Option<ArtifactTaken<A>> {
+        let start = Instant::now();
+        let Some(mut conn) = self.connect().await else {
+            tracing::warn!(id, "failed to commit reserved artifact: connection failed");
+            self.reserved.write().await.mine_reserved.remove(&id);
+            return None;
+        };
+
+        let artifact_result: Result<Option<A>, _> = conn.hget(&self.artifact_key, id).await;
+        let mut artifact = match artifact_result {
+            Ok(Some(a)) => a,
+            Ok(None) => {
+                tracing::warn!(id, "artifact not found for commit");
+                self.reserved.write().await.mine_reserved.remove(&id);
+                return None;
+            }
+            Err(err) => {
+                tracing::warn!(id, ?err, "failed to fetch artifact for commit");
+                self.reserved.write().await.mine_reserved.remove(&id);
+                return None;
+            }
+        };
+
+        let _: Result<i64, _> = conn.hdel(&self.artifact_key, id).await;
+        let holders_key = format!("{}:holders:{}", self.artifact_key, id);
+        let raw_holders: Vec<u32> = conn.smembers(&holders_key).await.unwrap_or_default();
+        let _: Result<i64, _> = conn.del(&holders_key).await;
+
+        let elapsed = start.elapsed();
+        crate::metrics::storage::REDIS_LATENCY
+            .with_label_values(&[A::METRIC_LABEL, "commit_reserved"])
+            .observe(elapsed.as_millis() as f64);
+
+        let holders = raw_holders.into_iter().map(Participant::from).collect();
+        artifact.set_holders(holders);
+        let mut state = self.reserved.write().await;
+        state.mine_reserved.remove(&id);
+        state.using.insert(id, true);
+        drop(state);
+        tracing::debug!(id, ?elapsed, "committed reserved artifact");
+        Some(ArtifactTaken::new(artifact, self.clone()))
+    }
+
+    /// Restore the mine-key entry for a previously reserved artifact.
+    ///
+    /// INVARIANT: Never put back an artifact once it has been removed. This is
+    /// preserved because we never read the artifact itself from redis, only the
+    /// id. Here we only put back the id.
+    async fn release_reserved(&self, id: A::Id) -> anyhow::Result<()> {
+        self.reserved.write().await.mine_reserved.remove(&id);
+        let me = self.me()?;
+        let mine_key = owner_key(&self.owner_keys, me);
+
+        let Some(mut conn) = self.connect().await else {
+            return Err(StorageError::ConnectionFailed)?;
+        };
+
+        let result: Result<i64, _> = conn.sadd(&mine_key, id).await;
+        if let Err(err) = result {
+            tracing::warn!(id, ?err, "failed to restore mine_key for reserved artifact");
+        } else {
+            tracing::debug!(id, "restored mine_key entry for reserved artifact");
+        }
+        Ok(())
     }
 
     /// Batch remove a peer from holders for a set of artifact IDs, and prune
