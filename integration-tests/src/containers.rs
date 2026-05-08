@@ -11,6 +11,7 @@ use crate::NodeConfig;
 use anyhow::{anyhow, Context};
 use async_process::{Child, Command};
 use bollard::container::LogsOptions;
+use bollard::errors::Error as DockerError;
 use bollard::network::CreateNetworkOptions;
 use bollard::secret::Ipam;
 use bollard::Docker;
@@ -49,12 +50,49 @@ use testcontainers::{
     runners::AsyncRunner,
     GenericImage, ImageExt,
 };
+use testcontainers::core::error::{ClientError, TestcontainersError};
 use tokio::io::AsyncWriteExt;
 use tokio::runtime::Builder;
 use tokio::time::sleep;
 use tracing;
 
 pub type Container = ContainerAsync<GenericImage>;
+
+async fn start_container_with_network_retry<I, R, F>(mut build: F, network: &str) -> Result<ContainerAsync<I>, TestcontainersError>
+where
+    I: testcontainers::Image,
+    R: AsyncRunner<I>,
+    F: FnMut() -> R,
+{
+    const ATTEMPTS: usize = 10;
+
+    for attempt in 1..=ATTEMPTS {
+        match build().start().await {
+            Ok(container) => return Ok(container),
+            Err(TestcontainersError::Client(ClientError::StartContainer(
+                DockerError::DockerResponseServerError {
+                    status_code: 404,
+                    message,
+                },
+            ))) if message.contains("failed to set up container networking") => {
+                if attempt == ATTEMPTS {
+                    return Err(TestcontainersError::Client(ClientError::StartContainer(
+                        DockerError::DockerResponseServerError {
+                            status_code: 404,
+                            message,
+                        },
+                    )));
+                }
+
+                tracing::debug!(network = %network, attempt, "waiting for docker network to become available");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    unreachable!("retry loop must return or fail")
+}
 
 pub struct Node {
     pub container: Container,
@@ -149,15 +187,19 @@ impl Node {
             message_options: ctx.message_options.clone(),
         }
         .into_str_args();
-        let container = GenericImage::new("near/mpc-node", "latest")
-            .with_wait_for(WaitFor::Nothing)
-            .with_exposed_port(Self::CONTAINER_PORT.tcp())
-            .with_env_var("RUST_LOG", "mpc_node=DEBUG")
-            .with_env_var("RUST_BACKTRACE", "1")
-            .with_network(&ctx.docker_network)
-            .with_cmd(args)
-            .start()
-            .await
+        let container = start_container_with_network_retry(
+            || {
+                GenericImage::new("near/mpc-node", "latest")
+                    .with_wait_for(WaitFor::Nothing)
+                    .with_exposed_port(Self::CONTAINER_PORT.tcp())
+                    .with_env_var("RUST_LOG", "mpc_node=DEBUG")
+                    .with_env_var("RUST_BACKTRACE", "1")
+                    .with_network(&ctx.docker_network)
+                    .with_cmd(args.clone())
+            },
+            &ctx.docker_network,
+        )
+        .await
             .unwrap();
 
         let ip_address = ctx
@@ -390,12 +432,16 @@ impl Redis {
 
     pub async fn run(spawner: &ClusterSpawner) -> Self {
         tracing::info!("Running Redis container...");
-        let container = GenericImage::new("redis", "7.4.2")
-            .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
-            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
-            .with_network(&spawner.network)
-            .start()
-            .await
+        let container = start_container_with_network_retry(
+            || {
+                GenericImage::new("redis", "7.4.2")
+                    .with_exposed_port(Self::DEFAULT_REDIS_PORT.tcp())
+                    .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+                    .with_network(&spawner.network)
+            },
+            &spawner.network,
+        )
+        .await
             .unwrap();
         let network_ip = spawner
             .docker
@@ -534,12 +580,16 @@ impl EthereumSandbox {
             Self::DEFAULT_MNEMONIC,
         );
 
-        let request = GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
-            .with_exposed_port(Self::RPC_PORT.tcp())
-            .with_network(&spawner.network)
-            .with_cmd(vec![command]);
-
-        let container = request.start().await?;
+        let container = start_container_with_network_retry(
+            || {
+                GenericImage::new("ghcr.io/foundry-rs/foundry", "nightly")
+                    .with_exposed_port(Self::RPC_PORT.tcp())
+                    .with_network(&spawner.network)
+                    .with_cmd(vec![command.clone()])
+            },
+            &spawner.network,
+        )
+        .await?;
 
         let secret_key = derive_secret_key(Self::DEFAULT_MNEMONIC)?;
 
