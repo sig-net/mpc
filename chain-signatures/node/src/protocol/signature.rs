@@ -325,11 +325,19 @@ impl SignState {
     }
 }
 
-struct SignPositor {
-    proposer: Participant,
+struct SignProposer {
     active: BTreeSet<Participant>,
     presignature_id: PresignatureId,
     presignature: Option<PresignatureTaken>,
+}
+
+struct SignDeliberator {
+    proposer: Participant,
+}
+
+enum OrganizedAttempt {
+    Proposer(SignProposer),
+    Deliberator(SignDeliberator),
 }
 
 struct SignGenerating {
@@ -341,7 +349,7 @@ struct SignGenerating {
 
 enum SignPhase {
     Organizing(SignOrganizer),
-    Posit(SignPositor),
+    Posit(OrganizedAttempt),
     Generating(SignGenerating),
     Complete(Result<(), SignError>),
 }
@@ -496,7 +504,7 @@ impl SignOrganizer {
             state.permit = None;
         }
 
-        let (presignature_id, presignature, active) = if is_proposer {
+        if is_proposer {
             tracing::info!(?sign_id, round = ?state.round, "proposer waiting for presignature");
             let active = active.iter().copied().collect::<Vec<_>>();
             let remaining = state.budget.remaining();
@@ -566,21 +574,64 @@ impl SignOrganizer {
 
             // Update active to only include participants that are in both the presignature and active set
             let active = participants.into_iter().collect::<BTreeSet<_>>();
-            (presignature_id, Some(taken), active)
+            SignPhase::Posit(OrganizedAttempt::Proposer(SignProposer {
+                active,
+                presignature_id,
+                presignature: Some(taken),
+            }))
         } else {
-            (PresignatureId::default(), None, active)
-        };
-
-        SignPhase::Posit(SignPositor {
-            proposer,
-            active,
-            presignature_id,
-            presignature,
-        })
+            SignPhase::Posit(OrganizedAttempt::Deliberator(SignDeliberator { proposer }))
+        }
     }
 }
 
-impl SignPositor {
+impl OrganizedAttempt {
+    fn take_current_round_message(
+        state: &mut SignState,
+        task_msg: SignTaskMessage,
+    ) -> Option<(Participant, PositAction)> {
+        let SignTaskMessage::PositMessage {
+            round: peer_round, ..
+        } = task_msg;
+
+        if state.round > peer_round {
+            return None;
+        }
+
+        if state.round < peer_round {
+            tracing::info!(
+                peer_round,
+                my_round = state.round,
+                "Storing message for future round",
+            );
+            state.store_future_posit_message(task_msg);
+            return None;
+        }
+
+        let SignTaskMessage::PositMessage {
+            presignature_id: _,
+            round: _,
+            from,
+            action,
+        } = task_msg;
+
+        Some((from, action))
+    }
+
+    async fn advance(
+        &mut self,
+        ctx: &mut SignTask,
+        state: &mut SignState,
+        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
+    ) -> SignPhase {
+        match self {
+            OrganizedAttempt::Proposer(phase) => phase.advance(ctx, state, task_rx).await,
+            OrganizedAttempt::Deliberator(phase) => phase.advance(ctx, state, task_rx).await,
+        }
+    }
+}
+
+impl SignDeliberator {
     /// Deliberator waits for the proposer to send a Propose message with a presignature_id.
     async fn wait_propose(
         ctx: &mut SignTask,
@@ -761,36 +812,98 @@ impl SignPositor {
         task_rx: &mut mpsc::Receiver<SignTaskMessage>,
     ) -> SignPhase {
         let proposer = self.proposer;
+        let sign_id = ctx.sign_id;
+        let round = state.round;
+
+        tracing::info!(
+            ?sign_id,
+            ?round,
+            ?proposer,
+            "deliberator entering posit phase"
+        );
+        tracing::info!(
+            ?sign_id,
+            ?round,
+            ?proposer,
+            "deliberator waiting for Propose"
+        );
+
+        let presignature_id = match Self::wait_propose(ctx, state, task_rx, proposer).await {
+            Ok(id) => id,
+            Err(phase) => return phase,
+        };
+
+        let remaining = state.budget.remaining();
+        let posit_deadline = tokio::time::sleep(remaining);
+        tokio::pin!(posit_deadline);
+
+        let accepted_participants = loop {
+            tokio::select! {
+                Some(task_msg) = task_rx.recv() => {
+                    let Some((from, action)) = OrganizedAttempt::take_current_round_message(state, task_msg) else {
+                        continue;
+                    };
+
+                    let PositAction::Start(participants) = action else {
+                        continue;
+                    };
+
+                    if from != proposer {
+                        tracing::warn!(?sign_id, ?round, ?from, ?proposer, "received Start from non-proposer, ignoring");
+                        continue;
+                    }
+
+                    if participants.len() < ctx.governance.threshold {
+                        tracing::warn!(
+                            ?sign_id,
+                            ?round,
+                            "not enough start participants"
+                        );
+                        state.bump_round();
+                        return SignPhase::Organizing(SignOrganizer);
+                    }
+
+                    tracing::info!(?sign_id, participant = ?ctx.governance.me, ?participants, "deliberator received Start");
+                    break participants;
+                }
+                _ = &mut posit_deadline => {
+                    tracing::warn!(?sign_id, me=?ctx.governance.me, ?proposer, "deliberator posit timeout waiting for Start, reorganizing");
+                    state.bump_round();
+                    return SignPhase::Organizing(SignOrganizer);
+                }
+            }
+        };
+
+        SignPhase::Generating(SignGenerating {
+            proposer,
+            presignature_id,
+            presignature: None,
+            accepted_participants,
+        })
+    }
+}
+
+impl SignProposer {
+    async fn advance(
+        &mut self,
+        ctx: &mut SignTask,
+        state: &mut SignState,
+        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
+    ) -> SignPhase {
         let active = self.active.clone();
-        let mut presignature_id = self.presignature_id;
+        let presignature_id = self.presignature_id;
         let presignature = self.presignature.take();
 
         let sign_id = ctx.sign_id;
         let round = state.round;
-        let is_proposer = proposer == ctx.governance.me;
-        let is_deliberator = !is_proposer;
 
         tracing::info!(
             ?sign_id,
             ?presignature_id,
             ?round,
-            is_proposer,
-            "entering posit phase"
+            proposer = ?ctx.governance.me,
+            "proposer entering posit phase"
         );
-
-        if is_deliberator {
-            tracing::info!(
-                ?sign_id,
-                ?round,
-                ?proposer,
-                "deliberator waiting for Propose"
-            );
-
-            presignature_id = match Self::wait_propose(ctx, state, task_rx, proposer).await {
-                Ok(id) => id,
-                Err(phase) => return phase,
-            }
-        }
 
         // GUARANTEE: at least threshold participants from organizing phase.
         let posit_participants = active.iter().copied().collect::<Vec<_>>();
@@ -806,105 +919,60 @@ impl SignPositor {
         let accepted_participants = loop {
             tokio::select! {
                 Some(task_msg) = task_rx.recv() => {
-                    let SignTaskMessage::PositMessage { round: peer_round , ..} = task_msg;
+                    let Some((from, action)) = OrganizedAttempt::take_current_round_message(state, task_msg) else {
+                        continue;
+                    };
 
-                    // Ignore messages for older rounds
-                    if state.round > peer_round {
+                    if !counter.process_action(from, &action) {
                         continue;
                     }
 
-                    // Message can't be processed now but is crucial to make progress later.
-                    // Note that we must first try and finish the current round and
-                    // not immediately jump to that higher round. Otherwise, any peer
-                    // could force themselves to be the proposer every time.
-                    if state.round < peer_round {
-                        tracing::info!(
-                            peer_round,
-                            my_round = state.round,
-                            "Storing message for future round",
-                        );
-                        state.store_future_posit_message(task_msg);
-                        continue;
+                    if counter.enough_rejects(ctx.governance.threshold) {
+                        tracing::warn!(?sign_id, ?round, ?from, "received enough REJECTs, reorganizing");
+                        if let Some(_taken) = presignature {
+                            tracing::warn!(?sign_id, "discarding presignature due to REJECTs");
+                        }
+                        state.bump_round();
+                        return SignPhase::Organizing(SignOrganizer);
                     }
 
-                    let SignTaskMessage::PositMessage { presignature_id: _, round: _peer_round, from, action } = task_msg;
-
-                    if is_deliberator {
-                        if let PositAction::Start(participants) = action {
-                            if from != proposer {
-                                tracing::warn!(?sign_id, ?round, ?from, ?proposer, "received Start from non-proposer, ignoring");
-                                continue;
-                            }
-
-                            if participants.len() < ctx.governance.threshold {
-                                tracing::warn!(
-                                    ?sign_id,
-                                    ?round,
-                                    "not enough start participants"
-                                );
-                                state.bump_round();
-                                return SignPhase::Organizing(SignOrganizer);
-                            }
-
-                            tracing::info!(?sign_id, participant = ?ctx.governance.me, ?participants, "deliberator received Start");
-                            break participants;
-                        }
-                    } else {
-                        if !counter.process_action(from, &action) {
-                            continue;
-                        }
-
-                        if counter.enough_rejects(ctx.governance.threshold) {
-                            tracing::warn!(?sign_id, ?round, ?from, "received enough REJECTs, reorganizing");
-                            if let Some(_taken) = presignature {
-                                tracing::warn!(?sign_id, "discarding presignature due to REJECTs");
-                            }
-                            state.bump_round();
-                            return SignPhase::Organizing(SignOrganizer);
-                        }
-
-                        // Starting as soon as we have enough accepts leaves
-                        // participants accepting a bit later in a bad state.
-                        // They will try to become propose in later rounds,
-                        // wasting Presignatures, memory and CPU time.
-                        //
-                        // Instead, wait for at least the `accept_deadline`,
-                        // only nodes answer slower will be left out. This isn't
-                        // perfect but much better than always forcing nodes
-                        // into the bad state.
-                        let ready_to_go = counter.meets_totality() ||  accept_deadline_reached;
-                        if ready_to_go && counter.enough_accepts(ctx.governance.threshold) {
-                            let participants = Self::start_with_current_accepts(
-                                ctx,
-                                state,
-                                counter,
-                                sign_id,
-                                presignature_id
-                            ).await;
-                            break participants;
-                        }
+                    // Starting as soon as we have enough accepts leaves
+                    // participants accepting a bit later in a bad state.
+                    // They will try to become propose in later rounds,
+                    // wasting Presignatures, memory and CPU time.
+                    //
+                    // Instead, wait for at least the `accept_deadline`,
+                    // only nodes answer slower will be left out. This isn't
+                    // perfect but much better than always forcing nodes
+                    // into the bad state.
+                    let ready_to_go = counter.meets_totality() || accept_deadline_reached;
+                    if ready_to_go && counter.enough_accepts(ctx.governance.threshold) {
+                        let participants = Self::start_with_current_accepts(
+                            ctx,
+                            state,
+                            counter,
+                            sign_id,
+                            presignature_id
+                        ).await;
+                        break participants;
                     }
                 }
                 _ = &mut posit_deadline => {
-                    if is_proposer {
-                        tracing::warn!(
-                            ?sign_id,
-                            accepts = counter.accepts.len(),
-                            threshold = ctx.governance.threshold,
-                            ?round,
-                            "proposer posit deadline reached, expiring round"
-                        );
-                        if let Some(_taken) = presignature {
-                            tracing::warn!(?sign_id, "discarding presignature due to proposer timeout");
-                        }
-                    } else {
-                        tracing::warn!(?sign_id, me=?ctx.governance.me, ?proposer, "deliberator posit timeout waiting for Start, reorganizing");
+                    tracing::warn!(
+                        ?sign_id,
+                        accepts = counter.accepts.len(),
+                        threshold = ctx.governance.threshold,
+                        ?round,
+                        "proposer posit deadline reached, expiring round"
+                    );
+                    if let Some(_taken) = presignature {
+                        tracing::warn!(?sign_id, "discarding presignature due to proposer timeout");
                     }
 
                     state.bump_round();
                     return SignPhase::Organizing(SignOrganizer);
                 }
-                _ = &mut accept_deadline, if is_proposer && !accept_deadline_reached => {
+                _ = &mut accept_deadline, if !accept_deadline_reached => {
                     accept_deadline_reached = true;
                     if counter.enough_accepts(ctx.governance.threshold) {
                         let participants = Self::start_with_current_accepts(
@@ -922,7 +990,7 @@ impl SignPositor {
         };
 
         SignPhase::Generating(SignGenerating {
-            proposer,
+            proposer: ctx.governance.me,
             presignature_id,
             presignature,
             accepted_participants,
