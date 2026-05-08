@@ -6,7 +6,7 @@ use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::respond_bidirectional::CompletedTx;
 use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
-use crate::stream::{ChainEvent, ChainIndexer, ChainStream, ExecutionOutcome};
+use crate::stream::{AsyncCatchupIter, ChainEvent, ChainIndexer, ChainStream, ExecutionOutcome};
 use crate::util::retry;
 
 use alloy::eips::BlockNumberOrTag;
@@ -38,6 +38,60 @@ fn live_blocks_channel() -> (mpsc::Sender<MaybeBlock>, mpsc::Receiver<MaybeBlock
 }
 
 type BlockNumber = u64;
+
+pub struct CatchupIter {
+    client: Arc<EthereumClient>,
+    next_block: BlockNumber,
+    end_block: BlockNumber,
+    buffered_blocks: std::vec::IntoIter<MaybeBlock>,
+}
+
+impl CatchupIter {
+    fn new(client: Arc<EthereumClient>, start_block: BlockNumber, end_block: BlockNumber) -> Self {
+        Self {
+            client,
+            next_block: start_block,
+            end_block,
+            buffered_blocks: Vec::new().into_iter(),
+        }
+    }
+
+    async fn fetch_next_batch(&mut self) {
+        if self.next_block >= self.end_block {
+            return;
+        }
+
+        let batch_end = self
+            .next_block
+            .saturating_add(CATCHUP_BLOCK_BATCH_SIZE)
+            .min(self.end_block);
+        let batch_block_ids = (self.next_block..batch_end)
+            .map(|block_number| BlockId::Number(BlockNumberOrTag::Number(block_number)))
+            .collect::<Vec<_>>();
+
+        self.buffered_blocks = self.client.get_blocks(&batch_block_ids).await.into_iter();
+        self.next_block = batch_end;
+    }
+}
+
+#[async_trait]
+impl AsyncCatchupIter for CatchupIter {
+    type Item = MaybeBlock;
+
+    async fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(block) = Iterator::next(&mut self.buffered_blocks) {
+                return Some(block);
+            }
+
+            if self.next_block >= self.end_block {
+                return None;
+            }
+
+            self.fetch_next_batch().await;
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -1303,7 +1357,7 @@ impl EthereumIndexer {
 #[async_trait]
 impl ChainIndexer for EthereumIndexer {
     type Block = MaybeBlock;
-    type Iter = std::vec::IntoIter<Self::Block>;
+    type Iter = CatchupIter;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         let start_block_number = loop {
@@ -1345,33 +1399,15 @@ impl ChainIndexer for EthereumIndexer {
             .client
             .clamp_oldest_supported(current_block, anchor_height);
 
-        let mut blocks = Vec::new();
-        let mut batch_start = catchup_start;
-
-        while batch_start < anchor_height {
-            let batch_end = batch_start
-                .saturating_add(CATCHUP_BLOCK_BATCH_SIZE)
-                .min(anchor_height);
-            let batch_block_ids = (batch_start..batch_end)
-                .map(|block_number| BlockId::Number(BlockNumberOrTag::Number(block_number)))
-                .collect::<Vec<_>>();
-
-            for block in self.client.get_blocks(&batch_block_ids).await {
-                blocks.push(block);
-            }
-
-            batch_start = batch_end;
-        }
-
-        blocks.into_iter()
+        CatchupIter::new(self.client.clone(), catchup_start, anchor_height)
     }
 
     async fn process_catchup(&mut self, block: &Self::Block) -> anyhow::Result<()> {
         let MaybeBlock::Block(block) = block else {
-            let &MaybeBlock::Missing(height) = block else {
+            let &MaybeBlock::Missing(block_id) = block else {
                 unreachable!();
             };
-            tracing::warn!(height, "ethereum catchup block not yet available");
+            tracing::warn!(?block_id, "ethereum catchup block not yet available");
             return Ok(());
         };
 
@@ -1455,13 +1491,15 @@ impl ChainStream for EthereumStream {
 }
 #[cfg(test)]
 mod tests {
-    use super::{EthConfig, EthereumClient, EthereumIndexer, MaybeBlock};
+    use super::{CatchupIter, EthConfig, EthereumClient, EthereumIndexer, MaybeBlock};
     use crate::backlog::Backlog;
     use crate::indexer_eth::indexer_eth_helios;
     use crate::protocol::Chain;
     use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId};
-    use crate::stream::{ChainEvent, ChainIndexer, ExecutionOutcome};
+    use crate::stream::{AsyncCatchupIter, ChainEvent, ChainIndexer, ExecutionOutcome};
+    use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{address, b256, Address};
+    use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
     use mpc_primitives::{SignId, LATEST_MPC_KEY_VERSION};
     use serde_json::json;
@@ -1516,6 +1554,88 @@ mod tests {
             .expect("missing catchup block should not fail");
 
         assert!(events_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn catchup_iter_fetches_batches_lazily() {
+        let mut server = Server::new_async().await;
+
+        fn block_response(request_id: u64, number: u64) -> serde_json::Value {
+            json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "number": format!("0x{number:x}"),
+                    "hash": format!("0x{:064x}", number),
+                    "parentHash": format!("0x{:064x}", number.saturating_sub(1)),
+                    "sha3Uncles": format!("0x{:064x}", 1),
+                    "logsBloom": format!("0x{}", "0".repeat(512)),
+                    "transactionsRoot": format!("0x{:064x}", 2),
+                    "stateRoot": format!("0x{:064x}", 3),
+                    "receiptsRoot": format!("0x{:064x}", 4),
+                    "miner": format!("0x{:040x}", 5),
+                    "difficulty": "0x0",
+                    "totalDifficulty": "0x0",
+                    "extraData": "0x",
+                    "size": "0x1",
+                    "gasLimit": "0x1c9c380",
+                    "gasUsed": "0x0",
+                    "timestamp": "0x1",
+                    "uncles": [],
+                    "nonce": "0x0000000000000000",
+                    "mixHash": format!("0x{:064x}", 9),
+                    "baseFeePerGas": "0x1",
+                    "transactions": []
+                }
+            })
+        }
+
+        let first_batch = (10..42)
+            .enumerate()
+            .map(|(index, block_number)| block_response(index as u64 + 1, block_number))
+            .collect::<Vec<_>>();
+        let second_batch = vec![block_response(33, 42)];
+
+        let second_batch_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r#"\"0x2a\""#.to_string()))
+            .expect(1)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!(second_batch).to_string())
+            .create_async()
+            .await;
+
+        let first_batch_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r#"\"0xa\""#.to_string()))
+            .expect(1)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!(first_batch).to_string())
+            .create_async()
+            .await;
+
+        let client = Arc::new(EthereumClient::DirectRpc(
+            super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
+        ));
+        let mut iter = CatchupIter::new(client, 10, 43);
+
+        for expected_number in 10..42 {
+            let next = iter.next().await;
+            assert!(matches!(
+                next,
+                Some(MaybeBlock::Block(block)) if block.header.number == expected_number
+            ));
+        }
+
+        assert!(first_batch_mock.matched_async().await);
+        assert!(!second_batch_mock.matched_async().await);
+
+        let next = iter.next().await;
+        assert!(matches!(next, Some(MaybeBlock::Block(block)) if block.header.number == 42));
+        assert!(second_batch_mock.matched_async().await);
+        assert!(iter.next().await.is_none());
     }
 
     #[tokio::test]

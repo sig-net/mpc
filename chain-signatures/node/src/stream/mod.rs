@@ -94,9 +94,29 @@ pub enum ExecutionOutcome {
 }
 
 #[async_trait]
+pub trait AsyncCatchupIter: Send + 'static {
+    type Item: Send;
+
+    async fn next(&mut self) -> Option<Self::Item>;
+}
+
+#[async_trait]
+impl<I> AsyncCatchupIter for I
+where
+    I: Iterator + Send + 'static,
+    I::Item: Send,
+{
+    type Item = I::Item;
+
+    async fn next(&mut self) -> Option<Self::Item> {
+        Iterator::next(self)
+    }
+}
+
+#[async_trait]
 pub trait ChainIndexer: Send + 'static {
     type Block: Send;
-    type Iter: Iterator<Item = Self::Block> + Send + 'static;
+    type Iter: AsyncCatchupIter<Item = Self::Block> + Send + 'static;
 
     const RETRY_DELAY: Duration = Duration::from_millis(500);
 
@@ -170,7 +190,8 @@ pub async fn catchup_then_livestream<I: ChainIndexer>(chain: Chain, mut indexer:
         return;
     };
 
-    for catchup_item in indexer.catchup_range(anchor_height).await {
+    let mut catchup_iter = indexer.catchup_range(anchor_height).await;
+    while let Some(catchup_item) = catchup_iter.next().await {
         while let Err(err) = indexer.process_catchup(&catchup_item).await {
             tracing::warn!(?err, %chain, "catchup item processing failed; retrying");
             tokio::time::sleep(I::RETRY_DELAY).await;
