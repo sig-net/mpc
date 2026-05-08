@@ -171,18 +171,19 @@ impl SignLimiter {
 
     /// Updates the limits for concurrent slots
     fn update(&self, new_limit: usize) {
-        let old_limit = {
-            let mut state = self.state.lock().unwrap();
-            let old_limit = state.limit;
-            state.limit = new_limit;
-            old_limit
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(err) => {
+                tracing::error!(new_limit, ?err, "unable to update SignLimiter limits");
+                return;
+            }
         };
+        let old_limit = std::mem::replace(&mut state.limit, new_limit);
 
         // add more permits if the limit increased
         if new_limit > old_limit {
             let mut permits_to_add = new_limit - old_limit;
             if permits_to_add > 0 {
-                let mut state = self.state.lock().unwrap();
                 let forgiven = permits_to_add.min(state.debt);
                 state.debt -= forgiven;
                 permits_to_add -= forgiven;
@@ -199,7 +200,6 @@ impl SignLimiter {
 
         let forgotten = self.semaphore.forget_permits(permits_to_remove);
         if forgotten < permits_to_remove {
-            let mut state = self.state.lock().unwrap();
             state.debt += permits_to_remove - forgotten;
         }
     }
