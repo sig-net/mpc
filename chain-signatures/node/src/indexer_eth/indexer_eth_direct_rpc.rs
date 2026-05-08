@@ -105,7 +105,7 @@ impl RpcEthereumClient {
 
             let block = match response.result {
                 Some(block) => MaybeBlock::Block(block),
-                None => missing_block(block_id),
+                None => MaybeBlock::Missing(block_id),
             };
             blocks_by_id.insert(response.id, block);
         }
@@ -115,7 +115,7 @@ impl RpcEthereumClient {
             .map(|(request_id, block_id)| {
                 blocks_by_id
                     .remove(&request_id)
-                    .unwrap_or_else(|| missing_block(block_id))
+                    .unwrap_or_else(|| MaybeBlock::Missing(block_id))
             })
             .collect();
         Ok(blocks)
@@ -240,16 +240,6 @@ impl RpcEthereumClient {
     }
 }
 
-fn missing_block(block_id: BlockId) -> MaybeBlock {
-    match block_id {
-        BlockId::Number(BlockNumberOrTag::Number(block_number)) => {
-            MaybeBlock::Missing(block_number)
-        }
-        BlockId::Number(tag) => panic!("expected numbered block id, got {tag:?}"),
-        BlockId::Hash(hash) => panic!("expected numbered block id, got hash {hash:?}"),
-    }
-}
-
 fn format_address(address: Address) -> String {
     format!("0x{}", address.encode_hex())
 }
@@ -284,5 +274,78 @@ fn to_hex_block_id(block_id: BlockId) -> String {
         BlockId::Number(BlockNumberOrTag::Earliest) => "earliest".to_string(),
         BlockId::Number(BlockNumberOrTag::Pending) => "pending".to_string(),
         BlockId::Hash(hash) => format!("{:#x}", hash.block_hash),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RpcEthereumClient;
+    use crate::indexer_eth::MaybeBlock;
+    use alloy::eips::BlockNumberOrTag;
+    use alloy::rpc::types::BlockId;
+    use mockito::{Matcher, Server};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn get_blocks_keeps_request_order_when_rpc_responses_are_reordered() {
+        let mut server = Server::new_async().await;
+        let client = RpcEthereumClient::new(&server.url());
+        let block_ids = vec![
+            BlockId::Number(BlockNumberOrTag::Number(7)),
+            BlockId::Number(BlockNumberOrTag::Number(8)),
+        ];
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!([
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "result": null
+                    },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "number": "0x7",
+                            "hash": format!("0x{:064x}", 7),
+                            "parentHash": format!("0x{:064x}", 6),
+                            "sha3Uncles": format!("0x{:064x}", 1),
+                            "logsBloom": format!("0x{}", "0".repeat(512)),
+                            "transactionsRoot": format!("0x{:064x}", 2),
+                            "stateRoot": format!("0x{:064x}", 3),
+                            "receiptsRoot": format!("0x{:064x}", 4),
+                            "miner": format!("0x{:040x}", 5),
+                            "difficulty": "0x0",
+                            "totalDifficulty": "0x0",
+                            "extraData": "0x",
+                            "size": "0x1",
+                            "gasLimit": "0x1c9c380",
+                            "gasUsed": "0x0",
+                            "timestamp": "0x1",
+                            "uncles": [],
+                            "nonce": "0x0000000000000000",
+                            "mixHash": format!("0x{:064x}", 9),
+                            "baseFeePerGas": "0x1",
+                            "transactions": []
+                        }
+                    }
+                ])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let blocks = client
+            .get_blocks(&block_ids)
+            .await
+            .expect("batch fetch should succeed");
+
+        assert!(matches!(&blocks[0], MaybeBlock::Block(block) if block.header.number == 7));
+        assert!(matches!(&blocks[1], MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(8)))));
     }
 }

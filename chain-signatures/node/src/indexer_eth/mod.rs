@@ -43,7 +43,7 @@ type BlockNumber = u64;
 #[allow(clippy::large_enum_variant)]
 pub enum MaybeBlock {
     Block(Block),
-    Missing(BlockNumber),
+    Missing(BlockId),
 }
 
 pub struct BlockAndRequests {
@@ -707,8 +707,9 @@ impl EthereumClient {
             EthereumClient::DirectRpc(client) => client.get_nonce(address, block_id).await,
         }
     }
+
     fn missing_block(block_id: BlockId) -> MaybeBlock {
-        MaybeBlock::Missing(Self::block_number_from_id(block_id))
+        MaybeBlock::Missing(block_id)
     }
 
     fn block_number_from_id(block_id: BlockId) -> BlockNumber {
@@ -1510,7 +1511,7 @@ mod tests {
         };
 
         indexer
-            .process_catchup(&MaybeBlock::Missing(42))
+            .process_catchup(&MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(12))))
             .await
             .expect("missing catchup block should not fail");
 

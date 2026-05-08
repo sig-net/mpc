@@ -50,10 +50,10 @@ impl HeliosEthereumClient {
         .into_iter()
         .map(|(block_id, result)| match result {
             Ok(Some(block)) => MaybeBlock::Block(block),
-            Ok(None) => missing_block(block_id),
+            Ok(None) => MaybeBlock::Missing(block_id),
             Err(err) => {
                 tracing::warn!(?err, "helios batch block fetch failed");
-                missing_block(block_id)
+                MaybeBlock::Missing(block_id)
             }
         })
         .collect::<Vec<_>>();
@@ -139,14 +139,6 @@ impl HeliosEthereumClient {
         self.client.get_block(block_id, false).await.map_err(|err| {
             anyhow::anyhow!("Failed to fetch block for block id {block_id:?}: {:?}", err)
         })
-    }
-}
-
-fn missing_block(block_id: BlockId) -> MaybeBlock {
-    match block_id {
-        BlockId::Number(BlockNumberOrTag::Number(block_number)) => MaybeBlock::Missing(block_number),
-        BlockId::Number(tag) => panic!("expected numbered block id, got {tag:?}"),
-        BlockId::Hash(hash) => panic!("expected numbered block id, got hash {hash:?}"),
     }
 }
 
