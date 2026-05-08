@@ -9,6 +9,7 @@ use crate::protocol::message::{
 };
 use crate::protocol::posit::{PositAction, SinglePositCounter};
 use crate::protocol::presignature::PresignatureId;
+use crate::protocol::SignKind;
 use crate::protocol::{Chain, ProtocolState};
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
@@ -18,7 +19,6 @@ use crate::stream::ops::SignBidirectionalEvent;
 use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap, TimeoutBudget};
 
-use crate::protocol::SignKind;
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::PresignOutput;
 use chrono::Utc;
@@ -31,7 +31,7 @@ use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
@@ -152,26 +152,26 @@ struct SignLimitState {
 #[derive(Clone, Debug)]
 struct SignLimiter {
     semaphore: Arc<Semaphore>,
-    state: Arc<Mutex<SignLimitState>>,
+    state: Arc<RwLock<SignLimitState>>,
 }
 
 #[derive(Debug)]
 struct SignPermit {
     permit: Option<OwnedSemaphorePermit>,
-    state: Arc<Mutex<SignLimitState>>,
+    state: Arc<RwLock<SignLimitState>>,
 }
 
 impl SignLimiter {
     fn new(limit: usize) -> Self {
         Self {
             semaphore: Arc::new(Semaphore::new(limit)),
-            state: Arc::new(Mutex::new(SignLimitState { limit, debt: 0 })),
+            state: Arc::new(RwLock::new(SignLimitState { limit, debt: 0 })),
         }
     }
 
     /// Updates the limits for concurrent slots
     fn update(&self, new_limit: usize) {
-        let mut state = match self.state.lock() {
+        let mut state = match self.state.write() {
             Ok(state) => state,
             Err(err) => {
                 tracing::error!(new_limit, ?err, "unable to update SignLimiter limits");
@@ -227,10 +227,10 @@ impl Drop for SignPermit {
         let Some(permit) = self.permit.take() else {
             return;
         };
-        let mut state = match self.state.lock() {
+        let mut state = match self.state.write() {
             Ok(state) => state,
             Err(err) => {
-                tracing::error!(?err, "failed to acquire lock in ProposerPermit drop");
+                tracing::error!(?err, "failed to acquire lock in SignPermit drop");
                 return;
             }
         };
