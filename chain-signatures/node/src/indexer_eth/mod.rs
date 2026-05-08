@@ -33,11 +33,18 @@ use tokio::time::Duration;
 const MAX_LIVE_BLOCK_BUFFER: usize = 16384;
 const CATCHUP_BLOCK_BATCH_SIZE: u64 = 32;
 
-fn live_blocks_channel() -> (mpsc::Sender<Block>, mpsc::Receiver<Block>) {
+fn live_blocks_channel() -> (mpsc::Sender<MaybeBlock>, mpsc::Receiver<MaybeBlock>) {
     mpsc::channel(MAX_LIVE_BLOCK_BUFFER)
 }
 
 type BlockNumber = u64;
+
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
+pub enum MaybeBlock {
+    Block(Block),
+    Missing(BlockNumber),
+}
 
 pub struct BlockAndRequests {
     block_number: u64,
@@ -624,7 +631,7 @@ impl EthereumClient {
         }
     }
 
-    async fn get_blocks(&self, block_ids: &[BlockId]) -> Vec<Option<Block>> {
+    async fn get_blocks(&self, block_ids: &[BlockId]) -> Vec<MaybeBlock> {
         if block_ids.is_empty() {
             return Vec::new();
         }
@@ -671,9 +678,7 @@ impl EthereumClient {
                     num_blocks = block_ids.len(),
                     "get_blocks failed: {last_error:#}; exhausted after {attempts} attempts"
                 );
-                std::iter::repeat_with(|| None)
-                    .take(block_ids.len())
-                    .collect()
+                block_ids.iter().copied().map(Self::missing_block).collect()
             }
             Err(retry::RetryError::TimeoutExhausted { attempts, last_timeout }) => {
                 tracing::warn!(
@@ -681,9 +686,7 @@ impl EthereumClient {
                     num_blocks = block_ids.len(),
                     "get_blocks timed out (last timeout {last_timeout:?}); exhausted after {attempts} attempts"
                 );
-                std::iter::repeat_with(|| None)
-                    .take(block_ids.len())
-                    .collect()
+                block_ids.iter().copied().map(Self::missing_block).collect()
             }
         }
     }
@@ -702,6 +705,17 @@ impl EthereumClient {
         match self {
             EthereumClient::Helios(client) => client.get_nonce(address, block_id).await,
             EthereumClient::DirectRpc(client) => client.get_nonce(address, block_id).await,
+        }
+    }
+    fn missing_block(block_id: BlockId) -> MaybeBlock {
+        MaybeBlock::Missing(Self::block_number_from_id(block_id))
+    }
+
+    fn block_number_from_id(block_id: BlockId) -> BlockNumber {
+        match block_id {
+            BlockId::Number(BlockNumberOrTag::Number(block_number)) => block_number,
+            BlockId::Number(tag) => panic!("expected numbered block id, got {tag:?}"),
+            BlockId::Hash(hash) => panic!("expected numbered block id, got hash {hash:?}"),
         }
     }
 
@@ -775,7 +789,7 @@ pub struct EthereumIndexer {
     events_tx: mpsc::Sender<ChainEvent>,
     contract_address: Address,
     catchup_complete: Arc<Notify>,
-    live_blocks_rx: Option<mpsc::Receiver<Block>>,
+    live_blocks_rx: Option<mpsc::Receiver<MaybeBlock>>,
 }
 
 impl EthereumIndexer {
@@ -805,7 +819,7 @@ impl EthereumIndexer {
         client: Arc<EthereumClient>,
         catchup_complete: Arc<Notify>,
         start_block_number: u64,
-        live_blocks: mpsc::Sender<Block>,
+        live_blocks: mpsc::Sender<MaybeBlock>,
     ) {
         tracing::info!("indexing ethereum live blocks");
 
@@ -838,7 +852,7 @@ impl EthereumIndexer {
                     break;
                 };
 
-                if let Err(err) = live_blocks.send(block).await {
+                if let Err(err) = live_blocks.send(MaybeBlock::Block(block)).await {
                     tracing::warn!(
                         ?err,
                         current_block_number,
@@ -1287,7 +1301,7 @@ impl EthereumIndexer {
 
 #[async_trait]
 impl ChainIndexer for EthereumIndexer {
-    type Block = Block;
+    type Block = MaybeBlock;
     type Iter = std::vec::IntoIter<Self::Block>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
@@ -1341,15 +1355,8 @@ impl ChainIndexer for EthereumIndexer {
                 .map(|block_number| BlockId::Number(BlockNumberOrTag::Number(block_number)))
                 .collect::<Vec<_>>();
 
-            for (block_number, block) in
-                (batch_start..batch_end).zip(self.client.get_blocks(&batch_block_ids).await)
-            {
-                match block {
-                    Some(block) => blocks.push(block),
-                    None => {
-                        tracing::warn!(block_number, "ethereum catchup block not yet available")
-                    }
-                }
+            for block in self.client.get_blocks(&batch_block_ids).await {
+                blocks.push(block);
             }
 
             batch_start = batch_end;
@@ -1359,6 +1366,14 @@ impl ChainIndexer for EthereumIndexer {
     }
 
     async fn process_catchup(&mut self, block: &Self::Block) -> anyhow::Result<()> {
+        let MaybeBlock::Block(block) = block else {
+            let &MaybeBlock::Missing(height) = block else {
+                unreachable!();
+            };
+            tracing::warn!(height, "ethereum catchup block not yet available");
+            return Ok(());
+        };
+
         let height = block.header.number;
 
         if height.is_multiple_of(10) {
@@ -1369,6 +1384,10 @@ impl ChainIndexer for EthereumIndexer {
     }
 
     async fn process(&mut self, block: &Self::Block) -> anyhow::Result<()> {
+        let MaybeBlock::Block(block) = block else {
+            anyhow::bail!("ethereum live stream yielded missing block")
+        };
+
         self.process_block(block).await?;
         Ok(())
     }
@@ -1435,12 +1454,12 @@ impl ChainStream for EthereumStream {
 }
 #[cfg(test)]
 mod tests {
-    use super::{EthConfig, EthereumClient, EthereumIndexer};
+    use super::{EthConfig, EthereumClient, EthereumIndexer, MaybeBlock};
     use crate::backlog::Backlog;
     use crate::indexer_eth::indexer_eth_helios;
     use crate::protocol::Chain;
     use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId};
-    use crate::stream::{ChainEvent, ExecutionOutcome};
+    use crate::stream::{ChainEvent, ChainIndexer, ExecutionOutcome};
     use alloy::primitives::{address, b256, Address};
     use mockito::{Matcher, Server};
     use mpc_primitives::{SignId, LATEST_MPC_KEY_VERSION};
@@ -1462,6 +1481,40 @@ mod tests {
 
         let heights: Vec<u64> = vec![2, 3, 4].into_iter().collect();
         assert_eq!(heights, vec![2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn missing_catchup_block_is_skipped() {
+        let backlog = Backlog::new();
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+        let mut indexer = EthereumIndexer {
+            eth: EthConfig {
+                account_sk: String::new(),
+                consensus_rpc_http_url: String::new(),
+                execution_rpc_http_url: String::new(),
+                contract_address: format!("{:x}", Address::ZERO),
+                network: "sepolia".to_string(),
+                helios_data_path: "/tmp/helios-test".to_string(),
+                refresh_finalized_interval: 100,
+                optimistic_requests: true,
+                light_client: false,
+            },
+            backlog,
+            client: Arc::new(EthereumClient::DirectRpc(
+                super::indexer_eth_direct_rpc::RpcEthereumClient::new("http://127.0.0.1:1"),
+            )),
+            events_tx,
+            contract_address: Address::ZERO,
+            catchup_complete: Arc::new(Notify::new()),
+            live_blocks_rx: None,
+        };
+
+        indexer
+            .process_catchup(&MaybeBlock::Missing(42))
+            .await
+            .expect("missing catchup block should not fail");
+
+        assert!(events_rx.try_recv().is_err());
     }
 
     #[tokio::test]

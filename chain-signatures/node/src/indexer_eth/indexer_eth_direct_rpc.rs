@@ -1,3 +1,4 @@
+use crate::indexer_eth::MaybeBlock;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, B256};
@@ -34,17 +35,15 @@ impl RpcEthereumClient {
         self.block(block_id).await
     }
 
-    pub async fn get_blocks(&self, block_ids: &[BlockId]) -> anyhow::Result<Vec<Option<Block>>> {
+    pub async fn get_blocks(&self, block_ids: &[BlockId]) -> anyhow::Result<Vec<MaybeBlock>> {
         if block_ids.is_empty() {
             return Ok(Vec::new());
         }
 
-        let mut request_ids = Vec::with_capacity(block_ids.len());
         let requests = block_ids
             .iter()
             .map(|block_id| {
                 let request_id = self.next_id();
-                request_ids.push(request_id);
                 let params = match block_id {
                     BlockId::Number(_) => {
                         vec![json!(to_hex_block_id(*block_id)), json!(false)]
@@ -54,21 +53,34 @@ impl RpcEthereumClient {
                     }
                 };
 
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "method": match block_id {
-                        BlockId::Number(_) => "eth_getBlockByNumber",
-                        BlockId::Hash(_) => "eth_getBlockByHash",
-                    },
-                    "params": params,
-                })
+                (
+                    request_id,
+                    *block_id,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "method": match block_id {
+                            BlockId::Number(_) => "eth_getBlockByNumber",
+                            BlockId::Hash(_) => "eth_getBlockByHash",
+                        },
+                        "params": params,
+                    }),
+                )
             })
             .collect::<Vec<_>>();
 
-        let response = self.http.post(&self.url).json(&requests).send().await?;
+        let request_ids = requests
+            .iter()
+            .map(|(request_id, block_id, _)| (*request_id, *block_id))
+            .collect::<Vec<_>>();
+        let payload = requests
+            .into_iter()
+            .map(|(_, _, request)| request)
+            .collect::<Vec<_>>();
+
+        let response = self.http.post(&self.url).json(&payload).send().await?;
         let value: serde_json::Value = response.json().await?;
-        let Some(items) = value.as_array() else {
+        let serde_json::Value::Array(items) = value else {
             anyhow::bail!("batch rpc response was not an array: {value}");
         };
 
@@ -79,21 +91,33 @@ impl RpcEthereumClient {
             error: Option<serde_json::Value>,
         }
 
-        let mut blocks_by_id = HashMap::new();
+        let requested_blocks = request_ids.iter().copied().collect::<HashMap<_, _>>();
+        let mut blocks_by_id = HashMap::with_capacity(request_ids.len());
         for item in items {
-            let response: BatchResponse<Block> = serde_json::from_value(item.clone())?;
+            let response: BatchResponse<Block> = serde_json::from_value(item)?;
             if let Some(error) = response.error {
                 anyhow::bail!("batch rpc call failed for id {}: {error}", response.id);
             }
-            blocks_by_id.insert(response.id, response.result);
+
+            let Some(block_id) = requested_blocks.get(&response.id).copied() else {
+                anyhow::bail!("batch rpc response contained unknown id {}", response.id);
+            };
+
+            let block = match response.result {
+                Some(block) => MaybeBlock::Block(block),
+                None => missing_block(block_id),
+            };
+            blocks_by_id.insert(response.id, block);
         }
 
-        let mut blocks = Vec::with_capacity(block_ids.len());
-        for request_id in request_ids {
-            let block = blocks_by_id.remove(&request_id).unwrap_or(None);
-            blocks.push(block);
-        }
-
+        let blocks = request_ids
+            .into_iter()
+            .map(|(request_id, block_id)| {
+                blocks_by_id
+                    .remove(&request_id)
+                    .unwrap_or_else(|| missing_block(block_id))
+            })
+            .collect();
         Ok(blocks)
     }
 
@@ -213,6 +237,16 @@ impl RpcEthereumClient {
             vec![json!(format!("{:#x}", tx_hash))],
         )
         .await
+    }
+}
+
+fn missing_block(block_id: BlockId) -> MaybeBlock {
+    match block_id {
+        BlockId::Number(BlockNumberOrTag::Number(block_number)) => {
+            MaybeBlock::Missing(block_number)
+        }
+        BlockId::Number(tag) => panic!("expected numbered block id, got {tag:?}"),
+        BlockId::Hash(hash) => panic!("expected numbered block id, got hash {hash:?}"),
     }
 }
 

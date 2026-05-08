@@ -1,4 +1,4 @@
-use crate::indexer_eth::EthConfig;
+use crate::indexer_eth::{EthConfig, MaybeBlock};
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::Address;
 use alloy::primitives::Bytes;
@@ -31,11 +31,11 @@ impl HeliosEthereumClient {
         self.fetch_block(block_id).await
     }
 
-    /// Fetch multiple blocks in parallel. If any block fetch fails, it will be logged and returned as None.
+    /// Fetch multiple blocks in parallel. Missing blocks stay associated with requested height.
     pub async fn get_blocks(
         &self,
         block_ids: &[alloy::rpc::types::BlockId],
-    ) -> anyhow::Result<Vec<Option<alloy::rpc::types::Block>>> {
+    ) -> anyhow::Result<Vec<MaybeBlock>> {
         if block_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -44,15 +44,16 @@ impl HeliosEthereumClient {
             block_ids
                 .iter()
                 .copied()
-                .map(|block_id| self.get_block(block_id)),
+                .map(|block_id| async move { (block_id, self.get_block(block_id).await) }),
         )
         .await
         .into_iter()
-        .map(|result| match result {
-            Ok(block) => block,
+        .map(|(block_id, result)| match result {
+            Ok(Some(block)) => MaybeBlock::Block(block),
+            Ok(None) => missing_block(block_id),
             Err(err) => {
                 tracing::warn!(?err, "helios batch block fetch failed");
-                None
+                missing_block(block_id)
             }
         })
         .collect::<Vec<_>>();
@@ -138,6 +139,14 @@ impl HeliosEthereumClient {
         self.client.get_block(block_id, false).await.map_err(|err| {
             anyhow::anyhow!("Failed to fetch block for block id {block_id:?}: {:?}", err)
         })
+    }
+}
+
+fn missing_block(block_id: BlockId) -> MaybeBlock {
+    match block_id {
+        BlockId::Number(BlockNumberOrTag::Number(block_number)) => MaybeBlock::Missing(block_number),
+        BlockId::Number(tag) => panic!("expected numbered block id, got {tag:?}"),
+        BlockId::Hash(hash) => panic!("expected numbered block id, got hash {hash:?}"),
     }
 }
 

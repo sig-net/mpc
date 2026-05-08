@@ -417,14 +417,13 @@ impl ChainIndexer for SolanaIndexer {
 
     async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
         // Get the last persisted processed block height from backlog
-        let last_processed = self
+        // TODO: https://github.com/sig-net/mpc/issues/777
+        let start_slot = self
             .backlog
             .processed_block(Chain::Solana)
             .await
             .map(|n| n.saturating_add(1))
-            .unwrap_or(0);
-        // TODO: https://github.com/sig-net/mpc/issues/777
-        let start_slot = last_processed.max(1); // Ensure we start from at least slot 1
+            .unwrap_or(anchor_height);
         let end_slot = anchor_height.saturating_sub(1); // We want to catch up to just before the anchor
 
         // This fetches a sparse list of transactions based on whether our program received
