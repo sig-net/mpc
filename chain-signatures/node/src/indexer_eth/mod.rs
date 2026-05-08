@@ -732,7 +732,7 @@ impl EthereumClient {
                     num_blocks = block_ids.len(),
                     "get_blocks failed: {last_error:#}; exhausted after {attempts} attempts"
                 );
-                block_ids.iter().copied().map(Self::missing_block).collect()
+                block_ids.iter().copied().map(MaybeBlock::Missing).collect()
             }
             Err(retry::RetryError::TimeoutExhausted { attempts, last_timeout }) => {
                 tracing::warn!(
@@ -740,7 +740,7 @@ impl EthereumClient {
                     num_blocks = block_ids.len(),
                     "get_blocks timed out (last timeout {last_timeout:?}); exhausted after {attempts} attempts"
                 );
-                block_ids.iter().copied().map(Self::missing_block).collect()
+                block_ids.iter().copied().map(MaybeBlock::Missing).collect()
             }
         }
     }
@@ -762,11 +762,7 @@ impl EthereumClient {
         }
     }
 
-    fn missing_block(block_id: BlockId) -> MaybeBlock {
-        MaybeBlock::Missing(block_id)
-    }
-
-    fn block_number_from_id(block_id: BlockId) -> BlockNumber {
+    pub fn block_number_from_id(block_id: BlockId) -> BlockNumber {
         match block_id {
             BlockId::Number(BlockNumberOrTag::Number(block_number)) => block_number,
             BlockId::Number(tag) => panic!("expected numbered block id, got {tag:?}"),
@@ -1403,16 +1399,24 @@ impl ChainIndexer for EthereumIndexer {
     }
 
     async fn process_catchup(&mut self, block: &Self::Block) -> anyhow::Result<()> {
-        let MaybeBlock::Block(block) = block else {
-            let &MaybeBlock::Missing(block_id) = block else {
-                unreachable!();
-            };
-            tracing::warn!(?block_id, "ethereum catchup block not yet available");
-            return Ok(());
+        // NOTE: oh rust: needed otherwise the block gets dropped before we can use
+        // it, since it `block` is of reference type. Maybe the language will let
+        // us elide this in the future, but for now we need to introduce a new var.
+        let _block;
+
+        let block = match block {
+            MaybeBlock::Block(block) => block,
+            MaybeBlock::Missing(block_id) => {
+                tracing::warn!(?block_id, "ethereum catchup block missing from batch; refetching");
+                let Some(block) = self.client.get_block(*block_id).await else {
+                    anyhow::bail!("ethereum catchup block {block_id:?} is still unavailable after refetch")
+                };
+                _block = block;
+                &_block
+            }
         };
 
         let height = block.header.number;
-
         if height.is_multiple_of(10) {
             tracing::info!(height, "processed ethereum catchup block attempt");
         }
@@ -1523,7 +1527,103 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_catchup_block_is_skipped() {
+    async fn missing_catchup_block_is_refetched() {
+        let mut server = Server::new_async().await;
+        let backlog = Backlog::new();
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": ["0xc", false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "number": "0xc",
+                        "hash": format!("0x{:064x}", 12),
+                        "parentHash": format!("0x{:064x}", 11),
+                        "sha3Uncles": format!("0x{:064x}", 1),
+                        "logsBloom": format!("0x{}", "0".repeat(512)),
+                        "transactionsRoot": format!("0x{:064x}", 2),
+                        "stateRoot": format!("0x{:064x}", 3),
+                        "receiptsRoot": format!("0x{:064x}", 4),
+                        "miner": format!("0x{:040x}", 5),
+                        "difficulty": "0x0",
+                        "totalDifficulty": "0x0",
+                        "extraData": "0x",
+                        "size": "0x1",
+                        "gasLimit": "0x1c9c380",
+                        "gasUsed": "0x0",
+                        "timestamp": "0x1",
+                        "uncles": [],
+                        "nonce": "0x0000000000000000",
+                        "mixHash": format!("0x{:064x}", 9),
+                        "baseFeePerGas": "0x1",
+                        "transactions": []
+                    }
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockReceipts",
+                "params": ["0xc"]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": null,
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mut indexer = EthereumIndexer {
+            eth: EthConfig {
+                account_sk: String::new(),
+                consensus_rpc_http_url: server.url(),
+                execution_rpc_http_url: server.url(),
+                contract_address: format!("{:x}", Address::ZERO),
+                network: "sepolia".to_string(),
+                helios_data_path: "/tmp/helios-test".to_string(),
+                refresh_finalized_interval: 100,
+                optimistic_requests: true,
+                light_client: false,
+            },
+            backlog,
+            client: Arc::new(EthereumClient::DirectRpc(
+                super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
+            )),
+            events_tx,
+            contract_address: Address::ZERO,
+            catchup_complete: Arc::new(Notify::new()),
+            live_blocks_rx: None,
+        };
+
+        indexer
+            .process_catchup(&MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(12))))
+            .await
+            .expect("missing catchup block should be refetched successfully");
+
+        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(12))));
+    }
+
+    #[tokio::test]
+    async fn missing_catchup_block_returns_error_when_refetch_fails() {
         let backlog = Backlog::new();
         let (events_tx, mut events_rx) = mpsc::channel(1);
         let mut indexer = EthereumIndexer {
@@ -1548,12 +1648,15 @@ mod tests {
             live_blocks_rx: None,
         };
 
-        indexer
+        let err = indexer
             .process_catchup(&MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(12))))
             .await
-            .expect("missing catchup block should not fail");
+            .expect_err("missing catchup block should fail when refetch cannot recover it");
 
         assert!(events_rx.try_recv().is_err());
+        assert!(err
+            .to_string()
+            .contains("still unavailable after refetch"));
     }
 
     #[tokio::test]
