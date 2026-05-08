@@ -220,6 +220,16 @@ impl SignLimiter {
             state: Arc::clone(&self.state),
         })
     }
+
+    fn limits(&self) -> usize {
+        match self.state.read() {
+            Ok(state) => state.limit,
+            Err(err) => {
+                tracing::error!(?err, "failed to acquire lock in SignLimiter::limits");
+                0
+            }
+        }
+    }
 }
 
 impl Drop for SignPermit {
@@ -460,7 +470,7 @@ impl SignOrganizer {
                 ?sign_id,
                 round = ?state.round,
                 timeout = ?remaining,
-                limit = ctx.cfg.signature.max_concurrent_proposers,
+                limit = ctx.limiter.limits(),
                 "proposer waiting for concurrency slot"
             );
 
