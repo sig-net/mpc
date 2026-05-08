@@ -258,12 +258,17 @@ struct SignState {
     /// Budget for the current organizing+posit attempt.
     budget: TimeoutBudget,
     permit: Option<SignPermit>,
-    /// The highest round sent by a peer
+    inbox: RoundInbox,
+}
+
+#[derive(Debug, Default)]
+struct RoundInbox {
+    /// The highest round sent by a peer.
     highest_seen_round: usize,
-    /// Posit message for `highest_seen_round` round.
+    /// Posit messages for `highest_seen_round`.
     ///
-    /// These are later processed, if the task reaches the `highest_seen_round`
-    /// as a deliberator. Proposers do not reprocess old messages. A valid peer
+    /// These are later processed if the task reaches `highest_seen_round` as a
+    /// deliberator. Proposers do not reprocess old messages. A valid peer
     /// would not have sent a posit message before the proposer proposes.
     ///
     /// INVARIANT: All messages stored here are for `highest_seen_round`. Must
@@ -271,35 +276,12 @@ struct SignState {
     buffered_messages: VecDeque<SignTaskMessage>,
 }
 
-impl SignState {
-    fn new(indexed: IndexedSignRequest, mesh_state: watch::Receiver<MeshState>) -> Self {
-        Self {
-            round: 0,
-            indexed,
-            mesh_state,
-            budget: TimeoutBudget::new(ORGANIZE_POSIT_TIMEOUT),
-            permit: None,
-            highest_seen_round: 0,
-            buffered_messages: VecDeque::new(),
-        }
+impl RoundInbox {
+    fn next_round(&self, round: usize) -> usize {
+        std::cmp::max(round + 1, self.highest_seen_round)
     }
 
-    fn indexed(&self) -> &IndexedSignRequest {
-        &self.indexed
-    }
-
-    fn bump_round(&mut self) {
-        let prev_round = self.round;
-        self.round = std::cmp::max(self.round + 1, self.highest_seen_round);
-        // Reset the budget for the new attempt
-        self.budget.reset(ORGANIZE_POSIT_TIMEOUT);
-        self.permit = None;
-        tracing::debug!(prev_round, new_round = self.round, "bumped round");
-    }
-
-    /// When receiving posit message for future rounds, store them away until
-    /// that round is reached.
-    fn store_future_posit_message(&mut self, msg: SignTaskMessage) {
+    fn store_future(&mut self, msg: SignTaskMessage) {
         let SignTaskMessage::PositMessage {
             round: peer_round, ..
         } = msg;
@@ -314,14 +296,38 @@ impl SignState {
         self.buffered_messages.push_back(msg);
     }
 
-    /// Remove a buffered message for processing, if there is one for the
-    /// current round.
-    fn take_buffered_posit_message(&mut self) -> Option<SignTaskMessage> {
-        if self.highest_seen_round == self.round {
+    fn take_current(&mut self, round: usize) -> Option<SignTaskMessage> {
+        if self.highest_seen_round == round {
             self.buffered_messages.pop_front()
         } else {
             None
         }
+    }
+}
+
+impl SignState {
+    fn new(indexed: IndexedSignRequest, mesh_state: watch::Receiver<MeshState>) -> Self {
+        Self {
+            round: 0,
+            indexed,
+            mesh_state,
+            budget: TimeoutBudget::new(ORGANIZE_POSIT_TIMEOUT),
+            permit: None,
+            inbox: RoundInbox::default(),
+        }
+    }
+
+    fn indexed(&self) -> &IndexedSignRequest {
+        &self.indexed
+    }
+
+    fn bump_round(&mut self) {
+        let prev_round = self.round;
+        self.round = self.inbox.next_round(self.round);
+        // Reset the budget for the new attempt
+        self.budget.reset(ORGANIZE_POSIT_TIMEOUT);
+        self.permit = None;
+        tracing::debug!(prev_round, new_round = self.round, "bumped round");
     }
 }
 
@@ -604,7 +610,7 @@ impl OrganizedAttempt {
                 my_round = state.round,
                 "Storing message for future round",
             );
-            state.store_future_posit_message(task_msg);
+            state.inbox.store_future(task_msg);
             return None;
         }
 
@@ -645,7 +651,7 @@ impl SignDeliberator {
         let outcome = tokio::time::timeout(remaining, async {
             loop {
                 // Prioritize buffered messages, if any for the current round
-                let task_msg = match state.take_buffered_posit_message() {
+                let task_msg = match state.inbox.take_current(state.round) {
                     Some(buffered) => buffered,
                     None => {
                         let Some(task_msg) = task_rx.recv().await else {
@@ -698,7 +704,7 @@ impl SignDeliberator {
                         my_round = state.round,
                         "Storing message for future round, as deliberator",
                     );
-                    state.store_future_posit_message(task_msg);
+                    state.inbox.store_future(task_msg);
                     continue;
                 }
 
@@ -1438,6 +1444,7 @@ impl SignTask {
 }
 
 /// Message types that can be sent to a running signature task
+#[derive(Debug)]
 enum SignTaskMessage {
     PositMessage {
         presignature_id: PresignatureId,
