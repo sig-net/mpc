@@ -4,7 +4,8 @@ use super::artifact_task::{
 use super::message::{MessageChannel, PositProtocolId, TripleMessage};
 use super::posit::PositAction;
 use super::MpcSignProtocol;
-use crate::storage::triple_storage::{TriplePair, TriplePairSlot, TripleStorage};
+use crate::storage::protocol_storage::ProtocolStorage;
+use crate::storage::triple_storage::TriplePair;
 use crate::types::TripleProtocol;
 use crate::util::AffinePointExt;
 
@@ -33,7 +34,6 @@ pub struct Triple {
 // ── TripleGenerator ───────────────────────────────────────────────────────────
 
 pub struct TripleGenerationDriver {
-    slot: TriplePairSlot,
 }
 
 #[async_trait]
@@ -46,6 +46,7 @@ impl ProtocolGeneratorDriver for TripleGenerationDriver {
     )>;
     type InMessage = TripleMessage;
     type WireMessage = TripleMessage;
+    type Artifact = TriplePair;
 
     fn poke_mode(&self) -> PokeMode {
         PokeMode::Blocking
@@ -142,7 +143,7 @@ impl ProtocolGeneratorDriver for TripleGenerationDriver {
         run_elapsed: Duration,
         total_wait: Duration,
         total_pokes: usize,
-    ) {
+    ) -> Option<Self::Artifact> {
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS_SUCCESS.inc();
         crate::metrics::protocols::TRIPLE_LATENCY.observe(run_elapsed.as_secs_f64());
         crate::metrics::protocols::TRIPLE_LATENCY_TOTAL.observe(created.elapsed().as_secs_f64());
@@ -151,7 +152,7 @@ impl ProtocolGeneratorDriver for TripleGenerationDriver {
 
         let [first, second, ..] = &outputs[..] else {
             tracing::warn!(id, triples = outputs.len(), "unexpected: not enough triples to make pair");
-            return;
+            return None;
         };
         let first = Triple {
             share: first.0.clone(),
@@ -179,13 +180,12 @@ impl ProtocolGeneratorDriver for TripleGenerationDriver {
             crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATIONS_OWNED_SUCCESS.inc();
         }
 
-        let pair = TriplePair {
+        Some(TriplePair {
             id,
             triple0: first,
             triple1: second,
             holders: Some(participants.to_vec()),
-        };
-        self.slot.insert(pair, owner).await;
+        })
     }
 }
 
@@ -194,7 +194,7 @@ impl ProtocolGeneratorDriver for TripleGenerationDriver {
 /// Shared context for all triple-generation tasks.
 #[derive(Clone)]
 pub struct TripleContext {
-    pub storage: TripleStorage,
+    pub storage: ProtocolStorage<TriplePair>,
     pub msg: MessageChannel,
     pub node_account_id: String,
 }
@@ -207,8 +207,8 @@ impl ArtifactProtocol for TripleArtifact {
     type ProposerState = ();
     type GenerationDeps = ();
     type Context = TripleContext;
+    type Artifact = TriplePair;
     type GeneratorDriver = TripleGenerationDriver;
-    const USE_PROTOCOL_BUILDER: bool = true;
 
     fn posit_id(task_id: TripleId) -> PositProtocolId {
         PositProtocolId::Triple(task_id)
@@ -301,7 +301,7 @@ impl ArtifactProtocol for TripleArtifact {
         };
 
         let inbox = ctx.msg.subscribe_triple(task_id).await;
-        let driver = TripleGenerationDriver { slot };
+        let driver = TripleGenerationDriver {};
 
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS.inc();
         Some(ProtocolBuildOutput {
@@ -309,12 +309,10 @@ impl ArtifactProtocol for TripleArtifact {
             participants: sorted_participants,
             protocol,
             inbox,
+            msg: ctx.msg,
+            slot: Some(slot),
             driver,
         })
-    }
-
-    fn message_channel(ctx: &Self::Context) -> MessageChannel {
-        ctx.msg.clone()
     }
 
     async fn subscribe_posit(

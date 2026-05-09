@@ -14,6 +14,7 @@ use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId};
 use crate::protocol::posit::PositAction;
+use crate::storage::protocol_storage::{ArtifactSlot, ProtocolArtifact};
 use crate::util::JoinMap;
 
 /// Delay after threshold accepts before the proposer broadcasts Start.
@@ -61,6 +62,7 @@ pub trait ProtocolGeneratorDriver: Send + Sync {
     type Output: Send + 'static;
     type InMessage: Send;
     type WireMessage: Send;
+    type Artifact: ProtocolArtifact;
 
     fn poke_mode(&self) -> PokeMode;
 
@@ -112,7 +114,7 @@ pub trait ProtocolGeneratorDriver: Send + Sync {
         run_elapsed: Duration,
         total_wait: Duration,
         total_pokes: usize,
-    )
+    ) -> Option<Self::Artifact>
     where
         Self: Sized;
 }
@@ -128,6 +130,7 @@ pub struct ProtocolGenerator<D: ProtocolGeneratorDriver> {
     timeout: Duration,
     inbox: mpsc::Receiver<D::InMessage>,
     msg: MessageChannel,
+    slot: Option<ArtifactSlot<D::Artifact>>,
     driver: D,
 }
 
@@ -136,6 +139,8 @@ pub struct ProtocolBuildOutput<D: ProtocolGeneratorDriver> {
     pub participants: Vec<Participant>,
     pub protocol: D::Protocol,
     pub inbox: mpsc::Receiver<D::InMessage>,
+    pub msg: MessageChannel,
+    pub slot: Option<ArtifactSlot<D::Artifact>>,
     pub driver: D,
 }
 
@@ -151,6 +156,7 @@ impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
         timeout: Duration,
         inbox: mpsc::Receiver<D::InMessage>,
         msg: MessageChannel,
+        slot: Option<ArtifactSlot<D::Artifact>>,
         driver: D,
     ) -> Self {
         Self {
@@ -164,6 +170,7 @@ impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
             timeout,
             inbox,
             msg,
+            slot,
             driver,
         }
     }
@@ -290,7 +297,8 @@ impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
                     self.send_private(to, data).await;
                 }
                 Action::Return(output) => {
-                    self.driver
+                    let artifact = self
+                        .driver
                         .finish(
                             self.id,
                             self.me,
@@ -303,6 +311,10 @@ impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
                             total_pokes,
                         )
                         .await;
+
+                    if let (Some(slot), Some(artifact)) = (self.slot.as_mut(), artifact) {
+                        slot.insert(artifact, self.owner).await;
+                    }
                     break;
                 }
             }
@@ -329,41 +341,7 @@ async fn run_generation_task<T: ArtifactProtocol>(
         return;
     };
 
-    if T::USE_PROTOCOL_BUILDER {
-        let Some(build) = T::build_protocol(
-            task_id,
-            me,
-            owner,
-            participants,
-            threshold,
-            epoch,
-            dependencies,
-            ctx.clone(),
-            timeout,
-        )
-        .await
-        else {
-            return;
-        };
-
-        ProtocolGenerator::new(
-            build.id,
-            epoch,
-            me,
-            owner,
-            build.participants,
-            build.protocol,
-            timeout,
-            build.inbox,
-            T::message_channel(&ctx),
-            build.driver,
-        )
-        .run()
-        .await;
-        return;
-    }
-
-    T::run_generation(
+    let Some(build) = T::build_protocol(
         task_id,
         me,
         owner,
@@ -371,9 +349,28 @@ async fn run_generation_task<T: ArtifactProtocol>(
         threshold,
         epoch,
         dependencies,
-        ctx,
+        ctx.clone(),
         timeout,
     )
+    .await
+    else {
+        return;
+    };
+
+    ProtocolGenerator::new(
+        build.id,
+        epoch,
+        me,
+        owner,
+        build.participants,
+        build.protocol,
+        timeout,
+        build.inbox,
+        build.msg,
+        build.slot,
+        build.driver,
+    )
+    .run()
     .await;
 }
 
@@ -672,11 +669,11 @@ pub trait ArtifactProtocol: Sized + Send + 'static {
     /// Shared context passed to every task (storage, msg channel, keys, …).
     type Context: Clone + Send + Sync + 'static;
 
+    /// Artifact stored by this protocol.
+    type Artifact: ProtocolArtifact;
+
     /// Driver used by the generic protocol generation loop.
     type GeneratorDriver: ProtocolGeneratorDriver;
-
-    /// Enable generic build->run flow. Disabled protocols use `run_generation`.
-    const USE_PROTOCOL_BUILDER: bool = false;
 
     /// Returns the [`PositProtocolId`] for outgoing posit messages.
     fn posit_id(task_id: Self::TaskId) -> PositProtocolId;
@@ -739,8 +736,6 @@ pub trait ArtifactProtocol: Sized + Send + 'static {
     ) -> impl std::future::Future<Output = Option<Self::GenerationDeps>> + Send;
 
     /// Build protocol + inbox + driver after posit completes.
-    ///
-    /// Returning `None` falls back to [`ArtifactProtocol::run_generation`].
     fn build_protocol(
         task_id: Self::TaskId,
         me: Participant,
@@ -751,35 +746,7 @@ pub trait ArtifactProtocol: Sized + Send + 'static {
         dependencies: Self::GenerationDeps,
         ctx: Self::Context,
         timeout: Duration,
-    ) -> impl std::future::Future<Output = Option<ProtocolBuildOutput<Self::GeneratorDriver>>> + Send {
-        async move {
-            let _ = (task_id, me, owner, participants, threshold, epoch, dependencies, ctx, timeout);
-            None
-        }
-    }
-
-    /// Fallback generation path used when [`ArtifactProtocol::build_protocol`]
-    /// is not implemented.
-    fn run_generation(
-        task_id: Self::TaskId,
-        me: Participant,
-        owner: Participant,
-        participants: Vec<Participant>,
-        threshold: usize,
-        epoch: u64,
-        dependencies: Self::GenerationDeps,
-        ctx: Self::Context,
-        timeout: Duration,
-    ) -> impl std::future::Future<Output = ()> + Send {
-        async move {
-            let _ = (task_id, me, owner, participants, threshold, epoch, dependencies, ctx, timeout);
-        }
-    }
-
-    /// Message channel used by the generic protocol generator.
-    fn message_channel(_ctx: &Self::Context) -> MessageChannel {
-        panic!("ArtifactProtocol::message_channel must be implemented when build_protocol is used")
-    }
+    ) -> impl std::future::Future<Output = Option<ProtocolBuildOutput<Self::GeneratorDriver>>> + Send;
 
     /// Subscribe to the global posit stream for this protocol type.
     fn subscribe_posit(
@@ -1187,6 +1154,7 @@ mod tests {
         type Output = ();
         type InMessage = ();
         type WireMessage = ();
+        type Artifact = crate::storage::triple_storage::TriplePair;
 
         fn poke_mode(&self) -> PokeMode {
             PokeMode::Inline
@@ -1261,7 +1229,101 @@ mod tests {
             _run_elapsed: Duration,
             _total_wait: Duration,
             _total_pokes: usize,
+        ) -> Option<Self::Artifact> {
+            None
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockGeneratorDriver {
+        completed: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ProtocolGeneratorDriver for MockGeneratorDriver {
+        type Id = u64;
+        type Protocol = ();
+        type Output = ();
+        type InMessage = ();
+        type WireMessage = ();
+        type Artifact = crate::storage::triple_storage::TriplePair;
+
+        fn poke_mode(&self) -> PokeMode {
+            PokeMode::Inline
+        }
+
+        fn protocol_poke(
+            _protocol: &mut Self::Protocol,
+        ) -> Result<Action<Self::Output>, ProtocolError> {
+            Ok(Action::Return(()))
+        }
+
+        fn protocol_message(_protocol: &mut Self::Protocol, _from: Participant, _data: MessageData) {}
+
+        fn split_incoming(_msg: Self::InMessage) -> (Participant, MessageData) {
+            unreachable!()
+        }
+
+        fn build_message(
+            &self,
+            _id: Self::Id,
+            _epoch: u64,
+            _from: Participant,
+            _to: Participant,
+            _data: MessageData,
+        ) -> Self::WireMessage {
+            unreachable!()
+        }
+
+        async fn send_message(
+            &self,
+            _msg: &MessageChannel,
+            _from: Participant,
+            _to: Participant,
+            _wire: Self::WireMessage,
         ) {
+        }
+
+        fn observe_before_poke_delay(&self, _created: Instant) {}
+
+        fn observe_poke_cpu_time(&self, _elapsed: Duration) {}
+
+        fn on_poke_protocol_error(
+            &mut self,
+            _me: Participant,
+            _owner: Participant,
+            _err: ProtocolError,
+        ) {
+        }
+
+        fn on_poke_join_error(
+            &mut self,
+            _me: Participant,
+            _owner: Participant,
+            _err: tokio::task::JoinError,
+        ) {
+        }
+
+        fn on_recv_closed(&mut self, _id: Self::Id, _owner: Participant) {}
+
+        fn on_recv_timeout(&mut self, _id: Self::Id, _owner: Participant) {}
+
+        fn on_drop(&self, _id: Self::Id, _msg: MessageChannel) {}
+
+        async fn finish(
+            &mut self,
+            _id: Self::Id,
+            _me: Participant,
+            _owner: Participant,
+            _participants: &[Participant],
+            _created: Instant,
+            _output: Self::Output,
+            _run_elapsed: Duration,
+            _total_wait: Duration,
+            _total_pokes: usize,
+        ) -> Option<Self::Artifact> {
+            self.completed.fetch_add(1, Ordering::SeqCst);
+            None
         }
     }
 
@@ -1293,7 +1355,8 @@ mod tests {
         type ProposerState = ();
         type GenerationDeps = ();
         type Context = MockContext;
-        type GeneratorDriver = NoopGeneratorDriver;
+        type Artifact = crate::storage::triple_storage::TriplePair;
+        type GeneratorDriver = MockGeneratorDriver;
 
         fn posit_id(task_id: u64) -> PositProtocolId {
             PositProtocolId::Triple(task_id)
@@ -1360,18 +1423,30 @@ mod tests {
             Some(())
         }
 
-        async fn run_generation(
-            _task_id: u64,
+        async fn build_protocol(
+            task_id: u64,
             _me: Participant,
             _owner: Participant,
-            _participants: Vec<Participant>,
+            participants: Vec<Participant>,
             _threshold: usize,
             _epoch: u64,
             _dependencies: (),
             ctx: MockContext,
             _timeout: Duration,
-        ) {
-            ctx.completed.fetch_add(1, Ordering::SeqCst);
+        ) -> Option<ProtocolBuildOutput<Self::GeneratorDriver>> {
+            let inbox = mpsc::channel(1).1;
+            let (_inbox, _outbox, msg) = crate::protocol::message::MessageChannel::new();
+            Some(ProtocolBuildOutput {
+                id: task_id,
+                participants,
+                protocol: (),
+                inbox,
+                msg,
+                slot: None,
+                driver: MockGeneratorDriver {
+                    completed: ctx.completed,
+                },
+            })
         }
 
         async fn subscribe_posit(
@@ -1547,6 +1622,7 @@ mod tests {
             type ProposerState = ();
             type GenerationDeps = ();
             type Context = RejectCtx;
+            type Artifact = crate::storage::triple_storage::TriplePair;
             type GeneratorDriver = NoopGeneratorDriver;
 
             fn posit_id(id: u64) -> PositProtocolId {
@@ -1592,7 +1668,7 @@ mod tests {
             ) -> Option<()> {
                 Some(())
             }
-            async fn run_generation(
+            async fn build_protocol(
                 _: u64,
                 _: Participant,
                 _: Participant,
@@ -1600,10 +1676,10 @@ mod tests {
                 _: usize,
                 _: u64,
                 _: (),
-                ctx: RejectCtx,
+                _: RejectCtx,
                 _: Duration,
-            ) {
-                ctx.completed.fetch_add(1, Ordering::SeqCst);
+            ) -> Option<ProtocolBuildOutput<Self::GeneratorDriver>> {
+                None
             }
             async fn subscribe_posit(_: &RejectCtx) -> mpsc::Receiver<(u64, Participant, PositAction)> {
                 mpsc::channel(1).1

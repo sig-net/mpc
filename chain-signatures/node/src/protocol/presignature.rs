@@ -6,10 +6,8 @@ use super::posit::PositAction;
 use super::triple::TripleId;
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::MpcSignProtocol;
-use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage};
-use crate::storage::triple_storage::{TriplesTaken, TriplesTakenDropper};
-use crate::storage::protocol_storage::ProtocolArtifact;
-use crate::storage::TripleStorage;
+use crate::storage::protocol_storage::{ProtocolArtifact, ProtocolStorage};
+use crate::storage::triple_storage::{TriplePair, TriplesTaken, TriplesTakenDropper};
 use crate::types::{PresignatureProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
 
@@ -113,7 +111,6 @@ impl<'de> Deserialize<'de> for Presignature {
 
 pub struct PresignatureGenerationDriver {
     dropper: TriplesTakenDropper,
-    slot: PresignatureSlot,
 }
 
 #[async_trait]
@@ -123,6 +120,7 @@ impl ProtocolGeneratorDriver for PresignatureGenerationDriver {
     type Output = PresignOutput<Secp256k1>;
     type InMessage = PresignatureMessage;
     type WireMessage = PresignatureMessage;
+    type Artifact = Presignature;
 
     fn poke_mode(&self) -> PokeMode {
         PokeMode::Inline
@@ -220,7 +218,7 @@ impl ProtocolGeneratorDriver for PresignatureGenerationDriver {
         run_elapsed: Duration,
         total_wait: Duration,
         total_pokes: usize,
-    ) {
+    ) -> Option<Self::Artifact> {
         crate::metrics::protocols::PRESIGNATURE_LATENCY.observe(run_elapsed.as_secs_f64());
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS.inc();
         crate::metrics::protocols::PRESIGNATURE_ACCRUED_WAIT_DELAY
@@ -240,13 +238,12 @@ impl ProtocolGeneratorDriver for PresignatureGenerationDriver {
             crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS.inc();
         }
 
-        let presignature = Presignature {
+        Some(Presignature {
             id,
             output,
             participants: participants.to_vec(),
             holders: Some(participants.to_vec()),
-        };
-        self.slot.insert(presignature, owner).await;
+        })
     }
 }
 
@@ -257,7 +254,7 @@ impl ProtocolGeneratorDriver for PresignatureGenerationDriver {
 #[allow(clippy::large_enum_variant)]
 enum PendingTriples {
     Available(TriplesTaken),
-    InStorage(TripleId, TripleStorage),
+    InStorage(TripleId, ProtocolStorage<TriplePair>),
 }
 
 pub struct PresignatureGenerationDeps(PendingTriples);
@@ -295,8 +292,8 @@ impl PendingTriples {
 /// Shared context for all presignature-generation tasks.
 #[derive(Clone)]
 pub struct PresignatureContext {
-    pub triples: TripleStorage,
-    pub presignatures: PresignatureStorage,
+    pub triples: ProtocolStorage<TriplePair>,
+    pub presignatures: ProtocolStorage<Presignature>,
     pub msg: MessageChannel,
     pub private_share: SecretKeyShare,
     pub public_key: PublicKey,
@@ -311,8 +308,8 @@ impl ArtifactProtocol for PresignatureArtifact {
     type ProposerState = TriplesTaken;
     type GenerationDeps = PresignatureGenerationDeps;
     type Context = PresignatureContext;
+    type Artifact = Presignature;
     type GeneratorDriver = PresignatureGenerationDriver;
-    const USE_PROTOCOL_BUILDER: bool = true;
 
     fn posit_id(task_id: FullPresignatureId) -> PositProtocolId {
         PositProtocolId::Presignature(task_id)
@@ -430,7 +427,7 @@ impl ArtifactProtocol for PresignatureArtifact {
         task_id: FullPresignatureId,
         me: Participant,
         owner: Participant,
-        participants: Vec<Participant>,
+        mut participants: Vec<Participant>,
         threshold: usize,
         _epoch: u64,
         dependencies: PresignatureGenerationDeps,
@@ -447,8 +444,7 @@ impl ArtifactProtocol for PresignatureArtifact {
             public_key: ctx.public_key,
         };
 
-        let mut sorted_participants = participants.clone();
-        sorted_participants.sort();
+        participants.sort();
 
         let Some(triples) = dependencies.0.fetch(owner, timeout).await else {
             return None;
@@ -456,9 +452,9 @@ impl ArtifactProtocol for PresignatureArtifact {
 
         let (pair, dropper) = triples.take();
         let protocol: PresignatureProtocol = match cait_sith::presign(
-            &sorted_participants,
+            &participants,
             me,
-            &sorted_participants,
+            &participants,
             me,
             PresignArguments {
                 triple0: (pair.triple0.share, pair.triple0.public),
@@ -481,18 +477,16 @@ impl ArtifactProtocol for PresignatureArtifact {
 
         let inbox = ctx.msg.subscribe_presignature(task_id.id).await;
 
-        let driver = PresignatureGenerationDriver { dropper, slot };
+        let driver = PresignatureGenerationDriver { dropper };
         Some(ProtocolBuildOutput {
             id: task_id.id,
-            participants: sorted_participants,
+            participants,
             protocol,
             inbox,
+            msg: ctx.msg,
+            slot: Some(slot),
             driver,
         })
-    }
-
-    fn message_channel(ctx: &Self::Context) -> MessageChannel {
-        ctx.msg.clone()
     }
 
     async fn subscribe_posit(
