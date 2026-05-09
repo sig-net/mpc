@@ -145,7 +145,7 @@ impl<T> Subscriber<T> {
         }
     }
 
-    pub fn estimated_queue_len(&self) -> usize {
+    pub fn estimated_len(&self) -> usize {
         match &self.kind {
             SubscriberKind::Subscribed(tx) | SubscriberKind::Unsubscribed(tx, _) => {
                 tx.max_capacity() - tx.capacity()
@@ -155,10 +155,7 @@ impl<T> Subscriber<T> {
     }
 
     pub fn report_queue_len(&self) {
-        crate::metrics::messaging::set_channel_queue_size(
-            self.metrics.name,
-            self.estimated_queue_len(),
-        );
+        crate::metrics::messaging::set_channel_queue_size(self.metrics.name, self.estimated_len());
     }
 
     pub fn clear_queue_len_metric(&self) {
@@ -183,11 +180,11 @@ mod tests {
     async fn estimated_queue_len_tracks_buffered_messages() {
         let sub = Subscriber::unsubscribed_with_capacity("test", 4);
 
-        assert_eq!(sub.estimated_queue_len(), 0);
+        assert_eq!(sub.estimated_len(), 0);
 
         sub.send(1u8).await.unwrap();
         sub.send(2u8).await.unwrap();
 
-        assert_eq!(sub.estimated_queue_len(), 2);
+        assert_eq!(sub.estimated_len(), 2);
     }
 }

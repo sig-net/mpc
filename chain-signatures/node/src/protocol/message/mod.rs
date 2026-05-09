@@ -4,6 +4,7 @@ mod types;
 
 pub use sub::Subscriber;
 
+use crate::metrics;
 use crate::protocol::message::sub::{
     SubscribeId, SubscribeRequest, SubscribeRequestAction, SubscribeResponse,
 };
@@ -41,7 +42,7 @@ pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
 
 fn report_channel_queue_len<T>(name: &'static str, tx: &mpsc::Sender<T>) {
-    crate::metrics::messaging::set_channel_queue_size(name, tx.max_capacity() - tx.capacity());
+    metrics::messaging::set_channel_queue_size(name, tx.max_capacity() - tx.capacity());
 }
 
 pub struct MessageInbox {
@@ -146,30 +147,31 @@ impl MessageInbox {
             Message::Triple(message) => {
                 // NOTE: not logging the error because this is simply just channel closure.
                 // The error message should be reported on the generator side.
-                let _ = self
+                let sub = self
                     .triple
                     .entry(message.id)
-                    .or_insert_with(|| Subscriber::unsubscribed("triple_task"))
-                    .send(message)
-                    .await;
+                    .or_insert_with(|| Subscriber::unsubscribed("triple_task"));
+                let _ = sub.send(message).await;
+                metrics::messaging::observe_queue_size("triple_task", sub.estimated_len());
             }
             Message::Presignature(message) => {
-                let _ = self
+                let sub = self
                     .presignature
                     .entry(message.id)
-                    .or_insert_with(|| Subscriber::unsubscribed("presign_task"))
-                    .send(message)
-                    .await;
+                    .or_insert_with(|| Subscriber::unsubscribed("presign_task"));
+                let _ = sub.send(message).await;
+                metrics::messaging::observe_queue_size("presign_task", sub.estimated_len());
             }
             Message::Signature(message) => {
-                let _ = self
+                let sub = self
                     .signature
                     .entry((message.id, message.presignature_id))
-                    .or_insert_with(|| Subscriber::unsubscribed("sign_task"))
-                    .send(message)
-                    .await;
+                    .or_insert_with(|| Subscriber::unsubscribed("sign_task"));
+                let _ = sub.send(message).await;
+                metrics::messaging::observe_queue_size("sign_task", sub.estimated_len());
             }
             Message::Unknown(entries) => {
+                metrics::messaging::observe_queue_size("unknown", entries.len());
                 tracing::warn!(
                     entries = ?entries.iter().map(|(k, v)| (k, cbor_name(v))).collect::<Vec<_>>(),
                     "inbox: received unknown message type",
@@ -946,12 +948,12 @@ impl MessageOutbox {
                 let info = participants.get(&to).unwrap();
                 let url = info.url.clone();
 
-                crate::metrics::messaging::NUM_SEND_ENCRYPTED_TOTAL.inc_by(message_len as f64);
+                metrics::messaging::NUM_SEND_ENCRYPTED_TOTAL.inc_by(message_len as f64);
 
                 let client = client.clone();
                 tokio::spawn(async move {
                     let instant = Instant::now();
-                    crate::metrics::messaging::MSG_CLIENT_SEND_DELAY
+                    metrics::messaging::MSG_CLIENT_SEND_DELAY
                         .observe((instant - timestamp).as_millis() as f64);
                     let payload = &[&encrypted_partition];
                     let timeout = tokio::time::sleep(timeout);
