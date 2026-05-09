@@ -43,6 +43,7 @@ use solana_sdk::pubkey::Pubkey as SolanaPubkey;
 use solana_sdk::signature::Keypair as SolanaKeypair;
 use solana_sdk::signature::{EncodableKey as _, Signature as SolanaSignature};
 use solana_sdk::signer::{SeedDerivable as _, Signer as _};
+use testcontainers::core::error::{ClientError, TestcontainersError};
 use testcontainers::core::ExecCommand;
 use testcontainers::ContainerAsync;
 use testcontainers::{
@@ -50,7 +51,6 @@ use testcontainers::{
     runners::AsyncRunner,
     GenericImage, ImageExt,
 };
-use testcontainers::core::error::{ClientError, TestcontainersError};
 use tokio::io::AsyncWriteExt;
 use tokio::runtime::Builder;
 use tokio::time::sleep;
@@ -58,7 +58,10 @@ use tracing;
 
 pub type Container = ContainerAsync<GenericImage>;
 
-async fn start_container_with_network_retry<I, R, F>(mut build: F, network: &str) -> Result<ContainerAsync<I>, TestcontainersError>
+async fn start_container_with_network_retry<I, R, F>(
+    mut build: F,
+    network: &str,
+) -> Result<ContainerAsync<I>, TestcontainersError>
 where
     I: testcontainers::Image,
     R: AsyncRunner<I>,
@@ -200,7 +203,7 @@ impl Node {
             &ctx.docker_network,
         )
         .await
-            .unwrap();
+        .unwrap();
 
         let ip_address = ctx
             .docker_client
@@ -442,7 +445,7 @@ impl Redis {
             &spawner.network,
         )
         .await
-            .unwrap();
+        .unwrap();
         let network_ip = spawner
             .docker
             .get_network_ip_address(&container, &spawner.network)
