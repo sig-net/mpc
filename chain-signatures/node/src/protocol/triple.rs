@@ -1,5 +1,5 @@
 use super::artifact_task::{
-    ArtifactProtocol, ProtocolGenerator, ProtocolGeneratorDriver, ProtocolSpawnerTask,
+    ArtifactProtocol, PokeMode, ProtocolGenerator, ProtocolGeneratorDriver, ProtocolSpawnerTask,
 };
 use super::message::{MessageChannel, PositProtocolId, TripleMessage};
 use super::posit::PositAction;
@@ -11,7 +11,7 @@ use crate::util::AffinePointExt;
 use mpc_contract::config::ProtocolConfig;
 
 use async_trait::async_trait;
-use cait_sith::protocol::{InitializationError, MessageData, Participant};
+use cait_sith::protocol::{MessageData, Participant, ProtocolError};
 use cait_sith::triples::{TriplePub, TripleShare};
 use chrono::Utc;
 use k256::Secp256k1;
@@ -32,207 +32,112 @@ pub struct Triple {
 
 // ── TripleGenerator ───────────────────────────────────────────────────────────
 
-struct TripleGenerator {
-    id: TripleId,
-    epoch: u64,
-    me: Participant,
-    owner: Participant,
-    participants: Vec<Participant>,
-    /// Temporarily moved to a blocking task during poke().
-    protocol: Option<TripleProtocol>,
-    timeout: Duration,
+struct TripleGenerationDriver {
     slot: TriplePairSlot,
-    created: Instant,
-    inbox: mpsc::Receiver<TripleMessage>,
-    msg: MessageChannel,
-    #[cfg(feature = "debug-page")]
-    debug_view: crate::web::debug::DebugPageTaskHandle,
-}
-
-impl TripleGenerator {
-    #[allow(clippy::too_many_arguments)]
-    pub async fn new(
-        id: TripleId,
-        epoch: u64,
-        me: Participant,
-        owner: Participant,
-        threshold: usize,
-        participants: &[Participant],
-        timeout: Duration,
-        slot: TriplePairSlot,
-        msg: &MessageChannel,
-        _node_account_id: &str,
-    ) -> Result<Self, InitializationError> {
-        #[cfg(feature = "debug-page")]
-        let node_account_id = _node_account_id;
-        #[cfg(not(feature = "debug-page"))]
-        let _ = _node_account_id;
-
-        let mut participants = participants.to_vec();
-        participants.sort();
-
-        let protocol =
-            cait_sith::triples::generate_triple_many::<Secp256k1, 2>(&participants, me, threshold)?;
-
-        let inbox = msg.subscribe_triple(id).await;
-        Ok(Self {
-            id,
-            epoch,
-            me,
-            owner,
-            participants,
-            protocol: Some(Box::new(protocol)),
-            timeout,
-            slot,
-            created: Instant::now(),
-            inbox,
-            msg: msg.clone(),
-            #[cfg(feature = "debug-page")]
-            debug_view: crate::web::debug::register_task(
-                node_account_id.to_string(),
-                format!("TripleGenerator {id:#?}"),
-            ),
-        })
-    }
-
-    async fn recv(&mut self) -> Option<TripleMessage> {
-        match tokio::time::timeout(
-            self.timeout.saturating_sub(self.created.elapsed()),
-            self.inbox.recv(),
-        )
-        .await
-        {
-            Ok(Some(msg)) => Some(msg),
-            Ok(None) => {
-                tracing::warn!(id = self.id, "triple generation aborted");
-                None
-            }
-            Err(_) => {
-                tracing::warn!(id = self.id, "triple generation timeout");
-                None
-            }
-        }
-    }
-
 }
 
 #[async_trait]
-impl ProtocolGeneratorDriver for TripleGenerator {
+impl ProtocolGeneratorDriver for TripleGenerationDriver {
+    type Id = TripleId;
+    type Protocol = TripleProtocol;
     type Output = Vec<(
         cait_sith::triples::TripleShare<Secp256k1>,
         cait_sith::triples::TriplePub<Secp256k1>,
     )>;
+    type InMessage = TripleMessage;
+    type WireMessage = TripleMessage;
 
-    fn created_at(&self) -> Instant {
-        self.created
+    fn poke_mode(&self) -> PokeMode {
+        PokeMode::Blocking
     }
 
-    fn observe_before_poke_delay(&self) {
-        crate::metrics::protocols::TRIPLE_BEFORE_POKE_DELAY
-            .observe(self.created.elapsed().as_millis() as f64);
+    fn protocol_poke(protocol: &mut Self::Protocol) -> Result<cait_sith::protocol::Action<Self::Output>, ProtocolError> {
+        protocol.poke()
+    }
+
+    fn protocol_message(protocol: &mut Self::Protocol, from: Participant, data: MessageData) {
+        protocol.message(from, data);
+    }
+
+    fn split_incoming(msg: Self::InMessage) -> (Participant, MessageData) {
+        (msg.from, msg.data)
+    }
+
+    fn build_message(
+        &self,
+        id: Self::Id,
+        epoch: u64,
+        from: Participant,
+        _to: Participant,
+        data: MessageData,
+    ) -> Self::WireMessage {
+        TripleMessage {
+            id,
+            epoch,
+            from,
+            data,
+            timestamp: Utc::now().timestamp() as u64,
+        }
+    }
+
+    async fn send_message(
+        &self,
+        msg: &MessageChannel,
+        from: Participant,
+        to: Participant,
+        wire: Self::WireMessage,
+    ) {
+        msg.send(from, to, wire).await;
+    }
+
+    fn observe_before_poke_delay(&self, created: Instant) {
+        crate::metrics::protocols::TRIPLE_BEFORE_POKE_DELAY.observe(created.elapsed().as_millis() as f64);
     }
 
     fn observe_poke_cpu_time(&self, elapsed: Duration) {
         crate::metrics::protocols::TRIPLE_POKE_CPU_TIME.observe(elapsed.as_millis() as f64);
     }
 
-    async fn poke(&mut self) -> Result<cait_sith::protocol::Action<Self::Output>, ()> {
-        let start_time = Instant::now();
-        let mut protocol = self.protocol.take().expect("always Some");
-
-        let poke_result =
-            match tokio::task::spawn_blocking(move || (protocol.poke(), protocol)).await {
-                Ok((res, protocol)) => {
-                    self.protocol = Some(protocol);
-                    res
-                }
-                Err(err) => {
-                    crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
-                    if self.owner == self.me {
-                        crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
-                    }
-                    tracing::warn!(
-                        id = self.id,
-                        ?err,
-                        elapsed = ?start_time.elapsed(),
-                        "triple generation failed in blocking task",
-                    );
-                    return Err(());
-                }
-            };
-
-        match poke_result {
-            Ok(action) => Ok(action),
-            Err(err) => {
-                crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
-                if self.owner == self.me {
-                    crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
-                }
-                tracing::warn!(
-                    id = self.id,
-                    ?err,
-                    elapsed = ?start_time.elapsed(),
-                    "triple generation failed",
-                );
-                Err(())
-            }
+    fn on_poke_protocol_error(&mut self, me: Participant, owner: Participant, err: ProtocolError) {
+        crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
+        if owner == me {
+            crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
         }
+        tracing::warn!(?err, "triple generation failed");
     }
 
-    async fn wait_for_messages(&mut self) -> bool {
-        let Some(msg) = self.recv().await else {
-            crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
-            if self.owner == self.me {
-                crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
-            }
-            return false;
-        };
-        self.protocol
-            .as_mut()
-            .expect("always Some")
-            .message(msg.from, msg.data);
-        true
-    }
-
-    async fn send_many(&mut self, data: MessageData) {
-        for to in &self.participants {
-            if *to == self.me {
-                continue;
-            }
-            self.msg
-                .send(
-                    self.me,
-                    *to,
-                    TripleMessage {
-                        id: self.id,
-                        epoch: self.epoch,
-                        from: self.me,
-                        data: data.clone(),
-                        timestamp: Utc::now().timestamp() as u64,
-                    },
-                )
-                .await;
+    fn on_poke_join_error(&mut self, me: Participant, owner: Participant, err: tokio::task::JoinError) {
+        crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
+        if owner == me {
+            crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
         }
+        tracing::warn!(?err, "triple generation failed in blocking task");
     }
 
-    async fn send_private(&mut self, to: Participant, data: MessageData) {
-        self.msg
-            .send(
-                self.me,
-                to,
-                TripleMessage {
-                    id: self.id,
-                    epoch: self.epoch,
-                    from: self.me,
-                    data,
-                    timestamp: Utc::now().timestamp() as u64,
-                },
-            )
-            .await;
+    fn on_recv_closed(&mut self, id: Self::Id, _owner: Participant) {
+        crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
+        tracing::warn!(id, "triple generation aborted");
+    }
+
+    fn on_recv_timeout(&mut self, id: Self::Id, _owner: Participant) {
+        crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
+        tracing::warn!(id, "triple generation timeout");
+    }
+
+    fn on_drop(&self, id: Self::Id, msg: MessageChannel) {
+        tokio::spawn(async move {
+            msg.unsubscribe_triple(id).await;
+            msg.filter_triple(id).await;
+        });
     }
 
     async fn finish(
-        mut self,
+        &mut self,
+        id: Self::Id,
+        me: Participant,
+        owner: Participant,
+        participants: &[Participant],
+        created: Instant,
         outputs: Self::Output,
         run_elapsed: Duration,
         total_wait: Duration,
@@ -240,17 +145,12 @@ impl ProtocolGeneratorDriver for TripleGenerator {
     ) {
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS_SUCCESS.inc();
         crate::metrics::protocols::TRIPLE_LATENCY.observe(run_elapsed.as_secs_f64());
-        crate::metrics::protocols::TRIPLE_LATENCY_TOTAL.observe(self.created.elapsed().as_secs_f64());
-        crate::metrics::protocols::TRIPLE_ACCRUED_WAIT_DELAY
-            .observe(total_wait.as_millis() as f64);
+        crate::metrics::protocols::TRIPLE_LATENCY_TOTAL.observe(created.elapsed().as_secs_f64());
+        crate::metrics::protocols::TRIPLE_ACCRUED_WAIT_DELAY.observe(total_wait.as_millis() as f64);
         crate::metrics::protocols::TRIPLE_POKES_CNT.observe(total_pokes as f64);
 
         let [first, second, ..] = &outputs[..] else {
-            tracing::warn!(
-                id = self.id,
-                triples = outputs.len(),
-                "unexpected: not enough triples to make pair"
-            );
+            tracing::warn!(id, triples = outputs.len(), "unexpected: not enough triples to make pair");
             return;
         };
         let first = Triple {
@@ -262,16 +162,16 @@ impl ProtocolGeneratorDriver for TripleGenerator {
             public: second.1.clone(),
         };
 
-        let pair_is_mine = self.owner == self.me;
+        let pair_is_mine = owner == me;
         tracing::debug!(
-            id = ?self.id,
-            me = ?self.me,
-            owner = ?self.owner,
+            id = ?id,
+            ?me,
+            ?owner,
             pair_is_mine,
-            participants = ?self.participants,
+            ?participants,
             big_a0 = ?first.public.big_a.to_base58(),
             big_a1 = ?second.public.big_a.to_base58(),
-            elapsed = ?self.created.elapsed(),
+            elapsed = ?created.elapsed(),
             "completed triple pair generation"
         );
 
@@ -280,31 +180,12 @@ impl ProtocolGeneratorDriver for TripleGenerator {
         }
 
         let pair = TriplePair {
-            id: self.id,
+            id,
             triple0: first,
             triple1: second,
-            holders: Some(self.participants.clone()),
+            holders: Some(participants.to_vec()),
         };
-        self.slot.insert(pair, self.owner).await;
-    }
-
-    #[cfg(feature = "debug-page")]
-    fn render_debug(&self, total_pokes: i32) {
-        let markup = maud::html! {
-            p { (format!("{total_pokes} pokes")) }
-        };
-        self.debug_view.send(markup);
-    }
-}
-
-impl Drop for TripleGenerator {
-    fn drop(&mut self) {
-        let id = self.id;
-        let msg = self.msg.clone();
-        tokio::spawn(async move {
-            msg.unsubscribe_triple(id).await;
-            msg.filter_triple(id).await;
-        });
+        self.slot.insert(pair, owner).await;
     }
 }
 
@@ -402,29 +283,39 @@ impl ArtifactProtocol for TripleArtifact {
             return;
         };
 
-        let generator = match TripleGenerator::new(
-            task_id,
-            epoch,
+        let mut sorted_participants = participants;
+        sorted_participants.sort();
+
+        let protocol: TripleProtocol = match cait_sith::triples::generate_triple_many::<Secp256k1, 2>(
+            &sorted_participants,
             me,
-            owner,
             threshold,
-            &participants,
-            timeout,
-            slot,
-            &ctx.msg,
-            &ctx.node_account_id,
-        )
-        .await
-        {
-            Ok(gen) => gen,
+        ) {
+            Ok(protocol) => Box::new(protocol),
             Err(err) => {
                 tracing::warn!(task_id, ?err, "failed to initialise triple generator");
                 return;
             }
         };
 
+        let inbox = ctx.msg.subscribe_triple(task_id).await;
+        let driver = TripleGenerationDriver { slot };
+
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS.inc();
-        ProtocolGenerator::new(generator).run().await;
+        ProtocolGenerator::new(
+            task_id,
+            epoch,
+            me,
+            owner,
+            sorted_participants,
+            protocol,
+            timeout,
+            inbox,
+            ctx.msg,
+            driver,
+        )
+        .run()
+        .await;
     }
 
     async fn subscribe_posit(

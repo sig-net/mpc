@@ -4,7 +4,7 @@ use std::fmt;
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
-use cait_sith::protocol::{Action, MessageData, Participant};
+use cait_sith::protocol::{Action, MessageData, Participant, ProtocolError};
 use mpc_contract::config::ProtocolConfig;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -48,36 +48,65 @@ impl<T: ArtifactProtocol> ProtocolTaskState<T> for ProtocolDeliberator {
     type Data = Participant;
 }
 
-pub struct ProtocolGenerator<D> {
-    driver: D,
-}
-
-impl<D> ProtocolGenerator<D> {
-    pub fn new(driver: D) -> Self {
-        Self { driver }
-    }
+pub enum PokeMode {
+    Inline,
+    Blocking,
 }
 
 #[async_trait]
 pub trait ProtocolGeneratorDriver: Send {
-    type Output: Send;
+    type Id: Copy + Send + 'static;
+    type Protocol: Send + 'static;
+    type Output: Send + 'static;
+    type InMessage: Send;
+    type WireMessage: Send;
 
-    fn created_at(&self) -> Instant;
+    fn poke_mode(&self) -> PokeMode;
 
-    fn observe_before_poke_delay(&self);
+    fn protocol_poke(protocol: &mut Self::Protocol) -> Result<Action<Self::Output>, ProtocolError>;
+
+    fn protocol_message(protocol: &mut Self::Protocol, from: Participant, data: MessageData);
+
+    fn split_incoming(msg: Self::InMessage) -> (Participant, MessageData);
+
+    fn build_message(
+        &self,
+        id: Self::Id,
+        epoch: u64,
+        from: Participant,
+        to: Participant,
+        data: MessageData,
+    ) -> Self::WireMessage;
+
+    async fn send_message(
+        &self,
+        msg: &MessageChannel,
+        from: Participant,
+        to: Participant,
+        wire: Self::WireMessage,
+    );
+
+    fn observe_before_poke_delay(&self, created: Instant);
 
     fn observe_poke_cpu_time(&self, elapsed: Duration);
 
-    async fn poke(&mut self) -> Result<Action<Self::Output>, ()>;
+    fn on_poke_protocol_error(&mut self, me: Participant, owner: Participant, err: ProtocolError);
 
-    async fn wait_for_messages(&mut self) -> bool;
+    fn on_poke_join_error(&mut self, me: Participant, owner: Participant, err: tokio::task::JoinError);
 
-    async fn send_many(&mut self, data: MessageData);
+    fn on_recv_closed(&mut self, id: Self::Id, owner: Participant);
 
-    async fn send_private(&mut self, to: Participant, data: MessageData);
+    fn on_recv_timeout(&mut self, id: Self::Id, owner: Participant);
+
+    fn on_drop(&self, id: Self::Id, msg: MessageChannel);
 
     async fn finish(
-        self,
+        &mut self,
+        id: Self::Id,
+        me: Participant,
+        owner: Participant,
+        participants: &[Participant],
+        created: Instant,
         output: Self::Output,
         run_elapsed: Duration,
         total_wait: Duration,
@@ -87,17 +116,149 @@ pub trait ProtocolGeneratorDriver: Send {
         Self: Sized;
 }
 
+pub struct ProtocolGenerator<D: ProtocolGeneratorDriver> {
+    id: D::Id,
+    epoch: u64,
+    me: Participant,
+    owner: Participant,
+    participants: Vec<Participant>,
+    protocol: Option<D::Protocol>,
+    created: Instant,
+    timeout: Duration,
+    inbox: mpsc::Receiver<D::InMessage>,
+    msg: MessageChannel,
+    driver: D,
+}
+
 impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: D::Id,
+        epoch: u64,
+        me: Participant,
+        owner: Participant,
+        participants: Vec<Participant>,
+        protocol: D::Protocol,
+        timeout: Duration,
+        inbox: mpsc::Receiver<D::InMessage>,
+        msg: MessageChannel,
+        driver: D,
+    ) -> Self {
+        Self {
+            id,
+            epoch,
+            me,
+            owner,
+            participants,
+            protocol: Some(protocol),
+            created: Instant::now(),
+            timeout,
+            inbox,
+            msg,
+            driver,
+        }
+    }
+}
+
+impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
+    async fn poke_action(&mut self) -> Result<Action<D::Output>, ()> {
+        let mode = self.driver.poke_mode();
+        let mut protocol = self.protocol.take().expect("protocol must exist");
+
+        let action_res = match mode {
+            PokeMode::Inline => D::protocol_poke(&mut protocol),
+            PokeMode::Blocking => {
+                match tokio::task::spawn_blocking(move || {
+                    let out = D::protocol_poke(&mut protocol);
+                    (out, protocol)
+                })
+                .await
+                {
+                    Ok((res, protocol_back)) => {
+                        self.protocol = Some(protocol_back);
+                        return match res {
+                            Ok(action) => Ok(action),
+                            Err(err) => {
+                                self.driver
+                                    .on_poke_protocol_error(self.me, self.owner, err);
+                                Err(())
+                            }
+                        };
+                    }
+                    Err(err) => {
+                        self.driver
+                            .on_poke_join_error(self.me, self.owner, err);
+                        return Err(());
+                    }
+                }
+            }
+        };
+
+        self.protocol = Some(protocol);
+        match action_res {
+            Ok(action) => Ok(action),
+            Err(err) => {
+                self.driver
+                    .on_poke_protocol_error(self.me, self.owner, err);
+                Err(())
+            }
+        }
+    }
+
+    async fn wait_message(&mut self) -> bool {
+        let remaining = self.timeout.saturating_sub(self.created.elapsed());
+        match tokio::time::timeout(remaining, self.inbox.recv()).await {
+            Ok(Some(msg)) => {
+                let (from, data) = D::split_incoming(msg);
+                let mut protocol = self.protocol.take().expect("protocol must exist");
+                D::protocol_message(&mut protocol, from, data);
+                self.protocol = Some(protocol);
+                true
+            }
+            Ok(None) => {
+                self.driver.on_recv_closed(self.id, self.owner);
+                false
+            }
+            Err(_) => {
+                self.driver.on_recv_timeout(self.id, self.owner);
+                false
+            }
+        }
+    }
+
+    async fn send_many(&self, data: MessageData) {
+        for &to in &self.participants {
+            if to == self.me {
+                continue;
+            }
+            let wire = self
+                .driver
+                .build_message(self.id, self.epoch, self.me, to, data.clone());
+            self.driver
+                .send_message(&self.msg, self.me, to, wire)
+                .await;
+        }
+    }
+
+    async fn send_private(&self, to: Participant, data: MessageData) {
+        let wire = self
+            .driver
+            .build_message(self.id, self.epoch, self.me, to, data);
+        self.driver
+            .send_message(&self.msg, self.me, to, wire)
+            .await;
+    }
+
     pub async fn run(mut self) {
         let run_start = Instant::now();
         let mut total_wait = Duration::from_millis(0);
         let mut total_pokes = 0;
-        let mut poke_last_time = self.driver.created_at();
-        self.driver.observe_before_poke_delay();
+        let mut poke_last_time = self.created;
+        self.driver.observe_before_poke_delay(self.created);
 
         loop {
             let poke_start_time = Instant::now();
-            let action = match self.driver.poke().await {
+            let action = match self.poke_action().await {
                 Ok(action) => action,
                 Err(()) => break,
             };
@@ -109,24 +270,36 @@ impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
 
             match action {
                 Action::Wait => {
-                    if !self.driver.wait_for_messages().await {
+                    if !self.wait_message().await {
                         break;
                     }
                 }
                 Action::SendMany(data) => {
-                    self.driver.send_many(data).await;
+                    self.send_many(data).await;
                 }
                 Action::SendPrivate(to, data) => {
-                    self.driver.send_private(to, data).await;
+                    self.send_private(to, data).await;
                 }
                 Action::Return(output) => {
                     self.driver
-                        .finish(output, run_start.elapsed(), total_wait, total_pokes)
+                        .finish(
+                            self.id,
+                            self.me,
+                            self.owner,
+                            &self.participants,
+                            self.created,
+                            output,
+                            run_start.elapsed(),
+                            total_wait,
+                            total_pokes,
+                        )
                         .await;
                     break;
                 }
             }
         }
+
+        self.driver.on_drop(self.id, self.msg.clone());
     }
 }
 
