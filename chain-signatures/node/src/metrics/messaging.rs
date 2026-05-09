@@ -1,4 +1,5 @@
 use std::sync::LazyLock;
+use tokio::sync::mpsc;
 
 use prometheus::{exponential_buckets, Counter, Histogram, HistogramVec, IntGaugeVec};
 
@@ -88,13 +89,21 @@ pub(crate) static CHANNEL_QUEUE_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     .unwrap()
 });
 
-pub(crate) fn set_queue_len_global(channel: &str, len: usize) {
+pub(crate) fn set_queue_len(channel: &str, len: usize) {
     CHANNEL_QUEUE_SIZE
         .with_label_values(&[channel])
         .set(len as i64);
 }
 
-pub(crate) fn remove_queue_len_global(channel: &str) {
+pub fn set_queue_len_tx<T>(name: &'static str, tx: &mpsc::Sender<T>) {
+    set_queue_len(name, channel_len(tx));
+}
+
+pub fn channel_len(tx: &mpsc::Sender<impl Sized>) -> usize {
+    tx.max_capacity() - tx.capacity()
+}
+
+pub(crate) fn remove_queue_len(channel: &str) {
     let _ = CHANNEL_QUEUE_SIZE.remove_label_values(&[channel]);
 }
 

@@ -42,7 +42,7 @@ impl MessageFilter {
         };
 
         self.filter.put((msg_type, id), ());
-        crate::metrics::messaging::set_queue_len_global(
+        crate::metrics::messaging::set_queue_len(
             "filter",
             self.filter_tx.max_capacity() - self.filter_tx.capacity(),
         );
@@ -56,7 +56,7 @@ impl MessageFilter {
         }
 
         if updated {
-            crate::metrics::messaging::set_queue_len_global(
+            crate::metrics::messaging::set_queue_len(
                 "filter",
                 self.filter_tx.max_capacity() - self.filter_tx.capacity(),
             );

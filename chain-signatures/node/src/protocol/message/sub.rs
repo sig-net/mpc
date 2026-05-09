@@ -155,11 +155,11 @@ impl<T> Subscriber<T> {
     }
 
     pub fn report_len_global(&self) {
-        crate::metrics::messaging::set_queue_len_global(self.metrics.name, self.estimated_len());
+        crate::metrics::messaging::set_queue_len(self.metrics.name, self.estimated_len());
     }
 
     pub fn clear_len_global(&self) {
-        crate::metrics::messaging::remove_queue_len_global(self.metrics.name);
+        crate::metrics::messaging::remove_queue_len(self.metrics.name);
     }
 
     pub fn report_len(&self) {

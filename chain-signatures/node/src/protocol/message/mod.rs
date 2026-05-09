@@ -4,26 +4,27 @@ mod types;
 
 pub use sub::Subscriber;
 
+use super::contract::primitives::{ParticipantMap, Participants};
+use super::presignature::PresignatureId;
+use super::triple::TripleId;
 use crate::metrics;
+use crate::metrics::messaging::set_queue_len_tx;
+use crate::node_client::NodeClient;
+use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::message::sub::{
     SubscribeId, SubscribeRequest, SubscribeRequestAction, SubscribeResponse,
 };
 use crate::protocol::message::types::Round;
+use crate::protocol::posit::PositAction;
+use crate::protocol::presignature::FullPresignatureId;
+use crate::protocol::Config;
+use crate::rpc::ContractStateWatcher;
+
 pub use crate::protocol::message::types::{
     GeneratingMessage, Message, MessageError, MessageFilterId, PositMessage, PositProtocolId,
     PresignatureMessage, Protocols, ReadyMessage, ResharingMessage, SignatureMessage,
     TripleMessage,
 };
-use crate::protocol::posit::PositAction;
-use crate::protocol::presignature::FullPresignatureId;
-use crate::rpc::ContractStateWatcher;
-
-use super::contract::primitives::{ParticipantMap, Participants};
-use super::presignature::PresignatureId;
-use super::triple::TripleId;
-use crate::node_client::NodeClient;
-use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
-use crate::protocol::Config;
 
 use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
@@ -40,10 +41,6 @@ use std::time::{Duration, Instant};
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
-
-fn report_channel_queue_len<T>(name: &'static str, tx: &mpsc::Sender<T>) {
-    metrics::messaging::set_queue_len_global(name, tx.max_capacity() - tx.capacity());
-}
 
 pub struct MessageInbox {
     /// encrypted messages that are pending to be decrypted. These are messages that we received
@@ -375,11 +372,11 @@ impl MessageInbox {
             tokio::select! {
                 _ = self.filter.update() => {}
                 Some(sub) = self.subscribe_rx.recv() => {
-                    report_channel_queue_len("subscribe", &self.subscribe_tx);
+                    set_queue_len_tx("subscribe", &self.subscribe_tx);
                     self.process_subscribe(sub);
                 }
                 Some(encrypted) = self.inbox_rx.recv() => {
-                    report_channel_queue_len("incoming", &self.inbox_tx);
+                    set_queue_len_tx("incoming", &self.inbox_tx);
                     let config = config.borrow().clone();
                     let expiration = Duration::from_millis(config.protocol.message_timeout);
                     let participants = contract.participant_map().await;
@@ -435,10 +432,10 @@ impl MessageChannel {
             filter: filter_tx,
         };
 
-        report_channel_queue_len("incoming", &channel.inbox);
-        report_channel_queue_len("outgoing", &channel.outgoing);
-        report_channel_queue_len("filter", &channel.filter);
-        report_channel_queue_len("subscribe", &channel.subscribe);
+        set_queue_len_tx("incoming", &channel.inbox);
+        set_queue_len_tx("outgoing", &channel.outgoing);
+        set_queue_len_tx("filter", &channel.filter);
+        set_queue_len_tx("subscribe", &channel.subscribe);
 
         (inbox, outbox, channel)
     }
@@ -464,7 +461,7 @@ impl MessageChannel {
         {
             tracing::error!(?err, "outbox: failed to send message to participants");
         } else {
-            report_channel_queue_len("outgoing", &self.outgoing);
+            set_queue_len_tx("outgoing", &self.outgoing);
         }
     }
 
@@ -472,7 +469,7 @@ impl MessageChannel {
         if let Err(err) = self.inbox.send(encrypted).await {
             tracing::error!(?err, "failed to forward an encrypted protocol message");
         } else {
-            report_channel_queue_len("incoming", &self.inbox);
+            set_queue_len_tx("incoming", &self.inbox);
         }
     }
 
@@ -482,7 +479,7 @@ impl MessageChannel {
         if let Err(err) = self.filter.send((M::PROTOCOL, msg.id())).await {
             tracing::warn!(?err, "failed to send filter message");
         } else {
-            report_channel_queue_len("filter", &self.filter);
+            set_queue_len_tx("filter", &self.filter);
         }
     }
 
@@ -490,7 +487,7 @@ impl MessageChannel {
         if let Err(err) = self.filter.send((Protocols::Triple, id)).await {
             tracing::warn!(?err, "failed to send filter message");
         } else {
-            report_channel_queue_len("filter", &self.filter);
+            set_queue_len_tx("filter", &self.filter);
         }
     }
 
@@ -498,7 +495,7 @@ impl MessageChannel {
         if let Err(err) = self.filter.send((Protocols::Presignature, id)).await {
             tracing::warn!(?err, "failed to send filter message");
         } else {
-            report_channel_queue_len("filter", &self.filter);
+            set_queue_len_tx("filter", &self.filter);
         }
     }
 
@@ -511,7 +508,7 @@ impl MessageChannel {
         if self.subscribe.send(req).await.is_err() {
             return None;
         };
-        report_channel_queue_len("subscribe", &self.subscribe);
+        set_queue_len_tx("subscribe", &self.subscribe);
         let Ok(subscription) = resp.await else {
             return None;
         };
@@ -541,7 +538,7 @@ impl MessageChannel {
         {
             tracing::warn!(id, "unable to send unsubscribe request for triple message");
         } else {
-            report_channel_queue_len("subscribe", &self.subscribe);
+            set_queue_len_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -573,7 +570,7 @@ impl MessageChannel {
         {
             tracing::warn!("unable to send unsubscribe request for triple posits");
         } else {
-            report_channel_queue_len("subscribe", &self.subscribe);
+            set_queue_len_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -606,7 +603,7 @@ impl MessageChannel {
         {
             tracing::warn!("unable to send unsubscribe request for presignature");
         } else {
-            report_channel_queue_len("subscribe", &self.subscribe);
+            set_queue_len_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -635,7 +632,7 @@ impl MessageChannel {
         {
             tracing::warn!("unable to send unsubscribe request for presignature posits");
         } else {
-            report_channel_queue_len("subscribe", &self.subscribe);
+            set_queue_len_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -684,7 +681,7 @@ impl MessageChannel {
                 "unable to send unsubscribe request for signature"
             );
         } else {
-            report_channel_queue_len("subscribe", &self.subscribe);
+            set_queue_len_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -714,7 +711,7 @@ impl MessageChannel {
         {
             tracing::warn!("unable to send unsubscribe request for signature posit");
         } else {
-            report_channel_queue_len("subscribe", &self.subscribe);
+            set_queue_len_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -1012,7 +1009,7 @@ impl MessageOutbox {
         loop {
             tokio::select! {
                 Some((msg, (from, to, timestamp))) = self.outbox_rx.recv() => {
-                    report_channel_queue_len("outgoing", &self.outbox_tx);
+                    set_queue_len_tx("outgoing", &self.outbox_tx);
                     // add it to the outbox and sort it by from and to participant
                     let entry = self.messages.entry((from, to)).or_default();
                     entry.push((msg, timestamp));
