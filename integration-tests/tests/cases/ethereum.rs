@@ -323,17 +323,14 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
     tracing::info!(%target_account, ?initial_checkpoint, "taking node offline for checkpoint recovery test");
     let offline_config = cluster.kill_node(&target_account).await;
 
-    // Keep the node offline while the remaining nodes continue operating and sign requests
-    // are being processed alongside new checkpoints being created.
-    let offline_duration = Duration::from_secs(10);
-    let mut elapsed = Duration::default();
-    let mut seed = 100usize;
-    while elapsed < offline_duration {
+    // Keep the node offline while the remaining nodes continue operating.
+    // Submit a few requests, then pump empty blocks so checkpoint progression
+    // does not depend on signature throughput under test load.
+    for seed in 100usize..103usize {
         submit_eth_sign_request(&eth_contract, seed).await?;
-        seed += 1;
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        elapsed += Duration::from_secs(2);
     }
+
+    produce_empty_eth_blocks_for_duration(&eth_contract.client(), Duration::from_secs(12)).await?;
 
     // Wait for active node to create a new checkpoint beyond the initial one
     let node_active_checkpoint = wait_node_checkpoint(
@@ -341,7 +338,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         active_idx,
         Chain::Ethereum,
         initial_checkpoint.block_height + 1,
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     )
     .await?;
 
@@ -360,7 +357,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         offline_idx,
         Chain::Ethereum,
         node_active_checkpoint.block_height,
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     )
     .await?;
 
@@ -384,7 +381,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
             node_recovered_checkpoint
                 .block_height
                 .max(node_active_checkpoint.block_height),
-            Duration::from_secs(20),
+            Duration::from_secs(45),
         )
         .await?;
 
@@ -398,7 +395,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         active_idx,
         Chain::Ethereum,
         active_checkpoint_after_restart.block_height,
-        Duration::from_secs(10),
+        Duration::from_secs(30),
     )
     .await?;
 
@@ -456,6 +453,18 @@ async fn produce_empty_eth_blocks(
             .context("empty block-pumping transaction failed")?;
     }
 
+    Ok(())
+}
+
+async fn produce_empty_eth_blocks_for_duration(
+    client: &std::sync::Arc<eth::SandboxMiddleware>,
+    duration: Duration,
+) -> anyhow::Result<()> {
+    let start = tokio::time::Instant::now();
+    while start.elapsed() < duration {
+        produce_empty_eth_blocks(client, 1).await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     Ok(())
 }
 

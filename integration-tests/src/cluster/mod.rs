@@ -287,21 +287,51 @@ impl Cluster {
 
     pub async fn vote_update(&self, id: UpdateId) {
         let participants = self.participant_accounts().await.unwrap();
+        let voting_accounts = participants
+            .iter()
+            .take(self.cfg.threshold)
+            .cloned()
+            .collect::<Vec<_>>();
 
         let mut success = 0;
-        for account in participants.iter() {
-            let execution = account
-                .call(self.contract().id(), "vote_update")
-                .args_json((id,))
-                .max_gas()
-                .transact()
-                .await
-                .unwrap()
-                .into_result();
+        for account in voting_accounts {
+            let mut voted = false;
+            for attempt in 1..=3 {
+                let tx = account
+                    .call(self.contract().id(), "vote_update")
+                    .args_json((id,))
+                    .max_gas()
+                    .transact()
+                    .await;
 
-            match execution {
-                Ok(_) => success += 1,
-                Err(e) => tracing::warn!(?id, ?e, "Failed to vote for update"),
+                match tx {
+                    Ok(outcome) => match outcome.into_result() {
+                        Ok(_) => {
+                            success += 1;
+                            voted = true;
+                            break;
+                        }
+                        Err(e) => {
+                            // Once threshold is reached by another voter, remaining votes may race
+                            // and fail with `Update not found` even though update succeeded.
+                            if e.to_string().contains("Update not found") {
+                                success += 1;
+                                voted = true;
+                                break;
+                            }
+                            tracing::warn!(?id, %attempt, ?e, "Failed to vote for update");
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(?id, %attempt, ?e, "RPC failure while voting for update");
+                    }
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+
+            if !voted {
+                tracing::warn!(?id, account = %account.id(), "exhausted vote_update retries");
             }
         }
 

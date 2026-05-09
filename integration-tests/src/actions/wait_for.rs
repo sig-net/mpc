@@ -96,6 +96,10 @@ pub async fn batch_signature_responded(
         }
 
         let receipt_outcomes = outcome.details.receipt_outcomes();
+        if receipt_outcomes.is_empty() {
+            return Err(WaitForError::Signature(SignatureError::NotYetAvailable));
+        }
+
         let mut result_receipts: HashMap<CryptoHash, Vec<CryptoHash>> = HashMap::new();
         for receipt_outcome in receipt_outcomes {
             result_receipts
@@ -110,20 +114,24 @@ pub async fn batch_signature_responded(
                 .or_insert(receipt_outcome);
         }
 
-        let starting_receipts = &receipt_outcomes.first().unwrap().outcome.receipt_ids;
-
         let mut signatures: Vec<FullSignature<Secp256k1>> = vec![];
-        for receipt_id in starting_receipts {
-            if !result_receipts.contains_key(receipt_id) {
-                break;
-            }
-            let sign_receipt_id = receipt_id;
-            for receipt_id in result_receipts.get(sign_receipt_id).unwrap() {
-                let receipt_outcome = receipt_outcomes_keyed
-                    .get(receipt_id)
-                    .unwrap()
-                    .outcome
-                    .clone();
+        let mut missing_receipts = false;
+
+        let starting_receipts = &receipt_outcomes[0].outcome.receipt_ids;
+        for sign_receipt_id in starting_receipts {
+            let Some(child_receipts) = result_receipts.get(sign_receipt_id) else {
+                missing_receipts = true;
+                continue;
+            };
+
+            for receipt_id in child_receipts {
+                let Some(receipt_outcome) = receipt_outcomes_keyed.get(receipt_id) else {
+                    // Final tx can be ready while some receipt outcomes are still not returned.
+                    missing_receipts = true;
+                    continue;
+                };
+
+                let receipt_outcome = receipt_outcome.outcome.clone();
                 if receipt_outcome
                     .logs
                     .contains(&"Signature is ready.".to_string())
@@ -146,6 +154,10 @@ pub async fn batch_signature_responded(
                     }
                 }
             }
+        }
+
+        if missing_receipts {
+            return Err(WaitForError::Signature(SignatureError::NotYetAvailable));
         }
 
         Ok(Outcome::Signatures(signatures))
