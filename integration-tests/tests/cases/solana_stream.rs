@@ -316,7 +316,8 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
                 backlog.set_processed_block(Chain::Solana, block).await;
                 break;
             }
-            Ok(Some(_)) | Ok(None) | Err(_) => continue,
+            Ok(Some(_)) | Err(_) => continue,
+            Ok(None) => break,
         }
     }
 

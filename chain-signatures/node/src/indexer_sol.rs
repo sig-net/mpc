@@ -541,7 +541,7 @@ impl SolanaIndexer {
                 .meta
                 .as_ref()
                 .and_then(|meta| match meta.log_messages.as_ref() {
-                    OptionSerializer::Some(logs) => Some(logs.clone()),
+                    OptionSerializer::Some(logs) => Some(logs),
                     _ => None,
                 })
             else {
@@ -549,7 +549,7 @@ impl SolanaIndexer {
             };
 
             let signature = extract_tx_signature(&tx.transaction)?;
-            emit_events(&self.events_tx, &self.program_id, signature, tx, &logs).await?;
+            emit_events(&self.events_tx, &self.program_id, signature, tx, logs).await?;
         }
 
         self.events_tx.send(ChainEvent::Block(height)).await?;
@@ -642,12 +642,12 @@ async fn subscribe_and_buffer_live_events(
 }
 
 fn parse_cpi_events(
-    tx: EncodedTransactionWithStatusMeta,
+    tx: &EncodedTransactionWithStatusMeta,
     target_program_id: &Pubkey,
 ) -> Result<Vec<SignatureEventBox>> {
     use solana_transaction_status::{UiInstruction, UiParsedInstruction};
 
-    let Some(meta) = tx.meta else {
+    let Some(meta) = &tx.meta else {
         return Ok(Vec::new());
     };
 
@@ -698,7 +698,7 @@ fn parse_cpi_events(
     };
 
     // Look into inner instructions for CPI calls
-    let inner_ixs = match meta.inner_instructions {
+    let inner_ixs = match &meta.inner_instructions {
         OptionSerializer::Some(ixs) => ixs,
         _ => return Ok(Vec::new()),
     };
@@ -852,12 +852,12 @@ fn has_log_starts_with(logs: &[String], start_with: &str) -> bool {
 }
 
 fn parse_cpi_respond_events(
-    tx: EncodedTransactionWithStatusMeta,
+    tx: &EncodedTransactionWithStatusMeta,
     target_program_id: &Pubkey,
 ) -> Result<(Vec<RespondBidirectionalEvent>, Vec<SignatureRespondedEvent>)> {
     use solana_transaction_status::{UiInstruction, UiParsedInstruction};
 
-    let Some(meta) = tx.meta else {
+    let Some(meta) = &tx.meta else {
         return Ok((Vec::new(), Vec::new()));
     };
 
@@ -908,7 +908,7 @@ fn parse_cpi_respond_events(
         };
 
     // Look into inner instructions for CPI calls
-    let inner_ixs = match meta.inner_instructions {
+    let inner_ixs = match &meta.inner_instructions {
         OptionSerializer::Some(ixs) => ixs,
         _ => return Ok((Vec::new(), Vec::new())),
     };
@@ -964,7 +964,7 @@ enum SolanaEvents {
 
 impl SolanaEvents {
     fn parse(
-        tx: EncodedTransactionWithStatusMeta,
+        tx: &EncodedTransactionWithStatusMeta,
         target_program_id: &Pubkey,
         logs: &[String],
     ) -> Result<Self> {
@@ -989,7 +989,7 @@ async fn emit_events(
     tx: &EncodedTransactionWithStatusMeta,
     logs: &[String],
 ) -> Result<()> {
-    match SolanaEvents::parse(tx.clone(), program_id, logs)? {
+    match SolanaEvents::parse(tx, program_id, logs)? {
         SolanaEvents::Sign(events) => {
             for ev in events {
                 let req = build_sign_request(ev, signature.as_ref().to_vec())?;

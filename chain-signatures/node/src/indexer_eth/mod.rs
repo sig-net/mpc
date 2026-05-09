@@ -1407,9 +1407,14 @@ impl ChainIndexer for EthereumIndexer {
         let block = match block {
             MaybeBlock::Block(block) => block,
             MaybeBlock::Missing(block_id) => {
-                tracing::warn!(?block_id, "ethereum catchup block missing from batch; refetching");
+                tracing::warn!(
+                    ?block_id,
+                    "ethereum catchup block missing from batch; refetching"
+                );
                 let Some(block) = self.client.get_block(*block_id).await else {
-                    anyhow::bail!("ethereum catchup block {block_id:?} is still unavailable after refetch")
+                    anyhow::bail!(
+                        "ethereum catchup block {block_id:?} is still unavailable after refetch"
+                    )
                 };
                 _block = block;
                 &_block
@@ -1521,9 +1526,6 @@ mod tests {
             EthereumClient::clamp_oldest_supported_with(1, anchor_height, max_catchup_blocks),
             expected_oldest,
         );
-
-        let heights: Vec<u64> = vec![2, 3, 4].into_iter().collect();
-        assert_eq!(heights, vec![2, 3, 4]);
     }
 
     #[tokio::test]
@@ -1615,11 +1617,16 @@ mod tests {
         };
 
         indexer
-            .process_catchup(&MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(12))))
+            .process_catchup(&MaybeBlock::Missing(BlockId::Number(
+                BlockNumberOrTag::Number(12),
+            )))
             .await
             .expect("missing catchup block should be refetched successfully");
 
-        assert!(matches!(events_rx.recv().await, Some(ChainEvent::Block(12))));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ChainEvent::Block(12))
+        ));
     }
 
     #[tokio::test]
@@ -1649,14 +1656,14 @@ mod tests {
         };
 
         let err = indexer
-            .process_catchup(&MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(12))))
+            .process_catchup(&MaybeBlock::Missing(BlockId::Number(
+                BlockNumberOrTag::Number(12),
+            )))
             .await
             .expect_err("missing catchup block should fail when refetch cannot recover it");
 
         assert!(events_rx.try_recv().is_err());
-        assert!(err
-            .to_string()
-            .contains("still unavailable after refetch"));
+        assert!(err.to_string().contains("still unavailable after refetch"));
     }
 
     #[tokio::test]
