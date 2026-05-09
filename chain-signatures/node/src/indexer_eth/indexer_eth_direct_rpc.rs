@@ -346,6 +346,9 @@ mod tests {
             .expect("batch fetch should succeed");
 
         assert!(matches!(&blocks[0], MaybeBlock::Block(block) if block.header.number == 7));
-        assert!(matches!(&blocks[1], MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(8)))));
+        assert!(matches!(
+            &blocks[1],
+            MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(8)))
+        ));
     }
 }
