@@ -1,3 +1,4 @@
+pub mod artifact_task;
 pub mod consensus;
 pub mod contract;
 pub mod cryptography;
