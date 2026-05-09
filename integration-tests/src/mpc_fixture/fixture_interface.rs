@@ -291,9 +291,17 @@ impl MpcFixtureNode {
             .expect("remove_holder_and_prune presignatures failed");
     }
 
-    pub fn start_web_interface(&mut self, account_id: AccountId) {
+    pub async fn start_web_interface(&mut self, account_id: AccountId) {
+        let web_port = match crate::utils::pick_unused_port().await {
+            Ok(port) => port,
+            Err(err) => {
+                tracing::error!(?err, "failed to allocate fixture web port");
+                return;
+            }
+        };
+
         let task = mpc_node::web::run(
-            8200 + u32::from(self.me) as u16,
+            web_port,
             self.msg_channel.clone(),
             self.state.clone(),
             self.triple_storage.clone(),

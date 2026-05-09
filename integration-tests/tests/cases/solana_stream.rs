@@ -256,14 +256,18 @@ async fn test_solana_stream_concurrent_events() -> Result<()> {
 
     // Collect all sign request events
     let mut sign_events = Vec::new();
-    for _ in 0..num_requests * 2 {
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while sign_events.len() < num_requests {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+
         if let Ok(Some(ChainEvent::SignRequest(req))) =
-            timeout(Duration::from_secs(5), stream.next_event()).await
+            timeout(remaining, stream.next_event()).await
         {
             sign_events.push(req);
-            if sign_events.len() == num_requests {
-                break;
-            }
         }
     }
 

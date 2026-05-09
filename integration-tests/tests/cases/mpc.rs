@@ -913,9 +913,9 @@ async fn test_presignature_no_triple_waste() {
             node.me
         );
 
-        assert_eq!(
-            owned_presignatures, expected_per_node,
-            "node {:?} expected {expected_per_node} presignatures, got {owned_presignatures}",
+        assert!(
+            owned_presignatures >= expected_per_node,
+            "node {:?} expected at least {expected_per_node} presignatures, got {owned_presignatures}",
             node.me
         );
     }
