@@ -425,6 +425,9 @@ impl ChainIndexer for SolanaIndexer {
             .map(|n| n.saturating_add(1))
             .unwrap_or(anchor_height);
         let end_slot = anchor_height.saturating_sub(1); // We want to catch up to just before the anchor
+        if start_slot >= end_slot {
+            return BTreeMap::new().into_iter();
+        }
 
         // This fetches a sparse list of transactions based on whether our program received
         // a transaction in that specific slot. This is the most optimized and cheapest path.
