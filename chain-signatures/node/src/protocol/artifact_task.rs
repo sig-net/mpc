@@ -1,9 +1,10 @@
+use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use cait_sith::protocol::Participant;
+use cait_sith::protocol::{Action, MessageData, Participant};
 use mpc_contract::config::ProtocolConfig;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -45,6 +46,119 @@ impl<T: ArtifactProtocol> ProtocolTaskState<T> for ProtocolProposer {
 
 impl<T: ArtifactProtocol> ProtocolTaskState<T> for ProtocolDeliberator {
     type Data = Participant;
+}
+
+pub struct ProtocolGenerator<D> {
+    driver: D,
+}
+
+impl<D> ProtocolGenerator<D> {
+    pub fn new(driver: D) -> Self {
+        Self { driver }
+    }
+}
+
+#[async_trait]
+pub trait ProtocolGeneratorDriver: Send {
+    type Output: Send;
+
+    fn created_at(&self) -> Instant;
+
+    fn observe_before_poke_delay(&self);
+
+    fn observe_poke_cpu_time(&self, elapsed: Duration);
+
+    async fn poke(&mut self) -> Result<Action<Self::Output>, ()>;
+
+    async fn wait_for_messages(&mut self) -> bool;
+
+    async fn send_many(&mut self, data: MessageData);
+
+    async fn send_private(&mut self, to: Participant, data: MessageData);
+
+    async fn finish(
+        self,
+        output: Self::Output,
+        run_elapsed: Duration,
+        total_wait: Duration,
+        total_pokes: usize,
+    )
+    where
+        Self: Sized;
+}
+
+impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
+    pub async fn run(mut self) {
+        let run_start = Instant::now();
+        let mut total_wait = Duration::from_millis(0);
+        let mut total_pokes = 0;
+        let mut poke_last_time = self.driver.created_at();
+        self.driver.observe_before_poke_delay();
+
+        loop {
+            let poke_start_time = Instant::now();
+            let action = match self.driver.poke().await {
+                Ok(action) => action,
+                Err(()) => break,
+            };
+
+            total_wait += poke_start_time - poke_last_time;
+            total_pokes += 1;
+            poke_last_time = Instant::now();
+            self.driver.observe_poke_cpu_time(poke_start_time.elapsed());
+
+            match action {
+                Action::Wait => {
+                    if !self.driver.wait_for_messages().await {
+                        break;
+                    }
+                }
+                Action::SendMany(data) => {
+                    self.driver.send_many(data).await;
+                }
+                Action::SendPrivate(to, data) => {
+                    self.driver.send_private(to, data).await;
+                }
+                Action::Return(output) => {
+                    self.driver
+                        .finish(output, run_start.elapsed(), total_wait, total_pokes)
+                        .await;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn run_generation_task<T: ArtifactProtocol>(
+    task_id: T::TaskId,
+    me: Participant,
+    owner: Participant,
+    participants: Vec<Participant>,
+    threshold: usize,
+    epoch: u64,
+    proposer_state: Option<T::ProposerState>,
+    ctx: T::Context,
+    timeout: Duration,
+) {
+    let Some(dependencies) =
+        T::prepare_generation(&ctx, task_id, owner, proposer_state, timeout).await
+    else {
+        return;
+    };
+
+    T::run_generation(
+        task_id,
+        me,
+        owner,
+        participants,
+        threshold,
+        epoch,
+        dependencies,
+        ctx,
+        timeout,
+    )
+    .await;
 }
 
 /// Single protocol task instance handling posit negotiation and generation.
@@ -204,7 +318,7 @@ impl<T: ArtifactProtocol> ProtocolTask<T, ProtocolProposer> {
         }
 
         tracing::info!(task_id = ?self.task_id, ?accepted, "posit complete (proposer), running generation");
-        T::run_generation(
+        run_generation_task::<T>(
             self.task_id,
             self.me,
             self.me,
@@ -307,7 +421,7 @@ impl<T: ArtifactProtocol> ProtocolTask<T, ProtocolDeliberator> {
         };
 
         tracing::info!(task_id = ?self.task_id, ?participants, "posit complete (deliberator), running generation");
-        T::run_generation(
+        run_generation_task::<T>(
             self.task_id,
             self.me,
             owner,
@@ -335,6 +449,9 @@ pub trait ArtifactProtocol: Sized + Send + 'static {
     /// State acquired by the proposer before broadcasting Propose
     /// (e.g. taken triple pairs for presignature generation).
     type ProposerState: Send + 'static;
+
+    /// Generation-time dependencies resolved before the cait-sith protocol runs.
+    type GenerationDeps: Send + 'static;
 
     /// Shared context passed to every task (storage, msg channel, keys, …).
     type Context: Clone + Send + Sync + 'static;
@@ -390,10 +507,16 @@ pub trait ArtifactProtocol: Sized + Send + 'static {
     /// Generation timeout extracted from config.
     fn generation_timeout(cfg: &ProtocolConfig) -> Duration;
 
+    /// Resolve dependencies needed to run generation.
+    fn prepare_generation(
+        ctx: &Self::Context,
+        task_id: Self::TaskId,
+        owner: Participant,
+        proposer_state: Option<Self::ProposerState>,
+        timeout: Duration,
+    ) -> impl std::future::Future<Output = Option<Self::GenerationDeps>> + Send;
+
     /// Run the cait-sith generation protocol after posit completes.
-    ///
-    /// `proposer_state` is `Some` for the proposer (holds pre-acquired
-    /// resources) and `None` for deliberators (must fetch from storage).
     fn run_generation(
         task_id: Self::TaskId,
         me: Participant,
@@ -401,7 +524,7 @@ pub trait ArtifactProtocol: Sized + Send + 'static {
         participants: Vec<Participant>,
         threshold: usize,
         epoch: u64,
-        proposer_state: Option<Self::ProposerState>,
+        dependencies: Self::GenerationDeps,
         ctx: Self::Context,
         timeout: Duration,
     ) -> impl std::future::Future<Output = ()> + Send;
@@ -805,6 +928,7 @@ mod tests {
     impl ArtifactProtocol for MockProtocol {
         type TaskId = u64;
         type ProposerState = ();
+        type GenerationDeps = ();
         type Context = MockContext;
 
         fn posit_id(task_id: u64) -> PositProtocolId {
@@ -862,6 +986,16 @@ mod tests {
             Duration::from_secs(5)
         }
 
+        async fn prepare_generation(
+            _ctx: &MockContext,
+            _task_id: u64,
+            _owner: Participant,
+            _proposer_state: Option<()>,
+            _timeout: Duration,
+        ) -> Option<()> {
+            Some(())
+        }
+
         async fn run_generation(
             _task_id: u64,
             _me: Participant,
@@ -869,7 +1003,7 @@ mod tests {
             _participants: Vec<Participant>,
             _threshold: usize,
             _epoch: u64,
-            _proposer_state: Option<()>,
+            _dependencies: (),
             ctx: MockContext,
             _timeout: Duration,
         ) {
@@ -1047,6 +1181,7 @@ mod tests {
         impl ArtifactProtocol for RejectingProtocol {
             type TaskId = u64;
             type ProposerState = ();
+            type GenerationDeps = ();
             type Context = RejectCtx;
 
             fn posit_id(id: u64) -> PositProtocolId {
@@ -1083,6 +1218,15 @@ mod tests {
             fn generation_timeout(_: &ProtocolConfig) -> Duration {
                 Duration::from_secs(5)
             }
+            async fn prepare_generation(
+                _: &RejectCtx,
+                _: u64,
+                _: Participant,
+                _: Option<()>,
+                _: Duration,
+            ) -> Option<()> {
+                Some(())
+            }
             async fn run_generation(
                 _: u64,
                 _: Participant,
@@ -1090,7 +1234,7 @@ mod tests {
                 _: Vec<Participant>,
                 _: usize,
                 _: u64,
-                _: Option<()>,
+                _: (),
                 ctx: RejectCtx,
                 _: Duration,
             ) {
