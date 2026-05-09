@@ -568,7 +568,7 @@ impl SolanaIndexer {
         };
 
         for slot in block_slots {
-            if slot >= end_slot {
+            if slot > end_slot {
                 continue;
             }
 
