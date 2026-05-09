@@ -1,5 +1,5 @@
 use super::artifact_task::{
-    ArtifactProtocol, PokeMode, ProtocolGenerator, ProtocolGeneratorDriver, ProtocolSpawnerTask,
+    ArtifactProtocol, PokeMode, ProtocolBuildOutput, ProtocolGeneratorDriver, ProtocolSpawnerTask,
 };
 use super::message::{MessageChannel, PositProtocolId, TripleMessage};
 use super::posit::PositAction;
@@ -32,7 +32,7 @@ pub struct Triple {
 
 // ── TripleGenerator ───────────────────────────────────────────────────────────
 
-struct TripleGenerationDriver {
+pub struct TripleGenerationDriver {
     slot: TriplePairSlot,
 }
 
@@ -207,6 +207,8 @@ impl ArtifactProtocol for TripleArtifact {
     type ProposerState = ();
     type GenerationDeps = ();
     type Context = TripleContext;
+    type GeneratorDriver = TripleGenerationDriver;
+    const USE_PROTOCOL_BUILDER: bool = true;
 
     fn posit_id(task_id: TripleId) -> PositProtocolId {
         PositProtocolId::Triple(task_id)
@@ -267,20 +269,20 @@ impl ArtifactProtocol for TripleArtifact {
         Some(())
     }
 
-    async fn run_generation(
+    async fn build_protocol(
         task_id: TripleId,
         me: Participant,
         owner: Participant,
         participants: Vec<Participant>,
         threshold: usize,
-        epoch: u64,
+        _epoch: u64,
         _dependencies: (),
         ctx: TripleContext,
-        timeout: Duration,
-    ) {
+        _timeout: Duration,
+    ) -> Option<ProtocolBuildOutput<Self::GeneratorDriver>> {
         let Some(slot) = ctx.storage.create_slot(task_id, owner).await else {
             tracing::warn!(task_id, "triple slot already taken, skipping generation");
-            return;
+            return None;
         };
 
         let mut sorted_participants = participants;
@@ -294,7 +296,7 @@ impl ArtifactProtocol for TripleArtifact {
             Ok(protocol) => Box::new(protocol),
             Err(err) => {
                 tracing::warn!(task_id, ?err, "failed to initialise triple generator");
-                return;
+                return None;
             }
         };
 
@@ -302,20 +304,17 @@ impl ArtifactProtocol for TripleArtifact {
         let driver = TripleGenerationDriver { slot };
 
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS.inc();
-        ProtocolGenerator::new(
-            task_id,
-            epoch,
-            me,
-            owner,
-            sorted_participants,
+        Some(ProtocolBuildOutput {
+            id: task_id,
+            participants: sorted_participants,
             protocol,
-            timeout,
             inbox,
-            ctx.msg,
             driver,
-        )
-        .run()
-        .await;
+        })
+    }
+
+    fn message_channel(ctx: &Self::Context) -> MessageChannel {
+        ctx.msg.clone()
     }
 
     async fn subscribe_posit(

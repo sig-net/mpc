@@ -1,5 +1,5 @@
 use super::artifact_task::{
-    ArtifactProtocol, PokeMode, ProtocolGenerator, ProtocolGeneratorDriver, ProtocolSpawnerTask,
+    ArtifactProtocol, PokeMode, ProtocolBuildOutput, ProtocolGeneratorDriver, ProtocolSpawnerTask,
 };
 use super::message::{MessageChannel, PositProtocolId, PresignatureMessage};
 use super::posit::PositAction;
@@ -311,6 +311,8 @@ impl ArtifactProtocol for PresignatureArtifact {
     type ProposerState = TriplesTaken;
     type GenerationDeps = PresignatureGenerationDeps;
     type Context = PresignatureContext;
+    type GeneratorDriver = PresignatureGenerationDriver;
+    const USE_PROTOCOL_BUILDER: bool = true;
 
     fn posit_id(task_id: FullPresignatureId) -> PositProtocolId {
         PositProtocolId::Presignature(task_id)
@@ -424,20 +426,20 @@ impl ArtifactProtocol for PresignatureArtifact {
         Some(PresignatureGenerationDeps(pending))
     }
 
-    async fn run_generation(
+    async fn build_protocol(
         task_id: FullPresignatureId,
         me: Participant,
         owner: Participant,
         participants: Vec<Participant>,
         threshold: usize,
-        epoch: u64,
+        _epoch: u64,
         dependencies: PresignatureGenerationDeps,
         ctx: PresignatureContext,
         timeout: Duration,
-    ) {
+    ) -> Option<ProtocolBuildOutput<Self::GeneratorDriver>> {
         let Some(slot) = ctx.presignatures.create_slot(task_id.id, owner).await else {
             tracing::warn!(?task_id, "presignature slot already taken, skipping");
-            return;
+            return None;
         };
 
         let keygen_out = KeygenOutput {
@@ -449,7 +451,7 @@ impl ArtifactProtocol for PresignatureArtifact {
         sorted_participants.sort();
 
         let Some(triples) = dependencies.0.fetch(owner, timeout).await else {
-            return;
+            return None;
         };
 
         let (pair, dropper) = triples.take();
@@ -468,7 +470,7 @@ impl ArtifactProtocol for PresignatureArtifact {
             Ok(p) => Box::new(p),
             Err(err) => {
                 tracing::warn!(?task_id, ?err, "failed to initialise presignature protocol");
-                return;
+                return None;
             }
         };
 
@@ -480,20 +482,17 @@ impl ArtifactProtocol for PresignatureArtifact {
         let inbox = ctx.msg.subscribe_presignature(task_id.id).await;
 
         let driver = PresignatureGenerationDriver { dropper, slot };
-        ProtocolGenerator::new(
-            task_id.id,
-            epoch,
-            me,
-            owner,
-            sorted_participants,
+        Some(ProtocolBuildOutput {
+            id: task_id.id,
+            participants: sorted_participants,
             protocol,
-            timeout,
             inbox,
-            ctx.msg,
             driver,
-        )
-        .run()
-        .await;
+        })
+    }
+
+    fn message_channel(ctx: &Self::Context) -> MessageChannel {
+        ctx.msg.clone()
     }
 
     async fn subscribe_posit(

@@ -8,6 +8,7 @@ use cait_sith::protocol::{Action, MessageData, Participant, ProtocolError};
 use mpc_contract::config::ProtocolConfig;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tracing::Instrument;
 
 use crate::config::Config;
 use crate::mesh::MeshState;
@@ -54,9 +55,9 @@ pub enum PokeMode {
 }
 
 #[async_trait]
-pub trait ProtocolGeneratorDriver: Send {
-    type Id: Copy + Send + 'static;
-    type Protocol: Send + 'static;
+pub trait ProtocolGeneratorDriver: Send + Sync {
+    type Id: Copy + Send + Sync + 'static;
+    type Protocol: Send + Sync + 'static;
     type Output: Send + 'static;
     type InMessage: Send;
     type WireMessage: Send;
@@ -128,6 +129,14 @@ pub struct ProtocolGenerator<D: ProtocolGeneratorDriver> {
     inbox: mpsc::Receiver<D::InMessage>,
     msg: MessageChannel,
     driver: D,
+}
+
+pub struct ProtocolBuildOutput<D: ProtocolGeneratorDriver> {
+    pub id: D::Id,
+    pub participants: Vec<Participant>,
+    pub protocol: D::Protocol,
+    pub inbox: mpsc::Receiver<D::InMessage>,
+    pub driver: D,
 }
 
 impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
@@ -319,6 +328,40 @@ async fn run_generation_task<T: ArtifactProtocol>(
     else {
         return;
     };
+
+    if T::USE_PROTOCOL_BUILDER {
+        let Some(build) = T::build_protocol(
+            task_id,
+            me,
+            owner,
+            participants,
+            threshold,
+            epoch,
+            dependencies,
+            ctx.clone(),
+            timeout,
+        )
+        .await
+        else {
+            return;
+        };
+
+        ProtocolGenerator::new(
+            build.id,
+            epoch,
+            me,
+            owner,
+            build.participants,
+            build.protocol,
+            timeout,
+            build.inbox,
+            T::message_channel(&ctx),
+            build.driver,
+        )
+        .run()
+        .await;
+        return;
+    }
 
     T::run_generation(
         task_id,
@@ -629,6 +672,12 @@ pub trait ArtifactProtocol: Sized + Send + 'static {
     /// Shared context passed to every task (storage, msg channel, keys, …).
     type Context: Clone + Send + Sync + 'static;
 
+    /// Driver used by the generic protocol generation loop.
+    type GeneratorDriver: ProtocolGeneratorDriver;
+
+    /// Enable generic build->run flow. Disabled protocols use `run_generation`.
+    const USE_PROTOCOL_BUILDER: bool = false;
+
     /// Returns the [`PositProtocolId`] for outgoing posit messages.
     fn posit_id(task_id: Self::TaskId) -> PositProtocolId;
 
@@ -689,7 +738,28 @@ pub trait ArtifactProtocol: Sized + Send + 'static {
         timeout: Duration,
     ) -> impl std::future::Future<Output = Option<Self::GenerationDeps>> + Send;
 
-    /// Run the cait-sith generation protocol after posit completes.
+    /// Build protocol + inbox + driver after posit completes.
+    ///
+    /// Returning `None` falls back to [`ArtifactProtocol::run_generation`].
+    fn build_protocol(
+        task_id: Self::TaskId,
+        me: Participant,
+        owner: Participant,
+        participants: Vec<Participant>,
+        threshold: usize,
+        epoch: u64,
+        dependencies: Self::GenerationDeps,
+        ctx: Self::Context,
+        timeout: Duration,
+    ) -> impl std::future::Future<Output = Option<ProtocolBuildOutput<Self::GeneratorDriver>>> + Send {
+        async move {
+            let _ = (task_id, me, owner, participants, threshold, epoch, dependencies, ctx, timeout);
+            None
+        }
+    }
+
+    /// Fallback generation path used when [`ArtifactProtocol::build_protocol`]
+    /// is not implemented.
     fn run_generation(
         task_id: Self::TaskId,
         me: Participant,
@@ -700,7 +770,16 @@ pub trait ArtifactProtocol: Sized + Send + 'static {
         dependencies: Self::GenerationDeps,
         ctx: Self::Context,
         timeout: Duration,
-    ) -> impl std::future::Future<Output = ()> + Send;
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async move {
+            let _ = (task_id, me, owner, participants, threshold, epoch, dependencies, ctx, timeout);
+        }
+    }
+
+    /// Message channel used by the generic protocol generator.
+    fn message_channel(_ctx: &Self::Context) -> MessageChannel {
+        panic!("ArtifactProtocol::message_channel must be implemented when build_protocol is used")
+    }
 
     /// Subscribe to the global posit stream for this protocol type.
     fn subscribe_posit(
@@ -799,6 +878,13 @@ impl<T: ArtifactProtocol> ProtocolSpawner<T> {
         let epoch = self.epoch;
         let ctx = self.ctx.clone();
         let msg = self.msg.clone();
+        let span = tracing::info_span!(
+            "protocol_task",
+            task_id = ?task_id,
+            me = ?me,
+            owner = ?me,
+            role = "proposer"
+        );
 
         self.tasks.spawn(
             task_id,
@@ -814,7 +900,8 @@ impl<T: ArtifactProtocol> ProtocolSpawner<T> {
                 generation_timeout,
                 msg,
             )
-            .run(),
+            .run()
+            .instrument(span),
         );
 
         true
@@ -854,6 +941,13 @@ impl<T: ArtifactProtocol> ProtocolSpawner<T> {
                 let epoch = self.epoch;
                 let ctx = self.ctx.clone();
                 let msg = self.msg.clone();
+                let span = tracing::info_span!(
+                    "protocol_task",
+                    task_id = ?task_id,
+                    me = ?me,
+                    owner = ?from,
+                    role = "deliberator"
+                );
 
                 self.tasks.spawn(
                     task_id,
@@ -868,7 +962,8 @@ impl<T: ArtifactProtocol> ProtocolSpawner<T> {
                         generation_timeout,
                         msg,
                     )
-                    .run(),
+                    .run()
+                    .instrument(span),
                 );
             }
 
@@ -904,7 +999,6 @@ impl<T: ArtifactProtocol> ProtocolSpawner<T> {
         &mut self,
         active: &[Participant],
         protocol: &ProtocolConfig,
-        ongoing_tx: &watch::Sender<usize>,
         last_active_warn: &mut Option<std::time::Instant>,
     ) {
         if active.len() < self.threshold {
@@ -942,8 +1036,19 @@ impl<T: ArtifactProtocol> ProtocolSpawner<T> {
             }
         }
 
-        let _ = ongoing_tx.send(self.tasks.len());
-        T::update_metrics(&self.ctx, self.me, self.tasks.len(), self.len_introduced()).await;
+    }
+
+    async fn publish_ongoing(
+        &self,
+        ongoing_tx: &watch::Sender<usize>,
+        last_ongoing: &mut usize,
+    ) {
+        let current = self.tasks.len();
+        if current != *last_ongoing {
+            let _ = ongoing_tx.send(current);
+            *last_ongoing = current;
+        }
+        T::update_metrics(&self.ctx, self.me, current, self.len_introduced()).await;
     }
 
     async fn reply_posit(&self, task_id: T::TaskId, to: Participant, action: PositAction) {
@@ -971,19 +1076,20 @@ impl<T: ArtifactProtocol> ProtocolSpawner<T> {
         let mut active = mesh_state.borrow().active().keys_vec();
         let mut protocol = cfg.borrow().protocol.clone();
         let mut last_active_warn: Option<std::time::Instant> = None;
+        let mut last_ongoing = self.tasks.len();
+        let mut ongoing_rx = ongoing_tx.subscribe();
 
-        self.maybe_stockpile(&active, &protocol, &ongoing_tx, &mut last_active_warn)
+        self.maybe_stockpile(&active, &protocol, &mut last_active_warn)
             .await;
+        self.publish_ongoing(&ongoing_tx, &mut last_ongoing).await;
 
         loop {
             tokio::select! {
                 Some((task_id, from, action)) = posit_rx.recv() => {
                     let timeout = T::generation_timeout(&protocol);
                     self.handle_posit(task_id, from, action, timeout).await;
-                    self.maybe_stockpile(&active, &protocol, &ongoing_tx, &mut last_active_warn)
-                        .await;
+                    self.publish_ongoing(&ongoing_tx, &mut last_ongoing).await;
                 }
-
                 Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     let task_id = match result {
                         Ok((id, ())) => id,
@@ -994,21 +1100,18 @@ impl<T: ArtifactProtocol> ProtocolSpawner<T> {
                     };
                     self.proposed.remove(&task_id);
                     self.task_posit_tx.remove(&task_id);
-                    let _ = ongoing_tx.send(self.tasks.len());
-                    self.maybe_stockpile(&active, &protocol, &ongoing_tx, &mut last_active_warn)
-                        .await;
+                    self.publish_ongoing(&ongoing_tx, &mut last_ongoing).await;
                 }
-
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();
-                    self.maybe_stockpile(&active, &protocol, &ongoing_tx, &mut last_active_warn)
-                        .await;
                 }
-
                 Ok(()) = mesh_state.changed() => {
                     active = mesh_state.borrow().active().keys_vec();
-                    self.maybe_stockpile(&active, &protocol, &ongoing_tx, &mut last_active_warn)
+                }
+                Ok(()) = ongoing_rx.changed() => {
+                    self.maybe_stockpile(&active, &protocol, &mut last_active_warn)
                         .await;
+                    self.publish_ongoing(&ongoing_tx, &mut last_ongoing).await;
                 }
             }
         }
@@ -1075,6 +1178,93 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
+    struct NoopGeneratorDriver;
+
+    #[async_trait]
+    impl ProtocolGeneratorDriver for NoopGeneratorDriver {
+        type Id = u64;
+        type Protocol = ();
+        type Output = ();
+        type InMessage = ();
+        type WireMessage = ();
+
+        fn poke_mode(&self) -> PokeMode {
+            PokeMode::Inline
+        }
+
+        fn protocol_poke(
+            _protocol: &mut Self::Protocol,
+        ) -> Result<Action<Self::Output>, ProtocolError> {
+            unreachable!()
+        }
+
+        fn protocol_message(_protocol: &mut Self::Protocol, _from: Participant, _data: MessageData) {}
+
+        fn split_incoming(_msg: Self::InMessage) -> (Participant, MessageData) {
+            unreachable!()
+        }
+
+        fn build_message(
+            &self,
+            _id: Self::Id,
+            _epoch: u64,
+            _from: Participant,
+            _to: Participant,
+            _data: MessageData,
+        ) -> Self::WireMessage {
+            unreachable!()
+        }
+
+        async fn send_message(
+            &self,
+            _msg: &MessageChannel,
+            _from: Participant,
+            _to: Participant,
+            _wire: Self::WireMessage,
+        ) {
+        }
+
+        fn observe_before_poke_delay(&self, _created: Instant) {}
+
+        fn observe_poke_cpu_time(&self, _elapsed: Duration) {}
+
+        fn on_poke_protocol_error(
+            &mut self,
+            _me: Participant,
+            _owner: Participant,
+            _err: ProtocolError,
+        ) {
+        }
+
+        fn on_poke_join_error(
+            &mut self,
+            _me: Participant,
+            _owner: Participant,
+            _err: tokio::task::JoinError,
+        ) {
+        }
+
+        fn on_recv_closed(&mut self, _id: Self::Id, _owner: Participant) {}
+
+        fn on_recv_timeout(&mut self, _id: Self::Id, _owner: Participant) {}
+
+        fn on_drop(&self, _id: Self::Id, _msg: MessageChannel) {}
+
+        async fn finish(
+            &mut self,
+            _id: Self::Id,
+            _me: Participant,
+            _owner: Participant,
+            _participants: &[Participant],
+            _created: Instant,
+            _output: Self::Output,
+            _run_elapsed: Duration,
+            _total_wait: Duration,
+            _total_pokes: usize,
+        ) {
+        }
+    }
+
     // ── Mock protocol ─────────────────────────────────────────────────────────
 
     /// A mock artifact protocol that counts successful generations and supports
@@ -1103,6 +1293,7 @@ mod tests {
         type ProposerState = ();
         type GenerationDeps = ();
         type Context = MockContext;
+        type GeneratorDriver = NoopGeneratorDriver;
 
         fn posit_id(task_id: u64) -> PositProtocolId {
             PositProtocolId::Triple(task_id)
@@ -1356,6 +1547,7 @@ mod tests {
             type ProposerState = ();
             type GenerationDeps = ();
             type Context = RejectCtx;
+            type GeneratorDriver = NoopGeneratorDriver;
 
             fn posit_id(id: u64) -> PositProtocolId {
                 PositProtocolId::Triple(id)
