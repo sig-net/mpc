@@ -42,7 +42,7 @@ pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
 
 fn report_channel_queue_len<T>(name: &'static str, tx: &mpsc::Sender<T>) {
-    metrics::messaging::set_channel_queue_size(name, tx.max_capacity() - tx.capacity());
+    metrics::messaging::set_queue_len_global(name, tx.max_capacity() - tx.capacity());
 }
 
 pub struct MessageInbox {
@@ -115,12 +115,14 @@ impl MessageInbox {
                         .triple_init
                         .send((id, message.from, message.action))
                         .await;
+                    self.triple_init.report_len_global();
                 }
                 PositProtocolId::Presignature(id) => {
                     let _ = self
                         .presignature_init
                         .send((id, message.from, message.action))
                         .await;
+                    self.presignature_init.report_len_global();
                 }
                 PositProtocolId::Signature(sign_id, presignature_id, round) => {
                     let _ = self
@@ -133,16 +135,20 @@ impl MessageInbox {
                             message.action,
                         ))
                         .await;
+                    self.signature_init.report_len_global();
                 }
             },
             Message::Generating(message) => {
                 let _ = self.generating.send(message).await;
+                self.generating.report_len_global();
             }
             Message::Resharing(message) => {
                 let _ = self.resharing.send(message).await;
+                self.resharing.report_len_global();
             }
             Message::Ready(message) => {
                 let _ = self.ready.send(message).await;
+                self.ready.report_len_global();
             }
             Message::Triple(message) => {
                 // NOTE: not logging the error because this is simply just channel closure.
@@ -152,7 +158,7 @@ impl MessageInbox {
                     .entry(message.id)
                     .or_insert_with(|| Subscriber::unsubscribed("triple_task"));
                 let _ = sub.send(message).await;
-                metrics::messaging::observe_queue_size("triple_task", sub.estimated_len());
+                sub.report_len();
             }
             Message::Presignature(message) => {
                 let sub = self
@@ -160,7 +166,7 @@ impl MessageInbox {
                     .entry(message.id)
                     .or_insert_with(|| Subscriber::unsubscribed("presign_task"));
                 let _ = sub.send(message).await;
-                metrics::messaging::observe_queue_size("presign_task", sub.estimated_len());
+                sub.report_len();
             }
             Message::Signature(message) => {
                 let sub = self
@@ -168,10 +174,10 @@ impl MessageInbox {
                     .entry((message.id, message.presignature_id))
                     .or_insert_with(|| Subscriber::unsubscribed("sign_task"));
                 let _ = sub.send(message).await;
-                metrics::messaging::observe_queue_size("sign_task", sub.estimated_len());
+                sub.report_len();
             }
             Message::Unknown(entries) => {
-                metrics::messaging::observe_queue_size("unknown", entries.len());
+                metrics::messaging::observe_queue_len("unknown", entries.len());
                 tracing::warn!(
                     entries = ?entries.iter().map(|(k, v)| (k, cbor_name(v))).collect::<Vec<_>>(),
                     "inbox: received unknown message type",
@@ -251,7 +257,6 @@ impl MessageInbox {
             SubscribeId::Generating => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
                     let rx = self.generating.subscribe();
-                    self.generating.report_queue_len();
                     let _ = resp.send(SubscribeResponse::Generating(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
@@ -261,7 +266,6 @@ impl MessageInbox {
             SubscribeId::Resharing => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
                     let rx = self.resharing.subscribe();
-                    self.resharing.report_queue_len();
                     let _ = resp.send(SubscribeResponse::Resharing(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
@@ -275,12 +279,11 @@ impl MessageInbox {
                         .entry(id)
                         .or_insert_with(|| Subscriber::unsubscribed("triple_task"));
                     let rx = sub.subscribe();
-                    sub.report_queue_len();
                     let _ = resp.send(SubscribeResponse::Triple(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
                     if let Some(sub) = self.triple.remove(&id) {
-                        sub.clear_queue_len_metric();
+                        sub.clear_len_global();
                     } else {
                         tracing::warn!(id, "trying to unsub from an unknown triple subscription");
                     }
@@ -293,12 +296,11 @@ impl MessageInbox {
                         .entry(id)
                         .or_insert_with(|| Subscriber::unsubscribed("presign_task"));
                     let rx = sub.subscribe();
-                    sub.report_queue_len();
                     let _ = resp.send(SubscribeResponse::Presignature(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
                     if let Some(sub) = self.presignature.remove(&id) {
-                        sub.clear_queue_len_metric();
+                        sub.clear_len_global();
                     } else {
                         tracing::warn!(
                             id,
@@ -314,12 +316,11 @@ impl MessageInbox {
                         .entry((sign_id, presignature_id))
                         .or_insert_with(|| Subscriber::unsubscribed("sign_task"));
                     let rx = sub.subscribe();
-                    sub.report_queue_len();
                     let _ = resp.send(SubscribeResponse::Signature(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
                     if let Some(sub) = self.signature.remove(&(sign_id, presignature_id)) {
-                        sub.clear_queue_len_metric();
+                        sub.clear_len_global();
                     } else {
                         tracing::warn!(
                             ?sign_id,
@@ -332,45 +333,38 @@ impl MessageInbox {
             SubscribeId::Ready => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
                     let rx = self.ready.subscribe();
-                    self.ready.report_queue_len();
                     let _ = resp.send(SubscribeResponse::Ready(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
                     self.ready.unsubscribe();
-                    self.ready.report_queue_len();
+                    self.ready.clear_len_global();
                 }
             },
             SubscribeId::Triples => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
                     let rx = self.triple_init.subscribe();
-                    self.triple_init.report_queue_len();
                     let _ = resp.send(SubscribeResponse::TriplePosit(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
                     self.triple_init.unsubscribe();
-                    self.triple_init.report_queue_len();
                 }
             },
             SubscribeId::Presignatures => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
                     let rx = self.presignature_init.subscribe();
-                    self.presignature_init.report_queue_len();
                     let _ = resp.send(SubscribeResponse::PresignaturePosit(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
                     self.presignature_init.unsubscribe();
-                    self.presignature_init.report_queue_len();
                 }
             },
             SubscribeId::Signatures => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
                     let rx = self.signature_init.subscribe();
-                    self.signature_init.report_queue_len();
                     let _ = resp.send(SubscribeResponse::SignaturePosit(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
                     self.signature_init.unsubscribe();
-                    self.signature_init.report_queue_len();
                 }
             },
         }

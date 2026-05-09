@@ -88,32 +88,30 @@ pub(crate) static CHANNEL_QUEUE_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     .unwrap()
 });
 
-pub(crate) fn set_channel_queue_size(channel: &str, len: usize) {
+pub(crate) fn set_queue_len_global(channel: &str, len: usize) {
     CHANNEL_QUEUE_SIZE
         .with_label_values(&[channel])
         .set(len as i64);
 }
 
-pub(crate) fn remove_channel_queue_size(channel: &str) {
+pub(crate) fn remove_queue_len_global(channel: &str) {
     let _ = CHANNEL_QUEUE_SIZE.remove_label_values(&[channel]);
 }
 
-const TASK_QUEUE_BUCKETS: &[f64] = &[
-    1.0, 10.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0,
-];
-
-pub(crate) static TASK_QUEUE_SIZE: LazyLock<HistogramVec> = LazyLock::new(|| {
+pub(crate) static TASK_QUEUE_LEN: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec_with_node_account_id(
         "multichain_task_queue_size",
         "Distribution of queue sizes across message channels",
         &["channel"],
-        Some(TASK_QUEUE_BUCKETS.to_vec()),
+        Some(vec![
+            1.0, 10.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0,
+        ]),
     )
     .unwrap()
 });
 
-pub(crate) fn observe_queue_size(channel: &str, len: usize) {
-    TASK_QUEUE_SIZE
+pub(crate) fn observe_queue_len(channel: &str, len: usize) {
+    TASK_QUEUE_LEN
         .with_label_values(&[channel])
         .observe(len as f64);
 }

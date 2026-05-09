@@ -154,12 +154,16 @@ impl<T> Subscriber<T> {
         }
     }
 
-    pub fn report_queue_len(&self) {
-        crate::metrics::messaging::set_channel_queue_size(self.metrics.name, self.estimated_len());
+    pub fn report_len_global(&self) {
+        crate::metrics::messaging::set_queue_len_global(self.metrics.name, self.estimated_len());
     }
 
-    pub fn clear_queue_len_metric(&self) {
-        crate::metrics::messaging::remove_channel_queue_size(self.metrics.name);
+    pub fn clear_len_global(&self) {
+        crate::metrics::messaging::remove_queue_len_global(self.metrics.name);
+    }
+
+    pub fn report_len(&self) {
+        crate::metrics::messaging::observe_queue_len(self.metrics.name, self.estimated_len());
     }
 
     pub async fn send(&self, msg: T) -> Result<(), mpsc::error::SendError<T>> {

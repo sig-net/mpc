@@ -1348,7 +1348,7 @@ impl SignatureSpawner {
 
     fn handle_completion(&mut self, sign_id: SignId) {
         if let Some(inbox) = self.inboxes.remove(&sign_id) {
-            inbox.clear_queue_len_metric();
+            inbox.clear_len_global();
         }
         self.abort_delayed_watcher(sign_id, "completion");
         if self.tasks.abort(sign_id) {
@@ -1365,14 +1365,14 @@ impl SignatureSpawner {
             Err(sign_id) => {
                 tracing::warn!(?sign_id, "signature task interrupted");
                 if let Some(inbox) = self.inboxes.remove(&sign_id) {
-                    inbox.clear_queue_len_metric();
+                    inbox.clear_len_global();
                 }
                 self.abort_delayed_watcher(sign_id, "interruption");
                 return;
             }
         };
         if let Some(inbox) = self.inboxes.remove(&sign_id) {
-            inbox.clear_queue_len_metric();
+            inbox.clear_len_global();
         }
         self.abort_delayed_watcher(sign_id, "task completion");
         match result {
