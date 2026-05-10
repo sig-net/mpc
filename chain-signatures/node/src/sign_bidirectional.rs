@@ -504,3 +504,123 @@ pub struct SignBidirectionalSignature {
     pub indexed: IndexedSignRequest,
     pub signature: Signature,
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::consensus::{SignableTransaction, TxEip1559, TxLegacy};
+    use alloy::eips::eip2718::Encodable2718;
+    use alloy::eips::eip2930::{AccessList, AccessListItem};
+    use alloy::primitives::{FixedBytes, Signature as AlloySignature, TxKind};
+
+    fn alloy_signature(r: [u8; 32], s: [u8; 32], y_parity: bool) -> AlloySignature {
+        AlloySignature::from_scalars_and_parity(
+            FixedBytes::from_slice(&r),
+            FixedBytes::from_slice(&s),
+            y_parity,
+        )
+    }
+
+    #[test]
+    fn derive_user_address_matches_private_key_one_vector() {
+        let address = derive_user_address(k256::AffinePoint::GENERATOR, Scalar::ZERO);
+
+        assert_eq!(
+            address,
+            Address::from_slice(&hex::decode("7e5f4552091a69125d5dfcb7b8c2659029395bdf").unwrap())
+        );
+    }
+
+    #[test]
+    fn sign_and_hash_eip1559_matches_alloy_for_access_list_with_leading_zero_signature_scalar() {
+        let tx = TxEip1559 {
+            chain_id: 1,
+            nonce: 7,
+            gas_limit: 100_000,
+            max_fee_per_gas: 100_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: TxKind::Call(Address::from([0x22; 20])),
+            value: U256::from(123u64),
+            access_list: AccessList(vec![AccessListItem {
+                address: Address::from([0x33; 20]),
+                storage_keys: vec![B256::from([0x44; 32])],
+            }]),
+            input: Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]),
+        };
+        let unsigned = tx.encoded_for_signing();
+        let r = [
+            0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+            23, 24, 25, 26, 27, 28, 29,
+        ];
+        let s = [
+            0, 0, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+            23, 24, 25, 26, 27, 28, 29, 30,
+        ];
+        let expected_hash = keccak256(tx.into_signed(alloy_signature(r, s, true)).encoded_2718());
+
+        let (actual_hash, nonce) =
+            sign_and_hash_eip1559_from_unsigned(&unsigned, &r, &s, true).unwrap();
+
+        assert_eq!(nonce, 7);
+        assert_eq!(B256::from(actual_hash), expected_hash);
+    }
+
+    #[test]
+    fn sign_and_hash_eip1559_matches_alloy_with_leading_zero_signature_scalars() {
+        let tx = TxEip1559 {
+            chain_id: 1,
+            nonce: 7,
+            gas_limit: 21_000,
+            max_fee_per_gas: 100_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: TxKind::Call(Address::from([0x11; 20])),
+            value: U256::from(123u64),
+            access_list: AccessList::default(),
+            input: Bytes::new(),
+        };
+        let unsigned = tx.encoded_for_signing();
+        let r = [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 1,
+        ];
+        let s = [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 2,
+        ];
+        let expected_hash = keccak256(tx.into_signed(alloy_signature(r, s, true)).encoded_2718());
+
+        let (actual_hash, nonce) =
+            sign_and_hash_eip1559_from_unsigned(&unsigned, &r, &s, true).unwrap();
+
+        assert_eq!(nonce, 7);
+        assert_eq!(B256::from(actual_hash), expected_hash);
+    }
+
+    #[test]
+    fn sign_and_hash_legacy_matches_alloy_with_leading_zero_signature_scalar() {
+        let tx = TxLegacy {
+            chain_id: Some(1),
+            nonce: 11,
+            gas_price: 20_000_000_000,
+            gas_limit: 21_000,
+            to: TxKind::Call(Address::from([0x55; 20])),
+            value: U256::from(456u64),
+            input: Bytes::from_static(&[0xca, 0xfe]),
+        };
+        let unsigned = tx.encoded_for_signing();
+        let r = [
+            0, 0, 0, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30, 31,
+        ];
+        let s = [
+            0, 0, 0, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+            25, 26, 27, 28, 29, 30, 31, 32,
+        ];
+        let expected_hash = keccak256(tx.into_signed(alloy_signature(r, s, false)).encoded_2718());
+
+        let (actual_hash, nonce) =
+            sign_and_hash_legacy_from_unsigned(&unsigned, Some(1), &r, &s, false).unwrap();
+
+        assert_eq!(nonce, 11);
+        assert_eq!(B256::from(actual_hash), expected_hash);
+    }
+}

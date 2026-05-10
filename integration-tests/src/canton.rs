@@ -51,7 +51,7 @@ fn evm_type2_anvil_params(
     access_list: Vec<EvmAccessListEntry>,
 ) -> EvmType2TransactionParams {
     EvmType2TransactionParams {
-        chain_id: evm_u256_hex(31_337),
+        chain_id: evm_u256_hex(1),
         nonce: evm_u256_hex(nonce as u128),
         max_priority_fee_per_gas: evm_u256_hex(1_000_000_000),
         max_fee_per_gas: evm_u256_hex(100_000_000_000),
@@ -187,6 +187,11 @@ pub struct CantonSandbox {
     pub party_id: String,
     pub operator_party: String,
     pub requester_party: String,
+    /// Additional requester parties allocated at sandbox startup (with the
+    /// same act_as/read_as rights as `requester_party`). Tests that need to
+    /// rotate the Daml `requester` Party across multiple flows pull from
+    /// this list.
+    pub extra_requester_parties: Vec<String>,
     pub signer_cid: String,
     pub signer_template_id: String,
     pub signer_disclosure: DisclosedContract,
@@ -328,9 +333,16 @@ canton.participants.sandbox.ledger-api {{
         let sig_network = admin_client.allocate_party("SigNetwork").await?;
         let operator = admin_client.allocate_party("Operator").await?;
         let requester = admin_client.allocate_party("Requester").await?;
+        let extra_requester_parties = vec![
+            admin_client.allocate_party("RequesterB").await?,
+            admin_client.allocate_party("RequesterC").await?,
+        ];
 
         let mut rights = Vec::new();
-        for party in [&sig_network, &operator, &requester] {
+        for party in [&sig_network, &operator, &requester]
+            .into_iter()
+            .chain(extra_requester_parties.iter())
+        {
             rights.push(ledger_api::can_act_as(party));
             rights.push(ledger_api::can_read_as(party));
         }
@@ -370,6 +382,7 @@ canton.participants.sandbox.ledger-api {{
             party_id: sig_network,
             operator_party: operator,
             requester_party: requester,
+            extra_requester_parties,
             signer_cid,
             signer_template_id,
             signer_disclosure,
@@ -616,6 +629,32 @@ impl CantonTestClient {
             }
         }
         anyhow::bail!("disclosed contract not found for {contract_id}")
+    }
+
+    /// Find the contract id of an active contract whose JSON payload matches
+    /// `predicate`. Used by tests that need the cid (e.g., to pass it as a
+    /// choice argument) rather than the typed payload.
+    pub async fn find_active_contract_cid<F>(
+        &self,
+        parties: &[&str],
+        template_id: &str,
+        predicate: F,
+    ) -> Result<String>
+    where
+        F: Fn(&Value) -> bool,
+    {
+        let entries = self
+            .ledger_client
+            .fetch_active_contracts(parties, Some(template_id), false)
+            .await?;
+        for entry in &entries {
+            if let Some(ContractEntry::JsActiveContract(ac)) = &entry.contract_entry {
+                if predicate(&ac.created_event.payload) {
+                    return Ok(ac.created_event.contract_id.clone());
+                }
+            }
+        }
+        anyhow::bail!("no active contract for {template_id} matching predicate")
     }
 
     /// Poll for a contract matching the given predicate, returning the typed payload.

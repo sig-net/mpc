@@ -1536,4 +1536,157 @@ mod tests {
             other => panic!("expected ExecutionConfirmed, got {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn late_watcher_receipt_by_hash_wins_over_stale_nonce_fallback() {
+        let mut server = Server::new_async().await;
+
+        let tx_hash = b256!("118b2331d461a4aeedf6a1f9cc37463377578244e6a35216057a8370714e798f");
+        let block_hash = b256!("7e4e53d1de650d5a5ebed19b38321db369ef1dc357904284ecf4d89b8834969c");
+        let from_address = address!("f39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+        let to_address = address!("5fbdb2315678afecb367f032d93f642f64180aa3");
+
+        let receipt_response = json!({
+            "transactionHash": format!("{tx_hash:#x}"),
+            "blockHash": format!("{block_hash:#x}"),
+            "blockNumber": "0x2",
+            "transactionIndex": "0x0",
+            "from": format!("{from_address:#x}"),
+            "to": format!("{to_address:#x}"),
+            "gasUsed": "0x5208",
+            "effectiveGasPrice": "0x3a29f0f8",
+            "contractAddress": null,
+            "logsBloom": format!("0x{}", "0".repeat(512)),
+            "cumulativeGasUsed": "0x5208",
+            "type": "0x2",
+            "logs": [],
+            "status": "0x1"
+        });
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionReceipt",
+                "params": [format!("{tx_hash:#x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": receipt_response,
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionByHash",
+                "params": [format!("{tx_hash:#x}")]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": null,
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getTransactionCount",
+                "params": [format!("{from_address:#x}"), "0x5"]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "result": "0x1",
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([0x56; 32]);
+        let tx = BidirectionalTx {
+            id: BidirectionalTxId(tx_hash),
+            sender: [0u8; 32],
+            serialized_transaction: vec![],
+            source_chain: Chain::Solana,
+            target_chain: Chain::Ethereum,
+            caip2_id: "eip155:31337".to_string(),
+            key_version: LATEST_MPC_KEY_VERSION,
+            deposit: 0,
+            path: "m/44'/60'/0'/0/0".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: Chain::Ethereum.to_string(),
+            params: "{}".to_string(),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+            request_id: sign_id.request_id,
+            from_address,
+            nonce: 0,
+        };
+        backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;
+
+        let (events_tx, _events_rx) = mpsc::channel(1);
+        let indexer = EthereumIndexer {
+            eth: EthConfig {
+                account_sk: String::new(),
+                consensus_rpc_http_url: server.url(),
+                execution_rpc_http_url: server.url(),
+                contract_address: format!("{:x}", Address::ZERO),
+                network: "sepolia".to_string(),
+                helios_data_path: "/tmp/helios-test".to_string(),
+                refresh_finalized_interval: 100,
+                optimistic_requests: true,
+                light_client: false,
+            },
+            backlog,
+            client: Arc::new(EthereumClient::DirectRpc(
+                super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
+            )),
+            events_tx,
+            contract_address: Address::ZERO,
+            catchup_complete: Arc::new(Notify::new()),
+            live_blocks_rx: None,
+        };
+
+        let events = indexer
+            .collect_execution_confirmations(5, Vec::new())
+            .await
+            .expect("late watcher receipt lookup should succeed");
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ChainEvent::ExecutionConfirmed {
+                tx_id: event_tx_id,
+                sign_id: event_sign_id,
+                source_chain,
+                block_height,
+                result,
+            } => {
+                assert_eq!(*event_tx_id, BidirectionalTxId(tx_hash));
+                assert_eq!(*event_sign_id, sign_id);
+                assert_eq!(*source_chain, Chain::Solana);
+                assert_eq!(*block_height, 2);
+                assert!(matches!(result, ExecutionOutcome::Success { .. }));
+            }
+            other => panic!("expected ExecutionConfirmed, got {other:?}"),
+        }
+    }
 }

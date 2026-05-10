@@ -522,7 +522,10 @@ pub struct EthereumSandbox {
 
 impl EthereumSandbox {
     const RPC_PORT: u16 = 8545;
-    const DEFAULT_CHAIN_ID: u64 = 31337;
+    // chain_id=1 (mainnet) so Anvil matches production caip2_id derivations
+    // (`"eip155:" <> chainIdToDecimalText`) — Erc20Vault.daml derives caip2Id
+    // from evmTxParams.chainId, and mpc-node only registers `"eip155:1"`.
+    const DEFAULT_CHAIN_ID: u64 = 1;
     const DEFAULT_MNEMONIC: &'static str =
         "test test test test test test test test test test test junk";
 
