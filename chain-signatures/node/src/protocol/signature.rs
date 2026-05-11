@@ -1244,12 +1244,10 @@ impl SignTask {
                 Some(contract_state) = contract_watcher.next_state() => {
                     // phase.advance was cancelled at its current await point.
                     // If is_running was true, advance was actually running, so
-                    // attribute its partial elapsed time to the cancelled
-                    // phase to keep Organizing + Posit + Generating == Total.
+                    // attribute its partial elapsed time to the cancelled phase.
                     // If is_running was false, the advance branch was already
                     // gated off; the iteration was idle-waiting and there is
-                    // no phase work to attribute. (Note: we check is_running
-                    // before refresh_governance mutates it below.)
+                    // no phase work to attribute.
                     if is_running {
                         if let Some(step) = current_phase_step {
                             durations.add(step, phase_start.elapsed());
@@ -1789,7 +1787,7 @@ mod tests {
     #[test]
     fn phase_durations_preserve_additivity_invariant() {
         // This represents the case where we have 2 attempts:
-        // 1st one fails at posit, then starts from oganizing again and finishes
+        // 1st one fails at posit, then starts from organizing again and finishes
         let inputs = [
             (SignRequestStep::Organizing, Duration::from_millis(40)),
             (SignRequestStep::Posit, Duration::from_millis(120)),

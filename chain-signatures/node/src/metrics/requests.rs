@@ -117,7 +117,7 @@ pub(crate) static SIGN_REQUEST_DELAYED: LazyLock<CounterVec> = LazyLock::new(|| 
 /// the loop-back: organizing (self-loop on no presignature / no active peers),
 /// posit (consensus failed / timeout), or generating (generator construction
 /// or MPC run failed).
-pub static SIGN_REQUEST_LOOPS: LazyLock<CounterVec> = LazyLock::new(|| {
+pub(crate) static SIGN_REQUEST_LOOPS: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec_with_node_and_version(
         "multichain_sign_request_loops_total",
         "Number of back-edges to organizing in the sign request state machine, by chain and source phase.",
