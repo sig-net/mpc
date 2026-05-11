@@ -2,7 +2,9 @@ use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
-use crate::metrics::requests::{record_request_latency, SignRequestStep};
+use crate::metrics::requests::{
+    record_request_latency, record_request_latency_since, SignRequestStep, SIGN_REQUEST_LOOPS,
+};
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{
     MessageChannel, PositMessage, PositProtocolId, SignatureMessage, Subscriber,
@@ -1082,12 +1084,7 @@ impl SignGenerator {
                         "completed signature generation"
                     );
 
-                    record_request_latency(
-                        self.indexed.chain,
-                        SignRequestStep::Generating,
-                        "ok",
-                        self.created,
-                    );
+                    // SignRequestStep::Generating is emitted cumulatively from SignTask::run; the per-attempt protocol metrics below are unchanged.
 
                     crate::metrics::protocols::SIGNATURE_ACCRUED_WAIT_DELAY
                         .observe(total_wait.as_millis() as f64);
@@ -1145,6 +1142,53 @@ impl Drop for SignGenerator {
     }
 }
 
+/// Per-request accumulator for time spent in the three phases that the
+/// `SignTask::run` loop drives: Organizing, Posit, and Generating. Each
+/// phase can be entered multiple times for one request (e.g. Posit can fail
+/// consensus and loop back to Organizing), so the times are summed across
+/// every attempt.
+///
+/// In the absence of governance pauses, the emitted histograms satisfy
+/// Indexing + AwaitingGeneration + Organizing + Posit + Generating +
+/// Responding == Total. If the contract state leaves `Running` mid-request
+/// (resharing, governance churn) the run loop idles until it transitions
+/// back; that idle time is captured in Total but not in any phase, so the
+/// equality becomes `<= Total`.
+///
+/// The other `SignRequestStep` variants are not part of SignTask at all —
+/// Indexing is emitted by the indexer modules, AwaitingGeneration by
+/// `SignatureSpawner::handle_request`, and Responding/Total by `rpc.rs`.
+/// `add` ignores them so they are not double-counted.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+struct PhaseDurations {
+    organizing: Duration,
+    posit: Duration,
+    generating: Duration,
+}
+
+impl PhaseDurations {
+    fn add(&mut self, step: SignRequestStep, elapsed: Duration) {
+        match step {
+            SignRequestStep::Organizing => self.organizing += elapsed,
+            SignRequestStep::Posit => self.posit += elapsed,
+            SignRequestStep::Generating => self.generating += elapsed,
+            // Not part of SignTask — emitted elsewhere in the codebase.
+            // Listed explicitly (instead of `_`) so adding a new variant to
+            // SignRequestStep forces a compile error and a deliberate choice.
+            SignRequestStep::Indexing
+            | SignRequestStep::AwaitingGeneration
+            | SignRequestStep::Responding
+            | SignRequestStep::Total => {}
+        }
+    }
+
+    fn emit(self, chain: Chain) {
+        record_request_latency(chain, SignRequestStep::Organizing, "ok", self.organizing);
+        record_request_latency(chain, SignRequestStep::Posit, "ok", self.posit);
+        record_request_latency(chain, SignRequestStep::Generating, "ok", self.generating);
+    }
+}
+
 struct SignTask {
     governance: GovernanceInfo,
     sign_id: SignId,
@@ -1181,9 +1225,36 @@ impl SignTask {
         // since we won't in the running state
         let mut is_running = self.governance.is_running;
 
+        // Accumulate time spent in each phase across all loop iterations so
+        // that the emitted latencies sum to Total. Emitted once on
+        // Complete(Ok) further below; on failed completion we skip emission
+        // to match existing practice of recording only the ok path.
+        let mut durations = PhaseDurations::default();
+
         loop {
+            let phase_start = Instant::now();
+            let current_phase_step = match &phase {
+                SignPhase::Organizing(_) => Some(SignRequestStep::Organizing),
+                SignPhase::Posit(_) => Some(SignRequestStep::Posit),
+                SignPhase::Generating(_) => Some(SignRequestStep::Generating),
+                SignPhase::Complete(_) => None,
+            };
+
             tokio::select! {
                 Some(contract_state) = contract_watcher.next_state() => {
+                    // phase.advance was cancelled at its current await point.
+                    // If is_running was true, advance was actually running, so
+                    // attribute its partial elapsed time to the cancelled
+                    // phase to keep Organizing + Posit + Generating == Total.
+                    // If is_running was false, the advance branch was already
+                    // gated off; the iteration was idle-waiting and there is
+                    // no phase work to attribute. (Note: we check is_running
+                    // before refresh_governance mutates it below.)
+                    if is_running {
+                        if let Some(step) = current_phase_step {
+                            durations.add(step, phase_start.elapsed());
+                        }
+                    }
                     is_running = self.refresh_governance(&contract_state);
                     if is_running {
                         // we're back into running, reset to SignOrganizer
@@ -1199,9 +1270,28 @@ impl SignTask {
                 // This branch in tokio::select will get cancelled since the future for next contract
                 // state is reached first. This effectively pauses this branch from executing and
                 // further advancing the signature organization/positing/generation flow.
-                new_phase = phase.advance(&mut self, &mut state, &mut task_rx), if is_running => match new_phase {
-                    SignPhase::Complete(result) => return result,
-                    new_phase => phase = new_phase,
+                new_phase = phase.advance(&mut self, &mut state, &mut task_rx), if is_running => {
+                    if let Some(step) = current_phase_step {
+                        durations.add(step, phase_start.elapsed());
+                        if matches!(&new_phase, SignPhase::Organizing(_)) {
+                            SIGN_REQUEST_LOOPS
+                                .with_label_values(&[
+                                    state.indexed().chain.as_str(),
+                                    step.as_str(),
+                                ])
+                                .inc();
+                        }
+                    }
+
+                    match new_phase {
+                        SignPhase::Complete(result) => {
+                            if result.is_ok() {
+                                durations.emit(state.indexed().chain);
+                            }
+                            return result;
+                        }
+                        new_phase => phase = new_phase,
+                    }
                 }
             };
         }
@@ -1402,7 +1492,7 @@ impl SignatureSpawner {
                     return;
                 }
 
-                record_request_latency(
+                record_request_latency_since(
                     request.chain,
                     SignRequestStep::AwaitingGeneration,
                     "ok",
@@ -1649,5 +1739,71 @@ mod tests {
         assert_eq!(sign_task.governance.epoch, 1);
         assert_eq!(sign_task.governance.threshold, 1);
         assert_eq!(sign_task.governance.me, Participant::from(0));
+    }
+
+    #[test]
+    fn phase_durations_default_is_zero() {
+        let d = PhaseDurations::default();
+        assert_eq!(d.organizing, Duration::ZERO);
+        assert_eq!(d.posit, Duration::ZERO);
+        assert_eq!(d.generating, Duration::ZERO);
+    }
+
+    #[test]
+    fn phase_durations_sum_per_phase_across_attempts() {
+        // Simulates a request that loops Organizing -> Posit -> Organizing ->
+        // Posit -> Generating before completing. Each `add` mirrors one
+        // iteration of the SignTask::run phase loop.
+        let mut d = PhaseDurations::default();
+        d.add(SignRequestStep::Organizing, Duration::from_millis(100));
+        d.add(SignRequestStep::Posit, Duration::from_millis(200));
+        // back-edge: Posit failed and we re-entered Organizing
+        d.add(SignRequestStep::Organizing, Duration::from_millis(50));
+        d.add(SignRequestStep::Posit, Duration::from_millis(150));
+        d.add(SignRequestStep::Generating, Duration::from_millis(500));
+
+        assert_eq!(d.organizing, Duration::from_millis(150));
+        assert_eq!(d.posit, Duration::from_millis(350));
+        assert_eq!(d.generating, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn phase_durations_ignore_steps_not_part_of_sign_task() {
+        // These variants are not part of SignTask: Indexing is emitted by
+        // the indexer modules, AwaitingGeneration by SignatureSpawner::
+        // handle_request, and Responding/Total by rpc.rs. Passing any to
+        // `add` must be a no-op or they would be double-counted on
+        // multichain_sign_request_latency_sec.
+        let mut d = PhaseDurations::default();
+        d.add(SignRequestStep::Indexing, Duration::from_millis(100));
+        d.add(
+            SignRequestStep::AwaitingGeneration,
+            Duration::from_millis(200),
+        );
+        d.add(SignRequestStep::Responding, Duration::from_millis(300));
+        d.add(SignRequestStep::Total, Duration::from_millis(400));
+
+        assert_eq!(d, PhaseDurations::default());
+    }
+
+    #[test]
+    fn phase_durations_preserve_additivity_invariant() {
+        // This represents the case where we have 2 attempts:
+        // 1st one fails at posit, then starts from oganizing again and finishes
+        let inputs = [
+            (SignRequestStep::Organizing, Duration::from_millis(40)),
+            (SignRequestStep::Posit, Duration::from_millis(120)),
+            (SignRequestStep::Organizing, Duration::from_millis(35)),
+            (SignRequestStep::Posit, Duration::from_millis(95)),
+            (SignRequestStep::Generating, Duration::from_millis(710)),
+        ];
+        let expected: Duration = inputs.iter().map(|(_, d)| *d).sum();
+
+        let mut d = PhaseDurations::default();
+        for (step, elapsed) in inputs {
+            d.add(step, elapsed);
+        }
+
+        assert_eq!(d.organizing + d.posit + d.generating, expected);
     }
 }

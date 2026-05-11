@@ -2,7 +2,7 @@ pub mod indexer_eth_direct_rpc;
 pub mod indexer_eth_helios;
 
 use crate::backlog::Backlog;
-use crate::metrics::requests::{record_request_latency, SignRequestStep};
+use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::respond_bidirectional::CompletedTx;
 use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
@@ -878,7 +878,7 @@ impl EthereumIndexer {
             .await?;
 
         for _request in &sign_requests {
-            record_request_latency(
+            record_request_latency_since(
                 Chain::Ethereum,
                 SignRequestStep::Indexing,
                 "ok",
