@@ -723,6 +723,20 @@ pub struct EthereumIndexer {
     live_blocks_rx: Option<mpsc::Receiver<Block>>,
 }
 
+/// Result of a `backfill_execution_confirmation` attempt. Distinguishes
+/// "we found a receipt for this tx" (so the staleness check should skip it)
+/// from "no receipt found yet" (still pending or was replaced).
+///
+/// The size difference flagged by `clippy::large_enum_variant` is not
+/// material here: every `BackfillOutcome` is constructed and consumed within
+/// a single match arm — never stored in a `Vec`, channel, or other
+/// collection where the waste would compound.
+#[allow(clippy::large_enum_variant)]
+enum BackfillOutcome {
+    NotObserved,
+    Observed { event: Option<ChainEvent> },
+}
+
 impl EthereumIndexer {
     pub async fn new(
         eth: EthConfig,
@@ -914,7 +928,7 @@ impl EthereumIndexer {
         pending_tx: &crate::sign_bidirectional::BidirectionalTx,
         block_number: u64,
         receipt: &alloy::rpc::types::TransactionReceipt,
-    ) -> ChainEvent {
+    ) -> Option<ChainEvent> {
         let receipt_succeeded = receipt.status();
 
         tracing::info!(
@@ -938,26 +952,36 @@ impl EthereumIndexer {
                     }
                 }
                 Err(err) => {
-                    tracing::warn!(
+                    // Returning `None` keeps the watcher pending so we retry
+                    // instead of fabricating an empty `output: vec![]` that
+                    // would get signed as a successful response with no return
+                    // data. The caller (`collect_execution_confirmations`)
+                    // tracks that the receipt was observed so the staleness
+                    // check does not incorrectly emit
+                    // `ExecutionOutcome::Failed` on the next iteration.
+                    tracing::error!(
                         ?tx_id,
                         ?sign_id,
                         ?err,
-                        "Failed to extract transaction output for bidirectional tx, using empty output"
+                        "Failed to extract transaction output for bidirectional \
+                         tx; leaving watcher pending for retry. Persistent \
+                         failures indicate the ETH RPC does not support \
+                         debug_traceTransaction."
                     );
-                    ExecutionOutcome::Success { output: vec![] }
+                    return None;
                 }
             }
         } else {
             ExecutionOutcome::Failed
         };
 
-        ChainEvent::ExecutionConfirmed {
+        Some(ChainEvent::ExecutionConfirmed {
             tx_id,
             sign_id,
             source_chain: pending_tx.source_chain,
             block_height: block_number,
             result,
-        }
+        })
     }
 
     async fn backfill_execution_confirmation(
@@ -966,13 +990,13 @@ impl EthereumIndexer {
         sign_id: SignId,
         pending_tx: &crate::sign_bidirectional::BidirectionalTx,
         current_block_number: u64,
-    ) -> anyhow::Result<Option<ChainEvent>> {
+    ) -> anyhow::Result<BackfillOutcome> {
         let Some(tx) = self.client.get_transaction_by_hash(tx_id.0).await? else {
-            return Ok(None);
+            return Ok(BackfillOutcome::NotObserved);
         };
 
         let Some(mined_block_number) = tx.block_number else {
-            return Ok(None);
+            return Ok(BackfillOutcome::NotObserved);
         };
 
         if mined_block_number > current_block_number {
@@ -983,7 +1007,7 @@ impl EthereumIndexer {
                 current_block_number,
                 "skipping late watcher backfill for future ethereum block"
             );
-            return Ok(None);
+            return Ok(BackfillOutcome::NotObserved);
         }
 
         let Some(block_receipts) = self
@@ -997,7 +1021,7 @@ impl EthereumIndexer {
                 mined_block_number,
                 "late watcher backfill found mined transaction without block receipts"
             );
-            return Ok(None);
+            return Ok(BackfillOutcome::NotObserved);
         };
 
         let Some(receipt) = block_receipts
@@ -1010,7 +1034,7 @@ impl EthereumIndexer {
                 mined_block_number,
                 "late watcher backfill could not find transaction receipt in mined block"
             );
-            return Ok(None);
+            return Ok(BackfillOutcome::NotObserved);
         };
 
         tracing::info!(
@@ -1021,16 +1045,10 @@ impl EthereumIndexer {
             "backfilled execution confirmation for late ethereum watcher"
         );
 
-        Ok(Some(
-            self.execution_confirmed_event(
-                tx_id,
-                sign_id,
-                pending_tx,
-                mined_block_number,
-                &receipt,
-            )
-            .await,
-        ))
+        let event = self
+            .execution_confirmed_event(tx_id, sign_id, pending_tx, mined_block_number, &receipt)
+            .await;
+        Ok(BackfillOutcome::Observed { event })
     }
 
     async fn collect_execution_confirmations(
@@ -1056,29 +1074,45 @@ impl EthereumIndexer {
             "collect_execution_confirmations checking watchers"
         );
 
+        // Tracks watchers for which a receipt was observed during this call,
+        // regardless of whether an event was emitted. The staleness check
+        // below uses this to avoid emitting `ExecutionOutcome::Failed` for
+        // txs that did mine successfully but whose output extraction failed
+        // (we want those to stay pending and retry on a subsequent block
+        // scan).
+        let mut observed_tx_ids = HashSet::new();
+
         for (tx_id, (sign_id, pending_tx)) in watchers {
             tracing::info!(?tx_id, ?sign_id, "querying receipt for bidirectional tx");
             if let Some(receipt) = block_receipts.get(&pending_tx.id.0) {
-                events.push(
-                    self.execution_confirmed_event(
-                        tx_id,
-                        sign_id,
-                        &pending_tx,
-                        block_number,
-                        receipt,
-                    )
-                    .await,
-                );
-                resolved_tx_ids.insert(tx_id);
+                observed_tx_ids.insert(tx_id);
+                if let Some(event) = self
+                    .execution_confirmed_event(tx_id, sign_id, &pending_tx, block_number, receipt)
+                    .await
+                {
+                    events.push(event);
+                    resolved_tx_ids.insert(tx_id);
+                }
+                // If `execution_confirmed_event` returned `None` (e.g. trace
+                // extraction failed), leave the watcher pending so we retry
+                // on the next poll cycle rather than emitting fabricated
+                // empty output. `observed_tx_ids` above exempts it from the
+                // staleness check below.
                 continue;
             }
 
-            if let Some(event) = self
+            match self
                 .backfill_execution_confirmation(tx_id, sign_id, &pending_tx, block_number)
                 .await?
             {
-                events.push(event);
-                resolved_tx_ids.insert(tx_id);
+                BackfillOutcome::Observed { event } => {
+                    observed_tx_ids.insert(tx_id);
+                    if let Some(event) = event {
+                        events.push(event);
+                        resolved_tx_ids.insert(tx_id);
+                    }
+                }
+                BackfillOutcome::NotObserved => {}
             }
         }
 
@@ -1086,7 +1120,7 @@ impl EthereumIndexer {
         let remaining_pending = self.backlog.pending_execution(Chain::Ethereum).await;
 
         for (tx_id, (sign_id, tx)) in remaining_pending {
-            if resolved_tx_ids.contains(&tx_id) {
+            if resolved_tx_ids.contains(&tx_id) || observed_tx_ids.contains(&tx_id) {
                 continue;
             }
 

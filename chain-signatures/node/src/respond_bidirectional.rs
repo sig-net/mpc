@@ -150,10 +150,6 @@ impl CompletedTx {
 
         let transaction_output = match output_deserialization_format {
             SerDeserFormat::Abi if is_contract_call => {
-                tx_info.inner.to().ok_or_else(|| {
-                    anyhow::anyhow!("Transaction {:?} missing destination", tx.id)
-                })?;
-
                 tracing::info!(
                     "Extracting transaction output using debug_traceTransaction for {:?}",
                     tx.id
