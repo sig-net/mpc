@@ -38,6 +38,7 @@ async fn stream_solana_with_backlog(config: SolConfig, backlog: Backlog) -> Resu
     let mut stream =
         SolanaStream::new(Some(config), backlog).context("failed to create SolanaStream")?;
     let _ = ChainStream::start(&mut stream).await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     Ok(stream)
 }
 
