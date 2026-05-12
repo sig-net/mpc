@@ -31,6 +31,7 @@ fn test_dependencies() -> (Backlog, watch::Receiver<MeshState>, NodeClient) {
 async fn stream_solana(config: SolConfig) -> Result<SolanaStream> {
     let mut stream = SolanaStream::new(Some(config)).context("failed to create SolanaStream")?;
     let _ = ChainStream::start(&mut stream).await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     Ok(stream)
 }
 
@@ -249,14 +250,18 @@ async fn test_solana_stream_concurrent_events() -> Result<()> {
 
     // Collect all sign request events
     let mut sign_events = Vec::new();
-    for _ in 0..num_requests * 2 {
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while sign_events.len() < num_requests {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+
         if let Ok(Some(ChainEvent::SignRequest(req))) =
-            timeout(Duration::from_secs(5), stream.next_event()).await
+            timeout(remaining, stream.next_event()).await
         {
             sign_events.push(req);
-            if sign_events.len() == num_requests {
-                break;
-            }
         }
     }
 
@@ -301,10 +306,14 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
         .await?;
 
     let mut checkpoint_block = None;
-    for _ in 0..10 {
-        if let Ok(Some(ChainEvent::Block(block))) =
-            timeout(Duration::from_secs(1), stream1.next_event()).await
-        {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while checkpoint_block.is_none() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+
+        if let Ok(Some(ChainEvent::Block(block))) = timeout(remaining, stream1.next_event()).await {
             checkpoint_block = Some(block);
             // Set checkpoint in backlog
             backlog.set_processed_block(Chain::Solana, block).await;

@@ -1,6 +1,6 @@
-# Always limit cluster tests to a single thread
+# Always limit cluster tests to 4 threads
 [test-groups]
-cluster = { max-threads = 1 }
+cluster = { max-threads = 4 }
 fixture = { max-threads = "num-cpus" }
 
 [[profile.default.overrides]]
