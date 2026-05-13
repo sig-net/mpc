@@ -141,7 +141,7 @@ enum SignError {
 }
 
 #[derive(Debug)]
-enum SignLimitError {
+pub enum SignLimitError {
     Timeout,
     Closed,
 }
@@ -153,19 +153,19 @@ struct SignLimitState {
 }
 
 #[derive(Clone, Debug)]
-struct SignLimiter {
+pub struct SignLimiter {
     semaphore: Arc<Semaphore>,
     state: Arc<RwLock<SignLimitState>>,
 }
 
 #[derive(Debug)]
-struct SignPermit {
+pub struct SignPermit {
     permit: Option<OwnedSemaphorePermit>,
     state: Arc<RwLock<SignLimitState>>,
 }
 
 impl SignLimiter {
-    fn new(limit: usize) -> Self {
+    pub fn new(limit: usize) -> Self {
         Self {
             semaphore: Arc::new(Semaphore::new(limit)),
             state: Arc::new(RwLock::new(SignLimitState { limit, debt: 0 })),
@@ -173,7 +173,7 @@ impl SignLimiter {
     }
 
     /// Updates the limits for concurrent slots
-    fn update(&self, new_limit: usize) {
+    pub fn update(&self, new_limit: usize) {
         let mut state = match self.state.write() {
             Ok(state) => state,
             Err(err) => {
@@ -209,7 +209,7 @@ impl SignLimiter {
 
     /// Try to acquire a spot with a timeout just in case we do not receive the slot in time.
     /// Returns a permit if successful, error otherwise.
-    async fn acquire(&self, timeout: Duration) -> Result<SignPermit, SignLimitError> {
+    pub async fn acquire(&self, timeout: Duration) -> Result<SignPermit, SignLimitError> {
         let permit =
             match tokio::time::timeout(timeout, self.semaphore.clone().acquire_owned()).await {
                 Ok(Ok(permit)) => permit,
@@ -224,7 +224,7 @@ impl SignLimiter {
         })
     }
 
-    fn limits(&self) -> usize {
+    pub fn limits(&self) -> usize {
         match self.state.read() {
             Ok(state) => state.limit,
             Err(err) => {
