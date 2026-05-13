@@ -11,12 +11,35 @@ fn assert_all_resolved(report: &StressRunReport) {
     let total = report.requests.len();
     assert!(total > 0, "stress report must contain requests");
 
-    let classified = report
-        .requests
-        .iter()
-        .filter(|outcome| !matches!(outcome.status, integration_tests::stress::StressRequestStatus::Success))
-        .count();
-    assert!(classified <= total, "all requests must be classified");
+    for outcome in &report.requests {
+        assert!(outcome.batch_label.is_some(), "each request should retain its batch label");
+        if matches!(
+            outcome.status,
+            integration_tests::stress::StressRequestStatus::Success
+        ) {
+            assert!(outcome.reason_code.is_none(), "successes should not carry a reason code");
+        } else {
+            assert!(outcome.reason_code.is_some(), "non-successes must carry a reason code");
+            assert!(outcome.detail.is_some(), "non-successes must carry detail");
+        }
+    }
+}
+
+fn assert_snapshot_shape(report: &StressRunReport, nodes: usize) {
+    for snapshot in &report.snapshots {
+        assert_eq!(snapshot.nodes.len(), nodes, "snapshot must include every node");
+        for node in &snapshot.nodes {
+            assert!(
+                node.metrics.is_some() || node.metrics_error.is_some(),
+                "snapshot must contain either metrics or a fetch error"
+            );
+        }
+    }
+}
+
+fn assert_batch_totals(report: &StressRunReport) {
+    let expected_total: usize = report.batches.iter().map(|batch| batch.summary.total).sum();
+    assert_eq!(expected_total, report.requests.len(), "batch totals must match request count");
 }
 
 async fn build_harness() -> anyhow::Result<integration_tests::stress::StressHarness> {
@@ -71,9 +94,14 @@ async fn test_stress_a1_global_latency_ci() -> anyhow::Result<()> {
     assert_eq!(report.batches.len(), cfg.stages.len());
     assert_eq!(report.snapshots.len(), cfg.stages.len() * 2);
     assert_all_resolved(&report);
+    assert_snapshot_shape(&report, 3);
+    assert_batch_totals(&report);
 
     let baseline = &report.batches[0].summary;
     assert_eq!(baseline.timeout + baseline.dropped + baseline.errors, 0);
+    let recovery = report.batches.last().unwrap();
+    assert_eq!(recovery.summary.timeout + recovery.summary.dropped + recovery.summary.errors, 0);
+    assert!(baseline.median_latency_ms.is_some());
 
     Ok(())
 }
@@ -93,7 +121,10 @@ async fn test_stress_a2_single_node_straggler_ci() -> anyhow::Result<()> {
     assert_eq!(report.batches.len(), 1);
     assert_eq!(report.snapshots.len(), 3);
     assert_all_resolved(&report);
+    assert_snapshot_shape(&report, 3);
+    assert_batch_totals(&report);
     assert_eq!(report.batches[0].summary.total, 12);
+    assert!(report.batches[0].summary.p99_latency_ms.is_some());
 
     Ok(())
 }
@@ -131,6 +162,13 @@ async fn test_stress_b1_steady_overload_ci() -> anyhow::Result<()> {
     assert_eq!(report.batches.len(), cfg.stages.len());
     assert_eq!(report.snapshots.len(), cfg.stages.len() * 2);
     assert_all_resolved(&report);
+    assert_snapshot_shape(&report, 3);
+    assert_batch_totals(&report);
+
+    let first = &report.batches[0].summary;
+    let last = &report.batches[report.batches.len() - 1].summary;
+    assert_eq!(first.timeout + first.dropped + first.errors, 0);
+    assert_eq!(last.timeout + last.dropped + last.errors, 0);
 
     Ok(())
 }

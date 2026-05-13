@@ -99,4 +99,8 @@ fn main() {
         report.snapshots.len(),
         report.batches.len(),
     );
+
+    rt.block_on(async move {
+        drop(harness);
+    });
 }

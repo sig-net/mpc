@@ -172,6 +172,7 @@ pub struct StressRequestOutcome {
     pub request_index: usize,
     pub latency_ms: u128,
     pub status: StressRequestStatus,
+    pub reason_code: Option<String>,
     pub detail: Option<String>,
 }
 
@@ -702,7 +703,7 @@ impl StressHarness {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let mut csv = String::from("batch_label,request_index,latency_ms,status,detail\n");
+        let mut csv = String::from("batch_label,request_index,latency_ms,status,reason_code,detail\n");
         for outcome in &report.requests {
             csv.push_str(&csv_escape(outcome.batch_label.as_deref().unwrap_or("")));
             csv.push(',');
@@ -711,6 +712,8 @@ impl StressHarness {
             csv.push_str(&outcome.latency_ms.to_string());
             csv.push(',');
             csv.push_str(outcome.status.as_str());
+            csv.push(',');
+            csv.push_str(&csv_escape(outcome.reason_code.as_deref().unwrap_or("")));
             csv.push(',');
             csv.push_str(&csv_escape(outcome.detail.as_deref().unwrap_or("")));
             csv.push('\n');
@@ -839,11 +842,12 @@ async fn run_sign_request(
     request_index: usize,
 ) -> StressRequestOutcome {
     let started = Instant::now();
-    let (status, detail) = match tokio::time::timeout(timeout, cluster.sign()).await {
-        Ok(Ok(_)) => (StressRequestStatus::Success, None),
+    let (status, reason_code, detail) = match tokio::time::timeout(timeout, cluster.sign()).await {
+        Ok(Ok(_)) => (StressRequestStatus::Success, None, None),
         Ok(Err(err)) => classify_request_error(&err.to_string()),
         Err(_) => (
             StressRequestStatus::Timeout,
+            Some("local_timeout".to_string()),
             Some(format!("local timeout after {timeout:?}")),
         ),
     };
@@ -853,6 +857,7 @@ async fn run_sign_request(
         request_index,
         latency_ms: started.elapsed().as_millis(),
         status,
+        reason_code,
         detail,
     }
 }
@@ -901,22 +906,39 @@ impl StressRequestStatus {
     }
 }
 
-fn classify_request_error(err: &str) -> (StressRequestStatus, Option<String>) {
+fn classify_request_error(err: &str) -> (StressRequestStatus, Option<String>, Option<String>) {
     let lower = err.to_ascii_lowercase();
-    let status = if lower.contains("timed out") || lower.contains("timeout") {
-        StressRequestStatus::Timeout
-    } else if lower.contains("too many pending requests")
+    let (status, reason_code) = if lower.contains("too many pending requests")
         || lower.contains("requestlimitexceeded")
-        || lower.contains("already been submitted")
-        || lower.contains("requestcollision")
-        || lower.contains("request not found")
     {
-        StressRequestStatus::Dropped
+        (StressRequestStatus::Dropped, "request_limit_exceeded")
+    } else if lower.contains("already been submitted") || lower.contains("requestcollision") {
+        (StressRequestStatus::Dropped, "request_collision")
+    } else if lower.contains("request not found") {
+        (StressRequestStatus::Dropped, "request_not_found")
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        let reason_code = if lower.contains("signature request has timed out") {
+            "contract_timeout"
+        } else {
+            "transport_timeout"
+        };
+        (StressRequestStatus::Timeout, reason_code)
+    } else if lower.contains("failed to send transaction") {
+        (StressRequestStatus::Error, "send_transaction_failed")
+    } else if lower.contains("transaction failed to mine") {
+        (StressRequestStatus::Error, "transaction_mining_failed")
+    } else if lower.contains("failed to parse") || lower.contains("error decoding response body") {
+        (StressRequestStatus::Error, "response_parse_failed")
+    } else if lower.contains("json rpc request error") {
+        (StressRequestStatus::Error, "json_rpc_error")
+    } else if lower.contains("too many pending requests")
+    {
+        (StressRequestStatus::Dropped, "request_limit_exceeded")
     } else {
-        StressRequestStatus::Error
+        (StressRequestStatus::Error, "unknown_error")
     };
 
-    (status, Some(err.to_string()))
+    (status, Some(reason_code.to_string()), Some(err.to_string()))
 }
 
 fn csv_escape(value: &str) -> String {
