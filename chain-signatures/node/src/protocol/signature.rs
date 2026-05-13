@@ -39,6 +39,9 @@ use tokio::task::JoinHandle;
 /// The round interval to search for a proposer in the organizing phase.
 const ROUND_INTERVAL: usize = 512;
 
+/// Max number of concurrent proposers, with unlimited deliberators.
+const MAX_CONCURRENT_PROPOSERS: usize = 4;
+
 /// The default timeout budget for organizing and posit phases.
 ///
 /// Tests have stable network conditions and don't benefit from a longer
@@ -1597,8 +1600,6 @@ impl SignatureSpawner {
                 }
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();
-                    self.limiter
-                        .update(protocol.signature.max_concurrent_proposers as usize);
                 }
                 Some(state) = contract_watcher.next_state() => {
                     if let Some(new_governance) = state.governance(&self.node_account_id) {
@@ -1634,7 +1635,6 @@ impl SignatureSpawnerTask {
         rpc_channel: RpcChannel,
         backlog: Backlog,
     ) -> Self {
-        let max_concurrent_proposers = config.borrow().protocol.signature.max_concurrent_proposers;
         let spawner = SignatureSpawner {
             contract,
             tasks: JoinMap::new(),
@@ -1642,7 +1642,7 @@ impl SignatureSpawnerTask {
             delayed_watchers: HashMap::new(),
             presignatures: presignature_storage,
             mesh_state,
-            limiter: SignLimiter::new(max_concurrent_proposers as usize),
+            limiter: SignLimiter::new(MAX_CONCURRENT_PROPOSERS),
             msg: msg_channel,
             rpc: rpc_channel,
             backlog,

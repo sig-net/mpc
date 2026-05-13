@@ -1,6 +1,5 @@
 use super::{
-    default_max_concurrent_proposers, Config, DynamicValue, PresignatureConfig, ProtocolConfig,
-    SignatureConfig, TripleConfig,
+    Config, DynamicValue, PresignatureConfig, ProtocolConfig, SignatureConfig, TripleConfig,
 };
 use borsh::{self, BorshDeserialize, BorshSerialize};
 
@@ -70,7 +69,6 @@ impl Default for SignatureConfig {
             generation_timeout: secs_to_ms(45),
             generation_timeout_total: secs_to_ms(200),
             garbage_timeout: hours_to_ms(24),
-            max_concurrent_proposers: default_max_concurrent_proposers(),
 
             other: Default::default(),
         }
