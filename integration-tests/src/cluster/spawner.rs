@@ -163,7 +163,7 @@ pub struct ClusterSpawner {
     pub solana: Option<containers::Solana>,
     pub canton: Option<crate::canton::CantonSandbox>,
     pub program_address: Option<String>,
-    prestockpile: Option<Prestockpile>,
+    pub(crate) prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
     pub use_ethereum: bool,
     /// Tracks which binary source to use for each node index

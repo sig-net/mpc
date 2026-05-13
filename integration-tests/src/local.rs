@@ -11,6 +11,7 @@ use mpc_node::config::OverrideConfig;
 use mpc_node::indexer_eth::EthArgs;
 use near_workspaces::Account;
 use shell_escape::escape;
+use url::Url;
 
 pub struct Node {
     pub address: String,
@@ -34,6 +35,7 @@ pub struct NodeEnvConfig {
     pub cfg: NodeConfig,
     // near rpc address, after proxy
     pub near_rpc: String,
+    pub advertised_address: Option<Url>,
     /// Optional custom binary path to use instead of the default target/release
     pub binary_path: Option<PathBuf>,
 }
@@ -46,6 +48,7 @@ impl fmt::Debug for NodeEnvConfig {
             .field("cipher_pk", &self.cipher_sk.public_key())
             .field("cfg", &self.cfg)
             .field("near_rpc", &self.near_rpc)
+            .field("advertised_address", &self.advertised_address)
             .field("binary_path", &self.binary_path)
             .finish()
     }
@@ -118,6 +121,7 @@ impl Node {
             sign_sk,
             cfg: cfg.clone(),
             near_rpc,
+            advertised_address: None,
             binary_path: None,
         };
         Ok(node_config)
@@ -158,6 +162,7 @@ impl Node {
                 sign_sk,
                 cfg: cfg.clone(),
                 near_rpc,
+                advertised_address: None,
                 binary_path,
             },
         )
@@ -188,7 +193,7 @@ impl Node {
             hydration,
             canton,
             indexer_options,
-            my_address: None,
+            my_address: config.advertised_address.clone(),
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),
             override_config: Some(OverrideConfig::new(serde_json::to_value(
@@ -206,10 +211,15 @@ impl Node {
             &mpc_node_id,
             cli,
         )?;
-        let address = format!("http://127.0.0.1:{web_port}");
-        tracing::info!("node is starting at {address}");
-        utils::ping_until_ok(&address, 120).await?;
-        tracing::info!(node_account_id = %config.account.id(), ?address, "node started");
+        let direct_address = format!("http://127.0.0.1:{web_port}");
+        tracing::info!("node is starting at {direct_address}");
+        utils::ping_until_ok(&direct_address, 120).await?;
+        let address = config
+            .advertised_address
+            .as_ref()
+            .map(Url::to_string)
+            .unwrap_or_else(|| direct_address.clone());
+        tracing::info!(node_account_id = %config.account.id(), ?address, ?direct_address, "node started");
 
         Ok(Self {
             address,
@@ -234,6 +244,7 @@ impl Node {
             sign_sk: self.sign_sk.clone(),
             cfg: self.cfg.clone(),
             near_rpc: self.near_rpc.clone(),
+            advertised_address: None,
             binary_path: None, // Don't preserve binary_path on restart
         }
     }

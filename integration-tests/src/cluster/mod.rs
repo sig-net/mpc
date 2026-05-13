@@ -34,7 +34,7 @@ pub struct Cluster {
     pub cfg: NodeConfig,
     pub docker_client: DockerClient,
     pub rpc_client: near_fetch::Client,
-    http_client: reqwest::Client,
+    pub(crate) http_client: reqwest::Client,
     pub nodes: Nodes,
     pub account_idx: usize,
     pub solana: Option<containers::Solana>,

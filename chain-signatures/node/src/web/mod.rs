@@ -32,6 +32,7 @@ use near_primitives::types::BlockHeight;
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::Instrument;
@@ -286,16 +287,71 @@ async fn metrics() -> (StatusCode, String) {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchStorageMetrics {
+    pub triples_mine: i64,
+    pub triples_total: i64,
+    pub presignatures_mine: i64,
+    pub presignatures_total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchProtocolMetrics {
+    pub triple_generators_total: i64,
+    pub presignature_generators_total: i64,
+    pub signature_queue_size: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchMetrics {
     pub sig_gen: Vec<f64>,
     pub presig_gen: Vec<f64>,
+    pub storage: BenchStorageMetrics,
+    pub protocols: BenchProtocolMetrics,
+    pub backlog: BTreeMap<String, i64>,
 }
 
 #[tracing::instrument(level = "debug", skip_all)]
 async fn bench_metrics() -> Json<BenchMetrics> {
+    let backlog = prometheus::gather()
+        .into_iter()
+        .find(|family| family.name() == "multichain_backlog_size")
+        .map(|family| {
+            family
+                .get_metric()
+                .iter()
+                .filter_map(|metric| {
+                    let chain = metric
+                        .get_label()
+                        .iter()
+                        .find(|label| label.name() == "chain")?
+                        .value()
+                        .to_string();
+                    let gauge_value = metric
+                        .get_gauge()
+                        .as_ref()
+                        .map(|gauge| gauge.value())
+                        .unwrap_or_default();
+                    Some((chain, gauge_value as i64))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     Json(BenchMetrics {
         sig_gen: crate::metrics::protocols::SIGN_GENERATION_LATENCY.exact(),
         presig_gen: crate::metrics::protocols::PRESIGNATURE_LATENCY.exact(),
+        storage: BenchStorageMetrics {
+            triples_mine: crate::metrics::storage::NUM_TRIPLES_MINE.get(),
+            triples_total: crate::metrics::storage::NUM_TRIPLES_TOTAL.get(),
+            presignatures_mine: crate::metrics::storage::NUM_PRESIGNATURES_MINE.get(),
+            presignatures_total: crate::metrics::storage::NUM_PRESIGNATURES_TOTAL.get(),
+        },
+        protocols: BenchProtocolMetrics {
+            triple_generators_total: crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL.get(),
+            presignature_generators_total: crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL.get(),
+            signature_queue_size: crate::metrics::requests::SIGN_QUEUE_SIZE.get(),
+        },
+        backlog,
     })
 }
 
