@@ -70,6 +70,8 @@ jobs:
       # instead of including the build time in the test time report on Github.
       - name: Build Chain-Signatures Integration Tests
         run: cargo build -p integration-tests --tests
+        env:
+          MPC_ENABLE_HELIOS: 1
 
       - name: Test
         run: cargo nextest run -p integration-tests --profile fixture

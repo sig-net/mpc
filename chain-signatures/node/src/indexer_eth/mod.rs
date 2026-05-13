@@ -1,4 +1,5 @@
 pub mod indexer_eth_direct_rpc;
+#[cfg(feature = "helios")]
 pub mod indexer_eth_helios;
 
 use crate::backlog::Backlog;
@@ -132,36 +133,52 @@ pub struct EthArgs {
 
     // -- Helios light-client --
     /// Use Helios light client instead of direct RPC
-    #[clap(
-        long,
-        env("MPC_ETH_LIGHT_CLIENT"),
-        default_value = "false",
-        requires_if("true", "eth_consensus_rpc_http_url")
+    #[cfg_attr(
+        feature = "helios",
+        clap(
+            long,
+            env("MPC_ETH_LIGHT_CLIENT"),
+            default_value = "false",
+            requires_if("true", "eth_consensus_rpc_http_url")
+        )
     )]
+    #[cfg_attr(not(feature = "helios"), arg(skip))]
     pub eth_light_client: bool,
     /// Ethereum consensus RPC URL (required when --eth-light-client is set)
-    #[clap(
-        long,
-        env("MPC_ETH_CONSENSUS_RPC_HTTP_URL"),
-        requires = "eth_account_sk"
+    #[cfg_attr(
+        feature = "helios",
+        clap(
+            long,
+            env("MPC_ETH_CONSENSUS_RPC_HTTP_URL"),
+            requires = "eth_account_sk"
+        )
     )]
+    #[cfg_attr(not(feature = "helios"), arg(skip))]
     pub eth_consensus_rpc_http_url: Option<String>,
     /// The network that the eth indexer is running on. Either "sepolia"/"mainnet"
-    #[clap(
-        long,
-        env("MPC_ETH_NETWORK"),
-        requires = "eth_account_sk",
-        default_value = "sepolia",
-        value_parser = ["sepolia", "mainnet"],
+    #[cfg_attr(
+        feature = "helios",
+        clap(
+            long,
+            env("MPC_ETH_NETWORK"),
+            requires = "eth_account_sk",
+            default_value = "sepolia",
+            value_parser = ["sepolia", "mainnet"],
+        )
     )]
+    #[cfg_attr(not(feature = "helios"), arg(skip))]
     pub eth_network: Option<String>,
     /// Helios light client data path
-    #[clap(
-        long,
-        env("MPC_ETH_HELIOS_DATA_PATH"),
-        requires = "eth_account_sk",
-        default_value = "/helios/sepolia"
+    #[cfg_attr(
+        feature = "helios",
+        clap(
+            long,
+            env("MPC_ETH_HELIOS_DATA_PATH"),
+            requires = "eth_account_sk",
+            default_value = "/helios/sepolia"
+        )
     )]
+    #[cfg_attr(not(feature = "helios"), arg(skip))]
     pub eth_helios_data_path: Option<String>,
 
     // -- Behaviour --
@@ -221,6 +238,13 @@ impl EthArgs {
     }
 
     pub fn into_config(self) -> Option<EthConfig> {
+        #[cfg(not(feature = "helios"))]
+        if self.eth_light_client {
+            tracing::warn!(
+                "ignoring ethereum light client request because mpc-node was built without helios feature"
+            );
+        }
+
         Some(EthConfig {
             account_sk: self.eth_account_sk?,
             consensus_rpc_http_url: self.eth_consensus_rpc_http_url.unwrap_or_default(),
@@ -230,7 +254,10 @@ impl EthArgs {
             helios_data_path: self.eth_helios_data_path.unwrap_or_default(),
             refresh_finalized_interval: self.eth_refresh_finalized_interval.unwrap(),
             optimistic_requests: self.eth_optimistic_requests,
+            #[cfg(feature = "helios")]
             light_client: self.eth_light_client,
+            #[cfg(not(feature = "helios"))]
+            light_client: false,
         })
     }
 
@@ -539,6 +566,7 @@ impl SignatureRequestedEvent {
 
 #[derive(Clone)]
 pub enum EthereumClient {
+    #[cfg(feature = "helios")]
     Helios(indexer_eth_helios::HeliosEthereumClient),
     DirectRpc(indexer_eth_direct_rpc::RpcEthereumClient),
 }
@@ -546,10 +574,22 @@ pub enum EthereumClient {
 impl EthereumClient {
     pub async fn new(eth: EthConfig) -> anyhow::Result<EthereumClient> {
         if eth.light_client {
-            Ok(EthereumClient::Helios(
-                indexer_eth_helios::build_client(eth.clone()).await?,
-            ))
-        } else {
+            #[cfg(feature = "helios")]
+            {
+                return Ok(EthereumClient::Helios(
+                    indexer_eth_helios::build_client(eth.clone()).await?,
+                ));
+            }
+
+            #[cfg(not(feature = "helios"))]
+            {
+                anyhow::bail!(
+                    "ethereum light client requested, but mpc-node was built without helios feature"
+                );
+            }
+        }
+
+        {
             Ok(EthereumClient::DirectRpc(
                 indexer_eth_direct_rpc::RpcEthereumClient::new(&eth.execution_rpc_http_url),
             ))
@@ -558,6 +598,7 @@ impl EthereumClient {
 
     fn client_name(&self) -> &str {
         match self {
+            #[cfg(feature = "helios")]
             EthereumClient::Helios(_) => "Helios",
             EthereumClient::DirectRpc(_) => "DirectRpc",
         }
@@ -568,6 +609,7 @@ impl EthereumClient {
         let retry_config = crate::util::retry::RetryConfig::default();
         let get_block_op = |_attempt: usize| async {
             match self {
+                #[cfg(feature = "helios")]
                 EthereumClient::Helios(client) => client.get_block(block_id).await,
                 EthereumClient::DirectRpc(client) => client.get_block(block_id).await,
             }
@@ -628,6 +670,7 @@ impl EthereumClient {
         block_id: BlockId,
     ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>> {
         match self {
+            #[cfg(feature = "helios")]
             EthereumClient::Helios(client) => client.get_block_receipts(block_id).await,
             EthereumClient::DirectRpc(client) => client.get_block_receipts(block_id).await,
         }
@@ -635,6 +678,7 @@ impl EthereumClient {
 
     async fn get_nonce(&self, address: Address, block_id: BlockId) -> anyhow::Result<u64> {
         match self {
+            #[cfg(feature = "helios")]
             EthereumClient::Helios(client) => client.get_nonce(address, block_id).await,
             EthereumClient::DirectRpc(client) => client.get_nonce(address, block_id).await,
         }
@@ -645,6 +689,7 @@ impl EthereumClient {
         tx_hash: alloy::primitives::B256,
     ) -> anyhow::Result<Option<alloy::rpc::types::Transaction>> {
         match self {
+            #[cfg(feature = "helios")]
             EthereumClient::Helios(client) => client.get_transaction_by_hash(tx_hash).await,
             EthereumClient::DirectRpc(client) => client.get_transaction_by_hash(tx_hash).await,
         }
@@ -658,6 +703,7 @@ impl EthereumClient {
         block_number: u64,
     ) -> anyhow::Result<Bytes> {
         match self {
+            #[cfg(feature = "helios")]
             EthereumClient::Helios(client) => client.call(from, to, data, block_number).await,
             EthereumClient::DirectRpc(client) => client.call(from, to, data, block_number).await,
         }
@@ -675,6 +721,7 @@ impl EthereumClient {
         anchor_height: BlockNumber,
     ) -> BlockNumber {
         let max_catchup_blocks = match self {
+            #[cfg(feature = "helios")]
             EthereumClient::Helios(_) => indexer_eth_helios::MAX_CATCHUP_BLOCKS,
             EthereumClient::DirectRpc(_) => indexer_eth_direct_rpc::MAX_CATCHUP_BLOCKS,
         };
@@ -1356,6 +1403,7 @@ impl ChainStream for EthereumStream {
 mod tests {
     use super::{EthConfig, EthereumClient, EthereumIndexer};
     use crate::backlog::Backlog;
+    #[cfg(feature = "helios")]
     use crate::indexer_eth::indexer_eth_helios;
     use crate::protocol::Chain;
     use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId};
@@ -1369,7 +1417,10 @@ mod tests {
 
     #[test]
     fn catchup_start_is_clamped_to_supported_window() {
+        #[cfg(feature = "helios")]
         let max_catchup_blocks = indexer_eth_helios::MAX_CATCHUP_BLOCKS;
+        #[cfg(not(feature = "helios"))]
+        let max_catchup_blocks = 8191;
         let anchor_height = 10_000;
         let catchup_end = anchor_height - 1;
         let expected_oldest = catchup_end - max_catchup_blocks;

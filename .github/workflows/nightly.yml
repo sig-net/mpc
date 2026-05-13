@@ -83,18 +83,14 @@ jobs:
           key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Build Chain-Signatures Contract
-        run: ./build-contract.sh
-
       - name: Build eth contract
         working-directory: ./chain-signatures/contract-eth
         run: npm i && npx hardhat compile
 
-      - name: Build Chain-Signatures Node
-        run: cargo build -p mpc-node --release
-
       - name: Build nightly
         run: cargo build -p integration-tests --tests
+        env:
+          MPC_ENABLE_HELIOS: 1
 
       - name: Run nightly
         run: cargo test -p integration-tests --test lib -- cases::nightly --show-output --ignored
