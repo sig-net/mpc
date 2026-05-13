@@ -36,7 +36,7 @@ if echo "$MPC_ENABLE_HELIOS" | grep -q "1"; then
     NODE_FEATURES="${NODE_FEATURES},helios"
 fi
 
-echo $SCRIPT_START_TEXT
+echo "$SCRIPT_START_TEXT"
 
 # Add additional features if we're benchmarking.
 if echo "$CARGO_CMD_ARGS" | grep -q "bench"; then
