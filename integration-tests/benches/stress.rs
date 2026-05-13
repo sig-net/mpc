@@ -31,6 +31,7 @@ fn main() {
     let samples = env_usize("MPC_STRESS_SAMPLES", 10).max(1);
     let latency_ms = env_u64("MPC_STRESS_LATENCY_MS", 0);
     let report_path = std::env::var("MPC_STRESS_REPORT_PATH").ok();
+    let csv_path = std::env::var("MPC_STRESS_CSV_PATH").ok();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -70,11 +71,7 @@ fn main() {
                     .block_on(harness.run_scenario(scenario, total_requests, concurrency))
                     .unwrap();
                 let summary = StressSummary::from_outcomes(&report.requests);
-                assert_eq!(summary.timeout + summary.errors, 0, "stress scenario had non-success outcomes");
-
-                if let Some(path) = &report_path {
-                    rt.block_on(harness.write_report_json(&report, path)).unwrap();
-                }
+                assert_eq!(summary.timeout + summary.dropped + summary.errors, 0, "stress scenario had non-success outcomes");
             })
         },
     );
@@ -85,13 +82,17 @@ fn main() {
     if let Some(path) = &report_path {
         rt.block_on(harness.write_report_json(&report, path)).unwrap();
     }
+    if let Some(path) = &csv_path {
+        rt.block_on(harness.write_requests_csv(&report, path)).unwrap();
+    }
     let summary = StressSummary::from_outcomes(&report.requests);
     println!(
-        "scenario={} total={} success={} timeout={} errors={} median_ms={:?} p99_ms={:?} snapshots={} batches={}",
+        "scenario={} total={} success={} timeout={} dropped={} errors={} median_ms={:?} p99_ms={:?} snapshots={} batches={}",
         scenario.as_str(),
         summary.total,
         summary.success,
         summary.timeout,
+        summary.dropped,
         summary.errors,
         summary.median_latency_ms,
         summary.p99_latency_ms,

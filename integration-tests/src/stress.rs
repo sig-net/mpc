@@ -162,20 +162,24 @@ pub enum StressAction {
 pub enum StressRequestStatus {
     Success,
     Timeout,
-    Error(String),
+    Dropped,
+    Error,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StressRequestOutcome {
+    pub batch_label: Option<String>,
     pub request_index: usize,
     pub latency_ms: u128,
     pub status: StressRequestStatus,
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeSnapshot {
     pub node_id: String,
-    pub metrics: mpc_node::web::BenchMetrics,
+    pub metrics: Option<mpc_node::web::BenchMetrics>,
+    pub metrics_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +208,7 @@ pub struct StressSummary {
     pub total: usize,
     pub success: usize,
     pub timeout: usize,
+    pub dropped: usize,
     pub errors: usize,
     pub median_latency_ms: Option<u128>,
     pub p99_latency_ms: Option<u128>,
@@ -500,9 +505,18 @@ impl StressHarness {
         total: usize,
         concurrency: usize,
     ) -> StressBatchReport {
-        let outcomes = self.submit_sign_requests(total, concurrency).await;
+        let label = label.into();
+        let outcomes = self
+            .submit_sign_requests(total, concurrency)
+            .await
+            .into_iter()
+            .map(|mut outcome| {
+                outcome.batch_label = Some(label.clone());
+                outcome
+            })
+            .collect::<Vec<_>>();
         StressBatchReport {
-            label: label.into(),
+            label,
             summary: StressSummary::from_outcomes(&outcomes),
             outcomes,
         }
@@ -513,9 +527,11 @@ impl StressHarness {
         let system_load = self.fetch_system_load().await?;
         let mut nodes = Vec::with_capacity(self.cluster.len());
         for id in 0..self.cluster.len() {
+            let metrics = self.cluster.fetch_bench_metrics(id).await;
             nodes.push(NodeSnapshot {
                 node_id: self.cluster.account_id(id).to_string(),
-                metrics: self.cluster.fetch_bench_metrics(id).await?,
+                metrics: metrics.as_ref().ok().cloned(),
+                metrics_error: metrics.err().map(|err| err.to_string()),
             });
         }
 
@@ -676,6 +692,34 @@ impl StressHarness {
         Ok(())
     }
 
+    pub async fn write_requests_csv(
+        &self,
+        report: &StressRunReport,
+        path: impl AsRef<Path>,
+    ) -> anyhow::Result<()> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let mut csv = String::from("batch_label,request_index,latency_ms,status,detail\n");
+        for outcome in &report.requests {
+            csv.push_str(&csv_escape(outcome.batch_label.as_deref().unwrap_or("")));
+            csv.push(',');
+            csv.push_str(&outcome.request_index.to_string());
+            csv.push(',');
+            csv.push_str(&outcome.latency_ms.to_string());
+            csv.push(',');
+            csv.push_str(outcome.status.as_str());
+            csv.push(',');
+            csv.push_str(&csv_escape(outcome.detail.as_deref().unwrap_or("")));
+            csv.push('\n');
+        }
+
+        tokio::fs::write(path, csv).await?;
+        Ok(())
+    }
+
     async fn fetch_system_load(&self) -> anyhow::Result<u32> {
         self.cluster
             .contract()
@@ -795,16 +839,21 @@ async fn run_sign_request(
     request_index: usize,
 ) -> StressRequestOutcome {
     let started = Instant::now();
-    let status = match tokio::time::timeout(timeout, cluster.sign()).await {
-        Ok(Ok(_)) => StressRequestStatus::Success,
-        Ok(Err(err)) => StressRequestStatus::Error(err.to_string()),
-        Err(_) => StressRequestStatus::Timeout,
+    let (status, detail) = match tokio::time::timeout(timeout, cluster.sign()).await {
+        Ok(Ok(_)) => (StressRequestStatus::Success, None),
+        Ok(Err(err)) => classify_request_error(&err.to_string()),
+        Err(_) => (
+            StressRequestStatus::Timeout,
+            Some(format!("local timeout after {timeout:?}")),
+        ),
     };
 
     StressRequestOutcome {
+        batch_label: None,
         request_index,
         latency_ms: started.elapsed().as_millis(),
         status,
+        detail,
     }
 }
 
@@ -813,6 +862,7 @@ impl StressSummary {
         let total = outcomes.len();
         let mut success = 0usize;
         let mut timeout = 0usize;
+        let mut dropped = 0usize;
         let mut errors = 0usize;
         let mut latencies = outcomes
             .iter()
@@ -820,7 +870,8 @@ impl StressSummary {
                 match &outcome.status {
                     StressRequestStatus::Success => success += 1,
                     StressRequestStatus::Timeout => timeout += 1,
-                    StressRequestStatus::Error(_) => errors += 1,
+                    StressRequestStatus::Dropped => dropped += 1,
+                    StressRequestStatus::Error => errors += 1,
                 }
                 outcome.latency_ms
             })
@@ -831,11 +882,46 @@ impl StressSummary {
             total,
             success,
             timeout,
+            dropped,
             errors,
             median_latency_ms: percentile(&latencies, 50),
             p99_latency_ms: percentile(&latencies, 99),
         }
     }
+}
+
+impl StressRequestStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Timeout => "timeout",
+            Self::Dropped => "dropped",
+            Self::Error => "error",
+        }
+    }
+}
+
+fn classify_request_error(err: &str) -> (StressRequestStatus, Option<String>) {
+    let lower = err.to_ascii_lowercase();
+    let status = if lower.contains("timed out") || lower.contains("timeout") {
+        StressRequestStatus::Timeout
+    } else if lower.contains("too many pending requests")
+        || lower.contains("requestlimitexceeded")
+        || lower.contains("already been submitted")
+        || lower.contains("requestcollision")
+        || lower.contains("request not found")
+    {
+        StressRequestStatus::Dropped
+    } else {
+        StressRequestStatus::Error
+    };
+
+    (status, Some(err.to_string()))
+}
+
+fn csv_escape(value: &str) -> String {
+    let escaped = value.replace('"', "\"\"");
+    format!("\"{escaped}\"")
 }
 
 fn percentile(sorted: &[u128], percentile: usize) -> Option<u128> {

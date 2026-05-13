@@ -27,6 +27,7 @@ pub mod nightly;
 pub mod solana;
 pub mod solana_stream;
 pub mod state_sync;
+pub mod stress;
 pub mod store;
 pub mod sync;
 
