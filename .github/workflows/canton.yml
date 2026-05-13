@@ -72,8 +72,6 @@ jobs:
 
       - name: Presetup binaries
         run: setup.sh
-        env:
-          MPC_ENABLE_HELIOS: 1
 
       - name: Build integration tests
         run: cargo build -p integration-tests --tests
@@ -143,8 +141,6 @@ jobs:
 
       - name: Presetup binaries
         run: setup.sh
-        env:
-          MPC_ENABLE_HELIOS: 1
 
       - name: Build integration tests
         run: cargo build -p integration-tests --tests
