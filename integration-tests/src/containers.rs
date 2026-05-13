@@ -7,6 +7,7 @@ use crate::cluster::spawner::ClusterSpawner;
 use crate::local::NodeEnvConfig;
 use crate::utils::{
     reserve_preferred_or_unused_port, reserve_preferred_or_unused_port_block,
+    PortBlockReservation,
 };
 use crate::NodeConfig;
 
@@ -648,6 +649,10 @@ pub struct Solana {
     pub faucet_port: u16,
     pub rpc_client: SolanaRpcClient,
     ledger_dir: PathBuf,
+    _rpc_ports: PortBlockReservation,
+    _faucet_port: PortBlockReservation,
+    _gossip_port: PortBlockReservation,
+    _dynamic_ports: PortBlockReservation,
 }
 
 impl Solana {
@@ -695,14 +700,14 @@ impl Solana {
             .expect("failed to reserve Solana rpc/ws ports");
         let rpc_port = rpc_ports.start();
         let ws_port = rpc_port + 1;
-        let faucet_port = reserve_preferred_or_unused_port(9900)
+        let faucet_port_reservation = reserve_preferred_or_unused_port(9900)
             .await
             .expect("failed to reserve Solana faucet port");
-        let faucet_port = faucet_port.start();
-        let gossip_port = reserve_preferred_or_unused_port(8000)
+        let faucet_port = faucet_port_reservation.start();
+        let gossip_port_reservation = reserve_preferred_or_unused_port(8000)
             .await
             .expect("failed to reserve Solana gossip port");
-        let gossip_port = gossip_port.start();
+        let gossip_port = gossip_port_reservation.start();
         let dynamic_ports = reserve_preferred_or_unused_port_block(gossip_port + 1, 33)
             .await
             .expect("failed to reserve Solana dynamic port range");
@@ -760,6 +765,10 @@ impl Solana {
             faucet_port,
             rpc_client,
             ledger_dir,
+            _rpc_ports: rpc_ports,
+            _faucet_port: faucet_port_reservation,
+            _gossip_port: gossip_port_reservation,
+            _dynamic_ports: dynamic_ports,
         }
     }
 
