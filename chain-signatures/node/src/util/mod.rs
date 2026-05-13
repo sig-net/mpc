@@ -230,3 +230,7 @@ impl TimeoutBudget {
         self.timeout = timeout;
     }
 }
+
+pub fn channel_len(tx: &tokio::sync::mpsc::Sender<impl Sized>) -> usize {
+    tx.max_capacity() - tx.capacity()
+}

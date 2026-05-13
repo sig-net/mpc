@@ -1,3 +1,5 @@
+use crate::util::channel_len;
+
 use std::sync::LazyLock;
 use tokio::sync::mpsc;
 
@@ -82,7 +84,7 @@ pub(crate) static WEB_ENDPOINT_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|
 
 pub(crate) static CHANNEL_QUEUE_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     super::try_create_int_gauge_vec_with_node_account_id(
-        "multichain_message_channel_queue_size",
+        "multichain_channel_queue_size",
         "Estimated number of buffered messages queued per message channel",
         &["channel"],
     )
@@ -97,10 +99,6 @@ pub(crate) fn set_queue_len(channel: &str, len: usize) {
 
 pub fn set_queue_len_tx<T>(name: &'static str, tx: &mpsc::Sender<T>) {
     set_queue_len(name, channel_len(tx));
-}
-
-pub fn channel_len(tx: &mpsc::Sender<impl Sized>) -> usize {
-    tx.max_capacity() - tx.capacity()
 }
 
 pub(crate) fn remove_queue_len(channel: &str) {

@@ -10,6 +10,7 @@ use crate::protocol::message::{
 use crate::protocol::posit::PositAction;
 use crate::protocol::presignature::{FullPresignatureId, PresignatureId};
 use crate::protocol::triple::TripleId;
+use crate::util::channel_len;
 
 /// This should be enough to hold a few messages in the inbox.
 pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
@@ -147,9 +148,7 @@ impl<T> Subscriber<T> {
 
     pub fn estimated_len(&self) -> usize {
         match &self.kind {
-            SubscriberKind::Subscribed(tx) | SubscriberKind::Unsubscribed(tx, _) => {
-                tx.max_capacity() - tx.capacity()
-            }
+            SubscriberKind::Subscribed(tx) | SubscriberKind::Unsubscribed(tx, _) => channel_len(tx),
             SubscriberKind::Unknown => 0,
         }
     }
