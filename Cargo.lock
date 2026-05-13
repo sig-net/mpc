@@ -6590,6 +6590,7 @@ dependencies = [
  "elliptic-curve",
  "ethers",
  "ethers-core",
+ "fs2",
  "futures",
  "generic-array",
  "hex",

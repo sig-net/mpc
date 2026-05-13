@@ -1,4 +1,5 @@
 use anyhow::Context;
+use fs2::FileExt;
 use hyper::{Body, Client, Method, Request, StatusCode, Uri};
 use near_workspaces::{
     network::Sandbox,
@@ -6,6 +7,7 @@ use near_workspaces::{
     Account, AccountId, Worker,
 };
 use rand::Rng;
+use std::fs::{self, File, OpenOptions};
 use std::collections::HashSet;
 use std::sync::{Mutex, Once};
 use tracing_subscriber::EnvFilter;
@@ -15,6 +17,29 @@ use tracing_subscriber::EnvFilter;
 static ALLOCATED_PORTS: Mutex<Option<HashSet<u16>>> = Mutex::new(None);
 
 static INIT: Once = Once::new();
+
+pub struct PortBlockReservation {
+    start: u16,
+    locks: Vec<File>,
+    lock_paths: Vec<std::path::PathBuf>,
+}
+
+impl PortBlockReservation {
+    pub fn start(&self) -> u16 {
+        self.start
+    }
+}
+
+impl Drop for PortBlockReservation {
+    fn drop(&mut self) {
+        let locks = std::mem::take(&mut self.locks);
+        drop(locks);
+
+        for path in std::mem::take(&mut self.lock_paths) {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
 
 /// Call at least once in every test to see tracing output
 pub fn init_tracing_log() {
@@ -178,6 +203,107 @@ fn reserve_port_block(start: u16, len: usize) -> bool {
     }
 
     true
+}
+
+fn port_lock_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("mpc-parallel-port-locks")
+}
+
+fn try_lock_port_block(start: u16, len: usize) -> Option<Vec<File>> {
+    if len == 0 {
+        return None;
+    }
+
+    let end = start as usize + len - 1;
+    if end > u16::MAX as usize {
+        return None;
+    }
+
+    let lock_dir = port_lock_dir();
+    fs::create_dir_all(&lock_dir).ok()?;
+
+    let mut locks = Vec::with_capacity(len);
+    for port in start..=(end as u16) {
+        let lock_path = lock_dir.join(format!("{port}.lock"));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)
+            .ok()?;
+
+        if file.try_lock_exclusive().is_err() {
+            return None;
+        }
+
+        if !reserve_port_block(port, 1) {
+            return None;
+        }
+
+        locks.push(file);
+    }
+
+    Some(locks)
+}
+
+pub async fn reserve_preferred_or_unused_port_block(
+    preferred: u16,
+    len: usize,
+) -> anyhow::Result<PortBlockReservation> {
+    assert!(len > 0, "port block length must be greater than zero");
+    assert!(
+        len <= u16::MAX as usize + 1,
+        "port block length must be at most {}",
+        u16::MAX as usize + 1
+    );
+
+    let max_start = u16::MAX as usize + 1 - len;
+    let preferred_start = preferred.max(1) as usize;
+
+    if preferred_start <= max_start {
+        if let Some(locks) = try_lock_port_block(preferred_start as u16, len) {
+            return Ok(PortBlockReservation {
+                start: preferred_start as u16,
+                lock_paths: (preferred_start as u16..=(preferred_start as u16 + len as u16 - 1))
+                    .map(|port| port_lock_dir().join(format!("{port}.lock")))
+                    .collect(),
+                locks,
+            });
+        }
+    }
+
+    if preferred_start < max_start {
+        for start in (preferred_start + 1)..=max_start {
+            if let Some(locks) = try_lock_port_block(start as u16, len) {
+                return Ok(PortBlockReservation {
+                    start: start as u16,
+                    lock_paths: (start as u16..=(start as u16 + len as u16 - 1))
+                        .map(|port| port_lock_dir().join(format!("{port}.lock")))
+                        .collect(),
+                    locks,
+                });
+            }
+        }
+    }
+
+    for start in 1..preferred_start.min(max_start + 1) {
+        if let Some(locks) = try_lock_port_block(start as u16, len) {
+            return Ok(PortBlockReservation {
+                start: start as u16,
+                lock_paths: (start as u16..=(start as u16 + len as u16 - 1))
+                    .map(|port| port_lock_dir().join(format!("{port}.lock")))
+                    .collect(),
+                locks,
+            });
+        }
+    }
+
+    anyhow::bail!("failed to reserve a contiguous block of {len} ports")
+}
+
+pub async fn reserve_preferred_or_unused_port(preferred: u16) -> anyhow::Result<PortBlockReservation> {
+    reserve_preferred_or_unused_port_block(preferred, 1).await
 }
 
 /// Request an unused port from the OS, guaranteed unique within this process.

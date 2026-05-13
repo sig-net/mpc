@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use crate::cluster::spawner::ClusterSpawner;
 use crate::local::NodeEnvConfig;
-use crate::utils::{pick_preferred_or_unused_port, pick_preferred_or_unused_port_block};
+use crate::utils::{
+    reserve_preferred_or_unused_port, reserve_preferred_or_unused_port_block,
+};
 use crate::NodeConfig;
 
 use anyhow::{anyhow, Context};
@@ -688,11 +690,23 @@ impl Solana {
         let payer_keypair = SolanaKeypair::from_seed(&[102u8; 32]).unwrap();
 
         // Reserve rpc/ws as one contiguous block so parallel Solana validators do not overlap.
-        let rpc_port = pick_preferred_or_unused_port_block(8899, 2).await;
+        let rpc_ports = reserve_preferred_or_unused_port_block(8899, 2)
+            .await
+            .expect("failed to reserve Solana rpc/ws ports");
+        let rpc_port = rpc_ports.start();
         let ws_port = rpc_port + 1;
-        let faucet_port = pick_preferred_or_unused_port(9900).await;
-        let gossip_port = pick_preferred_or_unused_port(8000).await;
-        let dynamic_port_start = pick_preferred_or_unused_port_block(gossip_port + 1, 33).await;
+        let faucet_port = reserve_preferred_or_unused_port(9900)
+            .await
+            .expect("failed to reserve Solana faucet port");
+        let faucet_port = faucet_port.start();
+        let gossip_port = reserve_preferred_or_unused_port(8000)
+            .await
+            .expect("failed to reserve Solana gossip port");
+        let gossip_port = gossip_port.start();
+        let dynamic_ports = reserve_preferred_or_unused_port_block(gossip_port + 1, 33)
+            .await
+            .expect("failed to reserve Solana dynamic port range");
+        let dynamic_port_start = dynamic_ports.start();
         let dynamic_port_end = dynamic_port_start + 32;
 
         let rpc_address = format!("http://127.0.0.1:{}", rpc_port);

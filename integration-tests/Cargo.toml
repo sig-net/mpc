@@ -17,6 +17,7 @@ ciborium.workspace = true
 clap.workspace = true
 deadpool-redis.workspace = true
 futures = "0.3"
+fs2 = "0.4"
 generic-array = { version = "0.14.7", default-features = false }
 hex.workspace = true
 hyper.workspace = true
