@@ -6,8 +6,7 @@ use std::time::Duration;
 use crate::cluster::spawner::ClusterSpawner;
 use crate::local::NodeEnvConfig;
 use crate::utils::{
-    reserve_preferred_or_unused_port, reserve_preferred_or_unused_port_block,
-    PortBlockReservation,
+    reserve_preferred_or_unused_port, reserve_preferred_or_unused_port_block, PortBlockReservation,
 };
 use crate::NodeConfig;
 

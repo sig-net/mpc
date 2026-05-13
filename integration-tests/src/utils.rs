@@ -7,8 +7,8 @@ use near_workspaces::{
     Account, AccountId, Worker,
 };
 use rand::Rng;
-use std::fs::{self, File, OpenOptions};
 use std::collections::HashSet;
+use std::fs::{self, File, OpenOptions};
 use std::sync::{Mutex, Once};
 use tracing_subscriber::EnvFilter;
 
@@ -309,7 +309,9 @@ pub async fn reserve_preferred_or_unused_port_block(
     anyhow::bail!("failed to reserve a contiguous block of {len} ports")
 }
 
-pub async fn reserve_preferred_or_unused_port(preferred: u16) -> anyhow::Result<PortBlockReservation> {
+pub async fn reserve_preferred_or_unused_port(
+    preferred: u16,
+) -> anyhow::Result<PortBlockReservation> {
     reserve_preferred_or_unused_port_block(preferred, 1).await
 }
 
