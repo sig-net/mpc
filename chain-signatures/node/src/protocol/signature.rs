@@ -1316,7 +1316,7 @@ impl SignatureSpawner {
     }
 
     /// Handle a posit message - routes to existing task or buffers if task not yet created
-    async fn handle_posit(
+    fn handle_posit(
         &mut self,
         me: Participant,
         sign_id: SignId,
@@ -1329,17 +1329,19 @@ impl SignatureSpawner {
         if from == me {
             return;
         }
-        let _ = self
+        if let Err(err) = self
             .inboxes
             .entry(sign_id)
-            .or_default()
-            .send(SignTaskMessage::PositMessage {
+            .or_insert_with(|| Subscriber::unsubscribed("sign_task"))
+            .try_send_lossy(SignTaskMessage::PositMessage {
                 presignature_id,
                 round,
                 from,
                 action,
             })
-            .await;
+        {
+            tracing::error!(?err, ?sign_id, "failed to send posit message");
+        }
     }
 
     fn handle_completion(&mut self, sign_id: SignId) {
@@ -1436,7 +1438,7 @@ impl SignatureSpawner {
                     self.handle_request(&governance, sign, &protocol);
                 }
                 Some((sign_id, presignature_id, round, from, action)) = posits.recv() => {
-                    self.handle_posit(governance.me, sign_id, presignature_id, round, from, action).await;
+                    self.handle_posit(governance.me, sign_id, presignature_id, round, from, action);
                 }
                 Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     self.handle_task_exit(result);

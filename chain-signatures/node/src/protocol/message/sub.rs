@@ -13,6 +13,9 @@ use crate::protocol::triple::TripleId;
 
 /// This should be enough to hold a few messages in the inbox.
 pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
+/// Posit channels can accumulate many small control-plane messages; use a large
+/// capacity to avoid backpressure or deadlock under high concurrency.
+pub const MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE: usize = 1 << 24;
 
 pub enum SubscribeId {
     Generating,
@@ -115,10 +118,43 @@ impl<T> Subscriber<T> {
             Self::Unknown => Ok(()),
         }
     }
+
+    pub fn try_send_lossy(&self, msg: T) -> Result<(), mpsc::error::SendError<T>> {
+        let result = match &self.kind {
+            SubscriberKind::Subscribed(tx) | SubscriberKind::Unsubscribed(tx, _) => {
+                match tx.try_send(msg) {
+                    Ok(()) => Ok(()),
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        tracing::warn!(
+                            subscriber = self.metrics.name,
+                            capacity = self.metrics.capacity,
+                            "dropping message: subscriber channel full"
+                        );
+                        Ok(())
+                    }
+                    Err(mpsc::error::TrySendError::Closed(msg)) => Err(mpsc::error::SendError(msg)),
+                }
+            }
+            SubscriberKind::Unknown => Ok(()),
+        };
+        self.report_queue_len();
+        result
+    }
 }
 
-impl<T> Default for Subscriber<T> {
-    fn default() -> Self {
-        Self::unsubscribed()
+#[cfg(test)]
+mod tests {
+    use super::Subscriber;
+
+    #[test]
+    fn estimated_queue_len_tracks_buffered_messages() {
+        let sub = Subscriber::unsubscribed_with_capacity("test", 4);
+
+        assert_eq!(sub.estimated_queue_len(), 0);
+
+        sub.try_send_lossy(1u8).unwrap();
+        sub.try_send_lossy(2u8).unwrap();
+
+        assert_eq!(sub.estimated_queue_len(), 2);
     }
 }
