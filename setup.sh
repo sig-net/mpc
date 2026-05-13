@@ -26,14 +26,17 @@ done
 
 CARGO_CMD_ARGS="$@"
 CARGO_BUILD_INDENT="            "
-echo "${CARGO_BUILD_INDENT} running MPC build script"
+SCRIPT_START_TEXT="${CARGO_BUILD_INDENT} running MPC build script"
 
 # Default feature set for building local binaries used by tests.
 NODE_FEATURES="test-feature,debug-page"
 CONTRACT_FEATURES=""
 if echo "$MPC_ENABLE_HELIOS" | grep -q "1"; then
+    SCRIPT_START_TEXT="${SCRIPT_START_TEXT}: building with helios enabled"
     NODE_FEATURES="${NODE_FEATURES},helios"
 fi
+
+echo $SCRIPT_START_TEXT
 
 # Add additional features if we're benchmarking.
 if echo "$CARGO_CMD_ARGS" | grep -q "bench"; then

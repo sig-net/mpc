@@ -87,10 +87,13 @@ jobs:
         working-directory: ./chain-signatures/contract-eth
         run: npm i && npx hardhat compile
 
-      - name: Build nightly
-        run: cargo build -p integration-tests --tests
+      - name: Presetup binaries
+        run: setup.sh
         env:
           MPC_ENABLE_HELIOS: 1
+
+      - name: Build nightly
+        run: cargo build -p integration-tests --tests
 
       - name: Run nightly
         run: cargo test -p integration-tests --test lib -- cases::nightly --show-output --ignored

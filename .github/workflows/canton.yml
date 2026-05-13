@@ -70,10 +70,13 @@ jobs:
         working-directory: ./chain-signatures/contract-eth
         run: npm i && npx hardhat compile
 
-      - name: Build integration tests
-        run: cargo build -p integration-tests --tests
+      - name: Presetup binaries
+        run: setup.sh
         env:
           MPC_ENABLE_HELIOS: 1
+
+      - name: Build integration tests
+        run: cargo build -p integration-tests --tests
 
       - name: Run Canton stream tests
         run: cargo test -p integration-tests --test lib -- canton_stream --ignored --nocapture --test-threads 1
@@ -134,15 +137,14 @@ jobs:
           key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Build Chain-Signatures Contract
-        run: ./build-contract.sh
-
       - name: Build eth contract
         working-directory: ./chain-signatures/contract-eth
         run: npm i && npx hardhat compile
 
-      - name: Build Chain-Signatures Node
-        run: cargo build -p mpc-node --release --features helios
+      - name: Presetup binaries
+        run: setup.sh
+        env:
+          MPC_ENABLE_HELIOS: 1
 
       - name: Build integration tests
         run: cargo build -p integration-tests --tests
