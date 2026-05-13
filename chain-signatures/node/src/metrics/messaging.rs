@@ -105,10 +105,10 @@ pub(crate) fn remove_queue_len(channel: &str) {
     let _ = CHANNEL_QUEUE_SIZE.remove_label_values(&[channel]);
 }
 
-pub(crate) static TASK_QUEUE_LEN: LazyLock<HistogramVec> = LazyLock::new(|| {
+pub(crate) static TASK_QUEUE_CAPACITY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec_with_node_account_id(
-        "multichain_task_queue_size",
-        "Distribution of queue sizes across message channels",
+        "multichain_task_queue_capacity",
+        "Distribution of queue capacities across message channels",
         &["channel"],
         Some(vec![
             1.0, 10.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0,
@@ -117,8 +117,8 @@ pub(crate) static TASK_QUEUE_LEN: LazyLock<HistogramVec> = LazyLock::new(|| {
     .unwrap()
 });
 
-pub(crate) fn observe_queue_len(channel: &str, len: usize) {
-    TASK_QUEUE_LEN
+pub(crate) fn observe_queue_capacity(channel: &str, len: usize) {
+    TASK_QUEUE_CAPACITY
         .with_label_values(&[channel])
         .observe(len as f64);
 }

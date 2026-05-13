@@ -2,6 +2,7 @@ use cait_sith::protocol::Participant;
 use mpc_primitives::SignId;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::metrics::messaging::{observe_queue_capacity, remove_queue_len, set_queue_len};
 use crate::protocol::message::types::Round;
 use crate::protocol::message::{
     GeneratingMessage, PresignatureMessage, ReadyMessage, ResharingMessage, SignatureMessage,
@@ -146,6 +147,13 @@ impl<T> Subscriber<T> {
         }
     }
 
+    pub fn remaining_capacity(&self) -> usize {
+        match &self.kind {
+            SubscriberKind::Subscribed(tx) | SubscriberKind::Unsubscribed(tx, _) => tx.capacity(),
+            SubscriberKind::Unknown => 0,
+        }
+    }
+
     pub fn estimated_len(&self) -> usize {
         match &self.kind {
             SubscriberKind::Subscribed(tx) | SubscriberKind::Unsubscribed(tx, _) => channel_len(tx),
@@ -154,15 +162,15 @@ impl<T> Subscriber<T> {
     }
 
     pub fn report_len_global(&self) {
-        crate::metrics::messaging::set_queue_len(self.metrics.name, self.estimated_len());
+        set_queue_len(self.metrics.name, self.estimated_len());
     }
 
     pub fn clear_len_global(&self) {
-        crate::metrics::messaging::remove_queue_len(self.metrics.name);
+        remove_queue_len(self.metrics.name);
     }
 
     pub fn report_len(&self) {
-        crate::metrics::messaging::observe_queue_len(self.metrics.name, self.estimated_len());
+        observe_queue_capacity(self.metrics.name, self.remaining_capacity());
     }
 
     pub async fn send(&self, msg: T) -> Result<(), mpsc::error::SendError<T>> {

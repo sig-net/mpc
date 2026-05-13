@@ -8,7 +8,7 @@ use super::contract::primitives::{ParticipantMap, Participants};
 use super::presignature::PresignatureId;
 use super::triple::TripleId;
 use crate::metrics;
-use crate::metrics::messaging::set_queue_len_tx;
+use crate::metrics::messaging::{set_queue_len, set_queue_len_tx};
 use crate::node_client::NodeClient;
 use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::message::sub::{
@@ -174,7 +174,7 @@ impl MessageInbox {
                 sub.report_len();
             }
             Message::Unknown(entries) => {
-                metrics::messaging::observe_queue_len("unknown", entries.len());
+                set_queue_len("unknown", entries.len());
                 tracing::warn!(
                     entries = ?entries.iter().map(|(k, v)| (k, cbor_name(v))).collect::<Vec<_>>(),
                     "inbox: received unknown message type",
