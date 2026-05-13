@@ -168,13 +168,20 @@ where
     Ok(response.status())
 }
 
-pub async fn is_port_available(port: u16) -> bool {
-    is_port_available_sync(port)
-}
-
 fn is_port_available_sync(port: u16) -> bool {
     let addr = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, port);
-    std::net::TcpListener::bind(addr).is_ok()
+    let tcp_listener = match std::net::TcpListener::bind(addr) {
+        Ok(listener) => listener,
+        Err(_) => return false,
+    };
+    let udp_socket = match std::net::UdpSocket::bind(addr) {
+        Ok(socket) => socket,
+        Err(_) => return false,
+    };
+
+    drop(udp_socket);
+    drop(tcp_listener);
+    true
 }
 
 fn reserve_port_block(start: u16, len: usize) -> bool {

@@ -768,7 +768,7 @@ impl Solana {
         ws_address: &str,
         payer: &SolanaPubkey,
     ) {
-        const MAX_ATTEMPTS: usize = 60;
+        const MAX_ATTEMPTS: usize = 120;
 
         for attempt in 1..=MAX_ATTEMPTS {
             let version_ready = rpc_client.get_version().await.is_ok();
