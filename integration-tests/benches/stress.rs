@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use criterion::Criterion;
-use integration_tests::stress::{StressAction, StressHarnessBuilder, StressRequestStatus};
+use integration_tests::stress::{StressHarnessBuilder, StressScenario, StressSummary};
 
 fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key)
@@ -17,13 +17,20 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn env_string(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
 fn main() {
+    let scenario = env_string("MPC_STRESS_SCENARIO", "burst");
+    let scenario = StressScenario::from_env(&scenario).unwrap_or(StressScenario::Burst);
     let nodes = env_usize("MPC_STRESS_NODES", 3);
     let threshold = env_usize("MPC_STRESS_THRESHOLD", 2);
     let total_requests = env_usize("MPC_STRESS_TOTAL_REQUESTS", 16);
     let concurrency = env_usize("MPC_STRESS_CONCURRENCY", 8);
     let samples = env_usize("MPC_STRESS_SAMPLES", 10).max(1);
     let latency_ms = env_u64("MPC_STRESS_LATENCY_MS", 0);
+    let report_path = std::env::var("MPC_STRESS_REPORT_PATH").ok();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -53,23 +60,42 @@ fn main() {
 
     let mut c = Criterion::default().sample_size(samples);
     c.bench_function(
-        &format!("stress/sign_burst/{total_requests}_req/{concurrency}_conc"),
+        &format!(
+            "stress/{}/{total_requests}_req/{concurrency}_conc",
+            scenario.as_str()
+        ),
         |b| {
             b.iter(|| {
-                let outcomes = rt.block_on(harness.submit_sign_requests(total_requests, concurrency));
-                let failures = outcomes
-                    .iter()
-                    .filter(|outcome| !matches!(outcome.status, StressRequestStatus::Success))
-                    .count();
-                assert_eq!(failures, 0, "stress sign burst had non-success outcomes");
+                let report = rt
+                    .block_on(harness.run_scenario(scenario, total_requests, concurrency))
+                    .unwrap();
+                let summary = StressSummary::from_outcomes(&report.requests);
+                assert_eq!(summary.timeout + summary.errors, 0, "stress scenario had non-success outcomes");
+
+                if let Some(path) = &report_path {
+                    rt.block_on(harness.write_report_json(&report, path)).unwrap();
+                }
             })
         },
     );
 
     let report = rt
-        .block_on(harness.run_actions(&[
-            StressAction::Snapshot("post-bench".to_string()),
-        ]))
+        .block_on(harness.run_scenario(scenario, total_requests, concurrency))
         .unwrap();
-    println!("post-bench snapshots: {}", report.snapshots.len());
+    if let Some(path) = &report_path {
+        rt.block_on(harness.write_report_json(&report, path)).unwrap();
+    }
+    let summary = StressSummary::from_outcomes(&report.requests);
+    println!(
+        "scenario={} total={} success={} timeout={} errors={} median_ms={:?} p99_ms={:?} snapshots={} batches={}",
+        scenario.as_str(),
+        summary.total,
+        summary.success,
+        summary.timeout,
+        summary.errors,
+        summary.median_latency_ms,
+        summary.p99_latency_ms,
+        report.snapshots.len(),
+        report.batches.len(),
+    );
 }

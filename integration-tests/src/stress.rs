@@ -1,19 +1,19 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use futures::stream::{FuturesUnordered, StreamExt};
 use k256::elliptic_curve::sec1::ToEncodedPoint;
-use near_workspaces::network::Sandbox;
-use near_workspaces::{AccountId, Worker};
+use near_workspaces::AccountId;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, RwLock};
 use url::Url;
 
-use crate::cluster::spawner::{ClusterSpawner, PregeneratedKeys, Prestockpile};
+use crate::cluster::spawner::{ClusterSpawner, PregeneratedKeys};
 use crate::cluster::Cluster;
 use crate::local::{Node, NodeEnvConfig};
 use crate::{setup, Context, Nodes};
@@ -189,6 +189,139 @@ pub struct StressSnapshot {
 pub struct StressRunReport {
     pub requests: Vec<StressRequestOutcome>,
     pub snapshots: Vec<StressSnapshot>,
+    pub batches: Vec<StressBatchReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StressBatchReport {
+    pub label: String,
+    pub summary: StressSummary,
+    pub outcomes: Vec<StressRequestOutcome>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StressSummary {
+    pub total: usize,
+    pub success: usize,
+    pub timeout: usize,
+    pub errors: usize,
+    pub median_latency_ms: Option<u128>,
+    pub p99_latency_ms: Option<u128>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum StressScenario {
+    Burst,
+    GlobalLatencySweep,
+    SingleNodeStraggler,
+    SteadyOverload,
+}
+
+impl StressScenario {
+    pub fn from_env(value: &str) -> Option<Self> {
+        match value {
+            "burst" => Some(Self::Burst),
+            "global-latency" => Some(Self::GlobalLatencySweep),
+            "single-node-straggler" => Some(Self::SingleNodeStraggler),
+            "steady-overload" => Some(Self::SteadyOverload),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Burst => "burst",
+            Self::GlobalLatencySweep => "global-latency",
+            Self::SingleNodeStraggler => "single-node-straggler",
+            Self::SteadyOverload => "steady-overload",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatencySweepStage {
+    pub label: String,
+    pub latency_ms: u64,
+    pub total_requests: usize,
+    pub concurrency: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GlobalLatencySweepConfig {
+    pub stages: Vec<LatencySweepStage>,
+}
+
+impl GlobalLatencySweepConfig {
+    pub fn default_with(total_requests: usize, concurrency: usize) -> Self {
+        let stage = |label: &str, latency_ms| LatencySweepStage {
+            label: label.to_string(),
+            latency_ms,
+            total_requests,
+            concurrency,
+        };
+
+        Self {
+            stages: vec![
+                stage("baseline", 0),
+                stage("low", 50),
+                stage("medium", 200),
+                stage("high", 500),
+                stage("severe", 1000),
+                stage("recovery", 0),
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SingleNodeStragglerConfig {
+    pub node: usize,
+    pub latency_ms: u64,
+    pub total_requests: usize,
+    pub concurrency: usize,
+}
+
+impl SingleNodeStragglerConfig {
+    pub fn default_with(total_requests: usize, concurrency: usize) -> Self {
+        Self {
+            node: 1,
+            latency_ms: 2_000,
+            total_requests,
+            concurrency,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverloadStage {
+    pub label: String,
+    pub concurrency: usize,
+    pub total_requests: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SteadyOverloadConfig {
+    pub stages: Vec<OverloadStage>,
+}
+
+impl SteadyOverloadConfig {
+    pub fn default_with(base_total_requests: usize) -> Self {
+        let stage = |label: &str, concurrency| OverloadStage {
+            label: label.to_string(),
+            concurrency,
+            total_requests: concurrency.max(base_total_requests),
+        };
+
+        Self {
+            stages: vec![
+                stage("c16", 16),
+                stage("c32", 32),
+                stage("c64", 64),
+                stage("c128", 128),
+                stage("recovery", 16),
+            ],
+        }
+    }
 }
 
 pub struct StressHarnessBuilder {
@@ -361,6 +494,20 @@ impl StressHarness {
         outcomes
     }
 
+    pub async fn run_named_batch(
+        &self,
+        label: impl Into<String>,
+        total: usize,
+        concurrency: usize,
+    ) -> StressBatchReport {
+        let outcomes = self.submit_sign_requests(total, concurrency).await;
+        StressBatchReport {
+            label: label.into(),
+            summary: StressSummary::from_outcomes(&outcomes),
+            outcomes,
+        }
+    }
+
     pub async fn snapshot(&self, label: impl Into<String>) -> anyhow::Result<StressSnapshot> {
         let label = label.into();
         let system_load = self.fetch_system_load().await?;
@@ -408,6 +555,125 @@ impl StressHarness {
         }
 
         Ok(report)
+    }
+
+    pub async fn run_global_latency_sweep(
+        &self,
+        cfg: &GlobalLatencySweepConfig,
+    ) -> anyhow::Result<StressRunReport> {
+        let mut report = StressRunReport::default();
+
+        for stage in &cfg.stages {
+            self.set_global_latency(Duration::from_millis(stage.latency_ms))
+                .await;
+            report
+                .snapshots
+                .push(self.snapshot(format!("{}-before", stage.label)).await?);
+            let batch = self
+                .run_named_batch(&stage.label, stage.total_requests, stage.concurrency)
+                .await;
+            report.requests.extend(batch.outcomes.iter().cloned());
+            report.batches.push(batch);
+            report
+                .snapshots
+                .push(self.snapshot(format!("{}-after", stage.label)).await?);
+        }
+
+        Ok(report)
+    }
+
+    pub async fn run_single_node_straggler(
+        &self,
+        cfg: &SingleNodeStragglerConfig,
+    ) -> anyhow::Result<StressRunReport> {
+        let mut report = StressRunReport::default();
+        report.snapshots.push(self.snapshot("baseline-before").await?);
+        self.set_node_latency(cfg.node, Duration::from_millis(cfg.latency_ms))
+            .await?;
+        report.snapshots.push(self.snapshot("straggler-before").await?);
+        let batch = self
+            .run_named_batch("straggler", cfg.total_requests, cfg.concurrency)
+            .await;
+        report.requests.extend(batch.outcomes.iter().cloned());
+        report.batches.push(batch);
+        self.clear_node(cfg.node).await?;
+        report.snapshots.push(self.snapshot("recovery").await?);
+        Ok(report)
+    }
+
+    pub async fn run_steady_overload(
+        &self,
+        cfg: &SteadyOverloadConfig,
+    ) -> anyhow::Result<StressRunReport> {
+        let mut report = StressRunReport::default();
+
+        for stage in &cfg.stages {
+            report
+                .snapshots
+                .push(self.snapshot(format!("{}-before", stage.label)).await?);
+            let batch = self
+                .run_named_batch(&stage.label, stage.total_requests, stage.concurrency)
+                .await;
+            report.requests.extend(batch.outcomes.iter().cloned());
+            report.batches.push(batch);
+            report
+                .snapshots
+                .push(self.snapshot(format!("{}-after", stage.label)).await?);
+        }
+
+        Ok(report)
+    }
+
+    pub async fn run_scenario(
+        &self,
+        scenario: StressScenario,
+        total_requests: usize,
+        concurrency: usize,
+    ) -> anyhow::Result<StressRunReport> {
+        match scenario {
+            StressScenario::Burst => {
+                let mut report = StressRunReport::default();
+                let batch = self
+                    .run_named_batch("burst", total_requests, concurrency)
+                    .await;
+                report.requests.extend(batch.outcomes.iter().cloned());
+                report.batches.push(batch);
+                report.snapshots.push(self.snapshot("post-burst").await?);
+                Ok(report)
+            }
+            StressScenario::GlobalLatencySweep => {
+                self.run_global_latency_sweep(&GlobalLatencySweepConfig::default_with(
+                    total_requests,
+                    concurrency,
+                ))
+                .await
+            }
+            StressScenario::SingleNodeStraggler => {
+                self.run_single_node_straggler(&SingleNodeStragglerConfig::default_with(
+                    total_requests,
+                    concurrency,
+                ))
+                .await
+            }
+            StressScenario::SteadyOverload => {
+                self.run_steady_overload(&SteadyOverloadConfig::default_with(total_requests))
+                    .await
+            }
+        }
+    }
+
+    pub async fn write_report_json(
+        &self,
+        report: &StressRunReport,
+        path: impl AsRef<Path>,
+    ) -> anyhow::Result<()> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let bytes = serde_json::to_vec_pretty(report)?;
+        tokio::fs::write(path, bytes).await?;
+        Ok(())
     }
 
     async fn fetch_system_load(&self) -> anyhow::Result<u32> {
@@ -540,4 +806,43 @@ async fn run_sign_request(
         latency_ms: started.elapsed().as_millis(),
         status,
     }
+}
+
+impl StressSummary {
+    pub fn from_outcomes(outcomes: &[StressRequestOutcome]) -> Self {
+        let total = outcomes.len();
+        let mut success = 0usize;
+        let mut timeout = 0usize;
+        let mut errors = 0usize;
+        let mut latencies = outcomes
+            .iter()
+            .map(|outcome| {
+                match &outcome.status {
+                    StressRequestStatus::Success => success += 1,
+                    StressRequestStatus::Timeout => timeout += 1,
+                    StressRequestStatus::Error(_) => errors += 1,
+                }
+                outcome.latency_ms
+            })
+            .collect::<Vec<_>>();
+        latencies.sort_unstable();
+
+        Self {
+            total,
+            success,
+            timeout,
+            errors,
+            median_latency_ms: percentile(&latencies, 50),
+            p99_latency_ms: percentile(&latencies, 99),
+        }
+    }
+}
+
+fn percentile(sorted: &[u128], percentile: usize) -> Option<u128> {
+    if sorted.is_empty() {
+        return None;
+    }
+
+    let index = ((sorted.len() - 1) * percentile) / 100;
+    sorted.get(index).copied()
 }
