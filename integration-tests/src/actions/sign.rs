@@ -574,13 +574,10 @@ async fn wait_for_signature_responded_event(
     timeout: Duration,
 ) -> anyhow::Result<SolSignatureResponse> {
     let rpc_client = RpcClient::new(rpc_http_url);
-    let pubsub_client = PubsubClient::new(rpc_ws_url.as_str()).await?;
-
     let filter = RpcTransactionLogsFilter::Mentions(vec![program_id.to_string()]);
     let config = RpcTransactionLogsConfig {
         commitment: Some(CommitmentConfig::confirmed()),
     };
-    let (mut stream, _unsubscribe) = pubsub_client.logs_subscribe(filter, config).await?;
 
     let mut seen = HashSet::new();
     let program_invoke_prefix = format!("Program {} invoke [", program_id);
@@ -589,70 +586,89 @@ async fn wait_for_signature_responded_event(
     tokio::pin!(deadline);
 
     loop {
-        tokio::select! {
-            _ = &mut deadline => {
-                anyhow::bail!("timeout waiting for respond on sol");
-            }
-            maybe = stream.next() => {
-                let Some(response) = maybe else {
-                    anyhow::bail!("sol signature respond log stream closed unexpectedly");
-                };
+        let pubsub_client = PubsubClient::new(rpc_ws_url.as_str()).await?;
+        let (mut stream, _unsubscribe) = pubsub_client
+            .logs_subscribe(filter.clone(), config.clone())
+            .await?;
 
-                if response.value.err.is_some() {
-                    continue;
+        let stream_result = loop {
+            tokio::select! {
+                _ = &mut deadline => {
+                    anyhow::bail!("timeout waiting for respond on sol");
                 }
+                maybe = stream.next() => {
+                    let Some(response) = maybe else {
+                        tracing::warn!("sol signature respond log stream closed unexpectedly, reconnecting");
+                        break Ok::<Option<SolSignatureResponse>, anyhow::Error>(None);
+                    };
 
-                let logs = &response.value.logs;
-                if !logs.iter().any(|log| log.contains(RESPOND_EVENT_HINT)) {
-                    continue;
-                }
-                if !logs.iter().any(|log| log.starts_with(&program_invoke_prefix)) {
-                    continue;
-                }
+                    if response.value.err.is_some() {
+                        continue;
+                    }
 
-                let sig_text = &response.value.signature;
-                let Ok(tx_signature) = solana_sdk::signature::Signature::from_str(sig_text) else {
-                    tracing::warn!(tx_signature = sig_text, "invalid solana signature string in respond logs");
-                    continue;
-                };
+                    let logs = &response.value.logs;
+                    if !logs.iter().any(|log| log.contains(RESPOND_EVENT_HINT)) {
+                        continue;
+                    }
+                    if !logs.iter().any(|log| log.starts_with(&program_invoke_prefix)) {
+                        continue;
+                    }
 
-                if !seen.insert(tx_signature) {
-                    continue;
-                }
+                    let sig_text = &response.value.signature;
+                    let Ok(tx_signature) = solana_sdk::signature::Signature::from_str(sig_text) else {
+                        tracing::warn!(tx_signature = sig_text, "invalid solana signature string in respond logs");
+                        continue;
+                    };
 
-                match parse_signature_responded_events(&rpc_client, &tx_signature, &program_id).await {
-                    Ok(events) => {
-                        for event in events {
-                            tracing::info!(
-                                request_id = %hex::encode(event.request_id),
-                                tx_signature = %tx_signature,
-                                "received SignatureRespondedEvent via CPI logs",
-                            );
+                    if !seen.insert(tx_signature) {
+                        continue;
+                    }
 
-                            match parse_sol_signature(&event.signature) {
-                                Ok((signature, recovery_id)) => {
-                                    return Ok(SolSignatureResponse {
-                                        request_id: event.request_id,
-                                        signature,
-                                        recovery_id,
-                                    });
-                                }
-                                Err(err) => {
-                                    tracing::warn!(?err, "failed to parse sol signature from SignatureRespondedEvent");
+                    match parse_signature_responded_events(&rpc_client, &tx_signature, &program_id).await {
+                        Ok(events) => {
+                            for event in events {
+                                tracing::info!(
+                                    request_id = %hex::encode(event.request_id),
+                                    tx_signature = %tx_signature,
+                                    "received SignatureRespondedEvent via CPI logs",
+                                );
+
+                                match parse_sol_signature(&event.signature) {
+                                    Ok((signature, recovery_id)) => {
+                                        return Ok(SolSignatureResponse {
+                                            request_id: event.request_id,
+                                            signature,
+                                            recovery_id,
+                                        });
+                                    }
+                                    Err(err) => {
+                                        tracing::warn!(
+                                            ?err,
+                                            tx_signature = %tx_signature,
+                                            request_id = %hex::encode(event.request_id),
+                                            "failed to parse sol signature from SignatureRespondedEvent",
+                                        );
+                                    }
                                 }
                             }
                         }
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            ?err,
-                            tx_signature = %tx_signature,
-                            "failed to parse SignatureRespondedEvent from respond transaction",
-                        );
+                        Err(err) => {
+                            tracing::warn!(
+                                ?err,
+                                tx_signature = %tx_signature,
+                                "failed to parse SignatureRespondedEvent from respond transaction",
+                            );
+                        }
                     }
                 }
             }
+        };
+
+        if let Some(response) = stream_result? {
+            return Ok(response);
         }
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -766,6 +782,19 @@ pub async fn wait_for_respond_bidirectional(
 
     let event_unsub = program
         .on(move |_ctx, event: RespondBidirectionalEvent| {
+            if event.request_id != expected_request_id {
+                return;
+            }
+
+            let Ok(mut sender) = tx.lock() else {
+                tracing::warn!("failed to lock RespondBidirectionalEvent sender");
+                return;
+            };
+
+            let Some(sender) = sender.take() else {
+                return;
+            };
+
             tracing::info!(
                 request_id = %hex::encode(event.request_id),
                 responder = ?event.responder,
@@ -773,26 +802,18 @@ pub async fn wait_for_respond_bidirectional(
                 "received RespondBidirectionalEvent",
             );
 
-            if event.request_id != expected_request_id {
-                return;
-            }
-
-            let signature_result = parse_sol_signature(&event.signature);
-            if let Ok(mut sender) = tx.lock() {
-                if let Some(sender) = sender.take() {
-                    let outcome = signature_result.map(|(signature, recovery_id)| {
-                        SolRespondBidirectionalOutcome {
-                            request_id: event.request_id,
-                            responder: event.responder.to_string(),
-                            serialized_output: event.serialized_output.clone(),
-                            signature,
-                            recovery_id,
-                        }
-                    });
-                    if sender.send(outcome).is_err() {
-                        tracing::error!("failed to send RespondBidirectionalEvent outcome");
-                    }
+            let outcome = parse_sol_signature(&event.signature).map(|(signature, recovery_id)| {
+                SolRespondBidirectionalOutcome {
+                    request_id: event.request_id,
+                    responder: event.responder.to_string(),
+                    serialized_output: event.serialized_output.clone(),
+                    signature,
+                    recovery_id,
                 }
+            });
+
+            if sender.send(outcome).is_err() {
+                tracing::error!("failed to send RespondBidirectionalEvent outcome");
             }
         })
         .await?;
