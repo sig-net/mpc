@@ -336,6 +336,8 @@ async fn test_sync_reports_missing_when_owner_mapping_is_missing_on_responder() 
         vec![404],
         "responder should report presignature as missing when owner mapping is gone"
     );
+    assert_triples_owned_state(&node1.triple_storage, node0.me, &[], &[404]).await;
+    assert_presig_owned_state(&node1.presignature_storage, node0.me, &[], &[404]).await;
 }
 
 /// Orphaned artifact: owner doesn't have id=77 but other nodes do.

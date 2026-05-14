@@ -380,11 +380,16 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 end
             end
 
+            local our_shares_check = {}
+            for _, id in ipairs(our_shares) do
+                our_shares_check[id] = 1
+            end
+
             -- find shares that were shared with us but not found in our storage
             local not_found = {}
             for _, id in ipairs(ARGV) do
                 local holders_key = artifact_key .. ':holders:' .. id
-                local owner_has = redis.call("SISMEMBER", owner_key, id) == 1
+                local owner_has = our_shares_check[id] == 1
                 local artifact_exists = redis.call("HEXISTS", artifact_key, id) == 1
                 local holders_exist = redis.call("EXISTS", holders_key) == 1
                 if not owner_has or not artifact_exists or not holders_exist then
