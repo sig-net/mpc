@@ -358,7 +358,6 @@ impl SolanaStream {
 
 #[async_trait]
 impl ChainStream for SolanaStream {
-    const CHAIN: Chain = Chain::Solana;
     type Indexer = SolanaIndexer;
 
     async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
@@ -389,6 +388,7 @@ impl ChainStream for SolanaStream {
 
 #[async_trait]
 impl ChainIndexer for SolanaIndexer {
+    const CHAIN: Chain = Chain::Solana;
     type Block = (u64, EncodedConfirmedBlock);
     type Iter = btree_map::IntoIter<u64, EncodedConfirmedBlock>;
 
@@ -599,7 +599,7 @@ fn build_sign_request(
 }
 
 /// Subscribe to the live WS feed, preprocess events into `ChainEvent`s, and buffer them
-/// in `live_tx`. The anchor slot (current confirmed slot + 1 at subscription time) is sent
+/// in `live_tx`. The anchor slot (current confirmed slot at subscription time) is sent
 /// via `anchor_tx` so that `livestream()` can return it to the catchup logic.
 ///
 /// Events accumulate in the channel while catchup runs; `process_next_block` drains them
@@ -612,26 +612,12 @@ async fn subscribe_and_buffer_live_events(
     anchor_tx: oneshot::Sender<u64>,
 ) {
     // Get anchor slot immediately so livestream() can return without waiting for an event.
-    let anchor = {
-        let rpc = RpcClient::new(rpc_url.clone());
-        loop {
-            match rpc
-                .get_slot_with_commitment(CommitmentConfig::confirmed())
-                .await
-            {
-                Ok(slot) => break slot.saturating_add(1),
-                Err(err) => {
-                    tracing::warn!(?err, "failed to get anchor slot; retrying");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }
-        }
-    };
-    let _ = anchor_tx.send(anchor);
-
+    let rpc = RpcClient::new(rpc_url);
+    let mut anchor_tx = Some(anchor_tx);
     loop {
         let result =
-            subscribe_to_program_events(program_id, &rpc_url, &ws_url, live_tx.clone()).await;
+            subscribe_to_program_events(program_id, &rpc, &ws_url, live_tx.clone(), &mut anchor_tx)
+                .await;
 
         if let Err(err) = result {
             tracing::warn!("Live solana subscription failed: {:?}", err);
@@ -736,11 +722,11 @@ fn parse_cpi_events(
 
 async fn subscribe_to_program_events(
     program_id: Pubkey,
-    rpc_url: &str,
+    rpc_client: &RpcClient,
     ws_url: &str,
     events_tx: mpsc::Sender<ChainEvent>,
+    anchor_tx: &mut Option<oneshot::Sender<u64>>,
 ) -> Result<()> {
-    let rpc_client = RpcClient::new(rpc_url.to_string());
     let pubsub_client = PubsubClient::new(ws_url).await?;
 
     let filter = RpcTransactionLogsFilter::Mentions(vec![program_id.to_string()]);
@@ -770,12 +756,19 @@ async fn subscribe_to_program_events(
                     Some(response) => {
                         last_ws_msg = Instant::now();
 
-                        if response.value.err.is_some() {
-                            continue;
+                        let slot = response.context.slot;
+                        if let Some(anchor_tx) = anchor_tx.take() {
+                            // Send the anchor slot back to livestream() on the first received message
+                            let _ = anchor_tx.send(slot);
                         }
 
                         let logs = &response.value.logs;
-                        if !has_log_starts_with(logs, &program_invoke_log) {
+                        if response.value.err.is_some() || !has_log_starts_with(logs, &program_invoke_log) {
+                            // block is not relevant to our program, skip but still
+                            // emit block event for progress tracking
+                            if let Err(err) = events_tx.send(ChainEvent::Block(slot)).await {
+                                tracing::warn!(?err, "failed to send block event");
+                            }
                             continue;
                         }
 
@@ -788,7 +781,7 @@ async fn subscribe_to_program_events(
                             continue;
                         }
 
-                        let tx_res = match get_tx(&rpc_client, &signature, RetryConfig::default()).await {
+                        let tx_res = match get_tx(rpc_client, &signature, RetryConfig::default()).await {
                             Ok(tx) => tx,
                             Err(e) => {
                                 tracing::warn!("Failed to fetch transaction {}: {}", signature, e);
@@ -813,7 +806,7 @@ async fn subscribe_to_program_events(
                         }
 
                         // Emit block event for every observed slot
-                        if let Err(err) = events_tx.send(ChainEvent::Block(response.context.slot)).await {
+                        if let Err(err) = events_tx.send(ChainEvent::Block(slot)).await {
                             tracing::warn!(?err, "failed to send block event");
                         }
                     }

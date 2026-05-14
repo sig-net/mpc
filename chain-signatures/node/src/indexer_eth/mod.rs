@@ -1352,6 +1352,7 @@ impl EthereumIndexer {
 
 #[async_trait]
 impl ChainIndexer for EthereumIndexer {
+    const CHAIN: Chain = Chain::Ethereum;
     type Block = MaybeBlock;
     type Iter = CatchupIter;
 
@@ -1482,7 +1483,6 @@ impl EthereumStream {
 
 #[async_trait]
 impl ChainStream for EthereumStream {
-    const CHAIN: Chain = Chain::Ethereum;
     type Indexer = EthereumIndexer;
 
     async fn start(&mut self) -> anyhow::Result<Self::Indexer> {

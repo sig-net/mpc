@@ -2,11 +2,10 @@ use crate::backlog::Backlog;
 use crate::protocol::Chain;
 use crate::rpc::CantonClient;
 use crate::stream::ops::{RespondBidirectionalEvent, SignatureEvent, SignatureRespondedEvent};
-use crate::stream::{ChainEvent, ChainStream, DisabledChainIndexer};
+use crate::stream::{ChainEvent, ChainIndexer, ChainStream};
 
 use alloy::primitives::keccak256;
 use async_trait::async_trait;
-
 use futures_util::{SinkExt, StreamExt};
 use mpc_primitives::{ScalarExt, Signature};
 use std::collections::HashSet;
@@ -67,8 +66,7 @@ impl CantonStream {
 
 #[async_trait]
 impl ChainStream for CantonStream {
-    const CHAIN: Chain = Chain::Canton;
-    type Indexer = DisabledChainIndexer;
+    type Indexer = CantonIndexer;
 
     async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
         let Some(state) = self.start_state.take() else {
@@ -81,11 +79,43 @@ impl ChainStream for CantonStream {
 
         // Canton stream manages its own catchup signaling from the websocket loop.
         // Return a silent indexer so generic catchup_then_livestream stays inert.
-        Ok(DisabledChainIndexer::silent())
+        Ok(Self::Indexer::silent())
     }
 
     async fn next_event(&mut self) -> Option<ChainEvent> {
         self.events_rx.recv().await
+    }
+}
+
+pub struct CantonIndexer {
+    events_tx: Option<mpsc::Sender<ChainEvent>>,
+}
+
+impl CantonIndexer {
+    pub fn silent() -> Self {
+        Self { events_tx: None }
+    }
+}
+
+#[async_trait]
+impl ChainIndexer for CantonIndexer {
+    const CHAIN: Chain = Chain::Canton;
+    type Block = ();
+    type Iter = std::iter::Empty<Self::Block>;
+
+    async fn next(&mut self) -> Option<Self::Block> {
+        None
+    }
+
+    async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
+        std::iter::empty()
+    }
+
+    async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
+        if let Some(events_tx) = &self.events_tx {
+            events_tx.send(ChainEvent::CatchupCompleted).await?;
+        }
+        Ok(())
     }
 }
 

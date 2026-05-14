@@ -115,6 +115,7 @@ where
 
 #[async_trait]
 pub trait ChainIndexer: Send + 'static {
+    const CHAIN: Chain;
     type Block: Send;
     type Iter: AsyncCatchupIter<Item = Self::Block> + Send + 'static;
 
@@ -160,14 +161,14 @@ pub trait ChainIndexer: Send + 'static {
 
 #[async_trait]
 pub trait ChainStream: Send + 'static {
-    const CHAIN: Chain;
     type Indexer: ChainIndexer + Send;
 
     async fn start(&mut self) -> anyhow::Result<Self::Indexer>;
     async fn next_event(&mut self) -> Option<ChainEvent>;
 }
 
-pub async fn catchup_then_livestream<I: ChainIndexer>(chain: Chain, mut indexer: I) {
+pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I) {
+    let chain = I::CHAIN;
     tracing::info!(%chain, "starting ChainStream catchup then livestream");
 
     // TODO: on failure, we currently send catchup_completed due to some streams not enabling
@@ -190,6 +191,7 @@ pub async fn catchup_then_livestream<I: ChainIndexer>(chain: Chain, mut indexer:
         return;
     };
 
+    tracing::info!(%chain, anchor_height, "livestream initialized => starting catchup");
     let mut catchup_iter = indexer.catchup_range(anchor_height).await;
     while let Some(catchup_item) = catchup_iter.next().await {
         while let Err(err) = indexer.process_catchup(&catchup_item).await {
@@ -198,6 +200,7 @@ pub async fn catchup_then_livestream<I: ChainIndexer>(chain: Chain, mut indexer:
         }
     }
 
+    tracing::info!(%chain, "catchup completed => processing livestream");
     if let Err(err) = indexer.notify_catchup_completed().await {
         tracing::warn!(?err, %chain, "failed to signal catchup completion");
         return;
@@ -215,7 +218,7 @@ pub async fn run_stream<S: ChainStream>(
     mut mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
 ) {
-    let chain = S::CHAIN;
+    let chain = S::Indexer::CHAIN;
     tracing::info!(%chain, "starting stream");
 
     recover_backlog(
@@ -234,7 +237,7 @@ pub async fn run_stream<S: ChainStream>(
             return;
         }
     };
-    let indexer_task = tokio::spawn(catchup_then_livestream(chain, indexer));
+    let indexer_task = tokio::spawn(catchup_then_livestream(indexer));
 
     let mut caught_up = false;
     while let Some(event) = stream.next_event().await {
@@ -276,11 +279,11 @@ pub async fn run_stream<S: ChainStream>(
                 }
             }
             ChainEvent::Block(block) => {
-                if let Some(checkpoint) = backlog.set_processed_block(S::CHAIN, block).await {
+                if let Some(checkpoint) = backlog.set_processed_block(chain, block).await {
                     tracing::info!(block, ?checkpoint, %chain, "created checkpoint");
                 }
                 crate::metrics::indexers::LATEST_BLOCK_NUMBER
-                    .with_label_values(&[S::CHAIN.as_str(), "finalized"])
+                    .with_label_values(&[chain.as_str(), "finalized"])
                     .set(block as i64);
             }
             ChainEvent::ExecutionConfirmed {
@@ -298,7 +301,7 @@ pub async fn run_stream<S: ChainStream>(
                     result,
                     &backlog,
                     sign_tx.clone(),
-                    S::CHAIN,
+                    chain,
                     caught_up,
                 )
                 .await
@@ -327,6 +330,7 @@ impl DisabledChainIndexer {
 
 #[async_trait]
 impl ChainIndexer for DisabledChainIndexer {
+    const CHAIN: Chain = Chain::Bitcoin;
     type Block = ();
     type Iter = std::iter::Empty<Self::Block>;
 
@@ -398,8 +402,6 @@ mod tests {
 
             #[async_trait]
             impl ChainStream for $name {
-                const CHAIN: Chain = $chain;
-
                 type Indexer = DisabledChainIndexer;
 
                 async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
@@ -483,6 +485,7 @@ mod tests {
 
     #[async_trait]
     impl ChainIndexer for TestLinearIndexer {
+        const CHAIN: Chain = Chain::Ethereum;
         type Block = u64;
         type Iter = std::vec::IntoIter<Self::Block>;
 
@@ -536,7 +539,6 @@ mod tests {
 
     #[async_trait]
     impl ChainStream for TestLinearStream {
-        const CHAIN: Chain = Chain::Ethereum;
         type Indexer = TestLinearIndexer;
 
         async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
@@ -557,7 +559,7 @@ mod tests {
     async fn test_run_linearized_source_orders_catchup_before_live() {
         let mut stream = TestLinearStream::new(TestLinearControl::new(Some(1), vec![4, 5]));
         let indexer = stream.start().await.unwrap();
-        catchup_then_livestream(Chain::Ethereum, indexer).await;
+        catchup_then_livestream(indexer).await;
 
         let mut observed = Vec::new();
         while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
@@ -582,7 +584,7 @@ mod tests {
                 .fail_live_once(4),
         );
         let indexer = stream.start().await.unwrap();
-        catchup_then_livestream(Chain::Ethereum, indexer).await;
+        catchup_then_livestream(indexer).await;
 
         let mut observed = Vec::new();
         while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
@@ -702,7 +704,6 @@ mod tests {
 
         #[async_trait]
         impl ChainStream for LocalStream {
-            const CHAIN: Chain = Chain::Solana;
             type Indexer = DisabledChainIndexer;
 
             async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
