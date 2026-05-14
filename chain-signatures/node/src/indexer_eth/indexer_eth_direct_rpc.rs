@@ -85,7 +85,7 @@ impl RpcEthereumClient {
                         "tracerConfig": {
                             "onlyTopCall": true
                         },
-                        "timeout": "30s"
+                        "timeout": "5s"
                     }),
                 ],
             )
