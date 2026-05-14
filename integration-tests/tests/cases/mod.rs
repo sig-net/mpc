@@ -80,10 +80,12 @@ async fn test_signature_many() -> anyhow::Result<()> {
     let nodes = cluster::spawn()
         .disable_prestockpile()
         .with_config(|config| {
-            config.protocol.presignature.min_presignatures = 10;
-            config.protocol.presignature.max_presignatures = 100;
+            config.protocol.presignature.min_presignatures = 2;
+            config.protocol.presignature.max_presignatures = 20;
         })
         .await?;
+
+    nodes.wait().min_mine_presignatures(2).await?;
 
     for idx in 0..10 {
         tracing::info!(idx, "producing signature");

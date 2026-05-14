@@ -1164,6 +1164,12 @@ struct SignTask {
 }
 
 impl SignTask {
+    fn should_restart_phase(&mut self, contract_state: &ProtocolState) -> bool {
+        let was_running = self.governance.is_running;
+        let is_running = self.refresh_governance(contract_state);
+        !was_running && is_running
+    }
+
     async fn run(
         mut self,
         indexed: IndexedSignRequest,
@@ -1184,10 +1190,17 @@ impl SignTask {
         loop {
             tokio::select! {
                 Some(contract_state) = contract_watcher.next_state() => {
-                    is_running = self.refresh_governance(&contract_state);
-                    if is_running {
-                        // we're back into running, reset to SignOrganizer
+                    let should_restart_phase = self.should_restart_phase(&contract_state);
+                    is_running = self.governance.is_running;
+                    if should_restart_phase {
+                        // We only reset after a real pause => resume transition.
                         phase = SignPhase::Organizing(SignOrganizer);
+                    } else if is_running {
+                        tracing::info!(
+                            ?sign_id,
+                            gov = ?self.governance,
+                            "signature task refreshed governance while running"
+                        );
                     } else {
                         tracing::info!(
                             ?sign_id,
@@ -1649,5 +1662,88 @@ mod tests {
         assert_eq!(sign_task.governance.epoch, 1);
         assert_eq!(sign_task.governance.threshold, 1);
         assert_eq!(sign_task.governance.me, Participant::from(0));
+    }
+
+    #[test]
+    fn sign_task_only_restarts_after_pause_resume() {
+        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+
+        let governance = GovernanceInfo {
+            me: Participant::from(0),
+            threshold: 1,
+            epoch: 0,
+            public_key: k256::AffinePoint::default(),
+            participants: [Participant::from(0)].into_iter().collect(),
+            is_running: true,
+        };
+
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let presignatures = Presignature::storage(&pool, &account_id);
+        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let rpc_channel = RpcChannel { tx: rpc_tx };
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants.clone(),
+        );
+
+        let mut sign_task = SignTask {
+            governance,
+            sign_id: SignId::new([0u8; 32]),
+            presignatures,
+            msg: msg_channel,
+            rpc: rpc_channel,
+            backlog: Backlog::new(),
+            cfg: ProtocolConfig::default(),
+            contract,
+            is_proposer: Arc::new(AtomicBool::new(false)),
+            node_account_id: account_id,
+        };
+
+        let running = ProtocolState::Running(RunningContractState {
+            epoch: 1,
+            public_key: k256::AffinePoint::default(),
+            participants: participants.clone(),
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+            threshold: 1,
+        });
+
+        assert!(!sign_task.should_restart_phase(&running));
+        assert!(sign_task.governance.is_running);
+        assert_eq!(sign_task.governance.epoch, 1);
+
+        let resharing = ProtocolState::Resharing(ResharingContractState {
+            old_epoch: 1,
+            old_participants: participants.clone(),
+            new_participants: participants.clone(),
+            threshold: 1,
+            public_key: k256::AffinePoint::default(),
+            finished_votes: Default::default(),
+            cancel_votes: Default::default(),
+        });
+
+        assert!(!sign_task.should_restart_phase(&resharing));
+        assert!(!sign_task.governance.is_running);
+
+        let resumed = ProtocolState::Running(RunningContractState {
+            epoch: 2,
+            public_key: k256::AffinePoint::default(),
+            participants,
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+            threshold: 1,
+        });
+
+        assert!(sign_task.should_restart_phase(&resumed));
+        assert!(sign_task.governance.is_running);
+        assert_eq!(sign_task.governance.epoch, 2);
     }
 }
