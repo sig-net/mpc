@@ -615,6 +615,9 @@ async fn subscribe_and_buffer_live_events(
     let rpc = RpcClient::new(rpc_url);
     let mut anchor_tx = Some(anchor_tx);
     loop {
+        // TODO: if solana ever fails and needs to retry, we actually need to do catchup
+        // again. This requires potentially complicating the coordination we have on the
+        // high level of run_stream. Issue: https://github.com/sig-net/mpc/issues/811
         let result =
             subscribe_to_program_events(program_id, &rpc, &ws_url, live_tx.clone(), &mut anchor_tx)
                 .await;
