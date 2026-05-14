@@ -191,95 +191,40 @@ impl RpcEthereumClient {
     }
 }
 
-/// Parse a geth `callTracer` (onlyTopCall) call-frame JSON into its return-data
-/// bytes. Bails when the call reverted/errored, including the decoded Solidity
-/// revert reason when available.
+/// Parse a `callTracer` (`onlyTopCall: true`) call-frame JSON into the
+/// top call's return data. Bails on revert or error, surfacing the decoded
+/// Solidity revert reason when present.
 ///
-/// # Expected response shape from geth `callTracer` + `onlyTopCall: true`
+/// The RPC `result` is the top call frame directly — no wrapper. Fields we
+/// care about:
 ///
-/// The whole JSON-RPC `result` IS the top call frame (no wrapper, no array).
-/// Common fields:
+/// - `output` (hex): the bytes we extract. For CALL-family this is the
+///   function's return data; for CREATE/CREATE2 it's the deployed runtime
+///   bytecode.
+/// - `error` (string, optional): set when the top call failed (revert, OOG,
+///   invalid opcode, etc.).
+/// - `revertReason` (string, optional): the decoded `Error(string)` payload,
+///   only present for Solidity `revert("...")` aborts.
 ///
-/// - `type` (string): `"CALL"` | `"STATICCALL"` | `"DELEGATECALL"` | `"CREATE"` | `"CREATE2"`.
-/// - `from` (hex string): caller address — the EOA for the top-level frame.
-/// - `to` (hex string or `null`): callee address. For `CREATE`/`CREATE2` this
-///   is the address of the newly deployed contract; for plain ETH transfers
-///   to an EOA it may be present but with empty `input`/`output`.
-/// - `value` (hex string): ETH value sent, in wei.
-/// - `gas` / `gasUsed` (hex strings): gas allowance and gas consumed.
-/// - `input` (hex string): calldata; for `CREATE`/`CREATE2` this is the init bytecode.
-/// - `output` (hex string, optional): **what we extract**. For a successful
-///   `CALL`/`STATICCALL`/`DELEGATECALL` this is the function's return data;
-///   for `CREATE`/`CREATE2` this is the deployed runtime bytecode.
-/// - `error` (string, optional): present iff the top call failed
-///   (revert / out-of-gas / invalid opcode / stack overflow / etc.).
-/// - `revertReason` (string, optional): present iff Solidity `revert("...")`
-///   ran and the error payload could be decoded as `Error(string)`.
-/// - `calls` (array, optional): nested call frames. Omitted when
-///   `onlyTopCall: true`, so the parser never looks at it.
+/// Other fields (`type`, `from`, `to`, `value`, `gas`, `gasUsed`, `input`)
+/// are part of the response but unused here. `calls` is omitted by
+/// `onlyTopCall: true`.
 ///
-/// # Example: successful contract call
+/// # Examples
 ///
-/// User calls `Token.transfer(addr, 100)`; returns `bool success`.
+/// Successful call returning `bool true`:
+/// ```json
+/// { "type": "CALL", "output": "0x0000...0001" }
+/// ```
+///
+/// Solidity revert with a decoded reason:
 /// ```json
 /// {
 ///   "type": "CALL",
-///   "from": "0xabc...",
-///   "to": "0xdef...",
-///   "value": "0x0",
-///   "gas": "0x5208",
-///   "gasUsed": "0x4f0a",
-///   "input": "0xa9059cbb000000000000000000000000...0064",
-///   "output": "0x0000000000000000000000000000000000000000000000000000000000000001"
-/// }
-/// ```
-/// `output` = 32 bytes encoding `true`. `trace_output_to_bytes` returns those bytes.
-///
-/// # Example: CREATE / CREATE2 deployment
-///
-/// User deploys a contract.
-/// ```json
-/// {
-///   "type": "CREATE",
-///   "from": "0xabc...",
-///   "to":   "0xnew...",         // address of the deployed contract
-///   "value": "0x0",
-///   "gas":  "0x...", "gasUsed": "0x...",
-///   "input":  "0x60806040...",   // init bytecode
-///   "output": "0x60806040..."    // deployed runtime bytecode
-/// }
-/// ```
-/// `output` = runtime bytecode. Same extraction path; no special-casing for CREATE.
-///
-/// # Example: Solidity revert with a reason string
-///
-/// Contract executes `revert("InsufficientBalance")`.
-/// ```json
-/// {
-///   "type": "CALL",
-///   "from": "0xabc...", "to": "0xdef...",
-///   "value": "0x0", "gas": "0x...", "gasUsed": "0x...",
-///   "input": "0x...",
-///   "output": "0x08c379a000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000013496e73756666696369656e7442616c616e6365000000000000000000000000",
 ///   "error": "execution reverted",
 ///   "revertReason": "InsufficientBalance"
 /// }
 /// ```
-/// `error` is set so we bail; the error message includes `revertReason` when present.
-///
-/// # Example: out-of-gas / invalid opcode
-///
-/// No Solidity reason — `revertReason` is absent, only `error`:
-/// ```json
-/// {
-///   "type": "CALL",
-///   "from": "0xabc...", "to": "0xdef...",
-///   "value": "0x0", "gas": "0x...", "gasUsed": "0x...",
-///   "input": "0x...",
-///   "error": "out of gas"
-/// }
-/// ```
-/// We bail with just the `error` string.
 fn trace_output_to_bytes(
     tx_hash: alloy::primitives::B256,
     frame: &serde_json::Value,
@@ -373,8 +318,6 @@ mod tests {
     use alloy::primitives::B256;
     use serde_json::json;
 
-    /// Happy path: successful contract call whose `output` is the 32-byte
-    /// ABI-encoded `bool true`. Verifies prefix stripping + hex decoding.
     #[test]
     fn parses_successful_call_output() {
         let frame = json!({
@@ -386,8 +329,6 @@ mod tests {
         assert_eq!(bytes[31], 1);
     }
 
-    /// Reverted call with a decoded Solidity reason. Verifies the error
-    /// message includes both the raw `error` and the decoded `revertReason`.
     #[test]
     fn bails_on_revert_with_reason() {
         let frame = json!({
@@ -401,10 +342,6 @@ mod tests {
         assert!(msg.contains("InsufficientBalance"));
     }
 
-    /// Regression test for the Codex-flagged empty-output bug: a response
-    /// missing both `output` and `error` must bail loudly rather than
-    /// silently producing empty bytes (which would then get signed as a
-    /// successful bidirectional response).
     #[test]
     fn bails_when_output_missing_and_no_error() {
         let frame = json!({ "type": "CALL" });
