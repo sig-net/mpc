@@ -313,7 +313,13 @@ async fn test_sync_reports_missing_when_holders_metadata_is_missing_on_responder
     let node1 = &fixture.nodes[1];
     let all_participants = fixture.sorted_participants();
 
-    insert_triples_for_owner(&node1.triple_storage, node0.me, &all_participants, 303..=303).await;
+    insert_triples_for_owner(
+        &node1.triple_storage,
+        node0.me,
+        &all_participants,
+        303..=303,
+    )
+    .await;
     insert_presignatures_for_owner(
         &node1.presignature_storage,
         node0.me,
@@ -347,6 +353,60 @@ async fn test_sync_reports_missing_when_holders_metadata_is_missing_on_responder
 
     assert_triples_owned_state(&node1.triple_storage, node0.me, &[], &[303]).await;
     assert_presig_owned_state(&node1.presignature_storage, node0.me, &[], &[303]).await;
+}
+
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sync_reports_missing_when_owner_mapping_is_missing_on_responder() {
+    let fixture = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    let node0 = &fixture.nodes[0];
+    let node1 = &fixture.nodes[1];
+    let all_participants = fixture.sorted_participants();
+
+    insert_triples_for_owner(
+        &node1.triple_storage,
+        node0.me,
+        &all_participants,
+        404..=404,
+    )
+    .await;
+    insert_presignatures_for_owner(
+        &node1.presignature_storage,
+        node0.me,
+        &all_participants,
+        404..=404,
+    )
+    .await;
+
+    let pool = fixture.redis_container.pool();
+    let mut conn = pool.get().await.unwrap();
+    let triple_owner_key = format!(
+        "{}:p{}",
+        node1.triple_storage.owner_keys(),
+        u32::from(node0.me)
+    );
+    let presig_owner_key = format!(
+        "{}:p{}",
+        node1.presignature_storage.owner_keys(),
+        u32::from(node0.me)
+    );
+    let _: usize = conn.srem(&triple_owner_key, 404).await.unwrap();
+    let _: usize = conn.srem(&presig_owner_key, 404).await.unwrap();
+
+    let response = node1.sync(node0.me, vec![404], vec![404]).await;
+    assert_eq!(
+        response.triples,
+        vec![404],
+        "responder should report triple as missing when owner mapping is gone"
+    );
+    assert_eq!(
+        response.presignatures,
+        vec![404],
+        "responder should report presignature as missing when owner mapping is gone"
+    );
 }
 
 /// Orphaned artifact: owner doesn't have id=77 but other nodes do.

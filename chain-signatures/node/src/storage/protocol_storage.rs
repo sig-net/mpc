@@ -414,9 +414,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             local not_found = {}
             for _, id in ipairs(ARGV) do
                 local holders_key = artifact_key .. ':holders:' .. id
+                local owner_has = redis.call("SISMEMBER", owner_key, id) == 1
                 local artifact_exists = redis.call("HEXISTS", artifact_key, id) == 1
                 local holders_exist = redis.call("EXISTS", holders_key) == 1
-                if not artifact_exists or not holders_exist then
+                if not owner_has or not artifact_exists or not holders_exist then
                     if artifact_exists then
                         redis.call("HDEL", artifact_key, id)
                     end
@@ -805,6 +806,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
     pub fn artifact_key(&self) -> &str {
         &self.artifact_key
+    }
+
+    pub fn owner_keys(&self) -> &str {
+        &self.owner_keys
     }
 
     /// Batch remove a peer from holders for a set of artifact IDs, and prune
