@@ -317,7 +317,7 @@ fn test_bidirectional_event() -> NodeSignBidirectionalEvent {
         params: "{}".to_string(),
         program_id: solana_sdk::pubkey::Pubkey::new_unique(),
         output_deserialization_schema: vec![],
-        respond_serialization_schema: vec![],
+        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
     })
 }
 
@@ -532,7 +532,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         dest: Chain::Ethereum.to_string(),
         params: "{}".to_string(),
         output_deserialization_schema: vec![],
-        respond_serialization_schema: vec![],
+        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         request_id: execution_sign_id.request_id,
         from_address: AlloyAddress::from_slice(ctx.wallet.as_bytes()),
         nonce: checkpoint_nonce,
@@ -690,7 +690,7 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
         dest: "".to_string(),
         params: "".to_string(),
         output_deserialization_schema: vec![],
-        respond_serialization_schema: vec![],
+        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         request_id: [7u8; 32],
         from_address: AlloyAddress::from_slice(ctx.wallet.as_bytes()),
         nonce: 0,
@@ -805,7 +805,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         dest: Chain::Ethereum.to_string(),
         params: "{}".to_string(),
         output_deserialization_schema: vec![],
-        respond_serialization_schema: vec![],
+        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         request_id: sign_id.request_id,
         from_address: AlloyAddress::from_slice(ctx.wallet.as_bytes()),
         nonce: 0,

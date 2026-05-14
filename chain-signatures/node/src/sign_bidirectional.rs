@@ -106,54 +106,56 @@ impl Output {
             .is_some_and(|v| v.as_bool().unwrap_or(false))
     }
 
-    pub fn serialize(&self, format: SerDeserFormat, schema: &[u8]) -> anyhow::Result<Vec<u8>> {
+    /// Encode this output for the given format using `schema_json_bytes` as
+    /// the field shape. For non-function-call outputs (`Output` is empty by
+    /// construction), synthesizes per-field default values from the schema
+    /// before encoding.
+    pub fn serialize(
+        &self,
+        format: SerDeserFormat,
+        schema_json_bytes: &[u8],
+    ) -> anyhow::Result<Vec<u8>> {
+        let schema = parse_schema_fields(schema_json_bytes)?;
+        let data_owned;
+        let data = if self.is_function_call() {
+            self
+        } else {
+            data_owned = default_output_for_non_function_call(&schema)?;
+            &data_owned
+        };
         match format {
-            SerDeserFormat::Abi => self.serialize_abi(schema),
-            SerDeserFormat::Borsh => self.serialize_borsh(schema),
+            SerDeserFormat::Abi => encode_abi(data, &schema),
+            SerDeserFormat::Borsh => encode_borsh(data, &schema),
         }
     }
+}
 
-    fn serialize_abi(&self, schema: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let schema: Vec<AbiField> = serde_json::from_slice(schema)
-            .map_err(|e| anyhow::anyhow!("Failed to get abi fields from schema: {e:?}"))?;
+fn encode_abi(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
+    let values = schema
+        .iter()
+        .map(|field| match data.0.get(&field.name) {
+            Some(value) => Ok(value.clone()),
+            None => Err(anyhow::anyhow!(
+                "Missing required field '{}' in output",
+                field.name
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    encode_abi_values(schema, &values)
+}
 
-        let mut data_to_encode = self.clone();
-        if !self.is_function_call() {
-            data_to_encode = create_abi_data(schema.clone())?;
-        }
-
-        let values = schema
-            .iter()
-            .map(|field| match data_to_encode.0.get(&field.name) {
-                Some(value) => Ok(value.clone()),
-                None => Err(anyhow::anyhow!(
-                    "Missing required field '{}' in output",
-                    field.name
-                )),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        encode_abi_values(&schema, &values)
-    }
-
-    /// Serialize `Output` to Borsh using the **order from `schema_json_bytes`**
-    /// Schema is a JSON array like: `[{"name":"...", "type":"..."}, ...]`
-    pub fn serialize_borsh(&self, schema_json_bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let fields: Vec<AbiField> = parse_borsh_schema_fields(schema_json_bytes)?;
-
-        tracing::info!("serialize borsh schema: {fields:?}");
-
-        let mut buf = Vec::with_capacity(128);
-
-        assert!(fields.len() == 1);
-        let val = self
-            .0
-            .get(&fields[0].name)
-            .ok_or_else(|| anyhow::anyhow!("missing value for field '{}'", fields[0].name))?;
-        serialize_dynsol(&mut buf, val)?;
-
-        Ok(buf)
-    }
+fn encode_borsh(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
+    assert!(
+        schema.len() == 1,
+        "borsh schema must have exactly one field"
+    );
+    let val = data
+        .0
+        .get(&schema[0].name)
+        .ok_or_else(|| anyhow::anyhow!("missing value for field '{}'", schema[0].name))?;
+    let mut buf = Vec::with_capacity(128);
+    serialize_dynsol(&mut buf, val)?;
+    Ok(buf)
 }
 
 #[derive(Debug)]
@@ -362,24 +364,28 @@ pub fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Sc
     public_key_to_address(&secp_pk)
 }
 
-fn create_abi_data(schema: Vec<AbiField>) -> anyhow::Result<Output> {
+/// Synthesize per-field default values for an `Output` whose source tx was
+/// not a contract function call. The destination chain's contract still needs
+/// shaped bytes back, so we fill defaults from the schema: `bool` → `true`,
+/// `string` → `"non_function_call_success"`. Other field types are unsupported.
+fn default_output_for_non_function_call(schema: &[AbiField]) -> anyhow::Result<Output> {
     let mut data = HashMap::new();
     for field in schema {
-        if field.typ == "string" {
-            data.insert(
-                field.name,
-                DynSolValue::String("non_function_call_success".to_string()),
-            );
-        } else if field.typ == "bool" {
-            data.insert(field.name, DynSolValue::Bool(true));
-        } else {
-            anyhow::bail!(
-                "Cannot serialize non-function call success as type {}",
-                field.typ
-            );
+        match field.typ.as_str() {
+            "string" => {
+                data.insert(
+                    field.name.clone(),
+                    DynSolValue::String("non_function_call_success".to_string()),
+                );
+            }
+            "bool" => {
+                data.insert(field.name.clone(), DynSolValue::Bool(true));
+            }
+            other => anyhow::bail!(
+                "cannot synthesize default for non-function-call output of type {other}"
+            ),
         }
     }
-
     Ok(Output(data))
 }
 
@@ -474,7 +480,11 @@ fn write_i256<W: Write>(w: &mut W, x: I256, size: usize) -> anyhow::Result<()> {
         .map_err(Into::into)
 }
 
-fn parse_borsh_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<AbiField>> {
+/// Parse a schema JSON describing the response shape. Accepts a JSON array of
+/// `{name, type}` objects (canonical form), a single object (treated as a
+/// one-field schema), or a bare string (treated as a single typed field with
+/// an empty name).
+fn parse_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<AbiField>> {
     let v: Value = serde_json::from_slice(schema_json_bytes)
         .map_err(|e| anyhow::anyhow!("schema JSON parse failed: {e:?}"))?;
 

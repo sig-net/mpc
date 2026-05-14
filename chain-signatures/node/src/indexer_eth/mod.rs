@@ -957,9 +957,9 @@ impl EthereumIndexer {
                         ?sign_id,
                         ?err,
                         "Failed to extract transaction output for bidirectional \
-                         tx; leaving watcher pending for retry. Persistent \
-                         failures indicate the ETH RPC does not support \
-                         debug_traceTransaction."
+                         tx; leaving watcher pending for retry. Common causes: \
+                         trace RPC unavailable, malformed trace response, or \
+                         invalid output/response serialization schema."
                     );
                     return None;
                 }
@@ -1514,7 +1514,7 @@ mod tests {
             dest: Chain::Ethereum.to_string(),
             params: "{}".to_string(),
             output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             request_id: sign_id.request_id,
             from_address,
             nonce: 0,
