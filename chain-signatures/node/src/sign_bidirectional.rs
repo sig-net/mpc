@@ -97,19 +97,24 @@ impl BidirectionalTx {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Output(pub HashMap<String, DynSolValue>);
+pub struct Output {
+    fields: HashMap<String, DynSolValue>,
+    /// `true` when this `Output` was built from a real ETH contract-call return
+    /// (via `TransactionOutput::from_call_result`); `false` for the
+    /// `non_contract_call_output()` path (plain transfers). Drives whether
+    /// `serialize` encodes real data or synthesizes per-schema defaults.
+    from_contract_call: bool,
+}
 
 impl Output {
-    pub fn is_function_call(&self) -> bool {
-        self.0
-            .get("is_function_call")
-            .is_some_and(|v| v.as_bool().unwrap_or(false))
+    pub fn is_contract_call(&self) -> bool {
+        self.from_contract_call
     }
 
     /// Encode this output for the given format using `schema_json_bytes` as
-    /// the field shape. For non-function-call outputs (`Output` is empty by
-    /// construction), synthesizes per-field default values from the schema
-    /// before encoding.
+    /// the field shape. For non-contract-call outputs (plain transfers),
+    /// synthesizes per-field default values from the schema. Real decoded
+    /// data from `from_call_result` flows through unchanged.
     pub fn serialize(
         &self,
         format: SerDeserFormat,
@@ -117,10 +122,10 @@ impl Output {
     ) -> anyhow::Result<Vec<u8>> {
         let schema = parse_schema_fields(schema_json_bytes)?;
         let data_owned;
-        let data = if self.is_function_call() {
+        let data = if self.is_contract_call() {
             self
         } else {
-            data_owned = default_output_for_non_function_call(&schema)?;
+            data_owned = default_output_for_non_contract_call(&schema)?;
             &data_owned
         };
         match format {
@@ -133,7 +138,7 @@ impl Output {
 fn encode_abi(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
     let values = schema
         .iter()
-        .map(|field| match data.0.get(&field.name) {
+        .map(|field| match data.fields.get(&field.name) {
             Some(value) => Ok(value.clone()),
             None => Err(anyhow::anyhow!(
                 "Missing required field '{}' in output",
@@ -150,7 +155,7 @@ fn encode_borsh(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
         "borsh schema must have exactly one field"
     );
     let val = data
-        .0
+        .fields
         .get(&schema[0].name)
         .ok_or_else(|| anyhow::anyhow!("missing value for field '{}'", schema[0].name))?;
     let mut buf = Vec::with_capacity(128);
@@ -165,10 +170,13 @@ pub struct TransactionOutput {
 }
 
 impl TransactionOutput {
-    pub fn non_function_call_output() -> Self {
+    pub fn non_contract_call_output() -> Self {
         Self {
             success: true,
-            output: Output(HashMap::new()),
+            output: Output {
+                fields: HashMap::new(),
+                from_contract_call: false,
+            },
         }
     }
 
@@ -201,7 +209,10 @@ impl TransactionOutput {
 
         Ok(TransactionOutput {
             success: true,
-            output: Output(output_map),
+            output: Output {
+                fields: output_map,
+                from_contract_call: true,
+            },
         })
     }
 }
@@ -368,7 +379,7 @@ pub fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Sc
 /// not a contract function call. The destination chain's contract still needs
 /// shaped bytes back, so we fill defaults from the schema: `bool` → `true`,
 /// `string` → `"non_function_call_success"`. Other field types are unsupported.
-fn default_output_for_non_function_call(schema: &[AbiField]) -> anyhow::Result<Output> {
+fn default_output_for_non_contract_call(schema: &[AbiField]) -> anyhow::Result<Output> {
     let mut data = HashMap::new();
     for field in schema {
         match field.typ.as_str() {
@@ -386,7 +397,10 @@ fn default_output_for_non_function_call(schema: &[AbiField]) -> anyhow::Result<O
             ),
         }
     }
-    Ok(Output(data))
+    Ok(Output {
+        fields: data,
+        from_contract_call: false,
+    })
 }
 
 fn encode_abi_values(schema: &[AbiField], values: &[DynSolValue]) -> anyhow::Result<Vec<u8>> {
