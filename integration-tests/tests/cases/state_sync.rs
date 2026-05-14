@@ -231,6 +231,77 @@ async fn test_sync_prunes_artifacts_with_missing_holders_metadata() {
     assert_presig_owned_state(&node0.presignature_storage, node0.me, &[], &[99]).await;
 }
 
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_ownership_queries_ignore_stale_owner_entries() {
+    let fixture = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    let node0 = &fixture.nodes[0];
+    let all_participants = fixture.sorted_participants();
+    let triples_before = node0.owned_triples().await;
+    let presigs_before = node0.owned_presignatures().await;
+
+    insert_triples_for_owner(
+        &node0.triple_storage,
+        node0.me,
+        &all_participants,
+        101..=101,
+    )
+    .await;
+    insert_presignatures_for_owner(
+        &node0.presignature_storage,
+        node0.me,
+        &all_participants,
+        101..=101,
+    )
+    .await;
+
+    let pool = fixture.redis_container.pool();
+    let mut conn = pool.get().await.unwrap();
+    let _: usize = conn
+        .hdel(node0.triple_storage.artifact_key(), 101)
+        .await
+        .unwrap();
+    let _: usize = conn
+        .hdel(node0.presignature_storage.artifact_key(), 101)
+        .await
+        .unwrap();
+
+    let triples_after = node0.owned_triples().await;
+    let presigs_after = node0.owned_presignatures().await;
+    assert_eq!(
+        triples_after, triples_before,
+        "owned triples should ignore stale owner-set entries whose hash entry is gone"
+    );
+    assert_eq!(
+        presigs_after, presigs_before,
+        "owned presignatures should ignore stale owner-set entries whose hash entry is gone"
+    );
+    assert!(
+        !node0.triple_storage.contains_by_owner(101, node0.me).await,
+        "contains_by_owner should be false for stale triple owner entries"
+    );
+    assert!(
+        !node0
+            .presignature_storage
+            .contains_by_owner(101, node0.me)
+            .await,
+        "contains_by_owner should be false for stale presignature owner entries"
+    );
+    assert_eq!(
+        node0.triple_storage.len_by_owner(node0.me).await,
+        triples_before.len(),
+        "len_by_owner should not count stale triple owner entries"
+    );
+    assert_eq!(
+        node0.presignature_storage.len_by_owner(node0.me).await,
+        presigs_before.len(),
+        "len_by_owner should not count stale presignature owner entries"
+    );
+}
+
 /// Orphaned artifact: owner doesn't have id=77 but other nodes do.
 /// When owner broadcasts its sync update (without id=77), responders remove it
 /// via remove_outdated.

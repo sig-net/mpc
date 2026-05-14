@@ -257,19 +257,49 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     }
 
     pub async fn fetch_owned_by(&self, owner: Participant) -> Result<Vec<A::Id>, StorageError> {
+        const SCRIPT: &str = r#"
+            local artifact_key = KEYS[1]
+            local owner_key = KEYS[2]
+            local existing = {}
+            local stale = {}
+
+            for _, id in ipairs(redis.call('SMEMBERS', owner_key)) do
+                if redis.call('HEXISTS', artifact_key, id) == 1 then
+                    table.insert(existing, id)
+                else
+                    table.insert(stale, id)
+                end
+            end
+
+            if #stale > 0 then
+                redis.call('SREM', owner_key, unpack(stale))
+                for _, id in ipairs(stale) do
+                    redis.call('DEL', artifact_key .. ':holders:' .. id)
+                end
+            end
+
+            return existing
+        "#;
+
         let Some(mut conn) = self.connect().await else {
             return Err(StorageError::ConnectionFailed);
         };
 
-        let owned: HashSet<A::Id> = conn
-            .smembers(owner_key(&self.owner_keys, owner))
+        let owned: Vec<A::Id> = redis::Script::new(SCRIPT)
+            .key(&self.artifact_key)
+            .key(owner_key(&self.owner_keys, owner))
+            .invoke_async(&mut conn)
             .await
             .map_err(|err| {
                 tracing::warn!(?err, "failed to fetch my owned artifacts");
                 StorageError::RedisFailed(err.to_string())
             })?;
 
-        Ok(owned.into_iter().collect())
+        Ok(owned
+            .into_iter()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect())
     }
 
     /// Create a slot for generating an artifact with the given ID.
@@ -507,11 +537,37 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
     }
 
     pub async fn contains_by_owner(&self, id: A::Id, owner: Participant) -> bool {
+        const SCRIPT: &str = r#"
+            local artifact_key = KEYS[1]
+            local owner_key = KEYS[2]
+            local id = ARGV[1]
+
+            if redis.call('SISMEMBER', owner_key, id) == 0 then
+                return 0
+            end
+
+            if redis.call('HEXISTS', artifact_key, id) == 1 then
+                return 1
+            end
+
+            redis.call('SREM', owner_key, id)
+            redis.call('DEL', artifact_key .. ':holders:' .. id)
+            return 0
+        "#;
+
         let Some(mut conn) = self.connect().await else {
             return false;
         };
-        match conn.sismember(owner_key(&self.owner_keys, owner), id).await {
-            Ok(exists) => exists,
+
+        let result: Result<i32, _> = redis::Script::new(SCRIPT)
+            .key(&self.artifact_key)
+            .key(owner_key(&self.owner_keys, owner))
+            .arg(id)
+            .invoke_async(&mut conn)
+            .await;
+
+        match result {
+            Ok(exists) => exists == 1,
             Err(err) => {
                 tracing::warn!(
                     id,
@@ -612,14 +668,9 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
 
     /// Get the number of unspent artifacts by a specific owner.
     pub async fn len_by_owner(&self, owner: Participant) -> usize {
-        let Some(mut conn) = self.connect().await else {
-            return 0;
-        };
-        conn.scard(owner_key(&self.owner_keys, owner))
+        self.fetch_owned_by(owner)
             .await
-            .inspect_err(|err| {
-                tracing::warn!(?err, "failed to get length of my artifacts");
-            })
+            .map(|ids| ids.len())
             .unwrap_or(0)
     }
 
