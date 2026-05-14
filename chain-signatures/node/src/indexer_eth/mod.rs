@@ -723,15 +723,11 @@ pub struct EthereumIndexer {
     live_blocks_rx: Option<mpsc::Receiver<Block>>,
 }
 
-/// Result of a `backfill_execution_confirmation` attempt. Distinguishes
-/// "we found a receipt for this tx" (so the staleness check should skip it)
-/// from "no receipt found yet" (still pending or was replaced).
-///
-/// The size difference flagged by `clippy::large_enum_variant` is not
-/// material here: every `BackfillOutcome` is constructed and consumed within
-/// a single match arm — never stored in a `Vec`, channel, or other
-/// collection where the waste would compound.
-#[allow(clippy::large_enum_variant)]
+/// Result of a `backfill_execution_confirmation`. `Observed` carries an
+/// optional event; the staleness check skips observed watchers so a mined tx
+/// with a failed extraction can stay pending for retry. `NotObserved` covers
+/// "no receipt yet" (pending or replaced).
+#[allow(clippy::large_enum_variant)] // value is consumed in one match arm; never stored.
 enum BackfillOutcome {
     NotObserved,
     Observed { event: Option<ChainEvent> },
@@ -952,13 +948,10 @@ impl EthereumIndexer {
                     }
                 }
                 Err(err) => {
-                    // Returning `None` keeps the watcher pending so we retry
-                    // instead of fabricating an empty `output: vec![]` that
-                    // would get signed as a successful response with no return
-                    // data. The caller (`collect_execution_confirmations`)
-                    // tracks that the receipt was observed so the staleness
-                    // check does not incorrectly emit
-                    // `ExecutionOutcome::Failed` on the next iteration.
+                    // Return `None` to retry on the next block; fabricating
+                    // `Success { output: vec![] }` here would silently sign a
+                    // wrong response. The caller tracks observed-but-unresolved
+                    // watchers so the staleness check below skips them.
                     tracing::error!(
                         ?tx_id,
                         ?sign_id,
@@ -1074,12 +1067,9 @@ impl EthereumIndexer {
             "collect_execution_confirmations checking watchers"
         );
 
-        // Tracks watchers for which a receipt was observed during this call,
-        // regardless of whether an event was emitted. The staleness check
-        // below uses this to avoid emitting `ExecutionOutcome::Failed` for
-        // txs that did mine successfully but whose output extraction failed
-        // (we want those to stay pending and retry on a subsequent block
-        // scan).
+        // Watchers whose receipt we saw this call, even if no event was
+        // emitted. The staleness check below skips these so a mined tx with
+        // a failed extraction stays pending for retry, not flagged Failed.
         let mut observed_tx_ids = HashSet::new();
 
         for (tx_id, (sign_id, pending_tx)) in watchers {
@@ -1093,11 +1083,8 @@ impl EthereumIndexer {
                     events.push(event);
                     resolved_tx_ids.insert(tx_id);
                 }
-                // If `execution_confirmed_event` returned `None` (e.g. trace
-                // extraction failed), leave the watcher pending so we retry
-                // on the next poll cycle rather than emitting fabricated
-                // empty output. `observed_tx_ids` above exempts it from the
-                // staleness check below.
+                // `None` means extraction failed — leave pending for retry.
+                // `observed_tx_ids` above exempts it from the staleness check.
                 continue;
             }
 

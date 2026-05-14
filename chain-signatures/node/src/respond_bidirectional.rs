@@ -148,11 +148,9 @@ impl CompletedTx {
         let output_deserialization_format = OUTPUT_DESERIALIZATION_FORMAT;
         let output_deserialization_schema = &tx.output_deserialization_schema;
 
-        // KNOWN LIMITATION: CREATE / CREATE2 bidirectional txs are not properly supported and will fail here.
-        // Reason: for a deployment, `trace_transaction_output` returns the deployed runtime bytecode, not
-        // the return value of a function call. `TransactionOutput::from_call_result` cannot decode that
-        // bytecode against the user's ABI schema, so it either errors or produces garbage.
-        // TODO: https://github.com/sig-net/mpc/issues/808 support CREATE / CREATE2
+        // CREATE/CREATE2 are unsupported: the trace returns deployed bytecode,
+        // not ABI return data, so `from_call_result` below errors or decodes
+        // garbage. TODO(#808): support contract deployments.
         let transaction_output = match output_deserialization_format {
             SerDeserFormat::Abi if is_contract_call => {
                 tracing::info!(

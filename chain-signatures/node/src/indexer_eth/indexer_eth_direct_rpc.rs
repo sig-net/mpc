@@ -67,16 +67,10 @@ impl RpcEthereumClient {
         self.transaction_by_hash(tx_hash).await
     }
 
-    /// Re-execute `tx_hash` via `debug_traceTransaction` and return the top
-    /// call's return data.
-    ///
-    /// geth `callTracer` with `onlyTopCall: true` returns a single call-frame
-    /// JSON object. Required fields: type, from, to, value, gas, gasUsed,
-    /// input. `output` is present on success (return data of the top call) and
-    /// may also appear on revert (ABI-encoded revert payload). `error` and
-    /// `revertReason` are populated when the call failed. The whole response
-    /// IS the call frame — no array wrapper — so we pass it straight through
-    /// to `trace_output_to_bytes`, which documents the shape in detail.
+    /// Re-execute `tx_hash` via `debug_traceTransaction` (`callTracer`,
+    /// `onlyTopCall: true`) and return the top call's return data. The RPC
+    /// response is the call frame directly — see `trace_output_to_bytes` for
+    /// the field reference and worked examples.
     pub async fn trace_transaction_output(
         &self,
         tx_hash: alloy::primitives::B256,
