@@ -776,17 +776,23 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 -- Skip if not owned by me (defense against malicious/buggy peer responses)
                 if redis.call('SISMEMBER', owner_key, id) == 0 then
                     -- noop: not our artifact
-                elseif redis.call('EXISTS', artifact_key .. ':holders:' .. id) == 1 then
+                else
                     local holders_key = artifact_key .. ':holders:' .. id
-                    redis.call('SREM', holders_key, peer)
-                    local count = redis.call('SCARD', holders_key)
-                    if count < threshold then
+                    if redis.call('EXISTS', holders_key) == 0 then
                         redis.call('HDEL', artifact_key, id)
-                        redis.call('DEL', holders_key)
                         redis.call('SREM', owner_key, id)
                         table.insert(removed, id)
                     else
-                        table.insert(updated, id)
+                        redis.call('SREM', holders_key, peer)
+                        local count = redis.call('SCARD', holders_key)
+                        if count < threshold then
+                            redis.call('HDEL', artifact_key, id)
+                            redis.call('DEL', holders_key)
+                            redis.call('SREM', owner_key, id)
+                            table.insert(removed, id)
+                        else
+                            table.insert(updated, id)
+                        end
                     end
                 end
             end
