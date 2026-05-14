@@ -162,7 +162,7 @@ impl CompletedTx {
 
                 TransactionOutput::from_call_result(output_deserialization_schema, &trace_output)?
             }
-            _ => TransactionOutput::non_function_call_output(),
+            _ => TransactionOutput::non_contract_call_output(),
         };
 
         let respond_serialization_format = tx.source_chain.respond_serialization_format();
