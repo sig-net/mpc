@@ -67,7 +67,7 @@ jobs:
         run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
 
       - name: Presetup binaries
-        run: setup.sh
+        run: ./setup.sh
         env:
           MPC_ENABLE_HELIOS: 1
 

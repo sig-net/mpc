@@ -71,7 +71,7 @@ jobs:
         run: npm i && npx hardhat compile
 
       - name: Presetup binaries
-        run: setup.sh
+        run: ./setup.sh
 
       - name: Build integration tests
         run: cargo build -p integration-tests --tests
@@ -140,7 +140,7 @@ jobs:
         run: npm i && npx hardhat compile
 
       - name: Presetup binaries
-        run: setup.sh
+        run: ./setup.sh
 
       - name: Build integration tests
         run: cargo build -p integration-tests --tests

@@ -1417,9 +1417,6 @@ mod tests {
 
     #[test]
     fn catchup_start_is_clamped_to_supported_window() {
-        #[cfg(feature = "helios")]
-        let max_catchup_blocks = indexer_eth_helios::MAX_CATCHUP_BLOCKS;
-        #[cfg(not(feature = "helios"))]
         let max_catchup_blocks = 8191;
         let anchor_height = 10_000;
         let catchup_end = anchor_height - 1;
