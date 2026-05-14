@@ -17,20 +17,12 @@ pub enum SignRequestStep {
     Indexing,
     /// Time from indexing to signature generation start (Status: ok)
     AwaitingGeneration,
-    /// Cumulative time spent in the organizing phase across all attempts for
-    /// this request (Status: ok). Summed across loop iterations. In the
-    /// absence of governance pauses, Indexing + AwaitingGeneration +
-    /// Organizing + Posit + Generating + Responding == Total; resharing or
-    /// other transitions out of `Running` mid-request show up only in Total,
-    /// so the equality holds as `<=` in that case.
+    /// Cumulative time in the organizing phase across all attempts (Status: ok).
+    /// See `PhaseDurations` for the additivity caveat around governance pauses.
     Organizing,
-    /// Cumulative time spent in the posit phase across all attempts for this
-    /// request (Status: ok). Summed across loop iterations. See `Organizing`
-    /// for the additivity caveat around governance pauses.
+    /// Cumulative time in the posit phase across all attempts (Status: ok).
     Posit,
-    /// Cumulative time spent in the generating phase across all attempts for
-    /// this request (Status: ok). Summed across loop iterations. See
-    /// `Organizing` for the additivity caveat around governance pauses.
+    /// Cumulative time in the generating phase across all attempts (Status: ok).
     Generating,
     /// Time to respond to the sign request (Status: ok)
     Responding,
@@ -112,11 +104,9 @@ pub(crate) static SIGN_REQUEST_DELAYED: LazyLock<CounterVec> = LazyLock::new(|| 
     .unwrap()
 });
 
-/// Counts each back-edge in the sign request state machine where a phase
-/// returns to organizing (a "loop"). `from_phase` is the phase that triggered
-/// the loop-back: organizing (self-loop on no presignature / no active peers),
-/// posit (consensus failed / timeout), or generating (generator construction
-/// or MPC run failed).
+/// Counts back-edges to organizing in the sign request state machine.
+/// `from_phase` identifies the source: organizing (self-loop), posit
+/// (consensus failed/timeout), or generating (construction or MPC failed).
 pub(crate) static SIGN_REQUEST_LOOPS: LazyLock<CounterVec> = LazyLock::new(|| {
     try_create_counter_vec_with_node_and_version(
         "multichain_sign_request_loops_total",

@@ -1294,23 +1294,15 @@ impl Drop for SignGenerator {
     }
 }
 
-/// Per-request accumulator for time spent in the three phases that the
-/// `SignTask::run` loop drives: Organizing, Posit, and Generating. Each
-/// phase can be entered multiple times for one request (e.g. Posit can fail
-/// consensus and loop back to Organizing), so the times are summed across
-/// every attempt.
+/// Per-request accumulator for the three looping phases in `SignTask::run`:
+/// Organizing, Posit, Generating. Times are summed across attempts so each
+/// histogram observation covers the full request even when the state machine
+/// loops back. Indexing/AwaitingGeneration/Responding/Total are emitted
+/// elsewhere and ignored by `add`.
 ///
-/// In the absence of governance pauses, the emitted histograms satisfy
-/// Indexing + AwaitingGeneration + Organizing + Posit + Generating +
-/// Responding == Total. If the contract state leaves `Running` mid-request
-/// (resharing, governance churn) the run loop idles until it transitions
-/// back; that idle time is captured in Total but not in any phase, so the
-/// equality becomes `<= Total`.
-///
-/// The other `SignRequestStep` variants are not part of SignTask at all —
-/// Indexing is emitted by the indexer modules, AwaitingGeneration by
-/// `SignatureSpawner::handle_request`, and Responding/Total by `rpc.rs`.
-/// `add` ignores them so they are not double-counted.
+/// Additivity caveat: without governance pauses, all five stages sum to
+/// Total. Resharing or other transitions out of `Running` mid-request show
+/// idle time only in Total, so the equality holds as `<=` in that case.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 struct PhaseDurations {
     organizing: Duration,
@@ -1324,9 +1316,8 @@ impl PhaseDurations {
             SignRequestStep::Organizing => self.organizing += elapsed,
             SignRequestStep::Posit => self.posit += elapsed,
             SignRequestStep::Generating => self.generating += elapsed,
-            // Not part of SignTask — emitted elsewhere in the codebase.
-            // Listed explicitly (instead of `_`) so adding a new variant to
-            // SignRequestStep forces a compile error and a deliberate choice.
+            // Emitted elsewhere; listed explicitly so adding a new variant
+            // forces a deliberate decision here.
             SignRequestStep::Indexing
             | SignRequestStep::AwaitingGeneration
             | SignRequestStep::Responding
@@ -1378,10 +1369,7 @@ impl SignTask {
         // since we won't in the running state
         let mut is_running = self.governance.is_running;
 
-        // Accumulate time spent in each phase across all loop iterations so
-        // that the emitted latencies sum to Total. Emitted once on
-        // Complete(Ok) further below; on failed completion we skip emission
-        // to match existing practice of recording only the ok path.
+        // Sum per-phase time across loop attempts; emit on Complete(Ok) only.
         let mut durations = PhaseDurations::default();
 
         loop {
@@ -1395,12 +1383,9 @@ impl SignTask {
 
             tokio::select! {
                 Some(contract_state) = contract_watcher.next_state() => {
-                    // phase.advance was cancelled at its current await point.
-                    // If is_running was true, advance was actually running, so
-                    // attribute its partial elapsed time to the cancelled phase.
-                    // If is_running was false, the advance branch was already
-                    // gated off; the iteration was idle-waiting and there is
-                    // no phase work to attribute.
+                    // `phase.advance` was cancelled. Attribute its partial
+                    // elapsed time only if `is_running` was true; otherwise
+                    // the branch was gated off and the iteration was idle.
                     if is_running {
                         if let Some(step) = current_phase_step {
                             durations.add(step, phase_start.elapsed());
