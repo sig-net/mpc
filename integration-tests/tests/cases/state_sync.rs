@@ -302,6 +302,53 @@ async fn test_ownership_queries_ignore_stale_owner_entries() {
     );
 }
 
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_sync_reports_missing_when_holders_metadata_is_missing_on_responder() {
+    let fixture = MpcFixtureBuilder::default()
+        .only_generate_signatures()
+        .build()
+        .await;
+
+    let node0 = &fixture.nodes[0];
+    let node1 = &fixture.nodes[1];
+    let all_participants = fixture.sorted_participants();
+
+    insert_triples_for_owner(&node1.triple_storage, node0.me, &all_participants, 303..=303).await;
+    insert_presignatures_for_owner(
+        &node1.presignature_storage,
+        node0.me,
+        &all_participants,
+        303..=303,
+    )
+    .await;
+
+    let pool = fixture.redis_container.pool();
+    let mut conn = pool.get().await.unwrap();
+    let triple_holders_key = format!("{}:holders:{}", node1.triple_storage.artifact_key(), 303);
+    let presig_holders_key = format!(
+        "{}:holders:{}",
+        node1.presignature_storage.artifact_key(),
+        303
+    );
+    let _: usize = conn.del(&triple_holders_key).await.unwrap();
+    let _: usize = conn.del(&presig_holders_key).await.unwrap();
+
+    let response = node1.sync(node0.me, vec![303], vec![303]).await;
+    assert_eq!(
+        response.triples,
+        vec![303],
+        "responder should report triple as missing when holders metadata is gone"
+    );
+    assert_eq!(
+        response.presignatures,
+        vec![303],
+        "responder should report presignature as missing when holders metadata is gone"
+    );
+
+    assert_triples_owned_state(&node1.triple_storage, node0.me, &[], &[303]).await;
+    assert_presig_owned_state(&node1.presignature_storage, node0.me, &[], &[303]).await;
+}
+
 /// Orphaned artifact: owner doesn't have id=77 but other nodes do.
 /// When owner broadcasts its sync update (without id=77), responders remove it
 /// via remove_outdated.

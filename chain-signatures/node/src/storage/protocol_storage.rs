@@ -413,7 +413,15 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             -- find shares that were shared with us but not found in our storage
             local not_found = {}
             for _, id in ipairs(ARGV) do
-                if redis.call("HEXISTS", artifact_key, id) == 0 then
+                local holders_key = artifact_key .. ':holders:' .. id
+                local artifact_exists = redis.call("HEXISTS", artifact_key, id) == 1
+                local holders_exist = redis.call("EXISTS", holders_key) == 1
+                if not artifact_exists or not holders_exist then
+                    if artifact_exists then
+                        redis.call("HDEL", artifact_key, id)
+                    end
+                    redis.call("SREM", owner_key, id)
+                    redis.call("DEL", holders_key)
                     table.insert(not_found, id)
                 end
             end
