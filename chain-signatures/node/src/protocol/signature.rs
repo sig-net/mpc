@@ -9,6 +9,7 @@ use crate::protocol::message::{
 };
 use crate::protocol::posit::{PositAction, SinglePositCounter};
 use crate::protocol::presignature::PresignatureId;
+use crate::protocol::SignKind;
 use crate::protocol::{Chain, ProtocolState};
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
@@ -18,7 +19,6 @@ use crate::stream::ops::SignBidirectionalEvent;
 use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap, TimeoutBudget};
 
-use crate::protocol::SignKind;
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::PresignOutput;
 use chrono::Utc;
@@ -31,13 +31,16 @@ use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
 /// The round interval to search for a proposer in the organizing phase.
 const ROUND_INTERVAL: usize = 512;
+
+/// Max number of concurrent proposers, with unlimited deliberators.
+const MAX_CONCURRENT_PROPOSERS: usize = 4;
 
 /// The default timeout budget for organizing and posit phases.
 ///
@@ -137,12 +140,127 @@ enum SignError {
     Aborted,
 }
 
+#[derive(Debug)]
+pub enum SignLimitError {
+    Timeout,
+    Closed,
+}
+
+#[derive(Debug)]
+struct SignLimitState {
+    limit: usize,
+    debt: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct SignLimiter {
+    semaphore: Arc<Semaphore>,
+    state: Arc<RwLock<SignLimitState>>,
+}
+
+#[derive(Debug)]
+pub struct SignPermit {
+    permit: Option<OwnedSemaphorePermit>,
+    state: Arc<RwLock<SignLimitState>>,
+}
+
+impl SignLimiter {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            semaphore: Arc::new(Semaphore::new(limit)),
+            state: Arc::new(RwLock::new(SignLimitState { limit, debt: 0 })),
+        }
+    }
+
+    /// Updates the limits for concurrent slots
+    pub fn update(&self, new_limit: usize) {
+        let mut state = match self.state.write() {
+            Ok(state) => state,
+            Err(err) => {
+                tracing::error!(new_limit, ?err, "unable to update SignLimiter limits");
+                return;
+            }
+        };
+        let old_limit = std::mem::replace(&mut state.limit, new_limit);
+
+        // add more permits if the limit increased
+        if new_limit > old_limit {
+            let mut permits_to_add = new_limit - old_limit;
+            if permits_to_add > 0 {
+                let forgiven = permits_to_add.min(state.debt);
+                state.debt -= forgiven;
+                permits_to_add -= forgiven;
+                self.semaphore.add_permits(permits_to_add);
+            }
+            return;
+        }
+
+        // remove permits or add to a debt where when the permit is dropped, we forget it.
+        let permits_to_remove = old_limit - new_limit;
+        if permits_to_remove == 0 {
+            return;
+        }
+
+        let forgotten = self.semaphore.forget_permits(permits_to_remove);
+        if forgotten < permits_to_remove {
+            state.debt += permits_to_remove - forgotten;
+        }
+    }
+
+    /// Try to acquire a spot with a timeout just in case we do not receive the slot in time.
+    /// Returns a permit if successful, error otherwise.
+    pub async fn acquire(&self, timeout: Duration) -> Result<SignPermit, SignLimitError> {
+        let permit =
+            match tokio::time::timeout(timeout, self.semaphore.clone().acquire_owned()).await {
+                Ok(Ok(permit)) => permit,
+                // note, acquire error is effectively the same as closed.
+                Ok(Err(_acquire_err)) => return Err(SignLimitError::Closed),
+                Err(_timeout) => return Err(SignLimitError::Timeout),
+            };
+
+        Ok(SignPermit {
+            permit: Some(permit),
+            state: Arc::clone(&self.state),
+        })
+    }
+
+    pub fn limits(&self) -> usize {
+        match self.state.read() {
+            Ok(state) => state.limit,
+            Err(err) => {
+                tracing::error!(?err, "failed to acquire lock in SignLimiter::limits");
+                0
+            }
+        }
+    }
+}
+
+impl Drop for SignPermit {
+    fn drop(&mut self) {
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+        let mut state = match self.state.write() {
+            Ok(state) => state,
+            Err(err) => {
+                tracing::error!(?err, "failed to acquire lock in SignPermit drop");
+                return;
+            }
+        };
+        if state.debt > 0 {
+            state.debt -= 1;
+            permit.forget();
+        }
+    }
+}
+
 struct SignState {
     round: usize,
     indexed: IndexedSignRequest,
     mesh_state: watch::Receiver<MeshState>,
     /// Budget for the current organizing+posit attempt.
     budget: TimeoutBudget,
+    permit: Option<SignPermit>,
     /// The highest round sent by a peer
     highest_seen_round: usize,
     /// Posit message for `highest_seen_round` round.
@@ -163,6 +281,7 @@ impl SignState {
             indexed,
             mesh_state,
             budget: TimeoutBudget::new(ORGANIZE_POSIT_TIMEOUT),
+            permit: None,
             highest_seen_round: 0,
             buffered_messages: VecDeque::new(),
         }
@@ -177,6 +296,7 @@ impl SignState {
         self.round = std::cmp::max(self.round + 1, self.highest_seen_round);
         // Reset the budget for the new attempt
         self.budget.reset(ORGANIZE_POSIT_TIMEOUT);
+        self.permit = None;
         tracing::debug!(prev_round, new_round = self.round, "bumped round");
     }
 
@@ -346,6 +466,38 @@ impl SignOrganizer {
 
             (active, proposer, is_proposer)
         };
+
+        if is_proposer {
+            let remaining = state.budget.remaining();
+            tracing::info!(
+                ?sign_id,
+                round = ?state.round,
+                timeout = ?remaining,
+                limit = ctx.limiter.limits(),
+                "proposer waiting for concurrency slot"
+            );
+
+            let permit = match ctx.limiter.acquire(remaining).await {
+                Ok(permit) => permit,
+                Err(SignLimitError::Timeout) => {
+                    tracing::warn!(
+                        ?sign_id,
+                        round = ?state.round,
+                        "proposer timeout waiting for concurrency slot, reorganizing"
+                    );
+                    state.bump_round();
+                    return SignPhase::Organizing(SignOrganizer);
+                }
+                Err(SignLimitError::Closed) => {
+                    tracing::error!(?sign_id, "proposer semaphore closed");
+                    return SignPhase::Complete(Err(SignError::Aborted));
+                }
+            };
+
+            state.permit = Some(permit);
+        } else {
+            state.permit = None;
+        }
 
         let (presignature_id, presignature, active) = if is_proposer {
             tracing::info!(?sign_id, round = ?state.round, "proposer waiting for presignature");
@@ -1160,6 +1312,7 @@ struct SignTask {
     cfg: ProtocolConfig,
     contract: ContractStateWatcher,
     is_proposer: Arc<AtomicBool>,
+    limiter: SignLimiter,
     node_account_id: near_account_id::AccountId,
 }
 
@@ -1240,6 +1393,9 @@ pub struct SignatureSpawner {
     /// Tracks delay watcher tasks that will increment the delayed metric when response time exceeds expected
     delayed_watchers: HashMap<SignId, JoinHandle<()>>,
     mesh_state: watch::Receiver<MeshState>,
+    /// Limiter that limits the amount of sign tasks from progressing and utilizing
+    /// too much compute otherwise the whole system will be flooded with requests.
+    limiter: SignLimiter,
 
     msg: MessageChannel,
     rpc: RpcChannel,
@@ -1307,6 +1463,7 @@ impl SignatureSpawner {
             cfg,
             contract: self.contract.clone(),
             is_proposer,
+            limiter: self.limiter.clone(),
             node_account_id: self.node_account_id.clone(),
         };
 
@@ -1485,6 +1642,7 @@ impl SignatureSpawnerTask {
             delayed_watchers: HashMap::new(),
             presignatures: presignature_storage,
             mesh_state,
+            limiter: SignLimiter::new(MAX_CONCURRENT_PROPOSERS),
             msg: msg_channel,
             rpc: rpc_channel,
             backlog,
@@ -1605,6 +1763,7 @@ mod tests {
             cfg: ProtocolConfig::default(),
             contract,
             is_proposer: Arc::new(AtomicBool::new(false)),
+            limiter: SignLimiter::new(1),
             node_account_id: account_id.clone(),
         };
 
@@ -1649,5 +1808,47 @@ mod tests {
         assert_eq!(sign_task.governance.epoch, 1);
         assert_eq!(sign_task.governance.threshold, 1);
         assert_eq!(sign_task.governance.me, Participant::from(0));
+    }
+
+    #[tokio::test]
+    async fn sign_limiter_times_out_at_limit() {
+        let semaphore = SignLimiter::new(1);
+        let permit = semaphore
+            .acquire(Duration::from_millis(10))
+            .await
+            .expect("first acquire should succeed");
+
+        let second = semaphore.acquire(Duration::from_millis(10)).await;
+        assert!(matches!(second, Err(SignLimitError::Timeout)));
+
+        drop(permit);
+
+        let third = semaphore.acquire(Duration::from_millis(10)).await;
+        assert!(third.is_ok());
+    }
+
+    #[tokio::test]
+    async fn sign_limiter_applies_reduced_limit_on_release() {
+        let semaphore = SignLimiter::new(2);
+        let first = semaphore
+            .acquire(Duration::from_millis(10))
+            .await
+            .expect("first acquire should succeed");
+        let second = semaphore
+            .acquire(Duration::from_millis(10))
+            .await
+            .expect("second acquire should succeed");
+
+        semaphore.update(1);
+
+        drop(first);
+
+        let third = semaphore.acquire(Duration::from_millis(10)).await;
+        assert!(matches!(third, Err(SignLimitError::Timeout)));
+
+        drop(second);
+
+        let fourth = semaphore.acquire(Duration::from_millis(10)).await;
+        assert!(fourth.is_ok());
     }
 }
