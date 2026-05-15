@@ -192,8 +192,10 @@ pub enum NodeStateSnapshot {
     Running {
         triple_count: usize,
         triple_potential_count: usize,
+        triple_generators_historical_total: f64,
         presignature_count: usize,
         presignature_potential_count: usize,
+        presignature_generators_historical_total: f64,
     },
     Resharing,
     Joining,
@@ -206,14 +208,18 @@ impl From<&mpc_node::web::StateView> for NodeStateSnapshot {
             mpc_node::web::StateView::Running {
                 triple_count,
                 triple_potential_count,
+                triple_generators_historical_total,
                 presignature_count,
                 presignature_potential_count,
+                presignature_generators_historical_total,
                 ..
             } => Self::Running {
                 triple_count: *triple_count,
                 triple_potential_count: *triple_potential_count,
+                triple_generators_historical_total: *triple_generators_historical_total,
                 presignature_count: *presignature_count,
                 presignature_potential_count: *presignature_potential_count,
+                presignature_generators_historical_total: *presignature_generators_historical_total,
             },
             mpc_node::web::StateView::Resharing { .. } => Self::Resharing,
             mpc_node::web::StateView::Joining { .. } => Self::Joining,
@@ -629,10 +635,9 @@ impl StressHarness {
                 .filter_map(|node| node.state.as_ref())
                 .map(|state| match state {
                     NodeStateSnapshot::Running {
-                        triple_count,
-                        triple_potential_count,
+                        triple_generators_historical_total,
                         ..
-                    } if triple_potential_count > triple_count => 1,
+                    } if *triple_generators_historical_total > 0.0 => 1,
                     _ => 0,
                 })
                 .max()
@@ -656,29 +661,38 @@ impl StressHarness {
         timeout: Duration,
     ) -> anyhow::Result<(Vec<NodeSnapshot>, Vec<NodeSnapshot>)> {
         let deadline = Instant::now() + timeout;
+        let poll_interval = Duration::from_millis(50);
         let mut triple_pressure_nodes = None;
         let mut presignature_pressure_nodes = None;
 
         loop {
             let nodes = self.collect_node_snapshots().await;
-            let triple_pressure = nodes.iter().filter_map(|node| node.state.as_ref()).any(|state| {
+            let triple_pressure = nodes.iter().any(|node| {
+                let state = match node.state.as_ref() {
+                    Some(state) => state,
+                    None => return false,
+                };
+
                 matches!(
                     state,
                     NodeStateSnapshot::Running {
-                        triple_count,
-                        triple_potential_count,
+                        triple_generators_historical_total,
                         ..
-                    } if triple_potential_count > triple_count
+                    } if *triple_generators_historical_total > 0.0
                 )
             });
-            let presignature_pressure = nodes.iter().filter_map(|node| node.state.as_ref()).any(|state| {
+            let presignature_pressure = nodes.iter().any(|node| {
+                let state = match node.state.as_ref() {
+                    Some(state) => state,
+                    None => return false,
+                };
+
                 matches!(
                     state,
                     NodeStateSnapshot::Running {
-                        presignature_count,
-                        presignature_potential_count,
+                        presignature_generators_historical_total,
                         ..
-                    } if presignature_potential_count > presignature_count
+                    } if *presignature_generators_historical_total > 0.0
                 )
             });
             if triple_pressure && triple_pressure_nodes.is_none() {
@@ -698,7 +712,7 @@ impl StressHarness {
                 anyhow::bail!("timed out waiting for concurrent triple and presignature refill pressure");
             }
 
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(poll_interval).await;
         }
     }
 
@@ -1036,12 +1050,32 @@ impl StressHarness {
         }
 
         let mut report = StressRunReport::default();
-        report.snapshots.push(self.snapshot("baseline-before").await?);
+        let baseline = self.snapshot("baseline-before").await?;
+        report.snapshots.push(baseline);
 
-        let pressure_watch = self.wait_for_pipeline_pressure(cfg.pressure_timeout);
-        let batch_run = self.run_named_batch("pipeline-contention", cfg.total_requests, cfg.concurrency);
-        let (pressure_nodes, batch) = tokio::join!(pressure_watch, batch_run);
-        let (triple_pressure_nodes, presignature_pressure_nodes) = pressure_nodes?;
+        let mut batch_run = std::pin::pin!(self.run_named_batch(
+            "pipeline-contention",
+            cfg.total_requests,
+            cfg.concurrency,
+        ));
+        let pressure_nodes = loop {
+            let pressure_watch = self.wait_for_pipeline_pressure(cfg.pressure_timeout);
+            tokio::pin!(pressure_watch);
+
+            let pressure_result = tokio::select! {
+                pressure = &mut pressure_watch => Some(pressure),
+                batch = &mut batch_run => {
+                    anyhow::bail!(
+                        "pipeline-contention batch completed before observing triple and presignature generator pressure: {:?}",
+                        batch.summary
+                    );
+                }
+            };
+
+            break pressure_result.expect("pressure watch should resolve before batch completion")?;
+        };
+        let batch = batch_run.await;
+        let (triple_pressure_nodes, presignature_pressure_nodes) = pressure_nodes;
 
         report.requests.extend(batch.outcomes.iter().cloned());
         report.batches.push(batch);

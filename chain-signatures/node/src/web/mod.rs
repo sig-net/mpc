@@ -163,9 +163,11 @@ pub enum StateView {
         triple_count: usize,
         triple_mine_count: usize,
         triple_potential_count: usize,
+        triple_generators_historical_total: f64,
         presignature_count: usize,
         presignature_mine_count: usize,
         presignature_potential_count: usize,
+        presignature_generators_historical_total: f64,
         latest_block_height: BlockHeight,
     },
     Resharing {
@@ -201,18 +203,24 @@ async fn state(Extension(web): Extension<Arc<AxumState>>) -> Result<Json<StateVi
             let triple_count = web.triple_storage.len_generated().await;
             let triple_mine_count = web.triple_storage.len_by_owner(me).await;
             let triple_potential_count = triple_count + ongoing_triple_gen;
+            let triple_generators_historical_total =
+                crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS.get();
             let presignature_count = web.presignature_storage.len_generated().await;
             let presignature_mine_count = web.presignature_storage.len_by_owner(me).await;
             let presignature_potential_count = presignature_count + ongoing_presignature_gen;
+            let presignature_generators_historical_total =
+                crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS.get();
 
             Ok(Json(StateView::Running {
                 participants: participants.clone(),
                 triple_count,
                 triple_mine_count,
                 triple_potential_count,
+                triple_generators_historical_total,
                 presignature_count,
                 presignature_mine_count,
                 presignature_potential_count,
+                presignature_generators_historical_total,
                 latest_block_height,
             }))
         }
@@ -297,7 +305,9 @@ pub struct BenchStorageMetrics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchProtocolMetrics {
     pub triple_generators_total: i64,
+    pub triple_generators_historical_total: f64,
     pub presignature_generators_total: i64,
+    pub presignature_generators_historical_total: f64,
     pub signature_queue_size: i64,
 }
 
@@ -348,7 +358,9 @@ async fn bench_metrics() -> Json<BenchMetrics> {
         },
         protocols: BenchProtocolMetrics {
             triple_generators_total: crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL.get(),
+            triple_generators_historical_total: crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS.get(),
             presignature_generators_total: crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL.get(),
+            presignature_generators_historical_total: crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS.get(),
             signature_queue_size: crate::metrics::requests::SIGN_QUEUE_SIZE.get(),
         },
         backlog,

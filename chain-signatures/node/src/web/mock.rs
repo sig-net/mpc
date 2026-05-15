@@ -163,9 +163,11 @@ fn default_state_body() -> Vec<u8> {
         triple_count: 0,
         triple_mine_count: 0,
         triple_potential_count: 0,
+        triple_generators_historical_total: 0.0,
         presignature_count: 0,
         presignature_mine_count: 0,
         presignature_potential_count: 0,
+        presignature_generators_historical_total: 0.0,
         latest_block_height: 0,
     })
     .unwrap()
