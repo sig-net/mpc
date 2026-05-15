@@ -64,7 +64,7 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
     let user_secp_pk = SecpPublicKey::from_slice(user_pk_bytes.as_bytes())
         .context("failed to convert user public key")?;
     let user_address = actions::public_key_to_address(&user_secp_pk);
-    let user_alloy_address = AlloyAddress::from_slice(user_address.as_bytes());
+    let user_alloy_address = AlloyAddress::from_slice(user_address.as_slice());
 
     let client = Client::new();
     // Use the live account nonce to avoid "nonce too low" errors if the address has prior sends
@@ -279,7 +279,7 @@ async fn ensure_eth_signer_funded(
     let secp = LibSecp256k1::signing_only();
     let payer_pk = SecpPublicKey::from_secret_key(&secp, &payer_sk);
     let payer_address = actions::public_key_to_address(&payer_pk);
-    let payer_alloy = AlloyAddress::from_slice(payer_address.as_bytes());
+    let payer_alloy = AlloyAddress::from_slice(payer_address.as_slice());
     let signing_key = SigningKey::from_bytes(&payer_sk_array.into())?;
 
     let mut gas_price = fetch_gas_price(client, rpc_url).await?;

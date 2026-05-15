@@ -2161,6 +2161,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "bip32"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db40d3dfbeab4e031d78c844642fa0caa0b0db11ce1607ac9d2986dff1405c69"
+dependencies = [
+ "bs58 0.5.1",
+ "hmac 0.12.1",
+ "k256",
+ "once_cell",
+ "pbkdf2 0.12.2",
+ "rand_core 0.6.4",
+ "ripemd",
+ "secp256k1 0.27.0",
+ "sha2 0.10.9",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "bip39"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6578,6 +6597,8 @@ dependencies = [
  "anyhow",
  "async-process 1.8.1",
  "backon",
+ "bip32",
+ "bip39",
  "bollard",
  "borsh 1.5.7",
  "bs58 0.5.1",
@@ -6589,7 +6610,6 @@ dependencies = [
  "ecdsa",
  "elliptic-curve",
  "ethers",
- "ethers-core",
  "futures",
  "generic-array",
  "hex",

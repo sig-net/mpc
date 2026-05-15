@@ -1,7 +1,9 @@
+pub mod abi;
 pub mod indexer_eth_direct_rpc;
 pub mod indexer_eth_helios;
 
 use crate::backlog::Backlog;
+use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
 use crate::metrics::requests::{record_request_latency, SignRequestStep};
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::respond_bidirectional::CompletedTx;
@@ -12,7 +14,7 @@ use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::rpc::types::{Block, BlockId, Log};
-use alloy::sol_types::{sol, SolEvent};
+use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -269,44 +271,6 @@ pub struct EthSignRequest {
     pub key_version: u32,
 }
 
-sol! {
-    event SignatureRequested(
-        address sender,
-        bytes32 payload,
-        uint32 keyVersion,
-        uint256 deposit,
-        uint256 chainId,
-        string path,
-        string algo,
-        string dest,
-        string params
-    );
-
-    event SignatureRequestedEncoding(
-        address sender,
-        bytes payload,
-        string path,
-        uint32 keyVersion,
-        uint256 chainId,
-        string algo,
-        string dest,
-        string params
-    );
-
-    struct AffinePoint {
-        uint256 x;
-        uint256 y;
-    }
-
-    struct Signature {
-        AffinePoint bigR;
-        uint256 s;
-        uint8 recoveryId;
-    }
-
-    event SignatureResponded(bytes32 indexed requestId, address responder, Signature signature);
-}
-
 fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
     let event = parse_event(&log);
     tracing::debug!("found eth event: {:?}", event);
@@ -493,7 +457,7 @@ async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEvent>) 
 fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
     if log
         .topic0()
-        .is_none_or(|topic| *topic != SignatureResponded::SIGNATURE_HASH)
+        .is_none_or(|topic| *topic != ChainSignatures::SignatureResponded::SIGNATURE_HASH)
     {
         return None;
     }
@@ -856,15 +820,17 @@ impl EthereumIndexer {
 
         let (respond_logs, potential_request_logs): (Vec<Log>, Vec<Log>) =
             relevant_logs.into_iter().partition(|log| {
-                log.topic0()
-                    .is_some_and(|topic| *topic == SignatureResponded::SIGNATURE_HASH)
+                log.topic0().is_some_and(|topic| {
+                    *topic == ChainSignatures::SignatureResponded::SIGNATURE_HASH
+                })
             });
 
         let request_logs: Vec<Log> = potential_request_logs
             .into_iter()
             .filter(|log| {
-                log.topic0()
-                    .is_some_and(|topic| *topic == SignatureRequested::SIGNATURE_HASH)
+                log.topic0().is_some_and(|topic| {
+                    *topic == ChainSignatures::SignatureRequested::SIGNATURE_HASH
+                })
             })
             .collect();
 
