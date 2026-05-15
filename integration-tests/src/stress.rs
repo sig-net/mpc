@@ -261,6 +261,7 @@ pub enum StressScenario {
     GlobalLatencySweep,
     SingleNodeStraggler,
     SteadyOverload,
+    OverloadNodeDegradation,
     TripleDepletion,
 }
 
@@ -304,6 +305,35 @@ pub struct TripleDepletionConfig {
     pub recovery_timeout: Duration,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverloadNodeDegradationConfig {
+    pub node: usize,
+    pub warmup_total_requests: usize,
+    pub warmup_concurrency: usize,
+    pub degraded_total_requests: usize,
+    pub degraded_concurrency: usize,
+    pub recovery_total_requests: usize,
+    pub recovery_concurrency: usize,
+}
+
+impl OverloadNodeDegradationConfig {
+    pub fn default_with(total_requests: usize, concurrency: usize) -> Self {
+        let warmup_concurrency = concurrency.max(4);
+        let degraded_concurrency = warmup_concurrency.max(8);
+        let recovery_concurrency = warmup_concurrency;
+
+        Self {
+            node: 1,
+            warmup_total_requests: total_requests.max(warmup_concurrency),
+            warmup_concurrency,
+            degraded_total_requests: total_requests.max(degraded_concurrency * 2),
+            degraded_concurrency,
+            recovery_total_requests: total_requests.max(recovery_concurrency),
+            recovery_concurrency,
+        }
+    }
+}
+
 impl TripleDepletionConfig {
     pub fn default_with(total_requests: usize, concurrency: usize) -> Self {
         Self {
@@ -326,6 +356,7 @@ impl StressScenario {
             "global-latency" => Some(Self::GlobalLatencySweep),
             "single-node-straggler" => Some(Self::SingleNodeStraggler),
             "steady-overload" => Some(Self::SteadyOverload),
+            "overload-node-degradation" => Some(Self::OverloadNodeDegradation),
             "triple-depletion" => Some(Self::TripleDepletion),
             _ => None,
         }
@@ -337,6 +368,7 @@ impl StressScenario {
             Self::GlobalLatencySweep => "global-latency",
             Self::SingleNodeStraggler => "single-node-straggler",
             Self::SteadyOverload => "steady-overload",
+            Self::OverloadNodeDegradation => "overload-node-degradation",
             Self::TripleDepletion => "triple-depletion",
         }
     }
@@ -824,6 +856,51 @@ impl StressHarness {
         Ok(report)
     }
 
+    pub async fn run_overload_with_node_degradation(
+        &self,
+        cfg: &OverloadNodeDegradationConfig,
+    ) -> anyhow::Result<StressRunReport> {
+        let mut report = StressRunReport::default();
+
+        report.snapshots.push(self.snapshot("warmup-before").await?);
+        let warmup = self
+            .run_named_batch(
+                "warmup",
+                cfg.warmup_total_requests,
+                cfg.warmup_concurrency,
+            )
+            .await;
+        report.requests.extend(warmup.outcomes.iter().cloned());
+        report.batches.push(warmup);
+
+        self.block_node(cfg.node).await?;
+        report.snapshots.push(self.snapshot("degraded-before").await?);
+        let degraded = self
+            .run_named_batch(
+                "degraded",
+                cfg.degraded_total_requests,
+                cfg.degraded_concurrency,
+            )
+            .await;
+        report.requests.extend(degraded.outcomes.iter().cloned());
+        report.batches.push(degraded);
+
+        self.clear_node(cfg.node).await?;
+        report.snapshots.push(self.snapshot("recovery-before").await?);
+        let recovery = self
+            .run_named_batch(
+                "recovery",
+                cfg.recovery_total_requests,
+                cfg.recovery_concurrency,
+            )
+            .await;
+        report.requests.extend(recovery.outcomes.iter().cloned());
+        report.batches.push(recovery);
+        report.snapshots.push(self.snapshot("recovery-after").await?);
+
+        Ok(report)
+    }
+
     pub async fn run_single_node_straggler(
         &self,
         cfg: &SingleNodeStragglerConfig,
@@ -894,6 +971,12 @@ impl StressHarness {
             StressScenario::SteadyOverload => {
                 self.run_steady_overload(&SteadyOverloadConfig::default_with(total_requests))
                     .await
+            }
+            StressScenario::OverloadNodeDegradation => {
+                self.run_overload_with_node_degradation(
+                    &OverloadNodeDegradationConfig::default_with(total_requests, concurrency),
+                )
+                .await
             }
             StressScenario::TripleDepletion => {
                 self.run_triple_depletion(&TripleDepletionConfig::default_with(

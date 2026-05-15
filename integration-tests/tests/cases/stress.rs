@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use integration_tests::stress::{
     BurstSpikeConfig, GlobalLatencySweepConfig, LatencySweepStage, SingleNodeStragglerConfig,
-    SteadyOverloadConfig, StressHarnessBuilder, StressRunReport, TripleDepletionConfig,
+    OverloadNodeDegradationConfig, SteadyOverloadConfig, StressHarnessBuilder, StressRunReport,
+    TripleDepletionConfig,
 };
 use serial_test::serial;
 use test_log::test;
@@ -282,6 +283,40 @@ async fn test_stress_c1_triple_depletion_ci() -> anyhow::Result<()> {
             "triple stockpile should recover after scenario"
         );
     }
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+#[serial]
+async fn test_stress_b3_overload_node_degradation_ci() -> anyhow::Result<()> {
+    let harness = build_harness().await?;
+    let cfg = OverloadNodeDegradationConfig {
+        node: 1,
+        warmup_total_requests: 6,
+        warmup_concurrency: 3,
+        degraded_total_requests: 16,
+        degraded_concurrency: 8,
+        recovery_total_requests: 6,
+        recovery_concurrency: 3,
+    };
+
+    let report = harness.run_overload_with_node_degradation(&cfg).await?;
+    assert_eq!(report.batches.len(), 3);
+    assert_eq!(report.snapshots.len(), 4);
+    assert_all_resolved(&report);
+    assert_snapshot_shape(&report, 3);
+    assert_batch_totals(&report);
+
+    let warmup = &report.batches[0];
+    let degraded = &report.batches[1];
+    let recovery = &report.batches[2];
+    assert_eq!(warmup.label, "warmup");
+    assert_eq!(degraded.label, "degraded");
+    assert_eq!(recovery.label, "recovery");
+    assert_eq!(warmup.summary.timeout + warmup.summary.dropped + warmup.summary.errors, 0);
+    assert_eq!(recovery.summary.timeout + recovery.summary.dropped + recovery.summary.errors, 0);
+    assert_eq!(degraded.summary.total, cfg.degraded_total_requests);
 
     Ok(())
 }
