@@ -133,52 +133,36 @@ pub struct EthArgs {
 
     // -- Helios light-client --
     /// Use Helios light client instead of direct RPC
-    #[cfg_attr(
-        feature = "helios",
-        clap(
-            long,
-            env("MPC_ETH_LIGHT_CLIENT"),
-            default_value = "false",
-            requires_if("true", "eth_consensus_rpc_http_url")
-        )
+    #[clap(
+        long,
+        env("MPC_ETH_LIGHT_CLIENT"),
+        default_value = "false",
+        requires_if("true", "eth_consensus_rpc_http_url")
     )]
-    #[cfg_attr(not(feature = "helios"), arg(skip))]
     pub eth_light_client: bool,
     /// Ethereum consensus RPC URL (required when --eth-light-client is set)
-    #[cfg_attr(
-        feature = "helios",
-        clap(
-            long,
-            env("MPC_ETH_CONSENSUS_RPC_HTTP_URL"),
-            requires = "eth_account_sk"
-        )
+    #[clap(
+        long,
+        env("MPC_ETH_CONSENSUS_RPC_HTTP_URL"),
+        requires = "eth_account_sk"
     )]
-    #[cfg_attr(not(feature = "helios"), arg(skip))]
     pub eth_consensus_rpc_http_url: Option<String>,
     /// The network that the eth indexer is running on. Either "sepolia"/"mainnet"
-    #[cfg_attr(
-        feature = "helios",
-        clap(
-            long,
-            env("MPC_ETH_NETWORK"),
-            requires = "eth_account_sk",
-            default_value = "sepolia",
-            value_parser = ["sepolia", "mainnet"],
-        )
+    #[clap(
+        long,
+        env("MPC_ETH_NETWORK"),
+        requires = "eth_account_sk",
+        default_value = "sepolia",
+        value_parser = ["sepolia", "mainnet"],
     )]
-    #[cfg_attr(not(feature = "helios"), arg(skip))]
     pub eth_network: Option<String>,
     /// Helios light client data path
-    #[cfg_attr(
-        feature = "helios",
-        clap(
-            long,
-            env("MPC_ETH_HELIOS_DATA_PATH"),
-            requires = "eth_account_sk",
-            default_value = "/helios/sepolia"
-        )
+    #[clap(
+        long,
+        env("MPC_ETH_HELIOS_DATA_PATH"),
+        requires = "eth_account_sk",
+        default_value = "/helios/sepolia"
     )]
-    #[cfg_attr(not(feature = "helios"), arg(skip))]
     pub eth_helios_data_path: Option<String>,
 
     // -- Behaviour --
