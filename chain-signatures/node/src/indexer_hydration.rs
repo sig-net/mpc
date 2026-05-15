@@ -5,15 +5,14 @@ use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::ops::SignatureEvent;
+use crate::util::ethabi_request_id;
 use alloy_sol_types::SolValue;
 use anyhow::{anyhow, Result};
-use ethabi::{encode, Token};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::Signature;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR};
-use sha3::{Digest, Keccak256};
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{twox_128, H256};
 use sp_runtime::traits::BlakeTwo256;
@@ -106,21 +105,16 @@ pub struct HydrationSignatureRequestedEvent {
 
 impl SignatureEvent for HydrationSignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
-        // Encode the event data in ABI format
-        let encoded = encode(&[
-            Token::String(self.sender_string()),
-            Token::Bytes(self.payload.to_vec()),
-            Token::String(self.path.clone()),
-            Token::Uint(self.key_version.into()),
-            Token::String(self.chain_id.clone()),
-            Token::String(self.algo.clone()),
-            Token::String(self.dest.clone()),
-            Token::String(self.params.clone()),
-        ]);
-        // Calculate keccak256 hash
-        let mut hasher = Keccak256::new();
-        hasher.update(&encoded);
-        hasher.finalize().into()
+        ethabi_request_id(
+            self.sender_string(),
+            self.payload,
+            self.path.clone(),
+            self.key_version,
+            self.chain_id.clone(),
+            self.algo.clone(),
+            self.dest.clone(),
+            self.params.clone(),
+        )
     }
 
     fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest> {
@@ -869,5 +863,30 @@ fn value_to_vec_u8(v: &Value<u32>) -> Result<Vec<u8>> {
             Ok(out)
         }
         other => Err(anyhow!("unsupported Vec<u8> shape: {other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_id_matches_ethabi() {
+        let event = HydrationSignatureRequestedEvent {
+            sender: [0xAA; 32],
+            payload: [0xBB; 32],
+            path: "m/44'/60'/0'/0/0".to_string(),
+            key_version: 3,
+            deposit: 999,
+            chain_id: "hydration-testnet".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "dest-address".to_string(),
+            params: "payload-params".to_string(),
+        };
+
+        assert_eq!(
+            hex::encode(event.generate_request_id()),
+            "67a3a9bf9d424d85bef21cf9780a0634c6a06061265ce9d1063f30f1eec84821"
+        );
     }
 }

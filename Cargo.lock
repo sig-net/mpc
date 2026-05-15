@@ -8017,7 +8017,6 @@ dependencies = [
  "clap",
  "deadpool-redis",
  "ed25519-zebra",
- "ethabi",
  "futures-util",
  "google-datastore1",
  "google-secretmanager1",
