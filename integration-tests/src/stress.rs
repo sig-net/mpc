@@ -171,6 +171,7 @@ pub enum StressRequestStatus {
 pub struct StressRequestOutcome {
     pub batch_label: Option<String>,
     pub request_index: usize,
+    pub completion_order: usize,
     pub latency_ms: u128,
     pub status: StressRequestStatus,
     pub reason_code: Option<String>,
@@ -268,6 +269,7 @@ pub enum StressScenario {
     SingleNodeStraggler,
     SteadyOverload,
     OverloadNodeDegradation,
+    QueueBackpressure,
     PipelineContention,
     TripleDepletion,
 }
@@ -334,6 +336,16 @@ pub struct PipelineContentionConfig {
     pub recovery_presignatures_min: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueBackpressureConfig {
+    pub initial_triples_per_node: usize,
+    pub initial_presignatures_per_node: usize,
+    pub total_requests: usize,
+    pub concurrency: usize,
+    pub pressure_timeout: Duration,
+    pub recovery_triples_min: usize,
+}
+
 impl PipelineContentionConfig {
     pub fn default_with(total_requests: usize, concurrency: usize) -> Self {
         Self {
@@ -344,6 +356,19 @@ impl PipelineContentionConfig {
             pressure_timeout: Duration::from_secs(45),
             recovery_triples_min: 1,
             recovery_presignatures_min: 1,
+        }
+    }
+}
+
+impl QueueBackpressureConfig {
+    pub fn default_with(total_requests: usize, concurrency: usize) -> Self {
+        Self {
+            initial_triples_per_node: 1,
+            initial_presignatures_per_node: 1,
+            total_requests: total_requests.max(8),
+            concurrency: concurrency.max(8),
+            pressure_timeout: Duration::from_secs(60),
+            recovery_triples_min: 1,
         }
     }
 }
@@ -389,6 +414,7 @@ impl StressScenario {
             "single-node-straggler" => Some(Self::SingleNodeStraggler),
             "steady-overload" => Some(Self::SteadyOverload),
             "overload-node-degradation" => Some(Self::OverloadNodeDegradation),
+            "queue-backpressure" => Some(Self::QueueBackpressure),
             "pipeline-contention" => Some(Self::PipelineContention),
             "triple-depletion" => Some(Self::TripleDepletion),
             _ => None,
@@ -402,6 +428,7 @@ impl StressScenario {
             Self::SingleNodeStraggler => "single-node-straggler",
             Self::SteadyOverload => "steady-overload",
             Self::OverloadNodeDegradation => "overload-node-degradation",
+            Self::QueueBackpressure => "queue-backpressure",
             Self::PipelineContention => "pipeline-contention",
             Self::TripleDepletion => "triple-depletion",
         }
@@ -785,7 +812,10 @@ impl StressHarness {
             let Some(outcome) = in_flight.next().await else {
                 break;
             };
-            outcomes.push(outcome);
+            outcomes.push(StressRequestOutcome {
+                completion_order: outcomes.len(),
+                ..outcome
+            });
         }
 
         outcomes.sort_by_key(|outcome| outcome.request_index);
@@ -1093,6 +1123,51 @@ impl StressHarness {
         Ok(report)
     }
 
+    pub async fn run_queue_backpressure(
+        &self,
+        cfg: &QueueBackpressureConfig,
+    ) -> anyhow::Result<StressRunReport> {
+        require_triples(&self.cluster, cfg.initial_triples_per_node, false).await?;
+        require_presignatures(&self.cluster, cfg.initial_presignatures_per_node, false).await?;
+
+        let mut report = StressRunReport::default();
+        report.snapshots.push(self.snapshot("stockpile-ready").await?);
+
+        let mut batch_run = std::pin::pin!(self.run_named_batch(
+            "queue-backpressure",
+            cfg.total_requests,
+            cfg.concurrency,
+        ));
+        let refill_nodes = loop {
+            let refill_watch = self.wait_for_active_triple_generation(1, cfg.pressure_timeout);
+            tokio::pin!(refill_watch);
+
+            let refill_result = tokio::select! {
+                queued = &mut refill_watch => Some(queued),
+                batch = &mut batch_run => {
+                    anyhow::bail!(
+                        "queue-backpressure batch completed before observing active triple refill: {:?}",
+                        batch.summary
+                    );
+                }
+            };
+
+            break refill_result.expect("refill watch should resolve before batch completion")?;
+        };
+        let batch = batch_run.await;
+
+        report.requests.extend(batch.outcomes.iter().cloned());
+        report.batches.push(batch);
+        report
+            .snapshots
+            .push(self.snapshot_from_nodes("refill-active", refill_nodes).await?);
+
+        require_triples(&self.cluster, cfg.recovery_triples_min, false).await?;
+        report.snapshots.push(self.snapshot("recovered").await?);
+
+        Ok(report)
+    }
+
     pub async fn run_single_node_straggler(
         &self,
         cfg: &SingleNodeStragglerConfig,
@@ -1170,6 +1245,13 @@ impl StressHarness {
                 )
                 .await
             }
+            StressScenario::QueueBackpressure => {
+                self.run_queue_backpressure(&QueueBackpressureConfig::default_with(
+                    total_requests,
+                    concurrency,
+                ))
+                .await
+            }
             StressScenario::PipelineContention => {
                 self.run_pipeline_contention(&PipelineContentionConfig::default_with(
                     total_requests,
@@ -1211,11 +1293,13 @@ impl StressHarness {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let mut csv = String::from("batch_label,request_index,latency_ms,status,reason_code,detail\n");
+        let mut csv = String::from("batch_label,request_index,completion_order,latency_ms,status,reason_code,detail\n");
         for outcome in &report.requests {
             csv.push_str(&csv_escape(outcome.batch_label.as_deref().unwrap_or("")));
             csv.push(',');
             csv.push_str(&outcome.request_index.to_string());
+            csv.push(',');
+            csv.push_str(&outcome.completion_order.to_string());
             csv.push(',');
             csv.push_str(&outcome.latency_ms.to_string());
             csv.push(',');
@@ -1363,6 +1447,7 @@ async fn run_sign_request(
     StressRequestOutcome {
         batch_label: None,
         request_index,
+        completion_order: 0,
         latency_ms: started.elapsed().as_millis(),
         status,
         reason_code,

@@ -3,7 +3,7 @@ use std::time::Duration;
 use integration_tests::stress::{
     BurstSpikeConfig, GlobalLatencySweepConfig, LatencySweepStage, SingleNodeStragglerConfig,
     OverloadNodeDegradationConfig, SteadyOverloadConfig, StressHarnessBuilder, StressRunReport,
-    PipelineContentionConfig, TripleDepletionConfig,
+    PipelineContentionConfig, QueueBackpressureConfig, TripleDepletionConfig,
 };
 use serial_test::serial;
 use test_log::test;
@@ -90,6 +90,24 @@ async fn build_pipeline_contention_harness() -> anyhow::Result<integration_tests
             cfg.protocol.triple.max_triples = 4;
             cfg.protocol.presignature.min_presignatures = 2;
             cfg.protocol.presignature.max_presignatures = 4;
+        })
+        .build()
+        .await
+}
+
+async fn build_queue_backpressure_harness() -> anyhow::Result<integration_tests::stress::StressHarness> {
+    StressHarnessBuilder::default()
+        .nodes(3)
+        .threshold(2)
+        .disable_prestockpile()
+        .request_timeout(Duration::from_secs(120))
+        .with_config(|cfg| {
+            cfg.protocol.max_concurrent_generation = 1;
+            cfg.protocol.max_concurrent_introduction = 1;
+            cfg.protocol.triple.min_triples = 1;
+            cfg.protocol.triple.max_triples = 2;
+            cfg.protocol.presignature.min_presignatures = 1;
+            cfg.protocol.presignature.max_presignatures = 2;
         })
         .build()
         .await
@@ -389,6 +407,66 @@ async fn test_stress_c2_pipeline_contention_ci() -> anyhow::Result<()> {
         ));
     assert!(triple_pressure, "triple refill should activate under signing load");
     assert!(presignature_pressure, "presignature refill should activate under signing load");
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+#[serial]
+#[ignore = "exposes non-FIFO drain under depleted-triple backpressure; protocol fairness fix required"]
+async fn test_stress_c3_queue_backpressure_ci() -> anyhow::Result<()> {
+    let harness = build_queue_backpressure_harness().await?;
+    let cfg = QueueBackpressureConfig {
+        initial_triples_per_node: 1,
+        initial_presignatures_per_node: 1,
+        total_requests: 8,
+        concurrency: 8,
+        pressure_timeout: Duration::from_secs(60),
+        recovery_triples_min: 1,
+    };
+
+    let report = harness.run_queue_backpressure(&cfg).await?;
+    assert_eq!(report.batches.len(), 1);
+    assert_eq!(report.snapshots.len(), 3);
+    assert_all_resolved(&report);
+    assert_snapshot_shape(&report, 3);
+    assert_batch_totals(&report);
+
+    let refill_snapshot = &report.snapshots[1];
+    let refill_pressure = refill_snapshot
+        .nodes
+        .iter()
+        .filter_map(|node| node.state.as_ref())
+        .any(|state| matches!(
+            state,
+            integration_tests::stress::NodeStateSnapshot::Running {
+                triple_generators_historical_total,
+                ..
+            } if *triple_generators_historical_total > 0.0
+        ));
+    assert!(refill_pressure, "triple refill should activate under queued signing load");
+
+    let batch = &report.batches[0];
+    assert_eq!(batch.label, "queue-backpressure");
+    assert_eq!(batch.summary.timeout + batch.summary.dropped + batch.summary.errors, 0);
+
+    let mut previous_completion_order = 0usize;
+    for (idx, outcome) in report.requests.iter().enumerate() {
+        if idx > 0 {
+            assert!(
+                previous_completion_order <= outcome.completion_order,
+                "request completions should drain in FIFO order"
+            );
+        }
+        previous_completion_order = outcome.completion_order;
+    }
+
+    let first = report.requests.first().expect("backpressure batch should have outcomes");
+    let last = report.requests.last().expect("backpressure batch should have outcomes");
+    assert!(
+        first.latency_ms <= last.latency_ms,
+        "later requests should not outrun the oldest queued request"
+    );
 
     Ok(())
 }

@@ -43,7 +43,10 @@ fn main() {
             let builder = StressHarnessBuilder::default()
                 .nodes(nodes)
                 .threshold(threshold);
-            let builder = if matches!(scenario, StressScenario::TripleDepletion) {
+            let builder = if matches!(
+                scenario,
+                StressScenario::TripleDepletion | StressScenario::QueueBackpressure
+            ) {
                 builder.disable_prestockpile()
             } else {
                 builder
@@ -62,6 +65,14 @@ fn main() {
                             cfg.protocol.presignature.max_presignatures = 4;
                         }
                         StressScenario::PipelineContention => {
+                            cfg.protocol.max_concurrent_generation = 1;
+                            cfg.protocol.max_concurrent_introduction = 1;
+                            cfg.protocol.triple.min_triples = 1;
+                            cfg.protocol.triple.max_triples = 2;
+                            cfg.protocol.presignature.min_presignatures = 1;
+                            cfg.protocol.presignature.max_presignatures = 2;
+                        }
+                        StressScenario::QueueBackpressure => {
                             cfg.protocol.max_concurrent_generation = 1;
                             cfg.protocol.max_concurrent_introduction = 1;
                             cfg.protocol.triple.min_triples = 1;
