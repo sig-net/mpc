@@ -316,40 +316,6 @@ pub async fn run_stream<S: ChainStream>(
     indexer_task.abort();
 }
 
-/// Type used to denote a disabled stream (i.e. Solana, Hydration) that does
-/// not yet support the flow for general catchup & livestream.
-pub struct DisabledChainIndexer {
-    events_tx: Option<mpsc::Sender<ChainEvent>>,
-}
-
-impl DisabledChainIndexer {
-    pub fn silent() -> Self {
-        Self { events_tx: None }
-    }
-}
-
-#[async_trait]
-impl ChainIndexer for DisabledChainIndexer {
-    const CHAIN: Chain = Chain::Bitcoin;
-    type Block = ();
-    type Iter = std::iter::Empty<Self::Block>;
-
-    async fn next(&mut self) -> Option<Self::Block> {
-        None
-    }
-
-    async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-        std::iter::empty()
-    }
-
-    async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
-        if let Some(events_tx) = &self.events_tx {
-            events_tx.send(ChainEvent::CatchupCompleted).await?;
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,36 +357,71 @@ mod tests {
     }
 
     macro_rules! impl_vec_event_stream {
-        ($name:ident, $chain:expr) => {
-            struct $name(VecEventStreamState);
+        ($stream:ident, $indexer:ident, $chain:expr) => {
+            struct $stream(VecEventStreamState);
 
-            impl $name {
+            impl $stream {
                 pub fn new(events: Vec<Option<ChainEvent>>) -> Self {
                     Self(VecEventStreamState::new(events))
                 }
             }
 
+            struct $indexer {
+                events_tx: Option<mpsc::Sender<ChainEvent>>,
+            }
+
+            impl $indexer {
+                pub fn silent() -> Self {
+                    Self { events_tx: None }
+                }
+            }
+
             #[async_trait]
-            impl ChainStream for $name {
-                type Indexer = DisabledChainIndexer;
+            impl ChainIndexer for $indexer {
+                const CHAIN: Chain = $chain;
+
+                type Block = ();
+                type Iter = std::iter::Empty<Self::Block>;
+
+                async fn next(&mut self) -> Option<Self::Block> {
+                    None
+                }
+
+                async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
+                    std::iter::empty()
+                }
+
+                async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
+                    if let Some(events_tx) = &self.events_tx {
+                        events_tx.send(ChainEvent::CatchupCompleted).await?;
+                    }
+
+                    Ok(())
+                }
+            }
+
+            #[async_trait]
+            impl ChainStream for $stream {
+                type Indexer = $indexer;
 
                 async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
                     self.0.started = true;
-                    Ok(DisabledChainIndexer::silent())
+                    Ok($indexer::silent())
                 }
 
                 async fn next_event(&mut self) -> Option<ChainEvent> {
                     if self.0.events.is_empty() {
                         return None;
                     }
+
                     self.0.events.remove(0)
                 }
             }
         };
     }
 
-    impl_vec_event_stream!(SolanaTestStream, Chain::Solana);
-    impl_vec_event_stream!(EthereumTestStream, Chain::Ethereum);
+    impl_vec_event_stream!(SolanaTestStream, DisabledSolanaIndexer, Chain::Solana);
+    impl_vec_event_stream!(EthereumTestStream, DisabledEthereumIndexer, Chain::Ethereum);
 
     #[derive(Clone)]
     struct TestLinearControl {
@@ -712,6 +713,38 @@ mod tests {
 
             async fn next_event(&mut self) -> Option<ChainEvent> {
                 self.rx.recv().await
+            }
+        }
+
+        pub struct DisabledChainIndexer {
+            events_tx: Option<mpsc::Sender<ChainEvent>>,
+        }
+
+        impl DisabledChainIndexer {
+            pub fn silent() -> Self {
+                Self { events_tx: None }
+            }
+        }
+
+        #[async_trait]
+        impl ChainIndexer for DisabledChainIndexer {
+            const CHAIN: Chain = Chain::Solana;
+            type Block = ();
+            type Iter = std::iter::Empty<Self::Block>;
+
+            async fn next(&mut self) -> Option<Self::Block> {
+                None
+            }
+
+            async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
+                std::iter::empty()
+            }
+
+            async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
+                if let Some(events_tx) = &self.events_tx {
+                    events_tx.send(ChainEvent::CatchupCompleted).await?;
+                }
+                Ok(())
             }
         }
 

@@ -48,6 +48,10 @@ async fn wait_for_sign_request(stream: &mut SolanaStream) -> Result<IndexedSignR
         match timeout(Duration::from_secs(6), stream.next_event()).await {
             Ok(Some(ChainEvent::SignRequest(req))) => return Ok(req),
             Ok(Some(ChainEvent::Block(_))) => continue,
+            Ok(Some(ChainEvent::CatchupCompleted)) => {
+                tracing::info!("received CatchupCompleted event while waiting for SignRequest");
+                continue;
+            }
             Ok(Some(other)) => anyhow::bail!("Expected SignRequest, got {:?}", other),
             Ok(None) => anyhow::bail!("stream returned None"),
             Err(_) => anyhow::bail!("timeout waiting for SignRequest event"),
