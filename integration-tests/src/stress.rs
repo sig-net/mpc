@@ -262,6 +262,7 @@ pub enum StressScenario {
     SingleNodeStraggler,
     SteadyOverload,
     OverloadNodeDegradation,
+    PipelineContention,
     TripleDepletion,
 }
 
@@ -316,6 +317,31 @@ pub struct OverloadNodeDegradationConfig {
     pub recovery_concurrency: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineContentionConfig {
+    pub initial_triples_per_node: usize,
+    pub initial_presignatures_per_node: usize,
+    pub total_requests: usize,
+    pub concurrency: usize,
+    pub pressure_timeout: Duration,
+    pub recovery_triples_min: usize,
+    pub recovery_presignatures_min: usize,
+}
+
+impl PipelineContentionConfig {
+    pub fn default_with(total_requests: usize, concurrency: usize) -> Self {
+        Self {
+            initial_triples_per_node: 1,
+            initial_presignatures_per_node: 0,
+            total_requests: total_requests.max(4),
+            concurrency: concurrency.max(2),
+            pressure_timeout: Duration::from_secs(45),
+            recovery_triples_min: 1,
+            recovery_presignatures_min: 1,
+        }
+    }
+}
+
 impl OverloadNodeDegradationConfig {
     pub fn default_with(total_requests: usize, concurrency: usize) -> Self {
         let warmup_concurrency = concurrency.max(4);
@@ -357,6 +383,7 @@ impl StressScenario {
             "single-node-straggler" => Some(Self::SingleNodeStraggler),
             "steady-overload" => Some(Self::SteadyOverload),
             "overload-node-degradation" => Some(Self::OverloadNodeDegradation),
+            "pipeline-contention" => Some(Self::PipelineContention),
             "triple-depletion" => Some(Self::TripleDepletion),
             _ => None,
         }
@@ -369,6 +396,7 @@ impl StressScenario {
             Self::SingleNodeStraggler => "single-node-straggler",
             Self::SteadyOverload => "steady-overload",
             Self::OverloadNodeDegradation => "overload-node-degradation",
+            Self::PipelineContention => "pipeline-contention",
             Self::TripleDepletion => "triple-depletion",
         }
     }
@@ -617,6 +645,57 @@ impl StressHarness {
                 anyhow::bail!(
                     "timed out waiting for active triple refill pressure"
                 );
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    async fn wait_for_pipeline_pressure(
+        &self,
+        timeout: Duration,
+    ) -> anyhow::Result<(Vec<NodeSnapshot>, Vec<NodeSnapshot>)> {
+        let deadline = Instant::now() + timeout;
+        let mut triple_pressure_nodes = None;
+        let mut presignature_pressure_nodes = None;
+
+        loop {
+            let nodes = self.collect_node_snapshots().await;
+            let triple_pressure = nodes.iter().filter_map(|node| node.state.as_ref()).any(|state| {
+                matches!(
+                    state,
+                    NodeStateSnapshot::Running {
+                        triple_count,
+                        triple_potential_count,
+                        ..
+                    } if triple_potential_count > triple_count
+                )
+            });
+            let presignature_pressure = nodes.iter().filter_map(|node| node.state.as_ref()).any(|state| {
+                matches!(
+                    state,
+                    NodeStateSnapshot::Running {
+                        presignature_count,
+                        presignature_potential_count,
+                        ..
+                    } if presignature_potential_count > presignature_count
+                )
+            });
+            if triple_pressure && triple_pressure_nodes.is_none() {
+                triple_pressure_nodes = Some(nodes.clone());
+            }
+            if presignature_pressure && presignature_pressure_nodes.is_none() {
+                presignature_pressure_nodes = Some(nodes.clone());
+            }
+            if let (Some(triple_nodes), Some(presignature_nodes)) = (
+                triple_pressure_nodes.clone(),
+                presignature_pressure_nodes.clone(),
+            ) {
+                return Ok((triple_nodes, presignature_nodes));
+            }
+
+            if Instant::now() >= deadline {
+                anyhow::bail!("timed out waiting for concurrent triple and presignature refill pressure");
             }
 
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -901,6 +980,39 @@ impl StressHarness {
         Ok(report)
     }
 
+    pub async fn run_pipeline_contention(
+        &self,
+        cfg: &PipelineContentionConfig,
+    ) -> anyhow::Result<StressRunReport> {
+        require_triples(&self.cluster, cfg.initial_triples_per_node, false).await?;
+        if cfg.initial_presignatures_per_node > 0 {
+            require_presignatures(&self.cluster, cfg.initial_presignatures_per_node, false).await?;
+        }
+
+        let mut report = StressRunReport::default();
+        report.snapshots.push(self.snapshot("baseline-before").await?);
+
+        let pressure_watch = self.wait_for_pipeline_pressure(cfg.pressure_timeout);
+        let batch_run = self.run_named_batch("pipeline-contention", cfg.total_requests, cfg.concurrency);
+        let (pressure_nodes, batch) = tokio::join!(pressure_watch, batch_run);
+        let (triple_pressure_nodes, presignature_pressure_nodes) = pressure_nodes?;
+
+        report.requests.extend(batch.outcomes.iter().cloned());
+        report.batches.push(batch);
+        report
+            .snapshots
+            .push(self.snapshot_from_nodes("triple-pressure", triple_pressure_nodes).await?);
+        report
+            .snapshots
+            .push(self.snapshot_from_nodes("presignature-pressure", presignature_pressure_nodes).await?);
+
+        require_triples(&self.cluster, cfg.recovery_triples_min, false).await?;
+        require_presignatures(&self.cluster, cfg.recovery_presignatures_min, false).await?;
+        report.snapshots.push(self.snapshot("recovered").await?);
+
+        Ok(report)
+    }
+
     pub async fn run_single_node_straggler(
         &self,
         cfg: &SingleNodeStragglerConfig,
@@ -976,6 +1088,13 @@ impl StressHarness {
                 self.run_overload_with_node_degradation(
                     &OverloadNodeDegradationConfig::default_with(total_requests, concurrency),
                 )
+                .await
+            }
+            StressScenario::PipelineContention => {
+                self.run_pipeline_contention(&PipelineContentionConfig::default_with(
+                    total_requests,
+                    concurrency,
+                ))
                 .await
             }
             StressScenario::TripleDepletion => {

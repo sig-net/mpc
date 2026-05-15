@@ -61,6 +61,14 @@ fn main() {
                             cfg.protocol.presignature.min_presignatures = 2;
                             cfg.protocol.presignature.max_presignatures = 4;
                         }
+                        StressScenario::PipelineContention => {
+                            cfg.protocol.max_concurrent_generation = 1;
+                            cfg.protocol.max_concurrent_introduction = 1;
+                            cfg.protocol.triple.min_triples = 1;
+                            cfg.protocol.triple.max_triples = 2;
+                            cfg.protocol.presignature.min_presignatures = 1;
+                            cfg.protocol.presignature.max_presignatures = 2;
+                        }
                         _ => {
                             cfg.protocol.triple.min_triples = (total_requests as u32).saturating_mul(2);
                             cfg.protocol.triple.max_triples = (total_requests as u32).saturating_mul(8);

@@ -3,7 +3,7 @@ use std::time::Duration;
 use integration_tests::stress::{
     BurstSpikeConfig, GlobalLatencySweepConfig, LatencySweepStage, SingleNodeStragglerConfig,
     OverloadNodeDegradationConfig, SteadyOverloadConfig, StressHarnessBuilder, StressRunReport,
-    TripleDepletionConfig,
+    PipelineContentionConfig, TripleDepletionConfig,
 };
 use serial_test::serial;
 use test_log::test;
@@ -72,6 +72,24 @@ async fn build_triple_depletion_harness() -> anyhow::Result<integration_tests::s
             cfg.protocol.triple.max_triples = 2;
             cfg.protocol.presignature.min_presignatures = 2;
             cfg.protocol.presignature.max_presignatures = 4;
+        })
+        .build()
+        .await
+}
+
+async fn build_pipeline_contention_harness() -> anyhow::Result<integration_tests::stress::StressHarness> {
+    StressHarnessBuilder::default()
+        .nodes(3)
+        .threshold(2)
+        .disable_prestockpile()
+        .request_timeout(Duration::from_secs(90))
+        .with_config(|cfg| {
+            cfg.protocol.max_concurrent_generation = 1;
+            cfg.protocol.max_concurrent_introduction = 1;
+            cfg.protocol.triple.min_triples = 1;
+            cfg.protocol.triple.max_triples = 2;
+            cfg.protocol.presignature.min_presignatures = 1;
+            cfg.protocol.presignature.max_presignatures = 2;
         })
         .build()
         .await
@@ -317,6 +335,64 @@ async fn test_stress_b3_overload_node_degradation_ci() -> anyhow::Result<()> {
     assert_eq!(warmup.summary.timeout + warmup.summary.dropped + warmup.summary.errors, 0);
     assert_eq!(recovery.summary.timeout + recovery.summary.dropped + recovery.summary.errors, 0);
     assert_eq!(degraded.summary.total, cfg.degraded_total_requests);
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+#[serial]
+#[ignore = "needs deterministic presignature refill hook under signing load"]
+async fn test_stress_c2_pipeline_contention_ci() -> anyhow::Result<()> {
+    let harness = build_pipeline_contention_harness().await?;
+    let cfg = PipelineContentionConfig {
+        initial_triples_per_node: 1,
+        initial_presignatures_per_node: 0,
+        total_requests: 4,
+        concurrency: 2,
+        pressure_timeout: Duration::from_secs(45),
+        recovery_triples_min: 1,
+        recovery_presignatures_min: 1,
+    };
+
+    let report = harness.run_pipeline_contention(&cfg).await?;
+    assert_eq!(report.batches.len(), 1);
+    assert_eq!(report.snapshots.len(), 4);
+    assert_all_resolved(&report);
+    assert_snapshot_shape(&report, 3);
+    assert_batch_totals(&report);
+
+    let triple_pressure_snapshot = &report.snapshots[1];
+    let triple_pressure = triple_pressure_snapshot
+        .nodes
+        .iter()
+        .filter_map(|node| node.state.as_ref())
+        .any(|state| {
+        matches!(
+            state,
+            integration_tests::stress::NodeStateSnapshot::Running {
+                triple_count,
+                triple_potential_count,
+                ..
+            } if triple_potential_count > triple_count
+        )
+    });
+    let presignature_pressure_snapshot = &report.snapshots[2];
+    let presignature_pressure = presignature_pressure_snapshot
+        .nodes
+        .iter()
+        .filter_map(|node| node.state.as_ref())
+        .any(|state| {
+        matches!(
+            state,
+            integration_tests::stress::NodeStateSnapshot::Running {
+                presignature_count,
+                presignature_potential_count,
+                ..
+            } if presignature_potential_count > presignature_count
+        )
+    });
+    assert!(triple_pressure, "triple refill should activate under signing load");
+    assert!(presignature_pressure, "presignature refill should activate under signing load");
 
     Ok(())
 }
