@@ -13,6 +13,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, RwLock};
 use url::Url;
 
+use crate::actions::wait::{require_presignatures, require_triples};
 use crate::cluster::spawner::{ClusterSpawner, PregeneratedKeys};
 use crate::cluster::Cluster;
 use crate::local::{Node, NodeEnvConfig};
@@ -181,6 +182,45 @@ pub struct NodeSnapshot {
     pub node_id: String,
     pub metrics: Option<mpc_node::web::BenchMetrics>,
     pub metrics_error: Option<String>,
+    pub state: Option<NodeStateSnapshot>,
+    pub state_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NodeStateSnapshot {
+    Running {
+        triple_count: usize,
+        triple_potential_count: usize,
+        presignature_count: usize,
+        presignature_potential_count: usize,
+    },
+    Resharing,
+    Joining,
+    NotRunning,
+}
+
+impl From<&mpc_node::web::StateView> for NodeStateSnapshot {
+    fn from(value: &mpc_node::web::StateView) -> Self {
+        match value {
+            mpc_node::web::StateView::Running {
+                triple_count,
+                triple_potential_count,
+                presignature_count,
+                presignature_potential_count,
+                ..
+            } => Self::Running {
+                triple_count: *triple_count,
+                triple_potential_count: *triple_potential_count,
+                presignature_count: *presignature_count,
+                presignature_potential_count: *presignature_potential_count,
+            },
+            mpc_node::web::StateView::Resharing { .. } => Self::Resharing,
+            mpc_node::web::StateView::Joining { .. } => Self::Joining,
+            mpc_node::web::StateView::NotRunning => Self::NotRunning,
+            _ => Self::NotRunning,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,6 +261,7 @@ pub enum StressScenario {
     GlobalLatencySweep,
     SingleNodeStraggler,
     SteadyOverload,
+    TripleDepletion,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,6 +292,33 @@ impl BurstSpikeConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TripleDepletionConfig {
+    pub initial_triples_per_node: usize,
+    pub initial_presignatures_per_node: usize,
+    pub active_triple_generators_min: i64,
+    pub recovery_triples_min: i64,
+    pub total_requests: usize,
+    pub concurrency: usize,
+    pub stockpile_timeout: Duration,
+    pub recovery_timeout: Duration,
+}
+
+impl TripleDepletionConfig {
+    pub fn default_with(total_requests: usize, concurrency: usize) -> Self {
+        Self {
+            initial_triples_per_node: 1,
+            initial_presignatures_per_node: 2,
+            active_triple_generators_min: 1,
+            recovery_triples_min: 1,
+            total_requests: total_requests.max(4),
+            concurrency: concurrency.max(2),
+            stockpile_timeout: Duration::from_secs(60),
+            recovery_timeout: Duration::from_secs(90),
+        }
+    }
+}
+
 impl StressScenario {
     pub fn from_env(value: &str) -> Option<Self> {
         match value {
@@ -258,6 +326,7 @@ impl StressScenario {
             "global-latency" => Some(Self::GlobalLatencySweep),
             "single-node-straggler" => Some(Self::SingleNodeStraggler),
             "steady-overload" => Some(Self::SteadyOverload),
+            "triple-depletion" => Some(Self::TripleDepletion),
             _ => None,
         }
     }
@@ -268,6 +337,7 @@ impl StressScenario {
             Self::GlobalLatencySweep => "global-latency",
             Self::SingleNodeStraggler => "single-node-straggler",
             Self::SteadyOverload => "steady-overload",
+            Self::TripleDepletion => "triple-depletion",
         }
     }
 }
@@ -378,6 +448,11 @@ impl StressHarnessBuilder {
         self
     }
 
+    pub fn disable_prestockpile(mut self) -> Self {
+        self.spawner = self.spawner.disable_prestockpile();
+        self
+    }
+
     pub fn threshold(mut self, threshold: usize) -> Self {
         self.spawner = self.spawner.threshold(threshold);
         self
@@ -452,6 +527,70 @@ pub struct StressHarness {
 }
 
 impl StressHarness {
+    async fn collect_node_snapshots(&self) -> Vec<NodeSnapshot> {
+        let mut nodes = Vec::with_capacity(self.cluster.len());
+        for id in 0..self.cluster.len() {
+            let metrics = self.cluster.fetch_bench_metrics(id).await;
+            let state = self.cluster.fetch_state(id).await;
+            nodes.push(NodeSnapshot {
+                node_id: self.cluster.account_id(id).to_string(),
+                metrics: metrics.as_ref().ok().cloned(),
+                metrics_error: metrics.err().map(|err| err.to_string()),
+                state: state.as_ref().ok().map(NodeStateSnapshot::from),
+                state_error: state.err().map(|err| err.to_string()),
+            });
+        }
+        nodes
+    }
+
+    async fn snapshot_from_nodes(
+        &self,
+        label: impl Into<String>,
+        nodes: Vec<NodeSnapshot>,
+    ) -> anyhow::Result<StressSnapshot> {
+        Ok(StressSnapshot {
+            label: label.into(),
+            system_load: self.fetch_system_load().await?,
+            nodes,
+        })
+    }
+
+    async fn wait_for_active_triple_generation(
+        &self,
+        min_generators: i64,
+        timeout: Duration,
+    ) -> anyhow::Result<Vec<NodeSnapshot>> {
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            let nodes = self.collect_node_snapshots().await;
+            let active_generators = nodes
+                .iter()
+                .filter_map(|node| node.state.as_ref())
+                .map(|state| match state {
+                    NodeStateSnapshot::Running {
+                        triple_count,
+                        triple_potential_count,
+                        ..
+                    } if triple_potential_count > triple_count => 1,
+                    _ => 0,
+                })
+                .max()
+                .unwrap_or_default();
+            if active_generators >= min_generators {
+                return Ok(nodes);
+            }
+
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "timed out waiting for active triple refill pressure"
+                );
+            }
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
     pub async fn set_global_latency(&self, latency: Duration) {
         for proxy in &self.proxies {
             proxy.set_profile(ProxyFaultProfile::with_latency(latency)).await;
@@ -554,15 +693,7 @@ impl StressHarness {
     pub async fn snapshot(&self, label: impl Into<String>) -> anyhow::Result<StressSnapshot> {
         let label = label.into();
         let system_load = self.fetch_system_load().await?;
-        let mut nodes = Vec::with_capacity(self.cluster.len());
-        for id in 0..self.cluster.len() {
-            let metrics = self.cluster.fetch_bench_metrics(id).await;
-            nodes.push(NodeSnapshot {
-                node_id: self.cluster.account_id(id).to_string(),
-                metrics: metrics.as_ref().ok().cloned(),
-                metrics_error: metrics.err().map(|err| err.to_string()),
-            });
-        }
+        let nodes = self.collect_node_snapshots().await;
 
         Ok(StressSnapshot {
             label,
@@ -663,6 +794,36 @@ impl StressHarness {
         Ok(report)
     }
 
+    pub async fn run_triple_depletion(
+        &self,
+        cfg: &TripleDepletionConfig,
+    ) -> anyhow::Result<StressRunReport> {
+        require_triples(&self.cluster, cfg.initial_triples_per_node, false).await?;
+        require_presignatures(&self.cluster, cfg.initial_presignatures_per_node, false).await?;
+
+        let mut report = StressRunReport::default();
+        report.snapshots.push(self.snapshot("stockpile-ready").await?);
+
+        let depletion_watch = self.wait_for_active_triple_generation(
+            cfg.active_triple_generators_min,
+            cfg.stockpile_timeout,
+        );
+        let batch_run = self.run_named_batch("triple-depletion", cfg.total_requests, cfg.concurrency);
+        let (depleted_nodes, batch) = tokio::join!(depletion_watch, batch_run);
+        let depleted_nodes = depleted_nodes?;
+
+        report.requests.extend(batch.outcomes.iter().cloned());
+        report.batches.push(batch);
+        report
+            .snapshots
+            .push(self.snapshot_from_nodes("refill-active", depleted_nodes).await?);
+
+        require_triples(&self.cluster, cfg.recovery_triples_min as usize, false).await?;
+        report.snapshots.push(self.snapshot("recovered").await?);
+
+        Ok(report)
+    }
+
     pub async fn run_single_node_straggler(
         &self,
         cfg: &SingleNodeStragglerConfig,
@@ -733,6 +894,13 @@ impl StressHarness {
             StressScenario::SteadyOverload => {
                 self.run_steady_overload(&SteadyOverloadConfig::default_with(total_requests))
                     .await
+            }
+            StressScenario::TripleDepletion => {
+                self.run_triple_depletion(&TripleDepletionConfig::default_with(
+                    total_requests,
+                    concurrency,
+                ))
+                .await
             }
         }
     }

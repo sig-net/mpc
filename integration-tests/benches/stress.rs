@@ -40,15 +40,35 @@ fn main() {
 
     let harness = rt
         .block_on(async {
-            StressHarnessBuilder::default()
+            let builder = StressHarnessBuilder::default()
                 .nodes(nodes)
-                .threshold(threshold)
+                .threshold(threshold);
+            let builder = if matches!(scenario, StressScenario::TripleDepletion) {
+                builder.disable_prestockpile()
+            } else {
+                builder
+            };
+
+            builder
                 .request_timeout(Duration::from_secs(60))
                 .with_config(|cfg| {
-                    cfg.protocol.triple.min_triples = (total_requests as u32).saturating_mul(2);
-                    cfg.protocol.triple.max_triples = (total_requests as u32).saturating_mul(8);
-                    cfg.protocol.presignature.min_presignatures = total_requests as u32;
-                    cfg.protocol.presignature.max_presignatures = (total_requests as u32).saturating_mul(4);
+                    match scenario {
+                        StressScenario::TripleDepletion => {
+                            cfg.protocol.max_concurrent_generation = 1;
+                            cfg.protocol.max_concurrent_introduction = 1;
+                            cfg.protocol.triple.min_triples = 1;
+                            cfg.protocol.triple.max_triples = 2;
+                            cfg.protocol.presignature.min_presignatures = 2;
+                            cfg.protocol.presignature.max_presignatures = 4;
+                        }
+                        _ => {
+                            cfg.protocol.triple.min_triples = (total_requests as u32).saturating_mul(2);
+                            cfg.protocol.triple.max_triples = (total_requests as u32).saturating_mul(8);
+                            cfg.protocol.presignature.min_presignatures = total_requests as u32;
+                            cfg.protocol.presignature.max_presignatures =
+                                (total_requests as u32).saturating_mul(4);
+                        }
+                    }
                 })
                 .build()
                 .await

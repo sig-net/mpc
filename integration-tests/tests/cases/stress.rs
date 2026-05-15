@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use integration_tests::stress::{
     BurstSpikeConfig, GlobalLatencySweepConfig, LatencySweepStage, SingleNodeStragglerConfig,
-    SteadyOverloadConfig, StressHarnessBuilder, StressRunReport,
+    SteadyOverloadConfig, StressHarnessBuilder, StressRunReport, TripleDepletionConfig,
 };
 use serial_test::serial;
 use test_log::test;
@@ -33,6 +33,7 @@ fn assert_snapshot_shape(report: &StressRunReport, nodes: usize) {
                 node.metrics.is_some() || node.metrics_error.is_some(),
                 "snapshot must contain either metrics or a fetch error"
             );
+            assert!(node.state.is_some() || node.state_error.is_some(), "snapshot must contain either state or a fetch error");
         }
     }
 }
@@ -52,6 +53,24 @@ async fn build_harness() -> anyhow::Result<integration_tests::stress::StressHarn
             cfg.protocol.triple.max_triples = 128;
             cfg.protocol.presignature.min_presignatures = 24;
             cfg.protocol.presignature.max_presignatures = 128;
+        })
+        .build()
+        .await
+}
+
+async fn build_triple_depletion_harness() -> anyhow::Result<integration_tests::stress::StressHarness> {
+    StressHarnessBuilder::default()
+        .nodes(3)
+        .threshold(2)
+        .disable_prestockpile()
+        .request_timeout(Duration::from_secs(90))
+        .with_config(|cfg| {
+            cfg.protocol.max_concurrent_generation = 1;
+            cfg.protocol.max_concurrent_introduction = 1;
+            cfg.protocol.triple.min_triples = 1;
+            cfg.protocol.triple.max_triples = 2;
+            cfg.protocol.presignature.min_presignatures = 2;
+            cfg.protocol.presignature.max_presignatures = 4;
         })
         .build()
         .await
@@ -203,6 +222,66 @@ async fn test_stress_b1_steady_overload_ci() -> anyhow::Result<()> {
     let last = &report.batches[report.batches.len() - 1].summary;
     assert_eq!(first.timeout + first.dropped + first.errors, 0);
     assert_eq!(last.timeout + last.dropped + last.errors, 0);
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+#[serial]
+async fn test_stress_c1_triple_depletion_ci() -> anyhow::Result<()> {
+    let harness = build_triple_depletion_harness().await?;
+    let cfg = TripleDepletionConfig {
+        initial_triples_per_node: 1,
+        initial_presignatures_per_node: 2,
+        active_triple_generators_min: 1,
+        recovery_triples_min: 1,
+        total_requests: 4,
+        concurrency: 2,
+        stockpile_timeout: Duration::from_secs(45),
+        recovery_timeout: Duration::from_secs(90),
+    };
+
+    let report = harness.run_triple_depletion(&cfg).await?;
+    assert_eq!(report.batches.len(), 1);
+    assert_eq!(report.snapshots.len(), 3);
+    assert_all_resolved(&report);
+    assert_snapshot_shape(&report, 3);
+    assert_batch_totals(&report);
+
+    let batch = &report.batches[0];
+    assert_eq!(batch.label, "triple-depletion");
+    assert_eq!(batch.summary.timeout + batch.summary.dropped + batch.summary.errors, 0);
+
+    let depleted = &report.snapshots[1];
+    let active_refill = depleted
+        .nodes
+        .iter()
+        .filter_map(|node| node.state.as_ref())
+        .any(|state| matches!(
+            state,
+            integration_tests::stress::NodeStateSnapshot::Running {
+                triple_count,
+                triple_potential_count,
+                ..
+            } if triple_potential_count > triple_count
+        ));
+    assert!(
+        active_refill,
+        "triple generation should be active while requests refill stockpile"
+    );
+
+    let recovered = &report.snapshots[2];
+    for node in &recovered.nodes {
+        let state = node.state.as_ref().expect("recovery snapshot should carry state");
+        assert!(
+            matches!(
+                state,
+                integration_tests::stress::NodeStateSnapshot::Running { triple_count, .. }
+                    if *triple_count >= cfg.recovery_triples_min as usize
+            ),
+            "triple stockpile should recover after scenario"
+        );
+    }
 
     Ok(())
 }
