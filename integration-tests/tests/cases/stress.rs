@@ -308,7 +308,7 @@ async fn test_stress_c1_triple_depletion_ci() -> anyhow::Result<()> {
 #[test(tokio::test)]
 #[serial]
 async fn test_stress_b3_overload_node_degradation_ci() -> anyhow::Result<()> {
-    let harness = build_harness().await?;
+    let mut harness = build_harness().await?;
     let cfg = OverloadNodeDegradationConfig {
         node: 1,
         warmup_total_requests: 6,
@@ -319,12 +319,16 @@ async fn test_stress_b3_overload_node_degradation_ci() -> anyhow::Result<()> {
         recovery_concurrency: 3,
     };
 
-    let report = harness.run_overload_with_node_degradation(&cfg).await?;
+    let report = harness.run_overload_with_node_restart(&cfg).await?;
     assert_eq!(report.batches.len(), 3);
     assert_eq!(report.snapshots.len(), 4);
     assert_all_resolved(&report);
-    assert_snapshot_shape(&report, 3);
     assert_batch_totals(&report);
+
+    assert_eq!(report.snapshots[0].nodes.len(), 3);
+    assert_eq!(report.snapshots[1].nodes.len(), 2);
+    assert_eq!(report.snapshots[2].nodes.len(), 3);
+    assert_eq!(report.snapshots[3].nodes.len(), 3);
 
     let warmup = &report.batches[0];
     let degraded = &report.batches[1];

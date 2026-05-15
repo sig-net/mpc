@@ -980,6 +980,52 @@ impl StressHarness {
         Ok(report)
     }
 
+    pub async fn run_overload_with_node_restart(
+        &mut self,
+        cfg: &OverloadNodeDegradationConfig,
+    ) -> anyhow::Result<StressRunReport> {
+        let mut report = StressRunReport::default();
+
+        report.snapshots.push(self.snapshot("warmup-before").await?);
+        let warmup = self
+            .run_named_batch(
+                "warmup",
+                cfg.warmup_total_requests,
+                cfg.warmup_concurrency,
+            )
+            .await;
+        report.requests.extend(warmup.outcomes.iter().cloned());
+        report.batches.push(warmup);
+
+        let account_id = self.cluster.account_id(cfg.node).clone();
+        let node_cfg = self.cluster.kill_node(&account_id).await;
+        report.snapshots.push(self.snapshot("degraded-before").await?);
+        let degraded = self
+            .run_named_batch(
+                "degraded",
+                cfg.degraded_total_requests,
+                cfg.degraded_concurrency,
+            )
+            .await;
+        report.requests.extend(degraded.outcomes.iter().cloned());
+        report.batches.push(degraded);
+
+        self.cluster.restart_node(node_cfg).await?;
+        report.snapshots.push(self.snapshot("recovery-before").await?);
+        let recovery = self
+            .run_named_batch(
+                "recovery",
+                cfg.recovery_total_requests,
+                cfg.recovery_concurrency,
+            )
+            .await;
+        report.requests.extend(recovery.outcomes.iter().cloned());
+        report.batches.push(recovery);
+        report.snapshots.push(self.snapshot("recovery-after").await?);
+
+        Ok(report)
+    }
+
     pub async fn run_pipeline_contention(
         &self,
         cfg: &PipelineContentionConfig,
