@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use integration_tests::stress::{
-    GlobalLatencySweepConfig, LatencySweepStage, SingleNodeStragglerConfig, SteadyOverloadConfig,
-    StressHarnessBuilder, StressRunReport,
+    BurstSpikeConfig, GlobalLatencySweepConfig, LatencySweepStage, SingleNodeStragglerConfig,
+    SteadyOverloadConfig, StressHarnessBuilder, StressRunReport,
 };
 use serial_test::serial;
 use test_log::test;
@@ -125,6 +125,40 @@ async fn test_stress_a2_single_node_straggler_ci() -> anyhow::Result<()> {
     assert_batch_totals(&report);
     assert_eq!(report.batches[0].summary.total, 12);
     assert!(report.batches[0].summary.p99_latency_ms.is_some());
+
+    Ok(())
+}
+
+#[test(tokio::test)]
+#[serial]
+async fn test_stress_b2_burst_spike_ci() -> anyhow::Result<()> {
+    let harness = build_harness().await?;
+    let cfg = BurstSpikeConfig {
+        warmup_total_requests: 6,
+        warmup_concurrency: 3,
+        spike_total_requests: 18,
+        spike_concurrency: 18,
+        recovery_total_requests: 6,
+        recovery_concurrency: 3,
+    };
+
+    let report = harness.run_burst_spike(&cfg).await?;
+    assert_eq!(report.batches.len(), 3);
+    assert_eq!(report.snapshots.len(), 4);
+    assert_all_resolved(&report);
+    assert_snapshot_shape(&report, 3);
+    assert_batch_totals(&report);
+
+    let warmup = &report.batches[0];
+    let spike = &report.batches[1];
+    let recovery = &report.batches[2];
+    assert_eq!(warmup.label, "warmup");
+    assert_eq!(spike.label, "spike");
+    assert_eq!(recovery.label, "recovery");
+    assert_eq!(warmup.summary.timeout + warmup.summary.dropped + warmup.summary.errors, 0);
+    assert_eq!(recovery.summary.timeout + recovery.summary.dropped + recovery.summary.errors, 0);
+    assert_eq!(spike.summary.total, 18);
+    assert!(spike.summary.p99_latency_ms.is_some());
 
     Ok(())
 }

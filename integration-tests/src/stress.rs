@@ -223,6 +223,34 @@ pub enum StressScenario {
     SteadyOverload,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BurstSpikeConfig {
+    pub warmup_total_requests: usize,
+    pub warmup_concurrency: usize,
+    pub spike_total_requests: usize,
+    pub spike_concurrency: usize,
+    pub recovery_total_requests: usize,
+    pub recovery_concurrency: usize,
+}
+
+impl BurstSpikeConfig {
+    pub fn default_with(total_requests: usize, concurrency: usize) -> Self {
+        let warmup_concurrency = concurrency.max(1);
+        let recovery_concurrency = warmup_concurrency;
+        let spike_total_requests = total_requests.max(warmup_concurrency.saturating_mul(4));
+        let spike_concurrency = spike_total_requests.max(warmup_concurrency);
+
+        Self {
+            warmup_total_requests: total_requests.max(warmup_concurrency),
+            warmup_concurrency,
+            spike_total_requests,
+            spike_concurrency,
+            recovery_total_requests: total_requests.max(recovery_concurrency),
+            recovery_concurrency,
+        }
+    }
+}
+
 impl StressScenario {
     pub fn from_env(value: &str) -> Option<Self> {
         match value {
@@ -599,6 +627,42 @@ impl StressHarness {
         Ok(report)
     }
 
+    pub async fn run_burst_spike(&self, cfg: &BurstSpikeConfig) -> anyhow::Result<StressRunReport> {
+        let mut report = StressRunReport::default();
+
+        report.snapshots.push(self.snapshot("warmup-before").await?);
+        let warmup = self
+            .run_named_batch(
+                "warmup",
+                cfg.warmup_total_requests,
+                cfg.warmup_concurrency,
+            )
+            .await;
+        report.requests.extend(warmup.outcomes.iter().cloned());
+        report.batches.push(warmup);
+
+        report.snapshots.push(self.snapshot("spike-before").await?);
+        let spike = self
+            .run_named_batch("spike", cfg.spike_total_requests, cfg.spike_concurrency)
+            .await;
+        report.requests.extend(spike.outcomes.iter().cloned());
+        report.batches.push(spike);
+
+        report.snapshots.push(self.snapshot("recovery-before").await?);
+        let recovery = self
+            .run_named_batch(
+                "recovery",
+                cfg.recovery_total_requests,
+                cfg.recovery_concurrency,
+            )
+            .await;
+        report.requests.extend(recovery.outcomes.iter().cloned());
+        report.batches.push(recovery);
+        report.snapshots.push(self.snapshot("recovery-after").await?);
+
+        Ok(report)
+    }
+
     pub async fn run_single_node_straggler(
         &self,
         cfg: &SingleNodeStragglerConfig,
@@ -649,14 +713,8 @@ impl StressHarness {
     ) -> anyhow::Result<StressRunReport> {
         match scenario {
             StressScenario::Burst => {
-                let mut report = StressRunReport::default();
-                let batch = self
-                    .run_named_batch("burst", total_requests, concurrency)
-                    .await;
-                report.requests.extend(batch.outcomes.iter().cloned());
-                report.batches.push(batch);
-                report.snapshots.push(self.snapshot("post-burst").await?);
-                Ok(report)
+                self.run_burst_spike(&BurstSpikeConfig::default_with(total_requests, concurrency))
+                    .await
             }
             StressScenario::GlobalLatencySweep => {
                 self.run_global_latency_sweep(&GlobalLatencySweepConfig::default_with(

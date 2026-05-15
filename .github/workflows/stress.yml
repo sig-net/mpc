@@ -1,0 +1,84 @@
+name: Stress CI
+
+on:
+  push:
+    branches:
+      - develop
+    paths:
+      - .github/workflows/stress.yml
+      - integration-tests/**
+      - chain-signatures/**
+      - doc/stress-*.md
+  pull_request:
+    paths:
+      - .github/workflows/stress.yml
+      - integration-tests/**
+      - chain-signatures/**
+      - doc/stress-*.md
+  workflow_dispatch:
+
+env:
+  RUSTFLAGS: -D warnings
+
+jobs:
+  stress-ci:
+    name: Stress CI Lite
+    runs-on: warp-ubuntu-latest-x64-4x
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Redis Image
+        run: docker pull redis:7.4.2
+
+      - name: Install Rust (1.81.0)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.81.0
+          target: wasm32-unknown-unknown
+
+      - uses: WarpBuilds/cache@v1
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build stress tests
+        run: cargo build -p integration-tests --test lib
+
+      - name: Run A-1 global latency
+        run: cargo test -p integration-tests --test lib test_stress_a1_global_latency_ci -- --nocapture
+        env:
+          RUST_LOG: info,workspaces=warn
+          RUST_BACKTRACE: 1
+
+      - name: Run A-2 single-node straggler
+        run: cargo test -p integration-tests --test lib test_stress_a2_single_node_straggler_ci -- --nocapture
+        env:
+          RUST_LOG: info,workspaces=warn
+          RUST_BACKTRACE: 1
+
+      - name: Run B-1 steady overload
+        run: cargo test -p integration-tests --test lib test_stress_b1_steady_overload_ci -- --nocapture
+        env:
+          RUST_LOG: info,workspaces=warn
+          RUST_BACKTRACE: 1
+
+      - name: Run B-2 burst spike
+        run: cargo test -p integration-tests --test lib test_stress_b2_burst_spike_ci -- --nocapture
+        env:
+          RUST_LOG: info,workspaces=warn
+          RUST_BACKTRACE: 1
