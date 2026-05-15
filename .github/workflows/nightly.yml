@@ -88,7 +88,7 @@ jobs:
         run: npm i && npx hardhat compile
 
       - name: Presetup binaries
-        run: setup.sh
+        run: ./setup.sh
         env:
           MPC_ENABLE_HELIOS: 1
 
