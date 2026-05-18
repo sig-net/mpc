@@ -1,9 +1,10 @@
 use std::fs::File;
 use std::io::Write;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::vec;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::NodeConfig;
 use mpc_node::indexer_eth::EthConfig;
@@ -13,8 +14,9 @@ use serde_json::json;
 use tokio::signal;
 
 mod commands;
+mod dev_env;
 
-#[derive(Parser, Debug)]
+#[derive(Subcommand, Debug)]
 enum Cli {
     /// Spin up dependent services and mpc nodes
     SetupEnv {
@@ -39,18 +41,46 @@ enum Cli {
         eth_helios_data_path: String,
         #[arg(long, default_value = "10000")]
         eth_refresh_finalized_interval: u64,
+        #[arg(long, default_value = dev_env::DEFAULT_STATE_FILE)]
+        state_file: PathBuf,
     },
     /// Spin up dependent services but not mpc nodes
     DepServices,
     /// Generate example commands to interact with the contract
     ContractCommands,
+    /// Submit sign requests into the latest interactive environment
+    InvokeSign {
+        #[arg(long, default_value = dev_env::DEFAULT_STATE_FILE)]
+        state_file: PathBuf,
+        #[arg(long)]
+        tx_hash: Option<String>,
+        #[arg(long)]
+        multi: Option<usize>,
+        #[arg(long, default_value_t = false)]
+        bidirectional: bool,
+    },
+    /// Trigger join/kick resharing flows against the latest interactive environment
+    Reshare {
+        #[arg(long, default_value = dev_env::DEFAULT_STATE_FILE)]
+        state_file: PathBuf,
+        #[arg(value_parser = ["join", "kick"])]
+        action: String,
+        #[arg(long)]
+        target: Option<String>,
+    },
+}
+
+#[derive(Parser, Debug)]
+struct Args {
+    #[command(subcommand)]
+    command: Cli,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     integration_tests::utils::init_tracing_log();
 
-    match Cli::parse() {
+    match Args::parse().command {
         Cli::SetupEnv {
             nodes,
             threshold,
@@ -61,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
             eth_network,
             eth_helios_data_path,
             eth_refresh_finalized_interval,
+            state_file,
         } => {
             println!("Setting up an environment with {nodes} nodes, {threshold} threshold ...");
             let config = NodeConfig {
@@ -86,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
 
             let nodes = spawner.run().await?;
+            dev_env::save_env(&state_file, &nodes, &spawner.cfg)?;
             let ctx = nodes.ctx();
             let urls: Vec<_> = (0..spawner.cfg.nodes).map(|i| nodes.url(i)).collect();
             let near_accounts = nodes.near_accounts();
@@ -97,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
             println!("\nExternal services:");
             println!("  near sandbox rpc:  {}", ctx.worker.rpc_addr());
             println!("  redis:  {}", ctx.redis.internal_address);
+            println!("  state file:  {}", state_file.display());
 
             println!("\nNodes:");
             for i in 0..urls.len() {
@@ -112,6 +145,7 @@ async fn main() -> anyhow::Result<()> {
 
             signal::ctrl_c().await.expect("Failed to listen for event");
             println!("Received Ctrl-C");
+            let _ = dev_env::remove_env(&state_file);
             println!("Clean up finished");
         }
         Cli::DepServices => {
@@ -207,6 +241,35 @@ async fn main() -> anyhow::Result<()> {
                 file.write_all(arg.as_bytes())?;
                 file.write_all("\n\n".as_bytes())?;
             }
+        }
+        Cli::InvokeSign {
+            state_file,
+            tx_hash,
+            multi,
+            bidirectional,
+        } => {
+            let command = if let Some(tx_hash) = tx_hash {
+                dev_env::SignCommand::TxHash(tx_hash)
+            } else if let Some(count) = multi {
+                dev_env::SignCommand::Multi(count)
+            } else if bidirectional {
+                dev_env::SignCommand::Bidirectional
+            } else {
+                dev_env::SignCommand::Default
+            };
+            dev_env::invoke_sign(&state_file, command).await?;
+        }
+        Cli::Reshare {
+            state_file,
+            action,
+            target,
+        } => {
+            let command = match action.as_str() {
+                "join" => dev_env::ReshareCommand::Join,
+                "kick" => dev_env::ReshareCommand::Kick(target),
+                _ => unreachable!("validated by clap"),
+            };
+            dev_env::invoke_reshare(&state_file, command).await?;
         }
     }
 
