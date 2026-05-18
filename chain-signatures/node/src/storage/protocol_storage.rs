@@ -380,10 +380,24 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 end
             end
 
+            local our_shares_check = {}
+            for _, id in ipairs(our_shares) do
+                our_shares_check[id] = 1
+            end
+
             -- find shares that were shared with us but not found in our storage
             local not_found = {}
             for _, id in ipairs(ARGV) do
-                if redis.call("HEXISTS", artifact_key, id) == 0 then
+                local holders_key = artifact_key .. ':holders:' .. id
+                local owner_has = our_shares_check[id] == 1
+                local artifact_exists = redis.call("HEXISTS", artifact_key, id) == 1
+                local holders_exist = redis.call("EXISTS", holders_key) == 1
+                if not owner_has or not artifact_exists or not holders_exist then
+                    if artifact_exists then
+                        redis.call("HDEL", artifact_key, id)
+                    end
+                    redis.call("SREM", owner_key, id)
+                    redis.call("DEL", holders_key)
                     table.insert(not_found, id)
                 end
             end
@@ -748,6 +762,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
         &self.artifact_key
     }
 
+    pub fn owner_keys(&self) -> &str {
+        &self.owner_keys
+    }
+
     /// Batch remove a peer from holders for a set of artifact IDs, and prune
     /// artifacts that fall below the holder threshold.
     /// Assumes the given IDs are owned by this node for ownership-set cleanup.
@@ -776,17 +794,23 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 -- Skip if not owned by me (defense against malicious/buggy peer responses)
                 if redis.call('SISMEMBER', owner_key, id) == 0 then
                     -- noop: not our artifact
-                elseif redis.call('EXISTS', artifact_key .. ':holders:' .. id) == 1 then
+                else
                     local holders_key = artifact_key .. ':holders:' .. id
-                    redis.call('SREM', holders_key, peer)
-                    local count = redis.call('SCARD', holders_key)
-                    if count < threshold then
+                    if redis.call('EXISTS', holders_key) == 0 then
                         redis.call('HDEL', artifact_key, id)
-                        redis.call('DEL', holders_key)
                         redis.call('SREM', owner_key, id)
                         table.insert(removed, id)
                     else
-                        table.insert(updated, id)
+                        redis.call('SREM', holders_key, peer)
+                        local count = redis.call('SCARD', holders_key)
+                        if count < threshold then
+                            redis.call('HDEL', artifact_key, id)
+                            redis.call('DEL', holders_key)
+                            redis.call('SREM', owner_key, id)
+                            table.insert(removed, id)
+                        else
+                            table.insert(updated, id)
+                        end
                     end
                 end
             end
