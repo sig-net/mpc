@@ -1,8 +1,8 @@
 use alloy::network::{Ethereum, TransactionBuilder};
 use alloy::primitives::U256;
 use alloy::providers::Provider;
-use alloy::rpc::types::Filter;
 use alloy::rpc::types::request::TransactionRequest;
+use alloy::rpc::types::Filter;
 use alloy::sol_types::SolEvent;
 use anyhow::{anyhow, Context, Result};
 use integration_tests::cluster::Cluster;
@@ -71,8 +71,9 @@ async fn test_signature_ethereum() -> Result<()> {
         params,
     );
 
-    let signature_responded_topic =
-        alloy::primitives::keccak256("SignatureResponded(bytes32,address,((uint256,uint256),uint256,uint8))");
+    let signature_responded_topic = alloy::primitives::keccak256(
+        "SignatureResponded(bytes32,address,((uint256,uint256),uint256,uint8))",
+    );
 
     let mut matching_event = None;
     for _ in 0..30 {
@@ -252,8 +253,9 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     );
 
     // Wait for the signature response
-    let signature_responded_topic =
-        alloy::primitives::keccak256("SignatureResponded(bytes32,address,((uint256,uint256),uint256,uint8))");
+    let signature_responded_topic = alloy::primitives::keccak256(
+        "SignatureResponded(bytes32,address,((uint256,uint256),uint256,uint8))",
+    );
 
     let mut matching_event = None;
     for _ in 0..30 {
@@ -456,7 +458,9 @@ async fn produce_empty_eth_blocks(
     block_count: u64,
 ) -> anyhow::Result<()> {
     // Use a non-contract sink address so these transactions only advance block height.
-    let sink = alloy::primitives::Address::from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let sink = alloy::primitives::Address::from([
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]);
 
     for _ in 0..block_count {
         let tx = <TransactionRequest as TransactionBuilder<Ethereum>>::with_gas_limit(
@@ -470,11 +474,7 @@ async fn produce_empty_eth_blocks(
             21_000,
         );
 
-        client
-            .send_transaction(tx)
-            .await?
-            .get_receipt()
-            .await?;
+        client.send_transaction(tx).await?.get_receipt().await?;
     }
 
     Ok(())

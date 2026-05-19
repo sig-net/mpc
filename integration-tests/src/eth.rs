@@ -1,5 +1,5 @@
 use alloy::network::{Ethereum, EthereumWallet, TransactionBuilder};
-use alloy::primitives::{Address, B256, Bytes, U256};
+use alloy::primitives::{Address, Bytes, B256, U256};
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
 use alloy::providers::{Provider, ProviderBuilder, RootProvider};
 use alloy::rpc::types::request::TransactionRequest;
@@ -134,8 +134,7 @@ fn encode_request_id(
         bytes: &[u8],
     ) {
         let mut offset_word = [0u8; WORD_SIZE];
-        offset_word[WORD_SIZE - 8..]
-            .copy_from_slice(&(head_size + tails.len() as usize).to_be_bytes());
+        offset_word[WORD_SIZE - 8..].copy_from_slice(&(head_size + tails.len()).to_be_bytes());
         heads.push(offset_word);
 
         let mut len_word = [0u8; WORD_SIZE];

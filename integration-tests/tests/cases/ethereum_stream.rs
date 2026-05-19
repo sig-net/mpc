@@ -113,11 +113,8 @@ impl EthereumTestEnvironment {
                     Ok(pending) => {
                         // Await mining so each tick reliably corresponds to a mined block.
                         // If it takes too long, just continue; the next iteration will try again.
-                        let _ = tokio::time::timeout(
-                            Duration::from_secs(5),
-                            pending.get_receipt(),
-                        )
-                        .await;
+                        let _ = tokio::time::timeout(Duration::from_secs(5), pending.get_receipt())
+                            .await;
                     }
                     Err(err) => {
                         tracing::debug!(?err, "block pumper failed to send tx");
@@ -1054,7 +1051,11 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     let sig_topic = alloy::primitives::keccak256(
         "SignatureResponded(bytes32,address,((uint256,uint256),uint256,uint8))",
     );
-    assert_eq!(logs[0].topic0(), Some(&sig_topic), "unexpected event emitted");
+    assert_eq!(
+        logs[0].topic0(),
+        Some(&sig_topic),
+        "unexpected event emitted"
+    );
 
     // Verify the indexer emits the Respond event with matching data.
     let mut saw_respond = false;

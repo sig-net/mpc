@@ -286,14 +286,14 @@ pub fn sign_and_hash_eip1559_from_unsigned(
     let nonce: u64 = rlp.val_at::<u64>(1)?;
 
     // Re-encode with signature fields appended
-    let mut srlp = RlpStream::new_list(12);
+    let mut srlp = EthereumTxRlp::new_list(12);
     for i in 0..9 {
-        srlp.append_raw(rlp.at(i)?.as_raw(), 1);
+        srlp.append_raw_field(rlp.at(i)?.as_raw());
     }
     let y: u8 = if y_parity { 1 } else { 0 };
-    srlp.append(&y);
-    srlp.append(&r);
-    srlp.append(&s);
+    srlp.append_u8(y);
+    srlp.append_uint_bytes(r);
+    srlp.append_uint_bytes(s);
 
     let srlp_body = srlp.as_raw(); // &[u8]
     let mut signed_bytes = Vec::with_capacity(1 + srlp_body.len());
@@ -319,18 +319,63 @@ pub fn sign_and_hash_legacy_from_unsigned(
     );
 
     let nonce: u64 = rlp.val_at::<u64>(0)?;
-    let mut out = RlpStream::new_list(9);
+    let mut out = EthereumTxRlp::new_list(9);
     for i in 0..6 {
-        out.append_raw(rlp.at(i)?.as_raw(), 1);
+        out.append_raw_field(rlp.at(i)?.as_raw());
     }
     let v: u64 = 35 + 2 * chain_id.unwrap_or(0) + if y_parity { 1 } else { 0 };
-    out.append(&v);
-    out.append(&r);
-    out.append(&s);
+    out.append_u64(v);
+    out.append_uint_bytes(r);
+    out.append_uint_bytes(s);
 
-    let signed_bytes = out.out().to_vec();
+    let signed_bytes = out.into_vec();
     let hash = alloy_primitives::keccak256(&signed_bytes);
     Ok((hash.into(), nonce))
+}
+
+struct EthereumTxRlp {
+    stream: RlpStream,
+}
+
+impl EthereumTxRlp {
+    fn new_list(len: usize) -> Self {
+        Self {
+            stream: RlpStream::new_list(len),
+        }
+    }
+
+    fn append_raw_field(&mut self, raw: &[u8]) {
+        self.stream.append_raw(raw, 1);
+    }
+
+    fn append_u8(&mut self, value: u8) {
+        self.stream.append(&value);
+    }
+
+    fn append_u64(&mut self, value: u64) {
+        self.stream.append(&value);
+    }
+
+    fn append_uint_bytes(&mut self, value: &[u8]) {
+        let first_nonzero = value
+            .iter()
+            .position(|&byte| byte != 0)
+            .unwrap_or(value.len());
+        if first_nonzero == value.len() {
+            self.stream.append_empty_data();
+            return;
+        }
+
+        self.stream.append(&value[first_nonzero..].to_vec());
+    }
+
+    fn as_raw(&self) -> &[u8] {
+        self.stream.as_raw()
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        self.stream.out().to_vec()
+    }
 }
 
 /// Get the x coordinate of a point, as a scalar
@@ -503,4 +548,46 @@ pub struct SignBidirectionalSignature {
     pub public_key: mpc_crypto::PublicKey,
     pub indexed: IndexedSignRequest,
     pub signature: Signature,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sign_and_hash_eip1559_from_unsigned;
+    use alloy::consensus::{SignableTransaction, TxEip1559};
+    use alloy::eips::eip2718::Encodable2718;
+    use alloy::primitives::{Bytes, FixedBytes, Signature, TxKind, U256};
+
+    #[test]
+    fn eip1559_hash_matches_alloy_for_create_with_leading_zero_r() {
+        let tx = TxEip1559 {
+            chain_id: 31_337,
+            nonce: 3,
+            gas_limit: 100_000,
+            max_fee_per_gas: 100_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: TxKind::Create,
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: Bytes::new(),
+        };
+        let unsigned = tx.encoded_for_signing();
+        let mut r = [0u8; 32];
+        let mut s = [0u8; 32];
+        r[31] = 1;
+        s[31] = 2;
+
+        let (hash, nonce) = sign_and_hash_eip1559_from_unsigned(&unsigned, &r, &s, true).unwrap();
+
+        let signed = tx
+            .into_signed(Signature::from_scalars_and_parity(
+                FixedBytes::from_slice(&r),
+                FixedBytes::from_slice(&s),
+                true,
+            ))
+            .encoded_2718();
+        let expected_hash: [u8; 32] = alloy::primitives::keccak256(&signed).into();
+
+        assert_eq!(hash, expected_hash);
+        assert_eq!(nonce, 3);
+    }
 }
