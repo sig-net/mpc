@@ -1,8 +1,9 @@
-use crate::indexer_eth::EthConfig;
+use crate::indexer_eth::{EthConfig, MaybeBlock};
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::Address;
 use alloy::primitives::Bytes;
 use alloy::rpc::types::TransactionRequest;
+use futures_util::future::join_all;
 use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -28,6 +29,36 @@ impl HeliosEthereumClient {
         block_id: alloy::rpc::types::BlockId,
     ) -> anyhow::Result<Option<alloy::rpc::types::Block>> {
         self.fetch_block(block_id).await
+    }
+
+    /// Fetch multiple blocks in parallel. Missing blocks stay associated with requested height.
+    pub async fn get_blocks(
+        &self,
+        block_ids: &[alloy::rpc::types::BlockId],
+    ) -> anyhow::Result<Vec<MaybeBlock>> {
+        if block_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let blocks = join_all(
+            block_ids
+                .iter()
+                .copied()
+                .map(|block_id| async move { (block_id, self.get_block(block_id).await) }),
+        )
+        .await
+        .into_iter()
+        .map(|(block_id, result)| match result {
+            Ok(Some(block)) => MaybeBlock::Block(block),
+            Ok(None) => MaybeBlock::Missing(block_id),
+            Err(err) => {
+                tracing::warn!(?err, "helios batch block fetch failed");
+                MaybeBlock::Missing(block_id)
+            }
+        })
+        .collect::<Vec<_>>();
+
+        Ok(blocks)
     }
 
     pub async fn get_block_receipts(
