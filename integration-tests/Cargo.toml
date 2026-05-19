@@ -64,7 +64,7 @@ near-primitives = "0.26.0"
 
 # if necessary, use the following branch for near related indexer hacking:
 # { git = "https://github.com/near/near-workspaces-rs", branch = "phuong/tmp-node-2.3.0" }
-near-workspaces = "0.15.0"
+near-workspaces = { version = "0.15.0", features = ["unstable"] }
 
 # local chain-signatures dependencies
 mpc-crypto.workspace = true

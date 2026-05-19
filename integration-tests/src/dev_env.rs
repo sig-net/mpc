@@ -22,9 +22,9 @@ use near_workspaces::{Account, Contract};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::execute;
-use crate::utils;
-use crate::{NodeConfig, Nodes};
+use integration_tests::execute;
+use integration_tests::utils;
+use integration_tests::{NodeConfig, Nodes};
 
 pub const DEFAULT_STATE_FILE: &str = "target/mpc-dev-env.json";
 const DEFAULT_JOIN_BALANCE_NEAR: u128 = 10;
@@ -270,7 +270,7 @@ pub async fn invoke_reshare(path: &Path, command: ReshareCommand) -> anyhow::Res
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let voter_refs = voters.iter().collect::<Vec<_>>();
 
-            crate::utils::vote_join(&voter_refs, contract.id(), candidate.id()).await?;
+            utils::vote_join(&voter_refs, contract.id(), candidate.id()).await?;
             wait_for_running_epoch_change(&contract).await?;
 
             println!("submitted reshare join for {}", candidate.id());
@@ -302,7 +302,7 @@ pub async fn invoke_reshare(path: &Path, command: ReshareCommand) -> anyhow::Res
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let voter_refs = voters.iter().collect::<Vec<_>>();
 
-            crate::utils::vote_leave(&voter_refs, contract.id(), &kick_id).await?;
+            utils::vote_leave(&voter_refs, contract.id(), &kick_id).await?;
             wait_for_running_epoch_change(&contract).await?;
 
             if let Some(index) = env
