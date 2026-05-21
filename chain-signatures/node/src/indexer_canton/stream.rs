@@ -399,8 +399,7 @@ async fn process_canton_event(
                 };
                 let request_id = canton_event.generate_request_id();
                 let entropy: [u8; 32] = keccak256(request_id).into();
-                let boxed: crate::stream::ops::SignatureEventBox = Box::new(canton_event);
-                match boxed.generate_sign_request(entropy) {
+                match canton_event.generate_sign_request(entropy) {
                     Ok(indexed) => {
                         if events_tx
                             .send(ChainEvent::SignRequest(indexed))
