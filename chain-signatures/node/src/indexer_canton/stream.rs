@@ -127,28 +127,38 @@ impl CantonConnection {
     }
 
     /// Read the next message from the WebSocket. Closes the connection if the WebSocket is closed.
-    async fn next(&mut self) -> anyhow::Result<Option<Message>> {
+    async fn next(&mut self) -> Option<Message> {
         let Self::Connected(ws_read, _) = self else {
-            anyhow::bail!("canton WebSocket not initialized");
+            tracing::warn!("canton WebSocket not initialized");
+            return None;
         };
-        let maybe_msg = tokio::time::timeout(Duration::from_secs(60), ws_read.next())
-            .await
-            .map_err(|_| anyhow::anyhow!("canton WebSocket stalled: no message for 60s"))?;
+        let Ok(maybe_msg) = tokio::time::timeout(Duration::from_secs(60), ws_read.next()).await
+        else {
+            tracing::warn!("canton WebSocket stalled: no message for 60s");
+            return None;
+        };
 
         let Some(msg) = maybe_msg else {
             *self = Self::Disconnected;
-            return Ok(None);
+            return None;
         };
-        let msg = msg?;
+        let msg = match msg {
+            Ok(msg) => msg,
+            Err(err) => {
+                tracing::warn!(%err, "canton WebSocket error");
+                return None;
+            }
+        };
+
         if matches!(msg, Message::Close(_)) {
             tracing::info!("canton WebSocket received close frame");
             if let Err(err) = self.close().await {
                 tracing::debug!(%err, "failed to flush canton WebSocket close reply");
             }
-            return Ok(None);
+            return None;
         }
 
-        Ok(Some(msg))
+        Some(msg)
     }
 
     async fn close(&mut self) -> anyhow::Result<()> {
@@ -194,7 +204,7 @@ impl CantonIndexer {
         Ok(())
     }
 
-    async fn reconnect(&mut self) -> anyhow::Result<()> {
+    async fn reconnect(&mut self) {
         let mut backoff = Duration::from_secs(1);
 
         loop {
@@ -204,7 +214,7 @@ impl CantonIndexer {
                         resume_offset = self.last_seen_offset,
                         "canton WebSocket reconnected"
                     );
-                    return Ok(());
+                    return;
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -220,10 +230,11 @@ impl CantonIndexer {
         }
     }
 
-    async fn read_next_update(&mut self) -> anyhow::Result<Option<ledger_api::Update>> {
+    async fn next_update(&mut self) -> Option<ledger_api::Update> {
         loop {
-            let Some(msg) = self.ws_conn.next().await? else {
-                return Ok(None);
+            let Some(msg) = self.ws_conn.next().await else {
+                self.reconnect().await;
+                continue;
             };
             let Message::Text(text) = msg else {
                 continue;
@@ -244,7 +255,7 @@ impl CantonIndexer {
             }
 
             if let Some(update) = msg.update {
-                return Ok(Some(update));
+                return Some(update);
             }
         }
     }
@@ -273,27 +284,8 @@ impl CantonIndexer {
 
     async fn process_catchup_offset(&mut self, target_offset: u64) -> anyhow::Result<()> {
         loop {
-            let update = match self.read_next_update().await {
-                Ok(Some(update)) => update,
-                Ok(None) => {
-                    tracing::warn!(
-                        target_offset,
-                        resume_offset = self.last_seen_offset,
-                        "canton WebSocket closed during catchup; reconnecting"
-                    );
-                    self.reconnect().await?;
-                    continue;
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        ?err,
-                        target_offset,
-                        resume_offset = self.last_seen_offset,
-                        "canton WebSocket read failed during catchup; reconnecting"
-                    );
-                    self.reconnect().await?;
-                    continue;
-                }
+            let Some(update) = self.next_update().await else {
+                anyhow::bail!("canton WebSocket closed during catchup; reconnecting");
             };
             let offset = self.process_update(&update).await?;
             if offset >= target_offset {
@@ -345,27 +337,8 @@ impl ChainIndexer for CantonIndexer {
     }
 
     async fn process_next_block(&mut self) -> bool {
-        let update = loop {
-            match self.read_next_update().await {
-                Ok(Some(update)) => break update,
-                Ok(None) => {
-                    tracing::warn!(
-                        resume_offset = self.last_seen_offset,
-                        "canton WebSocket closed during live processing; reconnecting"
-                    );
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        ?err,
-                        resume_offset = self.last_seen_offset,
-                        "canton live read failed; reconnecting"
-                    );
-                }
-            }
-            if let Err(err) = self.reconnect().await {
-                tracing::error!(?err, "canton reconnect failed");
-                return false;
-            }
+        let Some(update) = self.next_update().await else {
+            return false;
         };
 
         while let Err(err) = self.process_update(&update).await {
