@@ -287,13 +287,8 @@ impl Backlog {
         let mut requeueable: Vec<_> = pending
             .requests
             .values()
-            .filter(|entry| {
-                matches!(
-                    entry.status(),
-                    SignStatus::AwaitingResponse | SignStatus::AwaitingResponseBidirectional
-                ) && entry.execution_tx().is_none()
-            })
-            .map(|entry| entry.request.clone())
+            .filter(|entry| entry.is_requeueable())
+            .map(|entry| entry.request().clone())
             .collect();
 
         requeueable.sort_by(|left, right| {
@@ -423,7 +418,10 @@ impl Backlog {
             return None;
         };
         tracing::info!(?chain, ?id, before = ?entry.status(), after = ?status, "set_status: updating");
-        entry.set_status(status);
+        if let Err(err) = entry.set_status(status) {
+            tracing::warn!(?chain, ?id, ?status, ?err, "set_status: invalid state transition");
+            return None;
+        }
         Some(entry.clone())
     }
 
@@ -700,22 +698,116 @@ pub enum BacklogError {
     TransactionNotFound,
     #[error("cannot advance non-bidirectional or already-advanced backlog entry")]
     InvalidAdvanceTransition,
+    #[error("invalid backlog state shape for status {status:?}")]
+    InvalidStateShape { status: SignStatus },
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingResponse {
+    request: IndexedSignRequest,
+}
+
+impl PendingResponse {
+    fn new(request: IndexedSignRequest) -> Self {
+        Self { request }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingExecution {
+    request: IndexedSignRequest,
+    execution: BidirectionalTx,
+}
+
+impl PendingExecution {
+    fn new(request: IndexedSignRequest, execution: BidirectionalTx) -> Self {
+        Self { request, execution }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingResponseBidirectional {
+    request: IndexedSignRequest,
+    execution: BidirectionalTx,
+}
+
+impl PendingResponseBidirectional {
+    fn new(request: IndexedSignRequest, execution: BidirectionalTx) -> Self {
+        Self { request, execution }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum BacklogState {
+    PendingResponse(PendingResponse),
+    PendingExecution(PendingExecution),
+    PendingResponseBidirectional(PendingResponseBidirectional),
+}
+
+#[derive(Debug, Clone)]
+pub struct BacklogEntry {
+    state: BacklogState,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BacklogEntry {
-    pub request: IndexedSignRequest,
-    pub status: SignStatus,
-    pub execution: Option<BidirectionalTx>,
+struct BacklogEntryWire {
+    request: IndexedSignRequest,
+    status: SignStatus,
+    execution: Option<BidirectionalTx>,
+}
+
+impl serde::Serialize for BacklogEntry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        BacklogEntryWire {
+            request: self.request().clone(),
+            status: self.status(),
+            execution: self.execution_tx().cloned(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for BacklogEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = BacklogEntryWire::deserialize(deserializer)?;
+        Self::try_from_parts(wire.request, wire.status, wire.execution)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl From<PendingResponse> for BacklogEntry {
+    fn from(state: PendingResponse) -> Self {
+        Self {
+            state: BacklogState::PendingResponse(state),
+        }
+    }
+}
+
+impl From<PendingExecution> for BacklogEntry {
+    fn from(state: PendingExecution) -> Self {
+        Self {
+            state: BacklogState::PendingExecution(state),
+        }
+    }
+}
+
+impl From<PendingResponseBidirectional> for BacklogEntry {
+    fn from(state: PendingResponseBidirectional) -> Self {
+        Self {
+            state: BacklogState::PendingResponseBidirectional(state),
+        }
+    }
 }
 
 impl BacklogEntry {
     pub fn new(request: IndexedSignRequest) -> Self {
-        Self {
-            request,
-            status: SignStatus::AwaitingResponse,
-            execution: None,
-        }
+        PendingResponse::new(request).into()
     }
 
     pub fn with_status(
@@ -723,53 +815,89 @@ impl BacklogEntry {
         status: SignStatus,
         execution: Option<BidirectionalTx>,
     ) -> Self {
-        Self {
-            request,
-            status,
-            execution,
-        }
+        Self::try_from_parts(request, status, execution)
+            .expect("backlog entry must have a valid state shape")
     }
 
     pub fn pending_execution(request: IndexedSignRequest, tx: BidirectionalTx) -> Self {
-        Self::with_status(request, SignStatus::PendingExecution, Some(tx))
+        PendingExecution::new(request, tx).into()
+    }
+
+    fn try_from_parts(
+        request: IndexedSignRequest,
+        status: SignStatus,
+        execution: Option<BidirectionalTx>,
+    ) -> Result<Self, BacklogError> {
+        match (status, execution) {
+            (SignStatus::AwaitingResponse, None) => Ok(PendingResponse::new(request).into()),
+            (SignStatus::PendingExecution, Some(execution)) => {
+                Ok(PendingExecution::new(request, execution).into())
+            }
+            (SignStatus::AwaitingResponseBidirectional, Some(execution)) => {
+                Ok(PendingResponseBidirectional::new(request, execution).into())
+            }
+            (status, _) => Err(BacklogError::InvalidStateShape { status }),
+        }
     }
 
     pub fn sign_id(&self) -> SignId {
-        self.request.id
+        self.request().id
     }
 
     /// Get the request ID for this transaction
     pub fn request_id(&self) -> [u8; 32] {
-        self.request.id.request_id
+        self.request().id.request_id
     }
 
     /// Get the source chain for this transaction
     pub fn source_chain(&self) -> Chain {
-        self.request.chain
+        self.request().chain
+    }
+
+    pub fn request(&self) -> &IndexedSignRequest {
+        match &self.state {
+            BacklogState::PendingResponse(state) => &state.request,
+            BacklogState::PendingExecution(state) => &state.request,
+            BacklogState::PendingResponseBidirectional(state) => &state.request,
+        }
     }
 
     /// Get the status of this transaction
     pub fn status(&self) -> SignStatus {
-        self.status
+        match self.state {
+            BacklogState::PendingResponse(_) => SignStatus::AwaitingResponse,
+            BacklogState::PendingExecution(_) => SignStatus::PendingExecution,
+            BacklogState::PendingResponseBidirectional(_) => {
+                SignStatus::AwaitingResponseBidirectional
+            }
+        }
     }
 
     /// Set the status of this transaction
-    pub fn set_status(&mut self, status: SignStatus) {
-        self.status = status;
+    pub fn set_status(&mut self, status: SignStatus) -> Result<(), BacklogError> {
+        let request = self.request().clone();
+        let execution = self.execution_tx().cloned();
+        *self = Self::try_from_parts(request, status, execution)?;
+        Ok(())
     }
 
     pub fn set_request(&mut self, request: IndexedSignRequest) {
-        self.request = request;
+        match &mut self.state {
+            BacklogState::PendingResponse(state) => state.request = request,
+            BacklogState::PendingExecution(state) => state.request = request,
+            BacklogState::PendingResponseBidirectional(state) => state.request = request,
+        }
     }
 
     pub fn advance_to_execution(
         &mut self,
         bidirectional_tx: BidirectionalTx,
     ) -> Result<(), BacklogError> {
-        match (&self.request.kind, self.status) {
-            (SignKind::SignBidirectional(_), SignStatus::AwaitingResponse) => {
-                self.status = SignStatus::PendingExecution;
-                self.execution = Some(bidirectional_tx);
+        match &self.state {
+            BacklogState::PendingResponse(state)
+                if matches!(state.request.kind, SignKind::SignBidirectional(_)) =>
+            {
+                *self = PendingExecution::new(state.request.clone(), bidirectional_tx).into();
                 Ok(())
             }
             _ => Err(BacklogError::InvalidAdvanceTransition),
@@ -779,10 +907,9 @@ impl BacklogEntry {
     /// Get target chain if this is a bidirectional transaction
     // TODO: looks a bit weird having two different ways to get target_chain in the match
     pub fn target_chain(&self) -> Option<Chain> {
-        self.execution
-            .as_ref()
+        self.execution_tx()
             .map(|tx| tx.target_chain)
-            .or_else(|| match &self.request.kind {
+            .or_else(|| match &self.request().kind {
                 SignKind::Sign => None,
                 SignKind::SignBidirectional(event) => event.target_chain().ok(),
                 SignKind::RespondBidirectional(_) => None,
@@ -791,29 +918,43 @@ impl BacklogEntry {
 
     /// Check if this is a bidirectional transaction
     pub fn is_bidirectional(&self) -> bool {
-        matches!(self.request.kind, SignKind::SignBidirectional(_))
+        matches!(self.request().kind, SignKind::SignBidirectional(_))
     }
 
     pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
-        self.execution.as_ref()
+        match &self.state {
+            BacklogState::PendingResponse(_) => None,
+            BacklogState::PendingExecution(state) => Some(&state.execution),
+            BacklogState::PendingResponseBidirectional(state) => Some(&state.execution),
+        }
+    }
+
+    pub fn is_requeueable(&self) -> bool {
+        matches!(
+            self.state,
+            BacklogState::PendingResponse(_) | BacklogState::PendingResponseBidirectional(_)
+        )
     }
 
     pub fn take_execution_tx(self) -> Option<BidirectionalTx> {
-        self.execution
+        match self.state {
+            BacklogState::PendingResponse(_) => None,
+            BacklogState::PendingExecution(state) => Some(state.execution),
+            BacklogState::PendingResponseBidirectional(state) => Some(state.execution),
+        }
     }
 
     pub fn typename(&self) -> &'static str {
-        match (&self.request.kind, self.execution.is_some(), self.status) {
-            (SignKind::Sign, _, _) => "Sign",
-            (SignKind::SignBidirectional(_), true, _) => "BidirectionalExecution",
-            (SignKind::SignBidirectional(_), false, SignStatus::AwaitingResponse) => {
-                "BidirectionalPending"
+        match (&self.request().kind, &self.state) {
+            (SignKind::Sign, _) => "Sign",
+            (SignKind::SignBidirectional(_), BacklogState::PendingExecution(_)) => {
+                "BidirectionalExecution"
             }
-            (SignKind::SignBidirectional(_), false, _) => "BidirectionalPending",
-            (SignKind::RespondBidirectional(_), _, SignStatus::AwaitingResponseBidirectional) => {
+            (SignKind::SignBidirectional(_), _) => "BidirectionalPending",
+            (SignKind::RespondBidirectional(_), BacklogState::PendingResponseBidirectional(_)) => {
                 "BidirectionalRespondPending"
             }
-            (SignKind::RespondBidirectional(_), _, _) => "RespondBidirectional",
+            (SignKind::RespondBidirectional(_), _) => "RespondBidirectional",
         }
     }
 }
@@ -940,14 +1081,30 @@ mod tests {
         dest: &str,
     ) -> BacklogEntry {
         let sign_id = SignId::new(tx.request_id);
-        let request = IndexedSignRequest::new(
-            sign_id,
-            create_test_args(tx.request_id[0]),
-            chain,
-            0,
-            SignKind::SignBidirectional(create_test_event(dest)),
-        );
-        BacklogEntry::with_status(request, status, Some(tx))
+        match status {
+            SignStatus::AwaitingResponse => BacklogEntry::new(create_bidirectional_request(
+                sign_id, chain, dest, 0,
+            )),
+            SignStatus::PendingExecution => BacklogEntry::pending_execution(
+                create_bidirectional_request(sign_id, chain, dest, 0),
+                tx,
+            ),
+            SignStatus::AwaitingResponseBidirectional => BacklogEntry::with_status(
+                IndexedSignRequest::respond_bidirectional(
+                    sign_id,
+                    create_test_args(sign_id.request_id[0]),
+                    chain,
+                    0,
+                    crate::respond_bidirectional::RespondBidirectionalTx {
+                        tx_id: tx.id,
+                        output: vec![],
+                        chain_ctx: None,
+                    },
+                ),
+                SignStatus::AwaitingResponseBidirectional,
+                Some(tx),
+            ),
+        }
     }
 
     async fn insert_bidirectional_with_status(
@@ -965,6 +1122,7 @@ mod tests {
         match status {
             SignStatus::AwaitingResponse => {}
             SignStatus::AwaitingResponseBidirectional => {
+                backlog.advance(chain, sign_id, tx.clone()).await.unwrap();
                 let completion_request = IndexedSignRequest::respond_bidirectional(
                     sign_id,
                     create_test_args(sign_id.request_id[0]),
@@ -1279,7 +1437,7 @@ mod tests {
             create_execution_entry(
                 tx1.clone(),
                 Chain::Ethereum,
-                SignStatus::AwaitingResponse,
+                SignStatus::PendingExecution,
                 "ethereum",
             ),
         );
@@ -1421,7 +1579,7 @@ mod tests {
             .expect("missing recovered entry");
 
         assert!(matches!(
-            recovered_entry.request.kind,
+            &recovered_entry.request().kind,
             SignKind::SignBidirectional(_)
         ));
     }
@@ -1525,29 +1683,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_watch_unwatch_and_set_status() {
-        use k256::Scalar;
         let backlog = Backlog::new();
         let tx = create_test_tx(7);
         let sign_id = SignId::new(tx.request_id);
 
-        // Insert a pending Sign request on the source chain
-        let args = SignArgs {
-            entropy: [1u8; 32],
-            epsilon: Scalar::from(1u64),
-            payload: Scalar::from(2u64),
-            path: "test".to_string(),
-            key_version: 1,
-        };
         let unix_timestamp_indexed = 0;
         backlog
-            .insert(create_indexed_request(
+            .insert(create_bidirectional_request(
                 sign_id,
                 tx.source_chain,
-                args.clone(),
-                SignKind::Sign,
+                &tx.dest,
                 unix_timestamp_indexed,
             ))
             .await;
+
+        backlog
+            .advance(tx.source_chain, sign_id, tx.clone())
+            .await
+            .unwrap();
 
         // Watch execution on the target chain
         backlog
@@ -1562,13 +1715,14 @@ mod tests {
         assert_eq!(watched_tx.id, tx.id);
 
         // set_status should update the sign request status
-        backlog
+        let updated = backlog
             .set_status(
                 tx.source_chain,
                 &sign_id,
                 SignStatus::AwaitingResponseBidirectional,
             )
             .await;
+        assert!(updated.is_some());
         let successes = backlog
             .get_by_status(tx.source_chain, SignStatus::AwaitingResponseBidirectional)
             .await;

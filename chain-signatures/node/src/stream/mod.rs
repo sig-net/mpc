@@ -1153,6 +1153,6 @@ mod tests {
             .get(Chain::Ethereum, &sign_id)
             .await
             .expect("replayed entry should remain in backlog");
-        assert_eq!(entry.request.unix_timestamp_indexed, replayed_timestamp);
+        assert_eq!(entry.request().unix_timestamp_indexed, replayed_timestamp);
     }
 }

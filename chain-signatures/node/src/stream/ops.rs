@@ -393,7 +393,7 @@ pub(crate) async fn process_respond_event(
         return Ok(());
     };
 
-    let event = match &entry.request.kind {
+    let event = match &entry.request().kind {
         SignKind::Sign => {
             tracing::info!(?sign_id, "sign request completed successfully");
             backlog.remove(source_chain, &sign_id).await;
@@ -563,7 +563,7 @@ pub async fn process_execution_confirmed(
     let chain_ctx = backlog
         .get(pending_tx.source_chain, &unwatched_sign_id)
         .await
-        .and_then(|entry| match entry.request.kind {
+        .and_then(|entry| match &entry.request().kind {
             SignKind::SignBidirectional(event) => event.chain_ctx(),
             _ => None,
         });
@@ -733,6 +733,45 @@ mod tests {
         )
     }
 
+    fn test_solana_sign_bidirectional_request(
+        sign_id: SignId,
+        args: SignArgs,
+        unix_timestamp_indexed: u64,
+        tx: &BidirectionalTx,
+    ) -> IndexedSignRequest {
+        IndexedSignRequest::sign_bidirectional(
+            sign_id,
+            args,
+            tx.source_chain,
+            unix_timestamp_indexed,
+            SignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
+                sender: Pubkey::new_from_array(tx.sender),
+                serialized_transaction: tx.serialized_transaction.clone(),
+                dest: tx.dest.clone(),
+                caip2_id: tx.caip2_id.clone(),
+                key_version: tx.key_version,
+                deposit: tx.deposit,
+                path: tx.path.clone(),
+                algo: tx.algo.clone(),
+                params: tx.params.clone(),
+                program_id: Pubkey::new_unique(),
+                output_deserialization_schema: tx.output_deserialization_schema.clone(),
+                respond_serialization_schema: tx.respond_serialization_schema.clone(),
+            }),
+        )
+    }
+
+    async fn seed_pending_execution(
+        backlog: &Backlog,
+        request: IndexedSignRequest,
+        tx: BidirectionalTx,
+    ) {
+        let sign_id = request.id;
+        let source_chain = request.chain;
+        backlog.insert(request).await;
+        backlog.advance(source_chain, sign_id, tx).await.unwrap();
+    }
+
     #[test]
     fn ethereum_signature_respond_event_conversion() {
         let big_r = ProjectivePoint::GENERATOR.to_affine();
@@ -840,18 +879,11 @@ mod tests {
             key_version: 1,
         };
         let unix_timestamp_indexed = current_unix_timestamp();
-        backlog
-            .insert(test_indexed_request(
-                sign_id,
-                tx.source_chain,
-                args.clone(),
-                unix_timestamp_indexed,
-                SignKind::Sign,
-            ))
-            .await;
-
-        backlog
-            .watch_execution(tx.target_chain, sign_id, tx.clone())
+        seed_pending_execution(
+            &backlog,
+            test_solana_sign_bidirectional_request(sign_id, args, unix_timestamp_indexed, &tx),
+            tx.clone(),
+        )
             .await;
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -892,7 +924,7 @@ mod tests {
             tx_after.status()
         );
         assert!(matches!(
-            tx_after.request.kind,
+            &tx_after.request().kind,
             SignKind::RespondBidirectional(_)
         ));
 
@@ -925,17 +957,11 @@ mod tests {
             path: "test".to_string(),
             key_version: 1,
         };
-        backlog
-            .insert(test_indexed_request(
-                sign_id,
-                tx.source_chain,
-                args,
-                current_unix_timestamp(),
-                SignKind::Sign,
-            ))
-            .await;
-        backlog
-            .watch_execution(tx.target_chain, sign_id, tx.clone())
+        seed_pending_execution(
+            &backlog,
+            test_solana_sign_bidirectional_request(sign_id, args, current_unix_timestamp(), &tx),
+            tx.clone(),
+        )
             .await;
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -996,17 +1022,11 @@ mod tests {
             path: "test".to_string(),
             key_version: 1,
         };
-        backlog
-            .insert(test_indexed_request(
-                sign_id,
-                tx.source_chain,
-                args,
-                current_unix_timestamp(),
-                SignKind::Sign,
-            ))
-            .await;
-        backlog
-            .watch_execution(tx.target_chain, sign_id, tx.clone())
+        seed_pending_execution(
+            &backlog,
+            test_solana_sign_bidirectional_request(sign_id, args, current_unix_timestamp(), &tx),
+            tx.clone(),
+        )
             .await;
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -1028,7 +1048,7 @@ mod tests {
         let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
         assert_eq!(tx_after.status(), SignStatus::AwaitingResponseBidirectional);
         assert!(matches!(
-            tx_after.request.kind,
+            &tx_after.request().kind,
             SignKind::RespondBidirectional(_)
         ));
         assert!(backlog.pending_execution(tx.target_chain).await.is_empty());
@@ -1056,17 +1076,11 @@ mod tests {
             path: "test".to_string(),
             key_version: 1,
         };
-        backlog
-            .insert(test_indexed_request(
-                sign_id,
-                tx.source_chain,
-                args.clone(),
-                current_unix_timestamp(),
-                SignKind::Sign,
-            ))
-            .await;
-        backlog
-            .watch_execution(tx.target_chain, sign_id, tx.clone())
+        seed_pending_execution(
+            &backlog,
+            test_solana_sign_bidirectional_request(sign_id, args, current_unix_timestamp(), &tx),
+            tx.clone(),
+        )
             .await;
 
         let (sign_tx, sign_rx) = mpsc::channel(4);
@@ -1391,18 +1405,11 @@ mod tests {
             key_version: 1,
         };
         let unix_timestamp_indexed = current_unix_timestamp();
-        backlog
-            .insert(test_indexed_request(
-                sign_id,
-                tx.source_chain,
-                args.clone(),
-                unix_timestamp_indexed,
-                SignKind::Sign,
-            ))
-            .await;
-
-        backlog
-            .watch_execution(tx.target_chain, sign_id, tx.clone())
+        seed_pending_execution(
+            &backlog,
+            test_solana_sign_bidirectional_request(sign_id, args, unix_timestamp_indexed, &tx),
+            tx.clone(),
+        )
             .await;
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -1433,7 +1440,7 @@ mod tests {
 
         let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
         assert!(matches!(
-            tx_after.request.kind,
+            &tx_after.request().kind,
             SignKind::RespondBidirectional(_)
         ));
 
@@ -1490,18 +1497,11 @@ mod tests {
             key_version: 1,
         };
 
-        backlog
-            .insert(test_indexed_request(
-                sign_id,
-                tx.source_chain,
-                args,
-                current_unix_timestamp(),
-                SignKind::Sign,
-            ))
-            .await;
-
-        backlog
-            .watch_execution(tx.target_chain, sign_id, tx.clone())
+        seed_pending_execution(
+            &backlog,
+            test_solana_sign_bidirectional_request(sign_id, args, current_unix_timestamp(), &tx),
+            tx.clone(),
+        )
             .await;
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -1543,15 +1543,11 @@ mod tests {
         let sign_id = SignId::new(tx.request_id);
         let sign_event_contract_id = "#sign-event-cid";
 
-        backlog
-            .insert(test_canton_sign_bidirectional_request(
-                sign_id,
-                sign_event_contract_id,
-            ))
-            .await;
-
-        backlog
-            .watch_execution(tx.target_chain, sign_id, tx.clone())
+        seed_pending_execution(
+            &backlog,
+            test_canton_sign_bidirectional_request(sign_id, sign_event_contract_id),
+            tx.clone(),
+        )
             .await;
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -1580,7 +1576,7 @@ mod tests {
         assert!(backlog.pending_execution(tx.target_chain).await.is_empty());
         let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
         assert_eq!(tx_after.status(), SignStatus::AwaitingResponseBidirectional);
-        match &tx_after.request.kind {
+        match &tx_after.request().kind {
             SignKind::RespondBidirectional(res) => {
                 assert_eq!(res.tx_id, tx.id);
                 assert_eq!(res.output, vec![1]);
