@@ -47,7 +47,7 @@ impl SignRequestStep {
     }
 }
 
-pub(crate) static SIGN_REQUEST_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
+static SIGN_REQUEST_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|| {
     try_create_histogram_vec_with_node_and_version(
         "multichain_sign_request_latency_sec",
         "Latency of multichain sign request processing with step and status specification.",

@@ -1236,8 +1236,6 @@ impl SignGenerator {
                         "completed signature generation"
                     );
 
-                    // SignRequestStep::Generating is emitted cumulatively from SignTask::run; the per-attempt protocol metrics below are unchanged.
-
                     crate::metrics::protocols::SIGNATURE_ACCRUED_WAIT_DELAY
                         .observe(total_wait.as_millis() as f64);
                     crate::metrics::protocols::SIGNATURE_POKES_CNT.observe(total_pokes as f64);
@@ -1881,14 +1879,6 @@ mod tests {
         assert_eq!(sign_task.governance.epoch, 1);
         assert_eq!(sign_task.governance.threshold, 1);
         assert_eq!(sign_task.governance.me, Participant::from(0));
-    }
-
-    #[test]
-    fn phase_durations_default_is_zero() {
-        let d = PhaseDurations::default();
-        assert_eq!(d.organizing, Duration::ZERO);
-        assert_eq!(d.posit, Duration::ZERO);
-        assert_eq!(d.generating, Duration::ZERO);
     }
 
     #[test]
