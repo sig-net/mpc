@@ -229,6 +229,8 @@ impl CantonIndexer {
                 continue;
             };
 
+            // TODO: need to fix this in case we are not able to parse
+            // https://github.com/sig-net/mpc/issues/815
             let msg: ledger_api::UpdateMessage = match serde_json::from_str(&text) {
                 Ok(msg) => msg,
                 Err(err) => {
