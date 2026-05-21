@@ -30,7 +30,7 @@ type CantonWsWrite = SplitSink<CantonWs, Message>;
 pub struct CantonStream {
     config: CantonConfig,
     backlog: Backlog,
-    events_rx: Option<mpsc::Receiver<ChainEvent>>,
+    events_rx: mpsc::Receiver<ChainEvent>,
     events_tx: Option<mpsc::Sender<ChainEvent>>,
 }
 
@@ -49,7 +49,7 @@ impl CantonStream {
         Some(CantonStream {
             config,
             backlog,
-            events_rx: Some(events_rx),
+            events_rx,
             events_tx: Some(events_tx),
         })
     }
@@ -69,8 +69,7 @@ impl ChainStream for CantonStream {
     }
 
     async fn next_event(&mut self) -> Option<ChainEvent> {
-        let rx = self.events_rx.as_mut()?;
-        rx.recv().await
+        self.events_rx.recv().await
     }
 }
 
