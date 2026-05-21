@@ -80,12 +80,11 @@ enum CantonConnection {
 
 impl CantonConnection {
     async fn connect(
-        &mut self,
         ws_url: &str,
         jwt_token: &str,
         party_id: &str,
         begin_exclusive: u64,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Self> {
         let mut request = ws_url.into_client_request()?;
         request.headers_mut().insert(
             header::SEC_WEBSOCKET_PROTOCOL,
@@ -124,38 +123,42 @@ impl CantonConnection {
         .await
         .map_err(|_| anyhow::anyhow!("canton WebSocket subscription send timed out"))??;
 
-        *self = Self::Connected(ws_read, ws_write);
-
-        Ok(())
+        Ok(Self::Connected(ws_read, ws_write))
     }
 
-    async fn read_message(&mut self) -> anyhow::Result<Option<Message>> {
-        let maybe_msg = match self {
-            Self::Connected(ws_read, _) => {
-                tokio::time::timeout(Duration::from_secs(60), ws_read.next())
-                    .await
-                    .map_err(|_| anyhow::anyhow!("canton WebSocket stalled: no message for 60s"))?
-            }
-            Self::Disconnected => anyhow::bail!("canton WebSocket not initialized"),
+    /// Read the next message from the WebSocket. Closes the connection if the WebSocket is closed.
+    async fn next(&mut self) -> anyhow::Result<Option<Message>> {
+        let Self::Connected(ws_read, _) = self else {
+            anyhow::bail!("canton WebSocket not initialized");
         };
+        let maybe_msg = tokio::time::timeout(Duration::from_secs(60), ws_read.next())
+            .await
+            .map_err(|_| anyhow::anyhow!("canton WebSocket stalled: no message for 60s"))?;
 
         let Some(msg) = maybe_msg else {
             *self = Self::Disconnected;
             return Ok(None);
         };
+        let msg = msg?;
+        if matches!(msg, Message::Close(_)) {
+            tracing::info!("canton WebSocket received close frame");
+            if let Err(err) = self.close().await {
+                tracing::debug!(%err, "failed to flush canton WebSocket close reply");
+            }
+            return Ok(None);
+        }
 
-        Ok(Some(msg?))
+        Ok(Some(msg))
     }
 
     async fn close(&mut self) -> anyhow::Result<()> {
-        match self {
-            Self::Connected(_, ws_write) => {
-                let result = close_split_websocket(ws_write).await;
-                *self = Self::Disconnected;
-                result
-            }
-            Self::Disconnected => Ok(()),
-        }
+        let Self::Connected(_, ws_write) = self else {
+            tracing::warn!("canton WebSocket close on already disconnected connection");
+            return Ok(());
+        };
+        let result = close_split_websocket(ws_write).await;
+        *self = Self::Disconnected;
+        result
     }
 }
 
@@ -184,28 +187,18 @@ impl CantonIndexer {
         let jwt_token = self.client.generate_jwt()?;
         let ws_url = format!("{}/v2/updates", self.client.config.json_api_ws_url);
         let party_id = &self.client.config.party_id;
-        self.ws_conn
-            .connect(&ws_url, &jwt_token, party_id, begin_exclusive)
-            .await?;
+        self.ws_conn =
+            CantonConnection::connect(&ws_url, &jwt_token, party_id, begin_exclusive).await?;
         Ok(())
     }
 
     async fn read_next_update(&mut self) -> anyhow::Result<Option<ledger_api::Update>> {
         loop {
-            let Some(msg) = self.ws_conn.read_message().await? else {
+            let Some(msg) = self.ws_conn.next().await? else {
                 return Ok(None);
             };
-
-            let text = match msg {
-                Message::Text(text) => text,
-                Message::Close(_) => {
-                    tracing::info!("canton WebSocket received close frame");
-                    if let Err(err) = self.ws_conn.close().await {
-                        tracing::debug!(%err, "failed to flush canton WebSocket close reply");
-                    }
-                    return Ok(None);
-                }
-                _ => continue,
+            let Message::Text(text) = msg else {
+                continue;
             };
 
             let msg: ledger_api::UpdateMessage = match serde_json::from_str(&text) {
@@ -216,12 +209,12 @@ impl CantonIndexer {
                 }
             };
 
-            if let Some(update) = msg.update {
-                return Ok(Some(update));
+            if let Some(err) = &msg.error {
+                tracing::warn!(?err, "canton ledger stream error");
             }
 
-            if msg.error.is_some() {
-                tracing::warn!(error = ?msg.error, "canton ledger stream error");
+            if let Some(update) = msg.update {
+                return Ok(Some(update));
             }
         }
     }
@@ -320,7 +313,7 @@ impl ChainIndexer for CantonIndexer {
 }
 
 async fn close_split_websocket(ws_write: &mut CantonWsWrite) -> anyhow::Result<()> {
-    tokio::time::timeout(std::time::Duration::from_secs(5), ws_write.close())
+    tokio::time::timeout(Duration::from_secs(5), ws_write.close())
         .await
         .map_err(|_| anyhow::anyhow!("canton WebSocket close reply timed out"))?
         .map_err(|e| anyhow::anyhow!("failed to flush canton WebSocket close reply: {e}"))
