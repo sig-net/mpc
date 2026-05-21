@@ -11,6 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use mpc_primitives::{ScalarExt, Signature};
 use std::collections::HashSet;
 use std::ops::Range;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header;
@@ -73,35 +74,19 @@ impl ChainStream for CantonStream {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum CantonIndexerItem {
-    CatchupOffset(u64),
-    LiveUpdate(ledger_api::Update),
+enum CantonConnection {
+    Connected(CantonWsRead, CantonWsWrite),
+    Disconnected,
 }
 
-pub struct CantonIndexer {
-    client: CantonClient,
-    backlog: Backlog,
-    events_tx: mpsc::Sender<ChainEvent>,
-    ws_read: Option<CantonWsRead>,
-    ws_write: Option<CantonWsWrite>,
-}
-
-impl CantonIndexer {
-    pub fn new(client: CantonClient, backlog: Backlog, events_tx: mpsc::Sender<ChainEvent>) -> Self {
-        Self {
-            client,
-            backlog,
-            events_tx,
-            ws_read: None,
-            ws_write: None,
-        }
-    }
-
-    async fn connect_and_subscribe(&mut self, begin_exclusive: u64) -> anyhow::Result<()> {
-        let jwt_token = self.client.generate_jwt()?;
-        let ws_url = format!("{}/v2/updates", self.client.config.json_api_ws_url);
-
+impl CantonConnection {
+    async fn connect(
+        &mut self,
+        ws_url: &str,
+        jwt_token: &str,
+        party_id: &str,
+        begin_exclusive: u64,
+    ) -> anyhow::Result<()> {
         let mut request = ws_url.into_client_request()?;
         request.headers_mut().insert(
             header::SEC_WEBSOCKET_PROTOCOL,
@@ -109,7 +94,7 @@ impl CantonIndexer {
         );
 
         let (ws_stream, _) = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
+            Duration::from_secs(30),
             tokio_tungstenite::connect_async(request),
         )
         .await
@@ -119,7 +104,7 @@ impl CantonIndexer {
         tracing::info!(begin_exclusive, "canton WebSocket connected");
 
         let mut filters_by_party = serde_json::Map::new();
-        filters_by_party.insert(self.client.config.party_id.clone(), serde_json::json!({}));
+        filters_by_party.insert(party_id.to_string(), serde_json::json!({}));
 
         let subscribe_msg = ledger_api::GetUpdatesRequest {
             begin_exclusive,
@@ -134,42 +119,90 @@ impl CantonIndexer {
             },
         };
         tokio::time::timeout(
-            std::time::Duration::from_secs(30),
+            Duration::from_secs(30),
             ws_write.send(Message::Text(serde_json::to_string(&subscribe_msg)?.into())),
         )
         .await
         .map_err(|_| anyhow::anyhow!("canton WebSocket subscription send timed out"))??;
 
-        self.ws_write = Some(ws_write);
-        self.ws_read = Some(ws_read);
+        *self = Self::Connected(ws_read, ws_write);
+
+        Ok(())
+    }
+
+    async fn read_message(&mut self) -> anyhow::Result<Option<Message>> {
+        let maybe_msg = match self {
+            Self::Connected(ws_read, _) => {
+                tokio::time::timeout(Duration::from_secs(60), ws_read.next())
+                    .await
+                    .map_err(|_| anyhow::anyhow!("canton WebSocket stalled: no message for 60s"))?
+            }
+            Self::Disconnected => anyhow::bail!("canton WebSocket not initialized"),
+        };
+
+        let Some(msg) = maybe_msg else {
+            *self = Self::Disconnected;
+            return Ok(None);
+        };
+
+        Ok(Some(msg?))
+    }
+
+    async fn close(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::Connected(_, ws_write) => {
+                let result = close_split_websocket(ws_write).await;
+                *self = Self::Disconnected;
+                result
+            }
+            Self::Disconnected => Ok(()),
+        }
+    }
+}
+
+pub struct CantonIndexer {
+    client: CantonClient,
+    backlog: Backlog,
+    events_tx: mpsc::Sender<ChainEvent>,
+    ws_conn: CantonConnection,
+}
+
+impl CantonIndexer {
+    pub fn new(
+        client: CantonClient,
+        backlog: Backlog,
+        events_tx: mpsc::Sender<ChainEvent>,
+    ) -> Self {
+        Self {
+            client,
+            backlog,
+            events_tx,
+            ws_conn: CantonConnection::Disconnected,
+        }
+    }
+
+    async fn connect_and_subscribe(&mut self, begin_exclusive: u64) -> anyhow::Result<()> {
+        let jwt_token = self.client.generate_jwt()?;
+        let ws_url = format!("{}/v2/updates", self.client.config.json_api_ws_url);
+        let party_id = &self.client.config.party_id;
+        self.ws_conn
+            .connect(&ws_url, &jwt_token, party_id, begin_exclusive)
+            .await?;
         Ok(())
     }
 
     async fn read_next_update(&mut self) -> anyhow::Result<Option<ledger_api::Update>> {
         loop {
-            let maybe_msg = {
-                let Some(ws_read) = self.ws_read.as_mut() else {
-                    anyhow::bail!("canton WebSocket not initialized");
-                };
-
-                tokio::time::timeout(std::time::Duration::from_secs(60), ws_read.next())
-                    .await
-                    .map_err(|_| anyhow::anyhow!("canton WebSocket stalled: no message for 60s"))?
-            };
-
-            let Some(msg) = maybe_msg else {
+            let Some(msg) = self.ws_conn.read_message().await? else {
                 return Ok(None);
             };
 
-            let msg = msg?;
             let text = match msg {
                 Message::Text(text) => text,
                 Message::Close(_) => {
                     tracing::info!("canton WebSocket received close frame");
-                    if let Some(ws_write) = self.ws_write.as_mut() {
-                        if let Err(err) = close_split_websocket(ws_write).await {
-                            tracing::debug!(%err, "failed to flush canton WebSocket close reply");
-                        }
+                    if let Err(err) = self.ws_conn.close().await {
+                        tracing::debug!(%err, "failed to flush canton WebSocket close reply");
                     }
                     return Ok(None);
                 }
@@ -236,8 +269,8 @@ fn catchup_offset_range(checkpoint: u64, anchor_height: u64) -> Range<u64> {
 #[async_trait]
 impl ChainIndexer for CantonIndexer {
     const CHAIN: Chain = Chain::Canton;
-    type Block = CantonIndexerItem;
-    type Iter = std::vec::IntoIter<Self::Block>;
+    type Block = u64;
+    type Iter = Range<u64>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         let checkpoint = self
@@ -257,40 +290,33 @@ impl ChainIndexer for CantonIndexer {
             .await
             .unwrap_or(0);
         catchup_offset_range(checkpoint, anchor_height)
-            .map(CantonIndexerItem::CatchupOffset)
-            .collect::<Vec<_>>()
-            .into_iter()
     }
 
     async fn process_catchup(&mut self, item: &Self::Block) -> anyhow::Result<()> {
-        let CantonIndexerItem::CatchupOffset(target_offset) = item else {
-            anyhow::bail!("expected Canton catchup offset item");
-        };
-        self.process_catchup_offset(*target_offset).await
-    }
-
-    async fn next(&mut self) -> Option<Self::Block> {
-        match self.read_next_update().await {
-            Ok(Some(update)) => Some(CantonIndexerItem::LiveUpdate(update)),
-            Ok(None) => None,
-            Err(err) => {
-                tracing::warn!(?err, "canton live read failed");
-                None
-            }
-        }
-    }
-
-    async fn process(&mut self, block: &Self::Block) -> anyhow::Result<()> {
-        let CantonIndexerItem::LiveUpdate(update) = block else {
-            anyhow::bail!("expected Canton live update item");
-        };
-        self.process_update(update).await?;
-        Ok(())
+        self.process_catchup_offset(*item).await
     }
 
     async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
         self.events_tx.send(ChainEvent::CatchupCompleted).await?;
         Ok(())
+    }
+
+    async fn process_next_block(&mut self) -> bool {
+        let update = match self.read_next_update().await {
+            Ok(Some(update)) => update,
+            Ok(None) => return false,
+            Err(err) => {
+                tracing::warn!(?err, "canton live read failed");
+                return false;
+            }
+        };
+
+        while let Err(err) = self.process_update(&update).await {
+            tracing::warn!(?err, "live block processing failed; retrying");
+            tokio::time::sleep(Self::RETRY_DELAY).await;
+        }
+
+        true
     }
 }
 
@@ -741,6 +767,9 @@ mod tests {
             }
             other => panic!("expected Canton respond event, got {other:?}"),
         }
-        assert!(events_rx.try_recv().is_err(), "unexpected extra event emitted");
+        assert!(
+            events_rx.try_recv().is_err(),
+            "unexpected extra event emitted"
+        );
     }
 }
