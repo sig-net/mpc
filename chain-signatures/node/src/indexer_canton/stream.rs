@@ -166,9 +166,13 @@ impl CantonConnection {
             tracing::warn!("canton WebSocket close on already disconnected connection");
             return Ok(());
         };
-        let result = close_split_websocket(ws_write).await;
+
+        tokio::time::timeout(Duration::from_secs(5), ws_write.close())
+            .await
+            .map_err(|_| anyhow::anyhow!("canton WebSocket close reply timed out"))?
+            .map_err(|e| anyhow::anyhow!("failed to flush canton WebSocket close reply: {e}"))?;
         *self = Self::Disconnected;
-        result
+        Ok(())
     }
 }
 
@@ -348,13 +352,6 @@ impl ChainIndexer for CantonIndexer {
 
         true
     }
-}
-
-async fn close_split_websocket(ws_write: &mut CantonWsWrite) -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(5), ws_write.close())
-        .await
-        .map_err(|_| anyhow::anyhow!("canton WebSocket close reply timed out"))?
-        .map_err(|e| anyhow::anyhow!("failed to flush canton WebSocket close reply: {e}"))
 }
 
 /// Process a single Canton event from a WebSocket transaction update.
