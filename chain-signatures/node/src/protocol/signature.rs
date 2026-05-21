@@ -12,8 +12,9 @@ use crate::protocol::presignature::PresignatureId;
 use crate::protocol::SignKind;
 use crate::protocol::{Chain, ProtocolState};
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
-use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
-use crate::storage::protocol_storage::ProtocolArtifact;
+use crate::storage::presignature_storage::{
+    PresignatureReservation, PresignatureTaken, PresignatureTakenDropper,
+};
 use crate::storage::PresignatureStorage;
 use crate::stream::ops::SignBidirectionalEvent;
 use crate::types::SignatureProtocol;
@@ -332,13 +333,13 @@ struct SignPositor {
     proposer: Participant,
     active: BTreeSet<Participant>,
     presignature_id: PresignatureId,
-    presignature: Option<PresignatureTaken>,
+    presignature: Option<PresignatureReservation>,
 }
 
 struct SignGenerating {
     proposer: Participant,
     presignature_id: PresignatureId,
-    presignature: Option<PresignatureTaken>,
+    presignature: Option<PresignatureReservation>,
     accepted_participants: Vec<Participant>,
 }
 
@@ -504,35 +505,33 @@ impl SignOrganizer {
             let active = active.iter().copied().collect::<Vec<_>>();
             let remaining = state.budget.remaining();
             let fetch = tokio::time::timeout(remaining, async {
+                // IDs that were found unsuitable this round (kept in redis, skipped next peek)
+                let mut local_skip: Vec<PresignatureId> = Vec::new();
                 loop {
-                    if let Some(taken) = ctx.presignatures.take_mine().await {
-                        let Some(holders) = taken.artifact.holders() else {
-                            tracing::error!(
-                                id = taken.artifact.id,
-                                "holders not set on taken presignature"
-                            );
-                            continue;
-                        };
+                    if let Some(reservation) = ctx.presignatures.peek_mine(&local_skip).await {
+                        let holders = reservation.holders();
                         let participants = intersect_vec(&[holders, &active]);
                         if participants.len() < ctx.governance.threshold {
                             tracing::warn!(
                                 ?sign_id,
-                                id = taken.artifact.id,
+                                id = reservation.id,
                                 ?holders,
                                 ?active,
-                                "discarding presignature due to inactive participants"
+                                "skipping presignature due to inactive participants, returning to pool"
                             );
+                            local_skip.push(reservation.id);
+                            // drop: in-memory reservation released, presignature stays in redis
                             continue;
                         }
 
-                        break (taken, participants);
+                        break (reservation, participants);
                     }
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
             })
             .await;
 
-            let (taken, participants) = match fetch {
+            let (reservation, participants) = match fetch {
                 Ok(value) => value,
                 Err(_) => {
                     tracing::warn!(
@@ -545,7 +544,7 @@ impl SignOrganizer {
                 }
             };
 
-            let presignature_id = taken.artifact.id;
+            let presignature_id = reservation.id;
 
             tracing::info!(?sign_id, ?presignature_id, "proposer got presignature");
 
@@ -569,7 +568,7 @@ impl SignOrganizer {
 
             // Update active to only include participants that are in both the presignature and active set
             let active = participants.into_iter().collect::<BTreeSet<_>>();
-            (presignature_id, Some(taken), active)
+            (presignature_id, Some(reservation), active)
         } else {
             (PresignatureId::default(), None, active)
         };
@@ -859,8 +858,8 @@ impl SignPositor {
 
                         if counter.enough_rejects(ctx.governance.threshold) {
                             tracing::warn!(?sign_id, ?round, ?from, "received enough REJECTs, reorganizing");
-                            if let Some(_taken) = presignature {
-                                tracing::warn!(?sign_id, "discarding presignature due to REJECTs");
+                            if let Some(_reservation) = presignature {
+                                tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
                             }
                             state.bump_round();
                             return SignPhase::Organizing(SignOrganizer);
@@ -897,8 +896,8 @@ impl SignPositor {
                             ?round,
                             "proposer posit deadline reached, expiring round"
                         );
-                        if let Some(_taken) = presignature {
-                            tracing::warn!(?sign_id, "discarding presignature due to proposer timeout");
+                        if let Some(_reservation) = presignature {
+                            tracing::warn!(?sign_id, "returning presignature to pool due to proposer timeout");
                         }
                     } else {
                         tracing::warn!(?sign_id, me=?ctx.governance.me, ?proposer, "deliberator posit timeout waiting for Start, reorganizing");
@@ -974,8 +973,20 @@ impl SignGenerating {
             "posit complete, starting generation"
         );
 
-        let presignature_pending = if let Some(taken) = self.presignature.take() {
-            PendingPresignature::Available(Box::new(taken))
+        let presignature_pending = if let Some(reservation) = self.presignature.take() {
+            // Commit: actually remove from Redis now that posit succeeded and generation starts
+            match reservation.commit().await {
+                Some(taken) => PendingPresignature::Available(Box::new(taken)),
+                None => {
+                    tracing::warn!(
+                        ?sign_id,
+                        ?round,
+                        "failed to commit presignature reservation, reorganizing"
+                    );
+                    state.bump_round();
+                    return SignPhase::Organizing(SignOrganizer);
+                }
+            }
         } else {
             PendingPresignature::InStorage(
                 self.presignature_id,
