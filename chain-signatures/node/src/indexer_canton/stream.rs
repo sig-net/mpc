@@ -167,6 +167,7 @@ pub struct CantonIndexer {
     backlog: Backlog,
     events_tx: mpsc::Sender<ChainEvent>,
     ws_conn: CantonConnection,
+    last_seen_offset: u64,
 }
 
 impl CantonIndexer {
@@ -180,6 +181,7 @@ impl CantonIndexer {
             backlog,
             events_tx,
             ws_conn: CantonConnection::Disconnected,
+            last_seen_offset: 0,
         }
     }
 
@@ -190,6 +192,32 @@ impl CantonIndexer {
         self.ws_conn =
             CantonConnection::connect(&ws_url, &jwt_token, party_id, begin_exclusive).await?;
         Ok(())
+    }
+
+    async fn reconnect(&mut self) -> anyhow::Result<()> {
+        let mut backoff = Duration::from_secs(1);
+
+        loop {
+            match self.connect_and_subscribe(self.last_seen_offset).await {
+                Ok(()) => {
+                    tracing::info!(
+                        resume_offset = self.last_seen_offset,
+                        "canton WebSocket reconnected"
+                    );
+                    return Ok(());
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        resume_offset = self.last_seen_offset,
+                        backoff_secs = backoff.as_secs(),
+                        "canton WebSocket reconnect failed; retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                }
+            }
+        }
     }
 
     async fn read_next_update(&mut self) -> anyhow::Result<Option<ledger_api::Update>> {
@@ -236,14 +264,34 @@ impl CantonIndexer {
             ledger_api::Update::OffsetCheckpoint { value } => value.offset,
         };
 
+        self.last_seen_offset = offset;
         self.events_tx.send(ChainEvent::Block(offset)).await?;
         Ok(offset)
     }
 
     async fn process_catchup_offset(&mut self, target_offset: u64) -> anyhow::Result<()> {
         loop {
-            let Some(update) = self.read_next_update().await? else {
-                anyhow::bail!("canton WebSocket closed during catchup");
+            let update = match self.read_next_update().await {
+                Ok(Some(update)) => update,
+                Ok(None) => {
+                    tracing::warn!(
+                        target_offset,
+                        resume_offset = self.last_seen_offset,
+                        "canton WebSocket closed during catchup; reconnecting"
+                    );
+                    self.reconnect().await?;
+                    continue;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        target_offset,
+                        resume_offset = self.last_seen_offset,
+                        "canton WebSocket read failed during catchup; reconnecting"
+                    );
+                    self.reconnect().await?;
+                    continue;
+                }
             };
             let offset = self.process_update(&update).await?;
             if offset >= target_offset {
@@ -270,6 +318,7 @@ impl ChainIndexer for CantonIndexer {
             .processed_block(Chain::Canton)
             .await
             .unwrap_or(0);
+        self.last_seen_offset = checkpoint;
         let anchor_height = self.client.fetch_ledger_end().await?;
         self.connect_and_subscribe(checkpoint).await?;
         Ok(Some(anchor_height))
@@ -294,11 +343,25 @@ impl ChainIndexer for CantonIndexer {
     }
 
     async fn process_next_block(&mut self) -> bool {
-        let update = match self.read_next_update().await {
-            Ok(Some(update)) => update,
-            Ok(None) => return false,
-            Err(err) => {
-                tracing::warn!(?err, "canton live read failed");
+        let update = loop {
+            match self.read_next_update().await {
+                Ok(Some(update)) => break update,
+                Ok(None) => {
+                    tracing::warn!(
+                        resume_offset = self.last_seen_offset,
+                        "canton WebSocket closed during live processing; reconnecting"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        resume_offset = self.last_seen_offset,
+                        "canton live read failed; reconnecting"
+                    );
+                }
+            }
+            if let Err(err) = self.reconnect().await {
+                tracing::error!(?err, "canton reconnect failed");
                 return false;
             }
         };
