@@ -281,8 +281,8 @@ impl CantonIndexer {
             ledger_api::Update::OffsetCheckpoint { value } => value.offset,
         };
 
-        self.last_seen_offset = offset;
         self.events_tx.send(ChainEvent::Block(offset)).await?;
+        self.last_seen_offset = offset;
         Ok(offset)
     }
 
