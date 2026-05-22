@@ -1,7 +1,9 @@
 use cait_sith::protocol::Participant;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers;
+use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::PublicKey;
+use mpc_node::protocol::concurrency::ConcurrencyController;
 use mpc_node::protocol::presignature::PresignatureSpawner;
 use mpc_node::protocol::triple::TripleSpawner;
 use mpc_node::protocol::MessageChannel;
@@ -9,6 +11,10 @@ use mpc_node::types::SecretKeyShare;
 use test_log::test;
 
 use super::helpers::{dummy_pair, dummy_presignature};
+
+fn test_concurrency_controller() -> std::sync::Arc<ConcurrencyController> {
+    ConcurrencyController::from_protocol(&ProtocolConfig::default())
+}
 
 #[test(tokio::test)]
 async fn test_triple_persistence() -> anyhow::Result<()> {
@@ -23,8 +29,15 @@ async fn test_triple_persistence() -> anyhow::Result<()> {
     let node0_id = "party0.near".parse().unwrap();
     let redis = containers::Redis::run(&spawner).await;
     let triple_storage = redis.triple_storage(&node0_id, node0);
-    let triple_spawner =
-        TripleSpawner::new(node0, 5, 123, &triple_storage, msg, node0_id.to_string());
+    let triple_spawner = TripleSpawner::new(
+        node0,
+        5,
+        123,
+        &triple_storage,
+        msg,
+        node0_id.to_string(),
+        test_concurrency_controller(),
+    );
 
     let triple_id1: u64 = 1;
     let triple_id2: u64 = 2;
@@ -187,6 +200,7 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
         &presignature_storage,
         msg,
         node0_id.to_string(),
+        test_concurrency_controller(),
     );
 
     let id = 1;

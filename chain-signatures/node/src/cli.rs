@@ -350,6 +350,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 network,
             });
             let (config_tx, config_rx) = watch::channel(config);
+            let (cpu_tx, cpu_rx) = watch::channel(0.0);
 
             let node = Node::new();
             let node_watcher = node.watch();
@@ -380,6 +381,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 presignature_storage: presignature_storage.clone(),
                 config: config_rx,
                 mesh_state: mesh_state.clone(),
+                cpu_rx,
             };
 
             tracing::info!("protocol initialized");
@@ -387,7 +389,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tokio::spawn(rpc.run(contract_state_tx, config_tx.clone()));
 
             tokio::spawn(mesh.run(contract_watcher.clone()));
-            let system_handle = spawn_system_metrics().await;
+            let system_handle = spawn_system_metrics(cpu_tx);
             let protocol_handle = tokio::spawn(protocol.run(
                 node,
                 near_client,

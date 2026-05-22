@@ -1,3 +1,4 @@
+use super::concurrency::{ConcurrencyController, PresigPermit};
 use super::message::{MessageChannel, PositMessage, PositProtocolId, PresignatureMessage};
 use super::posit::{PositAction, Positor, Posits};
 use super::triple::TripleId;
@@ -24,10 +25,10 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::HashSet;
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio::time;
 
 /// Unique number used to identify a specific ongoing presignature generation protocol.
 /// Without `PresignatureId` it would be unclear where to route incoming cait-sith presignature
@@ -310,7 +311,7 @@ pub struct PresignatureSpawner {
     ongoing: JoinMap<PresignatureId, ()>,
     ongoing_owned: HashSet<PresignatureId>,
     /// The protocol posits that are currently in progress.
-    posits: Posits<FullPresignatureId, TriplesTaken>,
+    posits: Posits<FullPresignatureId, PresignLimbo>,
 
     me: Participant,
     threshold: usize,
@@ -319,6 +320,7 @@ pub struct PresignatureSpawner {
     public_key: PublicKey,
     msg: MessageChannel,
     node_account_id: String,
+    concurrency_controller: Arc<ConcurrencyController>,
 
     #[cfg(feature = "debug-page")]
     posits_debug_view: crate::web::debug::DebugPageTaskHandle,
@@ -336,6 +338,7 @@ impl PresignatureSpawner {
         presignatures: &PresignatureStorage,
         msg: MessageChannel,
         node_account_id: String,
+        concurrency_controller: Arc<ConcurrencyController>,
     ) -> Self {
         #[cfg(feature = "debug-page")]
         let posits_debug_view = crate::web::debug::register_task(
@@ -355,6 +358,7 @@ impl PresignatureSpawner {
             public_key: *public_key,
             msg,
             node_account_id,
+            concurrency_controller,
             #[cfg(feature = "debug-page")]
             posits_debug_view,
         }
@@ -470,7 +474,7 @@ impl PresignatureSpawner {
     }
 
     /// Starts a new presignature generation protocol.
-    async fn propose_posit(&mut self, active: &[Participant]) {
+    async fn propose_posit(&mut self, active: &[Participant], permit: PresigPermit) {
         // To ensure there is no contention between different nodes we are only using triples
         // that we own. This way in a non-BFT environment we are guaranteed to never try
         // to use the same triple as any other node.
@@ -500,7 +504,8 @@ impl PresignatureSpawner {
         let id = FullPresignatureId::from_pair(pair_id);
         tracing::info!(?id, "proposing protocol to generate a new presignature");
 
-        self.posits.propose(id, triples, &participants);
+        self.posits
+            .propose(id, PresignLimbo { triples, permit }, &participants);
         for &p in participants.iter() {
             if p == self.me {
                 continue;
@@ -523,37 +528,32 @@ impl PresignatureSpawner {
     /// Generate new presignatures if this node owns fewer than the per-node minimum
     /// (`min_presignatures`) and the network-wide total hasn't reached the cap
     /// (`max_presignatures`).
-    async fn stockpile(&mut self, active: &[Participant], cfg: &ProtocolConfig) {
-        let not_enough_presignatures = {
-            // Network-wide cap: stop generating once total potential presignatures reach max.
-            if self.len_potential().await >= cfg.presignature.max_presignatures as usize {
-                false
-            } else {
-                // Per-node floor: generate if this node owns fewer than min_presignatures.
-                self.len_mine().await < cfg.presignature.min_presignatures as usize
-                    && self.len_introduced() < cfg.max_concurrent_introduction as usize
-                    && self.ongoing.len() < cfg.max_concurrent_generation as usize
-            }
-        };
-
-        if not_enough_presignatures {
-            tracing::debug!("not enough presignatures, generating");
-            self.propose_posit(active).await;
+    async fn should_stockpile(&self, cfg: &ProtocolConfig) -> bool {
+        if self.len_potential().await >= cfg.presignature.max_presignatures as usize {
+            return false;
         }
+
+        self.len_mine().await < cfg.presignature.min_presignatures as usize
+            && self.len_introduced() < cfg.max_concurrent_introduction as usize
     }
 
     async fn generate(
         &mut self,
         id: FullPresignatureId,
-        positor: Positor<TriplesTaken>,
+        positor: Positor<PresignLimbo>,
         participants: &[Participant],
         timeout: Duration,
     ) -> Result<(), InitializationError> {
-        let (owner, triples) = match positor {
-            Positor::Proposer(owner, triples) => (owner, PendingTriples::Available(triples)),
+        let (owner, triples, reserved_permit) = match positor {
+            Positor::Proposer(owner, pending) => (
+                owner,
+                PendingTriples::Available(pending.triples),
+                Some(pending.permit),
+            ),
             Positor::Deliberator(owner) => (
                 owner,
                 PendingTriples::InStorage(id.pair_id, self.triples.clone()),
+                None,
             ),
         };
         tracing::info!(
@@ -638,7 +638,14 @@ impl PresignatureSpawner {
             generator.run(me, epoch).await;
         };
 
-        self.ongoing.spawn(id.id, task);
+        let controller = Arc::clone(&self.concurrency_controller);
+        self.ongoing.spawn(id.id, async move {
+            let _permit = match reserved_permit {
+                Some(permit) => permit,
+                None => controller.presig_permits().acquire().await,
+            };
+            task.await;
+        });
         if owner == me {
             self.ongoing_owned.insert(id.id);
         }
@@ -649,7 +656,7 @@ impl PresignatureSpawner {
     async fn start_generation(
         &mut self,
         id: FullPresignatureId,
-        positor: Positor<TriplesTaken>,
+        positor: Positor<PresignLimbo>,
         participants: Vec<Participant>,
         timeout: Duration,
     ) {
@@ -692,32 +699,42 @@ impl PresignatureSpawner {
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
         let mut last_active_warn: Option<Instant> = None;
-        let mut stockpile_interval = time::interval(Duration::from_millis(100));
-        stockpile_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(1));
         let mut posits = self.msg.subscribe_presignature_posit().await;
 
         let mut protocol = cfg.borrow().protocol.clone();
         let mut active = mesh_state.borrow().active().keys_vec();
+        let presig_permits = self.concurrency_controller.presig_permits();
 
         loop {
+            let try_stockpile = active.len() >= self.threshold;
             tokio::select! {
                 _ = expiration_interval.tick() => {
                     for (id, action) in self.posits.expire_and_start(self.threshold, Duration::from_secs(10), Duration::from_secs(2)) {
-                        let PositInternalAction::StartProtocol(participants, positor) = action else {
-                            tracing::warn!(
-                                ?id,
-                                "presignature posit expired: insufficient accepts"
-                            );
-                            continue;
-                        };
-                        let timeout = Duration::from_millis(protocol.presignature.generation_timeout);
-                        self.start_generation(id, positor, participants, timeout).await;
+                        match action {
+                            PositInternalAction::StartProtocol(participants, positor) => {
+                                let timeout = Duration::from_millis(protocol.presignature.generation_timeout);
+                                self.start_generation(id, positor, participants, timeout).await;
+                            }
+                            PositInternalAction::Abort => {
+                                tracing::warn!(
+                                    ?id,
+                                    "presignature posit expired: insufficient accepts"
+                                );
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 Some((id, from, action)) = posits.recv() => {
                     let timeout = Duration::from_millis(protocol.presignature.generation_timeout);
                     self.process_posit(id, from, action, timeout).await;
+                }
+                permit = presig_permits.acquire(), if try_stockpile => {
+                    if self.should_stockpile(&protocol).await {
+                        tracing::debug!("not enough presignatures, generating");
+                        self.propose_posit(&active, permit).await;
+                    }
                 }
                 // `join_next` returns None on the set being empty, so don't handle that case
                 Some(result) = self.ongoing.join_next(), if !self.ongoing.is_empty() => {
@@ -731,33 +748,32 @@ impl PresignatureSpawner {
                     self.ongoing_owned.remove(&id);
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
                 }
-                _ = stockpile_interval.tick() => {
-                    if active.len() >= self.threshold {
-                        last_active_warn = None;
-                        self.stockpile(&active, &protocol).await;
-                        let _ = ongoing_gen_tx.send(self.ongoing.len());
-
-                        crate::metrics::storage::NUM_PRESIGNATURES_MINE
-                            .set(self.len_mine().await as i64);
-                        crate::metrics::storage::NUM_PRESIGNATURES_TOTAL
-                            .set(self.len_generated().await as i64);
-                        crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL
-                            .set(self.len_potential().await as i64 - self.len_generated().await as i64);
-                    } else if last_active_warn.is_none_or(|i: Instant| i.elapsed() > Duration::from_secs(60)) {
-                        tracing::warn!(
-                            ?active,
-                            threshold = self.threshold,
-                            "not enough active participants to generate presignatures"
-                        );
-                        last_active_warn = Some(Instant::now());
-                    }
-                }
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();
                 }
                 Ok(()) = mesh_state.changed() => {
                     active = mesh_state.borrow().active().keys_vec();
                 }
+            }
+
+            if active.len() >= self.threshold {
+                last_active_warn = None;
+                let _ = ongoing_gen_tx.send(self.ongoing.len());
+
+                crate::metrics::storage::NUM_PRESIGNATURES_MINE.set(self.len_mine().await as i64);
+                crate::metrics::storage::NUM_PRESIGNATURES_TOTAL
+                    .set(self.len_generated().await as i64);
+                crate::metrics::protocols::NUM_PRESIGNATURE_GENERATORS_TOTAL
+                    .set(self.len_potential().await as i64 - self.len_generated().await as i64);
+            } else if last_active_warn
+                .is_none_or(|i: Instant| i.elapsed() > Duration::from_secs(60))
+            {
+                tracing::warn!(
+                    ?active,
+                    threshold = self.threshold,
+                    "not enough active participants to generate presignatures"
+                );
+                last_active_warn = Some(Instant::now());
             }
         }
     }
@@ -792,6 +808,7 @@ impl PresignatureSpawnerTask {
         ctx: &MpcSignProtocol,
         private_share: &SecretKeyShare,
         public_key: &PublicKey,
+        concurrency_controller: Arc<ConcurrencyController>,
     ) -> Self {
         let (ongoing_gen_tx, ongoing_gen_rx) = watch::channel(0);
         let spawner = PresignatureSpawner::new(
@@ -804,6 +821,7 @@ impl PresignatureSpawnerTask {
             &ctx.presignature_storage,
             ctx.msg_channel.clone(),
             ctx.my_account_id.to_string(),
+            concurrency_controller,
         );
 
         Self {
@@ -836,6 +854,11 @@ impl Drop for PresignatureSpawnerTask {
     fn drop(&mut self) {
         self.abort();
     }
+}
+
+struct PresignLimbo {
+    triples: TriplesTaken,
+    permit: PresigPermit,
 }
 
 /// Represents a triple pair that is either available immediately or will eventually be available within

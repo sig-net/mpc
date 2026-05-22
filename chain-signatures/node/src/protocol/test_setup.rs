@@ -33,6 +33,7 @@ impl MpcSignProtocol {
         let generating = channels.msg_channel.subscribe_generation().await;
         let resharing = channels.msg_channel.subscribe_resharing().await;
         let ready = channels.msg_channel.subscribe_ready().await;
+        let (_cpu_tx, cpu_rx) = watch::channel(0.0);
         let sign_task = SignatureSpawnerTask::run(
             my_account_id.clone(),
             channels.sign_rx,
@@ -56,6 +57,7 @@ impl MpcSignProtocol {
             ready,
             config: channels.config,
             mesh_state: channels.mesh_state,
+            cpu_rx,
         }
     }
 }

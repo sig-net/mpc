@@ -1,3 +1,4 @@
+use super::concurrency::ConcurrencyController;
 use super::contract::{ProtocolState, ResharingContractState};
 use super::state::{
     JoiningState, NodeState, PersistentNodeData, ResharingPhase, ResharingState, RunningState,
@@ -99,7 +100,16 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                             // Initialize identity for storage; this is an entry point into Running.
                             ctx.triple_storage.set_me(me);
                             ctx.presignature_storage.set_me(me);
-                            let triple_task = TripleSpawnerTask::run(me, threshold, epoch, ctx);
+                            let concurrency_controller =
+                                ConcurrencyController::from_protocol(&ctx.config.borrow().protocol);
+                            concurrency_controller.start(ctx.cpu_rx.clone());
+                            let triple_task = TripleSpawnerTask::run(
+                                me,
+                                threshold,
+                                epoch,
+                                ctx,
+                                concurrency_controller.clone(),
+                            );
                             let presign_task = PresignatureSpawnerTask::run(
                                 me,
                                 threshold,
@@ -107,6 +117,7 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
                                 ctx,
                                 &private_share,
                                 &public_key,
+                                concurrency_controller,
                             );
 
                             NodeState::Running(RunningState {
@@ -395,7 +406,16 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                     // Initialize identity for storage; this is an entry point into Running.
                     ctx.triple_storage.set_me(me);
                     ctx.presignature_storage.set_me(me);
-                    let triple_task = TripleSpawnerTask::run(me, self.threshold, self.epoch, ctx);
+                    let concurrency_controller =
+                        ConcurrencyController::from_protocol(&ctx.config.borrow().protocol);
+                    concurrency_controller.start(ctx.cpu_rx.clone());
+                    let triple_task = TripleSpawnerTask::run(
+                        me,
+                        self.threshold,
+                        self.epoch,
+                        ctx,
+                        concurrency_controller.clone(),
+                    );
                     let presign_task = PresignatureSpawnerTask::run(
                         me,
                         self.threshold,
@@ -403,6 +423,7 @@ impl<G: Governance> ConsensusProtocol<G> for WaitingForConsensusState {
                         ctx,
                         &self.private_share,
                         &self.public_key,
+                        concurrency_controller,
                     );
                     NodeState::Running(RunningState {
                         epoch: self.epoch,

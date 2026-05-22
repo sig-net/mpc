@@ -1,3 +1,4 @@
+use super::concurrency::{ConcurrencyController, TriplePermit};
 use super::message::{MessageChannel, PositMessage, PositProtocolId, TripleMessage};
 use super::posit::{PositAction, PositInternalAction, Posits};
 use super::MpcSignProtocol;
@@ -21,6 +22,7 @@ use tokio::task::JoinHandle;
 
 use std::collections::HashSet;
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Unique number used to identify a specific ongoing triple generation protocol.
@@ -313,13 +315,14 @@ pub struct TripleSpawner {
     ongoing_owned: HashSet<TripleId>,
 
     /// The protocol posits that are currently in progress.
-    posits: Posits<TripleId, ()>,
+    posits: Posits<TripleId, TriplePermit>,
 
     me: Participant,
     threshold: usize,
     epoch: u64,
     msg: MessageChannel,
     node_account_id: String,
+    concurrency_controller: Arc<ConcurrencyController>,
 
     #[cfg(feature = "debug-page")]
     posits_debug_view: crate::web::debug::DebugPageTaskHandle,
@@ -344,6 +347,7 @@ impl TripleSpawner {
         storage: &TripleStorage,
         msg: MessageChannel,
         node_account_id: String,
+        concurrency_controller: Arc<ConcurrencyController>,
     ) -> Self {
         #[cfg(feature = "debug-page")]
         let posits_debug_view = crate::web::debug::register_task(
@@ -360,6 +364,7 @@ impl TripleSpawner {
             posits: Posits::new(me),
             msg,
             node_account_id,
+            concurrency_controller,
             #[cfg(feature = "debug-page")]
             posits_debug_view,
         }
@@ -441,9 +446,9 @@ impl TripleSpawner {
     }
 
     /// Propose a new triple generation protocol to the network.
-    async fn propose_posit(&mut self, active: &[Participant]) {
+    async fn propose_posit(&mut self, active: &[Participant], permit: TriplePermit) {
         let pair_id = rand::random();
-        self.posits.propose(pair_id, (), active);
+        self.posits.propose(pair_id, permit, active);
         for &p in active.iter() {
             if p == self.me {
                 continue;
@@ -467,10 +472,13 @@ impl TripleSpawner {
         &mut self,
         id: TripleId,
         participants: Vec<Participant>,
-        positor: Positor<()>,
+        positor: Positor<TriplePermit>,
         timeout: Duration,
     ) {
-        if positor.is_proposer() {
+        let is_proposer = positor.is_proposer();
+        let owner = positor.id();
+
+        if is_proposer {
             for &to in &participants {
                 if to == self.me {
                     continue;
@@ -490,15 +498,20 @@ impl TripleSpawner {
             self.ongoing_owned.insert(id);
         }
 
+        let reserved_permit = match positor {
+            Positor::Proposer(_, permit) => Some(permit),
+            Positor::Deliberator(_) => None,
+        };
+
         if let Err(err) = self
-            .generate_with_id(id, &participants, positor.id(), timeout)
+            .generate_with_id(id, &participants, owner, timeout, reserved_permit)
             .await
         {
             self.ongoing_owned.remove(&id);
             tracing::warn!(
                 id,
                 ?participants,
-                is_proposer = positor.is_proposer(),
+                is_proposer,
                 ?err,
                 "unable to start triple generation on START"
             );
@@ -511,6 +524,7 @@ impl TripleSpawner {
         participants: &[Participant],
         owner: Participant,
         timeout: Duration,
+        reserved_permit: Option<TriplePermit>,
     ) -> Result<(), InitializationError> {
         // Check if the `id` is already in the system. Error out and have the next cycle try again.
         let Some(slot) = self.triple_storage.create_slot(id, owner).await else {
@@ -533,7 +547,15 @@ impl TripleSpawner {
         )
         .await?;
 
-        self.ongoing.spawn(id, generator.run(self.epoch));
+        let epoch = self.epoch;
+        let controller = Arc::clone(&self.concurrency_controller);
+        self.ongoing.spawn(id, async move {
+            let _permit = match reserved_permit {
+                Some(permit) => permit,
+                None => controller.triple_permits().acquire().await,
+            };
+            generator.run(epoch).await;
+        });
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS.inc();
 
         Ok(())
@@ -541,22 +563,13 @@ impl TripleSpawner {
 
     /// Generate new triples if this node owns fewer than the per-node minimum
     /// (`min_triples`) and the network-wide total hasn't reached the cap (`max_triples`).
-    async fn stockpile(&mut self, participants: &[Participant], cfg: &ProtocolConfig) {
-        let not_enough_triples = {
-            // Network-wide cap: stop generating once total potential triples reach max_triples.
-            if self.len_potential().await >= cfg.triple.max_triples as usize {
-                false
-            } else {
-                // Per-node floor: generate if this node owns fewer than min_triples.
-                self.len_mine().await < cfg.triple.min_triples as usize
-                    && self.len_introduced() < cfg.max_concurrent_introduction as usize
-                    && self.ongoing.len() < cfg.max_concurrent_generation as usize
-            }
-        };
-
-        if not_enough_triples {
-            self.propose_posit(participants).await;
+    async fn should_stockpile(&self, cfg: &ProtocolConfig) -> bool {
+        if self.len_potential().await >= cfg.triple.max_triples as usize {
+            return false;
         }
+
+        self.len_mine().await < cfg.triple.min_triples as usize
+            && self.len_introduced() < cfg.max_concurrent_introduction as usize
     }
 
     async fn run(
@@ -565,29 +578,37 @@ impl TripleSpawner {
         mut cfg: watch::Receiver<Config>,
         ongoing_gen_tx: watch::Sender<usize>,
     ) {
-        let mut stockpile_interval = tokio::time::interval(Duration::from_millis(100));
-        stockpile_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut expiration_interval = tokio::time::interval(Duration::from_secs(1));
         let mut posits = self.msg.subscribe_triple_posit().await;
 
         let mut active = mesh_state.borrow().active().keys_vec();
         let mut protocol = cfg.borrow().protocol.clone();
         let mut last_active_warn = None;
+        let triple_permits = self.concurrency_controller.triple_permits();
 
         loop {
+            let try_stockpile = active.len() >= self.threshold;
             tokio::select! {
                 _ = expiration_interval.tick() => {
                     for action in self.posits.expire_and_start(self.threshold, Duration::from_secs(10), Duration::from_secs(2)) {
-                        let (id, PositInternalAction::StartProtocol(participants, positor)) = action else {
-                            continue;
-                        };
-                        let timeout = Duration::from_millis(protocol.triple.generation_timeout);
-                        self.start_generation(id, participants, positor, timeout).await;
+                        match action {
+                            (id, PositInternalAction::StartProtocol(participants, positor)) => {
+                                let timeout = Duration::from_millis(protocol.triple.generation_timeout);
+                                self.start_generation(id, participants, positor, timeout).await;
+                            }
+                            (_id, PositInternalAction::Abort) => {}
+                            _ => {}
+                        }
                     }
                 }
                 Some((id, from, action)) = posits.recv() => {
                     let timeout = Duration::from_millis(protocol.triple.generation_timeout);
                     self.process_posit(id, from, action, timeout).await;
+                }
+                permit = triple_permits.acquire(), if try_stockpile => {
+                    if self.should_stockpile(&protocol).await {
+                        self.propose_posit(&active, permit).await;
+                    }
                 }
                 // `join_next` returns None on the set being empty, so don't handle that case
                 Some(result) = self.ongoing.join_next(), if !self.ongoing.is_empty() => {
@@ -601,35 +622,35 @@ impl TripleSpawner {
                     self.ongoing_owned.remove(&id);
                     let _ = ongoing_gen_tx.send(self.ongoing.len());
                 }
-                _ = stockpile_interval.tick() => {
-                    if active.len() >= self.threshold {
-                        last_active_warn = None;
-                        self.stockpile(&active, &protocol).await;
-                        let _ = ongoing_gen_tx.send(self.ongoing.len());
-
-                        crate::metrics::storage::NUM_TRIPLES_MINE
-                            .set(self.len_mine().await as i64);
-                        crate::metrics::storage::NUM_TRIPLES_TOTAL
-                            .set(self.triple_storage.len_generated().await as i64);
-                        crate::metrics::protocols::NUM_TRIPLE_GENERATORS_INTRODUCED
-                            .set(self.len_introduced() as i64);
-                        crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL
-                            .set(self.len_ongoing() as i64);
-                    } else if last_active_warn.is_none_or(|i: Instant| i.elapsed() > Duration::from_secs(60)) {
-                        tracing::warn!(
-                            ?active,
-                            threshold = self.threshold,
-                            "not enough active participants to generate triples"
-                        );
-                        last_active_warn = Some(Instant::now());
-                    }
-                }
                 Ok(()) = cfg.changed() => {
                     protocol = cfg.borrow().protocol.clone();
                 }
                 Ok(()) = mesh_state.changed() => {
                     active = mesh_state.borrow().active().keys_vec();
                 }
+                else => {}
+            }
+
+            if active.len() >= self.threshold {
+                last_active_warn = None;
+                let _ = ongoing_gen_tx.send(self.ongoing.len());
+
+                crate::metrics::storage::NUM_TRIPLES_MINE.set(self.len_mine().await as i64);
+                crate::metrics::storage::NUM_TRIPLES_TOTAL
+                    .set(self.triple_storage.len_generated().await as i64);
+                crate::metrics::protocols::NUM_TRIPLE_GENERATORS_INTRODUCED
+                    .set(self.len_introduced() as i64);
+                crate::metrics::protocols::NUM_TRIPLE_GENERATORS_TOTAL
+                    .set(self.len_ongoing() as i64);
+            } else if last_active_warn
+                .is_none_or(|i: Instant| i.elapsed() > Duration::from_secs(60))
+            {
+                tracing::warn!(
+                    ?active,
+                    threshold = self.threshold,
+                    "not enough active participants to generate triples"
+                );
+                last_active_warn = Some(Instant::now());
             }
         }
     }
@@ -648,7 +669,13 @@ pub struct TripleSpawnerTask {
 }
 
 impl TripleSpawnerTask {
-    pub fn run(me: Participant, threshold: usize, epoch: u64, ctx: &MpcSignProtocol) -> Self {
+    pub fn run(
+        me: Participant,
+        threshold: usize,
+        epoch: u64,
+        ctx: &MpcSignProtocol,
+        concurrency_controller: Arc<ConcurrencyController>,
+    ) -> Self {
         let (ongoing_gen_tx, ongoing_gen_rx) = watch::channel(0);
         let manager = TripleSpawner::new(
             me,
@@ -657,6 +684,7 @@ impl TripleSpawnerTask {
             &ctx.triple_storage,
             ctx.msg_channel.clone(),
             ctx.my_account_id.to_string(),
+            concurrency_controller,
         );
 
         Self {
@@ -688,5 +716,239 @@ impl TripleSpawnerTask {
 impl Drop for TripleSpawnerTask {
     fn drop(&mut self) {
         self.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
+    use crate::rpc::ContractStateWatcher;
+    use deadpool_redis::Runtime;
+    use k256::AffinePoint;
+    use near_sdk::AccountId;
+    use tokio::time::timeout;
+
+    fn test_controller(initial_slots: usize, max_slots: usize) -> Arc<ConcurrencyController> {
+        let mut protocol = ProtocolConfig::default();
+        protocol.other.insert(
+            "adaptive_concurrency".to_string(),
+            serde_json::json!({
+                "initial_slots": initial_slots,
+                "max_slots": max_slots,
+            })
+            .into(),
+        );
+        ConcurrencyController::from_protocol(&protocol)
+    }
+
+    fn test_protocol_config() -> ProtocolConfig {
+        let mut protocol = ProtocolConfig::default();
+        protocol.max_concurrent_introduction = 4;
+        protocol.triple.min_triples = 1;
+        protocol.triple.max_triples = 8;
+        protocol
+    }
+
+    fn test_account_id(label: &str) -> AccountId {
+        format!(
+            "{label}-{}.near",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default().unsigned_abs()
+        )
+        .parse()
+        .unwrap()
+    }
+
+    fn test_participants(ids: &[u32]) -> Participants {
+        let mut participants = Participants::default();
+        for id in ids {
+            let participant = Participant::from(*id);
+            participants.insert(&participant, ParticipantInfo::new(*id));
+        }
+        participants
+    }
+
+    fn test_storage(label: &str, me: Participant) -> (TripleStorage, AccountId) {
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let account_id = test_account_id(label);
+        let storage = TriplePair::storage(&pool, &account_id);
+        storage.set_me(me);
+        (storage, account_id)
+    }
+
+    #[tokio::test]
+    async fn start_generation_uses_reserved_proposer_permit_without_waiting() {
+        let me = Participant::from(0u32);
+        let other = Participant::from(1u32);
+        let controller = test_controller(2, 2);
+        let active_before = controller.triple_active_for_test();
+        let waiting_before = controller.waiting_triples_for_test();
+        let reserved = controller.triple_permits().acquire().await;
+        let blocker = controller.triple_permits().acquire().await;
+
+        let (triple_storage, account_id) = test_storage("triple-start", me);
+        let (inbox, _outbox, msg) = MessageChannel::new();
+        let (_cfg_tx, cfg_rx) = watch::channel(Config::default());
+        let (contract, _contract_tx) = ContractStateWatcher::with_running(
+            &account_id,
+            AffinePoint::default(),
+            1,
+            test_participants(&[0, 1]),
+        );
+        let inbox_task = tokio::spawn(inbox.run(cfg_rx, contract));
+
+        let mut spawner = TripleSpawner::new(
+            me,
+            1,
+            0,
+            &triple_storage,
+            msg,
+            account_id.to_string(),
+            Arc::clone(&controller),
+        );
+        let id = 42;
+
+        spawner
+            .start_generation(
+                id,
+                vec![me, other],
+                Positor::Proposer(me, reserved),
+                Duration::from_secs(5),
+            )
+            .await;
+
+        timeout(Duration::from_secs(1), async {
+            while !spawner.contains_ongoing(id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("triple generator should start without waiting for a second permit");
+
+        assert_eq!(controller.waiting_triples_for_test(), waiting_before);
+        assert_eq!(controller.triple_active_for_test(), active_before + 2);
+
+        assert!(spawner.ongoing.abort(id));
+        drop(blocker);
+        drop(spawner);
+
+        timeout(Duration::from_secs(1), async {
+            while controller.triple_active_for_test() != active_before {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reserved permit should be released when the spawner task is aborted");
+
+        inbox_task.abort();
+    }
+
+    #[tokio::test]
+    async fn abort_and_expire_paths_release_reserved_proposer_permits() {
+        let me = Participant::from(0u32);
+        let other = Participant::from(1u32);
+        let controller = test_controller(1, 1);
+        let active_before = controller.triple_active_for_test();
+        let (triple_storage, account_id) = test_storage("triple-abort-expire", me);
+        let (_inbox, _outbox, msg) = MessageChannel::new();
+        let mut spawner = TripleSpawner::new(
+            me,
+            2,
+            0,
+            &triple_storage,
+            msg,
+            account_id.to_string(),
+            Arc::clone(&controller),
+        );
+        let participants = [me, other];
+
+        let abort_permit = controller.triple_permits().acquire().await;
+        spawner.posits.propose(100, abort_permit, &participants);
+        assert_eq!(controller.triple_active_for_test(), active_before + 1);
+
+        spawner
+            .process_posit(100, other, PositAction::Reject, Duration::from_secs(1))
+            .await;
+
+        assert_eq!(spawner.len_introduced(), 0);
+        timeout(Duration::from_secs(1), async {
+            while controller.triple_active_for_test() != active_before {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("abort path should release the proposer permit");
+
+        let expire_permit = controller.triple_permits().acquire().await;
+        spawner.posits.propose(101, expire_permit, &participants);
+        assert_eq!(controller.triple_active_for_test(), active_before + 1);
+
+        let actions = spawner
+            .posits
+            .expire_and_start(2, Duration::ZERO, Duration::ZERO);
+        let (expired_id, action) = actions.into_iter().next().expect("expected one expired posit");
+        assert_eq!(expired_id, 101);
+        assert!(matches!(action, PositInternalAction::Abort));
+
+        timeout(Duration::from_secs(1), async {
+            while controller.triple_active_for_test() != active_before {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("expire path should release the proposer permit");
+    }
+
+    #[tokio::test]
+    async fn stockpile_wait_wakes_on_permit_availability_without_timer() {
+        let me = Participant::from(0u32);
+        let controller = test_controller(1, 1);
+        let waiting_before = controller.waiting_triples_for_test();
+        let active_before = controller.triple_active_for_test();
+        let held = controller.triple_permits().acquire().await;
+        let (triple_storage, account_id) = test_storage("triple-stockpile", me);
+        let (_inbox, _outbox, msg) = MessageChannel::new();
+        let mut spawner = TripleSpawner::new(
+            me,
+            1,
+            0,
+            &triple_storage,
+            msg,
+            account_id.to_string(),
+            Arc::clone(&controller),
+        );
+        let active = vec![me];
+        let protocol = test_protocol_config();
+
+        {
+            let stockpile = async {
+                let permit = spawner.concurrency_controller.triple_permits().acquire().await;
+                if spawner.should_stockpile(&protocol).await {
+                    spawner.propose_posit(&active, permit).await;
+                }
+            };
+            tokio::pin!(stockpile);
+
+            assert!(timeout(Duration::from_millis(50), &mut stockpile).await.is_err());
+            assert_eq!(controller.waiting_triples_for_test(), waiting_before + 1);
+
+            drop(held);
+            timeout(Duration::from_secs(1), &mut stockpile)
+                .await
+                .expect("stockpile branch should wake as soon as the permit becomes available");
+        }
+
+        assert_eq!(spawner.len_introduced(), 1);
+        assert_eq!(controller.waiting_triples_for_test(), waiting_before);
+
+        drop(spawner);
+        timeout(Duration::from_secs(1), async {
+            while controller.triple_active_for_test() != active_before {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("stored stockpile permit should be released when the spawner drops");
     }
 }

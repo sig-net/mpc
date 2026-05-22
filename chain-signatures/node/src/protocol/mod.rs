@@ -1,3 +1,4 @@
+pub mod concurrency;
 pub mod consensus;
 pub mod contract;
 pub mod cryptography;
@@ -37,7 +38,7 @@ use near_account_id::AccountId;
 use semver::Version;
 use std::path::Path;
 use std::time::{Duration, Instant};
-use sysinfo::{CpuRefreshKind, Disks, RefreshKind, System};
+use sysinfo::{CpuRefreshKind, Disks, System};
 use tokio::sync::{mpsc, watch};
 
 pub struct MpcSignProtocol {
@@ -52,6 +53,7 @@ pub struct MpcSignProtocol {
     pub(crate) msg_channel: MessageChannel,
     pub(crate) config: watch::Receiver<Config>,
     pub(crate) mesh_state: watch::Receiver<MeshState>,
+    pub(crate) cpu_rx: watch::Receiver<f64>,
 }
 
 impl Drop for MpcSignProtocol {
@@ -160,27 +162,28 @@ fn parse_node_version(version: &str) -> i64 {
     (rc_num + version.patch * 1000 + version.minor * 1000000 + version.major * 1000000000) as i64
 }
 
-pub async fn spawn_system_metrics() -> tokio::task::JoinHandle<()> {
-    tokio::task::spawn_blocking(move || {
+pub fn spawn_system_metrics(cpu_tx: watch::Sender<f64>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut system = System::new_all();
+        let cpu_refresh = CpuRefreshKind::everything();
+        let mut interval = tokio::time::interval(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut disk_refresh_at = Instant::now() - Duration::from_secs(30);
+
+        system.refresh_all();
+
         loop {
-            let mut system = System::new_all();
+            interval.tick().await;
 
-            // Refresh only the necessary components
-            system.refresh_all();
-
-            let mut s = System::new_with_specifics(
-                RefreshKind::new().with_cpu(CpuRefreshKind::everything()),
-            );
-            // Wait a bit because CPU usage is based on diff.
-            std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
-            // Refresh CPUs again to get actual value.
-            s.refresh_cpu_specifics(CpuRefreshKind::everything());
+            system.refresh_cpu_specifics(cpu_refresh);
+            system.refresh_memory();
 
             // Update CPU usage metric
-            let cpu_usage = s.global_cpu_usage() as i64;
+            let cpu_usage = system.global_cpu_usage();
             crate::metrics::hardware::CPU_USAGE_PERCENTAGE
                 .with_label_values(&["global"])
-                .set(cpu_usage);
+                .set(cpu_usage as i64);
+            let _ = cpu_tx.send((cpu_usage as f64 / 100.0).clamp(0.0, 1.0));
 
             // Update available memory metric
             let available_memory = system.available_memory() as i64;
@@ -194,28 +197,23 @@ pub async fn spawn_system_metrics() -> tokio::task::JoinHandle<()> {
                 .with_label_values(&["used"])
                 .set(used_memory);
 
-            let root_mount_point = Path::new("/");
-            // Update available disk space metric
-            let available_disk_space = Disks::new_with_refreshed_list()
-                .iter()
-                .find(|d| d.mount_point() == root_mount_point)
-                .expect("No disk found mounted at '/'")
-                .available_space() as i64;
-            crate::metrics::hardware::AVAILABLE_DISK_SPACE_BYTES
-                .with_label_values(&["available_disk"])
-                .set(available_disk_space);
+            if disk_refresh_at.elapsed() >= Duration::from_secs(30) {
+                let root_mount_point = Path::new("/");
+                let disks = Disks::new_with_refreshed_list();
+                let root_disk = disks
+                    .iter()
+                    .find(|disk| disk.mount_point() == root_mount_point)
+                    .expect("No disk found mounted at '/'");
 
-            // Update total disk space metric
-            let total_disk_space = Disks::new_with_refreshed_list()
-                .iter()
-                .find(|d| d.mount_point() == root_mount_point)
-                .expect("No disk found mounted at '/'")
-                .total_space() as i64;
-            crate::metrics::hardware::TOTAL_DISK_SPACE_BYTES
-                .with_label_values(&["total_disk"])
-                .set(total_disk_space);
+                crate::metrics::hardware::AVAILABLE_DISK_SPACE_BYTES
+                    .with_label_values(&["available_disk"])
+                    .set(root_disk.available_space() as i64);
+                crate::metrics::hardware::TOTAL_DISK_SPACE_BYTES
+                    .with_label_values(&["total_disk"])
+                    .set(root_disk.total_space() as i64);
 
-            std::thread::sleep(Duration::from_secs(5));
+                disk_refresh_at = Instant::now();
+            }
         }
     })
 }

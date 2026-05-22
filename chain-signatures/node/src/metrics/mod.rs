@@ -6,6 +6,7 @@ use std::{
 use near_account_id::AccountId;
 use prometheus::{HistogramOpts, HistogramVec, Opts, Result};
 
+pub mod concurrency;
 pub mod hardware;
 pub mod indexers;
 pub mod messaging;

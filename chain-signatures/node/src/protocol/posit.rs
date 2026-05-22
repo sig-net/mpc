@@ -457,6 +457,11 @@ impl SinglePositCounter {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
     use super::*;
     use cait_sith::protocol::Participant;
 
@@ -622,5 +627,66 @@ mod tests {
         let actions = posits1.expire_and_start(threshold, base_delay, deliberator_extra_delay);
         assert_eq!(actions.len(), 0);
         assert_eq!(posits1.len(), 0);
+    }
+
+    #[test]
+    fn test_posits_abort_drops_proposer_store() {
+        struct DropTracker(Arc<AtomicUsize>);
+
+        impl Drop for DropTracker {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let threshold = 2;
+        let participants = vec![
+            Participant::from(0),
+            Participant::from(1),
+            Participant::from(2),
+        ];
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut posits = Posits::<Id, DropTracker>::new(Participant::from(0));
+
+        posits.propose(101, DropTracker(Arc::clone(&drops)), &participants);
+        assert!(matches!(
+            posits.act(101, Participant::from(1), threshold, &PositAction::Reject),
+            PositInternalAction::None
+        ));
+        assert!(matches!(
+            posits.act(101, Participant::from(2), threshold, &PositAction::Reject),
+            PositInternalAction::Abort
+        ));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_posits_expire_abort_drops_proposer_store() {
+        struct DropTracker(Arc<AtomicUsize>);
+
+        impl Drop for DropTracker {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let threshold = 2;
+        let participants = vec![
+            Participant::from(0),
+            Participant::from(1),
+            Participant::from(2),
+        ];
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut posits = Posits::<Id, DropTracker>::new(Participant::from(0));
+
+        posits.propose(202, DropTracker(Arc::clone(&drops)), &participants);
+        let base_delay = Duration::from_millis(10);
+        let deliberator_extra_delay = Duration::from_millis(5);
+        std::thread::sleep(base_delay + deliberator_extra_delay + Duration::from_millis(10));
+        let actions = posits.expire_and_start(threshold, base_delay, deliberator_extra_delay);
+
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], (202, PositInternalAction::Abort)));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 }
