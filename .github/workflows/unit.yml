@@ -58,6 +58,12 @@ jobs:
         run: cargo clippy --tests -- -Dclippy::all
       - name: Unit tests
         run: cargo test --workspace --exclude integration-tests
+      - name: Install just
+        uses: taiki-e/install-action@just
+      - name: Install cargo-crap
+        run: cargo install cargo-crap
+      - name: Analyze complexity
+        run: just analyze
 
   audit:
     name: Audit
