@@ -101,7 +101,6 @@ impl CantonConnection {
             .await
             .map_err(|_| anyhow::anyhow!("canton WebSocket connect timeout"))??;
         let (mut ws_write, ws_read) = ws_stream.split();
-
         tracing::info!(begin_exclusive, "canton WebSocket connected");
 
         let mut filters_by_party = serde_json::Map::new();
@@ -119,6 +118,7 @@ impl CantonConnection {
                 },
             },
         };
+
         timeout(
             CONNECT_TIMEOUT,
             ws_write.send(Message::Text(serde_json::to_string(&subscribe_msg)?.into())),
@@ -210,11 +210,11 @@ impl CantonIndexer {
         Ok(())
     }
 
-    async fn reconnect(&mut self) {
+    async fn reconnect(&mut self, begin_exclusive: u64) {
         let mut backoff = Duration::from_secs(1);
 
         loop {
-            match self.connect_and_subscribe(self.last_seen_offset).await {
+            match self.connect_and_subscribe(begin_exclusive).await {
                 Ok(()) => {
                     tracing::info!(
                         resume_offset = self.last_seen_offset,
@@ -239,7 +239,7 @@ impl CantonIndexer {
     async fn next_update(&mut self) -> Option<ledger_api::Update> {
         loop {
             let Some(msg) = self.ws_conn.next().await else {
-                self.reconnect().await;
+                self.reconnect(self.last_seen_offset).await;
                 continue;
             };
             let Message::Text(text) = msg else {
@@ -325,7 +325,7 @@ impl ChainIndexer for CantonIndexer {
             .unwrap_or(0);
         self.last_seen_offset = checkpoint;
         let anchor_height = self.client.fetch_ledger_end().await?;
-        self.connect_and_subscribe(checkpoint).await?;
+        self.reconnect(self.last_seen_offset).await?;
         Ok(Some(anchor_height))
     }
 
