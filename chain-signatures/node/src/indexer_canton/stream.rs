@@ -287,6 +287,11 @@ impl CantonIndexer {
     }
 
     async fn process_catchup_offset(&mut self, target_offset: u64) -> anyhow::Result<()> {
+        // If we're already at or past the target offset, we're done
+        if self.last_seen_offset >= target_offset {
+            return Ok(());
+        }
+
         loop {
             let Some(update) = self.next_update().await else {
                 anyhow::bail!("canton WebSocket closed during catchup; reconnecting");
@@ -323,16 +328,12 @@ impl ChainIndexer for CantonIndexer {
     }
 
     async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
-        let checkpoint = self
-            .backlog
-            .processed_block(Chain::Canton)
-            .await
-            .unwrap_or(0);
-        catchup_offset_range(checkpoint, anchor_height)
+        // After a reconnect, we resume from last_seen_offset, so catchup should start there.
+        catchup_offset_range(self.last_seen_offset, anchor_height)
     }
 
-    async fn process_catchup(&mut self, item: &Self::Block) -> anyhow::Result<()> {
-        self.process_catchup_offset(*item).await
+    async fn process_catchup(&mut self, &item: &Self::Block) -> anyhow::Result<()> {
+        self.process_catchup_offset(item).await
     }
 
     async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
