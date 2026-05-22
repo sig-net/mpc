@@ -97,7 +97,7 @@ impl CantonConnection {
         );
 
         let request = tokio_tungstenite::connect_async(request);
-        let (ws_stream, _) = timeout(CONNECT_TIMEOUT, request)
+        let (ws_stream, _) = timeout(Self::CONNECT_TIMEOUT, request)
             .await
             .map_err(|_| anyhow::anyhow!("canton WebSocket connect timeout"))??;
         let (mut ws_write, ws_read) = ws_stream.split();
@@ -118,13 +118,11 @@ impl CantonConnection {
                 },
             },
         };
-
-        timeout(
-            CONNECT_TIMEOUT,
-            ws_write.send(Message::Text(serde_json::to_string(&subscribe_msg)?.into())),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("canton WebSocket subscription send timeout"))??;
+        let subscribe_msg = serde_json::to_string(&subscribe_msg)?;
+        let subscribe_task = ws_write.send(Message::Text(subscribe_msg.into()));
+        timeout(Self::CONNECT_TIMEOUT, subscribe_task)
+            .await
+            .map_err(|_| anyhow::anyhow!("canton WebSocket subscription send timeout"))??;
 
         Ok(Self::Connected(ws_read, ws_write))
     }
@@ -135,7 +133,7 @@ impl CantonConnection {
             tracing::warn!("canton WebSocket not initialized");
             return None;
         };
-        let Ok(maybe_msg) = timeout(MESSAGE_TIMEOUT, ws_read.next()).await else {
+        let Ok(maybe_msg) = timeout(Self::MESSAGE_TIMEOUT, ws_read.next()).await else {
             tracing::warn!("canton WebSocket stalled: no message for 60s");
             return None;
         };
@@ -169,7 +167,7 @@ impl CantonConnection {
             return Ok(());
         };
 
-        timeout(DISCONNECT_TIMEOUT, ws_write.close())
+        timeout(Self::DISCONNECT_TIMEOUT, ws_write.close())
             .await
             .map_err(|_| anyhow::anyhow!("canton WebSocket close reply timeout"))?
             .map_err(|e| anyhow::anyhow!("failed to flush canton WebSocket close reply: {e}"))?;
@@ -325,7 +323,7 @@ impl ChainIndexer for CantonIndexer {
             .unwrap_or(0);
         self.last_seen_offset = checkpoint;
         let anchor_height = self.client.fetch_ledger_end().await?;
-        self.reconnect(self.last_seen_offset).await?;
+        self.reconnect(self.last_seen_offset).await;
         Ok(Some(anchor_height))
     }
 
