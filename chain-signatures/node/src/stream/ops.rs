@@ -748,7 +748,13 @@ mod tests {
         let sign_id = request.id;
         let source_chain = request.chain;
         backlog.insert(request).await;
-        backlog.advance(source_chain, sign_id, tx).await.unwrap();
+        backlog
+            .pending_response_request(source_chain, &sign_id)
+            .await
+            .expect("missing pending response entry")
+            .advance(tx)
+            .await
+            .unwrap();
     }
 
     #[test]
