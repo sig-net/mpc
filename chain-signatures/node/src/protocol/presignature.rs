@@ -1,5 +1,5 @@
 use super::artifact_task::{
-    ArtifactProtocol, PokeMode, ProtocolBuildOutput, ProtocolGeneratorDriver, ProtocolSpawnerTask,
+    ArtifactProtocol, ProtocolBuildOutput, ProtocolSpawnerTask,
 };
 use super::message::{MessageChannel, PositProtocolId, PresignatureMessage};
 use super::posit::PositAction;
@@ -11,7 +11,6 @@ use crate::storage::triple_storage::{TriplePair, TriplesTaken, TriplesTakenDropp
 use crate::types::{PresignatureProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
 
-use async_trait::async_trait;
 use cait_sith::protocol::{MessageData, Participant, ProtocolError};
 use cait_sith::{KeygenOutput, PresignArguments, PresignOutput};
 use chrono::Utc;
@@ -107,146 +106,6 @@ impl<'de> Deserialize<'de> for Presignature {
     }
 }
 
-// ── PresignatureGenerator ─────────────────────────────────────────────────────
-
-pub struct PresignatureGenerationDriver {
-    dropper: TriplesTakenDropper,
-}
-
-#[async_trait]
-impl ProtocolGeneratorDriver for PresignatureGenerationDriver {
-    type Id = PresignatureId;
-    type Protocol = PresignatureProtocol;
-    type Output = PresignOutput<Secp256k1>;
-    type InMessage = PresignatureMessage;
-    type WireMessage = PresignatureMessage;
-    type Artifact = Presignature;
-
-    fn poke_mode(&self) -> PokeMode {
-        PokeMode::Inline
-    }
-
-    fn protocol_poke(protocol: &mut Self::Protocol) -> Result<cait_sith::protocol::Action<Self::Output>, ProtocolError> {
-        protocol.poke()
-    }
-
-    fn protocol_message(protocol: &mut Self::Protocol, from: Participant, data: MessageData) {
-        protocol.message(from, data);
-    }
-
-    fn split_incoming(msg: Self::InMessage) -> (Participant, MessageData) {
-        (msg.from, msg.data)
-    }
-
-    fn build_message(
-        &self,
-        id: Self::Id,
-        epoch: u64,
-        from: Participant,
-        _to: Participant,
-        data: MessageData,
-    ) -> Self::WireMessage {
-        PresignatureMessage {
-            id,
-            pair_id: self.dropper.id,
-            epoch,
-            from,
-            data,
-            timestamp: Utc::now().timestamp() as u64,
-        }
-    }
-
-    async fn send_message(
-        &self,
-        msg: &MessageChannel,
-        from: Participant,
-        to: Participant,
-        wire: Self::WireMessage,
-    ) {
-        msg.send(from, to, wire).await;
-    }
-
-    fn observe_before_poke_delay(&self, created: Instant) {
-        crate::metrics::protocols::PRESIGNATURE_BEFORE_POKE_DELAY.observe(created.elapsed().as_millis() as f64);
-    }
-
-    fn observe_poke_cpu_time(&self, elapsed: Duration) {
-        crate::metrics::protocols::PRESIGNATURE_POKE_CPU_TIME.observe(elapsed.as_millis() as f64);
-    }
-
-    fn on_poke_protocol_error(&mut self, me: Participant, owner: Participant, err: ProtocolError) {
-        crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES.inc();
-        if owner == me {
-            crate::metrics::protocols::PRESIGNATURE_GENERATOR_MINE_FAILURES.inc();
-        }
-        tracing::warn!(?owner, ?err, "presignature generation failed");
-    }
-
-    fn on_poke_join_error(&mut self, me: Participant, owner: Participant, err: tokio::task::JoinError) {
-        crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES.inc();
-        if owner == me {
-            crate::metrics::protocols::PRESIGNATURE_GENERATOR_MINE_FAILURES.inc();
-        }
-        tracing::warn!(?owner, ?err, "presignature generation failed in blocking task");
-    }
-
-    fn on_recv_closed(&mut self, id: Self::Id, owner: Participant) {
-        crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES.inc();
-        tracing::warn!(?id, ?owner, "presignature generation aborted");
-    }
-
-    fn on_recv_timeout(&mut self, id: Self::Id, owner: Participant) {
-        crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES.inc();
-        tracing::warn!(?id, ?owner, "presignature generation timeout");
-    }
-
-    fn on_drop(&self, id: Self::Id, msg: MessageChannel) {
-        tokio::spawn(async move {
-            msg.unsubscribe_presignature(id).await;
-            msg.filter_presignature(id).await;
-        });
-    }
-
-    async fn finish(
-        &mut self,
-        id: Self::Id,
-        me: Participant,
-        owner: Participant,
-        participants: &[Participant],
-        created: Instant,
-        output: Self::Output,
-        run_elapsed: Duration,
-        total_wait: Duration,
-        total_pokes: usize,
-    ) -> Option<Self::Artifact> {
-        crate::metrics::protocols::PRESIGNATURE_LATENCY.observe(run_elapsed.as_secs_f64());
-        crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS.inc();
-        crate::metrics::protocols::PRESIGNATURE_ACCRUED_WAIT_DELAY
-            .observe(total_wait.as_millis() as f64);
-        crate::metrics::protocols::PRESIGNATURE_POKES_CNT.observe(total_pokes as f64);
-
-        tracing::info!(
-            id = ?id,
-            owner = ?owner,
-            big_r = ?output.big_r.to_base58(),
-            elapsed = ?created.elapsed(),
-            "completed presignature generation"
-        );
-
-        if owner == me {
-            tracing::info!(id = id, "assigning presignature to myself");
-            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS.inc();
-        }
-
-        Some(Presignature {
-            id,
-            output,
-            participants: participants.to_vec(),
-            holders: Some(participants.to_vec()),
-        })
-    }
-}
-
 // ── PendingTriples ────────────────────────────────────────────────────────────
 
 /// Either an already-held triple pair (proposer) or one to be fetched from
@@ -309,7 +168,139 @@ impl ArtifactProtocol for PresignatureArtifact {
     type GenerationDeps = PresignatureGenerationDeps;
     type Context = PresignatureContext;
     type Artifact = Presignature;
-    type GeneratorDriver = PresignatureGenerationDriver;
+    type GenerationState = TriplesTakenDropper;
+    type Protocol = PresignatureProtocol;
+    type Output = PresignOutput<Secp256k1>;
+    type InMessage = PresignatureMessage;
+    type WireMessage = PresignatureMessage;
+
+    fn protocol_poke(protocol: &mut Self::Protocol) -> Result<cait_sith::protocol::Action<Self::Output>, ProtocolError> {
+        protocol.poke()
+    }
+
+    fn protocol_message(protocol: &mut Self::Protocol, from: Participant, data: MessageData) {
+        protocol.message(from, data);
+    }
+
+    fn split_incoming(msg: Self::InMessage) -> (Participant, MessageData) {
+        (msg.from, msg.data)
+    }
+
+    fn build_message(
+        state: &Self::GenerationState,
+        id: Self::TaskId,
+        epoch: u64,
+        from: Participant,
+        _to: Participant,
+        data: MessageData,
+    ) -> Self::WireMessage {
+        PresignatureMessage {
+            id: id.id,
+            pair_id: state.id,
+            epoch,
+            from,
+            data,
+            timestamp: Utc::now().timestamp() as u64,
+        }
+    }
+
+    fn observe_before_poke_delay(_state: &Self::GenerationState, created: Instant) {
+        crate::metrics::protocols::PRESIGNATURE_BEFORE_POKE_DELAY.observe(created.elapsed().as_millis() as f64);
+    }
+
+    fn observe_poke_cpu_time(_state: &Self::GenerationState, elapsed: Duration) {
+        crate::metrics::protocols::PRESIGNATURE_POKE_CPU_TIME.observe(elapsed.as_millis() as f64);
+    }
+
+    fn on_poke_protocol_error(
+        _state: &mut Self::GenerationState,
+        me: Participant,
+        owner: Participant,
+        err: ProtocolError,
+    ) {
+        crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES.inc();
+        if owner == me {
+            crate::metrics::protocols::PRESIGNATURE_GENERATOR_MINE_FAILURES.inc();
+        }
+        tracing::warn!(?owner, ?err, "presignature generation failed");
+    }
+
+    fn on_poke_join_error(
+        _state: &mut Self::GenerationState,
+        me: Participant,
+        owner: Participant,
+        err: tokio::task::JoinError,
+    ) {
+        crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES.inc();
+        if owner == me {
+            crate::metrics::protocols::PRESIGNATURE_GENERATOR_MINE_FAILURES.inc();
+        }
+        tracing::warn!(?owner, ?err, "presignature generation failed in blocking task");
+    }
+
+    fn on_recv_closed(
+        _state: &mut Self::GenerationState,
+        id: Self::TaskId,
+        owner: Participant,
+    ) {
+        crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES.inc();
+        tracing::warn!(?id, ?owner, "presignature generation aborted");
+    }
+
+    fn on_recv_timeout(
+        _state: &mut Self::GenerationState,
+        id: Self::TaskId,
+        owner: Participant,
+    ) {
+        crate::metrics::protocols::PRESIGNATURE_GENERATOR_FAILURES.inc();
+        tracing::warn!(?id, ?owner, "presignature generation timeout");
+    }
+
+    fn on_drop(_state: &Self::GenerationState, id: Self::TaskId, msg: MessageChannel) {
+        tokio::spawn(async move {
+            msg.unsubscribe_presignature(id.id).await;
+            msg.filter_presignature(id.id).await;
+        });
+    }
+
+    async fn finish(
+        _state: &mut Self::GenerationState,
+        id: Self::TaskId,
+        me: Participant,
+        owner: Participant,
+        participants: &[Participant],
+        created: Instant,
+        output: Self::Output,
+        run_elapsed: Duration,
+        total_wait: Duration,
+        total_pokes: usize,
+    ) -> Option<Self::Artifact> {
+        crate::metrics::protocols::PRESIGNATURE_LATENCY.observe(run_elapsed.as_secs_f64());
+        crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_SUCCESS.inc();
+        crate::metrics::protocols::PRESIGNATURE_ACCRUED_WAIT_DELAY
+            .observe(total_wait.as_millis() as f64);
+        crate::metrics::protocols::PRESIGNATURE_POKES_CNT.observe(total_pokes as f64);
+
+        tracing::info!(
+            id = ?id.id,
+            owner = ?owner,
+            big_r = ?output.big_r.to_base58(),
+            elapsed = ?created.elapsed(),
+            "completed presignature generation"
+        );
+
+        if owner == me {
+            tracing::info!(id = id.id, "assigning presignature to myself");
+            crate::metrics::protocols::NUM_TOTAL_HISTORICAL_PRESIGNATURE_GENERATORS_MINE_SUCCESS.inc();
+        }
+
+        Some(Presignature {
+            id: id.id,
+            output,
+            participants: participants.to_vec(),
+            holders: Some(participants.to_vec()),
+        })
+    }
 
     fn posit_id(task_id: FullPresignatureId) -> PositProtocolId {
         PositProtocolId::Presignature(task_id)
@@ -433,7 +424,7 @@ impl ArtifactProtocol for PresignatureArtifact {
         dependencies: PresignatureGenerationDeps,
         ctx: PresignatureContext,
         timeout: Duration,
-    ) -> Option<ProtocolBuildOutput<Self::GeneratorDriver>> {
+    ) -> Option<ProtocolBuildOutput<Self>> {
         let Some(slot) = ctx.presignatures.create_slot(task_id.id, owner).await else {
             tracing::warn!(?task_id, "presignature slot already taken, skipping");
             return None;
@@ -477,15 +468,14 @@ impl ArtifactProtocol for PresignatureArtifact {
 
         let inbox = ctx.msg.subscribe_presignature(task_id.id).await;
 
-        let driver = PresignatureGenerationDriver { dropper };
         Some(ProtocolBuildOutput {
-            id: task_id.id,
+            id: task_id,
             participants,
             protocol,
             inbox,
             msg: ctx.msg,
             slot: Some(slot),
-            driver,
+            state: dropper,
         })
     }
 

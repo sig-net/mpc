@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::Hash;
@@ -12,7 +11,7 @@ use tracing::Instrument;
 
 use crate::config::Config;
 use crate::mesh::MeshState;
-use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId};
+use crate::protocol::message::{Message, MessageChannel, PositMessage, PositProtocolId};
 use crate::protocol::posit::PositAction;
 use crate::storage::protocol_storage::{ArtifactSlot, ProtocolArtifact};
 use crate::util::JoinMap;
@@ -55,109 +54,45 @@ pub enum PokeMode {
     Blocking,
 }
 
-#[async_trait]
-pub trait ProtocolGeneratorDriver: Send + Sync {
-    type Id: Copy + Send + Sync + 'static;
-    type Protocol: Send + Sync + 'static;
-    type Output: Send + 'static;
-    type InMessage: Send;
-    type WireMessage: Send;
-    type Artifact: ProtocolArtifact;
-
-    fn poke_mode(&self) -> PokeMode;
-
-    fn protocol_poke(protocol: &mut Self::Protocol) -> Result<Action<Self::Output>, ProtocolError>;
-
-    fn protocol_message(protocol: &mut Self::Protocol, from: Participant, data: MessageData);
-
-    fn split_incoming(msg: Self::InMessage) -> (Participant, MessageData);
-
-    fn build_message(
-        &self,
-        id: Self::Id,
-        epoch: u64,
-        from: Participant,
-        to: Participant,
-        data: MessageData,
-    ) -> Self::WireMessage;
-
-    async fn send_message(
-        &self,
-        msg: &MessageChannel,
-        from: Participant,
-        to: Participant,
-        wire: Self::WireMessage,
-    );
-
-    fn observe_before_poke_delay(&self, created: Instant);
-
-    fn observe_poke_cpu_time(&self, elapsed: Duration);
-
-    fn on_poke_protocol_error(&mut self, me: Participant, owner: Participant, err: ProtocolError);
-
-    fn on_poke_join_error(&mut self, me: Participant, owner: Participant, err: tokio::task::JoinError);
-
-    fn on_recv_closed(&mut self, id: Self::Id, owner: Participant);
-
-    fn on_recv_timeout(&mut self, id: Self::Id, owner: Participant);
-
-    fn on_drop(&self, id: Self::Id, msg: MessageChannel);
-
-    async fn finish(
-        &mut self,
-        id: Self::Id,
-        me: Participant,
-        owner: Participant,
-        participants: &[Participant],
-        created: Instant,
-        output: Self::Output,
-        run_elapsed: Duration,
-        total_wait: Duration,
-        total_pokes: usize,
-    ) -> Option<Self::Artifact>
-    where
-        Self: Sized;
-}
-
-pub struct ProtocolGenerator<D: ProtocolGeneratorDriver> {
-    id: D::Id,
+pub struct ProtocolGenerator<T: ArtifactProtocol> {
+    id: T::TaskId,
     epoch: u64,
     me: Participant,
     owner: Participant,
     participants: Vec<Participant>,
-    protocol: Option<D::Protocol>,
+    protocol: Option<T::Protocol>,
     created: Instant,
     timeout: Duration,
-    inbox: mpsc::Receiver<D::InMessage>,
+    inbox: mpsc::Receiver<T::InMessage>,
     msg: MessageChannel,
-    slot: Option<ArtifactSlot<D::Artifact>>,
-    driver: D,
+    slot: Option<ArtifactSlot<T::Artifact>>,
+    state: T::GenerationState,
 }
 
-pub struct ProtocolBuildOutput<D: ProtocolGeneratorDriver> {
-    pub id: D::Id,
+pub struct ProtocolBuildOutput<T: ArtifactProtocol> {
+    pub id: T::TaskId,
     pub participants: Vec<Participant>,
-    pub protocol: D::Protocol,
-    pub inbox: mpsc::Receiver<D::InMessage>,
+    pub protocol: T::Protocol,
+    pub inbox: mpsc::Receiver<T::InMessage>,
     pub msg: MessageChannel,
-    pub slot: Option<ArtifactSlot<D::Artifact>>,
-    pub driver: D,
+    pub slot: Option<ArtifactSlot<T::Artifact>>,
+    pub state: T::GenerationState,
 }
 
-impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
+impl<T: ArtifactProtocol> ProtocolGenerator<T> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        id: D::Id,
+        id: T::TaskId,
         epoch: u64,
         me: Participant,
         owner: Participant,
         participants: Vec<Participant>,
-        protocol: D::Protocol,
+        protocol: T::Protocol,
         timeout: Duration,
-        inbox: mpsc::Receiver<D::InMessage>,
+        inbox: mpsc::Receiver<T::InMessage>,
         msg: MessageChannel,
-        slot: Option<ArtifactSlot<D::Artifact>>,
-        driver: D,
+        slot: Option<ArtifactSlot<T::Artifact>>,
+        state: T::GenerationState,
     ) -> Self {
         Self {
             id,
@@ -171,21 +106,21 @@ impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
             inbox,
             msg,
             slot,
-            driver,
+            state,
         }
     }
 }
 
-impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
-    async fn poke_action(&mut self) -> Result<Action<D::Output>, ()> {
-        let mode = self.driver.poke_mode();
+impl<T: ArtifactProtocol> ProtocolGenerator<T> {
+    async fn poke_action(&mut self) -> Result<Action<T::Output>, ()> {
+        let mode = T::poke_mode(&self.state);
         let mut protocol = self.protocol.take().expect("protocol must exist");
 
         let action_res = match mode {
-            PokeMode::Inline => D::protocol_poke(&mut protocol),
+            PokeMode::Inline => T::protocol_poke(&mut protocol),
             PokeMode::Blocking => {
                 match tokio::task::spawn_blocking(move || {
-                    let out = D::protocol_poke(&mut protocol);
+                    let out = T::protocol_poke(&mut protocol);
                     (out, protocol)
                 })
                 .await
@@ -195,15 +130,18 @@ impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
                         return match res {
                             Ok(action) => Ok(action),
                             Err(err) => {
-                                self.driver
-                                    .on_poke_protocol_error(self.me, self.owner, err);
+                                T::on_poke_protocol_error(
+                                    &mut self.state,
+                                    self.me,
+                                    self.owner,
+                                    err,
+                                );
                                 Err(())
                             }
                         };
                     }
                     Err(err) => {
-                        self.driver
-                            .on_poke_join_error(self.me, self.owner, err);
+                        T::on_poke_join_error(&mut self.state, self.me, self.owner, err);
                         return Err(());
                     }
                 }
@@ -214,8 +152,7 @@ impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
         match action_res {
             Ok(action) => Ok(action),
             Err(err) => {
-                self.driver
-                    .on_poke_protocol_error(self.me, self.owner, err);
+                T::on_poke_protocol_error(&mut self.state, self.me, self.owner, err);
                 Err(())
             }
         }
@@ -225,18 +162,18 @@ impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
         let remaining = self.timeout.saturating_sub(self.created.elapsed());
         match tokio::time::timeout(remaining, self.inbox.recv()).await {
             Ok(Some(msg)) => {
-                let (from, data) = D::split_incoming(msg);
+                let (from, data) = T::split_incoming(msg);
                 let mut protocol = self.protocol.take().expect("protocol must exist");
-                D::protocol_message(&mut protocol, from, data);
+                T::protocol_message(&mut protocol, from, data);
                 self.protocol = Some(protocol);
                 true
             }
             Ok(None) => {
-                self.driver.on_recv_closed(self.id, self.owner);
+                T::on_recv_closed(&mut self.state, self.id, self.owner);
                 false
             }
             Err(_) => {
-                self.driver.on_recv_timeout(self.id, self.owner);
+                T::on_recv_timeout(&mut self.state, self.id, self.owner);
                 false
             }
         }
@@ -247,22 +184,14 @@ impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
             if to == self.me {
                 continue;
             }
-            let wire = self
-                .driver
-                .build_message(self.id, self.epoch, self.me, to, data.clone());
-            self.driver
-                .send_message(&self.msg, self.me, to, wire)
-                .await;
+            let wire = T::build_message(&self.state, self.id, self.epoch, self.me, to, data.clone());
+            T::send_message(&self.state, &self.msg, self.me, to, wire).await;
         }
     }
 
     async fn send_private(&self, to: Participant, data: MessageData) {
-        let wire = self
-            .driver
-            .build_message(self.id, self.epoch, self.me, to, data);
-        self.driver
-            .send_message(&self.msg, self.me, to, wire)
-            .await;
+        let wire = T::build_message(&self.state, self.id, self.epoch, self.me, to, data);
+        T::send_message(&self.state, &self.msg, self.me, to, wire).await;
     }
 
     pub async fn run(mut self) {
@@ -270,7 +199,7 @@ impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
         let mut total_wait = Duration::from_millis(0);
         let mut total_pokes = 0;
         let mut poke_last_time = self.created;
-        self.driver.observe_before_poke_delay(self.created);
+        T::observe_before_poke_delay(&self.state, self.created);
 
         loop {
             let poke_start_time = Instant::now();
@@ -282,7 +211,7 @@ impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
             total_wait += poke_start_time - poke_last_time;
             total_pokes += 1;
             poke_last_time = Instant::now();
-            self.driver.observe_poke_cpu_time(poke_start_time.elapsed());
+            T::observe_poke_cpu_time(&self.state, poke_start_time.elapsed());
 
             match action {
                 Action::Wait => {
@@ -297,9 +226,8 @@ impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
                     self.send_private(to, data).await;
                 }
                 Action::Return(output) => {
-                    let artifact = self
-                        .driver
-                        .finish(
+                    let artifact = T::finish(
+                        &mut self.state,
                             self.id,
                             self.me,
                             self.owner,
@@ -320,7 +248,7 @@ impl<D: ProtocolGeneratorDriver> ProtocolGenerator<D> {
             }
         }
 
-        self.driver.on_drop(self.id, self.msg.clone());
+        T::on_drop(&self.state, self.id, self.msg.clone());
     }
 }
 
@@ -357,7 +285,7 @@ async fn run_generation_task<T: ArtifactProtocol>(
         return;
     };
 
-    ProtocolGenerator::new(
+    ProtocolGenerator::<T>::new(
         build.id,
         epoch,
         me,
@@ -368,7 +296,7 @@ async fn run_generation_task<T: ArtifactProtocol>(
         build.inbox,
         build.msg,
         build.slot,
-        build.driver,
+        build.state,
     )
     .run()
     .await;
@@ -659,6 +587,9 @@ pub trait ArtifactProtocol: Sized + Send + 'static {
     /// ID used to route posit and protocol messages for each task instance.
     type TaskId: Copy + Eq + Hash + fmt::Debug + Send + Sync + 'static;
 
+    /// Final artifact stored when generation succeeds.
+    type Artifact: ProtocolArtifact;
+
     /// State acquired by the proposer before broadcasting Propose
     /// (e.g. taken triple pairs for presignature generation).
     type ProposerState: Send + 'static;
@@ -669,11 +600,20 @@ pub trait ArtifactProtocol: Sized + Send + 'static {
     /// Shared context passed to every task (storage, msg channel, keys, …).
     type Context: Clone + Send + Sync + 'static;
 
-    /// Artifact stored by this protocol.
-    type Artifact: ProtocolArtifact;
+    /// Per-generation mutable state not belonging in shared generator core.
+    type GenerationState: Send + Sync + 'static;
 
-    /// Driver used by the generic protocol generation loop.
-    type GeneratorDriver: ProtocolGeneratorDriver;
+    /// Underlying cait-sith protocol object.
+    type Protocol: Send + Sync + 'static;
+
+    /// Final cait-sith protocol output.
+    type Output: Send + 'static;
+
+    /// Incoming protocol message type.
+    type InMessage: Send + 'static;
+
+    /// Outgoing protocol message type.
+    type WireMessage: Into<Message> + Send + 'static;
 
     /// Returns the [`PositProtocolId`] for outgoing posit messages.
     fn posit_id(task_id: Self::TaskId) -> PositProtocolId;
@@ -726,6 +666,90 @@ pub trait ArtifactProtocol: Sized + Send + 'static {
     /// Generation timeout extracted from config.
     fn generation_timeout(cfg: &ProtocolConfig) -> Duration;
 
+    fn poke_mode(_state: &Self::GenerationState) -> PokeMode {
+        PokeMode::Inline
+    }
+
+    fn protocol_poke(protocol: &mut Self::Protocol) -> Result<Action<Self::Output>, ProtocolError>;
+
+    fn protocol_message(protocol: &mut Self::Protocol, from: Participant, data: MessageData);
+
+    fn split_incoming(msg: Self::InMessage) -> (Participant, MessageData);
+
+    fn build_message(
+        state: &Self::GenerationState,
+        id: Self::TaskId,
+        epoch: u64,
+        from: Participant,
+        to: Participant,
+        data: MessageData,
+    ) -> Self::WireMessage;
+
+    fn send_message(
+        _state: &Self::GenerationState,
+        msg: &MessageChannel,
+        from: Participant,
+        to: Participant,
+        wire: Self::WireMessage,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async move {
+            msg.send(from, to, wire).await;
+        }
+    }
+
+    fn observe_before_poke_delay(_state: &Self::GenerationState, _created: Instant) {}
+
+    fn observe_poke_cpu_time(_state: &Self::GenerationState, _elapsed: Duration) {}
+
+    fn on_poke_protocol_error(
+        _state: &mut Self::GenerationState,
+        _me: Participant,
+        _owner: Participant,
+        err: ProtocolError,
+    ) {
+        tracing::warn!(?err, "protocol generation failed");
+    }
+
+    fn on_poke_join_error(
+        _state: &mut Self::GenerationState,
+        _me: Participant,
+        _owner: Participant,
+        err: tokio::task::JoinError,
+    ) {
+        tracing::warn!(?err, "protocol generation failed in blocking task");
+    }
+
+    fn on_recv_closed(
+        _state: &mut Self::GenerationState,
+        _id: Self::TaskId,
+        _owner: Participant,
+    ) {
+    }
+
+    fn on_recv_timeout(
+        _state: &mut Self::GenerationState,
+        _id: Self::TaskId,
+        _owner: Participant,
+    ) {
+    }
+
+    fn on_drop(_state: &Self::GenerationState, _id: Self::TaskId, _msg: MessageChannel) {}
+
+    fn finish(
+        _state: &mut Self::GenerationState,
+        _id: Self::TaskId,
+        _me: Participant,
+        _owner: Participant,
+        _participants: &[Participant],
+        _created: Instant,
+        _output: Self::Output,
+        _run_elapsed: Duration,
+        _total_wait: Duration,
+        _total_pokes: usize,
+    ) -> impl std::future::Future<Output = Option<Self::Artifact>> + Send {
+        async { None }
+    }
+
     /// Resolve dependencies needed to run generation.
     fn prepare_generation(
         ctx: &Self::Context,
@@ -746,7 +770,7 @@ pub trait ArtifactProtocol: Sized + Send + 'static {
         dependencies: Self::GenerationDeps,
         ctx: Self::Context,
         timeout: Duration,
-    ) -> impl std::future::Future<Output = Option<ProtocolBuildOutput<Self::GeneratorDriver>>> + Send;
+    ) -> impl std::future::Future<Output = Option<ProtocolBuildOutput<Self>>> + Send;
 
     /// Subscribe to the global posit stream for this protocol type.
     fn subscribe_posit(
@@ -1139,192 +1163,28 @@ impl Drop for ProtocolSpawnerTask {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cait_sith::protocol::Participant;
+    use cait_sith::protocol::{Participant, Protocol as CaitProtocol};
     use mpc_contract::config::ProtocolConfig;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
-    struct NoopGeneratorDriver;
-
-    #[async_trait]
-    impl ProtocolGeneratorDriver for NoopGeneratorDriver {
-        type Id = u64;
-        type Protocol = ();
-        type Output = ();
-        type InMessage = ();
-        type WireMessage = ();
-        type Artifact = crate::storage::triple_storage::TriplePair;
-
-        fn poke_mode(&self) -> PokeMode {
-            PokeMode::Inline
-        }
-
-        fn protocol_poke(
-            _protocol: &mut Self::Protocol,
-        ) -> Result<Action<Self::Output>, ProtocolError> {
-            unreachable!()
-        }
-
-        fn protocol_message(_protocol: &mut Self::Protocol, _from: Participant, _data: MessageData) {}
-
-        fn split_incoming(_msg: Self::InMessage) -> (Participant, MessageData) {
-            unreachable!()
-        }
-
-        fn build_message(
-            &self,
-            _id: Self::Id,
-            _epoch: u64,
-            _from: Participant,
-            _to: Participant,
-            _data: MessageData,
-        ) -> Self::WireMessage {
-            unreachable!()
-        }
-
-        async fn send_message(
-            &self,
-            _msg: &MessageChannel,
-            _from: Participant,
-            _to: Participant,
-            _wire: Self::WireMessage,
-        ) {
-        }
-
-        fn observe_before_poke_delay(&self, _created: Instant) {}
-
-        fn observe_poke_cpu_time(&self, _elapsed: Duration) {}
-
-        fn on_poke_protocol_error(
-            &mut self,
-            _me: Participant,
-            _owner: Participant,
-            _err: ProtocolError,
-        ) {
-        }
-
-        fn on_poke_join_error(
-            &mut self,
-            _me: Participant,
-            _owner: Participant,
-            _err: tokio::task::JoinError,
-        ) {
-        }
-
-        fn on_recv_closed(&mut self, _id: Self::Id, _owner: Participant) {}
-
-        fn on_recv_timeout(&mut self, _id: Self::Id, _owner: Participant) {}
-
-        fn on_drop(&self, _id: Self::Id, _msg: MessageChannel) {}
-
-        async fn finish(
-            &mut self,
-            _id: Self::Id,
-            _me: Participant,
-            _owner: Participant,
-            _participants: &[Participant],
-            _created: Instant,
-            _output: Self::Output,
-            _run_elapsed: Duration,
-            _total_wait: Duration,
-            _total_pokes: usize,
-        ) -> Option<Self::Artifact> {
-            None
-        }
+    struct ImmediateProtocol {
+        done: bool,
     }
 
-    #[derive(Clone)]
-    struct MockGeneratorDriver {
-        completed: Arc<AtomicUsize>,
-    }
-
-    #[async_trait]
-    impl ProtocolGeneratorDriver for MockGeneratorDriver {
-        type Id = u64;
-        type Protocol = ();
+    impl CaitProtocol for ImmediateProtocol {
         type Output = ();
-        type InMessage = ();
-        type WireMessage = ();
-        type Artifact = crate::storage::triple_storage::TriplePair;
 
-        fn poke_mode(&self) -> PokeMode {
-            PokeMode::Inline
-        }
-
-        fn protocol_poke(
-            _protocol: &mut Self::Protocol,
-        ) -> Result<Action<Self::Output>, ProtocolError> {
+        fn poke(&mut self) -> Result<Action<Self::Output>, ProtocolError> {
+            if self.done {
+                return Ok(Action::Wait);
+            }
+            self.done = true;
             Ok(Action::Return(()))
         }
 
-        fn protocol_message(_protocol: &mut Self::Protocol, _from: Participant, _data: MessageData) {}
-
-        fn split_incoming(_msg: Self::InMessage) -> (Participant, MessageData) {
-            unreachable!()
-        }
-
-        fn build_message(
-            &self,
-            _id: Self::Id,
-            _epoch: u64,
-            _from: Participant,
-            _to: Participant,
-            _data: MessageData,
-        ) -> Self::WireMessage {
-            unreachable!()
-        }
-
-        async fn send_message(
-            &self,
-            _msg: &MessageChannel,
-            _from: Participant,
-            _to: Participant,
-            _wire: Self::WireMessage,
-        ) {
-        }
-
-        fn observe_before_poke_delay(&self, _created: Instant) {}
-
-        fn observe_poke_cpu_time(&self, _elapsed: Duration) {}
-
-        fn on_poke_protocol_error(
-            &mut self,
-            _me: Participant,
-            _owner: Participant,
-            _err: ProtocolError,
-        ) {
-        }
-
-        fn on_poke_join_error(
-            &mut self,
-            _me: Participant,
-            _owner: Participant,
-            _err: tokio::task::JoinError,
-        ) {
-        }
-
-        fn on_recv_closed(&mut self, _id: Self::Id, _owner: Participant) {}
-
-        fn on_recv_timeout(&mut self, _id: Self::Id, _owner: Participant) {}
-
-        fn on_drop(&self, _id: Self::Id, _msg: MessageChannel) {}
-
-        async fn finish(
-            &mut self,
-            _id: Self::Id,
-            _me: Participant,
-            _owner: Participant,
-            _participants: &[Participant],
-            _created: Instant,
-            _output: Self::Output,
-            _run_elapsed: Duration,
-            _total_wait: Duration,
-            _total_pokes: usize,
-        ) -> Option<Self::Artifact> {
-            self.completed.fetch_add(1, Ordering::SeqCst);
-            None
-        }
+        fn message(&mut self, _from: Participant, _data: MessageData) {}
     }
 
     // ── Mock protocol ─────────────────────────────────────────────────────────
@@ -1352,11 +1212,15 @@ mod tests {
 
     impl ArtifactProtocol for MockProtocol {
         type TaskId = u64;
+        type Artifact = crate::storage::triple_storage::TriplePair;
         type ProposerState = ();
         type GenerationDeps = ();
         type Context = MockContext;
-        type Artifact = crate::storage::triple_storage::TriplePair;
-        type GeneratorDriver = MockGeneratorDriver;
+        type GenerationState = Arc<AtomicUsize>;
+        type Protocol = ImmediateProtocol;
+        type Output = ();
+        type InMessage = ();
+        type WireMessage = crate::protocol::message::TripleMessage;
 
         fn posit_id(task_id: u64) -> PositProtocolId {
             PositProtocolId::Triple(task_id)
@@ -1413,6 +1277,45 @@ mod tests {
             Duration::from_secs(5)
         }
 
+        fn protocol_poke(protocol: &mut Self::Protocol) -> Result<Action<Self::Output>, ProtocolError> {
+            protocol.poke()
+        }
+
+        fn protocol_message(protocol: &mut Self::Protocol, from: Participant, data: MessageData) {
+            protocol.message(from, data);
+        }
+
+        fn split_incoming(_msg: Self::InMessage) -> (Participant, MessageData) {
+            unreachable!()
+        }
+
+        fn build_message(
+            _state: &Self::GenerationState,
+            _id: Self::TaskId,
+            _epoch: u64,
+            _from: Participant,
+            _to: Participant,
+            _data: MessageData,
+        ) -> Self::WireMessage {
+            unreachable!()
+        }
+
+        async fn finish(
+            state: &mut Self::GenerationState,
+            _id: Self::TaskId,
+            _me: Participant,
+            _owner: Participant,
+            _participants: &[Participant],
+            _created: Instant,
+            _output: Self::Output,
+            _run_elapsed: Duration,
+            _total_wait: Duration,
+            _total_pokes: usize,
+        ) -> Option<Self::Artifact> {
+            state.fetch_add(1, Ordering::SeqCst);
+            None
+        }
+
         async fn prepare_generation(
             _ctx: &MockContext,
             _task_id: u64,
@@ -1433,19 +1336,17 @@ mod tests {
             _dependencies: (),
             ctx: MockContext,
             _timeout: Duration,
-        ) -> Option<ProtocolBuildOutput<Self::GeneratorDriver>> {
+        ) -> Option<ProtocolBuildOutput<Self>> {
             let inbox = mpsc::channel(1).1;
             let (_inbox, _outbox, msg) = crate::protocol::message::MessageChannel::new();
             Some(ProtocolBuildOutput {
                 id: task_id,
                 participants,
-                protocol: (),
+                protocol: ImmediateProtocol { done: false },
                 inbox,
                 msg,
                 slot: None,
-                driver: MockGeneratorDriver {
-                    completed: ctx.completed,
-                },
+                state: ctx.completed,
             })
         }
 
@@ -1619,11 +1520,15 @@ mod tests {
 
         impl ArtifactProtocol for RejectingProtocol {
             type TaskId = u64;
+            type Artifact = crate::storage::triple_storage::TriplePair;
             type ProposerState = ();
             type GenerationDeps = ();
             type Context = RejectCtx;
-            type Artifact = crate::storage::triple_storage::TriplePair;
-            type GeneratorDriver = NoopGeneratorDriver;
+            type GenerationState = ();
+            type Protocol = ImmediateProtocol;
+            type Output = ();
+            type InMessage = ();
+            type WireMessage = crate::protocol::message::TripleMessage;
 
             fn posit_id(id: u64) -> PositProtocolId {
                 PositProtocolId::Triple(id)
@@ -1659,6 +1564,25 @@ mod tests {
             fn generation_timeout(_: &ProtocolConfig) -> Duration {
                 Duration::from_secs(5)
             }
+            fn protocol_poke(protocol: &mut Self::Protocol) -> Result<Action<Self::Output>, ProtocolError> {
+                protocol.poke()
+            }
+            fn protocol_message(protocol: &mut Self::Protocol, from: Participant, data: MessageData) {
+                protocol.message(from, data);
+            }
+            fn split_incoming(_: Self::InMessage) -> (Participant, MessageData) {
+                unreachable!()
+            }
+            fn build_message(
+                _state: &Self::GenerationState,
+                _id: Self::TaskId,
+                _epoch: u64,
+                _from: Participant,
+                _to: Participant,
+                _data: MessageData,
+            ) -> Self::WireMessage {
+                unreachable!()
+            }
             async fn prepare_generation(
                 _: &RejectCtx,
                 _: u64,
@@ -1678,7 +1602,7 @@ mod tests {
                 _: (),
                 _: RejectCtx,
                 _: Duration,
-            ) -> Option<ProtocolBuildOutput<Self::GeneratorDriver>> {
+            ) -> Option<ProtocolBuildOutput<Self>> {
                 None
             }
             async fn subscribe_posit(_: &RejectCtx) -> mpsc::Receiver<(u64, Participant, PositAction)> {

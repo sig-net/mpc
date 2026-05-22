@@ -1,5 +1,5 @@
 use super::artifact_task::{
-    ArtifactProtocol, PokeMode, ProtocolBuildOutput, ProtocolGeneratorDriver, ProtocolSpawnerTask,
+    ArtifactProtocol, PokeMode, ProtocolBuildOutput, ProtocolSpawnerTask,
 };
 use super::message::{MessageChannel, PositProtocolId, TripleMessage};
 use super::posit::PositAction;
@@ -11,7 +11,6 @@ use crate::util::AffinePointExt;
 
 use mpc_contract::config::ProtocolConfig;
 
-use async_trait::async_trait;
 use cait_sith::protocol::{MessageData, Participant, ProtocolError};
 use cait_sith::triples::{TriplePub, TripleShare};
 use chrono::Utc;
@@ -31,14 +30,26 @@ pub struct Triple {
     pub public: TriplePub<Secp256k1>,
 }
 
-// ── TripleGenerator ───────────────────────────────────────────────────────────
+// ── TripleArtifact ────────────────────────────────────────────────────────────
 
-pub struct TripleGenerationDriver {
+/// Shared context for all triple-generation tasks.
+#[derive(Clone)]
+pub struct TripleContext {
+    pub storage: ProtocolStorage<TriplePair>,
+    pub msg: MessageChannel,
+    pub node_account_id: String,
 }
 
-#[async_trait]
-impl ProtocolGeneratorDriver for TripleGenerationDriver {
-    type Id = TripleId;
+/// Marker struct implementing [`ArtifactProtocol`] for triple generation.
+pub struct TripleArtifact;
+
+impl ArtifactProtocol for TripleArtifact {
+    type TaskId = TripleId;
+    type ProposerState = ();
+    type GenerationDeps = ();
+    type Context = TripleContext;
+    type Artifact = TriplePair;
+    type GenerationState = ();
     type Protocol = TripleProtocol;
     type Output = Vec<(
         cait_sith::triples::TripleShare<Secp256k1>,
@@ -46,9 +57,8 @@ impl ProtocolGeneratorDriver for TripleGenerationDriver {
     )>;
     type InMessage = TripleMessage;
     type WireMessage = TripleMessage;
-    type Artifact = TriplePair;
 
-    fn poke_mode(&self) -> PokeMode {
+    fn poke_mode(_state: &Self::GenerationState) -> PokeMode {
         PokeMode::Blocking
     }
 
@@ -65,8 +75,8 @@ impl ProtocolGeneratorDriver for TripleGenerationDriver {
     }
 
     fn build_message(
-        &self,
-        id: Self::Id,
+        _state: &Self::GenerationState,
+        id: Self::TaskId,
         epoch: u64,
         from: Participant,
         _to: Participant,
@@ -81,25 +91,20 @@ impl ProtocolGeneratorDriver for TripleGenerationDriver {
         }
     }
 
-    async fn send_message(
-        &self,
-        msg: &MessageChannel,
-        from: Participant,
-        to: Participant,
-        wire: Self::WireMessage,
-    ) {
-        msg.send(from, to, wire).await;
-    }
-
-    fn observe_before_poke_delay(&self, created: Instant) {
+    fn observe_before_poke_delay(_state: &Self::GenerationState, created: Instant) {
         crate::metrics::protocols::TRIPLE_BEFORE_POKE_DELAY.observe(created.elapsed().as_millis() as f64);
     }
 
-    fn observe_poke_cpu_time(&self, elapsed: Duration) {
+    fn observe_poke_cpu_time(_state: &Self::GenerationState, elapsed: Duration) {
         crate::metrics::protocols::TRIPLE_POKE_CPU_TIME.observe(elapsed.as_millis() as f64);
     }
 
-    fn on_poke_protocol_error(&mut self, me: Participant, owner: Participant, err: ProtocolError) {
+    fn on_poke_protocol_error(
+        _state: &mut Self::GenerationState,
+        me: Participant,
+        owner: Participant,
+        err: ProtocolError,
+    ) {
         crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
         if owner == me {
             crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
@@ -107,7 +112,12 @@ impl ProtocolGeneratorDriver for TripleGenerationDriver {
         tracing::warn!(?err, "triple generation failed");
     }
 
-    fn on_poke_join_error(&mut self, me: Participant, owner: Participant, err: tokio::task::JoinError) {
+    fn on_poke_join_error(
+        _state: &mut Self::GenerationState,
+        me: Participant,
+        owner: Participant,
+        err: tokio::task::JoinError,
+    ) {
         crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
         if owner == me {
             crate::metrics::protocols::TRIPLE_GENERATOR_OWNED_FAILURES.inc();
@@ -115,17 +125,25 @@ impl ProtocolGeneratorDriver for TripleGenerationDriver {
         tracing::warn!(?err, "triple generation failed in blocking task");
     }
 
-    fn on_recv_closed(&mut self, id: Self::Id, _owner: Participant) {
+    fn on_recv_closed(
+        _state: &mut Self::GenerationState,
+        id: Self::TaskId,
+        _owner: Participant,
+    ) {
         crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
         tracing::warn!(id, "triple generation aborted");
     }
 
-    fn on_recv_timeout(&mut self, id: Self::Id, _owner: Participant) {
+    fn on_recv_timeout(
+        _state: &mut Self::GenerationState,
+        id: Self::TaskId,
+        _owner: Participant,
+    ) {
         crate::metrics::protocols::TRIPLE_GENERATOR_FAILURES.inc();
         tracing::warn!(id, "triple generation timeout");
     }
 
-    fn on_drop(&self, id: Self::Id, msg: MessageChannel) {
+    fn on_drop(_state: &Self::GenerationState, id: Self::TaskId, msg: MessageChannel) {
         tokio::spawn(async move {
             msg.unsubscribe_triple(id).await;
             msg.filter_triple(id).await;
@@ -133,8 +151,8 @@ impl ProtocolGeneratorDriver for TripleGenerationDriver {
     }
 
     async fn finish(
-        &mut self,
-        id: Self::Id,
+        _state: &mut Self::GenerationState,
+        id: Self::TaskId,
         me: Participant,
         owner: Participant,
         participants: &[Participant],
@@ -187,28 +205,6 @@ impl ProtocolGeneratorDriver for TripleGenerationDriver {
             holders: Some(participants.to_vec()),
         })
     }
-}
-
-// ── TripleArtifact ────────────────────────────────────────────────────────────
-
-/// Shared context for all triple-generation tasks.
-#[derive(Clone)]
-pub struct TripleContext {
-    pub storage: ProtocolStorage<TriplePair>,
-    pub msg: MessageChannel,
-    pub node_account_id: String,
-}
-
-/// Marker struct implementing [`ArtifactProtocol`] for triple generation.
-pub struct TripleArtifact;
-
-impl ArtifactProtocol for TripleArtifact {
-    type TaskId = TripleId;
-    type ProposerState = ();
-    type GenerationDeps = ();
-    type Context = TripleContext;
-    type Artifact = TriplePair;
-    type GeneratorDriver = TripleGenerationDriver;
 
     fn posit_id(task_id: TripleId) -> PositProtocolId {
         PositProtocolId::Triple(task_id)
@@ -279,7 +275,7 @@ impl ArtifactProtocol for TripleArtifact {
         _dependencies: (),
         ctx: TripleContext,
         _timeout: Duration,
-    ) -> Option<ProtocolBuildOutput<Self::GeneratorDriver>> {
+    ) -> Option<ProtocolBuildOutput<Self>> {
         let Some(slot) = ctx.storage.create_slot(task_id, owner).await else {
             tracing::warn!(task_id, "triple slot already taken, skipping generation");
             return None;
@@ -301,8 +297,6 @@ impl ArtifactProtocol for TripleArtifact {
         };
 
         let inbox = ctx.msg.subscribe_triple(task_id).await;
-        let driver = TripleGenerationDriver {};
-
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_TRIPLE_GENERATORS.inc();
         Some(ProtocolBuildOutput {
             id: task_id,
@@ -311,7 +305,7 @@ impl ArtifactProtocol for TripleArtifact {
             inbox,
             msg: ctx.msg,
             slot: Some(slot),
-            driver,
+            state: (),
         })
     }
 
