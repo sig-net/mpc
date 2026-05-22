@@ -576,7 +576,7 @@ pub async fn process_execution_confirmed(
         }
     };
 
-    let updated_tx = match backlog.complete_execution(pending_execution, sign_request.clone()).await {
+    let updated_tx = match pending_execution.advance(sign_request.clone()).await {
         Ok(updated) => updated,
         Err(err) => {
             tracing::error!(

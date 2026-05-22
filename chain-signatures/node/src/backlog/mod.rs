@@ -334,15 +334,12 @@ impl Backlog {
         Ok(())
     }
 
-    pub async fn complete_execution(
+    async fn store_pending_response_bidirectional(
         &self,
-        pending_execution: PendingExecution,
-        request: IndexedSignRequest,
+        pending_response: PendingResponseBidirectional,
     ) -> Result<PendingResponseBidirectional, BacklogError> {
-        let chain = pending_execution.source_chain();
-        let id = pending_execution.request().id;
-        let next = pending_execution.complete(request);
-
+        let chain = pending_response.source_chain();
+        let id = pending_response.request().id;
         let mut requests = self.requests.write().await;
         let Some(pending) = requests.get_mut(&chain) else {
             return Err(BacklogError::ChainNotFound);
@@ -350,8 +347,8 @@ impl Backlog {
         let Some(entry) = pending.requests.get_mut(&id) else {
             return Err(BacklogError::NotFound { chain, id });
         };
-        *entry = next.clone().into();
-        Ok(next)
+        *entry = pending_response.clone().into();
+        Ok(pending_response)
     }
 
     /// Begin watching for execution of a bidirectional transaction on the destination chain.
@@ -373,7 +370,7 @@ impl Backlog {
         &self,
         chain: Chain,
         tx_id: &BidirectionalTxId,
-    ) -> Option<PendingExecution> {
+    ) -> Option<BacklogRequest<PendingExecution>> {
         let watcher = {
             let mut watchers = self.execution_watchers.write().await;
             watchers
@@ -384,7 +381,26 @@ impl Backlog {
         let requests = self.requests.read().await;
         let pending = requests.get(&watcher.tx.source_chain)?;
         let entry = pending.requests.get(&watcher.sign_id)?;
-        entry.as_pending_execution().cloned()
+        entry
+            .as_pending_execution()
+            .cloned()
+            .map(|state| BacklogRequest::new(self.clone(), state))
+    }
+
+    pub async fn pending_execution_request(
+        &self,
+        chain: Chain,
+        id: &SignId,
+    ) -> Result<BacklogRequest<PendingExecution>, BacklogError> {
+        let entry = self
+            .get(chain, id)
+            .await
+            .ok_or(BacklogError::NotFound { chain, id: *id })?;
+        let state = entry
+            .as_pending_execution()
+            .cloned()
+            .ok_or(BacklogError::InvalidAdvanceTransition)?;
+        Ok(BacklogRequest::new(self.clone(), state))
     }
 
     /// Get the set of bidirectional transactions currently awaiting execution on the
@@ -741,8 +757,40 @@ impl PendingExecution {
         &self.execution
     }
 
-    fn complete(self, request: IndexedSignRequest) -> PendingResponseBidirectional {
+    pub fn advance(self, request: IndexedSignRequest) -> PendingResponseBidirectional {
         PendingResponseBidirectional::new(request, self.execution)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BacklogRequest<State> {
+    backlog: Backlog,
+    state: State,
+}
+
+impl<State> BacklogRequest<State> {
+    fn new(backlog: Backlog, state: State) -> Self {
+        Self { backlog, state }
+    }
+}
+
+impl<State> std::ops::Deref for BacklogRequest<State> {
+    type Target = State;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl BacklogRequest<PendingExecution> {
+    pub async fn advance(
+        self,
+        request: IndexedSignRequest,
+    ) -> Result<BacklogRequest<PendingResponseBidirectional>, BacklogError> {
+        let backlog = self.backlog;
+        let next = self.state.advance(request);
+        let persisted = backlog.store_pending_response_bidirectional(next).await?;
+        Ok(BacklogRequest::new(backlog, persisted))
     }
 }
 
@@ -1166,13 +1214,11 @@ mod tests {
                         chain_ctx: None,
                     },
                 );
-                let pending_execution = backlog
-                    .get(chain, &sign_id)
-                    .await
-                    .and_then(|entry| entry.as_pending_execution().cloned())
-                    .expect("missing pending execution entry");
                 backlog
-                    .complete_execution(pending_execution, completion_request)
+                    .pending_execution_request(chain, &sign_id)
+                    .await
+                    .expect("missing pending execution entry")
+                    .advance(completion_request)
                     .await
                     .unwrap();
             }
@@ -1681,13 +1727,11 @@ mod tests {
             .insert(create_bidirectional_request(sign_id, Chain::Solana, "ethereum", 0))
             .await;
         backlog.advance(Chain::Solana, sign_id, tx).await.unwrap();
-        let pending_execution = backlog
-            .get(Chain::Solana, &sign_id)
-            .await
-            .and_then(|entry| entry.as_pending_execution().cloned())
-            .expect("missing pending execution entry");
         backlog
-            .complete_execution(pending_execution, completion_request)
+            .pending_execution_request(Chain::Solana, &sign_id)
+            .await
+            .expect("missing pending execution entry")
+            .advance(completion_request)
             .await
             .unwrap();
 
