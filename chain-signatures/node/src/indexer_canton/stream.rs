@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header;
 use tokio_tungstenite::tungstenite::Message;
@@ -79,6 +80,10 @@ enum CantonConnection {
 }
 
 impl CantonConnection {
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+    const MESSAGE_TIMEOUT: Duration = Duration::from_secs(60);
+    const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
     async fn connect(
         ws_url: &str,
         jwt_token: &str,
@@ -91,12 +96,10 @@ impl CantonConnection {
             format!("jwt.token.{jwt_token}, daml.ws.auth").parse()?,
         );
 
-        let (ws_stream, _) = tokio::time::timeout(
-            Duration::from_secs(30),
-            tokio_tungstenite::connect_async(request),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("canton WebSocket connect timed out"))??;
+        let request = tokio_tungstenite::connect_async(request);
+        let (ws_stream, _) = timeout(CONNECT_TIMEOUT, request)
+            .await
+            .map_err(|_| anyhow::anyhow!("canton WebSocket connect timeout"))??;
         let (mut ws_write, ws_read) = ws_stream.split();
 
         tracing::info!(begin_exclusive, "canton WebSocket connected");
@@ -116,12 +119,12 @@ impl CantonConnection {
                 },
             },
         };
-        tokio::time::timeout(
-            Duration::from_secs(30),
+        timeout(
+            CONNECT_TIMEOUT,
             ws_write.send(Message::Text(serde_json::to_string(&subscribe_msg)?.into())),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("canton WebSocket subscription send timed out"))??;
+        .map_err(|_| anyhow::anyhow!("canton WebSocket subscription send timeout"))??;
 
         Ok(Self::Connected(ws_read, ws_write))
     }
@@ -132,8 +135,7 @@ impl CantonConnection {
             tracing::warn!("canton WebSocket not initialized");
             return None;
         };
-        let Ok(maybe_msg) = tokio::time::timeout(Duration::from_secs(60), ws_read.next()).await
-        else {
+        let Ok(maybe_msg) = timeout(MESSAGE_TIMEOUT, ws_read.next()).await else {
             tracing::warn!("canton WebSocket stalled: no message for 60s");
             return None;
         };
@@ -167,9 +169,9 @@ impl CantonConnection {
             return Ok(());
         };
 
-        tokio::time::timeout(Duration::from_secs(5), ws_write.close())
+        timeout(DISCONNECT_TIMEOUT, ws_write.close())
             .await
-            .map_err(|_| anyhow::anyhow!("canton WebSocket close reply timed out"))?
+            .map_err(|_| anyhow::anyhow!("canton WebSocket close reply timeout"))?
             .map_err(|e| anyhow::anyhow!("failed to flush canton WebSocket close reply: {e}"))?;
         *self = Self::Disconnected;
         Ok(())
