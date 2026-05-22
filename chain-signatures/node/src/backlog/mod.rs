@@ -351,6 +351,28 @@ impl Backlog {
         Ok(pending_response)
     }
 
+    async fn store_pending_execution(
+        &self,
+        pending_execution: PendingExecution,
+    ) -> Result<PendingExecution, BacklogError> {
+        let chain = pending_execution.source_chain();
+        let id = pending_execution.request().id;
+        let tx = pending_execution.execution().clone();
+
+        let mut requests = self.requests.write().await;
+        let Some(pending) = requests.get_mut(&chain) else {
+            return Err(BacklogError::ChainNotFound);
+        };
+        let Some(entry) = pending.requests.get_mut(&id) else {
+            return Err(BacklogError::NotFound { chain, id });
+        };
+        *entry = pending_execution.clone().into();
+        drop(requests);
+
+        self.watch_execution(tx.target_chain, id, tx).await;
+        Ok(pending_execution)
+    }
+
     /// Begin watching for execution of a bidirectional transaction on the destination chain.
     pub async fn watch_execution(
         &self,
@@ -400,6 +422,36 @@ impl Backlog {
             .as_pending_execution()
             .cloned()
             .ok_or(BacklogError::InvalidAdvanceTransition)?;
+        Ok(BacklogRequest::new(self.clone(), state))
+    }
+
+    pub async fn pending_response_request(
+        &self,
+        chain: Chain,
+        id: &SignId,
+    ) -> Result<BacklogRequest<PendingResponse>, BacklogError> {
+        let entry = self
+            .get(chain, id)
+            .await
+            .ok_or(BacklogError::NotFound { chain, id: *id })?;
+        let BacklogState::PendingResponse(state) = entry.state else {
+            return Err(BacklogError::InvalidAdvanceTransition);
+        };
+        Ok(BacklogRequest::new(self.clone(), state))
+    }
+
+    pub async fn pending_response_bidirectional_request(
+        &self,
+        chain: Chain,
+        id: &SignId,
+    ) -> Result<BacklogRequest<PendingResponseBidirectional>, BacklogError> {
+        let entry = self
+            .get(chain, id)
+            .await
+            .ok_or(BacklogError::NotFound { chain, id: *id })?;
+        let BacklogState::PendingResponseBidirectional(state) = entry.state else {
+            return Err(BacklogError::InvalidAdvanceTransition);
+        };
         Ok(BacklogRequest::new(self.clone(), state))
     }
 
@@ -454,24 +506,10 @@ impl Backlog {
         sign_id: SignId,
         bidirectional_tx: BidirectionalTx,
     ) -> Result<(), BacklogError> {
-        // Update the transaction in the backlog from Sign to Bidirectional
-        let mut requests = self.requests.write().await;
-        let pending = requests
-            .get_mut(&chain)
-            .ok_or(BacklogError::ChainNotFound)?;
-
-        let entry = pending
-            .requests
-            .get_mut(&sign_id)
-            .ok_or(BacklogError::NotFound { chain, id: sign_id })?;
-
-        entry.advance_to_execution(bidirectional_tx.clone())?;
-
-        // Registration successful, now register the execution watcher on the target chain
-        let target_chain = bidirectional_tx.target_chain;
-        drop(requests);
-        self.watch_execution(target_chain, sign_id, bidirectional_tx)
-            .await;
+        self.pending_response_request(chain, &sign_id)
+            .await?
+            .advance(bidirectional_tx)
+            .await?;
         Ok(())
     }
 
@@ -732,6 +770,25 @@ impl PendingResponse {
     fn new(request: IndexedSignRequest) -> Self {
         Self { request }
     }
+
+    pub fn request(&self) -> &IndexedSignRequest {
+        &self.request
+    }
+
+    pub fn source_chain(&self) -> Chain {
+        self.request.chain
+    }
+
+    pub fn advance(
+        self,
+        bidirectional_tx: BidirectionalTx,
+    ) -> Result<PendingExecution, BacklogError> {
+        if !matches!(self.request.kind, SignKind::SignBidirectional(_)) {
+            return Err(BacklogError::InvalidAdvanceTransition);
+        }
+
+        Ok(PendingExecution::new(self.request, bidirectional_tx))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -790,6 +847,18 @@ impl BacklogRequest<PendingExecution> {
         let backlog = self.backlog;
         let next = self.state.advance(request);
         let persisted = backlog.store_pending_response_bidirectional(next).await?;
+        Ok(BacklogRequest::new(backlog, persisted))
+    }
+}
+
+impl BacklogRequest<PendingResponse> {
+    pub async fn advance(
+        self,
+        bidirectional_tx: BidirectionalTx,
+    ) -> Result<BacklogRequest<PendingExecution>, BacklogError> {
+        let backlog = self.backlog;
+        let next = self.state.advance(bidirectional_tx)?;
+        let persisted = backlog.store_pending_execution(next).await?;
         Ok(BacklogRequest::new(backlog, persisted))
     }
 }

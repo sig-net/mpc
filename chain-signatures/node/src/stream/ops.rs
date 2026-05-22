@@ -468,10 +468,12 @@ pub(crate) async fn process_respond_event(
         "bidirectional tx details before advancement",
     );
 
-    match backlog
-        .advance(source_chain, sign_id, bidirectional_tx)
-        .await
-    {
+    let advance_result = match backlog.pending_response_request(source_chain, &sign_id).await {
+        Ok(pending_response) => pending_response.advance(bidirectional_tx).await,
+        Err(err) => Err(err),
+    };
+
+    match advance_result {
         Ok(_) => {
             tracing::info!(
                 ?sign_id,
