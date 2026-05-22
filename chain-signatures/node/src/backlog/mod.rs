@@ -334,25 +334,24 @@ impl Backlog {
         Ok(())
     }
 
-    // TODO: the backlog is a bit bloated with transition functions, so we need to do a proper cleanup
-    // where we can have proper typestate on a set of types. With these types, we can easily guide
-    // ourselves into the right transitions. For now, this is used to set the request in
-    // `execution_confirmed` to transition from PendingExecution to AwaitingResponseBidirectional.
-    pub async fn set_request(
+    pub async fn complete_execution(
         &self,
-        chain: Chain,
-        id: &SignId,
+        pending_execution: PendingExecution,
         request: IndexedSignRequest,
-    ) -> Result<(), BacklogError> {
+    ) -> Result<PendingResponseBidirectional, BacklogError> {
+        let chain = pending_execution.source_chain();
+        let id = pending_execution.request().id;
+        let next = pending_execution.complete(request);
+
         let mut requests = self.requests.write().await;
         let Some(pending) = requests.get_mut(&chain) else {
             return Err(BacklogError::ChainNotFound);
         };
-        let Some(entry) = pending.requests.get_mut(id) else {
-            return Err(BacklogError::NotFound { chain, id: *id });
+        let Some(entry) = pending.requests.get_mut(&id) else {
+            return Err(BacklogError::NotFound { chain, id });
         };
-        entry.set_request(request);
-        Ok(())
+        *entry = next.clone().into();
+        Ok(next)
     }
 
     /// Begin watching for execution of a bidirectional transaction on the destination chain.
@@ -374,12 +373,18 @@ impl Backlog {
         &self,
         chain: Chain,
         tx_id: &BidirectionalTxId,
-    ) -> Option<(SignId, BidirectionalTx)> {
-        let mut watchers = self.execution_watchers.write().await;
-        watchers
-            .get_mut(&chain)
-            .and_then(|entry| entry.remove(tx_id))
-            .map(|watcher| (watcher.sign_id, watcher.tx))
+    ) -> Option<PendingExecution> {
+        let watcher = {
+            let mut watchers = self.execution_watchers.write().await;
+            watchers
+                .get_mut(&chain)
+                .and_then(|entry| entry.remove(tx_id))
+        }?;
+
+        let requests = self.requests.read().await;
+        let pending = requests.get(&watcher.tx.source_chain)?;
+        let entry = pending.requests.get(&watcher.sign_id)?;
+        entry.as_pending_execution().cloned()
     }
 
     /// Get the set of bidirectional transactions currently awaiting execution on the
@@ -723,6 +728,22 @@ impl PendingExecution {
     fn new(request: IndexedSignRequest, execution: BidirectionalTx) -> Self {
         Self { request, execution }
     }
+
+    pub fn request(&self) -> &IndexedSignRequest {
+        &self.request
+    }
+
+    pub fn source_chain(&self) -> Chain {
+        self.request.chain
+    }
+
+    pub fn execution(&self) -> &BidirectionalTx {
+        &self.execution
+    }
+
+    fn complete(self, request: IndexedSignRequest) -> PendingResponseBidirectional {
+        PendingResponseBidirectional::new(request, self.execution)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -734,6 +755,18 @@ pub struct PendingResponseBidirectional {
 impl PendingResponseBidirectional {
     fn new(request: IndexedSignRequest, execution: BidirectionalTx) -> Self {
         Self { request, execution }
+    }
+
+    pub fn request(&self) -> &IndexedSignRequest {
+        &self.request
+    }
+
+    pub fn source_chain(&self) -> Chain {
+        self.request.chain
+    }
+
+    pub fn execution(&self) -> &BidirectionalTx {
+        &self.execution
     }
 }
 
@@ -862,6 +895,13 @@ impl BacklogEntry {
         }
     }
 
+    pub fn as_pending_execution(&self) -> Option<&PendingExecution> {
+        match &self.state {
+            BacklogState::PendingExecution(state) => Some(state),
+            _ => None,
+        }
+    }
+
     /// Get the status of this transaction
     pub fn status(&self) -> SignStatus {
         match self.state {
@@ -879,14 +919,6 @@ impl BacklogEntry {
         let execution = self.execution_tx().cloned();
         *self = Self::try_from_parts(request, status, execution)?;
         Ok(())
-    }
-
-    pub fn set_request(&mut self, request: IndexedSignRequest) {
-        match &mut self.state {
-            BacklogState::PendingResponse(state) => state.request = request,
-            BacklogState::PendingExecution(state) => state.request = request,
-            BacklogState::PendingResponseBidirectional(state) => state.request = request,
-        }
     }
 
     pub fn advance_to_execution(
@@ -1134,8 +1166,13 @@ mod tests {
                         chain_ctx: None,
                     },
                 );
+                let pending_execution = backlog
+                    .get(chain, &sign_id)
+                    .await
+                    .and_then(|entry| entry.as_pending_execution().cloned())
+                    .expect("missing pending execution entry");
                 backlog
-                    .set_request(chain, &sign_id, completion_request)
+                    .complete_execution(pending_execution, completion_request)
                     .await
                     .unwrap();
             }
@@ -1563,8 +1600,8 @@ mod tests {
                 0,
             ))
             .await;
-        backlog.set_processed_block(Chain::Solana, 10).await;
 
+        backlog.set_processed_block(Chain::Solana, 10).await;
         let checkpoint = backlog.checkpoint(Chain::Solana).await;
 
         let recovered = Backlog::new();
@@ -1590,7 +1627,6 @@ mod tests {
         for offset in 0..2 {
             let backlog = Backlog::new();
             let tx = create_test_tx(8 + offset as u8);
-            let sign_id = SignId::new(tx.request_id);
 
             insert_bidirectional_with_status(
                 &backlog,
@@ -1609,29 +1645,6 @@ mod tests {
                 .recover_by_checkpoint(checkpoint)
                 .await
                 .expect("failed to recover");
-
-            let completion_request = IndexedSignRequest::respond_bidirectional(
-                sign_id,
-                create_test_args(sign_id.request_id[0]),
-                Chain::Solana,
-                0,
-                RespondBidirectionalTx {
-                    tx_id: tx.id,
-                    output: vec![],
-                    chain_ctx: None,
-                },
-            );
-            recovered
-                .set_request(Chain::Solana, &sign_id, completion_request)
-                .await
-                .expect("failed to store completion request");
-            recovered
-                .set_status(
-                    Chain::Solana,
-                    &sign_id,
-                    SignStatus::AwaitingResponseBidirectional,
-                )
-                .await;
 
             let requeued = recovered.take_requeueable_requests(Chain::Solana).await;
             assert_eq!(
@@ -1664,14 +1677,19 @@ mod tests {
             },
         );
 
-        backlog.insert(completion_request).await;
         backlog
-            .set_status(
-                Chain::Solana,
-                &sign_id,
-                SignStatus::AwaitingResponseBidirectional,
-            )
+            .insert(create_bidirectional_request(sign_id, Chain::Solana, "ethereum", 0))
             .await;
+        backlog.advance(Chain::Solana, sign_id, tx).await.unwrap();
+        let pending_execution = backlog
+            .get(Chain::Solana, &sign_id)
+            .await
+            .and_then(|entry| entry.as_pending_execution().cloned())
+            .expect("missing pending execution entry");
+        backlog
+            .complete_execution(pending_execution, completion_request)
+            .await
+            .unwrap();
 
         let requeued = backlog.take_requeueable_requests(Chain::Solana).await;
         assert_eq!(requeued.len(), 1);
@@ -1710,9 +1728,9 @@ mod tests {
         // Unwatch should return the watcher
         let maybe = backlog.unwatch_execution(tx.target_chain, &tx.id).await;
         assert!(maybe.is_some());
-        let (s, watched_tx) = maybe.unwrap();
-        assert_eq!(s, sign_id);
-        assert_eq!(watched_tx.id, tx.id);
+        let pending_execution = maybe.unwrap();
+        assert_eq!(pending_execution.request().id, sign_id);
+        assert_eq!(pending_execution.execution().id, tx.id);
 
         // set_status should update the sign request status
         let updated = backlog

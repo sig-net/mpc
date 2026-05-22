@@ -547,28 +547,24 @@ pub async fn process_execution_confirmed(
     );
 
     // Remove the watcher; if it's not found, it might have been processed already
-    let Some((unwatched_sign_id, pending_tx)) =
-        backlog.unwatch_execution(target_chain, &tx_id).await
-    else {
+    let Some(pending_execution) = backlog.unwatch_execution(target_chain, &tx_id).await else {
         tracing::warn!(
             ?tx_id,
             "execution watcher not found (maybe already processed)"
         );
         return Ok(());
     };
+    let unwatched_sign_id = pending_execution.request().id;
     if unwatched_sign_id != sign_id {
         tracing::warn!(?tx_id, expected = ?unwatched_sign_id, actual = ?sign_id, "sign_id mismatch between event and watcher");
     }
 
-    let chain_ctx = backlog
-        .get(pending_tx.source_chain, &unwatched_sign_id)
-        .await
-        .and_then(|entry| match &entry.request().kind {
-            SignKind::SignBidirectional(event) => event.chain_ctx(),
-            _ => None,
-        });
+    let chain_ctx = match &pending_execution.request().kind {
+        SignKind::SignBidirectional(event) => event.chain_ctx(),
+        _ => None,
+    };
 
-    let completed_tx = CompletedTx::new(pending_tx.clone(), block_height);
+    let completed_tx = CompletedTx::new(pending_execution.execution().clone(), block_height);
 
     let sign_request = match result {
         ExecutionOutcome::Success { output } => completed_tx
@@ -580,39 +576,20 @@ pub async fn process_execution_confirmed(
         }
     };
 
-    if let Err(err) = backlog
-        .set_request(
-            pending_tx.source_chain,
-            &unwatched_sign_id,
-            sign_request.clone(),
-        )
-        .await
-    {
-        tracing::error!(
-            ?tx_id,
-            ?unwatched_sign_id,
-            ?source_chain,
-            ?err,
-            "failed to persist completion request on pending tx"
-        );
-        anyhow::bail!("failed to persist completion request for sign id: {unwatched_sign_id:?}");
-    }
-
-    let set_res = backlog
-        .set_status(
-            pending_tx.source_chain,
-            &unwatched_sign_id,
-            SignStatus::AwaitingResponseBidirectional,
-        )
-        .await;
-    let updated_tx = match set_res {
-        Some(tx) => tx,
-        None => {
-            tracing::error!(?tx_id, ?unwatched_sign_id, source_chain = ?pending_tx.source_chain, "failed to set status on pending tx");
-            anyhow::bail!("failed to set status for sign id: {unwatched_sign_id:?}");
+    let updated_tx = match backlog.complete_execution(pending_execution, sign_request.clone()).await {
+        Ok(updated) => updated,
+        Err(err) => {
+            tracing::error!(
+                ?tx_id,
+                ?unwatched_sign_id,
+                ?source_chain,
+                ?err,
+                "failed to persist completion request on pending tx"
+            );
+            anyhow::bail!("failed to persist completion request for sign id: {unwatched_sign_id:?}");
         }
     };
-    tracing::info!(?tx_id, ?unwatched_sign_id, updated_status = ?updated_tx.status(), "set_status returned transaction");
+    tracing::info!(?tx_id, ?unwatched_sign_id, updated_status = ?SignStatus::AwaitingResponseBidirectional, source_chain = ?updated_tx.source_chain(), "completed pending execution transition");
 
     let chain = sign_request.chain;
     // Execution confirmations are observed on the target chain, but the follow-up
