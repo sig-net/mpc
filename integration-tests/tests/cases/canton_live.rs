@@ -1,24 +1,21 @@
 use alloy::consensus::{SignableTransaction, TxEip1559};
 use alloy::eips::eip2718::Encodable2718;
-use alloy::primitives::{Address, Bytes, FixedBytes, Signature, B256, U256};
+use alloy::primitives::{Address, B256, Bytes, FixedBytes, Signature, U256, keccak256};
 use alloy::providers::ext::AnvilApi;
 use alloy::providers::{Provider, ProviderBuilder};
+use alloy::rpc::types::TransactionRequest;
 use anyhow::{Context as _, Result};
-use integration_tests::canton::{
-    compute_operators_hash, find_created_contract, test_evm_type2_anvil_cases,
-    test_sign_request_payload, CantonTestClient, EvmType2AnvilCase,
-    EVM_TYPE2_TEST_CONTRACT_ADDRESS,
-};
+use integration_tests::canton::{CantonTestClient, compute_operators_hash, find_created_contract};
 use integration_tests::cluster;
 use mpc_node::indexer_canton::contracts::{
-    EvmType2TransactionParams, RespondBidirectionalEventPayload, SignBidirectionalRequestedEvent,
-    SignatureRespondedEventPayload, TxParams,
+    EvmType2TransactionParams, RespondBidirectionalEventPayload, SignatureRespondedEventPayload,
 };
-use mpc_node::indexer_canton::{
-    compute_request_id, parse_canton_signature, CantonAuthConfig, CantonConfig,
+use mpc_node::indexer_canton::ledger_api::{
+    ContractEntry, Event, SubmitAndWaitForTransactionResponse,
 };
-use mpc_node::protocol::Chain;
+use mpc_node::indexer_canton::{CantonAuthConfig, CantonConfig, parse_canton_signature};
 use mpc_node::respond_bidirectional::CANTON_RESPOND_BIDIRECTIONAL_PATH;
+use mpc_node::rpc::CantonClient;
 use mpc_node::sign_bidirectional::{derive_user_address, sign_and_hash_transaction};
 use mpc_node::util::NearPublicKeyExt;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
@@ -28,17 +25,21 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use test_log::test;
 use url::Url;
 
-const RETURN_TRUE_RUNTIME_BYTECODE: &str = "600160005260206000f3";
+const MOCK_ERC20_RUNTIME_BYTECODE: &str = "608060405234801561000f575f80fd5b5060043610610034575f3560e01c806370a0823114610038578063a9059cbb1461006a575b5f80fd5b610057610046366004610138565b5f6020819052908152604090205481565b6040519081526020015b60405180910390f35b61007d610078366004610158565b61008d565b6040519015158152602001610061565b335f908152602081905260408120548211156100d95760405162461bcd60e51b815260206004820152600760248201526662616c616e636560c81b604482015260640160405180910390fd5b335f90815260208190526040808220805485900390556001600160a01b03851682528120805484929061010d908490610180565b9091555060019150505b92915050565b80356001600160a01b0381168114610133575f80fd5b919050565b5f60208284031215610148575f80fd5b6101518261011d565b9392505050565b5f8060408385031215610169575f80fd5b6101728361011d565b946020939093013593505050565b8082018082111561011757634e487b7160e01b5f52601160045260245ffdfea264697066735822122094ff0cc29a3937308067e382ca5094e4c01439ad9a607a527bc03de7ed6fb1ad64736f6c634300081a0033";
 const ABI_ENCODED_BOOL_TRUE_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000001";
 const EVM_TYPE2_BOOL_OUTPUT_SCHEMA: &str = r#"[{"name":"output","type":"bool"}]"#;
+const LIVE_MOCK_ERC20_ADDRESS: &str = "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+const ERC20_TRANSFER_SELECTOR: &str = "a9059cbb";
+const ERC20_BALANCE_OF_SELECTOR: &str = "70a08231";
+const LIVE_EVM_CHAIN_ID: u64 = 1;
+const MOCK_DEPOSIT_AMOUNT: u64 = 100_000_000;
 
 struct LiveCanton {
     config: CantonConfig,
     client: CantonTestClient,
     party_id: String,
     signer_cid: String,
-    signer_template_id: String,
 }
 
 impl LiveCanton {
@@ -91,7 +92,6 @@ impl LiveCanton {
             client,
             party_id,
             signer_cid,
-            signer_template_id,
         })
     }
 }
@@ -103,23 +103,20 @@ impl LiveCanton {
 #[test(tokio::test)]
 async fn test_live_canton_mpc_bidirectional_flow() -> Result<()> {
     let live = LiveCanton::from_env().await?;
-    let case = test_evm_type2_anvil_cases()[0].clone().with_nonce(0);
 
-    run_live_canton_eth_bidirectional_flow_case(live, case)
+    run_live_canton_vault_deposit_flow(live)
         .await
-        .context("live Canton Ethereum bidirectional flow failed")?;
+        .context("live Canton Vault deposit flow failed")?;
 
     Ok(())
 }
 
-async fn run_live_canton_eth_bidirectional_flow_case(
-    live: LiveCanton,
-    case: EvmType2AnvilCase,
-) -> Result<()> {
-    let case_name = case.name;
-    let path = live_test_path(&live.party_id)?;
-    let expected_event = live_test_sign_request_event(&live, &case, path);
-    let expected_request_id = hex::encode(compute_request_id(&expected_event)?);
+async fn run_live_canton_vault_deposit_flow(live: LiveCanton) -> Result<()> {
+    let test_id = live_test_id()?;
+    let vault_id = format!("live-vault-{test_id}");
+    let deposit_path = format!("deposit-{test_id}");
+    let operators = vec![live.party_id.clone()];
+    let sender = compute_operators_hash(&operators);
 
     let nodes = cluster::spawn()
         .disable_prestockpile()
@@ -144,84 +141,118 @@ async fn run_live_canton_eth_bidirectional_flow_case(
         .context("ethereum not available")?;
     let anvil_rpc_url = &eth_ctx.sandbox.external_http_endpoint;
     let anvil = ProviderBuilder::new().connect_http(anvil_rpc_url.parse()?);
+    anvil.anvil_set_chain_id(LIVE_EVM_CHAIN_ID).await?;
     anvil.anvil_set_auto_mine(false).await?;
     anvil.anvil_set_interval_mining(0).await?;
 
-    let contract_call_address = Address::from_slice(&hex::decode(EVM_TYPE2_TEST_CONTRACT_ADDRESS)?);
+    let token_address = Address::from_slice(&hex::decode(LIVE_MOCK_ERC20_ADDRESS)?);
     anvil
         .anvil_set_code(
-            contract_call_address,
-            Bytes::from(hex::decode(RETURN_TRUE_RUNTIME_BYTECODE)?),
+            token_address,
+            Bytes::from(hex::decode(MOCK_ERC20_RUNTIME_BYTECODE)?),
         )
         .await?;
 
-    let evm_params = case.params.clone();
+    let vault_root_path = format!("{vault_id},root");
+    let vault_address = derive_canton_address(root_pk, &sender, &vault_root_path);
+    let response_pk = derive_canton_response_public_key(root_pk, &sender);
+    let response_spki = secp256k1_spki_hex(response_pk);
+    let vault_address_slot = abi_address_slot(vault_address);
 
-    let sign_request = live
+    let vault_create = live
         .client
         .create_contract(
             &[&live.party_id],
-            "#daml-signer:Signer:SignRequest",
-            serde_json::to_value(test_sign_request_payload(&expected_event))?,
+            "#daml-vault:Erc20Vault:Vault",
+            json!({
+                "operators": &operators,
+                "sigNetwork": &live.party_id,
+                "evmVaultAddress": &vault_address_slot,
+                "evmMpcPublicKey": &response_spki,
+                "vaultId": &vault_id,
+            }),
+        )
+        .await
+        .context("create live Vault contract")?;
+    let (vault_cid, vault_template_id) = find_created_contract(&vault_create, "Vault")?;
+
+    let full_deposit_path = format!("{vault_id},{},{}", live.party_id, deposit_path);
+    let user_address = derive_canton_address(root_pk, &sender, &full_deposit_path);
+    anvil
+        .anvil_set_balance(user_address, U256::from(10_000_000_000_000_000_000u128))
+        .await?;
+
+    let deposit_amount = U256::from(MOCK_DEPOSIT_AMOUNT);
+    let seeded = anvil
+        .anvil_set_storage_at(
+            token_address,
+            erc20_balance_slot(user_address),
+            B256::from(deposit_amount.to_be_bytes()),
         )
         .await?;
-    let (sign_request_cid, _) = find_created_contract(&sign_request, "SignRequest")?;
+    anyhow::ensure!(seeded, "failed to seed mock ERC20 user balance");
 
-    live.client
+    let deposit_params = vault_deposit_evm_params(token_address, vault_address, deposit_amount);
+    let deposit_result = live
+        .client
         .exercise_choice(
             &[&live.party_id],
-            &live.signer_template_id,
-            &live.signer_cid,
-            "SignBidirectional",
+            &vault_template_id,
+            &vault_cid,
+            "RequestDeposit",
             json!({
-                "signRequestCid": sign_request_cid,
                 "requester": &live.party_id,
+                "signerCid": &live.signer_cid,
+                "path": deposit_path,
+                "evmTxParams": deposit_params.clone(),
+                "keyVersion": LATEST_MPC_KEY_VERSION.to_string(),
+                "algo": "",
+                "dest": "",
+                "params": "",
+                "outputDeserializationSchema": EVM_TYPE2_BOOL_OUTPUT_SCHEMA,
+                "respondSerializationSchema": EVM_TYPE2_BOOL_OUTPUT_SCHEMA,
             }),
             &[],
         )
-        .await?;
-    tracing::info!(case_name, "live canton sign request submitted via Signer");
+        .await
+        .context("exercise Vault.RequestDeposit")?;
+    let (pending_deposit_cid, _) = find_created_contract(&deposit_result, "PendingDeposit")?;
+    let pending_deposit_payload =
+        created_payload(&deposit_result, &pending_deposit_cid).context("PendingDeposit payload")?;
+    let request_id = pending_deposit_payload
+        .get("requestId")
+        .and_then(|v| v.as_str())
+        .context("PendingDeposit.requestId")?
+        .to_string();
+    tracing::info!(
+        request_id = %request_id,
+        vault_id = %vault_id,
+        "live Vault.RequestDeposit submitted"
+    );
 
     let sig_payload: SignatureRespondedEventPayload = live
         .client
         .poll_for_contract(
             &[&live.party_id],
             "#daml-signer:Signer:SignatureRespondedEvent",
-            |p: &SignatureRespondedEventPayload| p.request_id == expected_request_id,
+            |p: &SignatureRespondedEventPayload| p.request_id == request_id,
             Duration::from_secs(180),
         )
         .await
-        .with_context(|| {
-            format!("timeout waiting for live SignatureRespondedEvent ({case_name})")
-        })?;
+        .context("timeout waiting for live Vault deposit SignatureRespondedEvent")?;
     tracing::info!(
-        case_name,
         request_id = %sig_payload.request_id,
-        "received live SignatureRespondedEvent"
+        "received live Vault deposit SignatureRespondedEvent"
     );
 
     let mpc_signature = parse_canton_signature(&sig_payload.signature)?;
-    let sign_epsilon = mpc_crypto::derive_epsilon_canton(
-        LATEST_MPC_KEY_VERSION,
-        &expected_event.sender,
-        &expected_event.path,
-    );
-    let expected_sender_addr = derive_user_address(root_pk, sign_epsilon);
-
-    anvil
-        .anvil_set_balance(
-            expected_sender_addr,
-            U256::from(10_000_000_000_000_000_000u128),
-        )
-        .await?;
-
     let y_parity = mpc_signature.recovery_id == 1;
     let r_bytes: [u8; 32] = mpc_crypto::x_coordinate(&mpc_signature.big_r)
         .to_bytes()
         .into();
     let s_bytes: [u8; 32] = mpc_signature.s.to_bytes().into();
-    let signed_bytes = encode_signed_eip1559(&evm_params, y_parity, &r_bytes, &s_bytes)?;
-    let unsigned_bytes = TxEip1559::try_from(&evm_params)?.encoded_for_signing();
+    let signed_bytes = encode_signed_eip1559(&deposit_params, y_parity, &r_bytes, &s_bytes)?;
+    let unsigned_bytes = TxEip1559::try_from(&deposit_params)?.encoded_for_signing();
     let (watched_tx_hash, _) = sign_and_hash_transaction(&unsigned_bytes, mpc_signature)?;
     let watched_tx_hash = B256::from(watched_tx_hash);
 
@@ -229,43 +260,241 @@ async fn run_live_canton_eth_bidirectional_flow_case(
     let tx_hash = *pending_tx.tx_hash();
     assert_eq!(
         tx_hash, watched_tx_hash,
-        "MPC watcher tx hash mismatch ({case_name})"
+        "MPC watcher tx hash mismatch for live Vault deposit"
     );
 
     anvil.evm_mine(None).await?;
 
-    let respond_payload = live
+    let respond_payload: RespondBidirectionalEventPayload = live
         .client
         .poll_for_contract(
             &[&live.party_id],
             "#daml-signer:Signer:RespondBidirectionalEvent",
-            |p: &RespondBidirectionalEventPayload| p.request_id == expected_request_id,
+            |p: &RespondBidirectionalEventPayload| p.request_id == request_id,
             Duration::from_secs(300),
         )
         .await
-        .with_context(|| {
-            format!("timeout waiting for live RespondBidirectionalEvent ({case_name})")
-        })?;
+        .context("timeout waiting for live Vault deposit RespondBidirectionalEvent")?;
     tracing::info!(
-        case_name,
         request_id = %respond_payload.request_id,
-        "received live RespondBidirectionalEvent"
+        "received live Vault deposit RespondBidirectionalEvent"
     );
 
     let submitted_receipt = anvil
         .get_transaction_receipt(tx_hash)
         .await?
-        .with_context(|| format!("submitted Anvil receipt not found ({case_name})"))?;
+        .context("submitted live Vault deposit receipt not found")?;
     assert!(
         submitted_receipt.status(),
-        "submitted Anvil receipt failed ({case_name}); tx_hash={tx_hash:?}"
+        "submitted live Vault deposit receipt failed; tx_hash={tx_hash:?}"
     );
-
     assert_eq!(
         respond_payload.serialized_output, ABI_ENCODED_BOOL_TRUE_HEX,
-        "expected ABI-encoded bool true output ({case_name})"
+        "expected ABI-encoded bool true output for live Vault deposit"
     );
 
+    let user_balance = erc20_balance_of(&anvil, token_address, user_address).await?;
+    let vault_balance = erc20_balance_of(&anvil, token_address, vault_address).await?;
+    assert_eq!(
+        user_balance,
+        U256::ZERO,
+        "mock ERC20 user balance should be empty after Vault deposit"
+    );
+    assert_eq!(
+        vault_balance, deposit_amount,
+        "mock ERC20 vault balance should equal deposit amount"
+    );
+
+    verify_response_signature(root_pk, &sender, &respond_payload)
+        .context("verify live Vault deposit response signature")?;
+
+    let ledger_client = CantonClient::new(&live.config).await?;
+    let signature_event_cid = find_active_contract_cid(
+        &ledger_client,
+        &[&live.party_id],
+        "#daml-signer:Signer:SignatureRespondedEvent",
+        |payload| payload.get("requestId").and_then(|v| v.as_str()) == Some(request_id.as_str()),
+    )
+    .await?;
+    let respond_event_cid = find_active_contract_cid(
+        &ledger_client,
+        &[&live.party_id],
+        "#daml-signer:Signer:RespondBidirectionalEvent",
+        |payload| payload.get("requestId").and_then(|v| v.as_str()) == Some(request_id.as_str()),
+    )
+    .await?;
+
+    let claim_result = live
+        .client
+        .exercise_choice(
+            &[&live.party_id],
+            &vault_template_id,
+            &vault_cid,
+            "ClaimDeposit",
+            json!({
+                "requester": &live.party_id,
+                "pendingDepositCid": pending_deposit_cid,
+                "respondBidirectionalEventCid": respond_event_cid,
+                "signatureRespondedEventCid": signature_event_cid,
+            }),
+            &[],
+        )
+        .await
+        .context("exercise Vault.ClaimDeposit")?;
+    let (holding_cid, _) = find_created_contract(&claim_result, "Erc20Holding")?;
+    let holding_payload = created_payload(&claim_result, &holding_cid)?;
+    assert_eq!(
+        holding_payload.get("owner").and_then(|v| v.as_str()),
+        Some(live.party_id.as_str())
+    );
+    assert_eq!(
+        holding_payload.get("operators"),
+        Some(&serde_json::to_value(&operators)?)
+    );
+    assert_eq!(
+        holding_payload.get("erc20Address").and_then(|v| v.as_str()),
+        Some(hex::encode(token_address.as_slice()).as_str())
+    );
+    assert_eq!(
+        holding_payload.get("amount").and_then(|v| v.as_str()),
+        Some(evm_u256_hex(MOCK_DEPOSIT_AMOUNT as u128).as_str())
+    );
+    tracing::info!(
+        holding_cid = %holding_cid,
+        request_id = %request_id,
+        "live Vault.ClaimDeposit created Erc20Holding"
+    );
+
+    Ok(())
+}
+
+fn vault_deposit_evm_params(
+    token_address: Address,
+    vault_address: Address,
+    amount: U256,
+) -> EvmType2TransactionParams {
+    EvmType2TransactionParams {
+        chain_id: evm_u256_hex(LIVE_EVM_CHAIN_ID as u128),
+        nonce: evm_u256_hex(0),
+        max_priority_fee_per_gas: evm_u256_hex(1_000_000_000),
+        max_fee_per_gas: evm_u256_hex(100_000_000_000),
+        gas_limit: evm_u256_hex(200_000),
+        to: Some(hex::encode(token_address.as_slice())),
+        value: evm_u256_hex(0),
+        calldata: erc20_transfer_calldata(vault_address, amount),
+        access_list: vec![],
+    }
+}
+
+fn erc20_transfer_calldata(to: Address, amount: U256) -> String {
+    format!(
+        "{ERC20_TRANSFER_SELECTOR}{}{}",
+        abi_address_slot(to),
+        hex::encode(amount.to_be_bytes::<32>())
+    )
+}
+
+fn abi_address_slot(address: Address) -> String {
+    format!("{:0>64}", hex::encode(address.as_slice()))
+}
+
+fn evm_u256_hex(value: u128) -> String {
+    format!("{value:064x}")
+}
+
+fn derive_canton_address(root_pk: k256::AffinePoint, sender: &str, path: &str) -> Address {
+    let epsilon = mpc_crypto::derive_epsilon_canton(LATEST_MPC_KEY_VERSION, sender, path);
+    derive_user_address(root_pk, epsilon)
+}
+
+fn derive_canton_response_public_key(
+    root_pk: k256::AffinePoint,
+    sender: &str,
+) -> k256::AffinePoint {
+    let epsilon = mpc_crypto::derive_epsilon_canton(
+        LATEST_MPC_KEY_VERSION,
+        sender,
+        CANTON_RESPOND_BIDIRECTIONAL_PATH,
+    );
+    mpc_crypto::derive_key(root_pk, epsilon)
+}
+
+fn secp256k1_spki_hex(pk: k256::AffinePoint) -> String {
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
+
+    let encoded = pk.to_encoded_point(false);
+    let raw = &encoded.as_bytes()[1..];
+    let mut spki = Vec::with_capacity(88);
+    spki.extend_from_slice(&[
+        0x30, 0x56, 0x30, 0x10, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x05,
+        0x2b, 0x81, 0x04, 0x00, 0x0a, 0x03, 0x42, 0x00, 0x04,
+    ]);
+    spki.extend_from_slice(raw);
+    hex::encode(spki)
+}
+
+fn erc20_balance_slot(owner: Address) -> U256 {
+    let mut input = [0u8; 64];
+    input[12..32].copy_from_slice(owner.as_slice());
+    U256::from_be_bytes(*keccak256(input))
+}
+
+async fn erc20_balance_of<P>(provider: &P, token: Address, owner: Address) -> Result<U256>
+where
+    P: Provider,
+{
+    let calldata = format!("{ERC20_BALANCE_OF_SELECTOR}{}", abi_address_slot(owner));
+    let tx = TransactionRequest::default()
+        .to(token)
+        .input(Bytes::from(hex::decode(calldata)?).into());
+    let raw = provider.call(tx).await?;
+    Ok(U256::from_be_slice(raw.as_ref()))
+}
+
+fn created_payload<'a>(
+    response: &'a SubmitAndWaitForTransactionResponse,
+    contract_id: &str,
+) -> Result<&'a serde_json::Value> {
+    response
+        .transaction
+        .events
+        .iter()
+        .find_map(|event| match event {
+            Event::CreatedEvent(created) if created.contract_id == contract_id => {
+                Some(&created.payload)
+            }
+            _ => None,
+        })
+        .with_context(|| format!("created payload not found for {contract_id}"))
+}
+
+async fn find_active_contract_cid<F>(
+    client: &CantonClient,
+    parties: &[&str],
+    template_id: &str,
+    predicate: F,
+) -> Result<String>
+where
+    F: Fn(&serde_json::Value) -> bool,
+{
+    let entries = client
+        .fetch_active_contracts(parties, Some(template_id), false)
+        .await?;
+    for entry in &entries {
+        if let Some(ContractEntry::JsActiveContract(ac)) = &entry.contract_entry {
+            if predicate(&ac.created_event.payload) {
+                return Ok(ac.created_event.contract_id.clone());
+            }
+        }
+    }
+    anyhow::bail!("no active contract for {template_id} matching predicate")
+}
+
+fn verify_response_signature(
+    root_pk: k256::AffinePoint,
+    sender: &str,
+    respond_payload: &RespondBidirectionalEventPayload,
+) -> Result<()> {
     let respond_signature = parse_canton_signature(&respond_payload.signature)?;
     let response_hash =
         mpc_node::respond_bidirectional::calculate_respond_bidirectional_hash_message(
@@ -273,13 +502,7 @@ async fn run_live_canton_eth_bidirectional_flow_case(
             &hex::decode(&respond_payload.serialized_output)?,
         );
 
-    let respond_epsilon = mpc_crypto::derive_epsilon_canton(
-        LATEST_MPC_KEY_VERSION,
-        &expected_event.sender,
-        CANTON_RESPOND_BIDIRECTIONAL_PATH,
-    );
-    let respond_derived_pk = mpc_crypto::derive_key(root_pk, respond_epsilon);
-
+    let respond_derived_pk = derive_canton_response_public_key(root_pk, sender);
     let respond_ecdsa = k256::ecdsa::Signature::from_scalars(
         mpc_crypto::x_coordinate(&respond_signature.big_r),
         respond_signature.s,
@@ -291,39 +514,7 @@ async fn run_live_canton_eth_bidirectional_flow_case(
         .map_err(|e| anyhow::anyhow!("invalid derived public key: {e}"))?;
     verifying_key
         .verify_prehash(&response_hash, &respond_ecdsa)
-        .with_context(|| {
-            format!("live RespondBidirectional signature verification failed ({case_name})")
-        })?;
-
-    Ok(())
-}
-
-fn live_test_sign_request_event(
-    live: &LiveCanton,
-    case: &EvmType2AnvilCase,
-    path: String,
-) -> SignBidirectionalRequestedEvent {
-    let operators = vec![live.party_id.clone()];
-    let sender = compute_operators_hash(&operators);
-
-    // The dev credentials authorize one party. Reusing it for sigNetwork,
-    // operator, and requester keeps this live test focused on the external
-    // ledger/MPC handshake; the local sandbox test covers cross-party disclosure.
-    SignBidirectionalRequestedEvent {
-        operators,
-        requester: live.party_id.clone(),
-        sig_network: live.party_id.clone(),
-        sender,
-        tx_params: TxParams::EvmType2TxParams(case.params.clone()),
-        caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
-        key_version: LATEST_MPC_KEY_VERSION,
-        path,
-        algo: String::new(),
-        dest: String::new(),
-        params: String::new(),
-        output_deserialization_schema: EVM_TYPE2_BOOL_OUTPUT_SCHEMA.to_string(),
-        respond_serialization_schema: EVM_TYPE2_BOOL_OUTPUT_SCHEMA.to_string(),
-    }
+        .context("RespondBidirectional signature verification failed")
 }
 
 fn encode_signed_eip1559(
@@ -384,9 +575,11 @@ fn configured_signer() -> Result<Option<(String, String)>> {
     }
 }
 
-fn live_test_path(party_id: &str) -> Result<String> {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-    Ok(format!("{party_id}:live-canton-mpc:{now}"))
+fn live_test_id() -> Result<String> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)?
+        .as_nanos()
+        .to_string())
 }
 
 fn required_env(name: &str) -> Result<String> {

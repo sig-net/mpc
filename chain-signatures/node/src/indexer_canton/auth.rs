@@ -1,18 +1,15 @@
 use anyhow::Context as _;
 use oauth2::basic::{BasicClient, BasicTokenType};
-use oauth2::{
-    ClientId, ClientSecret, EndpointNotSet, EndpointSet, HttpClientError, HttpRequest,
-    HttpResponse, Scope, TokenResponse, TokenUrl,
-};
+use oauth2::reqwest::async_http_client;
+use oauth2::{AuthUrl, ClientId, ClientSecret, Scope, TokenResponse, TokenUrl};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 const TOKEN_REFRESH_SKEW: Duration = Duration::from_secs(60);
+const UNUSED_CLIENT_CREDENTIALS_AUTH_URL: &str = "http://localhost/unused-canton-oauth-auth-url";
 
-type CantonOAuthClient =
-    BasicClient<EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
-type OAuthHttpError = HttpClientError<reqwest::Error>;
+type CantonOAuthClient = BasicClient;
 
 #[derive(Clone)]
 pub struct CantonAuthConfig {
@@ -32,7 +29,6 @@ impl CantonAuthConfig {
 #[derive(Clone)]
 pub struct CantonAuthProvider {
     ledger_api_user: String,
-    http_client: reqwest::Client,
     oauth_client: CantonOAuthClient,
     audience: String,
     scope: Option<String>,
@@ -46,20 +42,23 @@ struct CachedToken {
 }
 
 impl CantonAuthProvider {
-    pub async fn new(
-        config: CantonAuthConfig,
-        ledger_api_user: String,
-        http_client: reqwest::Client,
-    ) -> anyhow::Result<Self> {
-        let oauth_client = BasicClient::new(ClientId::new(config.client_id))
-            .set_client_secret(ClientSecret::new(config.client_secret))
-            .set_token_uri(
-                TokenUrl::new(config.token_url).context("invalid Canton OIDC token URL")?,
-            );
+    pub async fn new(config: CantonAuthConfig, ledger_api_user: String) -> anyhow::Result<Self> {
+        let token_url =
+            TokenUrl::new(config.token_url.clone()).context("invalid Canton OIDC token URL")?;
+        // oauth2 4.x requires an auth URL even though the client credentials
+        // flow never uses it. When migrating to oauth2 5.x with reqwest 0.12,
+        // remove this dummy URL and use `set_token_uri(...)` instead.
+        let unused_auth_url = AuthUrl::new(UNUSED_CLIENT_CREDENTIALS_AUTH_URL.to_string())
+            .context("invalid unused Canton OIDC auth URL")?;
+        let oauth_client = BasicClient::new(
+            ClientId::new(config.client_id),
+            Some(ClientSecret::new(config.client_secret)),
+            unused_auth_url,
+            Some(token_url),
+        );
 
         Ok(Self {
             ledger_api_user,
-            http_client,
             oauth_client,
             audience: config.audience,
             scope: config.scope.filter(|s| !s.trim().is_empty()),
@@ -94,10 +93,8 @@ impl CantonAuthProvider {
             request = request.add_scope(Scope::new(scope.clone()));
         }
 
-        let http_client = self.http_client.clone();
-        let oauth_http_client = move |request| execute_oauth_request(http_client.clone(), request);
         let response = request
-            .request_async(&oauth_http_client)
+            .request_async(async_http_client)
             .await
             .context("failed to request Canton OIDC token")?;
 
@@ -122,40 +119,4 @@ impl CantonAuthProvider {
             refresh_after,
         })
     }
-}
-
-async fn execute_oauth_request(
-    client: reqwest::Client,
-    request: HttpRequest,
-) -> Result<HttpResponse, OAuthHttpError> {
-    let (parts, body) = request.into_parts();
-    let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
-        .map_err(|err| OAuthHttpError::Other(format!("invalid OAuth HTTP method: {err}")))?;
-    let mut request_builder = client.request(method, parts.uri.to_string()).body(body);
-    for (name, value) in parts.headers.iter() {
-        request_builder = request_builder.header(name.as_str(), value.as_bytes());
-    }
-
-    let response = client
-        .execute(
-            request_builder
-                .build()
-                .map_err(|err| OAuthHttpError::Reqwest(Box::new(err)))?,
-        )
-        .await
-        .map_err(|err| OAuthHttpError::Reqwest(Box::new(err)))?;
-    let status_code = oauth2::http::StatusCode::from_u16(response.status().as_u16())
-        .map_err(|err| OAuthHttpError::Other(format!("invalid OAuth HTTP status: {err}")))?;
-    let headers = response.headers().to_owned();
-    let body = response
-        .bytes()
-        .await
-        .map_err(|err| OAuthHttpError::Reqwest(Box::new(err)))?
-        .to_vec();
-
-    let mut response_builder = oauth2::http::Response::builder().status(status_code);
-    for (name, value) in headers.iter() {
-        response_builder = response_builder.header(name.as_str(), value.as_bytes());
-    }
-    response_builder.body(body).map_err(OAuthHttpError::Http)
 }
