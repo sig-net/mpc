@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
+const DEFAULT_TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TOKEN_REFRESH_SKEW: Duration = Duration::from_secs(60);
 const UNUSED_CLIENT_CREDENTIALS_AUTH_URL: &str = "http://localhost/unused-canton-oauth-auth-url";
 
@@ -28,10 +29,10 @@ impl CantonAuthConfig {
 
 #[derive(Clone)]
 pub struct CantonAuthProvider {
-    ledger_api_user: String,
     oauth_client: CantonOAuthClient,
     audience: String,
     scope: Option<String>,
+    token_request_timeout: Duration,
     cached_token: Arc<Mutex<Option<CachedToken>>>,
 }
 
@@ -42,7 +43,7 @@ struct CachedToken {
 }
 
 impl CantonAuthProvider {
-    pub async fn new(config: CantonAuthConfig, ledger_api_user: String) -> anyhow::Result<Self> {
+    pub async fn new(config: CantonAuthConfig) -> anyhow::Result<Self> {
         let token_url =
             TokenUrl::new(config.token_url.clone()).context("invalid Canton OIDC token URL")?;
         // oauth2 4.x requires an auth URL even though the client credentials
@@ -58,16 +59,12 @@ impl CantonAuthProvider {
         );
 
         Ok(Self {
-            ledger_api_user,
             oauth_client,
             audience: config.audience,
             scope: config.scope.filter(|s| !s.trim().is_empty()),
+            token_request_timeout: DEFAULT_TOKEN_REQUEST_TIMEOUT,
             cached_token: Arc::new(Mutex::new(None)),
         })
-    }
-
-    pub fn ledger_api_user(&self) -> &str {
-        &self.ledger_api_user
     }
 
     pub async fn bearer_token(&self) -> anyhow::Result<String> {
@@ -93,10 +90,18 @@ impl CantonAuthProvider {
             request = request.add_scope(Scope::new(scope.clone()));
         }
 
-        let response = request
-            .request_async(async_http_client)
-            .await
-            .context("failed to request Canton OIDC token")?;
+        let response = tokio::time::timeout(
+            self.token_request_timeout,
+            request.request_async(async_http_client),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "Canton OIDC token request timed out after {:?}",
+                self.token_request_timeout
+            )
+        })?
+        .context("failed to request Canton OIDC token")?;
 
         anyhow::ensure!(
             response.token_type() == &BasicTokenType::Bearer,

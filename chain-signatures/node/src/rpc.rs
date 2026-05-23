@@ -964,8 +964,7 @@ impl CantonClient {
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
-        let auth_provider =
-            CantonAuthProvider::new(config.auth.clone(), config.ledger_api_user.clone()).await?;
+        let auth_provider = CantonAuthProvider::new(config.auth.clone()).await?;
 
         if !config.signer_contract_id.is_empty() || !config.signer_template_id.is_empty() {
             tracing::info!(
@@ -983,7 +982,7 @@ impl CantonClient {
     }
 
     pub fn ledger_api_user(&self) -> &str {
-        self.auth_provider.ledger_api_user()
+        &self.config.ledger_api_user
     }
 
     pub async fn bearer_token(&self) -> anyhow::Result<String> {
