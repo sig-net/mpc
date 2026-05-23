@@ -9,7 +9,6 @@ publish = false
 alloy = { workspace = true, features = ["provider-anvil-api"] }
 anyhow.workspace = true
 async-process = "1"
-base64.workspace = true
 backon = "0.4"
 bollard = "0.17.0"
 borsh.workspace = true
@@ -21,14 +20,10 @@ futures = "0.3"
 generic-array = { version = "0.14.7", default-features = false }
 hex.workspace = true
 hyper.workspace = true
-jsonwebtoken.workspace = true
-mockito.workspace = true
-p256.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_urlencoded.workspace = true
 semver.workspace = true
 shell-escape = "0.1.5"
 testcontainers = "0.23.1"

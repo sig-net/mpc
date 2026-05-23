@@ -5,8 +5,8 @@ use alloy::providers::ext::AnvilApi;
 use alloy::providers::{Provider, ProviderBuilder};
 use anyhow::{Context as _, Result};
 use integration_tests::canton::{
-    generate_untrusted_test_access_token, test_evm_type2_anvil_cases, test_sign_request_event,
-    test_sign_request_payload, EvmType2AnvilCase, EVM_TYPE2_TEST_CONTRACT_ADDRESS,
+    test_evm_type2_anvil_cases, test_sign_request_event, test_sign_request_payload,
+    EvmType2AnvilCase, EVM_TYPE2_TEST_CONTRACT_ADDRESS,
 };
 use integration_tests::cluster;
 use mpc_node::indexer_canton::contracts::{
@@ -305,7 +305,9 @@ async fn test_canton_rejects_token_signed_by_untrusted_jwks_key() -> Result<()> 
 
     // Mint a structurally valid bearer token for the runtime user, but sign it
     // with a key that is not exposed by the trusted JWKS endpoint.
-    let rogue_token = generate_untrusted_test_access_token(&sandbox.ledger_api_user)?;
+    let rogue_token = sandbox
+        .generate_untrusted_test_access_token(&sandbox.ledger_api_user)
+        .await?;
 
     // Canton should reject it because the token signature does not match the
     // configured OAuth/JWKS issuer key.

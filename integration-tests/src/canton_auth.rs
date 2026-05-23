@@ -1,61 +1,50 @@
 use anyhow::{Context as _, Result};
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use jsonwebtoken::jwk::{Jwk, JwkSet, PublicKeyUse};
-use jsonwebtoken::{Algorithm, EncodingKey, Header};
-use p256::ecdsa::SigningKey;
-use p256::elliptic_curve::pkcs8::EncodePrivateKey;
-use rand::rngs::OsRng;
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use testcontainers::core::{IntoContainerPort, WaitFor};
+use testcontainers::runners::AsyncRunner;
+use testcontainers::{ContainerAsync, GenericImage, ImageExt};
+use tokio::time::{sleep, Duration};
 
 pub(crate) const LOCAL_OIDC_AUDIENCE: &str = "https://canton.network.global";
 pub(crate) const LOCAL_OIDC_CLIENT_SECRET: &str = "local-canton-client-secret";
 pub(crate) const LOCAL_OIDC_SCOPE: &str = "daml_ledger_api";
 
-const LOCAL_OIDC_JWKS_KEY_ID: &str = "local-canton-jwks-key";
-const LOCAL_OIDC_TOKEN_TTL_SECS: u64 = 3600;
+const MOCK_OAUTH2_SERVER_IMAGE: &str = "ghcr.io/navikt/mock-oauth2-server";
+const MOCK_OAUTH2_SERVER_TAG: &str = "3.0.1";
+const MOCK_OAUTH2_SERVER_PORT: u16 = 8080;
+const TRUSTED_ISSUER_ID: &str = "default";
+const ROGUE_ISSUER_ID: &str = "rogue";
+const LOCAL_OIDC_TOKEN_TTL_SECS: u64 = 300;
 
 pub(crate) struct OidcTestProvider {
+    base_url: String,
     token_url: String,
     jwks_url: String,
-    _server: mockito::ServerGuard,
+    _container: ContainerAsync<GenericImage>,
 }
 
 impl OidcTestProvider {
     pub(crate) async fn run() -> Result<Self> {
-        let issuer = Arc::new(LocalJwtIssuer::new()?);
-        let mut server = mockito::Server::new_async().await;
-
-        // Keep the provider small but production-shaped: Canton fetches JWKS to
-        // verify bearer tokens, while the MPC node fetches OAuth access tokens.
-        let jwks_body = serde_json::to_vec(&issuer.jwks())?;
-        server
-            .mock("GET", "/.well-known/jwks.json")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(jwks_body)
-            .create_async()
-            .await;
-
-        let token_issuer = Arc::clone(&issuer);
-        server
-            .mock("POST", "/oauth/token")
-            .match_request(|request| token_request_client_id(request).is_ok())
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body_from_request(move |request| {
-                build_token_response_body(request, &token_issuer)
-                    .expect("valid OAuth token request should build a token response")
-            })
-            .create_async()
-            .await;
-
-        let base_url = server.url();
+        let container = GenericImage::new(MOCK_OAUTH2_SERVER_IMAGE, MOCK_OAUTH2_SERVER_TAG)
+            .with_exposed_port(MOCK_OAUTH2_SERVER_PORT.tcp())
+            .with_wait_for(WaitFor::seconds(1))
+            .with_env_var("JSON_CONFIG", oidc_json_config())
+            .start()
+            .await
+            .context("failed to start mock-oauth2-server container")?;
+        let host_port = container
+            .get_host_port_ipv4(MOCK_OAUTH2_SERVER_PORT)
+            .await
+            .context("mock-oauth2-server port mapping")?;
+        let base_url = format!("http://127.0.0.1:{host_port}");
+        wait_for_mock_oauth2_server(&base_url).await?;
 
         Ok(Self {
-            token_url: format!("{base_url}/oauth/token"),
-            jwks_url: format!("{base_url}/.well-known/jwks.json"),
-            _server: server,
+            token_url: issuer_token_url(&base_url, TRUSTED_ISSUER_ID),
+            jwks_url: issuer_jwks_url(&base_url, TRUSTED_ISSUER_ID),
+            base_url,
+            _container: container,
         })
     }
 
@@ -66,145 +55,108 @@ impl OidcTestProvider {
     pub(crate) fn jwks_url(&self) -> &str {
         &self.jwks_url
     }
+
+    pub(crate) async fn untrusted_access_token(&self, subject: &str) -> Result<String> {
+        self.issue_access_token(ROGUE_ISSUER_ID, subject).await
+    }
+
+    async fn issue_access_token(&self, issuer_id: &str, subject: &str) -> Result<String> {
+        let response: TokenResponse = reqwest::Client::new()
+            .post(issuer_token_url(&self.base_url, issuer_id))
+            .basic_auth(subject, Some(LOCAL_OIDC_CLIENT_SECRET))
+            .form(&[
+                ("grant_type", "client_credentials"),
+                ("audience", LOCAL_OIDC_AUDIENCE),
+                ("scope", LOCAL_OIDC_SCOPE),
+            ])
+            .send()
+            .await
+            .with_context(|| format!("failed to request {issuer_id} access token"))?
+            .error_for_status()
+            .with_context(|| format!("mock-oauth2-server rejected {issuer_id} token request"))?
+            .json()
+            .await
+            .with_context(|| format!("invalid {issuer_id} token response"))?;
+
+        anyhow::ensure!(
+            response.token_type.eq_ignore_ascii_case("Bearer"),
+            "unsupported mock-oauth2-server token_type {}",
+            response.token_type
+        );
+        anyhow::ensure!(
+            !response.access_token.is_empty(),
+            "mock-oauth2-server returned an empty access token"
+        );
+
+        Ok(response.access_token)
+    }
 }
 
 #[derive(Deserialize)]
-struct TokenRequest {
-    grant_type: String,
-    audience: String,
-    #[serde(default)]
-    scope: Option<String>,
-}
-
-fn token_request_client_id(request: &mockito::Request) -> Result<String> {
-    let authorization = request
-        .header("authorization")
-        .into_iter()
-        .next()
-        .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned);
-    let body = request
-        .body()
-        .map_err(|err| anyhow::anyhow!("OAuth token request body unavailable: {err}"))?;
-    let token_request: TokenRequest =
-        serde_urlencoded::from_bytes(body).context("invalid OAuth token request form body")?;
-    anyhow::ensure!(
-        token_request.grant_type == "client_credentials",
-        "unsupported grant_type"
-    );
-    anyhow::ensure!(
-        token_request.audience == LOCAL_OIDC_AUDIENCE,
-        "invalid audience"
-    );
-    anyhow::ensure!(
-        token_request.scope.as_deref().unwrap_or(LOCAL_OIDC_SCOPE) == LOCAL_OIDC_SCOPE,
-        "invalid scope"
-    );
-
-    let (client_id, client_secret) = parse_basic_client_credentials(authorization.as_deref())?;
-    anyhow::ensure!(
-        client_secret == LOCAL_OIDC_CLIENT_SECRET,
-        "invalid client_secret"
-    );
-    Ok(client_id)
-}
-
-#[derive(Serialize)]
 struct TokenResponse {
     access_token: String,
-    token_type: &'static str,
-    expires_in: u64,
+    token_type: String,
 }
 
-fn build_token_response_body(
-    request: &mockito::Request,
-    issuer: &LocalJwtIssuer,
-) -> Result<Vec<u8>> {
-    let client_id = token_request_client_id(request)?;
-    Ok(serde_json::to_vec(&TokenResponse {
-        access_token: issuer.generate_access_token(&client_id)?,
-        token_type: "Bearer",
-        expires_in: LOCAL_OIDC_TOKEN_TTL_SECS,
-    })?)
+fn oidc_json_config() -> String {
+    json!({
+        "interactiveLogin": false,
+        "httpServer": "NettyWrapper",
+        "tokenProvider": {
+            "keyProvider": {
+                "algorithm": "RS256"
+            }
+        },
+        "tokenCallbacks": [
+            token_callback(TRUSTED_ISSUER_ID),
+            token_callback(ROGUE_ISSUER_ID)
+        ]
+    })
+    .to_string()
 }
 
-fn parse_basic_client_credentials(authorization: Option<&str>) -> Result<(String, String)> {
-    let encoded_credentials = authorization
-        .context("missing authorization header")?
-        .strip_prefix("Basic ")
-        .context("unsupported authorization scheme")?;
-    let credentials = STANDARD
-        .decode(encoded_credentials)
-        .context("invalid basic credentials")?;
-    let credentials = String::from_utf8(credentials).context("basic credentials were not UTF-8")?;
-    let (client_id, client_secret) = credentials
-        .split_once(':')
-        .context("malformed basic credentials")?;
-    Ok((client_id.to_string(), client_secret.to_string()))
+fn token_callback(issuer_id: &str) -> Value {
+    json!({
+        "issuerId": issuer_id,
+        "tokenExpiry": LOCAL_OIDC_TOKEN_TTL_SECS,
+        "requestMappings": [
+            {
+                "requestParam": "grant_type",
+                "match": "client_credentials",
+                "claims": {
+                    "sub": "${clientId}",
+                    "aud": LOCAL_OIDC_AUDIENCE,
+                    "scope": LOCAL_OIDC_SCOPE
+                }
+            }
+        ]
+    })
 }
 
-pub fn generate_untrusted_test_access_token(subject: &str) -> Result<String> {
-    LocalJwtIssuer::new()?.generate_access_token(subject)
+fn issuer_token_url(base_url: &str, issuer_id: &str) -> String {
+    format!("{base_url}/{issuer_id}/token")
 }
 
-struct LocalJwtIssuer {
-    encoding_key: EncodingKey,
-    jwk: Jwk,
+fn issuer_jwks_url(base_url: &str, issuer_id: &str) -> String {
+    format!("{base_url}/{issuer_id}/jwks")
 }
 
-impl LocalJwtIssuer {
-    fn new() -> Result<Self> {
-        let signing_key = SigningKey::random(&mut OsRng);
-        let private_key_der = signing_key
-            .to_pkcs8_der()
-            .context("failed to encode local Canton OIDC signing key")?;
-        let encoding_key = EncodingKey::from_ec_der(private_key_der.as_bytes());
-        let mut jwk = Jwk::from_encoding_key(&encoding_key, Algorithm::ES256)
-            .context("failed to derive local Canton OIDC JWK")?;
-        jwk.common.key_id = Some(LOCAL_OIDC_JWKS_KEY_ID.to_string());
-        jwk.common.public_key_use = Some(PublicKeyUse::Signature);
+async fn wait_for_mock_oauth2_server(base_url: &str) -> Result<()> {
+    let client = reqwest::Client::new();
+    let is_alive_url = format!("{base_url}/isalive");
+    let mut last_error = None;
 
-        Ok(Self { encoding_key, jwk })
-    }
-
-    fn generate_access_token(&self, subject: &str) -> Result<String> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs();
-        let mut header = Header::new(Algorithm::ES256);
-        header.kid = Some(LOCAL_OIDC_JWKS_KEY_ID.to_string());
-        // Keep `iss` omitted for the sandbox default identity provider. A real
-        // Auth0 issuer would require matching Canton identity-provider config.
-        let claims = LocalAccessTokenClaims {
-            audience: LOCAL_OIDC_AUDIENCE,
-            subject,
-            scope: LOCAL_OIDC_SCOPE,
-            issued_at: now,
-            expires_at: now + 300,
-            not_before: now.saturating_sub(60),
-        };
-        jsonwebtoken::encode(&header, &claims, &self.encoding_key)
-            .context("failed to encode local Canton OIDC access token")
-    }
-
-    fn jwks(&self) -> JwkSet {
-        JwkSet {
-            keys: vec![self.jwk.clone()],
+    for _ in 0..60 {
+        match client.get(&is_alive_url).send().await {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => last_error = Some(format!("status {}", response.status())),
+            Err(err) => last_error = Some(err.to_string()),
         }
+        sleep(Duration::from_millis(500)).await;
     }
-}
 
-#[derive(Serialize)]
-struct LocalAccessTokenClaims<'a> {
-    #[serde(rename = "aud")]
-    audience: &'static str,
-    #[serde(rename = "sub")]
-    subject: &'a str,
-    scope: &'static str,
-    #[serde(rename = "iat")]
-    issued_at: u64,
-    #[serde(rename = "exp")]
-    expires_at: u64,
-    #[serde(rename = "nbf")]
-    not_before: u64,
+    anyhow::bail!(
+        "mock-oauth2-server did not become ready at {is_alive_url}: {:?}",
+        last_error
+    )
 }
