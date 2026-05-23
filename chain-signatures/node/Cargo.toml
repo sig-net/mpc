@@ -79,7 +79,6 @@ solana-sdk.workspace = true
 solana-transaction-status.workspace = true
 solana-client.workspace = true
 futures-util.workspace = true
-jsonwebtoken.workspace = true
 p256.workspace = true
 parity-scale-codec.workspace = true
 tokio-tungstenite.workspace = true
@@ -89,6 +88,7 @@ near-crypto = "0.26.0"
 near-fetch = "0.6.0"
 near-primitives.workspace = true
 near-sdk.workspace = true
+oauth2.workspace = true
 
 mpc-contract.workspace = true
 mpc-crypto.workspace = true
@@ -105,7 +105,7 @@ rlp.workspace = true
 maud = { version = "0.27.0", optional = true }
 
 [dev-dependencies]
-mockito = "1.7.0"
+mockito.workspace = true
 test-log = { version = "0.2.12", features = ["log", "trace"] }
 
 [features]

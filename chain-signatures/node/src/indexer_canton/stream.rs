@@ -216,14 +216,14 @@ async fn subscribe_and_process(
     catchup_target: u64,
     catchup_completed: &mut bool,
 ) -> anyhow::Result<()> {
-    let jwt_token = client.generate_jwt()?;
+    let bearer_token = client.bearer_token().await?;
 
     let ws_url = format!("{}/v2/updates", client.config.json_api_ws_url);
 
     let mut request = ws_url.into_client_request()?;
     request.headers_mut().insert(
         header::SEC_WEBSOCKET_PROTOCOL,
-        format!("jwt.token.{jwt_token}, daml.ws.auth").parse()?,
+        format!("jwt.token.{bearer_token}, daml.ws.auth").parse()?,
     );
 
     let (ws_stream, _) = tokio::time::timeout(

@@ -162,6 +162,7 @@ pub struct ClusterSpawner {
     pub worker: Option<Worker<Sandbox>>,
     pub solana: Option<containers::Solana>,
     pub canton: Option<crate::canton::CantonSandbox>,
+    pub spawn_canton_sandbox: bool,
     pub program_address: Option<String>,
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
@@ -200,6 +201,7 @@ impl Default for ClusterSpawner {
             worker: None,
             solana: None,
             canton: None,
+            spawn_canton_sandbox: false,
             program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
             pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
@@ -334,17 +336,30 @@ impl ClusterSpawner {
     }
 
     pub fn canton(mut self) -> Self {
+        self.spawn_canton_sandbox = true;
         if self.cfg.canton.is_none() {
             self.cfg.canton = Some(mpc_node::indexer_canton::CantonConfig {
                 json_api_url: String::new(),
                 json_api_ws_url: String::new(),
-                jwt_private_key_path: String::new(),
-                jwt_subject: String::new(),
+                auth: mpc_node::indexer_canton::CantonAuthConfig {
+                    token_url: String::new(),
+                    client_id: String::new(),
+                    client_secret: String::new(),
+                    audience: String::new(),
+                    scope: None,
+                },
+                ledger_api_user: String::new(),
                 party_id: String::new(),
                 signer_contract_id: String::new(),
                 signer_template_id: String::new(),
             });
         }
+        self
+    }
+
+    pub fn live_canton(mut self, config: mpc_node::indexer_canton::CantonConfig) -> Self {
+        self.cfg.canton = Some(config);
+        self.spawn_canton_sandbox = false;
         self
     }
 
@@ -470,7 +485,7 @@ impl IntoFuture for ClusterSpawner {
                 self.solana = Some(solana);
             }
 
-            if self.cfg.canton.is_some() && self.canton.is_none() {
+            if self.spawn_canton_sandbox && self.canton.is_none() {
                 let sandbox = crate::canton::CantonSandbox::run().await?;
                 self.cfg.canton = Some(sandbox.get_config());
                 self.canton = Some(sandbox);

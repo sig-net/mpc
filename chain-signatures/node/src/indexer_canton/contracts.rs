@@ -7,7 +7,7 @@
 use alloy::consensus::TxEip1559;
 use alloy::eips::eip2930::{AccessList, AccessListItem};
 use alloy::primitives::{Address, Bytes, TxKind, B256, U256};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_aux::field_attributes::deserialize_number_from_string;
 
 /// EIP-2930/EIP-1559 access-list entry from the Signer contract.
@@ -57,6 +57,14 @@ fn decode_fixed_hex<const N: usize>(value: &str, field: &str) -> anyhow::Result<
     hex::decode_to_slice(value, &mut out)
         .map_err(|e| anyhow::anyhow!("invalid {N}-byte hex value in {field}: {e}"))?;
     Ok(out)
+}
+
+fn serialize_number_to_string<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
+where
+    T: std::fmt::Display,
+    S: Serializer,
+{
+    serializer.serialize_str(&value.to_string())
 }
 
 fn parse_access_list(entries: &[EvmAccessListEntry]) -> anyhow::Result<AccessList> {
@@ -130,7 +138,10 @@ pub struct SignBidirectionalRequestedEvent {
     pub tx_params: TxParams,
     pub caip2_id: String,
     /// Canton sends this as either a number or a string.
-    #[serde(deserialize_with = "deserialize_number_from_string")]
+    #[serde(
+        deserialize_with = "deserialize_number_from_string",
+        serialize_with = "serialize_number_to_string"
+    )]
     pub key_version: u32,
     pub path: String,
     pub algo: String,
@@ -148,7 +159,10 @@ pub struct SignRequestPayload {
     pub sig_network: String,
     pub tx_params: TxParams,
     pub caip2_id: String,
-    #[serde(deserialize_with = "deserialize_number_from_string")]
+    #[serde(
+        deserialize_with = "deserialize_number_from_string",
+        serialize_with = "serialize_number_to_string"
+    )]
     pub key_version: u32,
     pub path: String,
     pub algo: String,
@@ -180,7 +194,10 @@ pub struct EcdsaSigData {
     pub der: String,
     /// Recovery ID (0 or 1) — y-parity for EVM ecrecover.
     /// Canton serializes Daml `Int` as a JSON string on outbound events.
-    #[serde(deserialize_with = "deserialize_number_from_string")]
+    #[serde(
+        deserialize_with = "deserialize_number_from_string",
+        serialize_with = "serialize_number_to_string"
+    )]
     pub recovery_id: u8,
 }
 
@@ -207,4 +224,51 @@ pub struct RespondBidirectionalEventPayload {
     pub responder: String,
     pub serialized_output: String,
     pub signature: CantonSignature,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_evm_params() -> EvmType2TransactionParams {
+        EvmType2TransactionParams {
+            chain_id: "0".repeat(64),
+            nonce: "0".repeat(64),
+            max_priority_fee_per_gas: "0".repeat(64),
+            max_fee_per_gas: "0".repeat(64),
+            gas_limit: "0".repeat(64),
+            to: None,
+            value: "0".repeat(64),
+            calldata: String::new(),
+            access_list: vec![],
+        }
+    }
+
+    #[test]
+    fn daml_int_fields_serialize_as_strings() {
+        let sign_request = SignRequestPayload {
+            operators: vec!["operator".to_string()],
+            requester: "requester".to_string(),
+            sig_network: "sig-network".to_string(),
+            tx_params: TxParams::EvmType2TxParams(test_evm_params()),
+            caip2_id: "eip155:31337".to_string(),
+            key_version: 1,
+            path: "path".to_string(),
+            algo: String::new(),
+            dest: String::new(),
+            params: String::new(),
+            output_deserialization_schema: "[]".to_string(),
+            respond_serialization_schema: "[]".to_string(),
+        };
+
+        let sign_request_value = serde_json::to_value(sign_request).unwrap();
+        assert_eq!(sign_request_value["keyVersion"], "1");
+
+        let signature = CantonSignature::EcdsaSig(EcdsaSigData {
+            der: "30440220".to_string(),
+            recovery_id: 1,
+        });
+        let signature_value = serde_json::to_value(signature).unwrap();
+        assert_eq!(signature_value["value"]["recoveryId"], "1");
+    }
 }

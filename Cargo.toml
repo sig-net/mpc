@@ -17,6 +17,7 @@ version = "1.15.0"
 [workspace.dependencies]
 alloy = { version = "=1.0.38", features = ["contract", "json"] }
 anyhow = { version = "1.0.95", features = ["backtrace"] }
+base64 = "0.22"
 borsh = "1.5.3"
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
 ciborium = "0.2.2"
@@ -32,12 +33,15 @@ k256 = { version = "0.13.1", features = [
     "arithmetic",
     "expose-field",
 ] }
+mockito = "1.7.0"
+oauth2 = { version = "5", default-features = false }
 rand = "0.8.5"
 reqwest = { version = "0.11.16", features = ["blocking", "json"] }
 semver = "1.0.23"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11.15"
 serde_json = "1"
+serde_urlencoded = "0.7"
 sha3 = "0.10.8"
 thiserror = "1"
 tokio = { version = "1.45.1", features = ["full"] }
@@ -65,7 +69,7 @@ alloy-json-abi = "1.4.1"
 alloy-rlp = "0.3.12"
 solana-client = "2.2.7"
 futures-util = "0.3.31"
-p256 = { version = "0.13.2", features = ["ecdsa"] }
+p256 = { version = "0.13.2", features = ["ecdsa", "pkcs8"] }
 parity-scale-codec = { version = "3", features = ["derive"] }
 
 near-account-id = "1.0.0"

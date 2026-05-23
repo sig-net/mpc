@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod canton;
+mod canton_auth;
 pub mod cluster;
 pub mod containers;
 pub mod eth;
