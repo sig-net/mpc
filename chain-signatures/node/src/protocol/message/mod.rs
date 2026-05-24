@@ -802,6 +802,8 @@ pub struct Partition {
     messages: Vec<Message>,
     /// The earliest timestamp from all the messages.
     timestamp: Instant,
+    /// The earliest protocol deadline from all the messages.
+    deadline: Instant,
 }
 
 /// Message outbox is the set of messages that are pending to be sent to other nodes.
@@ -831,6 +833,7 @@ impl MessageOutbox {
     fn compact(
         &mut self,
         route: MessageRoute,
+        cfg: &ProtocolConfig,
         compacted: &mut HashMap<MessageRoute, Vec<Partition>>,
     ) {
         let Some(messages) = self.messages.remove(&route) else {
@@ -838,7 +841,7 @@ impl MessageOutbox {
         };
 
         let entry = compacted.entry(route).or_default();
-        entry.extend(partition_256kb(messages.messages));
+        entry.extend(partition_256kb(messages.messages, cfg));
     }
 
     /// Queue a message and immediately flush the route when it reaches the payload threshold.
@@ -849,6 +852,7 @@ impl MessageOutbox {
         message: Message,
         timestamp: Instant,
         payload_limit: usize,
+        cfg: &ProtocolConfig,
     ) -> HashMap<MessageRoute, Vec<Partition>> {
         let route = (from, to);
         let pending = self.messages.entry(route).or_default();
@@ -859,15 +863,16 @@ impl MessageOutbox {
         }
 
         let mut compacted = HashMap::new();
-        self.compact(route, &mut compacted);
+        self.compact(route, cfg, &mut compacted);
         compacted
     }
 
     /// Flush any routes whose oldest pending message has waited past the timeout.
-    pub fn take_flushable(
+    pub fn take_expired_partitions(
         &mut self,
         timeout: Duration,
         now: Instant,
+        cfg: &ProtocolConfig,
     ) -> HashMap<MessageRoute, Vec<Partition>> {
         let expired: Vec<_> = self
             .messages
@@ -882,7 +887,7 @@ impl MessageOutbox {
 
         let mut compacted = HashMap::new();
         for route in expired {
-            self.compact(route, &mut compacted);
+            self.compact(route, cfg, &mut compacted);
         }
         compacted
     }
@@ -899,8 +904,9 @@ impl MessageOutbox {
         &self,
         sign_sk: &near_crypto::SecretKey,
         participants: &Participants,
+        cfg: &ProtocolConfig,
         compacted: HashMap<MessageRoute, Vec<Partition>>,
-    ) -> HashMap<MessageRoute, Vec<(Ciphered, Instant, usize)>> {
+    ) -> HashMap<MessageRoute, Vec<(Ciphered, Instant, usize, Instant)>> {
         // failed for when a participant is not active, so keep this message for next round.
         let mut errors = Vec::new();
 
@@ -925,10 +931,14 @@ impl MessageOutbox {
                     }
                 };
 
+                let deadline = partition
+                    .deadline
+                    .min(partition.timestamp + message_timeout(cfg, &partition.messages[0]));
                 encrypted.entry((from, to)).or_insert_with(Vec::new).push((
                     message,
                     partition.timestamp,
                     partition.messages.len(),
+                    deadline,
                 ));
             }
         }
@@ -945,14 +955,12 @@ impl MessageOutbox {
         &self,
         client: &NodeClient,
         participants: &Participants,
-        cfg: &ProtocolConfig,
-        encrypted: HashMap<MessageRoute, Vec<(Ciphered, Instant, usize)>>,
+        encrypted: HashMap<MessageRoute, Vec<(Ciphered, Instant, usize, Instant)>>,
     ) {
         let start = Instant::now();
-        let timeout = Duration::from_millis(cfg.message_timeout);
 
         for ((_from, to), encrypted) in encrypted {
-            for (encrypted_partition, timestamp, message_len) in encrypted {
+            for (encrypted_partition, timestamp, message_len, deadline) in encrypted {
                 // guaranteed to unwrap due to our previous loop check:
                 let info = participants.get(&to).unwrap();
                 let url = info.url.clone();
@@ -965,7 +973,7 @@ impl MessageOutbox {
                     crate::metrics::messaging::MSG_CLIENT_SEND_DELAY
                         .observe((instant - timestamp).as_millis() as f64);
                     let payload = &[&encrypted_partition];
-                    let timeout = tokio::time::sleep(timeout);
+                    let timeout = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
                     tokio::pin!(timeout);
 
                     loop {
@@ -1004,7 +1012,8 @@ impl MessageOutbox {
     async fn publish_partitions(
         &self,
         client: &NodeClient,
-        config: &watch::Receiver<Config>,
+        sign_sk: &near_crypto::SecretKey,
+        protocol: &ProtocolConfig,
         contract: &ContractStateWatcher,
         compacted: HashMap<MessageRoute, Vec<Partition>>,
     ) {
@@ -1015,18 +1024,24 @@ impl MessageOutbox {
         let Some(participants) = contract.participants() else {
             return;
         };
-        let config = config.borrow().clone();
-        let encrypted = self.encrypt(&config.local.network.sign_sk, &participants, compacted);
-        self.send(client, &participants, &config.protocol, encrypted)
-            .await;
+        let encrypted = self.encrypt(
+            sign_sk,
+            &participants,
+            protocol,
+            compacted,
+        );
+        self.send(client, &participants, encrypted).await;
     }
 
     pub async fn run(
         mut self,
         client: NodeClient,
-        config: watch::Receiver<Config>,
+        mut config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
     ) {
+        let mut protocol = config.borrow().protocol.clone();
+        let mut sign_sk = config.borrow().local.network.sign_sk.clone();
+
         loop {
             let next_flush_delay = self.next_flush_delay(Self::FLUSH_INTERVAL, Instant::now());
             let sleep_until_flush = async {
@@ -1044,12 +1059,22 @@ impl MessageOutbox {
                         msg,
                         timestamp,
                         MAX_OUTBOX_PAYLOAD_LIMIT,
+                        &protocol,
                     );
-                    self.publish_partitions(&client, &config, &contract, ready).await;
+                    self.publish_partitions(&client, &sign_sk, &protocol, &contract, ready).await;
                 }
                 _ = sleep_until_flush => {
-                    let ready = self.take_flushable(Self::FLUSH_INTERVAL, Instant::now());
-                    self.publish_partitions(&client, &config, &contract, ready).await;
+                    let ready = self.take_expired_partitions(
+                        Self::FLUSH_INTERVAL,
+                        Instant::now(),
+                        &protocol,
+                    );
+                    self.publish_partitions(&client, &sign_sk, &protocol, &contract, ready).await;
+                }
+                Ok(()) = config.changed() => {
+                    let config = config.borrow();
+                    protocol = config.protocol.clone();
+                    sign_sk = config.local.network.sign_sk.clone();
                 }
             }
         }
@@ -1063,13 +1088,35 @@ impl MessageOutbox {
     }
 }
 
+fn message_timeout(cfg: &ProtocolConfig, message: &Message) -> Duration {
+    let millis = match message {
+        Message::Posit(message) => match message.id {
+            PositProtocolId::Triple(_) => cfg.triple.generation_timeout,
+            PositProtocolId::Presignature(_) => cfg.presignature.generation_timeout,
+            PositProtocolId::Signature(_, _, _) => cfg.signature.generation_timeout,
+        },
+        Message::Triple(_) => cfg.triple.generation_timeout,
+        Message::Presignature(_) => cfg.presignature.generation_timeout,
+        Message::Signature(_) => cfg.signature.generation_timeout,
+        Message::Generating(_) | Message::Resharing(_) | Message::Ready(_) | Message::Unknown(_) => {
+            cfg.message_timeout
+        }
+    };
+
+    Duration::from_millis(millis)
+}
+
 /// Partition a list of messages into a list of partitions where each partition is at most 256kb
 /// worth of `Message`s.
-fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Vec<Partition> {
+fn partition_256kb(
+    outgoing: impl IntoIterator<Item = (Message, Instant)>,
+    cfg: &ProtocolConfig,
+) -> Vec<Partition> {
     let mut partitions = Vec::new();
     let mut current_messages = Vec::new();
     let mut current_size: usize = 0;
-    let mut earliest = Instant::now();
+    let mut earliest = None;
+    let mut deadline = None;
 
     for (msg, timestamp) in outgoing {
         if matches!(msg, Message::Unknown(_)) {
@@ -1081,17 +1128,22 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
             continue;
         }
 
-        earliest = earliest.min(timestamp);
         let bytesize = msg.size();
         if current_size + bytesize > 256 * 1024 && !current_messages.is_empty() {
             // If adding this byte vector exceeds 256kb, start a new partition
             partitions.push(Partition {
                 messages: std::mem::take(&mut current_messages),
-                timestamp: earliest,
+                timestamp: earliest.unwrap_or_else(Instant::now),
+                deadline: deadline.unwrap_or_else(Instant::now),
             });
             current_size = 0;
-            earliest = Instant::now();
+            earliest = None;
+            deadline = None;
         }
+
+        let message_deadline = timestamp + message_timeout(cfg, &msg);
+        earliest = Some(earliest.map_or(timestamp, |current| current.min(timestamp)));
+        deadline = Some(deadline.map_or(message_deadline, |current| current.min(message_deadline)));
         current_messages.push(msg);
         current_size += bytesize;
     }
@@ -1100,7 +1152,8 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
         // Add the last partition
         partitions.push(Partition {
             messages: current_messages,
-            timestamp: earliest,
+            timestamp: earliest.unwrap_or_else(Instant::now),
+            deadline: deadline.unwrap_or_else(Instant::now),
         });
     }
 
@@ -1138,6 +1191,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use cait_sith::protocol::Participant;
+    use mpc_contract::config::ProtocolConfig;
     use mpc_keys::hpke::{self, Ciphered};
     use mpc_primitives::SignId;
     use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -1462,7 +1516,7 @@ mod tests {
         let first = triple_message(1, 180 * 1024);
         let second = triple_message(2, 180 * 1024);
 
-        let partitions = partition_256kb([(first, earliest), (second, later)]);
+        let partitions = partition_256kb([(first, earliest), (second, later)], &ProtocolConfig::default());
 
         assert_eq!(
             partitions.len(),
@@ -1489,6 +1543,7 @@ mod tests {
             triple_message(1, MAX_OUTBOX_PAYLOAD_LIMIT / 2),
             timestamp,
             MAX_OUTBOX_PAYLOAD_LIMIT,
+            &ProtocolConfig::default(),
         );
         assert!(ready.is_empty(), "single message should stay buffered");
 
@@ -1498,6 +1553,7 @@ mod tests {
             triple_message(2, MAX_OUTBOX_PAYLOAD_LIMIT / 2),
             timestamp,
             MAX_OUTBOX_PAYLOAD_LIMIT,
+            &ProtocolConfig::default(),
         );
         let partitions = ready
             .get(&(from, to))
@@ -1525,6 +1581,7 @@ mod tests {
         let fresh = Instant::now();
         let route_a = (Participant::from(0), Participant::from(1));
         let route_b = (Participant::from(0), Participant::from(2));
+        let cfg = ProtocolConfig::default();
 
         let _ = outbox.push_message(
             route_a.0,
@@ -1532,6 +1589,7 @@ mod tests {
             triple_message(1, 32),
             stale,
             MAX_OUTBOX_PAYLOAD_LIMIT,
+            &cfg,
         );
         let _ = outbox.push_message(
             route_b.0,
@@ -1539,9 +1597,10 @@ mod tests {
             triple_message(2, 32),
             fresh,
             MAX_OUTBOX_PAYLOAD_LIMIT,
+            &cfg,
         );
 
-        let ready = outbox.take_flushable(timeout, fresh);
+        let ready = outbox.take_expired_partitions(timeout, fresh, &cfg);
 
         assert!(ready.contains_key(&route_a), "stale route should flush");
         assert!(
@@ -1549,6 +1608,29 @@ mod tests {
             "fresh route should remain buffered"
         );
         assert!(outbox.messages.contains_key(&route_b));
+    }
+
+    #[test]
+    fn test_partition_uses_earliest_protocol_deadline() {
+        let cfg = ProtocolConfig::default();
+        let timestamp = Instant::now() - Duration::from_secs(1);
+        let triple = triple_message(1, 32);
+        let presignature = Message::Presignature(crate::protocol::message::PresignatureMessage {
+            id: 2,
+            pair_id: 3,
+            epoch: 0,
+            from: Participant::from(0),
+            data: vec![7; 32],
+            timestamp: 2,
+        });
+
+        let partitions = partition_256kb([(triple, timestamp), (presignature, timestamp)], &cfg);
+
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(
+            partitions[0].deadline,
+            timestamp + Duration::from_millis(cfg.presignature.generation_timeout),
+        );
     }
 
     #[tokio::test]
