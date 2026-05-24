@@ -964,7 +964,7 @@ impl CantonClient {
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
-        let auth_provider = CantonAuthProvider::new(config.auth.clone()).await?;
+        let auth_provider = CantonAuthProvider::new(config.auth.clone())?;
 
         if !config.signer_contract_id.is_empty() || !config.signer_template_id.is_empty() {
             tracing::info!(

@@ -10,8 +10,6 @@ const DEFAULT_TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TOKEN_REFRESH_SKEW: Duration = Duration::from_secs(60);
 const UNUSED_CLIENT_CREDENTIALS_AUTH_URL: &str = "http://localhost/unused-canton-oauth-auth-url";
 
-type CantonOAuthClient = BasicClient;
-
 #[derive(Clone)]
 pub struct CantonAuthConfig {
     pub token_url: String,
@@ -29,7 +27,7 @@ impl CantonAuthConfig {
 
 #[derive(Clone)]
 pub struct CantonAuthProvider {
-    oauth_client: CantonOAuthClient,
+    oauth_client: BasicClient,
     audience: String,
     scope: Option<String>,
     token_request_timeout: Duration,
@@ -43,7 +41,7 @@ struct CachedToken {
 }
 
 impl CantonAuthProvider {
-    pub async fn new(config: CantonAuthConfig) -> anyhow::Result<Self> {
+    pub fn new(config: CantonAuthConfig) -> anyhow::Result<Self> {
         let token_url =
             TokenUrl::new(config.token_url.clone()).context("invalid Canton OIDC token URL")?;
         // oauth2 4.x requires an auth URL even though the client credentials
