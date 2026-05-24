@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 pub const MAX_MESSAGE_INCOMING: usize = 1024 * 1024;
 pub const MAX_MESSAGE_OUTGOING: usize = 1024 * 1024;
 pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
+pub const MAX_INBOX_BATCH_SIZE: usize = 32;
 
 pub struct MessageInbox {
     /// encrypted messages that are pending to be decrypted. These are messages that we received
@@ -336,21 +337,33 @@ impl MessageInbox {
         }
     }
 
-    pub async fn run(mut self, config: watch::Receiver<Config>, contract: ContractStateWatcher) {
+    pub async fn run(
+        mut self,
+        mut config: watch::Receiver<Config>,
+        contract: ContractStateWatcher,
+    ) {
+        let mut buf = Vec::with_capacity(MAX_INBOX_BATCH_SIZE);
+        let mut expiration = Duration::from_millis(config.borrow().protocol.message_timeout);
+        let mut cipher_sk = config.borrow().local.network.cipher_sk.clone();
+
         loop {
             tokio::select! {
                 _ = self.filter.update() => {}
                 Some(sub) = self.subscribe_rx.recv() => {
                     self.process_subscribe(sub);
                 }
-                Some(encrypted) = self.inbox_rx.recv() => {
-                    let config = config.borrow().clone();
-                    let expiration = Duration::from_millis(config.protocol.message_timeout);
+                received = self.inbox_rx.recv_many(&mut buf, MAX_INBOX_BATCH_SIZE) => {
+                    if received == 0 {
+                        continue;
+                    }
+
+                    for encrypted in buf.drain(..) {
+                        self.try_decrypt.push_back((encrypted, Instant::now()));
+                    }
+
                     let participants = contract.participant_map().await;
-                    let cipher_sk = config.local.network.cipher_sk;
 
                     self.expire(expiration);
-                    self.try_decrypt.push_back((encrypted, Instant::now()));
                     let messages = self.decrypt(&cipher_sk, &participants);
 
                     // update filter before fanning out messages.
@@ -362,6 +375,11 @@ impl MessageInbox {
 
                     crate::metrics::messaging::NUM_RECEIVED_ENCRYPTED_TOTAL
                         .inc_by(messages_len as f64);
+                }
+                Ok(()) = config.changed() => {
+                    let config = config.borrow();
+                    expiration = Duration::from_millis(config.protocol.message_timeout);
+                    cipher_sk = config.local.network.cipher_sk.clone();
                 }
             }
         }
@@ -759,6 +777,27 @@ type ToParticipant = Participant;
 type MessageRoute = (FromParticipant, ToParticipant);
 pub type SendMessage = (Message, (FromParticipant, ToParticipant, Instant));
 
+#[derive(Default)]
+struct PendingRouteMessages {
+    messages: Vec<(Message, Instant)>,
+    payload_bytes: usize,
+    earliest: Option<Instant>,
+}
+
+impl PendingRouteMessages {
+    fn push(&mut self, message: Message, timestamp: Instant) {
+        self.payload_bytes += message.size();
+        self.earliest = Some(self.earliest.unwrap_or(timestamp).min(timestamp));
+        self.messages.push((message, timestamp));
+    }
+
+    fn flush_due_in(&self, timeout: Duration, now: Instant) -> Option<Duration> {
+        let earliest = self.earliest?;
+        let deadline = earliest + timeout;
+        Some(deadline.saturating_duration_since(now))
+    }
+}
+
 pub struct Partition {
     messages: Vec<Message>,
     /// The earliest timestamp from all the messages.
@@ -776,10 +815,12 @@ pub struct MessageOutbox {
     // type.
     /// Messsages sorted by participant map to a list of partitioned messages to be sent as
     /// a single request to other participants.
-    messages: HashMap<MessageRoute, Vec<(Message, Instant)>>,
+    messages: HashMap<MessageRoute, PendingRouteMessages>,
 }
 
 impl MessageOutbox {
+    const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
+
     pub fn new(outbox_rx: mpsc::Receiver<SendMessage>) -> Self {
         Self {
             outbox_rx,
@@ -787,19 +828,75 @@ impl MessageOutbox {
         }
     }
 
-    /// Compact the messages in the outbox into partitions of at most 256kb.
-    pub fn compact(&mut self) -> HashMap<MessageRoute, Vec<Partition>> {
+    fn compact(
+        &mut self,
+        route: MessageRoute,
+        compacted: &mut HashMap<MessageRoute, Vec<Partition>>,
+    ) {
+        let Some(messages) = self.messages.remove(&route) else {
+            return;
+        };
+
+        let entry = compacted.entry(route).or_default();
+        entry.extend(partition_256kb(messages.messages));
+    }
+
+    /// Queue a message and immediately flush the route when it reaches the payload threshold.
+    pub fn push_message(
+        &mut self,
+        from: Participant,
+        to: Participant,
+        message: Message,
+        timestamp: Instant,
+        payload_limit: usize,
+    ) -> HashMap<MessageRoute, Vec<Partition>> {
+        let route = (from, to);
+        let pending = self.messages.entry(route).or_default();
+        pending.push(message, timestamp);
+
+        if pending.payload_bytes < payload_limit {
+            return HashMap::new();
+        }
+
         let mut compacted = HashMap::new();
-        for (route, messages) in self.messages.drain() {
-            let entry = compacted.entry(route).or_insert_with(Vec::new);
-            entry.extend(partition_256kb(messages));
+        self.compact(route, &mut compacted);
+        compacted
+    }
+
+    /// Flush any routes whose oldest pending message has waited past the timeout.
+    pub fn take_flushable(
+        &mut self,
+        timeout: Duration,
+        now: Instant,
+    ) -> HashMap<MessageRoute, Vec<Partition>> {
+        let expired: Vec<_> = self
+            .messages
+            .iter()
+            .filter_map(|(route, pending)| {
+                let flush_due = pending
+                    .flush_due_in(timeout, now)
+                    .is_some_and(|remaining| remaining.is_zero());
+                flush_due.then_some(*route)
+            })
+            .collect();
+
+        let mut compacted = HashMap::new();
+        for route in expired {
+            self.compact(route, &mut compacted);
         }
         compacted
     }
 
+    fn next_flush_delay(&self, timeout: Duration, now: Instant) -> Option<Duration> {
+        self.messages
+            .values()
+            .filter_map(|pending| pending.flush_due_in(timeout, now))
+            .min()
+    }
+
     /// Encrypt all the messages in the outbox and return a map of participant to encrypted messages.
     pub fn encrypt(
-        &mut self,
+        &self,
         sign_sk: &near_crypto::SecretKey,
         participants: &Participants,
         compacted: HashMap<MessageRoute, Vec<Partition>>,
@@ -845,7 +942,7 @@ impl MessageOutbox {
 
     /// Send the encrypted messages to other participants.
     pub async fn send(
-        &mut self,
+        &self,
         client: &NodeClient,
         participants: &Participants,
         cfg: &ProtocolConfig,
@@ -903,18 +1000,22 @@ impl MessageOutbox {
         }
     }
 
-    /// Publish messages to other nodes
-    async fn publish(
-        &mut self,
+    /// Publish pre-partitioned messages to other nodes.
+    async fn publish_partitions(
+        &self,
         client: &NodeClient,
         config: &watch::Receiver<Config>,
         contract: &ContractStateWatcher,
+        compacted: HashMap<MessageRoute, Vec<Partition>>,
     ) {
+        if compacted.is_empty() {
+            return;
+        }
+
         let Some(participants) = contract.participants() else {
             return;
         };
         let config = config.borrow().clone();
-        let compacted = self.compact();
         let encrypted = self.encrypt(&config.local.network.sign_sk, &participants, compacted);
         self.send(client, &participants, &config.protocol, encrypted)
             .await;
@@ -926,16 +1027,29 @@ impl MessageOutbox {
         config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
     ) {
-        let mut interval = tokio::time::interval(Duration::from_millis(10));
         loop {
+            let next_flush_delay = self.next_flush_delay(Self::FLUSH_INTERVAL, Instant::now());
+            let sleep_until_flush = async {
+                match next_flush_delay {
+                    Some(delay) => tokio::time::sleep(delay).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+
             tokio::select! {
                 Some((msg, (from, to, timestamp))) = self.outbox_rx.recv() => {
-                    // add it to the outbox and sort it by from and to participant
-                    let entry = self.messages.entry((from, to)).or_default();
-                    entry.push((msg, timestamp));
+                    let ready = self.push_message(
+                        from,
+                        to,
+                        msg,
+                        timestamp,
+                        MAX_OUTBOX_PAYLOAD_LIMIT,
+                    );
+                    self.publish_partitions(&client, &config, &contract, ready).await;
                 }
-                _ = interval.tick() => {
-                    self.publish(&client, &config, &contract).await;
+                _ = sleep_until_flush => {
+                    let ready = self.take_flushable(Self::FLUSH_INTERVAL, Instant::now());
+                    self.publish_partitions(&client, &config, &contract, ready).await;
                 }
             }
         }
@@ -969,13 +1083,14 @@ fn partition_256kb(outgoing: impl IntoIterator<Item = (Message, Instant)>) -> Ve
 
         earliest = earliest.min(timestamp);
         let bytesize = msg.size();
-        if current_size + bytesize > 256 * 1024 {
+        if current_size + bytesize > 256 * 1024 && !current_messages.is_empty() {
             // If adding this byte vector exceeds 256kb, start a new partition
             partitions.push(Partition {
                 messages: std::mem::take(&mut current_messages),
                 timestamp: earliest,
             });
             current_size = 0;
+            earliest = Instant::now();
         }
         current_messages.push(msg);
         current_size += bytesize;
@@ -1020,7 +1135,7 @@ const fn cbor_name(value: &ciborium::Value) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use cait_sith::protocol::Participant;
     use mpc_keys::hpke::{self, Ciphered};
@@ -1031,14 +1146,27 @@ mod tests {
         config::{Config, LocalConfig, NetworkConfig, OverrideConfig},
         protocol::{
             contract::primitives::{ParticipantMap, Participants},
-            message::{GeneratingMessage, Message, SignatureMessage, SignedMessage, TripleMessage},
+            message::{
+                GeneratingMessage, Message, MessageError, SignatureMessage, SignedMessage,
+                TripleMessage,
+            },
             ParticipantInfo,
         },
         rpc::ContractStateWatcher,
         util::NearPublicKeyExt,
     };
 
-    use super::MessageChannel;
+    use super::{partition_256kb, MessageChannel, MessageOutbox, MAX_OUTBOX_PAYLOAD_LIMIT};
+
+    fn triple_message(id: u64, data_len: usize) -> Message {
+        Message::Triple(TripleMessage {
+            id,
+            epoch: 0,
+            from: Participant::from(0),
+            data: vec![1; data_len],
+            timestamp: id,
+        })
+    }
 
     #[test]
     fn test_sending_encrypted_message() {
@@ -1094,6 +1222,35 @@ mod tests {
             batch, decrypted_batch,
             "batch messages did not get encrypted and decrypted correctly"
         );
+    }
+
+    #[test]
+    fn test_decrypt_rejects_invalid_signature() {
+        let (cipher_sk, cipher_pk) = mpc_keys::hpke::generate();
+        let sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt2");
+        let wrong_sign_sk =
+            near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "sign-encrypt3");
+        let from = Participant::from(8);
+        let mut participants = Participants::default();
+        participants.insert(
+            &from,
+            ParticipantInfo {
+                sign_pk: wrong_sign_sk.public_key(),
+                cipher_pk: cipher_pk.clone(),
+                id: from.into(),
+                url: "http://localhost:3030".to_string(),
+                account_id: "test.near".parse().unwrap(),
+            },
+        );
+        let participants = ParticipantMap::One(participants);
+        let batch = vec![triple_message(9, 32)];
+
+        let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
+        let err = SignedMessage::decrypt::<Vec<Message>>(&encrypted, &cipher_sk, &participants)
+            .unwrap_err();
+
+        assert!(matches!(err, MessageError::Verification(_)));
     }
 
     #[test]
@@ -1296,6 +1453,102 @@ mod tests {
                 .contains(&ciphered_bytesize),
             "ciphered message size is not within 5% of the original message size"
         );
+    }
+
+    #[test]
+    fn test_partition_256kb_splits_messages_and_keeps_earliest_timestamp() {
+        let earliest = Instant::now() - Duration::from_secs(5);
+        let later = Instant::now();
+        let first = triple_message(1, 180 * 1024);
+        let second = triple_message(2, 180 * 1024);
+
+        let partitions = partition_256kb([(first, earliest), (second, later)]);
+
+        assert_eq!(
+            partitions.len(),
+            2,
+            "messages should split into two partitions"
+        );
+        assert_eq!(partitions[0].messages.len(), 1);
+        assert_eq!(partitions[1].messages.len(), 1);
+        assert_eq!(partitions[0].timestamp, earliest);
+        assert_eq!(partitions[1].timestamp, later);
+    }
+
+    #[test]
+    fn test_outbox_flushes_route_once_payload_limit_reached() {
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let mut outbox = MessageOutbox::new(rx);
+        let from = Participant::from(0);
+        let to = Participant::from(1);
+        let timestamp = Instant::now();
+
+        let ready = outbox.push_message(
+            from,
+            to,
+            triple_message(1, MAX_OUTBOX_PAYLOAD_LIMIT / 2),
+            timestamp,
+            MAX_OUTBOX_PAYLOAD_LIMIT,
+        );
+        assert!(ready.is_empty(), "single message should stay buffered");
+
+        let ready = outbox.push_message(
+            from,
+            to,
+            triple_message(2, MAX_OUTBOX_PAYLOAD_LIMIT / 2),
+            timestamp,
+            MAX_OUTBOX_PAYLOAD_LIMIT,
+        );
+        let partitions = ready
+            .get(&(from, to))
+            .expect("route should flush once payload threshold reached");
+
+        assert_eq!(
+            partitions
+                .iter()
+                .map(|partition| partition.messages.len())
+                .sum::<usize>(),
+            2
+        );
+        assert!(
+            outbox.messages.is_empty(),
+            "flushed route should be removed"
+        );
+    }
+
+    #[test]
+    fn test_outbox_flushes_expired_routes_only() {
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let mut outbox = MessageOutbox::new(rx);
+        let timeout = Duration::from_millis(10);
+        let stale = Instant::now() - Duration::from_millis(20);
+        let fresh = Instant::now();
+        let route_a = (Participant::from(0), Participant::from(1));
+        let route_b = (Participant::from(0), Participant::from(2));
+
+        let _ = outbox.push_message(
+            route_a.0,
+            route_a.1,
+            triple_message(1, 32),
+            stale,
+            MAX_OUTBOX_PAYLOAD_LIMIT,
+        );
+        let _ = outbox.push_message(
+            route_b.0,
+            route_b.1,
+            triple_message(2, 32),
+            fresh,
+            MAX_OUTBOX_PAYLOAD_LIMIT,
+        );
+
+        let ready = outbox.take_flushable(timeout, fresh);
+
+        assert!(ready.contains_key(&route_a), "stale route should flush");
+        assert!(
+            !ready.contains_key(&route_b),
+            "fresh route should remain buffered"
+        );
+        assert!(outbox.messages.contains_key(&route_b));
     }
 
     #[tokio::test]

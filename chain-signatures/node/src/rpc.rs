@@ -333,7 +333,7 @@ impl ContractStateWatcher {
     }
 
     pub async fn participant_map(&self) -> ParticipantMap {
-        let Some(state) = self.state().clone() else {
+        let Some(state) = &*self.borrow_state() else {
             return ParticipantMap::Zero;
         };
 
