@@ -1001,14 +1001,16 @@ impl CantonClient {
             .bearer_auth(token))
     }
 
-    pub async fn fetch_ledger_end(&self) -> anyhow::Result<u64> {
+    pub async fn auth_get(&self, path: &str) -> anyhow::Result<reqwest::RequestBuilder> {
         let token = self.bearer_token().await?;
-        let resp = self
+        Ok(self
             .http_client
-            .get(self.json_api_endpoint("/v2/state/ledger-end"))
-            .bearer_auth(token)
-            .send()
-            .await?;
+            .get(self.json_api_endpoint(path))
+            .bearer_auth(token))
+    }
+
+    pub async fn fetch_ledger_end(&self) -> anyhow::Result<u64> {
+        let resp = self.auth_get("/v2/state/ledger-end").await?.send().await?;
         let resp = check_response(resp, "ledger-end").await?;
         let body: LedgerEndResponse = resp.json().await?;
         Ok(body.offset)
@@ -1021,7 +1023,6 @@ impl CantonClient {
         include_blob: bool,
     ) -> anyhow::Result<Vec<ActiveContractEntry>> {
         let offset = self.fetch_ledger_end().await?;
-        let token = self.bearer_token().await?;
 
         let mut filters = serde_json::Map::new();
         for party in parties {
@@ -1050,9 +1051,8 @@ impl CantonClient {
         };
 
         let resp = self
-            .http_client
-            .post(self.json_api_endpoint("/v2/state/active-contracts"))
-            .bearer_auth(token)
+            .auth_post("/v2/state/active-contracts")
+            .await?
             .json(&req)
             .send()
             .await?;
@@ -1066,11 +1066,9 @@ impl CantonClient {
         commands: JsCommands,
         context: &str,
     ) -> anyhow::Result<SubmitAndWaitForTransactionResponse> {
-        let token = self.bearer_token().await?;
         let resp = self
-            .http_client
-            .post(self.json_api_endpoint("/v2/commands/submit-and-wait-for-transaction"))
-            .bearer_auth(token)
+            .auth_post("/v2/commands/submit-and-wait-for-transaction")
+            .await?
             .json(&SubmitAndWaitForTransactionRequest { commands })
             .send()
             .await?;
