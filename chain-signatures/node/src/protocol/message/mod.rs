@@ -781,20 +781,12 @@ pub type SendMessage = (Message, (FromParticipant, ToParticipant, Instant));
 struct PendingRouteMessages {
     messages: Vec<(Message, Instant)>,
     payload_bytes: usize,
-    earliest: Option<Instant>,
 }
 
 impl PendingRouteMessages {
     fn push(&mut self, message: Message, timestamp: Instant) {
         self.payload_bytes += message.size();
-        self.earliest = Some(self.earliest.unwrap_or(timestamp).min(timestamp));
         self.messages.push((message, timestamp));
-    }
-
-    fn flush_due_in(&self, timeout: Duration, now: Instant) -> Option<Duration> {
-        let earliest = self.earliest?;
-        let deadline = earliest + timeout;
-        Some(deadline.saturating_duration_since(now))
     }
 }
 
@@ -844,6 +836,20 @@ impl MessageOutbox {
         entry.extend(partition_256kb(messages.messages, cfg));
     }
 
+    fn take_pending_partitions(
+        &mut self,
+        cfg: &ProtocolConfig,
+    ) -> HashMap<MessageRoute, Vec<Partition>> {
+        let routes: Vec<_> = self.messages.keys().copied().collect();
+        let mut compacted = HashMap::new();
+
+        for route in routes {
+            self.compact(route, cfg, &mut compacted);
+        }
+
+        compacted
+    }
+
     /// Queue a message and immediately flush the route when it reaches the payload threshold.
     pub fn push_message(
         &mut self,
@@ -855,48 +861,19 @@ impl MessageOutbox {
         cfg: &ProtocolConfig,
     ) -> HashMap<MessageRoute, Vec<Partition>> {
         let route = (from, to);
-        let pending = self.messages.entry(route).or_default();
-        pending.push(message, timestamp);
+        let should_flush = {
+            let pending = self.messages.entry(route).or_default();
+            pending.push(message, timestamp);
+            pending.payload_bytes >= payload_limit
+        };
 
-        if pending.payload_bytes < payload_limit {
+        if !should_flush {
             return HashMap::new();
         }
 
         let mut compacted = HashMap::new();
         self.compact(route, cfg, &mut compacted);
         compacted
-    }
-
-    /// Flush any routes whose oldest pending message has waited past the timeout.
-    pub fn take_expired_partitions(
-        &mut self,
-        timeout: Duration,
-        now: Instant,
-        cfg: &ProtocolConfig,
-    ) -> HashMap<MessageRoute, Vec<Partition>> {
-        let expired: Vec<_> = self
-            .messages
-            .iter()
-            .filter_map(|(route, pending)| {
-                let flush_due = pending
-                    .flush_due_in(timeout, now)
-                    .is_some_and(|remaining| remaining.is_zero());
-                flush_due.then_some(*route)
-            })
-            .collect();
-
-        let mut compacted = HashMap::new();
-        for route in expired {
-            self.compact(route, cfg, &mut compacted);
-        }
-        compacted
-    }
-
-    fn next_flush_delay(&self, timeout: Duration, now: Instant) -> Option<Duration> {
-        self.messages
-            .values()
-            .filter_map(|pending| pending.flush_due_in(timeout, now))
-            .min()
     }
 
     /// Encrypt all the messages in the outbox and return a map of participant to encrypted messages.
@@ -973,7 +950,8 @@ impl MessageOutbox {
                     crate::metrics::messaging::MSG_CLIENT_SEND_DELAY
                         .observe((instant - timestamp).as_millis() as f64);
                     let payload = &[&encrypted_partition];
-                    let timeout = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
+                    let timeout =
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
                     tokio::pin!(timeout);
 
                     loop {
@@ -1024,12 +1002,7 @@ impl MessageOutbox {
         let Some(participants) = contract.participants() else {
             return;
         };
-        let encrypted = self.encrypt(
-            sign_sk,
-            &participants,
-            protocol,
-            compacted,
-        );
+        let encrypted = self.encrypt(sign_sk, &participants, protocol, compacted);
         self.send(client, &participants, encrypted).await;
     }
 
@@ -1041,16 +1014,11 @@ impl MessageOutbox {
     ) {
         let mut protocol = config.borrow().protocol.clone();
         let mut sign_sk = config.borrow().local.network.sign_sk.clone();
+        let sleep = tokio::time::sleep(Duration::from_secs(365 * 24 * 60 * 60));
+        tokio::pin!(sleep);
 
         loop {
-            let next_flush_delay = self.next_flush_delay(Self::FLUSH_INTERVAL, Instant::now());
-            let sleep_until_flush = async {
-                match next_flush_delay {
-                    Some(delay) => tokio::time::sleep(delay).await,
-                    None => std::future::pending::<()>().await,
-                }
-            };
-
+            let was_empty = self.messages.is_empty();
             tokio::select! {
                 Some((msg, (from, to, timestamp))) = self.outbox_rx.recv() => {
                     let ready = self.push_message(
@@ -1062,13 +1030,13 @@ impl MessageOutbox {
                         &protocol,
                     );
                     self.publish_partitions(&client, &sign_sk, &protocol, &contract, ready).await;
+
+                    if was_empty && !self.messages.is_empty() {
+                        sleep.as_mut().reset(tokio::time::Instant::now() + Self::FLUSH_INTERVAL);
+                    }
                 }
-                _ = sleep_until_flush => {
-                    let ready = self.take_expired_partitions(
-                        Self::FLUSH_INTERVAL,
-                        Instant::now(),
-                        &protocol,
-                    );
+                _ = &mut sleep, if !was_empty => {
+                    let ready = self.take_pending_partitions(&protocol);
                     self.publish_partitions(&client, &sign_sk, &protocol, &contract, ready).await;
                 }
                 Ok(()) = config.changed() => {
@@ -1098,9 +1066,10 @@ fn message_timeout(cfg: &ProtocolConfig, message: &Message) -> Duration {
         Message::Triple(_) => cfg.triple.generation_timeout,
         Message::Presignature(_) => cfg.presignature.generation_timeout,
         Message::Signature(_) => cfg.signature.generation_timeout,
-        Message::Generating(_) | Message::Resharing(_) | Message::Ready(_) | Message::Unknown(_) => {
-            cfg.message_timeout
-        }
+        Message::Generating(_)
+        | Message::Resharing(_)
+        | Message::Ready(_)
+        | Message::Unknown(_) => cfg.message_timeout,
     };
 
     Duration::from_millis(millis)
@@ -1516,7 +1485,10 @@ mod tests {
         let first = triple_message(1, 180 * 1024);
         let second = triple_message(2, 180 * 1024);
 
-        let partitions = partition_256kb([(first, earliest), (second, later)], &ProtocolConfig::default());
+        let partitions = partition_256kb(
+            [(first, earliest), (second, later)],
+            &ProtocolConfig::default(),
+        );
 
         assert_eq!(
             partitions.len(),
@@ -1573,12 +1545,9 @@ mod tests {
     }
 
     #[test]
-    fn test_outbox_flushes_expired_routes_only() {
+    fn test_outbox_flush_timer_drains_all_buffered_routes() {
         let (_tx, rx) = tokio::sync::mpsc::channel(1);
         let mut outbox = MessageOutbox::new(rx);
-        let timeout = Duration::from_millis(10);
-        let stale = Instant::now() - Duration::from_millis(20);
-        let fresh = Instant::now();
         let route_a = (Participant::from(0), Participant::from(1));
         let route_b = (Participant::from(0), Participant::from(2));
         let cfg = ProtocolConfig::default();
@@ -1587,7 +1556,7 @@ mod tests {
             route_a.0,
             route_a.1,
             triple_message(1, 32),
-            stale,
+            Instant::now(),
             MAX_OUTBOX_PAYLOAD_LIMIT,
             &cfg,
         );
@@ -1595,19 +1564,19 @@ mod tests {
             route_b.0,
             route_b.1,
             triple_message(2, 32),
-            fresh,
+            Instant::now(),
             MAX_OUTBOX_PAYLOAD_LIMIT,
             &cfg,
         );
 
-        let ready = outbox.take_expired_partitions(timeout, fresh, &cfg);
+        let ready = outbox.take_pending_partitions(&cfg);
 
-        assert!(ready.contains_key(&route_a), "stale route should flush");
+        assert!(ready.contains_key(&route_a), "first route should flush");
+        assert!(ready.contains_key(&route_b), "second route should flush");
         assert!(
-            !ready.contains_key(&route_b),
-            "fresh route should remain buffered"
+            outbox.messages.is_empty(),
+            "timer flush should drain the buffer"
         );
-        assert!(outbox.messages.contains_key(&route_b));
     }
 
     #[test]
