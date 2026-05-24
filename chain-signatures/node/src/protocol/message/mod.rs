@@ -42,11 +42,6 @@ pub const MAX_OUTBOX_PAYLOAD_LIMIT: usize = 256 * 1024;
 pub const MAX_INBOX_BATCH_SIZE: usize = 32;
 
 pub struct MessageInbox {
-    /// encrypted messages that are pending to be decrypted. These are messages that we received
-    /// from other nodes that weren't able to be processed yet due to missing info such as the
-    /// participant id in the case of slow resharing.
-    try_decrypt: VecDeque<(Ciphered, Instant)>,
-
     /// This idempotent checker is used to check that the same batch of messages does not make
     /// it back in the system somehow. Uses the signature to make this check.
     idempotent: lru::LruCache<Signature, ()>,
@@ -79,7 +74,6 @@ impl MessageInbox {
         subscribe_rx: mpsc::Receiver<SubscribeRequest>,
     ) -> Self {
         Self {
-            try_decrypt: VecDeque::new(),
             idempotent: lru::LruCache::new(MAX_FILTER_SIZE),
             filter: MessageFilter::new(filter_rx),
             inbox_rx,
@@ -352,6 +346,11 @@ impl MessageInbox {
         mut config: watch::Receiver<Config>,
         mut contract: ContractStateWatcher,
     ) {
+        // encrypted messages that are pending to be decrypted. These are messages that we received
+        // from other nodes that weren't able to be processed yet due to missing info such as the
+        // participant id in the case of slow resharing.
+        let mut retry_decrypt = VecDeque::new();
+
         let mut buf = Vec::with_capacity(MAX_INBOX_BATCH_SIZE);
         let mut expiration = Duration::from_millis(config.borrow().protocol.message_timeout);
         let mut cipher_sk = config.borrow().local.network.cipher_sk.clone();
@@ -367,7 +366,7 @@ impl MessageInbox {
                         continue;
                     }
 
-                    let mut pending = VecDeque::with_capacity(received + self.try_decrypt.len());
+                    let mut pending = VecDeque::with_capacity(received);
                     for encrypted in buf.drain(..) {
                         pending.push_back((encrypted, Instant::now()));
                     }
@@ -376,20 +375,18 @@ impl MessageInbox {
 
                     Self::expire_pending(&mut pending, expiration);
                     let messages = self.decrypt_pending(&mut pending, &cipher_sk, &participants);
-                    self.try_decrypt.extend(pending);
+                    retry_decrypt.extend(pending);
 
                     let messages_len = self.publish_decrypted(messages).await;
 
                     crate::metrics::messaging::NUM_RECEIVED_ENCRYPTED_TOTAL
                         .inc_by(messages_len as f64);
                 }
-                _ = contract.next_state(), if !self.try_decrypt.is_empty() => {
+                _ = contract.next_state(), if !retry_decrypt.is_empty() => {
                     let participants = contract.participant_map().await;
 
-                    Self::expire_pending(&mut self.try_decrypt, expiration);
-                    let mut pending = std::mem::take(&mut self.try_decrypt);
-                    let messages = self.decrypt_pending(&mut pending, &cipher_sk, &participants);
-                    self.try_decrypt = pending;
+                    Self::expire_pending(&mut retry_decrypt, expiration);
+                    let messages = self.decrypt_pending(&mut retry_decrypt, &cipher_sk, &participants);
                     self.publish_decrypted(messages).await;
                 }
                 Ok(()) = config.changed() => {
