@@ -168,20 +168,20 @@ impl MessageInbox {
         }
     }
 
-    fn expire(&mut self, timeout: Duration) {
-        self.try_decrypt
-            .retain(|(_, timestamp)| timestamp.elapsed() < timeout);
+    fn expire_pending(pending: &mut VecDeque<(Ciphered, Instant)>, timeout: Duration) {
+        pending.retain(|(_, timestamp)| timestamp.elapsed() < timeout);
     }
 
-    fn decrypt(
+    fn decrypt_pending(
         &mut self,
+        pending: &mut VecDeque<(Ciphered, Instant)>,
         cipher_sk: &hpke::SecretKey,
         participants: &ParticipantMap,
     ) -> Vec<Message> {
-        let mut retry = Vec::new();
+        let mut retry = VecDeque::new();
 
         let mut messages = Vec::new();
-        while let Some((encrypted, timestamp)) = self.try_decrypt.pop_front() {
+        while let Some((encrypted, timestamp)) = pending.pop_front() {
             let decrypted: Result<Vec<Message>, _> =
                 SignedMessage::decrypt_with(&encrypted, cipher_sk, participants, |sig| {
                     if self.idempotent.put(sig.clone(), ()).is_some() {
@@ -195,7 +195,7 @@ impl MessageInbox {
                 Ok(decrypted) => messages.extend(decrypted),
                 Err(err) => {
                     if matches!(err, MessageError::UnknownParticipant(_)) {
-                        retry.push((encrypted, timestamp));
+                        retry.push_back((encrypted, timestamp));
                     } else {
                         tracing::warn!(?err, "inbox: failed to decrypt/verify messages");
                     }
@@ -204,8 +204,18 @@ impl MessageInbox {
             };
         }
 
-        self.try_decrypt.extend(retry);
+        pending.extend(retry);
         messages
+    }
+
+    async fn publish_decrypted(&mut self, messages: Vec<Message>) -> usize {
+        self.filter.try_update();
+
+        let messages = self.filter(messages);
+        let messages_len = messages.len();
+        self.publish(messages).await;
+
+        messages_len
     }
 
     /// Filter out all messages that have been filtered
@@ -340,7 +350,7 @@ impl MessageInbox {
     pub async fn run(
         mut self,
         mut config: watch::Receiver<Config>,
-        contract: ContractStateWatcher,
+        mut contract: ContractStateWatcher,
     ) {
         let mut buf = Vec::with_capacity(MAX_INBOX_BATCH_SIZE);
         let mut expiration = Duration::from_millis(config.borrow().protocol.message_timeout);
@@ -357,24 +367,30 @@ impl MessageInbox {
                         continue;
                     }
 
+                    let mut pending = VecDeque::with_capacity(received + self.try_decrypt.len());
                     for encrypted in buf.drain(..) {
-                        self.try_decrypt.push_back((encrypted, Instant::now()));
+                        pending.push_back((encrypted, Instant::now()));
                     }
 
                     let participants = contract.participant_map().await;
 
-                    self.expire(expiration);
-                    let messages = self.decrypt(&cipher_sk, &participants);
+                    Self::expire_pending(&mut pending, expiration);
+                    let messages = self.decrypt_pending(&mut pending, &cipher_sk, &participants);
+                    self.try_decrypt.extend(pending);
 
-                    // update filter before fanning out messages.
-                    self.filter.try_update();
-
-                    let messages = self.filter(messages);
-                    let messages_len = messages.len();
-                    self.publish(messages).await;
+                    let messages_len = self.publish_decrypted(messages).await;
 
                     crate::metrics::messaging::NUM_RECEIVED_ENCRYPTED_TOTAL
                         .inc_by(messages_len as f64);
+                }
+                _ = contract.next_state(), if !self.try_decrypt.is_empty() => {
+                    let participants = contract.participant_map().await;
+
+                    Self::expire_pending(&mut self.try_decrypt, expiration);
+                    let mut pending = std::mem::take(&mut self.try_decrypt);
+                    let messages = self.decrypt_pending(&mut pending, &cipher_sk, &participants);
+                    self.try_decrypt = pending;
+                    self.publish_decrypted(messages).await;
                 }
                 Ok(()) = config.changed() => {
                     let config = config.borrow();
