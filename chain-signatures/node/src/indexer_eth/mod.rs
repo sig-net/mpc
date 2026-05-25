@@ -722,6 +722,7 @@ impl EthereumClient {
             let block_ids = block_ids.clone();
             async move {
                 match self {
+                    #[cfg(feature = "helios")]
                     EthereumClient::Helios(client) => client.get_blocks(&block_ids).await,
                     EthereumClient::DirectRpc(client) => client.get_blocks(&block_ids).await,
                 }
