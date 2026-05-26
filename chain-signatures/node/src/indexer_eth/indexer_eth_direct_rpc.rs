@@ -390,9 +390,10 @@ fn to_hex_block_id(block_id: BlockId) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::RpcEthereumClient;
+    use super::*;
     use crate::indexer_eth::MaybeBlock;
     use alloy::eips::BlockNumberOrTag;
+    use alloy::primitives::B256;
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
     use serde_json::json;
@@ -462,13 +463,6 @@ mod tests {
             MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(8)))
         ));
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use alloy::primitives::B256;
-    use serde_json::json;
 
     #[test]
     fn parses_successful_call_output() {

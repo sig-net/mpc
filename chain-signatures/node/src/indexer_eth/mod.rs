@@ -815,6 +815,7 @@ impl EthereumClient {
         tx_hash: alloy::primitives::B256,
     ) -> anyhow::Result<alloy::primitives::Bytes> {
         match self {
+            #[cfg(feature = "helios")]
             EthereumClient::Helios(client) => client.trace_transaction_output(tx_hash).await,
             EthereumClient::DirectRpc(client) => client.trace_transaction_output(tx_hash).await,
         }
