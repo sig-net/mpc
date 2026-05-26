@@ -70,7 +70,7 @@ near-workspaces = "0.15.0"
 mpc-crypto.workspace = true
 mpc-contract.workspace = true
 mpc-keys.workspace = true
-mpc-node = { path = "../chain-signatures/node", features = ["test-feature", "debug-page"] }
+mpc-node = { path = "../chain-signatures/node", default-features = false, features = ["test-feature", "debug-page"] }
 mpc-primitives.workspace = true
 
 [dev-dependencies]
@@ -97,3 +97,4 @@ harness = false
 [features]
 default = []
 docker-test = []
+helios = ["mpc-node/helios"]

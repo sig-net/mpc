@@ -210,6 +210,16 @@ impl Backlog {
         }
     }
 
+    async fn remember_checkpoint(&self, checkpoint: &Checkpoint) {
+        let mut historical = self.historical_checkpoints.write().await;
+        let historical = historical.entry(checkpoint.chain).or_insert_with(Vec::new);
+        historical.push(HistoricalCheckpoint {
+            checkpoint: checkpoint.clone(),
+            created_at: Instant::now(),
+        });
+        historical.retain(|hcp| hcp.created_at.elapsed() < RETENTION_DURATION);
+    }
+
     pub async fn insert(&self, request: IndexedSignRequest) -> Option<BacklogEntry> {
         let chain = request.chain;
         let id = request.id;
@@ -503,14 +513,7 @@ impl Backlog {
             .map(|pr| pr.checkpoint(chain))
             .unwrap_or_else(|| Checkpoint::empty(chain));
 
-        // Store checkpoint in historical checkpoints
-        let mut historical = self.historical_checkpoints.write().await;
-        let historical = historical.entry(chain).or_insert_with(Vec::new);
-        historical.push(HistoricalCheckpoint {
-            checkpoint: checkpoint.clone(),
-            created_at: Instant::now(),
-        });
-        historical.retain(|hcp| hcp.created_at.elapsed() < RETENTION_DURATION);
+        self.remember_checkpoint(&checkpoint).await;
 
         if let Err(err) = self.storage.persist(&checkpoint).await {
             tracing::warn!(?chain, %err, "failed to persist checkpoint");
@@ -590,6 +593,20 @@ impl Backlog {
             Vec::new()
         };
         drop(requests);
+
+        // Need to set the checkpoint as latest in our historical checkpoints
+        // when we initially recover for this particular chain.
+        if checkpoint_height > previous_height {
+            let checkpoint = self
+                .requests
+                .read()
+                .await
+                .get(&chain)
+                .map(|pending| pending.checkpoint(chain));
+            if let Some(checkpoint) = checkpoint {
+                self.remember_checkpoint(&checkpoint).await;
+            }
+        }
 
         // now repopulate our execution watchers
         for (sign_id, tx) in execution_to_watch {
@@ -1317,6 +1334,36 @@ mod tests {
         let watchers = recovered.pending_execution(Chain::Ethereum).await;
         assert_eq!(watchers.len(), 1);
         assert!(watchers.contains_key(&tx.id));
+    }
+
+    #[tokio::test]
+    async fn test_recover_makes_checkpoint_visible_as_latest() {
+        let backlog = Backlog::new();
+        let tx = create_test_tx(16);
+
+        insert_bidirectional_with_status(
+            &backlog,
+            Chain::Solana,
+            tx,
+            SignStatus::PendingExecution,
+            "ethereum",
+        )
+        .await;
+        backlog.set_processed_block(Chain::Solana, 10).await;
+
+        let checkpoint = backlog.checkpoint(Chain::Solana).await;
+
+        let recovered = Backlog::new();
+        recovered
+            .recover_by_checkpoint(checkpoint.clone())
+            .await
+            .expect("failed to recover");
+
+        assert_eq!(
+            recovered.latest_checkpoint(Chain::Solana).await,
+            Some(checkpoint),
+            "recovered checkpoint should be visible via latest_checkpoint for /checkpoint"
+        );
     }
 
     #[tokio::test]

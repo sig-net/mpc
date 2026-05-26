@@ -1,11 +1,11 @@
+use crate::backlog::Backlog;
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::ops::{SignatureEvent, SignatureEventBox};
-use crate::stream::{ChainEvent, ChainStream, DisabledChainIndexer};
+use crate::stream::{ChainEvent, ChainIndexer, ChainStream};
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 
-use async_trait::async_trait;
-use std::collections::HashMap;
+use std::collections::{btree_map, BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -14,6 +14,7 @@ use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
+use async_trait::async_trait;
 use ethabi::{encode, Token};
 use futures_util::StreamExt;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -29,10 +30,16 @@ use signet_program::{
 };
 use solana_client::{
     nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient},
+    rpc_client::GetConfirmedSignaturesForAddress2Config,
     rpc_config::{RpcTransactionLogsConfig, RpcTransactionLogsFilter},
 };
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
-use tokio::sync::mpsc;
+use solana_transaction_status::option_serializer::OptionSerializer;
+use solana_transaction_status::{
+    EncodedConfirmedBlock, EncodedConfirmedTransactionWithStatusMeta, EncodedTransaction,
+    EncodedTransactionWithStatusMeta, UiTransactionEncoding,
+};
+use tokio::sync::{mpsc, oneshot};
 
 const CPI_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: Sign",
@@ -286,6 +293,8 @@ impl SignatureEvent for SignBidirectionalEvent {
 
 type Result<T> = anyhow::Result<T>;
 
+const MAX_SIGNATURES_FOR_FAST_CATCHUP: usize = 1000;
+
 /// Solana stream that implements the new ChainStream abstraction
 pub struct SolanaStream {
     rx: Option<mpsc::Receiver<ChainEvent>>,
@@ -293,10 +302,21 @@ pub struct SolanaStream {
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
+pub struct SolanaIndexer {
+    program_id: Pubkey,
+    rpc_client: RpcClient,
+    rpc_http_url: String,
+    rpc_ws_url: String,
+    events_tx: mpsc::Sender<ChainEvent>,
+    backlog: Backlog,
+    live_rx: Option<mpsc::Receiver<ChainEvent>>,
+}
+
 struct SolanaStreamStartState {
     program_id: Pubkey,
     rpc_http_url: String,
     rpc_ws_url: String,
+    backlog: Backlog,
     tx: mpsc::Sender<ChainEvent>,
 }
 
@@ -309,7 +329,7 @@ impl Drop for SolanaStream {
 }
 
 impl SolanaStream {
-    pub fn new(sol: Option<SolConfig>) -> Option<Self> {
+    pub fn new(sol: Option<SolConfig>, backlog: Backlog) -> Option<Self> {
         let Some(sol) = sol else {
             tracing::warn!("solana indexer is disabled");
             return None;
@@ -328,6 +348,7 @@ impl SolanaStream {
                 program_id,
                 rpc_http_url: sol.rpc_http_url.clone(),
                 rpc_ws_url: sol.rpc_ws_url.clone(),
+                backlog,
                 tx,
             }),
             tasks: Vec::new(),
@@ -337,21 +358,24 @@ impl SolanaStream {
 
 #[async_trait]
 impl ChainStream for SolanaStream {
-    const CHAIN: Chain = Chain::Solana;
-    type Indexer = DisabledChainIndexer;
+    type Indexer = SolanaIndexer;
 
     async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
         let Some(start_state) = self.start_state.take() else {
             anyhow::bail!("solana stream already started");
         };
 
-        self.tasks.push(spawn_events(
-            start_state.program_id,
-            start_state.rpc_http_url.clone(),
-            start_state.rpc_ws_url.clone(),
-            start_state.tx.clone(),
-        ));
-        Ok(DisabledChainIndexer::new(start_state.tx))
+        let indexer = SolanaIndexer {
+            program_id: start_state.program_id,
+            rpc_client: RpcClient::new(start_state.rpc_http_url.clone()),
+            rpc_http_url: start_state.rpc_http_url.clone(),
+            rpc_ws_url: start_state.rpc_ws_url.clone(),
+            events_tx: start_state.tx.clone(),
+            backlog: start_state.backlog.clone(),
+            live_rx: None,
+        };
+
+        Ok(indexer)
     }
 
     async fn next_event(&mut self) -> Option<ChainEvent> {
@@ -362,18 +386,207 @@ impl ChainStream for SolanaStream {
     }
 }
 
-fn spawn_events(
-    program_id: Pubkey,
-    rpc_url: String,
-    ws_url: String,
-    events_tx: mpsc::Sender<ChainEvent>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(subscribe_and_process_events(
-        program_id,
-        rpc_url.clone(),
-        ws_url.clone(),
-        events_tx.clone(),
-    ))
+#[async_trait]
+impl ChainIndexer for SolanaIndexer {
+    const CHAIN: Chain = Chain::Solana;
+    type Block = (u64, EncodedConfirmedBlock);
+    type Iter = btree_map::IntoIter<u64, EncodedConfirmedBlock>;
+
+    async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
+        let (live_tx, live_rx) = crate::stream::channel();
+        self.live_rx = Some(live_rx);
+
+        let program_id = self.program_id;
+        let rpc_http_url = self.rpc_http_url.clone();
+        let rpc_ws_url = self.rpc_ws_url.clone();
+
+        // Oneshot to receive the first observed slot from the live subscription.
+        let (anchor_tx, anchor_rx) = oneshot::channel::<u64>();
+
+        tokio::spawn(subscribe_and_buffer_live_events(
+            program_id,
+            rpc_http_url,
+            rpc_ws_url,
+            live_tx,
+            anchor_tx,
+        ));
+
+        // Wait for the first slot observed on the live feed to use as anchor.
+        Ok(Some(anchor_rx.await?))
+    }
+
+    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
+        // Get the last persisted processed block height from backlog
+        // TODO: https://github.com/sig-net/mpc/issues/777
+        let start_slot = self
+            .backlog
+            .processed_block(Chain::Solana)
+            .await
+            .map(|n| n.saturating_add(1))
+            .unwrap_or(anchor_height);
+        let end_slot = anchor_height.saturating_sub(1); // We want to catch up to just before the anchor
+        if start_slot >= end_slot {
+            return BTreeMap::new().into_iter();
+        }
+
+        // This fetches a sparse list of transactions based on whether our program received
+        // a transaction in that specific slot. This is the most optimized and cheapest path.
+        let signatures = match self
+            .rpc_client
+            .get_signatures_for_address_with_config(
+                &self.program_id,
+                GetConfirmedSignaturesForAddress2Config {
+                    before: None,
+                    until: None,
+                    limit: Some(MAX_SIGNATURES_FOR_FAST_CATCHUP),
+                    commitment: Some(CommitmentConfig::confirmed()),
+                },
+            )
+            .await
+        {
+            Ok(signatures) => signatures,
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "failed to query solana signature history; falling back to sparse catchup"
+                );
+                return self
+                    .fetch_sparse_blocks(start_slot, end_slot)
+                    .await
+                    .into_iter();
+            }
+        };
+
+        let signatures_len = signatures.len();
+        let mut mid_slot = None;
+        let mut slots = BTreeSet::new();
+        for sig in signatures {
+            if sig.slot < start_slot || sig.slot > end_slot {
+                continue;
+            }
+            mid_slot = Some(mid_slot.unwrap_or(sig.slot).min(sig.slot));
+            slots.insert(sig.slot);
+        }
+        let mid_slot = mid_slot.map(|n| n.saturating_sub(1)).unwrap_or(start_slot);
+        let mut items = self.fetch_blocks_for_slots(slots).await;
+
+        // NOTE: since we can only do fast catchup for up to 1000 signatures,
+        // if we hit that limit and the earliest signature is significantly
+        // ahead of our start slot, we do one additional fetch for the
+        // sparse blocks between start_slot and the earliest signature (mid_slot).
+        if signatures_len == MAX_SIGNATURES_FOR_FAST_CATCHUP && mid_slot > start_slot {
+            tracing::info!(
+                start_slot,
+                mid_slot,
+                "solana signature history hit the 1000-signature limit; combining sparse blocks with signatures"
+            );
+            items.extend(self.fetch_sparse_blocks(start_slot, mid_slot).await);
+        }
+
+        items.into_iter()
+    }
+
+    async fn process_catchup(&mut self, (height, block): &Self::Block) -> anyhow::Result<()> {
+        self.process_block(*height, block).await
+    }
+
+    async fn process_next_block(&mut self) -> bool {
+        let Some(rx) = self.live_rx.as_mut() else {
+            return false;
+        };
+        let Some(event) = rx.recv().await else {
+            return false;
+        };
+        if let Err(err) = self.events_tx.send(event).await {
+            tracing::warn!(?err, "failed to forward live solana event");
+            return false;
+        }
+        true
+    }
+
+    async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
+        self.events_tx.send(ChainEvent::CatchupCompleted).await?;
+        Ok(())
+    }
+}
+
+impl SolanaIndexer {
+    async fn fetch_blocks_for_slots(
+        &self,
+        slots: BTreeSet<u64>,
+    ) -> BTreeMap<u64, EncodedConfirmedBlock> {
+        let mut blocks_by_height = BTreeMap::new();
+
+        for slot in slots {
+            match self.rpc_client.get_block(slot).await {
+                Ok(block) => {
+                    blocks_by_height.insert(slot, block);
+                }
+                Err(err) => {
+                    tracing::warn!(?err, slot, "failed to fetch Solana block for catchup slot");
+                }
+            }
+        }
+
+        blocks_by_height
+    }
+
+    async fn process_block(
+        &mut self,
+        height: u64,
+        block: &EncodedConfirmedBlock,
+    ) -> anyhow::Result<()> {
+        for tx in &block.transactions {
+            let Some(logs) = tx
+                .meta
+                .as_ref()
+                .and_then(|meta| match meta.log_messages.as_ref() {
+                    OptionSerializer::Some(logs) => Some(logs),
+                    _ => None,
+                })
+            else {
+                continue;
+            };
+
+            let signature = extract_tx_signature(&tx.transaction)?;
+            emit_events(&self.events_tx, &self.program_id, signature, tx, logs).await?;
+        }
+
+        self.events_tx.send(ChainEvent::Block(height)).await?;
+        Ok(())
+    }
+
+    /// Fetches blocks from start_slot to end_slot. The range is inclusive `[start_slot, endslot]`
+    async fn fetch_sparse_blocks(
+        &self,
+        start_slot: u64,
+        end_slot: u64,
+    ) -> BTreeMap<u64, EncodedConfirmedBlock> {
+        let mut blocks_by_height = BTreeMap::new();
+
+        // Fetch all blocks in the range from start_slot to end_slot
+        let Ok(block_slots) = self.rpc_client.get_blocks(start_slot, Some(end_slot)).await else {
+            tracing::warn!(start_slot, end_slot, "failed to fetch blocks for range");
+            return BTreeMap::new();
+        };
+
+        for slot in block_slots {
+            if slot > end_slot {
+                continue;
+            }
+
+            match self.rpc_client.get_block(slot).await {
+                Ok(block) => {
+                    blocks_by_height.insert(slot, block);
+                }
+                Err(err) => {
+                    tracing::warn!(?err, slot, "failed to cache Solana block for catchup");
+                }
+            }
+        }
+
+        blocks_by_height
+    }
 }
 
 fn build_sign_request(
@@ -385,38 +598,32 @@ fn build_sign_request(
     sign_event.generate_sign_request(entropy)
 }
 
-// Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L31
-async fn subscribe_and_process_events(
+/// Subscribe to the live WS feed, preprocess events into `ChainEvent`s, and buffer them
+/// in `live_tx`. The anchor slot (current confirmed slot at subscription time) is sent
+/// via `anchor_tx` so that `livestream()` can return it to the catchup logic.
+///
+/// Events accumulate in the channel while catchup runs; `process_next_block` drains them
+/// only after catchup completes (enforced by `catchup_then_livestream`).
+async fn subscribe_and_buffer_live_events(
     program_id: Pubkey,
     rpc_url: String,
     ws_url: String,
-    events_tx: mpsc::Sender<ChainEvent>,
+    live_tx: mpsc::Sender<ChainEvent>,
+    anchor_tx: oneshot::Sender<u64>,
 ) {
+    // Get anchor slot immediately so livestream() can return without waiting for an event.
+    let rpc = RpcClient::new(rpc_url);
+    let mut anchor_tx = Some(anchor_tx);
     loop {
-        let events_tx_clone = events_tx.clone();
-        let result = subscribe_to_program_events(
-            program_id,
-            &rpc_url,
-            &ws_url,
-            events_tx.clone(),
-            move |event, signature: solana_sdk::signature::Signature, _slot| {
-                tracing::info!("got event: {:?}", event);
-                let tx_sig: Vec<u8> = signature.as_ref().to_vec();
-                let events_tx = events_tx_clone.clone();
-                tokio::spawn(async move {
-                    match build_sign_request(event, tx_sig) {
-                        Ok(req) => {
-                            let _ = events_tx.send(ChainEvent::SignRequest(req)).await;
-                        }
-                        Err(err) => tracing::warn!("Failed to process event: {:?}", err),
-                    }
-                });
-            },
-        )
-        .await;
+        // TODO: if solana ever fails and needs to retry, we actually need to do catchup
+        // again. This requires potentially complicating the coordination we have on the
+        // high level of run_stream. Issue: https://github.com/sig-net/mpc/issues/811
+        let result =
+            subscribe_to_program_events(program_id, &rpc, &ws_url, live_tx.clone(), &mut anchor_tx)
+                .await;
 
         if let Err(err) = result {
-            tracing::warn!("Failed to subscribe to solana events: {:?}", err);
+            tracing::warn!("Live solana subscription failed: {:?}", err);
         }
 
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -424,12 +631,12 @@ async fn subscribe_and_process_events(
 }
 
 fn parse_cpi_events(
-    tx: solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta,
+    tx: &EncodedTransactionWithStatusMeta,
     target_program_id: &Pubkey,
 ) -> Result<Vec<SignatureEventBox>> {
     use solana_transaction_status::{UiInstruction, UiParsedInstruction};
 
-    let Some(meta) = tx.transaction.meta else {
+    let Some(meta) = &tx.meta else {
         return Ok(Vec::new());
     };
 
@@ -480,8 +687,8 @@ fn parse_cpi_events(
     };
 
     // Look into inner instructions for CPI calls
-    let inner_ixs = match meta.inner_instructions {
-        solana_transaction_status::option_serializer::OptionSerializer::Some(ixs) => ixs,
+    let inner_ixs = match &meta.inner_instructions {
+        OptionSerializer::Some(ixs) => ixs,
         _ => return Ok(Vec::new()),
     };
 
@@ -516,17 +723,13 @@ fn parse_cpi_events(
     Ok(out)
 }
 
-async fn subscribe_to_program_events<F>(
+async fn subscribe_to_program_events(
     program_id: Pubkey,
-    rpc_url: &str,
+    rpc_client: &RpcClient,
     ws_url: &str,
     events_tx: mpsc::Sender<ChainEvent>,
-    mut sign_event_handler: F,
-) -> Result<()>
-where
-    F: FnMut(SignatureEventBox, Signature, u64) + Send,
-{
-    let rpc_client = RpcClient::new(rpc_url.to_string());
+    anchor_tx: &mut Option<oneshot::Sender<u64>>,
+) -> Result<()> {
     let pubsub_client = PubsubClient::new(ws_url).await?;
 
     let filter = RpcTransactionLogsFilter::Mentions(vec![program_id.to_string()]);
@@ -556,12 +759,19 @@ where
                     Some(response) => {
                         last_ws_msg = Instant::now();
 
-                        if response.value.err.is_some() {
-                            continue;
+                        let slot = response.context.slot;
+                        if let Some(anchor_tx) = anchor_tx.take() {
+                            // Send the anchor slot back to livestream() on the first received message
+                            let _ = anchor_tx.send(slot);
                         }
 
                         let logs = &response.value.logs;
-                        if !has_log_starts_with(logs, &program_invoke_log) {
+                        if response.value.err.is_some() || !has_log_starts_with(logs, &program_invoke_log) {
+                            // block is not relevant to our program, skip but still
+                            // emit block event for progress tracking
+                            if let Err(err) = events_tx.send(ChainEvent::Block(slot)).await {
+                                tracing::warn!(?err, "failed to send block event");
+                            }
                             continue;
                         }
 
@@ -574,7 +784,7 @@ where
                             continue;
                         }
 
-                        let tx_res = match get_tx(&rpc_client, &signature, RetryConfig::default()).await {
+                        let tx_res = match get_tx(rpc_client, &signature, RetryConfig::default()).await {
                             Ok(tx) => tx,
                             Err(e) => {
                                 tracing::warn!("Failed to fetch transaction {}: {}", signature, e);
@@ -585,39 +795,21 @@ where
                         let now = Instant::now();
                         seen.insert(signature, now);
 
-                        // Reference: https://github.com/solana-foundation/anchor/blob/a5df519319ac39cff21191f2b09d54eda42c5716/client/src/lib.rs#L311
-                        if looks_like_cpi_sign_event(logs) {
-                            match parse_cpi_events(tx_res, &program_id) {
-                                Ok(events) => {
-                                    for ev in events {
-                                        sign_event_handler(ev, signature, response.context.slot);
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Failed to parse cpi events for {}: {}", signature, e);
-                                    continue;
-                                }
-                            }
-                        } else if looks_like_respond_event(logs) {
-                            let (respond_bidirectional_events, respond_events) = match parse_cpi_respond_events(tx_res, &program_id) {
-                                Ok(v) => v,
-                                Err(err) => {
-                                    tracing::warn!(?err, sig = %signature, "failed to parse respond events (will skip this signature)");
-                                    continue;
-                                }
-                            };
-
-                            for ev in respond_bidirectional_events {
-                                let _ = events_tx.send(ChainEvent::RespondBidirectional(crate::stream::ops::RespondBidirectionalEvent::Solana(ev))).await;
-                            }
-
-                            for ev in respond_events {
-                                let _ = events_tx.send(ChainEvent::Respond(crate::stream::ops::SignatureRespondedEvent::Solana(ev))).await;
-                            }
+                        if let Err(err) = emit_events(
+                            &events_tx,
+                            &program_id,
+                            signature,
+                            &tx_res.transaction,
+                            logs,
+                        )
+                        .await
+                        {
+                            tracing::warn!(?err, sig = %signature, "failed to parse solana tx events");
+                            continue;
                         }
 
                         // Emit block event for every observed slot
-                        if let Err(err) = events_tx.send(ChainEvent::Block(response.context.slot)).await {
+                        if let Err(err) = events_tx.send(ChainEvent::Block(slot)).await {
                             tracing::warn!(?err, "failed to send block event");
                         }
                     }
@@ -656,12 +848,12 @@ fn has_log_starts_with(logs: &[String], start_with: &str) -> bool {
 }
 
 fn parse_cpi_respond_events(
-    tx: solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta,
+    tx: &EncodedTransactionWithStatusMeta,
     target_program_id: &Pubkey,
 ) -> Result<(Vec<RespondBidirectionalEvent>, Vec<SignatureRespondedEvent>)> {
     use solana_transaction_status::{UiInstruction, UiParsedInstruction};
 
-    let Some(meta) = tx.transaction.meta else {
+    let Some(meta) = &tx.meta else {
         return Ok((Vec::new(), Vec::new()));
     };
 
@@ -712,8 +904,8 @@ fn parse_cpi_respond_events(
         };
 
     // Look into inner instructions for CPI calls
-    let inner_ixs = match meta.inner_instructions {
-        solana_transaction_status::option_serializer::OptionSerializer::Some(ixs) => ixs,
+    let inner_ixs = match &meta.inner_instructions {
+        OptionSerializer::Some(ixs) => ixs,
         _ => return Ok((Vec::new(), Vec::new())),
     };
 
@@ -757,6 +949,90 @@ fn parse_cpi_respond_events(
     Ok((respond_bidirectional_events, signature_responded_events))
 }
 
+enum SolanaEvents {
+    Sign(Vec<SignatureEventBox>),
+    Respond {
+        bidirectional: Vec<RespondBidirectionalEvent>,
+        responded: Vec<SignatureRespondedEvent>,
+    },
+    None,
+}
+
+impl SolanaEvents {
+    fn parse(
+        tx: &EncodedTransactionWithStatusMeta,
+        target_program_id: &Pubkey,
+        logs: &[String],
+    ) -> Result<Self> {
+        if looks_like_cpi_sign_event(logs) {
+            Ok(SolanaEvents::Sign(parse_cpi_events(tx, target_program_id)?))
+        } else if looks_like_respond_event(logs) {
+            let (bidirectional, responded) = parse_cpi_respond_events(tx, target_program_id)?;
+            Ok(SolanaEvents::Respond {
+                bidirectional,
+                responded,
+            })
+        } else {
+            Ok(SolanaEvents::None)
+        }
+    }
+}
+
+async fn emit_events(
+    events_tx: &mpsc::Sender<ChainEvent>,
+    program_id: &Pubkey,
+    signature: Signature,
+    tx: &EncodedTransactionWithStatusMeta,
+    logs: &[String],
+) -> Result<()> {
+    match SolanaEvents::parse(tx, program_id, logs)? {
+        SolanaEvents::Sign(events) => {
+            for ev in events {
+                let req = build_sign_request(ev, signature.as_ref().to_vec())?;
+                events_tx.send(ChainEvent::SignRequest(req)).await?;
+            }
+        }
+        SolanaEvents::Respond {
+            bidirectional,
+            responded,
+        } => {
+            for ev in bidirectional {
+                let _ = events_tx
+                    .send(ChainEvent::RespondBidirectional(
+                        crate::stream::ops::RespondBidirectionalEvent::Solana(ev),
+                    ))
+                    .await;
+            }
+
+            for ev in responded {
+                let _ = events_tx
+                    .send(ChainEvent::Respond(
+                        crate::stream::ops::SignatureRespondedEvent::Solana(ev),
+                    ))
+                    .await;
+            }
+        }
+        SolanaEvents::None => {}
+    }
+    Ok(())
+}
+
+fn extract_tx_signature(tx: &EncodedTransaction) -> anyhow::Result<Signature> {
+    match tx {
+        EncodedTransaction::Json(ui_tx) => {
+            let signature = ui_tx
+                .signatures
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("missing signature in block transaction"))?;
+            Signature::from_str(signature)
+                .map_err(|err| anyhow::anyhow!(err).context("failed to parse block signature"))
+        }
+        other => {
+            anyhow::bail!("unsupported encoded transaction variant in block catchup: {other:?}")
+        }
+    }
+}
+
 // Clean up seen cache based on TTL
 fn cleanup_seen_cache(seen: &mut HashMap<Signature, Instant>, ttl: Duration) {
     let now = Instant::now();
@@ -795,7 +1071,7 @@ async fn get_tx(
     rpc_client: &RpcClient,
     signature: &Signature,
     retry_cfg: RetryConfig,
-) -> anyhow::Result<solana_transaction_status::EncodedConfirmedTransactionWithStatusMeta> {
+) -> anyhow::Result<EncodedConfirmedTransactionWithStatusMeta> {
     let max_attempts = retry_cfg.max_attempts;
 
     let res = retry_async(
@@ -805,7 +1081,7 @@ async fn get_tx(
                 .get_transaction_with_config(
                     signature,
                     solana_client::rpc_config::RpcTransactionConfig {
-                        encoding: Some(solana_transaction_status::UiTransactionEncoding::JsonParsed),
+                        encoding: Some(UiTransactionEncoding::JsonParsed),
                         commitment: Some(CommitmentConfig::confirmed()),
                         max_supported_transaction_version: Some(0),
                     },

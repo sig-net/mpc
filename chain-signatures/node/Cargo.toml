@@ -38,7 +38,7 @@ opentelemetry_sdk = { version = "0.29.0", default-features = false, features = [
 opentelemetry-appender-tracing = "0.29.1"
 alloy-signer-local = "1.0.38"
 alloy-sol-types = "1.4.1"
-helios = { git = "https://github.com/a16z/helios", rev = "e1f9a50f73d7af6f6ae4acf2b663d04aab6adb19" }
+helios = { git = "https://github.com/a16z/helios", rev = "e1f9a50f73d7af6f6ae4acf2b663d04aab6adb19", optional = true }
 ed25519-zebra = { version = "4.1", default-features = false, features = ["alloc"] }
 subxt = { version = "0.44", default-features = false, features = ["jsonrpsee","native","unstable-light-client"] }
 sp-core = { version = "38.1", default-features = false, features = ["std"] }
@@ -110,6 +110,7 @@ test-log = { version = "0.2.12", features = ["log", "trace"] }
 
 [features]
 default = []
+helios = ["dep:helios"]
 # utilized for benchmarking the node:
 bench = []
 # utilized by "integration-tests" package:
