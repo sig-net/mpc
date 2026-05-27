@@ -134,16 +134,7 @@ async fn test_key_derivation() -> anyhow::Result<()> {
         .unwrap();
 
         // start recovering the address and compare them:
-        let user_pk_x = x_coordinate(&user_pk);
-        let user_pk_y_parity = match user_pk.y_is_odd().unwrap_u8() {
-            1 => secp256k1::Parity::Odd,
-            0 => secp256k1::Parity::Even,
-            _ => unreachable!(),
-        };
-        let user_pk_x = secp256k1::XOnlyPublicKey::from_slice(&user_pk_x.to_bytes()).unwrap();
-        let user_secp_pk =
-            secp256k1::PublicKey::from_x_only_public_key(user_pk_x, user_pk_y_parity);
-        let user_addr = actions::public_key_to_address(&user_secp_pk);
+        let user_addr = actions::public_key_to_address(user_pk.to_encoded_point(false).as_bytes());
         let r = x_coordinate(&multichain_sig.big_r);
         let s = multichain_sig.s;
         let signature_for_recovery: [u8; 64] = {

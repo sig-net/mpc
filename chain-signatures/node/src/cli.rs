@@ -291,11 +291,16 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     .to_string()
             });
             let hydration_signer_address = hydration.signer_uri.as_ref().and_then(|uri| {
-                use std::str::FromStr;
-                use subxt_signer::{sr25519, SecretUri};
-                let uri = SecretUri::from_str(uri).ok()?;
-                let kp = sr25519::Keypair::from_uri(&uri).ok()?;
-                Some(kp.public_key().to_account_id().to_string())
+                use sp_core::Pair as _;
+                use sp_core::sr25519;
+                use sp_runtime::traits::{IdentifyAccount, Verify};
+                use sp_runtime::MultiSignature as SpMultiSignature;
+                use subxt::config::substrate::AccountId32;
+
+                let pair = sr25519::Pair::from_string(uri, None).ok()?;
+                let account_id = <SpMultiSignature as Verify>::Signer::from(pair.public())
+                    .into_account();
+                Some(AccountId32(account_id.into()).to_string())
             });
             let eth = eth.into_config();
             let sol = sol.into_config();

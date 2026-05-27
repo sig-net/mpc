@@ -36,6 +36,11 @@ use k256::elliptic_curve::sec1::ToEncodedPoint;
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 use near_fetch::result::ExecutionFinalResult;
+use sp_core::{Pair as _, sr25519};
+use sp_runtime::{
+    MultiSignature as SpMultiSignature,
+    traits::{IdentifyAccount, Verify},
+};
 use serde_json::json;
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -53,12 +58,12 @@ use crate::indexer_canton::{generate_jwt_with_key, CantonConfig};
 use crate::indexer_hydration::HydrationConfig;
 use parity_scale_codec::{Decode, Encode};
 use subxt::config::substrate::{
-    BlakeTwo256, SubstrateConfig, SubstrateExtrinsicParams, SubstrateHeader,
+    AccountId32, BlakeTwo256, MultiSignature, SubstrateConfig, SubstrateExtrinsicParams,
+    SubstrateHeader,
 };
 use subxt::tx::Payload;
 use subxt::Config as SubxtConfig;
 use subxt::OnlineClient;
-use subxt_signer::{sr25519, SecretUri};
 
 /// The maximum amount of times to retry publishing a signature.
 const MAX_PUBLISH_RETRY: usize = 6;
@@ -759,9 +764,38 @@ impl SubxtConfig for HydradxConfig {
 }
 
 #[derive(Clone)]
+struct HydrationSigner {
+    account_id: AccountId32,
+    signer: sr25519::Pair,
+}
+
+impl HydrationSigner {
+    fn from_uri(uri: &str) -> anyhow::Result<Self> {
+        let signer = sr25519::Pair::from_string(uri, None)?;
+        let account_id = <SpMultiSignature as Verify>::Signer::from(signer.public())
+            .into_account();
+
+        Ok(Self {
+            account_id: AccountId32(account_id.into()),
+            signer,
+        })
+    }
+}
+
+impl subxt::tx::Signer<HydradxConfig> for HydrationSigner {
+    fn account_id(&self) -> <HydradxConfig as SubxtConfig>::AccountId {
+        self.account_id.clone()
+    }
+
+    fn sign(&self, signer_payload: &[u8]) -> <HydradxConfig as SubxtConfig>::Signature {
+        MultiSignature::Sr25519(self.signer.sign(signer_payload).0)
+    }
+}
+
+#[derive(Clone)]
 pub struct HydrationClient {
     api: OnlineClient<HydradxConfig>,
-    signer: sr25519::Keypair,
+    signer: HydrationSigner,
 }
 
 const PALLET_SIGNET: &str = "Signet";
@@ -872,8 +906,7 @@ impl Payload for HydrationRespondBidirectionalTx {
 impl HydrationClient {
     pub async fn new(config: &HydrationConfig) -> anyhow::Result<Self> {
         let api = OnlineClient::<HydradxConfig>::from_url(&config.rpc_ws_url).await?;
-        let uri = SecretUri::from_str(&config.signer_uri)?;
-        let signer = sr25519::Keypair::from_uri(&uri)?;
+        let signer = HydrationSigner::from_uri(&config.signer_uri)?;
         Ok(Self { api, signer })
     }
 
