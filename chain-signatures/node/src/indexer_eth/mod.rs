@@ -19,6 +19,7 @@ use alloy::rpc::types::{Block, BlockId, Log};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
+use futures_util::stream::{SplitSink, SplitStream};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
@@ -31,7 +32,10 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
+use tokio::task::JoinHandle;
 use tokio::time::Duration;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 const MAX_LIVE_BLOCK_BUFFER: usize = 16384;
 const CATCHUP_BLOCK_BATCH_SIZE: u64 = 32;
@@ -41,6 +45,67 @@ fn live_blocks_channel() -> (mpsc::Sender<MaybeBlock>, mpsc::Receiver<MaybeBlock
 }
 
 type BlockNumber = u64;
+type EthereumWs = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+type EthereumWsRead = SplitStream<EthereumWs>;
+type EthereumWsWrite = SplitSink<EthereumWs, Message>;
+
+pub enum EthereumConnection {
+    Connected(EthereumWsRead, EthereumWsWrite),
+    Disconnected,
+}
+
+enum EthereumBlockSource {
+    Polling(tokio::time::Interval),
+    Subscription(EthereumConnection),
+}
+
+impl EthereumBlockSource {
+    fn polling(retry_delay: Duration) -> Self {
+        let mut interval = tokio::time::interval(retry_delay);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        Self::Polling(interval)
+    }
+
+    async fn next(&mut self, client: &EthereumClient, current: BlockNumber) -> Option<BlockNumber> {
+        match self {
+            Self::Polling(interval) => {
+                interval.tick().await;
+                client.get_latest_block_number().await
+            }
+            Self::Subscription(connection) => {
+                loop {
+                    if let Some(block_number) = connection.next_block_number().await {
+                        return Some(block_number);
+                    }
+
+                    // TODO: same with solana in https://github.com/sig-net/mpc/issues/811,
+                    // we need to handle reconnection logic properly where we should catchup again
+                    tracing::info!(current, "eth websocket failed; attempting reconnect");
+                    Self::reconnect(connection, client).await;
+                }
+            }
+        }
+    }
+
+    async fn reconnect(connection: &mut EthereumConnection, client: &EthereumClient) {
+        let mut backoff = Duration::from_secs(1);
+
+        loop {
+            match client.subscribe().await {
+                new_connection @ EthereumConnection::Connected(_, _) => {
+                    *connection = new_connection;
+                    tracing::info!("eth websocket reconnected");
+                    return;
+                }
+                EthereumConnection::Disconnected => {
+                    tracing::warn!(?backoff, "eth websocket reconnect failed; retrying");
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                }
+            }
+        }
+    }
+}
 
 pub struct CatchupIter {
     client: Arc<EthereumClient>,
@@ -614,6 +679,14 @@ impl EthereumClient {
         }
     }
 
+    async fn subscribe(&self) -> EthereumConnection {
+        match self {
+            #[cfg(feature = "helios")]
+            EthereumClient::Helios(_) => EthereumConnection::Disconnected,
+            EthereumClient::DirectRpc(client) => client.subscribe().await,
+        }
+    }
+
     async fn get_block(&self, block_id: BlockId) -> Option<Block> {
         // Configure retry behaviour and delegate to shared retry_async helper.
         let retry_config = retry::RetryConfig::default();
@@ -848,6 +921,15 @@ pub struct EthereumIndexer {
     contract_address: Address,
     catchup_complete: Arc<Notify>,
     live_blocks_rx: Option<mpsc::Receiver<MaybeBlock>>,
+    task: Option<JoinHandle<()>>,
+}
+
+impl Drop for EthereumIndexer {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
 }
 
 /// Result of a `backfill_execution_confirmation`. `Observed` carries an
@@ -880,6 +962,7 @@ impl EthereumIndexer {
             contract_address,
             catchup_complete: Arc::new(Notify::new()),
             live_blocks_rx: None,
+            task: None,
         })
     }
 
@@ -888,21 +971,19 @@ impl EthereumIndexer {
         catchup_complete: Arc<Notify>,
         start_block_number: u64,
         live_blocks: mpsc::Sender<MaybeBlock>,
+        mut source: EthereumBlockSource,
     ) {
-        tracing::info!("indexing ethereum live blocks");
+        tracing::info!(start_block_number, "indexing ethereum live blocks");
 
         // Wait for catchup to complete before starting to index live blocks
         catchup_complete.notified().await;
 
         let mut current_block_number = start_block_number;
 
-        // Missing ticks is what we want due to retrying on transient errors
-        let mut interval = tokio::time::interval(Self::RETRY_DELAY);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
         loop {
-            interval.tick().await;
-            let Some(latest_block_number) = client.get_latest_block_number().await else {
+            let Some(latest_block_number) =
+                source.next(client.as_ref(), current_block_number).await
+            else {
                 continue;
             };
 
@@ -915,7 +996,7 @@ impl EthereumIndexer {
                 else {
                     tracing::warn!(
                         current_block_number,
-                        "ethereum live block not yet available"
+                        "ethereum subscribed block not yet available"
                     );
                     break;
                 };
@@ -924,7 +1005,7 @@ impl EthereumIndexer {
                     tracing::warn!(
                         ?err,
                         current_block_number,
-                        "failed to add ethereum live block"
+                        "failed to add ethereum subscribed block"
                     );
                     return;
                 }
@@ -1387,7 +1468,7 @@ impl ChainIndexer for EthereumIndexer {
     type Iter = CatchupIter;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
-        let start_block_number = loop {
+        let start_block = loop {
             if let Some(block_number) = self.client.get_latest_block_number().await {
                 break block_number.saturating_add(1);
             };
@@ -1395,15 +1476,28 @@ impl ChainIndexer for EthereumIndexer {
         };
 
         let (live_blocks_tx, live_blocks_rx) = live_blocks_channel();
-        tokio::spawn(Self::index_live_blocks(
+        let source = match self.client.subscribe().await {
+            connection @ EthereumConnection::Connected(_, _) => {
+                tracing::info!(start_block, "eth subscription enabled");
+                EthereumBlockSource::Subscription(connection)
+            }
+            EthereumConnection::Disconnected => {
+                tracing::info!(start_block, "eth subscription disabled; polling instead");
+                EthereumBlockSource::polling(Self::RETRY_DELAY)
+            }
+        };
+
+        let task = tokio::spawn(Self::index_live_blocks(
             self.client.clone(),
             self.catchup_complete.clone(),
-            start_block_number,
+            start_block,
             live_blocks_tx,
+            source,
         ));
+        self.task = Some(task);
 
         self.live_blocks_rx = Some(live_blocks_rx);
-        Ok(Some(start_block_number))
+        Ok(Some(start_block))
     }
 
     async fn next(&mut self) -> Option<Self::Block> {
@@ -1530,7 +1624,9 @@ impl ChainStream for EthereumStream {
 }
 #[cfg(test)]
 mod tests {
-    use super::{CatchupIter, EthConfig, EthereumClient, EthereumIndexer, MaybeBlock};
+    use super::{
+        CatchupIter, EthConfig, EthereumClient, EthereumConnection, EthereumIndexer, MaybeBlock,
+    };
     use crate::backlog::Backlog;
     #[cfg(feature = "helios")]
     use crate::indexer_eth::indexer_eth_helios;
@@ -1647,6 +1743,7 @@ mod tests {
             contract_address: Address::ZERO,
             catchup_complete: Arc::new(Notify::new()),
             live_blocks_rx: None,
+            task: None,
         };
 
         indexer
@@ -1686,6 +1783,7 @@ mod tests {
             contract_address: Address::ZERO,
             catchup_complete: Arc::new(Notify::new()),
             live_blocks_rx: None,
+            task: None,
         };
 
         let err = indexer
@@ -1789,6 +1887,19 @@ mod tests {
             MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(21)))
         ));
         assert!(matches!(&blocks[2], MaybeBlock::Block(block) if block.header.number == 22));
+    }
+
+    #[tokio::test]
+    async fn ethereum_client_subscribe_returns_disconnected_when_ws_unavailable() {
+        let server = Server::new_async().await;
+        let client = EthereumClient::DirectRpc(
+            super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
+        );
+
+        assert!(matches!(
+            client.subscribe().await,
+            EthereumConnection::Disconnected
+        ));
     }
 
     #[tokio::test]
@@ -2037,6 +2148,7 @@ mod tests {
             contract_address: Address::ZERO,
             catchup_complete: Arc::new(Notify::new()),
             live_blocks_rx: None,
+            task: None,
         };
 
         let events = indexer

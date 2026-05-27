@@ -1,10 +1,16 @@
-use crate::indexer_eth::MaybeBlock;
+use crate::indexer_eth::{BlockNumber, EthereumConnection, MaybeBlock};
+
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, B256};
 use alloy::rpc::types::{Block, BlockId, Transaction, TransactionReceipt};
+use futures_util::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
 use serde_json::json;
+use tokio::time::{timeout, Duration};
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
+use url::Url;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,12 +29,39 @@ pub struct RpcEthereumClient {
 }
 
 impl RpcEthereumClient {
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+    const MESSAGE_TIMEOUT: Duration = Duration::from_secs(60);
+    const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
     pub fn new(endpoint: &str) -> Self {
         Self {
             http: reqwest::Client::new(),
             url: endpoint.to_owned(),
             id: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    pub async fn subscribe(&self) -> EthereumConnection {
+        let Some(ws_url) = websocket_url(&self.url) else {
+            tracing::info!(rpc_url = %self.url, "ethereum RPC URL has no websocket scheme");
+            return EthereumConnection::Disconnected;
+        };
+
+        let mut connection = match EthereumConnection::connect(ws_url.as_str()).await {
+            Ok(connection) => connection,
+            Err(err) => {
+                tracing::info!(%err, ws_url = %ws_url, "failed to connect ethereum websocket");
+                return EthereumConnection::Disconnected;
+            }
+        };
+
+        if let Err(err) = connection.subscribe_new_heads(self.next_id()).await {
+            tracing::info!(%err, ws_url = %ws_url, "failed to subscribe to ethereum newHeads");
+            let _ = connection.close().await;
+            return EthereumConnection::Disconnected;
+        }
+
+        connection
     }
 
     pub async fn get_block(&self, block_id: BlockId) -> anyhow::Result<Option<Block>> {
@@ -351,6 +384,152 @@ fn trace_output_to_bytes(
     Ok(Bytes::from(hex::decode(stripped)?))
 }
 
+impl EthereumConnection {
+    async fn connect(ws_url: &str) -> anyhow::Result<Self> {
+        let (ws_stream, _) = timeout(RpcEthereumClient::CONNECT_TIMEOUT, connect_async(ws_url))
+            .await
+            .map_err(|_| anyhow::anyhow!("ethereum websocket connect timeout"))??;
+        let (ws_write, ws_read) = ws_stream.split();
+        Ok(Self::Connected(ws_read, ws_write))
+    }
+
+    async fn subscribe_new_heads(&mut self, request_id: u64) -> anyhow::Result<()> {
+        let Self::Connected(_, ws_write) = self else {
+            anyhow::bail!("ethereum websocket not connected")
+        };
+
+        let subscribe_request = json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "eth_subscribe",
+            "params": ["newHeads"],
+        });
+
+        timeout(
+            RpcEthereumClient::CONNECT_TIMEOUT,
+            ws_write.send(Message::Text(subscribe_request.to_string().into())),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("ethereum websocket subscription send timeout"))??;
+
+        loop {
+            let Some(msg) = self.next_message().await else {
+                anyhow::bail!("ethereum websocket closed before subscription ack")
+            };
+
+            let Message::Text(text) = msg else {
+                continue;
+            };
+
+            let value: serde_json::Value = serde_json::from_str(&text)?;
+            if let Some(error) = value.get("error") {
+                anyhow::bail!("ethereum eth_subscribe failed: {error}");
+            }
+
+            let Some(id) = value.get("id").and_then(serde_json::Value::as_u64) else {
+                continue;
+            };
+            if id != request_id {
+                continue;
+            }
+
+            let Some(subscription_id) = value.get("result").and_then(serde_json::Value::as_str)
+            else {
+                anyhow::bail!("ethereum eth_subscribe ack missing subscription id")
+            };
+
+            tracing::info!(%subscription_id, "ethereum websocket subscribed to newHeads");
+            return Ok(());
+        }
+    }
+
+    pub async fn next_block_number(&mut self) -> Option<BlockNumber> {
+        loop {
+            let msg = self.next_message().await?;
+
+            let Message::Text(text) = msg else {
+                continue;
+            };
+
+            let value: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!(%err, "failed to parse ethereum websocket message");
+                    continue;
+                }
+            };
+
+            if let Some(error) = value.get("error") {
+                tracing::warn!(?error, "ethereum websocket returned rpc error");
+                continue;
+            }
+
+            let Some(params) = value.get("params") else {
+                continue;
+            };
+            let Some(result) = params.get("result") else {
+                continue;
+            };
+            let Some(number_hex) = result.get("number").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+
+            match hex_to_u64(number_hex) {
+                Ok(block_number) => return Some(block_number),
+                Err(err) => {
+                    tracing::warn!(%err, %number_hex, "failed to parse ethereum head number");
+                }
+            }
+        }
+    }
+
+    async fn next_message(&mut self) -> Option<Message> {
+        let Self::Connected(ws_read, _) = self else {
+            return None;
+        };
+
+        let Ok(maybe_msg) = timeout(RpcEthereumClient::MESSAGE_TIMEOUT, ws_read.next()).await
+        else {
+            tracing::warn!("ethereum websocket stalled: no message for 60s");
+            *self = Self::Disconnected;
+            return None;
+        };
+
+        let Some(msg) = maybe_msg else {
+            *self = Self::Disconnected;
+            return None;
+        };
+
+        match msg {
+            Ok(Message::Close(_)) => {
+                tracing::info!("ethereum websocket received close frame");
+                if let Err(err) = self.close().await {
+                    tracing::debug!(%err, "failed to flush ethereum websocket close reply");
+                }
+                None
+            }
+            Ok(msg) => Some(msg),
+            Err(err) => {
+                tracing::warn!(%err, "ethereum websocket error");
+                *self = Self::Disconnected;
+                None
+            }
+        }
+    }
+
+    async fn close(&mut self) -> anyhow::Result<()> {
+        let Self::Connected(_, ws_write) = self else {
+            return Ok(());
+        };
+
+        timeout(RpcEthereumClient::DISCONNECT_TIMEOUT, ws_write.close())
+            .await
+            .map_err(|_| anyhow::anyhow!("ethereum websocket close timeout"))??;
+        *self = Self::Disconnected;
+        Ok(())
+    }
+}
+
 fn format_address(address: Address) -> String {
     format!("0x{}", address.encode_hex())
 }
@@ -385,6 +564,23 @@ fn to_hex_block_id(block_id: BlockId) -> String {
         BlockId::Number(BlockNumberOrTag::Earliest) => "earliest".to_string(),
         BlockId::Number(BlockNumberOrTag::Pending) => "pending".to_string(),
         BlockId::Hash(hash) => format!("{:#x}", hash.block_hash),
+    }
+}
+
+fn websocket_url(rpc_url: &str) -> Option<Url> {
+    let mut url = Url::parse(rpc_url).ok()?;
+
+    match url.scheme() {
+        "ws" | "wss" => Some(url),
+        "http" => {
+            url.set_scheme("ws").ok()?;
+            Some(url)
+        }
+        "https" => {
+            url.set_scheme("wss").ok()?;
+            Some(url)
+        }
+        _ => None,
     }
 }
 
@@ -493,5 +689,13 @@ mod tests {
         let frame = json!({ "type": "CALL" });
         let err = trace_output_to_bytes(B256::ZERO, &frame).expect_err("should bail");
         assert!(format!("{err}").contains("missing `output`"));
+    }
+
+    #[test]
+    fn websocket_url_promotes_http_to_ws() {
+        let ws_url = super::websocket_url("https://rpc.example.com/path")
+            .expect("https URL should convert to websocket URL");
+
+        assert_eq!(ws_url.as_str(), "wss://rpc.example.com/path");
     }
 }
