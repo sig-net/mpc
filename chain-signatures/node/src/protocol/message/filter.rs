@@ -42,10 +42,7 @@ impl MessageFilter {
         };
 
         self.filter.put((msg_type, id), ());
-        crate::metrics::messaging::set_queue_len(
-            "filter",
-            self.filter_tx.max_capacity() - self.filter_tx.capacity(),
-        );
+        crate::metrics::messaging::set_channel_capacity("filter", self.filter_tx.capacity());
     }
 
     pub fn try_update(&mut self) {
@@ -56,10 +53,7 @@ impl MessageFilter {
         }
 
         if updated {
-            crate::metrics::messaging::set_queue_len(
-                "filter",
-                self.filter_tx.max_capacity() - self.filter_tx.capacity(),
-            );
+            crate::metrics::messaging::set_channel_capacity("filter", self.filter_tx.capacity());
         }
     }
 

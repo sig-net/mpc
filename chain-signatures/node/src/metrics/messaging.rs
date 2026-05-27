@@ -1,5 +1,3 @@
-use crate::util::channel_len;
-
 use std::sync::LazyLock;
 use tokio::sync::mpsc;
 
@@ -82,27 +80,27 @@ pub(crate) static WEB_ENDPOINT_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|
     .unwrap()
 });
 
-pub(crate) static CHANNEL_QUEUE_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+pub(crate) static CHANNEL_CAPACITY_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     super::try_create_int_gauge_vec_with_node_account_id(
-        "multichain_channel_queue_size",
-        "Estimated number of buffered messages queued per message channel",
+        "multichain_channel_capacity_size",
+        "Estimated remaining capacity per message channel",
         &["channel"],
     )
     .unwrap()
 });
 
-pub(crate) fn set_queue_len(channel: &str, len: usize) {
-    CHANNEL_QUEUE_SIZE
+pub(crate) fn set_channel_capacity(channel: &str, capacity: usize) {
+    CHANNEL_CAPACITY_SIZE
         .with_label_values(&[channel])
-        .set(len as i64);
+        .set(capacity as i64);
 }
 
-pub fn set_queue_len_tx<T>(name: &'static str, tx: &mpsc::Sender<T>) {
-    set_queue_len(name, channel_len(tx));
+pub(crate) fn set_channel_capacity_tx<T>(name: &'static str, tx: &mpsc::Sender<T>) {
+    set_channel_capacity(name, tx.capacity());
 }
 
-pub(crate) fn remove_queue_len(channel: &str) {
-    let _ = CHANNEL_QUEUE_SIZE.remove_label_values(&[channel]);
+pub(crate) fn remove_channel_capacity(channel: &str) {
+    let _ = CHANNEL_CAPACITY_SIZE.remove_label_values(&[channel]);
 }
 
 pub(crate) static TASK_QUEUE_CAPACITY: LazyLock<HistogramVec> = LazyLock::new(|| {

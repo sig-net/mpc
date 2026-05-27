@@ -2,7 +2,9 @@ use cait_sith::protocol::Participant;
 use mpc_primitives::SignId;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::metrics::messaging::{observe_queue_capacity, remove_queue_len, set_queue_len};
+use crate::metrics::messaging::{
+    observe_queue_capacity, remove_channel_capacity, set_channel_capacity,
+};
 use crate::protocol::message::types::Round;
 use crate::protocol::message::{
     GeneratingMessage, PresignatureMessage, ReadyMessage, ResharingMessage, SignatureMessage,
@@ -161,15 +163,15 @@ impl<T> Subscriber<T> {
         }
     }
 
-    pub fn report_len_global(&self) {
-        set_queue_len(self.metrics.name, self.estimated_len());
+    pub fn report_capacity_global(&self) {
+        set_channel_capacity(self.metrics.name, self.remaining_capacity());
     }
 
-    pub fn clear_len_global(&self) {
-        remove_queue_len(self.metrics.name);
+    pub fn clear_capacity_global(&self) {
+        remove_channel_capacity(self.metrics.name);
     }
 
-    pub fn report_len(&self) {
+    pub fn report_capacity(&self) {
         observe_queue_capacity(self.metrics.name, self.remaining_capacity());
     }
 

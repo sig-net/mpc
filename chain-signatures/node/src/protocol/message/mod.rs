@@ -8,7 +8,7 @@ use super::contract::primitives::{ParticipantMap, Participants};
 use super::presignature::PresignatureId;
 use super::triple::TripleId;
 use crate::metrics;
-use crate::metrics::messaging::{set_queue_len, set_queue_len_tx};
+use crate::metrics::messaging::set_channel_capacity_tx;
 use crate::node_client::NodeClient;
 use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::message::sub::{
@@ -112,14 +112,14 @@ impl MessageInbox {
                         .triple_init
                         .send((id, message.from, message.action))
                         .await;
-                    self.triple_init.report_len_global();
+                    self.triple_init.report_capacity_global();
                 }
                 PositProtocolId::Presignature(id) => {
                     let _ = self
                         .presignature_init
                         .send((id, message.from, message.action))
                         .await;
-                    self.presignature_init.report_len_global();
+                    self.presignature_init.report_capacity_global();
                 }
                 PositProtocolId::Signature(sign_id, presignature_id, round) => {
                     let _ = self
@@ -132,20 +132,20 @@ impl MessageInbox {
                             message.action,
                         ))
                         .await;
-                    self.signature_init.report_len_global();
+                    self.signature_init.report_capacity_global();
                 }
             },
             Message::Generating(message) => {
                 let _ = self.generating.send(message).await;
-                self.generating.report_len_global();
+                self.generating.report_capacity_global();
             }
             Message::Resharing(message) => {
                 let _ = self.resharing.send(message).await;
-                self.resharing.report_len_global();
+                self.resharing.report_capacity_global();
             }
             Message::Ready(message) => {
                 let _ = self.ready.send(message).await;
-                self.ready.report_len_global();
+                self.ready.report_capacity_global();
             }
             Message::Triple(message) => {
                 // NOTE: not logging the error because this is simply just channel closure.
@@ -155,7 +155,7 @@ impl MessageInbox {
                     .entry(message.id)
                     .or_insert_with(|| Subscriber::unsubscribed("triple_task"));
                 let _ = sub.send(message).await;
-                sub.report_len();
+                sub.report_capacity();
             }
             Message::Presignature(message) => {
                 let sub = self
@@ -163,7 +163,7 @@ impl MessageInbox {
                     .entry(message.id)
                     .or_insert_with(|| Subscriber::unsubscribed("presign_task"));
                 let _ = sub.send(message).await;
-                sub.report_len();
+                sub.report_capacity();
             }
             Message::Signature(message) => {
                 let sub = self
@@ -171,10 +171,9 @@ impl MessageInbox {
                     .entry((message.id, message.presignature_id))
                     .or_insert_with(|| Subscriber::unsubscribed("sign_task"));
                 let _ = sub.send(message).await;
-                sub.report_len();
+                sub.report_capacity();
             }
             Message::Unknown(entries) => {
-                set_queue_len("unknown", entries.len());
                 tracing::warn!(
                     entries = ?entries.iter().map(|(k, v)| (k, cbor_name(v))).collect::<Vec<_>>(),
                     "inbox: received unknown message type",
@@ -280,7 +279,7 @@ impl MessageInbox {
                 }
                 SubscribeRequestAction::Unsubscribe => {
                     if let Some(sub) = self.triple.remove(&id) {
-                        sub.clear_len_global();
+                        sub.clear_capacity_global();
                     } else {
                         tracing::warn!(id, "trying to unsub from an unknown triple subscription");
                     }
@@ -297,7 +296,7 @@ impl MessageInbox {
                 }
                 SubscribeRequestAction::Unsubscribe => {
                     if let Some(sub) = self.presignature.remove(&id) {
-                        sub.clear_len_global();
+                        sub.clear_capacity_global();
                     } else {
                         tracing::warn!(
                             id,
@@ -317,7 +316,7 @@ impl MessageInbox {
                 }
                 SubscribeRequestAction::Unsubscribe => {
                     if let Some(sub) = self.signature.remove(&(sign_id, presignature_id)) {
-                        sub.clear_len_global();
+                        sub.clear_capacity_global();
                     } else {
                         tracing::warn!(
                             ?sign_id,
@@ -334,7 +333,7 @@ impl MessageInbox {
                 }
                 SubscribeRequestAction::Unsubscribe => {
                     self.ready.unsubscribe();
-                    self.ready.clear_len_global();
+                    self.ready.clear_capacity_global();
                 }
             },
             SubscribeId::Triples => match sub.action {
@@ -372,11 +371,11 @@ impl MessageInbox {
             tokio::select! {
                 _ = self.filter.update() => {}
                 Some(sub) = self.subscribe_rx.recv() => {
-                    set_queue_len_tx("subscribe", &self.subscribe_tx);
+                    set_channel_capacity_tx("subscribe", &self.subscribe_tx);
                     self.process_subscribe(sub);
                 }
                 Some(encrypted) = self.inbox_rx.recv() => {
-                    set_queue_len_tx("incoming", &self.inbox_tx);
+                    set_channel_capacity_tx("incoming", &self.inbox_tx);
                     let config = config.borrow().clone();
                     let expiration = Duration::from_millis(config.protocol.message_timeout);
                     let participants = contract.participant_map().await;
@@ -432,10 +431,10 @@ impl MessageChannel {
             filter: filter_tx,
         };
 
-        set_queue_len_tx("incoming", &channel.inbox);
-        set_queue_len_tx("outgoing", &channel.outgoing);
-        set_queue_len_tx("filter", &channel.filter);
-        set_queue_len_tx("subscribe", &channel.subscribe);
+        set_channel_capacity_tx("incoming", &channel.inbox);
+        set_channel_capacity_tx("outgoing", &channel.outgoing);
+        set_channel_capacity_tx("filter", &channel.filter);
+        set_channel_capacity_tx("subscribe", &channel.subscribe);
 
         (inbox, outbox, channel)
     }
@@ -461,7 +460,7 @@ impl MessageChannel {
         {
             tracing::error!(?err, "outbox: failed to send message to participants");
         } else {
-            set_queue_len_tx("outgoing", &self.outgoing);
+            set_channel_capacity_tx("outgoing", &self.outgoing);
         }
     }
 
@@ -469,7 +468,7 @@ impl MessageChannel {
         if let Err(err) = self.inbox.send(encrypted).await {
             tracing::error!(?err, "failed to forward an encrypted protocol message");
         } else {
-            set_queue_len_tx("incoming", &self.inbox);
+            set_channel_capacity_tx("incoming", &self.inbox);
         }
     }
 
@@ -479,7 +478,7 @@ impl MessageChannel {
         if let Err(err) = self.filter.send((M::PROTOCOL, msg.id())).await {
             tracing::warn!(?err, "failed to send filter message");
         } else {
-            set_queue_len_tx("filter", &self.filter);
+            set_channel_capacity_tx("filter", &self.filter);
         }
     }
 
@@ -487,7 +486,7 @@ impl MessageChannel {
         if let Err(err) = self.filter.send((Protocols::Triple, id)).await {
             tracing::warn!(?err, "failed to send filter message");
         } else {
-            set_queue_len_tx("filter", &self.filter);
+            set_channel_capacity_tx("filter", &self.filter);
         }
     }
 
@@ -495,7 +494,7 @@ impl MessageChannel {
         if let Err(err) = self.filter.send((Protocols::Presignature, id)).await {
             tracing::warn!(?err, "failed to send filter message");
         } else {
-            set_queue_len_tx("filter", &self.filter);
+            set_channel_capacity_tx("filter", &self.filter);
         }
     }
 
@@ -508,7 +507,7 @@ impl MessageChannel {
         if self.subscribe.send(req).await.is_err() {
             return None;
         };
-        set_queue_len_tx("subscribe", &self.subscribe);
+        set_channel_capacity_tx("subscribe", &self.subscribe);
         let Ok(subscription) = resp.await else {
             return None;
         };
@@ -538,7 +537,7 @@ impl MessageChannel {
         {
             tracing::warn!(id, "unable to send unsubscribe request for triple message");
         } else {
-            set_queue_len_tx("subscribe", &self.subscribe);
+            set_channel_capacity_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -570,7 +569,7 @@ impl MessageChannel {
         {
             tracing::warn!("unable to send unsubscribe request for triple posits");
         } else {
-            set_queue_len_tx("subscribe", &self.subscribe);
+            set_channel_capacity_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -603,7 +602,7 @@ impl MessageChannel {
         {
             tracing::warn!("unable to send unsubscribe request for presignature");
         } else {
-            set_queue_len_tx("subscribe", &self.subscribe);
+            set_channel_capacity_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -632,7 +631,7 @@ impl MessageChannel {
         {
             tracing::warn!("unable to send unsubscribe request for presignature posits");
         } else {
-            set_queue_len_tx("subscribe", &self.subscribe);
+            set_channel_capacity_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -681,7 +680,7 @@ impl MessageChannel {
                 "unable to send unsubscribe request for signature"
             );
         } else {
-            set_queue_len_tx("subscribe", &self.subscribe);
+            set_channel_capacity_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -711,7 +710,7 @@ impl MessageChannel {
         {
             tracing::warn!("unable to send unsubscribe request for signature posit");
         } else {
-            set_queue_len_tx("subscribe", &self.subscribe);
+            set_channel_capacity_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -1009,7 +1008,7 @@ impl MessageOutbox {
         loop {
             tokio::select! {
                 Some((msg, (from, to, timestamp))) = self.outbox_rx.recv() => {
-                    set_queue_len_tx("outgoing", &self.outbox_tx);
+                    set_channel_capacity_tx("outgoing", &self.outbox_tx);
                     // add it to the outbox and sort it by from and to participant
                     let entry = self.messages.entry((from, to)).or_default();
                     entry.push((msg, timestamp));
