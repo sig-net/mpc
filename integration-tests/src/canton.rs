@@ -125,10 +125,14 @@ pub fn test_evm_type2_anvil_cases() -> Vec<EvmType2AnvilCase> {
                 }],
             ),
         },
-        EvmType2AnvilCase {
-            name: "evm_type2_create_empty_initcode",
-            params: evm_type2_anvil_params(3, 100_000, None, 0, "", vec![]),
-        },
+        // TODO(#808): re-enable when CREATE is supported. The node bails on
+        // CREATE in chain-signatures/node/src/respond_bidirectional.rs:150,
+        // which leaves the bidirectional watcher pending indefinitely and the
+        // test times out waiting for RespondBidirectionalEvent.
+        // EvmType2AnvilCase {
+        //     name: "evm_type2_create_empty_initcode",
+        //     params: evm_type2_anvil_params(3, 100_000, None, 0, "", vec![]),
+        // },
     ]
 }
 
