@@ -294,7 +294,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     // Checkpoints are emitted on interval boundaries. Produce enough non-contract
     // empty transfers so Anvil mines blocks and the indexer can publish the next
     // checkpoint after the response has been observed.
-    produce_empty_eth_blocks(&client, checkpoint_interval).await?;
+    produce_empty_eth_blocks(&client, requester, checkpoint_interval).await?;
 
     let min_next_checkpoint_height =
         ((checkpoint_height_after_request / checkpoint_interval) + 1) * checkpoint_interval;
@@ -340,7 +340,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         .ethereum
         .as_ref()
         .context("ethereum sandbox not initialized")?;
-    let (eth_client, _requester) = eth::client(
+    let (eth_client, requester) = eth::client(
         &eth_ctx.sandbox.external_http_endpoint,
         &eth_ctx.sandbox.secret_key,
         eth_ctx.sandbox.chain_id,
@@ -375,7 +375,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         eth::submit_sign_request(&eth_contract, seed).await?;
     }
 
-    produce_empty_eth_blocks_for_duration(&eth_client, Duration::from_secs(12)).await?;
+    produce_empty_eth_blocks_for_duration(&eth_client, requester, Duration::from_secs(12)).await?;
 
     // Wait for active node to create a new checkpoint beyond the initial one
     let node_active_checkpoint = wait_node_checkpoint(
@@ -455,6 +455,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
 
 async fn produce_empty_eth_blocks(
     client: &eth::SandboxMiddleware,
+    sender: alloy::primitives::Address,
     block_count: u64,
 ) -> anyhow::Result<()> {
     // Use a non-contract sink address so these transactions only advance block height.
@@ -463,15 +464,22 @@ async fn produce_empty_eth_blocks(
     ]);
 
     for _ in 0..block_count {
-        let tx = <TransactionRequest as TransactionBuilder<Ethereum>>::with_gas_limit(
-            <TransactionRequest as TransactionBuilder<Ethereum>>::with_value(
-                <TransactionRequest as TransactionBuilder<Ethereum>>::with_to(
-                    TransactionRequest::default(),
-                    sink,
+        let nonce = client.get_transaction_count(sender).pending().await?;
+        let tx = <TransactionRequest as TransactionBuilder<Ethereum>>::with_nonce(
+            <TransactionRequest as TransactionBuilder<Ethereum>>::with_gas_limit(
+                <TransactionRequest as TransactionBuilder<Ethereum>>::with_value(
+                    <TransactionRequest as TransactionBuilder<Ethereum>>::with_to(
+                        <TransactionRequest as TransactionBuilder<Ethereum>>::with_from(
+                            TransactionRequest::default(),
+                            sender,
+                        ),
+                        sink,
+                    ),
+                    U256::ZERO,
                 ),
-                U256::ZERO,
+                21_000,
             ),
-            21_000,
+            nonce,
         );
 
         client.send_transaction(tx).await?.get_receipt().await?;
@@ -482,11 +490,12 @@ async fn produce_empty_eth_blocks(
 
 async fn produce_empty_eth_blocks_for_duration(
     client: &eth::SandboxMiddleware,
+    sender: alloy::primitives::Address,
     duration: Duration,
 ) -> anyhow::Result<()> {
     let start = tokio::time::Instant::now();
     while start.elapsed() < duration {
-        produce_empty_eth_blocks(client, 1).await?;
+        produce_empty_eth_blocks(client, sender, 1).await?;
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     Ok(())

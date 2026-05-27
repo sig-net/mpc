@@ -1,7 +1,7 @@
 use alloy::network::{Ethereum, EthereumWallet, TransactionBuilder};
 use alloy::primitives::{Address, Bytes, B256, U256};
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
-use alloy::providers::{Provider, ProviderBuilder, RootProvider};
+use alloy::providers::{Provider, ProviderBuilder, RootProvider, WalletProvider};
 use alloy::rpc::types::request::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
@@ -181,9 +181,10 @@ pub async fn submit_sign_request<P>(
     seed: usize,
 ) -> anyhow::Result<()>
 where
-    P: Provider + Clone + Send + Sync + 'static,
+    P: Provider + WalletProvider + Clone + Send + Sync + 'static,
 {
     const MAX_ATTEMPTS: usize = 3;
+    let sender = contract.provider().default_signer_address();
 
     for attempt in 1..=MAX_ATTEMPTS {
         let payload = [seed as u8; 32];
@@ -196,15 +197,25 @@ where
             params: "{}".to_string(),
         };
 
-        match contract.sign(request).value(U256::from(1_u64)).send().await {
+        let nonce = contract.provider().get_transaction_count(sender).pending().await?;
+
+        match contract
+            .sign(request)
+            .value(U256::from(1_u64))
+            .nonce(nonce)
+            .send()
+            .await
+        {
             Ok(pending) => {
                 pending.get_receipt().await?;
                 return Ok(());
             }
             Err(err) => {
                 let err_msg = err.to_string();
-                if err_msg.contains("nonce too low") && attempt < MAX_ATTEMPTS {
-                    tracing::warn!(attempt, "retrying ethereum sign after nonce too low");
+                let retryable_nonce_error = err_msg.contains("nonce too low")
+                    || err_msg.contains("replacement transaction underpriced");
+                if retryable_nonce_error && attempt < MAX_ATTEMPTS {
+                    tracing::warn!(attempt, nonce, %err, "retrying ethereum sign after nonce conflict");
                     tokio::time::sleep(Duration::from_millis(200)).await;
                     continue;
                 }
