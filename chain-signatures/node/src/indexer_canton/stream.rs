@@ -6,38 +6,33 @@ use crate::stream::{ChainEvent, ChainIndexer, ChainStream};
 
 use alloy::primitives::keccak256;
 use async_trait::async_trait;
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use mpc_primitives::{ScalarExt, Signature};
 use std::collections::HashSet;
+use std::ops::Range;
+use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use super::{
     contracts, ledger_api, CantonConfig, CantonRespondBidirectionalEvent,
     CantonSignBidirectionalRequestedEvent, CantonSignatureRespondedEvent,
 };
 
-struct CantonStreamStartState {
-    config: CantonConfig,
-    events_tx: mpsc::Sender<ChainEvent>,
-    backlog: Backlog,
-}
+type CantonWs = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+type CantonWsRead = SplitStream<CantonWs>;
+type CantonWsWrite = SplitSink<CantonWs, Message>;
 
 pub struct CantonStream {
+    config: CantonConfig,
+    backlog: Backlog,
     events_rx: mpsc::Receiver<ChainEvent>,
-    start_state: Option<CantonStreamStartState>,
-    tasks: Vec<JoinHandle<()>>,
-}
-
-impl Drop for CantonStream {
-    fn drop(&mut self) {
-        for task in &self.tasks {
-            task.abort();
-        }
-    }
+    events_tx: Option<mpsc::Sender<ChainEvent>>,
 }
 
 impl CantonStream {
@@ -53,13 +48,10 @@ impl CantonStream {
         let (events_tx, events_rx) = crate::stream::channel();
 
         Some(CantonStream {
+            config,
+            backlog,
             events_rx,
-            start_state: Some(CantonStreamStartState {
-                config,
-                events_tx,
-                backlog,
-            }),
-            tasks: Vec::new(),
+            events_tx: Some(events_tx),
         })
     }
 }
@@ -69,17 +61,12 @@ impl ChainStream for CantonStream {
     type Indexer = CantonIndexer;
 
     async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-        let Some(state) = self.start_state.take() else {
+        let Some(events_tx) = self.events_tx.take() else {
             anyhow::bail!("canton stream already started");
         };
 
-        self.tasks.push(tokio::spawn(async move {
-            run_canton_event_loop(state.config, state.events_tx, state.backlog).await;
-        }));
-
-        // Canton stream manages its own catchup signaling from the websocket loop.
-        // Return a silent indexer so generic catchup_then_livestream stays inert.
-        Ok(Self::Indexer::silent())
+        let client = CantonClient::new(&self.config).await?;
+        Ok(Self::Indexer::new(client, self.backlog.clone(), events_tx))
     }
 
     async fn next_event(&mut self) -> Option<ChainEvent> {
@@ -87,269 +74,285 @@ impl ChainStream for CantonStream {
     }
 }
 
+enum CantonConnection {
+    Connected(CantonWsRead, CantonWsWrite),
+    Disconnected,
+}
+
+impl CantonConnection {
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+    const MESSAGE_TIMEOUT: Duration = Duration::from_secs(60);
+    const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+    async fn connect(
+        ws_url: &str,
+        jwt_token: &str,
+        party_id: &str,
+        begin_exclusive: u64,
+    ) -> anyhow::Result<Self> {
+        let mut request = ws_url.into_client_request()?;
+        request.headers_mut().insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            format!("jwt.token.{jwt_token}, daml.ws.auth").parse()?,
+        );
+
+        let request = tokio_tungstenite::connect_async(request);
+        let (ws_stream, _) = timeout(Self::CONNECT_TIMEOUT, request)
+            .await
+            .map_err(|_| anyhow::anyhow!("canton WebSocket connect timeout"))??;
+        let (mut ws_write, ws_read) = ws_stream.split();
+        tracing::info!(begin_exclusive, "canton WebSocket connected");
+
+        let mut filters_by_party = serde_json::Map::new();
+        filters_by_party.insert(party_id.to_string(), serde_json::json!({}));
+
+        let subscribe_msg = ledger_api::GetUpdatesRequest {
+            begin_exclusive,
+            update_format: ledger_api::UpdateFormat {
+                include_transactions: ledger_api::TransactionFormat {
+                    transaction_shape: "TRANSACTION_SHAPE_LEDGER_EFFECTS".to_string(),
+                    event_format: ledger_api::EventFormat {
+                        filters_by_party,
+                        verbose: true,
+                    },
+                },
+            },
+        };
+        let subscribe_msg = serde_json::to_string(&subscribe_msg)?;
+        let subscribe_task = ws_write.send(Message::Text(subscribe_msg.into()));
+        timeout(Self::CONNECT_TIMEOUT, subscribe_task)
+            .await
+            .map_err(|_| anyhow::anyhow!("canton WebSocket subscription send timeout"))??;
+
+        Ok(Self::Connected(ws_read, ws_write))
+    }
+
+    /// Read the next message from the WebSocket. Closes the connection if the WebSocket is closed.
+    async fn next(&mut self) -> Option<Message> {
+        let Self::Connected(ws_read, _) = self else {
+            tracing::warn!("canton WebSocket not initialized");
+            return None;
+        };
+        let Ok(maybe_msg) = timeout(Self::MESSAGE_TIMEOUT, ws_read.next()).await else {
+            tracing::warn!("canton WebSocket stalled: no message for 60s");
+            return None;
+        };
+
+        let Some(msg) = maybe_msg else {
+            *self = Self::Disconnected;
+            return None;
+        };
+        let msg = match msg {
+            Ok(msg) => msg,
+            Err(err) => {
+                tracing::warn!(%err, "canton WebSocket error");
+                return None;
+            }
+        };
+
+        if matches!(msg, Message::Close(_)) {
+            tracing::info!("canton WebSocket received close frame");
+            if let Err(err) = self.close().await {
+                tracing::debug!(%err, "failed to flush canton WebSocket close reply");
+            }
+            return None;
+        }
+
+        Some(msg)
+    }
+
+    async fn close(&mut self) -> anyhow::Result<()> {
+        let Self::Connected(_, ws_write) = self else {
+            tracing::warn!("canton WebSocket close on already disconnected connection");
+            return Ok(());
+        };
+
+        timeout(Self::DISCONNECT_TIMEOUT, ws_write.close())
+            .await
+            .map_err(|_| anyhow::anyhow!("canton WebSocket close reply timeout"))?
+            .map_err(|e| anyhow::anyhow!("failed to flush canton WebSocket close reply: {e}"))?;
+        *self = Self::Disconnected;
+        Ok(())
+    }
+}
+
 pub struct CantonIndexer {
-    events_tx: Option<mpsc::Sender<ChainEvent>>,
+    client: CantonClient,
+    backlog: Backlog,
+    events_tx: mpsc::Sender<ChainEvent>,
+    ws_conn: CantonConnection,
+    last_seen_offset: u64,
 }
 
 impl CantonIndexer {
-    pub fn silent() -> Self {
-        Self { events_tx: None }
+    pub fn new(
+        client: CantonClient,
+        backlog: Backlog,
+        events_tx: mpsc::Sender<ChainEvent>,
+    ) -> Self {
+        Self {
+            client,
+            backlog,
+            events_tx,
+            ws_conn: CantonConnection::Disconnected,
+            last_seen_offset: 0,
+        }
     }
+
+    async fn connect_and_subscribe(&mut self, begin_exclusive: u64) -> anyhow::Result<()> {
+        let jwt_token = self.client.generate_jwt()?;
+        let ws_url = format!("{}/v2/updates", self.client.config.json_api_ws_url);
+        let party_id = &self.client.config.party_id;
+        self.ws_conn =
+            CantonConnection::connect(&ws_url, &jwt_token, party_id, begin_exclusive).await?;
+        Ok(())
+    }
+
+    async fn reconnect(&mut self, begin_exclusive: u64) {
+        let mut backoff = Duration::from_secs(1);
+
+        loop {
+            match self.connect_and_subscribe(begin_exclusive).await {
+                Ok(()) => {
+                    tracing::info!(
+                        resume_offset = self.last_seen_offset,
+                        "canton WebSocket reconnected"
+                    );
+                    return;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        resume_offset = self.last_seen_offset,
+                        backoff_secs = backoff.as_secs(),
+                        "canton WebSocket reconnect failed; retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                }
+            }
+        }
+    }
+
+    async fn next_update(&mut self) -> Option<ledger_api::Update> {
+        loop {
+            let Some(msg) = self.ws_conn.next().await else {
+                self.reconnect(self.last_seen_offset).await;
+                continue;
+            };
+            let Message::Text(text) = msg else {
+                continue;
+            };
+
+            // TODO: need to fix this in case we are not able to parse
+            // https://github.com/sig-net/mpc/issues/815
+            let msg: ledger_api::UpdateMessage = match serde_json::from_str(&text) {
+                Ok(msg) => msg,
+                Err(err) => {
+                    tracing::warn!(%err, "failed to parse canton WebSocket message");
+                    continue;
+                }
+            };
+
+            if let Some(err) = &msg.error {
+                tracing::warn!(?err, "canton ledger stream error");
+            }
+
+            if let Some(update) = msg.update {
+                return Some(update);
+            }
+        }
+    }
+
+    async fn process_update(&mut self, update: &ledger_api::Update) -> anyhow::Result<u64> {
+        let offset = match update {
+            ledger_api::Update::Transaction { value } => {
+                for event in &value.events {
+                    process_canton_event(
+                        event,
+                        &value.events,
+                        &self.events_tx,
+                        &self.client.config.signer_contract_id,
+                    )
+                    .await;
+                }
+                value.offset
+            }
+            ledger_api::Update::OffsetCheckpoint { value } => value.offset,
+        };
+
+        self.events_tx.send(ChainEvent::Block(offset)).await?;
+        self.last_seen_offset = offset;
+        Ok(offset)
+    }
+
+    async fn process_catchup_offset(&mut self, target_offset: u64) -> anyhow::Result<()> {
+        // If we're already at or past the target offset, we're done
+        if self.last_seen_offset >= target_offset {
+            return Ok(());
+        }
+
+        loop {
+            let Some(update) = self.next_update().await else {
+                anyhow::bail!("canton WebSocket closed during catchup; reconnecting");
+            };
+            let offset = self.process_update(&update).await?;
+            if offset >= target_offset {
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn catchup_offset_range(checkpoint: u64, anchor_height: u64) -> Range<u64> {
+    let start = checkpoint.saturating_add(1).min(anchor_height);
+    start..anchor_height
 }
 
 #[async_trait]
 impl ChainIndexer for CantonIndexer {
     const CHAIN: Chain = Chain::Canton;
-    type Block = ();
-    type Iter = std::iter::Empty<Self::Block>;
+    type Block = u64;
+    type Iter = Range<u64>;
 
-    async fn next(&mut self) -> Option<Self::Block> {
-        None
+    async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
+        let checkpoint = self
+            .backlog
+            .processed_block(Chain::Canton)
+            .await
+            .unwrap_or(0);
+        self.last_seen_offset = checkpoint;
+        let anchor_height = self.client.fetch_ledger_end().await?;
+        self.reconnect(self.last_seen_offset).await;
+        Ok(Some(anchor_height))
     }
 
-    async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-        std::iter::empty()
+    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
+        // After a reconnect, we resume from last_seen_offset, so catchup should start there.
+        catchup_offset_range(self.last_seen_offset, anchor_height)
+    }
+
+    async fn process_catchup(&mut self, &item: &Self::Block) -> anyhow::Result<()> {
+        self.process_catchup_offset(item).await
     }
 
     async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
-        if let Some(events_tx) = &self.events_tx {
-            events_tx.send(ChainEvent::CatchupCompleted).await?;
-        }
+        self.events_tx.send(ChainEvent::CatchupCompleted).await?;
         Ok(())
     }
-}
 
-async fn close_split_websocket<S>(
-    ws_write: &mut futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<S>, Message>,
-) -> anyhow::Result<()>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    tokio::time::timeout(std::time::Duration::from_secs(5), ws_write.close())
-        .await
-        .map_err(|_| anyhow::anyhow!("canton WebSocket close reply timed out"))?
-        .map_err(|e| anyhow::anyhow!("failed to flush canton WebSocket close reply: {e}"))
-}
-
-/// Main event loop with reconnection logic and exponential backoff.
-async fn run_canton_event_loop(
-    config: CantonConfig,
-    events_tx: mpsc::Sender<ChainEvent>,
-    backlog: Backlog,
-) {
-    let client = match CantonClient::new(&config).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(%e, "failed to create canton client — canton indexer disabled");
-            return;
-        }
-    };
-
-    // Seed counter from backlog checkpoint
-    let mut counter = backlog.processed_block(Chain::Canton).await.unwrap_or(0);
-
-    tracing::info!(initial_offset = counter, "canton event loop starting");
-
-    let catchup_target = match client.fetch_ledger_end().await {
-        Ok(offset) => offset,
-        Err(e) => {
-            tracing::warn!(%e, "failed to fetch ledger end — assuming already caught up");
-            counter
-        }
-    };
-
-    // Track whether we've emitted CatchupCompleted
-    let mut catchup_completed = false;
-
-    // If already at or past the ledger end, emit CatchupCompleted immediately
-    if counter >= catchup_target {
-        tracing::info!(counter, catchup_target, "canton already caught up");
-        if events_tx.send(ChainEvent::CatchupCompleted).await.is_err() {
-            tracing::error!("canton event channel closed");
-            return;
-        }
-        catchup_completed = true;
-    } else {
-        tracing::info!(
-            counter,
-            catchup_target,
-            remaining = catchup_target.saturating_sub(counter),
-            "canton catching up"
-        );
-    }
-
-    // Exponential backoff: 1s, 2s, 4s, 8s, 16s, capped at 30s
-    const MIN_BACKOFF_SECS: u64 = 1;
-    const MAX_BACKOFF_SECS: u64 = 30;
-    let mut backoff_secs = MIN_BACKOFF_SECS;
-
-    loop {
-        match subscribe_and_process(
-            &client,
-            &events_tx,
-            &mut counter,
-            catchup_target,
-            &mut catchup_completed,
-        )
-        .await
-        {
-            Ok(()) => {
-                tracing::info!("canton WebSocket stream ended cleanly, reconnecting...");
-                // Reset backoff on clean disconnect
-                backoff_secs = MIN_BACKOFF_SECS;
-            }
-            Err(e) => {
-                tracing::warn!(%e, backoff_secs, "canton WebSocket error, reconnecting...");
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-        // Exponential backoff with cap
-        backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF_SECS);
-    }
-}
-
-/// Connect to the Canton WebSocket, subscribe, and process events until disconnection.
-async fn subscribe_and_process(
-    client: &CantonClient,
-    events_tx: &mpsc::Sender<ChainEvent>,
-    counter: &mut u64,
-    catchup_target: u64,
-    catchup_completed: &mut bool,
-) -> anyhow::Result<()> {
-    let jwt_token = client.generate_jwt()?;
-
-    let ws_url = format!("{}/v2/updates", client.config.json_api_ws_url);
-
-    let mut request = ws_url.into_client_request()?;
-    request.headers_mut().insert(
-        header::SEC_WEBSOCKET_PROTOCOL,
-        format!("jwt.token.{jwt_token}, daml.ws.auth").parse()?,
-    );
-
-    let (ws_stream, _) = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        tokio_tungstenite::connect_async(request),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("canton WebSocket connect timed out"))??;
-    let (mut ws_write, mut ws_read) = ws_stream.split();
-
-    tracing::info!("canton WebSocket connected");
-
-    // Send subscription message using updateFormat (Canton 3.4+).
-    // TRANSACTION_SHAPE_LEDGER_EFFECTS gives us ExercisedEvent which we use
-    // to verify the SignBidirectional choice was exercised on a Signer:Signer.
-    let mut filters_by_party = serde_json::Map::new();
-    filters_by_party.insert(client.config.party_id.clone(), serde_json::json!({}));
-
-    let subscribe_msg = ledger_api::GetUpdatesRequest {
-        begin_exclusive: *counter,
-        update_format: ledger_api::UpdateFormat {
-            include_transactions: ledger_api::TransactionFormat {
-                transaction_shape: "TRANSACTION_SHAPE_LEDGER_EFFECTS".to_string(),
-                event_format: ledger_api::EventFormat {
-                    filters_by_party,
-                    verbose: true,
-                },
-            },
-        },
-    };
-    tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        ws_write.send(Message::Text(serde_json::to_string(&subscribe_msg)?.into())),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("canton WebSocket subscription send timed out"))??;
-
-    // Process incoming messages with stall watchdog
-    let stall_timeout = std::time::Duration::from_secs(60);
-    let mut last_ws_msg = tokio::time::Instant::now();
-    let mut watchdog = tokio::time::interval(std::time::Duration::from_secs(5));
-
-    loop {
-        let msg = tokio::select! {
-            maybe = ws_read.next() => {
-                match maybe {
-                    Some(msg) => {
-                        last_ws_msg = tokio::time::Instant::now();
-                        msg?
-                    }
-                    None => break,
-                }
-            }
-            _ = watchdog.tick() => {
-                if last_ws_msg.elapsed() > stall_timeout {
-                    anyhow::bail!("canton WebSocket stalled: no message for {stall_timeout:?}");
-                }
-                continue;
-            }
-        };
-        let text = match msg {
-            Message::Text(t) => t,
-            // tokio-tungstenite auto-sends pong replies; manual Pong would double-respond
-            Message::Close(_) => {
-                tracing::info!("canton WebSocket received close frame");
-                if let Err(e) = close_split_websocket(&mut ws_write).await {
-                    tracing::debug!(%e, "failed to flush canton WebSocket close reply");
-                }
-                break;
-            }
-            _ => continue,
+    async fn process_next_block(&mut self) -> bool {
+        let Some(update) = self.next_update().await else {
+            return false;
         };
 
-        let msg: ledger_api::UpdateMessage = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(%e, "failed to parse canton WebSocket message");
-                continue;
-            }
-        };
-
-        match msg.update {
-            Some(ledger_api::Update::Transaction { value }) => {
-                *counter = value.offset;
-
-                for event in &value.events {
-                    process_canton_event(
-                        event,
-                        &value.events,
-                        events_tx,
-                        &client.config.signer_contract_id,
-                    )
-                    .await;
-                }
-            }
-            Some(ledger_api::Update::OffsetCheckpoint { value }) => {
-                *counter = value.offset;
-            }
-            None => {
-                if msg.error.is_some() {
-                    tracing::warn!(error = ?msg.error, "canton ledger stream error");
-                }
-                continue;
-            }
+        while let Err(err) = self.process_update(&update).await {
+            tracing::warn!(?err, "live block processing failed; retrying");
+            tokio::time::sleep(Self::RETRY_DELAY).await;
         }
 
-        if events_tx.send(ChainEvent::Block(*counter)).await.is_err() {
-            tracing::error!("canton event channel closed");
-            return Ok(());
-        }
-
-        if !*catchup_completed && *counter >= catchup_target {
-            tracing::info!(
-                counter = *counter,
-                catchup_target,
-                "canton catchup completed"
-            );
-            if events_tx.send(ChainEvent::CatchupCompleted).await.is_err() {
-                tracing::error!("canton event channel closed");
-                return Ok(());
-            }
-            *catchup_completed = true;
-        }
+        true
     }
-
-    Ok(())
 }
 
 /// Process a single Canton event from a WebSocket transaction update.
@@ -394,8 +397,7 @@ async fn process_canton_event(
                 };
                 let request_id = canton_event.generate_request_id();
                 let entropy: [u8; 32] = keccak256(request_id).into();
-                let boxed: crate::stream::ops::SignatureEventBox = Box::new(canton_event);
-                match boxed.generate_sign_request(entropy) {
+                match canton_event.generate_sign_request(entropy) {
                     Ok(indexed) => {
                         if events_tx
                             .send(ChainEvent::SignRequest(indexed))
@@ -575,4 +577,226 @@ pub fn parse_der_signature_with_recovery(
             .ok_or_else(|| anyhow::anyhow!("invalid s"))?,
         recovery_id,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indexer_canton::der_encode_signature;
+    use k256::AffinePoint;
+    use serde_json::json;
+
+    fn sample_tx_params() -> contracts::TxParams {
+        contracts::TxParams::EvmType2TxParams(contracts::EvmType2TransactionParams {
+            chain_id: format!("{:064x}", 1u64),
+            nonce: format!("{:064x}", 0u64),
+            max_priority_fee_per_gas: format!("{:064x}", 1u64),
+            max_fee_per_gas: format!("{:064x}", 2u64),
+            gas_limit: format!("{:064x}", 21_000u64),
+            to: Some(hex::encode([3u8; 20])),
+            value: format!("{:064x}", 0u64),
+            calldata: String::new(),
+            access_list: Vec::new(),
+        })
+    }
+
+    fn sample_sign_event() -> contracts::SignBidirectionalRequestedEvent {
+        contracts::SignBidirectionalRequestedEvent {
+            operators: vec!["operator-1".to_string()],
+            sender: hex::encode([7u8; 32]),
+            requester: "requester-1".to_string(),
+            sig_network: "testnet".to_string(),
+            tx_params: sample_tx_params(),
+            caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
+            key_version: 0,
+            path: "m/0".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: Chain::Ethereum.to_string(),
+            params: "{}".to_string(),
+            output_deserialization_schema: "[]".to_string(),
+            respond_serialization_schema: "[]".to_string(),
+        }
+    }
+
+    fn sample_created_event(signatories: &[&str]) -> ledger_api::CreatedEvent {
+        ledger_api::CreatedEvent {
+            contract_id: "cid-1".to_string(),
+            template_id: ledger_api::templates::SIGN_BIDIRECTIONAL_EVENT.to_string(),
+            payload: json!({}),
+            created_event_blob: None,
+            signatories: signatories.iter().map(|s| (*s).to_string()).collect(),
+            witness_parties: Vec::new(),
+            node_id: Some(1),
+            package_name: None,
+        }
+    }
+
+    fn sample_exercised_event(contract_id: &str) -> ledger_api::Event {
+        ledger_api::Event::ExercisedEvent(ledger_api::ExercisedEvent {
+            contract_id: contract_id.to_string(),
+            template_id: "pkg:Signer:Signer".to_string(),
+            choice: "SignBidirectional".to_string(),
+            acting_parties: Vec::new(),
+            consuming: false,
+            node_id: Some(2),
+            last_descendant_node_id: Some(2),
+            package_name: None,
+        })
+    }
+
+    fn sample_canton_signature() -> contracts::CantonSignature {
+        let signature = Signature::new(AffinePoint::GENERATOR, k256::Scalar::from(9u64), 0);
+        let der = hex::encode(der_encode_signature(&signature).expect("signature should encode"));
+        contracts::CantonSignature::EcdsaSig(contracts::EcdsaSigData {
+            der,
+            recovery_id: 0,
+        })
+    }
+
+    #[test]
+    fn catchup_range_without_checkpoint_starts_at_one() {
+        let offsets: Vec<_> = catchup_offset_range(0, 5).collect();
+        assert_eq!(offsets, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn catchup_range_uses_checkpoint_plus_one() {
+        let offsets: Vec<_> = catchup_offset_range(5, 9).collect();
+        assert_eq!(offsets, vec![6, 7, 8]);
+    }
+
+    #[test]
+    fn catchup_range_empty_when_caught_up() {
+        let offsets: Vec<_> = catchup_offset_range(9, 9).collect();
+        assert!(offsets.is_empty());
+    }
+
+    #[test]
+    fn catchup_range_empty_when_checkpoint_past_anchor() {
+        let offsets: Vec<_> = catchup_offset_range(12, 9).collect();
+        assert!(offsets.is_empty());
+    }
+
+    #[test]
+    fn verify_sign_event_rejects_missing_operator_signatory() {
+        let event = sample_sign_event();
+        let created = sample_created_event(&["requester-1"]);
+        let tx_events = vec![sample_exercised_event("signer-contract")];
+
+        let err = verify_sign_event(&event, &created, &tx_events, "signer-contract")
+            .expect_err("verification should fail");
+        assert!(err.to_string().contains("operator operator-1"));
+    }
+
+    #[test]
+    fn verify_sign_event_rejects_missing_requester_signatory() {
+        let event = sample_sign_event();
+        let created = sample_created_event(&["operator-1"]);
+        let tx_events = vec![sample_exercised_event("signer-contract")];
+
+        let err = verify_sign_event(&event, &created, &tx_events, "signer-contract")
+            .expect_err("verification should fail");
+        assert!(err.to_string().contains("requester requester-1"));
+    }
+
+    #[test]
+    fn verify_sign_event_rejects_missing_exercised_event() {
+        let event = sample_sign_event();
+        let created = sample_created_event(&["operator-1", "requester-1"]);
+        let tx_events = Vec::new();
+
+        let err = verify_sign_event(&event, &created, &tx_events, "signer-contract")
+            .expect_err("verification should fail");
+        assert!(err.to_string().contains("no ExercisedEvent"));
+    }
+
+    #[test]
+    fn parse_signature_responded_event_rejects_invalid_hex() {
+        let created = ledger_api::CreatedEvent {
+            contract_id: "cid-respond".to_string(),
+            template_id: ledger_api::templates::SIGNATURE_RESPONDED_EVENT.to_string(),
+            payload: json!({
+                "requestId": "zz",
+                "responder": "alice",
+                "signature": {
+                    "tag": "EcdsaSig",
+                    "value": {
+                        "der": "00",
+                        "recoveryId": "0"
+                    }
+                }
+            }),
+            created_event_blob: None,
+            signatories: Vec::new(),
+            witness_parties: Vec::new(),
+            node_id: None,
+            package_name: None,
+        };
+
+        let err = parse_signature_responded_event(&created).expect_err("invalid hex should fail");
+        assert!(err.to_string().contains("invalid request_id hex"));
+    }
+
+    #[test]
+    fn parse_respond_bidirectional_event_parses_valid_payload() {
+        let created = ledger_api::CreatedEvent {
+            contract_id: "cid-respond-bidir".to_string(),
+            template_id: ledger_api::templates::RESPOND_BIDIRECTIONAL_EVENT.to_string(),
+            payload: json!({
+                "requestId": hex::encode([5u8; 32]),
+                "responder": "alice",
+                "serializedOutput": hex::encode([8u8, 9u8]),
+                "signature": sample_canton_signature(),
+            }),
+            created_event_blob: None,
+            signatories: Vec::new(),
+            witness_parties: Vec::new(),
+            node_id: None,
+            package_name: None,
+        };
+
+        let event = parse_respond_bidirectional_event(&created).expect("payload should parse");
+        assert_eq!(event.request_id, [5u8; 32]);
+        assert_eq!(event.responder, "alice");
+        assert_eq!(event.serialized_output, vec![8u8, 9u8]);
+        assert_eq!(event.signature.recovery_id, 0);
+    }
+
+    #[tokio::test]
+    async fn process_canton_event_routes_respond_without_catchup_completed() {
+        let created = ledger_api::CreatedEvent {
+            contract_id: "cid-respond".to_string(),
+            template_id: ledger_api::templates::SIGNATURE_RESPONDED_EVENT.to_string(),
+            payload: json!({
+                "requestId": hex::encode([6u8; 32]),
+                "responder": "alice",
+                "signature": sample_canton_signature(),
+            }),
+            created_event_blob: None,
+            signatories: Vec::new(),
+            witness_parties: Vec::new(),
+            node_id: None,
+            package_name: None,
+        };
+        let (events_tx, mut events_rx) = crate::stream::channel();
+
+        process_canton_event(
+            &ledger_api::Event::CreatedEvent(created),
+            &[],
+            &events_tx,
+            "signer-contract",
+        )
+        .await;
+
+        match events_rx.recv().await {
+            Some(ChainEvent::Respond(SignatureRespondedEvent::Canton(event))) => {
+                assert_eq!(event.request_id, [6u8; 32]);
+            }
+            other => panic!("expected Canton respond event, got {other:?}"),
+        }
+        assert!(
+            events_rx.try_recv().is_err(),
+            "unexpected extra event emitted"
+        );
+    }
 }

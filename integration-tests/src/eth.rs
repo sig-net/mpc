@@ -197,7 +197,11 @@ where
             params: "{}".to_string(),
         };
 
-        let nonce = contract.provider().get_transaction_count(sender).pending().await?;
+        let nonce = contract
+            .provider()
+            .get_transaction_count(sender)
+            .pending()
+            .await?;
 
         match contract
             .sign(request)

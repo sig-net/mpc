@@ -66,13 +66,18 @@ jobs:
       - name: Install cargo-nextest
         run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
 
+      - name: Presetup binaries
+        run: ./setup.sh
+        env:
+          MPC_ENABLE_HELIOS: 1
+
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.
       - name: Build Chain-Signatures Integration Tests
-        run: cargo build -p integration-tests --tests
+        run: cargo build -p integration-tests --tests --features helios
 
       - name: Test
-        run: cargo nextest run -p integration-tests --profile fixture
+        run: cargo nextest run -p integration-tests --features helios --profile fixture
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
