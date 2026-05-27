@@ -870,7 +870,7 @@ mod tests {
             dest: "0x1234567890123456789012345678901234567890".to_string(),
             params: "{}".to_string(),
             output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             request_id: [id; 32],
             from_address: Address::ZERO,
             nonce: 0,
@@ -894,7 +894,7 @@ mod tests {
             params: "".to_string(),
             program_id: Pubkey::new_from_array(program_id),
             output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         })
     }
 

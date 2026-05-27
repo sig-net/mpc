@@ -811,7 +811,7 @@ mod tests {
             params: "".to_string(),
             program_id,
             output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         };
 
         let indexed = IndexedSignRequest::sign_bidirectional(

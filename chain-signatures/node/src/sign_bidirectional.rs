@@ -97,63 +97,70 @@ impl BidirectionalTx {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Output(pub HashMap<String, DynSolValue>);
+pub struct Output {
+    fields: HashMap<String, DynSolValue>,
+    /// `true` when this `Output` was built from a real ETH contract-call return
+    /// (via `TransactionOutput::from_call_result`); `false` for the
+    /// `non_contract_call_output()` path (plain transfers). Drives whether
+    /// `serialize` encodes real data or synthesizes per-schema defaults.
+    from_contract_call: bool,
+}
 
 impl Output {
-    pub fn is_function_call(&self) -> bool {
-        self.0
-            .get("is_function_call")
-            .is_some_and(|v| v.as_bool().unwrap_or(false))
+    pub fn is_contract_call(&self) -> bool {
+        self.from_contract_call
     }
 
-    pub fn serialize(&self, format: SerDeserFormat, schema: &[u8]) -> anyhow::Result<Vec<u8>> {
+    /// Encode this output for the given format using `schema_json_bytes` as
+    /// the field shape. For non-contract-call outputs (plain transfers),
+    /// synthesizes per-field default values from the schema. Real decoded
+    /// data from `from_call_result` flows through unchanged.
+    pub fn serialize(
+        &self,
+        format: SerDeserFormat,
+        schema_json_bytes: &[u8],
+    ) -> anyhow::Result<Vec<u8>> {
+        let schema = parse_schema_fields(schema_json_bytes)?;
+        let data_owned;
+        let data = if self.is_contract_call() {
+            self
+        } else {
+            data_owned = default_output_for_non_contract_call(&schema)?;
+            &data_owned
+        };
         match format {
-            SerDeserFormat::Abi => self.serialize_abi(schema),
-            SerDeserFormat::Borsh => self.serialize_borsh(schema),
+            SerDeserFormat::Abi => encode_abi(data, &schema),
+            SerDeserFormat::Borsh => encode_borsh(data, &schema),
         }
     }
+}
 
-    fn serialize_abi(&self, schema: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let schema: Vec<AbiField> = serde_json::from_slice(schema)
-            .map_err(|e| anyhow::anyhow!("Failed to get abi fields from schema: {e:?}"))?;
+fn encode_abi(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
+    let values = schema
+        .iter()
+        .map(|field| match data.fields.get(&field.name) {
+            Some(value) => Ok(value.clone()),
+            None => Err(anyhow::anyhow!(
+                "Missing required field '{}' in output",
+                field.name
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    encode_abi_values(schema, &values)
+}
 
-        let mut data_to_encode = self.clone();
-        if !self.is_function_call() {
-            data_to_encode = create_abi_data(schema.clone())?;
-        }
-
-        let values = schema
-            .iter()
-            .map(|field| match data_to_encode.0.get(&field.name) {
-                Some(value) => Ok(value.clone()),
-                None => Err(anyhow::anyhow!(
-                    "Missing required field '{}' in output",
-                    field.name
-                )),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        encode_abi_values(&schema, &values)
-    }
-
-    /// Serialize `Output` to Borsh using the **order from `schema_json_bytes`**
-    /// Schema is a JSON array like: `[{"name":"...", "type":"..."}, ...]`
-    pub fn serialize_borsh(&self, schema_json_bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let fields: Vec<AbiField> = parse_borsh_schema_fields(schema_json_bytes)?;
-
-        tracing::info!("serialize borsh schema: {fields:?}");
-
-        let mut buf = Vec::with_capacity(128);
-
-        assert!(fields.len() == 1);
-        let val = self
-            .0
-            .get(&fields[0].name)
-            .ok_or_else(|| anyhow::anyhow!("missing value for field '{}'", fields[0].name))?;
-        serialize_dynsol(&mut buf, val)?;
-
-        Ok(buf)
-    }
+fn encode_borsh(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
+    assert!(
+        schema.len() == 1,
+        "borsh schema must have exactly one field"
+    );
+    let val = data
+        .fields
+        .get(&schema[0].name)
+        .ok_or_else(|| anyhow::anyhow!("missing value for field '{}'", schema[0].name))?;
+    let mut buf = Vec::with_capacity(128);
+    serialize_dynsol(&mut buf, val)?;
+    Ok(buf)
 }
 
 #[derive(Debug)]
@@ -163,10 +170,13 @@ pub struct TransactionOutput {
 }
 
 impl TransactionOutput {
-    pub fn non_function_call_output() -> Self {
+    pub fn non_contract_call_output() -> Self {
         Self {
             success: true,
-            output: Output(HashMap::new()),
+            output: Output {
+                fields: HashMap::new(),
+                from_contract_call: false,
+            },
         }
     }
 
@@ -199,7 +209,10 @@ impl TransactionOutput {
 
         Ok(TransactionOutput {
             success: true,
-            output: Output(output_map),
+            output: Output {
+                fields: output_map,
+                from_contract_call: true,
+            },
         })
     }
 }
@@ -286,14 +299,14 @@ pub fn sign_and_hash_eip1559_from_unsigned(
     let nonce: u64 = rlp.val_at::<u64>(1)?;
 
     // Re-encode with signature fields appended
-    let mut srlp = RlpStream::new_list(12);
+    let mut srlp = EthereumTxRlp::new_list(12);
     for i in 0..9 {
-        srlp.append_raw(rlp.at(i)?.as_raw(), 1);
+        srlp.append_raw_field(rlp.at(i)?.as_raw());
     }
     let y: u8 = if y_parity { 1 } else { 0 };
-    srlp.append(&y);
-    srlp.append(&r);
-    srlp.append(&s);
+    srlp.append_u8(y);
+    srlp.append_uint_bytes(r);
+    srlp.append_uint_bytes(s);
 
     let srlp_body = srlp.as_raw(); // &[u8]
     let mut signed_bytes = Vec::with_capacity(1 + srlp_body.len());
@@ -319,18 +332,63 @@ pub fn sign_and_hash_legacy_from_unsigned(
     );
 
     let nonce: u64 = rlp.val_at::<u64>(0)?;
-    let mut out = RlpStream::new_list(9);
+    let mut out = EthereumTxRlp::new_list(9);
     for i in 0..6 {
-        out.append_raw(rlp.at(i)?.as_raw(), 1);
+        out.append_raw_field(rlp.at(i)?.as_raw());
     }
     let v: u64 = 35 + 2 * chain_id.unwrap_or(0) + if y_parity { 1 } else { 0 };
-    out.append(&v);
-    out.append(&r);
-    out.append(&s);
+    out.append_u64(v);
+    out.append_uint_bytes(r);
+    out.append_uint_bytes(s);
 
-    let signed_bytes = out.out().to_vec();
+    let signed_bytes = out.into_vec();
     let hash = alloy_primitives::keccak256(&signed_bytes);
     Ok((hash.into(), nonce))
+}
+
+struct EthereumTxRlp {
+    stream: RlpStream,
+}
+
+impl EthereumTxRlp {
+    fn new_list(len: usize) -> Self {
+        Self {
+            stream: RlpStream::new_list(len),
+        }
+    }
+
+    fn append_raw_field(&mut self, raw: &[u8]) {
+        self.stream.append_raw(raw, 1);
+    }
+
+    fn append_u8(&mut self, value: u8) {
+        self.stream.append(&value);
+    }
+
+    fn append_u64(&mut self, value: u64) {
+        self.stream.append(&value);
+    }
+
+    fn append_uint_bytes(&mut self, value: &[u8]) {
+        let first_nonzero = value
+            .iter()
+            .position(|&byte| byte != 0)
+            .unwrap_or(value.len());
+        if first_nonzero == value.len() {
+            self.stream.append_empty_data();
+            return;
+        }
+
+        self.stream.append(&value[first_nonzero..].to_vec());
+    }
+
+    fn as_raw(&self) -> &[u8] {
+        self.stream.as_raw()
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        self.stream.out().to_vec()
+    }
 }
 
 /// Get the x coordinate of a point, as a scalar
@@ -362,25 +420,32 @@ pub fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Sc
     public_key_to_address(&secp_pk)
 }
 
-fn create_abi_data(schema: Vec<AbiField>) -> anyhow::Result<Output> {
+/// Synthesize per-field default values for an `Output` whose source tx was
+/// not a contract function call. The destination chain's contract still needs
+/// shaped bytes back, so we fill defaults from the schema: `bool` → `true`,
+/// `string` → `"non_function_call_success"`. Other field types are unsupported.
+fn default_output_for_non_contract_call(schema: &[AbiField]) -> anyhow::Result<Output> {
     let mut data = HashMap::new();
     for field in schema {
-        if field.typ == "string" {
-            data.insert(
-                field.name,
-                DynSolValue::String("non_function_call_success".to_string()),
-            );
-        } else if field.typ == "bool" {
-            data.insert(field.name, DynSolValue::Bool(true));
-        } else {
-            anyhow::bail!(
-                "Cannot serialize non-function call success as type {}",
-                field.typ
-            );
+        match field.typ.as_str() {
+            "string" => {
+                data.insert(
+                    field.name.clone(),
+                    DynSolValue::String("non_function_call_success".to_string()),
+                );
+            }
+            "bool" => {
+                data.insert(field.name.clone(), DynSolValue::Bool(true));
+            }
+            other => anyhow::bail!(
+                "cannot synthesize default for non-function-call output of type {other}"
+            ),
         }
     }
-
-    Ok(Output(data))
+    Ok(Output {
+        fields: data,
+        from_contract_call: false,
+    })
 }
 
 fn encode_abi_values(schema: &[AbiField], values: &[DynSolValue]) -> anyhow::Result<Vec<u8>> {
@@ -474,7 +539,11 @@ fn write_i256<W: Write>(w: &mut W, x: I256, size: usize) -> anyhow::Result<()> {
         .map_err(Into::into)
 }
 
-fn parse_borsh_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<AbiField>> {
+/// Parse a schema JSON describing the response shape. Accepts a JSON array of
+/// `{name, type}` objects (canonical form), a single object (treated as a
+/// one-field schema), or a bare string (treated as a single typed field with
+/// an empty name).
+fn parse_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<AbiField>> {
     let v: Value = serde_json::from_slice(schema_json_bytes)
         .map_err(|e| anyhow::anyhow!("schema JSON parse failed: {e:?}"))?;
 
@@ -503,4 +572,46 @@ pub struct SignBidirectionalSignature {
     pub public_key: mpc_crypto::PublicKey,
     pub indexed: IndexedSignRequest,
     pub signature: Signature,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sign_and_hash_eip1559_from_unsigned;
+    use alloy::consensus::{SignableTransaction, TxEip1559};
+    use alloy::eips::eip2718::Encodable2718;
+    use alloy::primitives::{Bytes, FixedBytes, Signature, TxKind, U256};
+
+    #[test]
+    fn eip1559_hash_matches_alloy_for_create_with_leading_zero_r() {
+        let tx = TxEip1559 {
+            chain_id: 31_337,
+            nonce: 3,
+            gas_limit: 100_000,
+            max_fee_per_gas: 100_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: TxKind::Create,
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: Bytes::new(),
+        };
+        let unsigned = tx.encoded_for_signing();
+        let mut r = [0u8; 32];
+        let mut s = [0u8; 32];
+        r[31] = 1;
+        s[31] = 2;
+
+        let (hash, nonce) = sign_and_hash_eip1559_from_unsigned(&unsigned, &r, &s, true).unwrap();
+
+        let signed = tx
+            .into_signed(Signature::from_scalars_and_parity(
+                FixedBytes::from_slice(&r),
+                FixedBytes::from_slice(&s),
+                true,
+            ))
+            .encoded_2718();
+        let expected_hash: [u8; 32] = alloy::primitives::keccak256(&signed).into();
+
+        assert_eq!(hash, expected_hash);
+        assert_eq!(nonce, 3);
+    }
 }

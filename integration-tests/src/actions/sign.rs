@@ -20,6 +20,7 @@ use generic_array::GenericArray;
 use k256::Secp256k1;
 use mpc_contract::primitives::SignRequest;
 use mpc_crypto::ScalarExt as _;
+use mpc_node::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
@@ -42,65 +43,6 @@ use crate::cluster::Cluster;
 use crate::containers;
 
 use signet_program::{RespondBidirectionalEvent, SignatureRespondedEvent};
-
-// ChainSignatures contract ABI
-alloy::sol! {
-    #[sol(rpc)]
-    interface ChainSignatures {
-        struct SignRequest {
-            bytes32 payload;
-            string path;
-            uint32 keyVersion;
-            string algo;
-            string dest;
-            string params;
-        }
-
-        struct AffinePoint {
-            uint256 x;
-            uint256 y;
-        }
-
-        struct Signature {
-            AffinePoint bigR;
-            uint256 s;
-            uint8 recoveryId;
-        }
-
-        function sign(SignRequest memory _request) external payable;
-        function getSignatureDeposit() external view returns (uint256);
-
-        event SignatureRequested(
-            address indexed sender,
-            bytes32 payload,
-            uint32 keyVersion,
-            uint256 deposit,
-            uint256 chainId,
-            string path,
-            string algo,
-            string dest,
-            string params
-        );
-
-        event SignatureResponded(
-            bytes32 indexed requestId,
-            address indexed responder,
-            Signature signature
-        );
-    }
-
-    // Event encoding for request_id calculation
-    event SignatureRequestedEncoding(
-        address sender,
-        bytes payload,
-        string path,
-        uint32 keyVersion,
-        uint256 chainId,
-        string algo,
-        string dest,
-        string params
-    );
-}
 
 pub const SIGN_GAS: Gas = Gas::from_tgas(50);
 pub const SIGN_DEPOSIT: NearToken = NearToken::from_yoctonear(1);

@@ -664,15 +664,34 @@ async fn wait_for_rpc(endpoint: &str) -> anyhow::Result<()> {
 }
 
 fn derive_secret_key(mnemonic: &str) -> anyhow::Result<String> {
-    use ethers::signers::{coins_bip39::English, MnemonicBuilder};
+    use std::str::FromStr;
 
-    let wallet = MnemonicBuilder::<English>::default()
-        .phrase(mnemonic)
-        .derivation_path("m/44'/60'/0'/0/0")?
-        .build()?;
-    let bytes = wallet.signer().to_bytes();
+    use bip32::{DerivationPath, XPrv};
+    use bip39::Mnemonic;
+
+    let mnemonic = Mnemonic::from_str(mnemonic)?;
+    let seed = mnemonic.to_seed("");
+    let derivation_path = DerivationPath::from_str("m/44'/60'/0'/0/0")?;
+    let child_key = XPrv::derive_from_path(seed, &derivation_path)?;
+    let bytes = child_key.private_key().to_bytes();
 
     Ok(format!("0x{}", hex::encode(bytes)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_secret_key;
+
+    #[test]
+    fn derive_secret_key_matches_hardhat_default_account() {
+        let mnemonic = "test test test test test test test test test test test junk";
+        let secret_key = derive_secret_key(mnemonic).unwrap();
+
+        assert_eq!(
+            secret_key,
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+        );
+    }
 }
 
 fn shares_to_triples(

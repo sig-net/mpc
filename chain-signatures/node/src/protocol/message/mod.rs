@@ -162,11 +162,11 @@ impl MessageInbox {
         }
     }
 
-    fn expire_pending(pending: &mut VecDeque<(Ciphered, Instant)>, timeout: Duration) {
+    fn expire(pending: &mut VecDeque<(Ciphered, Instant)>, timeout: Duration) {
         pending.retain(|(_, timestamp)| timestamp.elapsed() < timeout);
     }
 
-    fn decrypt_pending(
+    fn decrypt(
         &mut self,
         pending: &mut VecDeque<(Ciphered, Instant)>,
         cipher_sk: &hpke::SecretKey,
@@ -202,7 +202,7 @@ impl MessageInbox {
         messages
     }
 
-    async fn publish_decrypted(&mut self, messages: Vec<Message>) -> usize {
+    async fn process(&mut self, messages: Vec<Message>) -> usize {
         self.filter.try_update();
 
         let messages = self.filter(messages);
@@ -373,11 +373,11 @@ impl MessageInbox {
 
                     let participants = contract.participant_map().await;
 
-                    Self::expire_pending(&mut pending, expiration);
-                    let messages = self.decrypt_pending(&mut pending, &cipher_sk, &participants);
+                    Self::expire(&mut pending, expiration);
+                    let messages = self.decrypt(&mut pending, &cipher_sk, &participants);
                     retry_decrypt.extend(pending);
 
-                    let messages_len = self.publish_decrypted(messages).await;
+                    let messages_len = self.process(messages).await;
 
                     crate::metrics::messaging::NUM_RECEIVED_ENCRYPTED_TOTAL
                         .inc_by(messages_len as f64);
@@ -385,9 +385,9 @@ impl MessageInbox {
                 _ = contract.next_state(), if !retry_decrypt.is_empty() => {
                     let participants = contract.participant_map().await;
 
-                    Self::expire_pending(&mut retry_decrypt, expiration);
-                    let messages = self.decrypt_pending(&mut retry_decrypt, &cipher_sk, &participants);
-                    self.publish_decrypted(messages).await;
+                    Self::expire(&mut retry_decrypt, expiration);
+                    let messages = self.decrypt(&mut retry_decrypt, &cipher_sk, &participants);
+                    self.process(messages).await;
                 }
                 Ok(()) = config.changed() => {
                     let config = config.borrow();

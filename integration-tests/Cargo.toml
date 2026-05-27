@@ -46,9 +46,9 @@ solana-client.workspace = true
 solana-transaction-status.workspace = true
 
 # crypto dependencies
+bip32 = "0.5.3"
+bip39 = "2.2.0"
 ecdsa = "0.16.9"
-ethers-core.workspace = true
-ethers = { version = "2.0.13", features = ["abigen"] }
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
 elliptic-curve = { version = "0.13.5", default-features = false }
 k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
