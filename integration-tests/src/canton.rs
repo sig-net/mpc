@@ -193,8 +193,8 @@ pub struct CantonSandbox {
     pub signer_cid: String,
     pub signer_template_id: String,
     pub signer_disclosure: DisclosedContract,
-    pub runtime_client: CantonTestClient,
-    pub client: CantonTestClient,
+    pub sig_network_runtime_client: CantonTestClient,
+    pub requester_workflow_client: CantonTestClient,
 }
 
 impl CantonSandbox {
@@ -359,7 +359,7 @@ canton.participants.sandbox.ledger-api {{
             .create_user(&requester_workflow_user_id, &requester, app_rights)
             .await?;
 
-        let runtime_client = CantonTestClient::new(canton_test_client_config(
+        let sig_network_runtime_client = CantonTestClient::new(canton_test_client_config(
             &base_url,
             &ws_url,
             oidc_provider.token_url(),
@@ -368,7 +368,7 @@ canton.participants.sandbox.ledger-api {{
         ))
         .await?;
 
-        let client = CantonTestClient::new(canton_test_client_config(
+        let requester_workflow_client = CantonTestClient::new(canton_test_client_config(
             &base_url,
             &ws_url,
             oidc_provider.token_url(),
@@ -378,8 +378,8 @@ canton.participants.sandbox.ledger-api {{
         .await?;
 
         // The Signer contract is owned by SigNetwork and created through the
-        // runtime client so later runtime choices use the same party/user pair.
-        let signer_result = runtime_client
+        // sig_network_runtime_client so later runtime choices use the same party/user pair.
+        let signer_result = sig_network_runtime_client
             .create_contract(
                 &[&sig_network],
                 "#daml-signer:Signer:Signer",
@@ -388,7 +388,7 @@ canton.participants.sandbox.ledger-api {{
             .await?;
         let (signer_cid, signer_template_id) = find_created_contract(&signer_result, "Signer")?;
 
-        let signer_disclosure = runtime_client
+        let signer_disclosure = sig_network_runtime_client
             .get_disclosed_contract(&[&sig_network], "#daml-signer:Signer:Signer", &signer_cid)
             .await?;
 
@@ -406,8 +406,8 @@ canton.participants.sandbox.ledger-api {{
             signer_cid,
             signer_template_id,
             signer_disclosure,
-            runtime_client,
-            client,
+            sig_network_runtime_client,
+            requester_workflow_client,
         })
     }
 
@@ -446,7 +446,7 @@ canton.participants.sandbox.ledger-api {{
         let event = test_sign_request_event(self, &case);
         let payload = test_sign_request_payload(&event);
         let sign_request = self
-            .client
+            .requester_workflow_client
             .create_contract(
                 &[&self.operator_party, &self.requester_party],
                 "#daml-signer:Signer:SignRequest",
@@ -455,7 +455,7 @@ canton.participants.sandbox.ledger-api {{
             .await?;
         let sign_request_cid = find_created_contract(&sign_request, "SignRequest")?.0;
 
-        self.client
+        self.requester_workflow_client
             .exercise_choice(
                 &[&self.requester_party],
                 &self.signer_template_id,

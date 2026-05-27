@@ -74,7 +74,7 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
         .canton
         .as_ref()
         .context("canton sandbox not available")?;
-    let client = &canton.client;
+    let client = &canton.requester_workflow_client;
 
     let root_pk: k256::AffinePoint = nodes.root_public_key().await?.into_affine_point();
 

@@ -379,7 +379,7 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     let der_hex = hex::encode(&der_bytes);
 
     sandbox
-        .runtime_client
+        .sig_network_runtime_client
         .exercise_choice(
             &[&sandbox.party_id],
             &sandbox.signer_template_id,
