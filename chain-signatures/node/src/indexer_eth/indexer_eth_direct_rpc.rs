@@ -29,10 +29,6 @@ pub struct RpcEthereumClient {
 }
 
 impl RpcEthereumClient {
-    const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-    const MESSAGE_TIMEOUT: Duration = Duration::from_secs(60);
-    const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-
     pub fn new(endpoint: &str) -> Self {
         Self {
             http: reqwest::Client::new(),
@@ -43,20 +39,20 @@ impl RpcEthereumClient {
 
     pub async fn subscribe(&self) -> EthereumConnection {
         let Some(ws_url) = websocket_url(&self.url) else {
-            tracing::info!(rpc_url = %self.url, "ethereum RPC URL has no websocket scheme");
+            tracing::info!("ethereum RPC URL has no websocket scheme");
             return EthereumConnection::Disconnected;
         };
 
         let mut connection = match EthereumConnection::connect(ws_url.as_str()).await {
             Ok(connection) => connection,
             Err(err) => {
-                tracing::info!(%err, ws_url = %ws_url, "failed to connect ethereum websocket");
+                tracing::info!(%err, "failed to connect ethereum websocket");
                 return EthereumConnection::Disconnected;
             }
         };
 
         if let Err(err) = connection.subscribe_new_heads(self.next_id()).await {
-            tracing::info!(%err, ws_url = %ws_url, "failed to subscribe to ethereum newHeads");
+            tracing::info!(%err, "failed to subscribe to ethereum newHeads");
             let _ = connection.close().await;
             return EthereumConnection::Disconnected;
         }
@@ -385,8 +381,12 @@ fn trace_output_to_bytes(
 }
 
 impl EthereumConnection {
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+    const MESSAGE_TIMEOUT: Duration = Duration::from_secs(60);
+    const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
     async fn connect(ws_url: &str) -> anyhow::Result<Self> {
-        let (ws_stream, _) = timeout(RpcEthereumClient::CONNECT_TIMEOUT, connect_async(ws_url))
+        let (ws_stream, _) = timeout(Self::CONNECT_TIMEOUT, connect_async(ws_url))
             .await
             .map_err(|_| anyhow::anyhow!("ethereum websocket connect timeout"))??;
         let (ws_write, ws_read) = ws_stream.split();
@@ -406,7 +406,7 @@ impl EthereumConnection {
         });
 
         timeout(
-            RpcEthereumClient::CONNECT_TIMEOUT,
+            Self::CONNECT_TIMEOUT,
             ws_write.send(Message::Text(subscribe_request.to_string().into())),
         )
         .await
@@ -488,9 +488,8 @@ impl EthereumConnection {
             return None;
         };
 
-        let Ok(maybe_msg) = timeout(RpcEthereumClient::MESSAGE_TIMEOUT, ws_read.next()).await
-        else {
-            tracing::warn!("ethereum websocket stalled: no message for 60s");
+        let Ok(maybe_msg) = timeout(Self::MESSAGE_TIMEOUT, ws_read.next()).await else {
+            tracing::warn!(timeout = ?Self::MESSAGE_TIMEOUT, "ethereum websocket stalled");
             *self = Self::Disconnected;
             return None;
         };
@@ -522,7 +521,7 @@ impl EthereumConnection {
             return Ok(());
         };
 
-        timeout(RpcEthereumClient::DISCONNECT_TIMEOUT, ws_write.close())
+        timeout(Self::DISCONNECT_TIMEOUT, ws_write.close())
             .await
             .map_err(|_| anyhow::anyhow!("ethereum websocket close timeout"))??;
         *self = Self::Disconnected;

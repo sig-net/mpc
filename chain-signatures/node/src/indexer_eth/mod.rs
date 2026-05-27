@@ -994,19 +994,12 @@ impl EthereumIndexer {
                     )))
                     .await
                 else {
-                    tracing::warn!(
-                        current_block_number,
-                        "ethereum subscribed block not yet available"
-                    );
+                    tracing::warn!(current_block_number, "ethereum block not yet available");
                     break;
                 };
 
                 if let Err(err) = live_blocks.send(MaybeBlock::Block(block)).await {
-                    tracing::warn!(
-                        ?err,
-                        current_block_number,
-                        "failed to add ethereum subscribed block"
-                    );
+                    tracing::warn!(?err, current_block_number, "failed to fetch ethereum block");
                     return;
                 }
 
