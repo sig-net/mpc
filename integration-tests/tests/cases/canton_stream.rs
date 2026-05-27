@@ -6,7 +6,7 @@ use mpc_node::backlog::Backlog;
 use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
 use mpc_node::protocol::{Chain, IndexedSignRequest, SignKind};
 use mpc_node::stream::ops::SignatureRespondedEvent;
-use mpc_node::stream::{ChainEvent, ChainStream};
+use mpc_node::stream::{catchup_then_livestream, ChainEvent, ChainStream};
 use mpc_primitives::{ScalarExt, Signature, LATEST_MPC_KEY_VERSION};
 use serde_json::json;
 use serial_test::serial;
@@ -21,7 +21,8 @@ async fn stream_canton(sandbox: &CantonSandbox, backlog: Backlog) -> Result<Cant
     let config = sandbox.get_config();
     let mut stream =
         CantonStream::new(Some(config), backlog).context("failed to create CantonStream")?;
-    ChainStream::start(&mut stream).await?;
+    let indexer = ChainStream::start(&mut stream).await?;
+    tokio::spawn(catchup_then_livestream(indexer));
     Ok(stream)
 }
 

@@ -3,6 +3,7 @@ use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::ops::{SignatureEvent, SignatureEventBox};
 use crate::stream::{ChainEvent, ChainIndexer, ChainStream};
+use crate::util::ethabi_request_id;
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 
 use std::collections::{btree_map, BTreeMap, BTreeSet, HashMap};
@@ -15,7 +16,6 @@ use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
 use async_trait::async_trait;
-use ethabi::{encode, Token};
 use futures_util::StreamExt;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
@@ -23,7 +23,6 @@ use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR};
 use serde::{Deserialize, Serialize};
-use sha3::{Digest, Keccak256};
 use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
     SignatureRespondedEvent,
@@ -146,21 +145,16 @@ pub struct SolSignRequest {
 
 impl SignatureEvent for SignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
-        // Encode the event data in ABI format
-        let encoded = encode(&[
-            Token::String(self.sender.to_string()),
-            Token::Bytes(self.payload.to_vec()),
-            Token::String(self.path.clone()),
-            Token::Uint(self.key_version.into()),
-            Token::String(self.chain_id.clone()),
-            Token::String(self.algo.clone()),
-            Token::String(self.dest.clone()),
-            Token::String(self.params.clone()),
-        ]);
-        // Calculate keccak256 hash
-        let mut hasher = Keccak256::new();
-        hasher.update(&encoded);
-        hasher.finalize().into()
+        ethabi_request_id(
+            self.sender_string(),
+            self.payload,
+            self.path.clone(),
+            self.key_version,
+            self.chain_id.clone(),
+            self.algo.clone(),
+            self.dest.clone(),
+            self.params.clone(),
+        )
     }
 
     fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest> {
@@ -1126,5 +1120,31 @@ async fn get_tx(
             max_attempts,
             signature
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_id_matches_ethabi() {
+        let event = SignatureRequestedEvent {
+            sender: Pubkey::new_from_array([0x11; 32]),
+            payload: [0x22; 32],
+            key_version: 7,
+            deposit: 12345,
+            chain_id: "solana-test-chain".to_string(),
+            path: "m/44'/501'/0'/0'".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "destination-address".to_string(),
+            params: "params-json".to_string(),
+            fee_payer: None,
+        };
+
+        assert_eq!(
+            hex::encode(event.generate_request_id()),
+            "7f7aee49c2a994cc17f85058f7e0b19a44603d619a7e738522f9aa329e457879"
+        );
     }
 }

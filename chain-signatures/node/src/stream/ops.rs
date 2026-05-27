@@ -568,7 +568,7 @@ pub async fn process_execution_confirmed(
             _ => None,
         });
 
-    let completed_tx = CompletedTx::new(pending_tx.clone(), block_height);
+    let completed_tx = CompletedTx::new(pending_tx.clone());
 
     let sign_request = match result {
         ExecutionOutcome::Success { output } => completed_tx
@@ -690,7 +690,7 @@ mod tests {
             dest: "0x1234567890123456789012345678901234567890".to_string(),
             params: "{}".to_string(),
             output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             request_id: [id; 32],
             from_address: Address::ZERO,
             nonce: 0,
@@ -728,7 +728,7 @@ mod tests {
                 dest: "0x1234567890123456789012345678901234567890".to_string(),
                 params: "{}".to_string(),
                 output_deserialization_schema: vec![],
-                respond_serialization_schema: vec![],
+                respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             }),
         )
     }
@@ -1172,7 +1172,7 @@ mod tests {
                     params: "{}".to_string(),
                     program_id: Pubkey::new_unique(),
                     output_deserialization_schema: vec![],
-                    respond_serialization_schema: vec![],
+                    respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
                 }),
             ))
             .await;
@@ -1375,7 +1375,7 @@ mod tests {
             dest: "0x1234567890123456789012345678901234567890".to_string(),
             params: "{}".to_string(),
             output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             request_id: [2u8; 32],
             from_address: Address::ZERO,
             nonce: 0,
@@ -1475,7 +1475,7 @@ mod tests {
             dest: "0x1234567890123456789012345678901234567890".to_string(),
             params: "{}".to_string(),
             output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             request_id: [4u8; 32],
             from_address: Address::ZERO,
             nonce: 0,
