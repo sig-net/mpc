@@ -314,7 +314,9 @@ impl Backlog {
         let mut requeueable: Vec<_> = pending
             .requests
             .values()
-            .filter(|entry| entry.status().is_pending_generation() && entry.execution_tx().is_none())
+            .filter(|entry| {
+                entry.status().is_pending_generation() && entry.execution_tx().is_none()
+            })
             .map(|entry| entry.request.clone())
             .collect();
 
@@ -397,10 +399,8 @@ impl Backlog {
 
         match (&entry.request.kind, &entry.status) {
             (SignKind::SignBidirectional(_), SignStatus::PendingPublish { .. })
-            | (
-                SignKind::RespondBidirectional(_),
-                SignStatus::PendingPublishBidirectional { .. },
-            ) => {
+            | (SignKind::RespondBidirectional(_), SignStatus::PendingPublishBidirectional { .. }) =>
+            {
                 tracing::info!(?chain, ?id, success, status = ?entry.status, "publish attempt recorded");
                 Ok(())
             }
@@ -894,11 +894,7 @@ impl BacklogEntry {
                 "BidirectionalPending"
             }
             (SignKind::SignBidirectional(_), false, _) => "BidirectionalPending",
-            (
-                SignKind::RespondBidirectional(_),
-                _,
-                SignStatus::PendingGenerationBidirectional,
-            ) => {
+            (SignKind::RespondBidirectional(_), _, SignStatus::PendingGenerationBidirectional) => {
                 "BidirectionalRespondPending"
             }
             (SignKind::RespondBidirectional(_), _, _) => "RespondBidirectional",
@@ -943,8 +939,8 @@ mod tests {
     use anchor_lang::prelude::Pubkey;
     use cait_sith::protocol::Participant;
     use k256::{AffinePoint, Scalar};
-    use std::convert::TryInto;
     use mpc_primitives::{SignArgs, SignId};
+    use std::convert::TryInto;
 
     fn digest_hex(hex_str: &str) -> [u8; 32] {
         hex::decode(hex_str)
@@ -1231,7 +1227,10 @@ mod tests {
 
         // Filter Ethereum by Pending
         let eth_pending = backlog
-            .get_by_status(Chain::Ethereum, pending_execution_status(&create_test_tx(3)))
+            .get_by_status(
+                Chain::Ethereum,
+                pending_execution_status(&create_test_tx(3)),
+            )
             .await;
         assert_eq!(eth_pending.len(), 1);
 
@@ -1412,7 +1411,10 @@ mod tests {
         let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
         // Same data should be equal
         assert_eq!(checkpoint1, checkpoint2);
-        assert_eq!(checkpoint_digest(&checkpoint1).unwrap(), checkpoint_digest(&checkpoint2).unwrap());
+        assert_eq!(
+            checkpoint_digest(&checkpoint1).unwrap(),
+            checkpoint_digest(&checkpoint2).unwrap()
+        );
 
         // Different block height should not be equal
         let mut checkpoint3 = pending2.checkpoint(Chain::Ethereum);
@@ -1487,7 +1489,10 @@ mod tests {
             checkpoint_digest(&checkpoint).unwrap(),
             digest_hex("5a3f743ba792e69b970bef34c3dbb1c8649ee0f049fb7f3fb66f70b869106415")
         );
-        assert_eq!(checkpoint_digest(&checkpoint).unwrap(), checkpoint_digest(&deserialized).unwrap());
+        assert_eq!(
+            checkpoint_digest(&checkpoint).unwrap(),
+            checkpoint_digest(&deserialized).unwrap()
+        );
 
         let (sign_id, restored_tx) = {
             let pending = &deserialized.pending_requests[0];
@@ -1727,7 +1732,12 @@ mod tests {
         let sign_id = SignId::new(tx.request_id);
 
         backlog
-            .insert(create_bidirectional_request(sign_id, Chain::Solana, "ethereum", 0))
+            .insert(create_bidirectional_request(
+                sign_id,
+                Chain::Solana,
+                "ethereum",
+                0,
+            ))
             .await;
         backlog
             .set_status(
@@ -1782,7 +1792,12 @@ mod tests {
         let sign_id = SignId::new(tx.request_id);
 
         backlog
-            .insert(create_bidirectional_request(sign_id, Chain::Solana, "ethereum", 0))
+            .insert(create_bidirectional_request(
+                sign_id,
+                Chain::Solana,
+                "ethereum",
+                0,
+            ))
             .await;
 
         let err = backlog
@@ -1957,7 +1972,12 @@ mod tests {
         let sign_id = SignId::new(tx.request_id);
 
         backlog
-            .insert(create_bidirectional_request(sign_id, tx.source_chain, "ethereum", 0))
+            .insert(create_bidirectional_request(
+                sign_id,
+                tx.source_chain,
+                "ethereum",
+                0,
+            ))
             .await;
 
         backlog
@@ -1970,6 +1990,9 @@ mod tests {
             .await
             .expect("entry should remain in backlog");
         assert_eq!(entry.status(), pending_execution_status(&tx));
-        assert_eq!(entry.execution_tx().map(|execution| execution.id), Some(tx.id));
+        assert_eq!(
+            entry.execution_tx().map(|execution| execution.id),
+            Some(tx.id)
+        );
     }
 }

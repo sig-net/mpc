@@ -8,8 +8,7 @@ use crate::sign_bidirectional::BidirectionalTxId;
 use crate::stream::ops::{
     process_execution_confirmed, process_respond_bidirectional_event, process_respond_event,
     process_sign_request, recover_backlog, requeue_pending_sign_requests,
-    resume_pending_publish_requests,
-    RespondBidirectionalEvent, SignatureRespondedEvent,
+    resume_pending_publish_requests, RespondBidirectionalEvent, SignatureRespondedEvent,
 };
 
 pub mod ops;
@@ -779,7 +778,7 @@ mod tests {
             run_stream(
                 client,
                 sign_tx,
-            rpc,
+                rpc,
                 backlog_for_run,
                 contract_watcher,
                 mesh_state_rx,

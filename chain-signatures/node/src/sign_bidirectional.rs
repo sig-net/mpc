@@ -42,9 +42,7 @@ pub struct PublishState {
 impl PublishState {
     fn digest_bytes(&self, tag: u8) -> Vec<u8> {
         let mut bytes = vec![tag];
-        bytes.extend(
-            borsh_to_vec(&self.signature).expect("signature serialization is infallible"),
-        );
+        bytes.extend(borsh_to_vec(&self.signature).expect("signature serialization is infallible"));
         ciborium::ser::into_writer(&self.participants, &mut bytes)
             .expect("participant serialization is infallible");
         bytes.push(u8::from(self.is_proposer));
@@ -55,13 +53,17 @@ impl PublishState {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SignStatus {
     PendingGeneration,
-    PendingPublish { publish: PublishState },
+    PendingPublish {
+        publish: PublishState,
+    },
     PendingExecution {
         tx_hash: BidirectionalTxId,
         target_chain: Chain,
     },
     PendingGenerationBidirectional,
-    PendingPublishBidirectional { publish: PublishState },
+    PendingPublishBidirectional {
+        publish: PublishState,
+    },
 }
 
 impl SignStatus {
@@ -80,7 +82,10 @@ impl SignStatus {
         matches!(
             (self, other),
             (SignStatus::PendingGeneration, SignStatus::PendingGeneration)
-                | (SignStatus::PendingPublish { .. }, SignStatus::PendingPublish { .. })
+                | (
+                    SignStatus::PendingPublish { .. },
+                    SignStatus::PendingPublish { .. }
+                )
                 | (
                     SignStatus::PendingGenerationBidirectional,
                     SignStatus::PendingGenerationBidirectional,
@@ -114,9 +119,8 @@ impl SignStatus {
             } => {
                 let mut bytes = vec![2];
                 bytes.extend_from_slice(tx_hash.0.as_slice());
-                bytes.extend(
-                    borsh_to_vec(target_chain).expect("chain serialization is infallible"),
-                );
+                bytes
+                    .extend(borsh_to_vec(target_chain).expect("chain serialization is infallible"));
                 bytes
             }
             SignStatus::PendingGenerationBidirectional => vec![3],

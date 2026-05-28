@@ -1057,7 +1057,10 @@ mod tests {
         .unwrap();
 
         let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
-        assert_eq!(tx_after.status(), SignStatus::PendingGenerationBidirectional);
+        assert_eq!(
+            tx_after.status(),
+            SignStatus::PendingGenerationBidirectional
+        );
         assert!(matches!(
             tx_after.request.kind,
             SignKind::RespondBidirectional(_)
@@ -1610,7 +1613,10 @@ mod tests {
 
         assert!(backlog.pending_execution(tx.target_chain).await.is_empty());
         let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
-        assert_eq!(tx_after.status(), SignStatus::PendingGenerationBidirectional);
+        assert_eq!(
+            tx_after.status(),
+            SignStatus::PendingGenerationBidirectional
+        );
         match &tx_after.request.kind {
             SignKind::RespondBidirectional(res) => {
                 assert_eq!(res.tx_id, tx.id);
