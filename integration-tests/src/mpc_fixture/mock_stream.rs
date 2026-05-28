@@ -1,7 +1,8 @@
+use async_trait::async_trait;
 use elliptic_curve::sec1::ToEncodedPoint;
 use mpc_node::protocol::{IndexedSignRequest, SignKind};
 use mpc_node::rpc::RpcAction;
-use mpc_node::stream::{ChainEvent, ChainStream};
+use mpc_node::stream::{ChainEvent, ChainIndexer, ChainStream};
 use mpc_primitives::Chain;
 use solana_sdk::pubkey::Pubkey;
 use std::sync::Arc;
@@ -23,12 +24,38 @@ pub struct InnerMockStream {
     pending_events: Vec<ChainEvent>,
 }
 
-impl ChainStream for MockStream {
-    const CHAIN: Chain = Chain::Solana;
+pub struct MockIndexer {
+    inner: Arc<Mutex<InnerMockStream>>,
+}
 
-    async fn start(&mut self) {
-        let mut guard = self.inner.lock().await;
-        guard.pending_events.push(ChainEvent::CatchupCompleted);
+#[async_trait]
+impl ChainIndexer for MockIndexer {
+    const CHAIN: Chain = Chain::Solana;
+    type Block = ();
+    type Iter = std::iter::Empty<()>;
+
+    async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
+        std::iter::empty()
+    }
+
+    async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
+        self.inner
+            .lock()
+            .await
+            .pending_events
+            .push(ChainEvent::CatchupCompleted);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ChainStream for MockStream {
+    type Indexer = MockIndexer;
+
+    async fn start(&mut self) -> anyhow::Result<MockIndexer> {
+        Ok(MockIndexer {
+            inner: self.inner.clone(),
+        })
     }
 
     async fn next_event(&mut self) -> Option<ChainEvent> {
@@ -38,6 +65,7 @@ impl ChainStream for MockStream {
             if out.is_some() {
                 return out;
             }
+            drop(guard);
             // TODO: would be better to avoid sleep by awaiting new data
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -93,7 +121,7 @@ impl InnerMockStream {
 
         for request in requests {
             // Skip events for other chains
-            if request.chain != MockStream::CHAIN {
+            if request.chain != Chain::Solana {
                 continue;
             }
 
@@ -111,7 +139,7 @@ impl InnerMockStream {
             let RpcAction::Publish(publish_action) = action;
 
             // Skip events for other chains
-            if publish_action.indexed.chain != MockStream::CHAIN {
+            if publish_action.indexed.chain != Chain::Solana {
                 continue;
             }
 
