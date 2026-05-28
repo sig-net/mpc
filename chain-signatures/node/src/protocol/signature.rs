@@ -9,7 +9,7 @@ use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{
     MessageChannel, PositMessage, PositProtocolId, SignatureMessage, Subscriber,
 };
-use crate::protocol::posit::{PositAction, SinglePositCounter};
+use crate::protocol::posit::{PositAction, PositRejectReason, SinglePositCounter};
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::SignKind;
 use crate::protocol::{Chain, ProtocolState};
@@ -272,6 +272,9 @@ struct SignState {
     /// INVARIANT: All messages stored here are for `highest_seen_round`. Must
     /// be cleared when `highest_seen_round` changes.
     buffered_messages: VecDeque<SignTaskMessage>,
+    /// When Some, another group is already generating this signature.
+    /// The timestamp is when proposing can be resumed.
+    pause_proposing: Option<std::time::Instant>,
 }
 
 impl SignState {
@@ -284,6 +287,7 @@ impl SignState {
             permit: None,
             highest_seen_round: 0,
             buffered_messages: VecDeque::new(),
+            pause_proposing: None,
         }
     }
 
@@ -359,7 +363,7 @@ impl SignPhase {
         match self {
             SignPhase::Organizing(phase) => phase.advance(ctx, state).await,
             SignPhase::Posit(phase) => phase.advance(ctx, state, task_rx).await,
-            SignPhase::Generating(phase) => phase.advance(ctx, state).await,
+            SignPhase::Generating(phase) => phase.advance(ctx, state, task_rx).await,
             SignPhase::Complete(result) => SignPhase::Complete(*result),
         }
     }
@@ -451,7 +455,11 @@ impl SignOrganizer {
 
             state.round = selected_round;
 
-            let is_proposer = proposer == me;
+            // If proposing is paused (generating already ongoing), we act as if we weren't a proposer.
+            let skip_proposing = state
+                .pause_proposing
+                .is_some_and(|until| until > std::time::Instant::now());
+            let is_proposer = proposer == me && !skip_proposing;
             ctx.is_proposer.store(is_proposer, Ordering::Relaxed);
 
             tracing::info!(
@@ -460,6 +468,7 @@ impl SignOrganizer {
                 ?proposer,
                 ?me,
                 is_proposer,
+                skip_proposing,
                 active_count = active.len(),
                 "organized: selected proposer"
             );
@@ -631,7 +640,9 @@ impl SignPositor {
                                     *peer_round,
                                 ),
                                 from: ctx.governance.me,
-                                action: PositAction::Reject,
+                                action: PositAction::RejectWithReason(
+                                    PositRejectReason::InvalidRequest,
+                                ),
                             },
                         )
                         .await;
@@ -687,7 +698,9 @@ impl SignPositor {
                                         state.round,
                                     ),
                                     from: ctx.governance.me,
-                                    action: PositAction::Reject,
+                                    action: PositAction::RejectWithReason(
+                                        PositRejectReason::MissingArtifact,
+                                    ),
                                 },
                             )
                             .await;
@@ -714,7 +727,9 @@ impl SignPositor {
                                     state.round,
                                 ),
                                 from: ctx.governance.me,
-                                action: PositAction::Reject,
+                                action: PositAction::RejectWithReason(
+                                    PositRejectReason::InvalidRequest,
+                                ),
                             },
                         )
                         .await;
@@ -856,7 +871,23 @@ impl SignPositor {
                         }
 
                         if counter.enough_rejects(ctx.governance.threshold) {
-                            tracing::warn!(?sign_id, ?round, ?from, "received enough REJECTs, reorganizing");
+                            let num_ongoing = counter.num_peers_with_ongoing_generation();
+                            if ctx.governance.participants.len().saturating_sub(num_ongoing) < ctx.governance.threshold {
+                                state.pause_proposing = Some(Instant::now() + Duration::from_millis(ctx.cfg.signature.generation_timeout));
+                                tracing::info!(
+                                    ?sign_id,
+                                    ?round,
+                                    resume=?state.pause_proposing,
+                                    "pausing proposer: peers already generating this signature"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    ?sign_id,
+                                    ?round,
+                                    ?from,
+                                    "received enough REJECTs, reorganizing"
+                                );
+                            }
                             if let Some(_reservation) = presignature {
                                 tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
                             }
@@ -961,7 +992,15 @@ impl SignPositor {
 }
 
 impl SignGenerating {
-    async fn advance(&mut self, ctx: &SignTask, state: &mut SignState) -> SignPhase {
+    async fn advance(
+        &mut self,
+        ctx: &SignTask,
+        state: &mut SignState,
+        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
+    ) -> SignPhase {
+        // We successfully committed to generating; future rounds should be unrestricted.
+        state.pause_proposing = None;
+
         let sign_id = ctx.sign_id;
         let round = state.round;
 
@@ -1020,7 +1059,7 @@ impl SignGenerating {
         // Track that we've created a generator
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS.inc();
 
-        match generator.run(ctx).await {
+        match generator.run(ctx, task_rx).await {
             Ok(()) => SignPhase::Complete(Ok(())),
             Err(err) => {
                 tracing::warn!(
@@ -1142,7 +1181,11 @@ impl SignGenerator {
         }
     }
 
-    async fn run(mut self, ctx: &SignTask) -> Result<(), SignError> {
+    async fn run(
+        mut self,
+        ctx: &SignTask,
+        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
+    ) -> Result<(), SignError> {
         let me = ctx.governance.me;
         let epoch = ctx.governance.epoch;
 
@@ -1184,13 +1227,51 @@ impl SignGenerator {
             match action {
                 Action::Wait => {
                     // Wait for the next set of messages to arrive.
-                    let msg = self.recv().await.inspect_err(|_| {
-                        crate::metrics::protocols::SIGNATURE_GENERATOR_FAILURES.inc();
-                        if self.proposer == me {
-                            crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_FAILURES.inc();
+                    tokio::select! {
+                        result = self.recv() => {
+                            let msg = result.inspect_err(|_| {
+                                crate::metrics::protocols::SIGNATURE_GENERATOR_FAILURES.inc();
+                                if self.proposer == me {
+                                    crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_FAILURES.inc();
+                                }
+                            })?;
+                            self.protocol.message(msg.from, msg.data);
                         }
-                    })?;
-                    self.protocol.message(msg.from, msg.data);
+                        Some(task_msg) = task_rx.recv() => {
+                            let SignTaskMessage::PositMessage {
+                                presignature_id: posit_presig_id,
+                                round: posit_round,
+                                from,
+                                action,
+                            } = task_msg;
+                            if matches!(action, PositAction::Propose) {
+                                tracing::info!(
+                                    ?sign_id,
+                                    ?from,
+                                    posit_round,
+                                    "received Propose while already generating, rejecting"
+                                );
+                                ctx.msg
+                                    .send(
+                                        me,
+                                        from,
+                                        PositMessage {
+                                            id: PositProtocolId::Signature(
+                                                sign_id,
+                                                posit_presig_id,
+                                                posit_round,
+                                            ),
+                                            from: me,
+                                            action: PositAction::RejectWithReason(
+                                                PositRejectReason::AlreadyGenerating
+                                            ),
+                                        },
+                                    )
+                                    .await;
+                            }
+                            // Other variants (stale Accept/Reject/Start) are silently dropped.
+                        }
+                    }
                 }
                 Action::SendMany(data) => {
                     for &to in self.participants.iter() {
@@ -2005,5 +2086,32 @@ mod tests {
 
         let fourth = semaphore.acquire(Duration::from_millis(10)).await;
         assert!(fourth.is_ok());
+    }
+
+    /// Some integrations tests rely on this. If this changes, you probably also
+    /// have to update the tests.
+    #[test]
+    fn proposer_order_for_seed_0() {
+        // SHA256([0,0,0,0])[0] = 223.
+        // With 3 participants:
+        //   round 0: (223 + 0) % 3 = 1 -> participant 1
+        //   round 1: (223 + 1) % 3 = 2 -> participant 2
+        //   round 2: (223 + 2) % 3 = 0 -> participant 0
+        let participants: Vec<Participant> = (0u32..3).map(Participant::from).collect();
+        // entropy[0] = SHA256([0,0,0,0])[0] = 0xdf = 223; only the first byte matters.
+        let mut entropy = [0u8; 32];
+        entropy[0] = 0xdf;
+        assert_eq!(
+            SignOrganizer::proposer_per_round(0, &participants, &entropy),
+            Participant::from(1)
+        );
+        assert_eq!(
+            SignOrganizer::proposer_per_round(1, &participants, &entropy),
+            Participant::from(2)
+        );
+        assert_eq!(
+            SignOrganizer::proposer_per_round(2, &participants, &entropy),
+            Participant::from(0)
+        );
     }
 }

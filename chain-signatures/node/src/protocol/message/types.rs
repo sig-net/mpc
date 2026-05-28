@@ -4,7 +4,7 @@ use std::hash::{DefaultHasher, Hash as _};
 use cait_sith::protocol::{MessageData, Participant};
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::posit::PositAction;
+use crate::protocol::posit::{PositAction, PositRejectReason};
 use crate::protocol::presignature::{FullPresignatureId, PresignatureId};
 use crate::protocol::triple::TripleId;
 use crate::types::Epoch;
@@ -46,7 +46,9 @@ impl PositMessage {
                 participants.len() * std::mem::size_of::<Participant>()
             }
             PositAction::Accept => 0,
+            #[allow(deprecated)]
             PositAction::Reject => 0,
+            PositAction::RejectWithReason(_reason) => std::mem::size_of::<PositRejectReason>(),
         }
     }
 }
