@@ -3,11 +3,12 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::IndexedSignRequest;
 use crate::protocol::{Chain, Sign};
-use crate::rpc::ContractStateWatcher;
+use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::BidirectionalTxId;
 use crate::stream::ops::{
     process_execution_confirmed, process_respond_bidirectional_event, process_respond_event,
     process_sign_request, recover_backlog, requeue_pending_sign_requests,
+    resume_pending_publish_requests,
     RespondBidirectionalEvent, SignatureRespondedEvent,
 };
 
@@ -213,6 +214,7 @@ pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I) {
 pub async fn run_stream<S: ChainStream>(
     mut stream: S,
     sign_tx: mpsc::Sender<Sign>,
+    rpc: RpcChannel,
     backlog: Backlog,
     mut contract_watcher: ContractStateWatcher,
     mut mesh_state: watch::Receiver<MeshState>,
@@ -249,6 +251,7 @@ pub async fn run_stream<S: ChainStream>(
                 caught_up = true;
 
                 requeue_pending_sign_requests(&backlog, chain, sign_tx.clone()).await;
+                resume_pending_publish_requests(&backlog, chain, &contract_watcher, &rpc).await;
             }
             ChainEvent::SignRequest(req) => {
                 if let Err(err) =
@@ -325,12 +328,12 @@ mod tests {
     use crate::protocol::ParticipantInfo;
     use crate::protocol::Sign;
     use crate::protocol::{Chain, IndexedSignRequest};
-    use crate::rpc::ContractStateWatcher;
+    use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
     use crate::storage::checkpoint_storage::CheckpointStorage;
     use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
     use crate::util::current_unix_timestamp;
     use alloy::primitives::Address;
-    use k256::Scalar;
+    use k256::{AffinePoint, Scalar};
     use mockito::Server;
     use mpc_primitives::SignArgs;
     use mpc_primitives::SignId;
@@ -341,6 +344,11 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
+
+    fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<RpcAction>) {
+        let (tx, rx) = mpsc::channel(buffer);
+        (RpcChannel { tx }, rx)
+    }
 
     struct VecEventStreamState {
         started: bool,
@@ -654,11 +662,13 @@ mod tests {
         );
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
         let node_client = NodeClient::new(&Default::default());
+        let (rpc, _rpc_rx) = test_rpc_channel(4);
 
         // Run the indexer
         run_stream(
             client,
             sign_tx.clone(),
+            rpc,
             backlog.clone(),
             contract_watcher,
             mesh_state_rx,
@@ -761,6 +771,7 @@ mod tests {
         );
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
         let node_client = NodeClient::new(&Default::default());
+        let (rpc, _rpc_rx) = test_rpc_channel(8);
 
         // Start indexer in background (clone backlog so the test retains ownership)
         let backlog_for_run = backlog.clone();
@@ -768,6 +779,7 @@ mod tests {
             run_stream(
                 client,
                 sign_tx,
+            rpc,
                 backlog_for_run,
                 contract_watcher,
                 mesh_state_rx,
@@ -1047,10 +1059,12 @@ mod tests {
         }
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(mesh_state);
         let node_client = NodeClient::new(&Default::default());
+        let (rpc, _rpc_rx) = test_rpc_channel(8);
 
         run_stream(
             client,
             sign_tx,
+            rpc,
             backlog.clone(),
             contract_watcher,
             mesh_state_rx,
@@ -1141,10 +1155,12 @@ mod tests {
         }
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(mesh_state);
         let node_client = NodeClient::new(&Default::default());
+        let (rpc, _rpc_rx) = test_rpc_channel(8);
 
         run_stream(
             client,
             sign_tx,
+            rpc,
             backlog.clone(),
             contract_watcher,
             mesh_state_rx,
@@ -1169,5 +1185,80 @@ mod tests {
             .await
             .expect("replayed entry should remain in backlog");
         assert_eq!(entry.request.unix_timestamp_indexed, replayed_timestamp);
+    }
+
+    #[tokio::test]
+    async fn test_stream_resumes_pending_publish_after_catchup() {
+        use crate::sign_bidirectional::SignStatus;
+
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([77u8; 32]);
+        let signature = Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0);
+
+        backlog
+            .insert(IndexedSignRequest::sign(
+                sign_id,
+                SignArgs {
+                    entropy: [9u8; 32],
+                    epsilon: Scalar::from(1u64),
+                    payload: Scalar::from(2u64),
+                    path: "test".to_string(),
+                    key_version: 1,
+                },
+                Chain::Solana,
+                current_unix_timestamp(),
+            ))
+            .await;
+        backlog
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingPublish { signature },
+            )
+            .await;
+
+        let client = SolanaTestStream::new(vec![Some(ChainEvent::CatchupCompleted), None]);
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        let (rpc, mut rpc_rx) = test_rpc_channel(4);
+        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+            &"test.near".parse::<AccountId>().unwrap(),
+            k256::ProjectivePoint::GENERATOR.to_affine(),
+            0,
+            Default::default(),
+        );
+        let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
+        let node_client = NodeClient::new(&Default::default());
+
+        let run_handle = tokio::spawn(async move {
+            run_stream(
+                client,
+                sign_tx,
+                rpc,
+                backlog,
+                contract_watcher,
+                mesh_state_rx,
+                node_client,
+            )
+            .await;
+        });
+
+        match timeout(Duration::from_millis(100), sign_rx.recv()).await {
+            Err(_) | Ok(None) => {}
+            Ok(Some(msg)) => panic!("unexpected sign message during publish resume: {msg:?}"),
+        }
+
+        let action = timeout(Duration::from_secs(1), rpc_rx.recv())
+            .await
+            .expect("publish resume should not timeout")
+            .expect("publish resume should enqueue an RPC action");
+        match action {
+            RpcAction::Publish(action) => {
+                assert_eq!(action.indexed.id, sign_id);
+                assert_eq!(action.indexed.chain, Chain::Solana);
+                assert_eq!(action.signature, signature);
+            }
+        }
+
+        run_handle.abort();
     }
 }

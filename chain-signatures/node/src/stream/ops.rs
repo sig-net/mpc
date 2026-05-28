@@ -12,7 +12,7 @@ use crate::metrics::requests::record_indexing_step_reached;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignKind};
 use crate::respond_bidirectional::CompletedTx;
-use crate::rpc::ContractStateWatcher;
+use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, SignStatus};
 use crate::stream::ExecutionOutcome;
 
@@ -372,6 +372,34 @@ pub(crate) async fn requeue_pending_sign_requests(
                 "failed to requeue sign request after catchup"
             );
         }
+    }
+}
+
+pub(crate) async fn resume_pending_publish_requests(
+    backlog: &Backlog,
+    source_chain: Chain,
+    contract_watcher: &ContractStateWatcher,
+    rpc: &RpcChannel,
+) {
+    let publishable = backlog.publishable_requests(source_chain).await;
+    if publishable.is_empty() {
+        return;
+    }
+
+    let Some(public_key) = contract_watcher.public_key().await else {
+        tracing::warn!(%source_chain, count = publishable.len(), "cannot resume pending publish requests without a public key");
+        return;
+    };
+    let Some(participants) = contract_watcher.participants() else {
+        tracing::warn!(%source_chain, count = publishable.len(), "cannot resume pending publish requests without participants");
+        return;
+    };
+    let participants = participants.keys_vec();
+
+    for (sign_request, signature) in publishable {
+        let sign_id = sign_request.id;
+        rpc.publish_signature(public_key, sign_request, signature, participants.clone());
+        tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
     }
 }
 

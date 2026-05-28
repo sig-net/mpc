@@ -8,7 +8,7 @@ use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use anyhow::Context;
-use mpc_primitives::{PendingTx, SignId};
+use mpc_primitives::{PendingTx, SignId, Signature};
 use sha3::{Digest, Sha3_256};
 use std::collections::{hash_map, HashMap};
 use std::hash::{Hash, Hasher};
@@ -325,6 +325,34 @@ impl Backlog {
         });
 
         requeueable
+    }
+
+    pub async fn publishable_requests(&self, chain: Chain) -> Vec<(IndexedSignRequest, Signature)> {
+        let requests = self.requests.read().await;
+        let Some(pending) = requests.get(&chain) else {
+            return Vec::new();
+        };
+
+        let mut publishable: Vec<_> = pending
+            .requests
+            .values()
+            .filter_map(|entry| match entry.status() {
+                SignStatus::PendingPublish { signature }
+                | SignStatus::PendingPublishBidirectional { signature } => {
+                    Some((entry.request.clone(), signature))
+                }
+                _ => None,
+            })
+            .collect();
+
+        publishable.sort_by(|left, right| {
+            left.0
+                .unix_timestamp_indexed
+                .cmp(&right.0.unix_timestamp_indexed)
+                .then_with(|| left.0.id.request_id.cmp(&right.0.id.request_id))
+        });
+
+        publishable
     }
 
     /// Returns all sign-respond transactions with a specific status
@@ -814,7 +842,10 @@ impl BacklogEntry {
         bidirectional_tx: BidirectionalTx,
     ) -> Result<(), BacklogError> {
         match (&self.request.kind, self.status.clone()) {
-            (SignKind::SignBidirectional(_), SignStatus::PendingPublish { .. }) => {
+            (
+                SignKind::SignBidirectional(_),
+                SignStatus::PendingGeneration | SignStatus::PendingPublish { .. },
+            ) => {
                 self.status = SignStatus::PendingExecution {
                     tx_hash: bidirectional_tx.id,
                     target_chain: bidirectional_tx.target_chain,
@@ -1054,6 +1085,9 @@ mod tests {
                     .set_request(chain, &sign_id, completion_request)
                     .await
                     .unwrap();
+                backlog
+                    .set_status(chain, &sign_id, SignStatus::PendingGenerationBidirectional)
+                    .await;
             }
             SignStatus::PendingPublish { .. } => {
                 backlog.set_status(chain, &sign_id, status).await;
@@ -1902,5 +1936,28 @@ mod tests {
             .expect_err("advance should fail for plain Sign requests");
 
         assert!(matches!(err, BacklogError::InvalidAdvanceTransition));
+    }
+
+    #[tokio::test]
+    async fn test_advance_accepts_pending_generation_bidirectional_entry() {
+        let backlog = Backlog::new();
+        let tx = create_test_tx(9);
+        let sign_id = SignId::new(tx.request_id);
+
+        backlog
+            .insert(create_bidirectional_request(sign_id, tx.source_chain, "ethereum", 0))
+            .await;
+
+        backlog
+            .advance(tx.source_chain, sign_id, tx.clone())
+            .await
+            .expect("advance should succeed once a real respond event is observed");
+
+        let entry = backlog
+            .get(tx.source_chain, &sign_id)
+            .await
+            .expect("entry should remain in backlog");
+        assert_eq!(entry.status(), pending_execution_status(&tx));
+        assert_eq!(entry.execution_tx().map(|execution| execution.id), Some(tx.id));
     }
 }

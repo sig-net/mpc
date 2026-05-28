@@ -61,10 +61,6 @@ impl SignStatus {
             (SignStatus::PendingGeneration, SignStatus::PendingGeneration)
                 | (SignStatus::PendingPublish { .. }, SignStatus::PendingPublish { .. })
                 | (
-                    SignStatus::PendingExecution { .. },
-                    SignStatus::PendingExecution { .. }
-                )
-                | (
                     SignStatus::PendingGenerationBidirectional,
                     SignStatus::PendingGenerationBidirectional,
                 )
@@ -72,6 +68,18 @@ impl SignStatus {
                     SignStatus::PendingPublishBidirectional { .. },
                     SignStatus::PendingPublishBidirectional { .. },
                 )
+        ) || matches!(
+            (self, other),
+            (
+                SignStatus::PendingExecution {
+                    tx_hash: left_tx_hash,
+                    target_chain: left_target_chain,
+                },
+                SignStatus::PendingExecution {
+                    tx_hash: right_tx_hash,
+                    target_chain: right_target_chain,
+                }
+            ) if left_tx_hash == right_tx_hash && left_target_chain == right_target_chain
         )
     }
 

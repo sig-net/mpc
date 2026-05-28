@@ -416,6 +416,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     tokio::spawn(run_stream(
                         eth_stream,
                         sign_tx.clone(),
+                        rpc_channel.clone(),
                         backlog.clone(),
                         contract_watcher.clone(),
                         mesh_state.clone(),
@@ -431,6 +432,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 tokio::spawn(run_stream(
                     sol_stream,
                     sign_tx.clone(),
+                    rpc_channel.clone(),
                     backlog.clone(),
                     contract_watcher.clone(),
                     mesh_state.clone(),
@@ -450,6 +452,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 tokio::spawn(run_stream(
                     canton_stream,
                     sign_tx.clone(),
+                    rpc_channel.clone(),
                     backlog.clone(),
                     contract_watcher.clone(),
                     mesh_state.clone(),

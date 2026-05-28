@@ -170,6 +170,31 @@ impl RpcChannel {
             }
         });
     }
+
+    pub fn publish_signature(
+        &self,
+        public_key: mpc_crypto::PublicKey,
+        indexed: IndexedSignRequest,
+        signature: Signature,
+        participants: Vec<Participant>,
+    ) {
+        let rpc = self.clone();
+        tokio::spawn(async move {
+            if let Err(err) = rpc
+                .tx
+                .send(RpcAction::Publish(PublishAction {
+                    public_key,
+                    indexed,
+                    signature,
+                    participants,
+                    timestamp: Instant::now(),
+                }))
+                .await
+            {
+                tracing::error!(%err, "failed to send publish action");
+            }
+        });
+    }
 }
 
 #[derive(Clone)]
