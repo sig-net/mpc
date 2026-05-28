@@ -1,7 +1,7 @@
 use crate::protocol::{Chain, IndexedSignRequest};
 use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
-use borsh::BorshSerialize;
+use borsh::{to_vec as borsh_to_vec, BorshSerialize};
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
@@ -31,16 +31,83 @@ struct AbiField {
     typ: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SignStatus {
-    /// Request has been received on the source chain and is waiting for a `respond`
-    /// transaction to be observed.
-    AwaitingResponse,
-    /// Request has been responded to and the derived transaction is now waiting to
-    /// execute on the destination chain.
-    PendingExecution,
-    /// Execution was confirmed and final respond request is waiting to be signed.
-    AwaitingResponseBidirectional,
+    PendingGeneration,
+    PendingPublish { signature: Signature },
+    PendingExecution {
+        tx_hash: BidirectionalTxId,
+        target_chain: Chain,
+    },
+    PendingGenerationBidirectional,
+    PendingPublishBidirectional { signature: Signature },
+}
+
+impl SignStatus {
+    #[allow(non_upper_case_globals)]
+    pub const AwaitingResponse: Self = Self::PendingGeneration;
+
+    #[allow(non_upper_case_globals)]
+    pub const AwaitingResponseBidirectional: Self = Self::PendingGenerationBidirectional;
+
+    pub fn is_pending_generation(&self) -> bool {
+        matches!(
+            self,
+            SignStatus::PendingGeneration | SignStatus::PendingGenerationBidirectional
+        )
+    }
+
+    pub fn is_pending_execution(&self) -> bool {
+        matches!(self, SignStatus::PendingExecution { .. })
+    }
+
+    pub fn same_kind(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (SignStatus::PendingGeneration, SignStatus::PendingGeneration)
+                | (SignStatus::PendingPublish { .. }, SignStatus::PendingPublish { .. })
+                | (
+                    SignStatus::PendingExecution { .. },
+                    SignStatus::PendingExecution { .. }
+                )
+                | (
+                    SignStatus::PendingGenerationBidirectional,
+                    SignStatus::PendingGenerationBidirectional,
+                )
+                | (
+                    SignStatus::PendingPublishBidirectional { .. },
+                    SignStatus::PendingPublishBidirectional { .. },
+                )
+        )
+    }
+
+    pub fn digest_bytes(&self) -> Vec<u8> {
+        match self {
+            SignStatus::PendingGeneration => vec![0],
+            SignStatus::PendingPublish { signature } => {
+                let mut bytes = vec![1];
+                bytes.extend(borsh_to_vec(signature).expect("signature serialization is infallible"));
+                bytes
+            }
+            SignStatus::PendingExecution {
+                tx_hash,
+                target_chain,
+            } => {
+                let mut bytes = vec![2];
+                bytes.extend_from_slice(tx_hash.0.as_slice());
+                bytes.extend(
+                    borsh_to_vec(target_chain).expect("chain serialization is infallible"),
+                );
+                bytes
+            }
+            SignStatus::PendingGenerationBidirectional => vec![3],
+            SignStatus::PendingPublishBidirectional { signature } => {
+                let mut bytes = vec![4];
+                bytes.extend(borsh_to_vec(signature).expect("signature serialization is infallible"));
+                bytes
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Hash, serde::Serialize, serde::Deserialize)]

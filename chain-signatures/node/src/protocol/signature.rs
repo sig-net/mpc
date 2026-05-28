@@ -14,6 +14,7 @@ use crate::protocol::presignature::PresignatureId;
 use crate::protocol::SignKind;
 use crate::protocol::{Chain, ProtocolState};
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
+use crate::sign_bidirectional::SignStatus;
 use crate::storage::presignature_storage::{
     PresignatureReservation, PresignatureTaken, PresignatureTakenDropper,
 };
@@ -1256,6 +1257,20 @@ impl SignGenerator {
 
                     if self.proposer == me {
                         crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS.inc();
+                        if let Some(status) = publish_status(
+                            ctx.governance.public_key,
+                            &self.indexed,
+                            &output,
+                        ) {
+                            if ctx
+                                .backlog
+                                .set_status(self.indexed.chain, &sign_id, status)
+                                .await
+                                .is_none()
+                            {
+                                tracing::warn!(?sign_id, "failed to persist publish status in backlog");
+                            }
+                        }
                         ctx.rpc.publish(
                             ctx.governance.public_key,
                             self.indexed.clone(),
@@ -1289,6 +1304,26 @@ impl SignGenerator {
         };
         self.debug_view.send(markup);
     }
+}
+
+fn publish_status(
+    public_key: mpc_crypto::PublicKey,
+    indexed: &IndexedSignRequest,
+    output: &cait_sith::FullSignature<Secp256k1>,
+) -> Option<SignStatus> {
+    let expected_public_key = derive_key(public_key, indexed.args.epsilon);
+    let signature = crate::kdf::into_signature(
+        &expected_public_key,
+        &output.big_r,
+        &output.s,
+        indexed.args.payload,
+    )
+    .ok()?;
+
+    Some(match indexed.kind {
+        SignKind::RespondBidirectional(_) => SignStatus::PendingPublishBidirectional { signature },
+        _ => SignStatus::PendingPublish { signature },
+    })
 }
 
 impl Drop for SignGenerator {

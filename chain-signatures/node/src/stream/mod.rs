@@ -886,8 +886,23 @@ mod tests {
         .unwrap();
 
         // mark status as PendingExecution so it will be included in checkpoints
+        let execution = backlog
+            .pending_execution(target_chain)
+            .await
+            .into_iter()
+            .find_map(|(_, (watched_sign_id, watched_tx))| {
+                (watched_sign_id == sign_id).then_some(watched_tx)
+            })
+            .expect("expected execution watcher to exist");
         backlog
-            .set_status(Chain::Solana, &sign_id, SignStatus::PendingExecution)
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingExecution {
+                    tx_hash: execution.id,
+                    target_chain: execution.target_chain,
+                },
+            )
             .await;
 
         // send a block event for this chain and ensure checkpoint is persisted

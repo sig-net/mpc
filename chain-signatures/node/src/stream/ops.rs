@@ -602,7 +602,7 @@ pub async fn process_execution_confirmed(
         .set_status(
             pending_tx.source_chain,
             &unwatched_sign_id,
-            SignStatus::AwaitingResponseBidirectional,
+            SignStatus::PendingGenerationBidirectional,
         )
         .await;
     let updated_tx = match set_res {
@@ -887,8 +887,8 @@ mod tests {
         let tx_after = maybe_tx.unwrap();
         assert_eq!(
             tx_after.status(),
-            SignStatus::AwaitingResponseBidirectional,
-            "expected AwaitingResponseBidirectional but found status: {:?}",
+            SignStatus::PendingGenerationBidirectional,
+            "expected PendingGenerationBidirectional but found status: {:?}",
             tx_after.status()
         );
         assert!(matches!(
@@ -1026,7 +1026,7 @@ mod tests {
         .unwrap();
 
         let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
-        assert_eq!(tx_after.status(), SignStatus::AwaitingResponseBidirectional);
+        assert_eq!(tx_after.status(), SignStatus::PendingGenerationBidirectional);
         assert!(matches!(
             tx_after.request.kind,
             SignKind::RespondBidirectional(_)
