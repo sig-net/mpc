@@ -15,7 +15,7 @@ pub struct MockStream {
 }
 
 /// Holds chain events to be processed in tests.
-/// 
+///
 /// Events are grouped into blocks and drained by calling `next_event`.
 #[derive(Default)]
 pub struct InnerMockStream {
