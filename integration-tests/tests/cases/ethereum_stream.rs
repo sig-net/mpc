@@ -852,7 +852,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         other => panic!("expected Sign::Request from late watcher backfill, got {other:?}"),
     }
 
-    let watchers = backlog.pending_execution(Chain::Ethereum).await;
+    let watchers = backlog.execution_watchers(Chain::Ethereum).await;
     assert!(
         watchers.is_empty(),
         "late watcher should be cleared after backfill"

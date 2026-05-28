@@ -76,7 +76,9 @@ impl PendingRequests {
     }
 
     fn pending_execution(&self, id: &SignId) -> Option<&BacklogEntry> {
-        self.requests.get(id).filter(|entry| entry.status().is_pending_execution())
+        self.requests
+            .get(id)
+            .filter(|entry| entry.status().is_pending_execution())
     }
 
     fn pending_executions(&self) -> Vec<(SignId, BacklogEntry)> {
@@ -378,6 +380,14 @@ impl Backlog {
             .unwrap_or_default()
     }
 
+    pub async fn pending_execution(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
+        self.requests
+            .read()
+            .await
+            .get(&chain)
+            .and_then(|requests| requests.pending_execution(id).cloned())
+    }
+
     pub async fn len_by_chain(&self, chain: Chain) -> usize {
         self.requests
             .read()
@@ -462,7 +472,7 @@ impl Backlog {
 
     /// Get the set of bidirectional transactions currently awaiting execution on the
     /// specified destination chain.
-    pub async fn pending_execution(
+    pub async fn execution_watchers(
         &self,
         chain: Chain,
     ) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)> {
@@ -1169,6 +1179,7 @@ mod tests {
         let backlog = Backlog::new();
 
         // Add transactions with different statuses to Ethereum
+        let tx0 = create_test_tx(0);
         let tx1 = create_test_tx(1);
         let tx2 = create_test_tx(2);
         let tx3 = create_test_tx(3);
@@ -1211,12 +1222,9 @@ mod tests {
 
         // Filter Ethereum by Pending
         let eth_pending = backlog
-            .get_by_status(
-                Chain::Ethereum,
-                pending_execution_status(&create_test_tx(3)),
-            )
+            .pending_execution(Chain::Ethereum, &SignId::new(tx3.request_id))
             .await;
-        assert_eq!(eth_pending.len(), 1);
+        assert!(eth_pending.is_some());
 
         let eth_awaiting = backlog
             .get_by_status(Chain::Ethereum, SignStatus::PendingGeneration)
@@ -1231,15 +1239,15 @@ mod tests {
 
         // Filter Solana by Pending
         let sol_pending = backlog
-            .get_by_status(Chain::Solana, pending_execution_status(&create_test_tx(4)))
+            .pending_execution(Chain::Solana, &SignId::new(tx4.request_id))
             .await;
-        assert_eq!(sol_pending.len(), 1);
+        assert!(sol_pending.is_some());
 
         // Filter non-existent chain returns empty
         let near_pending = backlog
-            .get_by_status(Chain::NEAR, pending_execution_status(&create_test_tx(0)))
+            .pending_execution(Chain::NEAR, &SignId::new(tx0.request_id))
             .await;
-        assert_eq!(near_pending.len(), 0);
+        assert!(near_pending.is_none());
     }
 
     #[tokio::test]
@@ -1518,7 +1526,7 @@ mod tests {
             .await
             .expect("failed to recover");
 
-        let watchers = recovered.pending_execution(Chain::Ethereum).await;
+        let watchers = recovered.execution_watchers(Chain::Ethereum).await;
         assert_eq!(watchers.len(), 1);
         assert!(watchers.contains_key(&tx.id));
     }

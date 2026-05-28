@@ -886,7 +886,7 @@ mod tests {
         let target_chain = Chain::Ethereum;
         timeout(Duration::from_secs(1), async {
             loop {
-                let watchers = backlog.pending_execution(target_chain).await;
+                let watchers = backlog.execution_watchers(target_chain).await;
                 if watchers.values().any(|(s, _)| *s == sign_id) {
                     break;
                 }
@@ -898,7 +898,7 @@ mod tests {
 
         // mark status as PendingExecution so it will be included in checkpoints
         let execution = backlog
-            .pending_execution(target_chain)
+            .execution_watchers(target_chain)
             .await
             .into_iter()
             .find_map(|(_, (watched_sign_id, watched_tx))| {
@@ -931,8 +931,8 @@ mod tests {
             .await
             .expect("recovery failed");
 
-        let old_watchers = backlog.pending_execution(target_chain).await;
-        let new_watchers = recovered.pending_execution(target_chain).await;
+        let old_watchers = backlog.execution_watchers(target_chain).await;
+        let new_watchers = recovered.execution_watchers(target_chain).await;
         assert_eq!(old_watchers.len(), new_watchers.len());
         for (tx_id, (s, _)) in old_watchers {
             assert!(new_watchers.contains_key(&tx_id));

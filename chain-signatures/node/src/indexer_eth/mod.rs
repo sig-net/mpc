@@ -1177,7 +1177,7 @@ impl EthereumIndexer {
         let mut events = Vec::new();
         let mut resolved_tx_ids = HashSet::new();
 
-        let watchers = self.backlog.pending_execution(Chain::Ethereum).await;
+        let watchers = self.backlog.execution_watchers(Chain::Ethereum).await;
         tracing::info!(
             watchers_count = watchers.len(),
             block_number,
@@ -1221,7 +1221,7 @@ impl EthereumIndexer {
         }
 
         // Staleness checks (nonce too low)
-        let remaining_pending = self.backlog.pending_execution(Chain::Ethereum).await;
+        let remaining_pending = self.backlog.execution_watchers(Chain::Ethereum).await;
 
         for (tx_id, (sign_id, tx)) in remaining_pending {
             if resolved_tx_ids.contains(&tx_id) || observed_tx_ids.contains(&tx_id) {

@@ -890,7 +890,7 @@ mod tests {
         // Call the handler with a Success and empty output
         let tx_id = tx.id;
         // ensure watcher exists before processing
-        let before_watchers = backlog.pending_execution(tx.target_chain).await;
+        let before_watchers = backlog.execution_watchers(tx.target_chain).await;
         assert!(before_watchers.contains_key(&tx.id));
         process_execution_confirmed(
             tx_id,
@@ -907,7 +907,7 @@ mod tests {
         .unwrap();
 
         // Watcher should be removed
-        let watchers = backlog.pending_execution(tx.target_chain).await;
+        let watchers = backlog.execution_watchers(tx.target_chain).await;
         tracing::info!(?watchers, "watchers after execution confirmed");
         assert!(watchers.is_empty());
 
@@ -1011,7 +1011,7 @@ mod tests {
         let no_second = timeout(Duration::from_millis(100), sign_rx.recv()).await;
         assert!(matches!(no_second, Err(_) | Ok(None)));
 
-        assert!(backlog.pending_execution(tx.target_chain).await.is_empty());
+        assert!(backlog.execution_watchers(tx.target_chain).await.is_empty());
     }
 
     #[tokio::test]
@@ -1065,7 +1065,7 @@ mod tests {
             tx_after.request.kind,
             SignKind::RespondBidirectional(_)
         ));
-        assert!(backlog.pending_execution(tx.target_chain).await.is_empty());
+        assert!(backlog.execution_watchers(tx.target_chain).await.is_empty());
 
         let msg = timeout(Duration::from_secs(1), sign_rx.recv())
             .await
@@ -1456,7 +1456,7 @@ mod tests {
         .unwrap();
 
         // Watcher removed
-        let watchers = backlog.pending_execution(tx.target_chain).await;
+        let watchers = backlog.execution_watchers(tx.target_chain).await;
         assert!(watchers.is_empty());
 
         // Source chain should now wait for final bidirectional response.
@@ -1611,7 +1611,7 @@ mod tests {
             assert_eq!(decoded.sign_event_contract_id, sign_event_contract_id);
         };
 
-        assert!(backlog.pending_execution(tx.target_chain).await.is_empty());
+        assert!(backlog.execution_watchers(tx.target_chain).await.is_empty());
         let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
         assert_eq!(
             tx_after.status(),
