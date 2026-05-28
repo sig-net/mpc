@@ -1,4 +1,5 @@
-//! Component test that combine the MPC network combined with a chain stream  as input and output.
+//! Component tests that combine the MPC network combined with a chain stream as
+//! input and output.
 
 use integration_tests::mpc_fixture::{mock_stream::MockStream, MpcFixtureBuilder};
 use mpc_node::protocol::IndexedSignRequest;
@@ -48,7 +49,7 @@ async fn test_sign() {
     );
 }
 
-/// Common checker function called with different parameters in test case below.
+/// Common checker function called with different parameters in test cases below.
 async fn check_channel_contention(
     // number of blocks with requests to send
     num_blocks: usize,

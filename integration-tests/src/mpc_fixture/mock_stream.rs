@@ -14,8 +14,13 @@ pub struct MockStream {
     inner: Arc<Mutex<InnerMockStream>>,
 }
 
+/// Holds chain events to be processed in tests.
+/// 
+/// Events are grouped into blocks and drained by calling `next_event`.
 #[derive(Default)]
 pub struct InnerMockStream {
+    /// The current simulated block height. Events are only released on
+    /// `next_event()` if they belong to a block <= `block_height`.
     block_height: u64,
     /// Events for blocks >= `block_height`, not ready to be published, yet.
     future_blocks: Vec<Vec<ChainEvent>>,
@@ -73,6 +78,8 @@ impl ChainStream for MockStream {
 }
 
 impl MockStream {
+    /// Clones internal data to create different copies of the stream that can
+    /// be drained independently. The standard clone only does an Arc::clone.
     pub async fn deep_clone(&self) -> Self {
         let guard = self.inner.lock().await;
         let cloned = InnerMockStream {
@@ -104,7 +111,7 @@ impl MockStream {
 }
 
 impl InnerMockStream {
-    /// Move events from future blocks tp pending blocks.
+    /// Move events from future blocks to pending blocks.
     pub fn progress_block_height(&mut self, steps: usize) {
         let checked_steps = steps.min(self.future_blocks.len());
         for mut block in self.future_blocks.drain(0..checked_steps) {
