@@ -854,7 +854,7 @@ impl BacklogEntry {
         bidirectional_tx: BidirectionalTx,
     ) -> Result<(), BacklogError> {
         match (&self.request.kind, self.status.clone()) {
-            (SignKind::SignBidirectional(_), SignStatus::PendingPublish { .. }) => {
+            (SignKind::SignBidirectional(_), SignStatus::PendingGeneration | SignStatus::PendingPublish { .. }) => {
                 self.status = SignStatus::PendingExecution {
                     tx: bidirectional_tx,
                 };
@@ -1966,7 +1966,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_advance_rejects_pending_generation_bidirectional() {
+    async fn test_advance_accepts_pending_generation_bidirectional() {
         let backlog = Backlog::new();
         let tx = create_test_tx(9);
         let sign_id = SignId::new(tx.request_id);
@@ -1980,12 +1980,16 @@ mod tests {
             ))
             .await;
 
-        let err = backlog
-            .advance(tx.source_chain, sign_id, tx)
+        backlog
+            .advance(tx.source_chain, sign_id, tx.clone())
             .await
-            .expect_err("advance should require PendingPublish for bidirectional requests");
+            .expect("advance should accept catchup advancement from PendingGeneration");
 
-        assert!(matches!(err, BacklogError::InvalidAdvanceTransition));
+        let entry = backlog
+            .get(tx.source_chain, &sign_id)
+            .await
+            .expect("entry should remain in backlog");
+        assert_eq!(entry.status(), pending_execution_status(&tx));
     }
 
     #[tokio::test]

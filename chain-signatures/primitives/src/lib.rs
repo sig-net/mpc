@@ -1,6 +1,8 @@
 pub mod bytes;
 
-use k256::elliptic_curve::{bigint::ArrayEncoding, CurveArithmetic, PrimeField};
+use k256::elliptic_curve::{
+    bigint::ArrayEncoding, sec1::ToEncodedPoint, CurveArithmetic, PrimeField,
+};
 use k256::{AffinePoint, Scalar, Secp256k1, U256};
 use near_account_id::AccountId;
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
@@ -142,6 +144,15 @@ impl Signature {
             s,
             recovery_id,
         }
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let encoded_point = self.big_r.to_encoded_point(false);
+        let mut bytes = Vec::with_capacity(encoded_point.len() + 32 + 1);
+        bytes.extend_from_slice(encoded_point.as_bytes());
+        bytes.extend_from_slice(self.s.to_bytes().as_slice());
+        bytes.push(self.recovery_id);
+        bytes
     }
 }
 
@@ -388,6 +399,18 @@ impl Checkpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signature_to_bytes_is_stable() {
+        let signature = Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 7);
+
+        let bytes = signature.to_bytes();
+
+        assert_eq!(bytes.len(), 98);
+        assert_eq!(bytes[0], 0x04);
+        assert_eq!(&bytes[65..97], Scalar::ONE.to_bytes().as_slice());
+        assert_eq!(bytes[97], 7);
+    }
 
     #[test]
     fn scalar_fails_as_expected() {

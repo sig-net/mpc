@@ -1391,6 +1391,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_respond_event_advances_bidirectional_from_pending_generation() {
+        let backlog = Backlog::new();
+        let tx = test_bidirectional_tx(14, Chain::Ethereum, Chain::Solana);
+        let sign_id = SignId::new(tx.request_id);
+
+        backlog
+            .insert(IndexedSignRequest::sign_bidirectional(
+                sign_id,
+                test_sign_args(14),
+                Chain::Ethereum,
+                current_unix_timestamp(),
+                SignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
+                    sender: Default::default(),
+                    serialized_transaction: tx.serialized_transaction.clone(),
+                    dest: tx.dest.clone(),
+                    caip2_id: tx.caip2_id.clone(),
+                    key_version: tx.key_version,
+                    deposit: tx.deposit,
+                    path: tx.path.clone(),
+                    algo: tx.algo.clone(),
+                    params: tx.params.clone(),
+                    program_id: Pubkey::new_unique(),
+                    output_deserialization_schema: tx.output_deserialization_schema.clone(),
+                    respond_serialization_schema: tx.respond_serialization_schema.clone(),
+                }),
+            ))
+            .await;
+
+        let event = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
+            request_id: sign_id.request_id,
+            responder: alloy::primitives::Address::from_slice(&[0u8; 20]),
+            signature: Signature::new(ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
+        });
+
+        let account_id: AccountId = "test.near".parse().unwrap();
+        let public_key = ProjectivePoint::GENERATOR.to_affine();
+        let (mut contract_watcher, _tx) =
+            ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
+
+        let (sign_tx, _sign_rx) = mpsc::channel(4);
+
+        process_respond_event(event, sign_tx, &mut contract_watcher, &backlog, false)
+            .await
+            .expect("respond event should advance pending generation bidirectional entries");
+
+        let entry = backlog
+            .get(Chain::Ethereum, &sign_id)
+            .await
+            .expect("entry should remain in backlog");
+        assert!(matches!(entry.status(), SignStatus::PendingExecution { .. }));
+
+        let watchers = backlog.execution_watchers(Chain::Solana).await;
+        assert_eq!(watchers.len(), 1);
+        assert!(watchers.contains_key(&tx.id));
+    }
+
+    #[tokio::test]
     async fn process_execution_confirmed_failed_creates_error_respond_request() {
         let backlog = Backlog::new();
 

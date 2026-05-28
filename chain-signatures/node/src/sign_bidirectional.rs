@@ -1,7 +1,7 @@
 use crate::protocol::{Chain, IndexedSignRequest};
 use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
-use borsh::{to_vec as borsh_to_vec, BorshSerialize};
+use borsh::BorshSerialize;
 use cait_sith::protocol::Participant;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::{AffinePoint, Scalar};
@@ -42,7 +42,7 @@ pub struct PublishState {
 impl PublishState {
     fn digest_bytes(&self, tag: u8) -> Vec<u8> {
         let mut bytes = vec![tag];
-        bytes.extend(borsh_to_vec(&self.signature).expect("signature serialization is infallible"));
+        bytes.extend_from_slice(&self.signature.to_bytes());
         ciborium::ser::into_writer(&self.participants, &mut bytes)
             .expect("participant serialization is infallible");
         bytes.push(u8::from(self.is_proposer));
