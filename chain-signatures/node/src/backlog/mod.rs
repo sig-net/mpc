@@ -320,9 +320,7 @@ impl Backlog {
         let mut requeueable: Vec<_> = pending
             .requests
             .values()
-            .filter(|entry| {
-                entry.status().is_pending_generation() && entry.execution_tx().is_none()
-            })
+            .filter(|entry| entry.status().is_pending_generation())
             .map(|entry| entry.request.clone())
             .collect();
 
