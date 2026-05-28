@@ -13,7 +13,7 @@ use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign, SignKind};
-use mpc_node::rpc::ContractStateWatcher;
+use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::ops::SignBidirectionalEvent as NodeSignBidirectionalEvent;
 use mpc_node::stream::ops::SignatureRespondedEvent;
@@ -27,6 +27,11 @@ use tokio::time::timeout;
 
 fn signature_deposit() -> U256 {
     U256::from(1u64)
+}
+
+fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<mpc_node::rpc::RpcAction>) {
+    let (tx, rx) = mpsc::channel(buffer);
+    (RpcChannel { tx }, rx)
 }
 
 // Integration tests for EthereumStream
@@ -418,10 +423,12 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     info.url = "http://127.0.0.1:1".to_string();
     mesh_state.update(Participant::from(0u32), NodeStatus::Active, info);
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
+    let (rpc, _rpc_rx) = test_rpc_channel(16);
 
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
+        rpc,
         backlog,
         contract_watcher,
         mesh_rx,
@@ -563,10 +570,12 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     info.url = "http://127.0.0.1:1".to_string();
     mesh_state.update(Participant::from(0u32), NodeStatus::Active, info);
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
+    let (rpc, _rpc_rx) = test_rpc_channel(16);
 
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
+        rpc,
         backlog.clone(),
         contract_watcher,
         mesh_rx,
@@ -746,10 +755,12 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     info.url = "http://127.0.0.1:1".to_string();
     mesh_state.update(Participant::from(0u32), NodeStatus::Active, info);
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
+    let (rpc, _rpc_rx) = test_rpc_channel(16);
 
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
+        rpc,
         backlog.clone(),
         contract_watcher,
         mesh_rx,
