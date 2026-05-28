@@ -1,4 +1,3 @@
-# Always limit cluster tests to a single thread
 [test-groups]
 cluster = { max-threads = 1 }
 fixture = { max-threads = "num-cpus" }

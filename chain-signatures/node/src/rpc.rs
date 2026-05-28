@@ -2,7 +2,7 @@ use crate::backlog::Backlog;
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
-use crate::metrics::requests::{record_request_latency, SignRequestStep};
+use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, SignKind};
@@ -1233,21 +1233,21 @@ async fn execute_publish(client: ChainClient, action: PublishAction, backlog: Ba
         let elapsed_secs =
             crate::util::unix_elapsed(action.indexed.unix_timestamp_indexed).as_secs();
         if elapsed_secs <= chain.expected_response_time_secs() {
-            record_request_latency(
+            record_request_latency_since(
                 chain,
                 SignRequestStep::Total,
                 "in_time",
                 action.indexed.unix_timestamp_indexed,
             );
         } else {
-            record_request_latency(
+            record_request_latency_since(
                 chain,
                 SignRequestStep::Total,
                 "expired",
                 action.indexed.unix_timestamp_indexed,
             );
         }
-        record_request_latency(chain, SignRequestStep::Responding, "ok", action.timestamp);
+        record_request_latency_since(chain, SignRequestStep::Responding, "ok", action.timestamp);
     } else {
         tracing::info!(
             ?sign_id,
@@ -1802,21 +1802,26 @@ async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAc
             let chain = action.indexed.chain;
             let elapsed = crate::util::unix_elapsed(action.indexed.unix_timestamp_indexed);
             if elapsed.as_secs() <= chain.expected_response_time_secs() {
-                record_request_latency(
+                record_request_latency_since(
                     chain,
                     SignRequestStep::Total,
                     "in_time",
                     action.indexed.unix_timestamp_indexed,
                 );
             } else {
-                record_request_latency(
+                record_request_latency_since(
                     chain,
                     SignRequestStep::Total,
                     "expired",
                     action.indexed.unix_timestamp_indexed,
                 );
             }
-            record_request_latency(chain, SignRequestStep::Responding, "ok", action.timestamp);
+            record_request_latency_since(
+                chain,
+                SignRequestStep::Responding,
+                "ok",
+                action.timestamp,
+            );
         }
         actions.clear();
         return;

@@ -208,7 +208,7 @@ impl Node {
         )?;
         let address = format!("http://127.0.0.1:{web_port}");
         tracing::info!("node is starting at {address}");
-        utils::ping_until_ok(&address, 60).await?;
+        utils::ping_until_ok(&address, 120).await?;
         tracing::info!(node_account_id = %config.account.id(), ?address, "node started");
 
         Ok(Self {

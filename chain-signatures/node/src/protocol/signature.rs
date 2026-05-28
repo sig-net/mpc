@@ -2,23 +2,26 @@ use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
-use crate::metrics::requests::{record_request_latency, SignRequestStep};
+use crate::metrics::requests::{
+    record_request_latency, record_request_latency_since, SignRequestStep, SIGN_REQUEST_LOOPS,
+};
 use crate::protocol::contract::primitives::intersect_vec;
 use crate::protocol::message::{
     MessageChannel, PositMessage, PositProtocolId, SignatureMessage, Subscriber,
 };
 use crate::protocol::posit::{PositAction, SinglePositCounter};
 use crate::protocol::presignature::PresignatureId;
+use crate::protocol::SignKind;
 use crate::protocol::{Chain, ProtocolState};
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
-use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
-use crate::storage::protocol_storage::ProtocolArtifact;
+use crate::storage::presignature_storage::{
+    PresignatureReservation, PresignatureTaken, PresignatureTakenDropper,
+};
 use crate::storage::PresignatureStorage;
 use crate::stream::ops::SignBidirectionalEvent;
 use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap, TimeoutBudget};
 
-use crate::protocol::SignKind;
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::PresignOutput;
 use chrono::Utc;
@@ -31,13 +34,16 @@ use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
 /// The round interval to search for a proposer in the organizing phase.
 const ROUND_INTERVAL: usize = 512;
+
+/// Max number of concurrent proposers, with unlimited deliberators.
+const MAX_CONCURRENT_PROPOSERS: usize = 4;
 
 /// The default timeout budget for organizing and posit phases.
 ///
@@ -140,12 +146,127 @@ enum SignError {
     Aborted,
 }
 
+#[derive(Debug)]
+pub enum SignLimitError {
+    Timeout,
+    Closed,
+}
+
+#[derive(Debug)]
+struct SignLimitState {
+    limit: usize,
+    debt: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct SignLimiter {
+    semaphore: Arc<Semaphore>,
+    state: Arc<RwLock<SignLimitState>>,
+}
+
+#[derive(Debug)]
+pub struct SignPermit {
+    permit: Option<OwnedSemaphorePermit>,
+    state: Arc<RwLock<SignLimitState>>,
+}
+
+impl SignLimiter {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            semaphore: Arc::new(Semaphore::new(limit)),
+            state: Arc::new(RwLock::new(SignLimitState { limit, debt: 0 })),
+        }
+    }
+
+    /// Updates the limits for concurrent slots
+    pub fn update(&self, new_limit: usize) {
+        let mut state = match self.state.write() {
+            Ok(state) => state,
+            Err(err) => {
+                tracing::error!(new_limit, ?err, "unable to update SignLimiter limits");
+                return;
+            }
+        };
+        let old_limit = std::mem::replace(&mut state.limit, new_limit);
+
+        // add more permits if the limit increased
+        if new_limit > old_limit {
+            let mut permits_to_add = new_limit - old_limit;
+            if permits_to_add > 0 {
+                let forgiven = permits_to_add.min(state.debt);
+                state.debt -= forgiven;
+                permits_to_add -= forgiven;
+                self.semaphore.add_permits(permits_to_add);
+            }
+            return;
+        }
+
+        // remove permits or add to a debt where when the permit is dropped, we forget it.
+        let permits_to_remove = old_limit - new_limit;
+        if permits_to_remove == 0 {
+            return;
+        }
+
+        let forgotten = self.semaphore.forget_permits(permits_to_remove);
+        if forgotten < permits_to_remove {
+            state.debt += permits_to_remove - forgotten;
+        }
+    }
+
+    /// Try to acquire a spot with a timeout just in case we do not receive the slot in time.
+    /// Returns a permit if successful, error otherwise.
+    pub async fn acquire(&self, timeout: Duration) -> Result<SignPermit, SignLimitError> {
+        let permit =
+            match tokio::time::timeout(timeout, self.semaphore.clone().acquire_owned()).await {
+                Ok(Ok(permit)) => permit,
+                // note, acquire error is effectively the same as closed.
+                Ok(Err(_acquire_err)) => return Err(SignLimitError::Closed),
+                Err(_timeout) => return Err(SignLimitError::Timeout),
+            };
+
+        Ok(SignPermit {
+            permit: Some(permit),
+            state: Arc::clone(&self.state),
+        })
+    }
+
+    pub fn limits(&self) -> usize {
+        match self.state.read() {
+            Ok(state) => state.limit,
+            Err(err) => {
+                tracing::error!(?err, "failed to acquire lock in SignLimiter::limits");
+                0
+            }
+        }
+    }
+}
+
+impl Drop for SignPermit {
+    fn drop(&mut self) {
+        let Some(permit) = self.permit.take() else {
+            return;
+        };
+        let mut state = match self.state.write() {
+            Ok(state) => state,
+            Err(err) => {
+                tracing::error!(?err, "failed to acquire lock in SignPermit drop");
+                return;
+            }
+        };
+        if state.debt > 0 {
+            state.debt -= 1;
+            permit.forget();
+        }
+    }
+}
+
 struct SignState {
     round: usize,
     indexed: IndexedSignRequest,
     mesh_state: watch::Receiver<MeshState>,
     /// Budget for the current organizing+posit attempt.
     budget: TimeoutBudget,
+    permit: Option<SignPermit>,
     /// The highest round sent by a peer
     highest_seen_round: usize,
     /// Posit message for `highest_seen_round` round.
@@ -166,6 +287,7 @@ impl SignState {
             indexed,
             mesh_state,
             budget: TimeoutBudget::new(ORGANIZE_POSIT_TIMEOUT),
+            permit: None,
             highest_seen_round: 0,
             buffered_messages: VecDeque::new(),
         }
@@ -180,6 +302,7 @@ impl SignState {
         self.round = std::cmp::max(self.round + 1, self.highest_seen_round);
         // Reset the budget for the new attempt
         self.budget.reset(ORGANIZE_POSIT_TIMEOUT);
+        self.permit = None;
         tracing::debug!(prev_round, new_round = self.round, "bumped round");
     }
 
@@ -215,13 +338,13 @@ struct SignPositor {
     proposer: Participant,
     active: BTreeSet<Participant>,
     presignature_id: PresignatureId,
-    presignature: Option<PresignatureTaken>,
+    presignature: Option<PresignatureReservation>,
 }
 
 struct SignGenerating {
     proposer: Participant,
     presignature_id: PresignatureId,
-    presignature: Option<PresignatureTaken>,
+    presignature: Option<PresignatureReservation>,
     accepted_participants: Vec<Participant>,
 }
 
@@ -350,40 +473,70 @@ impl SignOrganizer {
             (active, proposer, is_proposer)
         };
 
+        if is_proposer {
+            let remaining = state.budget.remaining();
+            tracing::info!(
+                ?sign_id,
+                round = ?state.round,
+                timeout = ?remaining,
+                limit = ctx.limiter.limits(),
+                "proposer waiting for concurrency slot"
+            );
+
+            let permit = match ctx.limiter.acquire(remaining).await {
+                Ok(permit) => permit,
+                Err(SignLimitError::Timeout) => {
+                    tracing::warn!(
+                        ?sign_id,
+                        round = ?state.round,
+                        "proposer timeout waiting for concurrency slot, reorganizing"
+                    );
+                    state.bump_round();
+                    return SignPhase::Organizing(SignOrganizer);
+                }
+                Err(SignLimitError::Closed) => {
+                    tracing::error!(?sign_id, "proposer semaphore closed");
+                    return SignPhase::Complete(Err(SignError::Aborted));
+                }
+            };
+
+            state.permit = Some(permit);
+        } else {
+            state.permit = None;
+        }
+
         let (presignature_id, presignature, active) = if is_proposer {
             tracing::info!(?sign_id, round = ?state.round, "proposer waiting for presignature");
             let active = active.iter().copied().collect::<Vec<_>>();
             let remaining = state.budget.remaining();
             let fetch = tokio::time::timeout(remaining, async {
+                // IDs that were found unsuitable this round (kept in redis, skipped next peek)
+                let mut local_skip: Vec<PresignatureId> = Vec::new();
                 loop {
-                    if let Some(taken) = ctx.presignatures.take_mine().await {
-                        let Some(holders) = taken.artifact.holders() else {
-                            tracing::error!(
-                                id = taken.artifact.id,
-                                "holders not set on taken presignature"
-                            );
-                            continue;
-                        };
+                    if let Some(reservation) = ctx.presignatures.peek_mine(&local_skip).await {
+                        let holders = reservation.holders();
                         let participants = intersect_vec(&[holders, &active]);
                         if participants.len() < ctx.governance.threshold {
                             tracing::warn!(
                                 ?sign_id,
-                                id = taken.artifact.id,
+                                id = reservation.id,
                                 ?holders,
                                 ?active,
-                                "discarding presignature due to inactive participants"
+                                "skipping presignature due to inactive participants, returning to pool"
                             );
+                            local_skip.push(reservation.id);
+                            // drop: in-memory reservation released, presignature stays in redis
                             continue;
                         }
 
-                        break (taken, participants);
+                        break (reservation, participants);
                     }
                     tokio::time::sleep(Duration::from_millis(500)).await;
                 }
             })
             .await;
 
-            let (taken, participants) = match fetch {
+            let (reservation, participants) = match fetch {
                 Ok(value) => value,
                 Err(_) => {
                     tracing::warn!(
@@ -396,7 +549,7 @@ impl SignOrganizer {
                 }
             };
 
-            let presignature_id = taken.artifact.id;
+            let presignature_id = reservation.id;
 
             tracing::info!(?sign_id, ?presignature_id, "proposer got presignature");
 
@@ -420,7 +573,7 @@ impl SignOrganizer {
 
             // Update active to only include participants that are in both the presignature and active set
             let active = participants.into_iter().collect::<BTreeSet<_>>();
-            (presignature_id, Some(taken), active)
+            (presignature_id, Some(reservation), active)
         } else {
             (PresignatureId::default(), None, active)
         };
@@ -710,8 +863,8 @@ impl SignPositor {
 
                         if counter.enough_rejects(ctx.governance.threshold) {
                             tracing::warn!(?sign_id, ?round, ?from, "received enough REJECTs, reorganizing");
-                            if let Some(_taken) = presignature {
-                                tracing::warn!(?sign_id, "discarding presignature due to REJECTs");
+                            if let Some(_reservation) = presignature {
+                                tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
                             }
                             state.bump_round();
                             return SignPhase::Organizing(SignOrganizer);
@@ -748,8 +901,8 @@ impl SignPositor {
                             ?round,
                             "proposer posit deadline reached, expiring round"
                         );
-                        if let Some(_taken) = presignature {
-                            tracing::warn!(?sign_id, "discarding presignature due to proposer timeout");
+                        if let Some(_reservation) = presignature {
+                            tracing::warn!(?sign_id, "returning presignature to pool due to proposer timeout");
                         }
                     } else {
                         tracing::warn!(?sign_id, me=?ctx.governance.me, ?proposer, "deliberator posit timeout waiting for Start, reorganizing");
@@ -825,8 +978,20 @@ impl SignGenerating {
             "posit complete, starting generation"
         );
 
-        let presignature_pending = if let Some(taken) = self.presignature.take() {
-            PendingPresignature::Available(Box::new(taken))
+        let presignature_pending = if let Some(reservation) = self.presignature.take() {
+            // Commit: actually remove from Redis now that posit succeeded and generation starts
+            match reservation.commit().await {
+                Some(taken) => PendingPresignature::Available(Box::new(taken)),
+                None => {
+                    tracing::warn!(
+                        ?sign_id,
+                        ?round,
+                        "failed to commit presignature reservation, reorganizing"
+                    );
+                    state.bump_round();
+                    return SignPhase::Organizing(SignOrganizer);
+                }
+            }
         } else {
             PendingPresignature::InStorage(
                 self.presignature_id,
@@ -1085,13 +1250,6 @@ impl SignGenerator {
                         "completed signature generation"
                     );
 
-                    record_request_latency(
-                        self.indexed.chain,
-                        SignRequestStep::Generating,
-                        "ok",
-                        self.created,
-                    );
-
                     crate::metrics::protocols::SIGNATURE_ACCRUED_WAIT_DELAY
                         .observe(total_wait.as_millis() as f64);
                     crate::metrics::protocols::SIGNATURE_POKES_CNT.observe(total_pokes as f64);
@@ -1148,6 +1306,44 @@ impl Drop for SignGenerator {
     }
 }
 
+/// Per-request accumulator for the three looping phases in `SignTask::run`:
+/// Organizing, Posit, Generating. Times are summed across attempts so each
+/// histogram observation covers the full request even when the state machine
+/// loops back. Indexing/AwaitingGeneration/Responding/Total are emitted
+/// elsewhere and ignored by `add`.
+///
+/// Additivity caveat: without governance pauses, all five stages sum to
+/// Total. Resharing or other transitions out of `Running` mid-request show
+/// idle time only in Total, so the equality holds as `<=` in that case.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+struct PhaseDurations {
+    organizing: Duration,
+    posit: Duration,
+    generating: Duration,
+}
+
+impl PhaseDurations {
+    fn add(&mut self, step: SignRequestStep, elapsed: Duration) {
+        match step {
+            SignRequestStep::Organizing => self.organizing += elapsed,
+            SignRequestStep::Posit => self.posit += elapsed,
+            SignRequestStep::Generating => self.generating += elapsed,
+            // Emitted elsewhere; listed explicitly so adding a new variant
+            // forces a deliberate decision here.
+            SignRequestStep::Indexing
+            | SignRequestStep::AwaitingGeneration
+            | SignRequestStep::Responding
+            | SignRequestStep::Total => {}
+        }
+    }
+
+    fn emit(self, chain: Chain) {
+        record_request_latency(chain, SignRequestStep::Organizing, "ok", self.organizing);
+        record_request_latency(chain, SignRequestStep::Posit, "ok", self.posit);
+        record_request_latency(chain, SignRequestStep::Generating, "ok", self.generating);
+    }
+}
+
 struct SignTask {
     governance: GovernanceInfo,
     sign_id: SignId,
@@ -1163,6 +1359,7 @@ struct SignTask {
     cfg: ProtocolConfig,
     contract: ContractStateWatcher,
     is_proposer: Arc<AtomicBool>,
+    limiter: SignLimiter,
     node_account_id: near_account_id::AccountId,
 }
 
@@ -1184,9 +1381,28 @@ impl SignTask {
         // since we won't in the running state
         let mut is_running = self.governance.is_running;
 
+        // Sum per-phase time across loop attempts; emit on Complete(Ok) only.
+        let mut durations = PhaseDurations::default();
+
         loop {
+            let phase_start = Instant::now();
+            let current_phase_step = match &phase {
+                SignPhase::Organizing(_) => Some(SignRequestStep::Organizing),
+                SignPhase::Posit(_) => Some(SignRequestStep::Posit),
+                SignPhase::Generating(_) => Some(SignRequestStep::Generating),
+                SignPhase::Complete(_) => None,
+            };
+
             tokio::select! {
                 Some(contract_state) = contract_watcher.next_state() => {
+                    // `phase.advance` was cancelled. Attribute its partial
+                    // elapsed time only if `is_running` was true; otherwise
+                    // the branch was gated off and the iteration was idle.
+                    if is_running {
+                        if let Some(step) = current_phase_step {
+                            durations.add(step, phase_start.elapsed());
+                        }
+                    }
                     is_running = self.refresh_governance(&contract_state);
                     if is_running {
                         // we're back into running, reset to SignOrganizer
@@ -1202,9 +1418,28 @@ impl SignTask {
                 // This branch in tokio::select will get cancelled since the future for next contract
                 // state is reached first. This effectively pauses this branch from executing and
                 // further advancing the signature organization/positing/generation flow.
-                new_phase = phase.advance(&mut self, &mut state, &mut task_rx), if is_running => match new_phase {
-                    SignPhase::Complete(result) => return result,
-                    new_phase => phase = new_phase,
+                new_phase = phase.advance(&mut self, &mut state, &mut task_rx), if is_running => {
+                    if let Some(step) = current_phase_step {
+                        durations.add(step, phase_start.elapsed());
+                        if matches!(&new_phase, SignPhase::Organizing(_)) {
+                            SIGN_REQUEST_LOOPS
+                                .with_label_values(&[
+                                    state.indexed().chain.as_str(),
+                                    step.as_str(),
+                                ])
+                                .inc();
+                        }
+                    }
+
+                    match new_phase {
+                        SignPhase::Complete(result) => {
+                            if result.is_ok() {
+                                durations.emit(state.indexed().chain);
+                            }
+                            return result;
+                        }
+                        new_phase => phase = new_phase,
+                    }
                 }
             };
         }
@@ -1243,6 +1478,9 @@ pub struct SignatureSpawner {
     /// Tracks delay watcher tasks that will increment the delayed metric when response time exceeds expected
     delayed_watchers: HashMap<SignId, JoinHandle<()>>,
     mesh_state: watch::Receiver<MeshState>,
+    /// Limiter that limits the amount of sign tasks from progressing and utilizing
+    /// too much compute otherwise the whole system will be flooded with requests.
+    limiter: SignLimiter,
 
     msg: MessageChannel,
     rpc: RpcChannel,
@@ -1305,6 +1543,7 @@ impl SignatureSpawner {
             .or_insert_with(|| Subscriber::unsubscribed(SIGN_POSIT_INBOX_LABEL));
         let rx = inbox.subscribe();
         inbox.report_capacity();
+
         let task = SignTask {
             governance: governance.clone(),
             sign_id,
@@ -1315,6 +1554,7 @@ impl SignatureSpawner {
             cfg,
             contract: self.contract.clone(),
             is_proposer,
+            limiter: self.limiter.clone(),
             node_account_id: self.node_account_id.clone(),
         };
 
@@ -1417,7 +1657,7 @@ impl SignatureSpawner {
                     return;
                 }
 
-                record_request_latency(
+                record_request_latency_since(
                     request.chain,
                     SignRequestStep::AwaitingGeneration,
                     "ok",
@@ -1500,6 +1740,7 @@ impl SignatureSpawnerTask {
             delayed_watchers: HashMap::new(),
             presignatures: presignature_storage,
             mesh_state,
+            limiter: SignLimiter::new(MAX_CONCURRENT_PROPOSERS),
             msg: msg_channel,
             rpc: rpc_channel,
             backlog,
@@ -1620,6 +1861,7 @@ mod tests {
             cfg: ProtocolConfig::default(),
             contract,
             is_proposer: Arc::new(AtomicBool::new(false)),
+            limiter: SignLimiter::new(1),
             node_account_id: account_id.clone(),
         };
 
@@ -1664,5 +1906,105 @@ mod tests {
         assert_eq!(sign_task.governance.epoch, 1);
         assert_eq!(sign_task.governance.threshold, 1);
         assert_eq!(sign_task.governance.me, Participant::from(0));
+    }
+
+    #[test]
+    fn phase_durations_sum_per_phase_across_attempts() {
+        // Simulates a request that loops Organizing -> Posit -> Organizing ->
+        // Posit -> Generating before completing. Each `add` mirrors one
+        // iteration of the SignTask::run phase loop.
+        let mut d = PhaseDurations::default();
+        d.add(SignRequestStep::Organizing, Duration::from_millis(100));
+        d.add(SignRequestStep::Posit, Duration::from_millis(200));
+        // back-edge: Posit failed and we re-entered Organizing
+        d.add(SignRequestStep::Organizing, Duration::from_millis(50));
+        d.add(SignRequestStep::Posit, Duration::from_millis(150));
+        d.add(SignRequestStep::Generating, Duration::from_millis(500));
+
+        assert_eq!(d.organizing, Duration::from_millis(150));
+        assert_eq!(d.posit, Duration::from_millis(350));
+        assert_eq!(d.generating, Duration::from_millis(500));
+    }
+
+    #[test]
+    fn phase_durations_ignore_steps_not_part_of_sign_task() {
+        // These variants are not part of SignTask: Indexing is emitted by
+        // the indexer modules, AwaitingGeneration by SignatureSpawner::
+        // handle_request, and Responding/Total by rpc.rs. Passing any to
+        // `add` must be a no-op or they would be double-counted on
+        // multichain_sign_request_latency_sec.
+        let mut d = PhaseDurations::default();
+        d.add(SignRequestStep::Indexing, Duration::from_millis(100));
+        d.add(
+            SignRequestStep::AwaitingGeneration,
+            Duration::from_millis(200),
+        );
+        d.add(SignRequestStep::Responding, Duration::from_millis(300));
+        d.add(SignRequestStep::Total, Duration::from_millis(400));
+
+        assert_eq!(d, PhaseDurations::default());
+    }
+
+    #[test]
+    fn phase_durations_preserve_additivity_invariant() {
+        // This represents the case where we have 2 attempts:
+        // 1st one fails at posit, then starts from organizing again and finishes
+        let inputs = [
+            (SignRequestStep::Organizing, Duration::from_millis(40)),
+            (SignRequestStep::Posit, Duration::from_millis(120)),
+            (SignRequestStep::Organizing, Duration::from_millis(35)),
+            (SignRequestStep::Posit, Duration::from_millis(95)),
+            (SignRequestStep::Generating, Duration::from_millis(710)),
+        ];
+        let expected: Duration = inputs.iter().map(|(_, d)| *d).sum();
+
+        let mut d = PhaseDurations::default();
+        for (step, elapsed) in inputs {
+            d.add(step, elapsed);
+        }
+
+        assert_eq!(d.organizing + d.posit + d.generating, expected);
+    }
+
+    #[tokio::test]
+    async fn sign_limiter_times_out_at_limit() {
+        let semaphore = SignLimiter::new(1);
+        let permit = semaphore
+            .acquire(Duration::from_millis(10))
+            .await
+            .expect("first acquire should succeed");
+
+        let second = semaphore.acquire(Duration::from_millis(10)).await;
+        assert!(matches!(second, Err(SignLimitError::Timeout)));
+
+        drop(permit);
+
+        let third = semaphore.acquire(Duration::from_millis(10)).await;
+        assert!(third.is_ok());
+    }
+
+    #[tokio::test]
+    async fn sign_limiter_applies_reduced_limit_on_release() {
+        let semaphore = SignLimiter::new(2);
+        let first = semaphore
+            .acquire(Duration::from_millis(10))
+            .await
+            .expect("first acquire should succeed");
+        let second = semaphore
+            .acquire(Duration::from_millis(10))
+            .await
+            .expect("second acquire should succeed");
+
+        semaphore.update(1);
+
+        drop(first);
+
+        let third = semaphore.acquire(Duration::from_millis(10)).await;
+        assert!(matches!(third, Err(SignLimitError::Timeout)));
+
+        drop(second);
+
+        let fourth = semaphore.acquire(Duration::from_millis(10)).await;
+        assert!(fourth.is_ok());
     }
 }

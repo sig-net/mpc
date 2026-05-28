@@ -5,9 +5,11 @@ use near_account_id::AccountId;
 use near_workspaces::network::Sandbox;
 use near_workspaces::{Account, Worker};
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::{Future, IntoFuture};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::containers::{self, DockerClient};
 use crate::utils::dev_gen_indexed;
@@ -15,7 +17,44 @@ use crate::{execute, NodeBinarySource, NodeConfig, Nodes};
 
 use crate::cluster::Cluster;
 
-const DOCKER_NETWORK: &str = "mpc_it_network";
+thread_local! {
+    static THREAD_NETWORK_NAME: RefCell<Option<String>> = const { RefCell::new(None) };
+    static THREAD_NETWORK_CLEANUP: RefCell<Option<ThreadNetworkCleanup>> = const { RefCell::new(None) };
+}
+
+static NEXT_NETWORK_SLOT: AtomicUsize = AtomicUsize::new(0);
+
+struct ThreadNetworkCleanup {
+    docker: DockerClient,
+    network: String,
+}
+
+impl Drop for ThreadNetworkCleanup {
+    fn drop(&mut self) {
+        self.docker.best_effort_remove_network(self.network.clone());
+    }
+}
+
+fn thread_network_name(docker: &DockerClient) -> String {
+    THREAD_NETWORK_NAME.with(|name_cell| {
+        let mut name = name_cell.borrow_mut();
+        if let Some(name) = name.as_ref() {
+            return name.clone();
+        }
+
+        let slot = NEXT_NETWORK_SLOT.fetch_add(1, Ordering::Relaxed);
+        let network = format!("mpc_it_{}", slot);
+        THREAD_NETWORK_CLEANUP.with(|cleanup_cell| {
+            *cleanup_cell.borrow_mut() = Some(ThreadNetworkCleanup {
+                docker: docker.clone(),
+                network: network.clone(),
+            });
+        });
+        *name = Some(network.clone());
+        network
+    })
+}
+
 const GCP_PROJECT_ID: &str = "multichain-integration";
 const ENV: &str = "integration-tests";
 
@@ -107,7 +146,6 @@ pub struct Prestockpile {
     /// the number of triples to be lower than the stockpile limit.
     pub multiplier: u32,
 }
-
 pub struct ClusterSpawner {
     pub docker: DockerClient,
     pub release: bool,
@@ -144,12 +182,14 @@ impl Default for ClusterSpawner {
             threshold,
             ..Default::default()
         };
+        let docker = DockerClient::default();
+        let network = thread_network_name(&docker);
         Self {
-            docker: DockerClient::default(),
+            docker,
             release: true,
             env: ENV.to_string(),
             gcp_project_id: GCP_PROJECT_ID.to_string(),
-            network: DOCKER_NETWORK.to_string(),
+            network,
             accounts: Vec::with_capacity(cfg.nodes),
             participants: Vec::with_capacity(cfg.nodes),
             tmp_dir,
