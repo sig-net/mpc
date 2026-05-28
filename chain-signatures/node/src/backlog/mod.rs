@@ -680,7 +680,7 @@ impl Backlog {
         // now repopulate our execution watchers
         for (sign_id, tx) in execution_to_watch {
             // Only restore execution watchers for bidirectional transactions
-            if let Some(tx) = tx.take_execution_tx() {
+            if let Some(tx) = tx.execution_tx().cloned() {
                 self.watch_execution(tx.target_chain, sign_id, tx).await;
             }
         }
@@ -832,7 +832,9 @@ impl BacklogEntry {
                 SignKind::SignBidirectional(_),
                 SignStatus::PendingGeneration | SignStatus::PendingPublish { .. },
             ) => {
-                self.status = SignStatus::PendingExecution { tx: bidirectional_tx };
+                self.status = SignStatus::PendingExecution {
+                    tx: bidirectional_tx,
+                };
                 Ok(())
             }
             _ => Err(BacklogError::InvalidAdvanceTransition),
@@ -859,10 +861,6 @@ impl BacklogEntry {
 
     pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
         self.status.execution_tx()
-    }
-
-    pub fn take_execution_tx(self) -> Option<BidirectionalTx> {
-        self.status.into_execution_tx()
     }
 
     pub fn typename(&self) -> &'static str {
@@ -1038,7 +1036,11 @@ mod tests {
             0,
             SignKind::SignBidirectional(create_test_event(dest)),
         );
-        BacklogEntry::with_status(request, status)
+
+        match status {
+            SignStatus::PendingExecution { .. } => BacklogEntry::pending_execution(request, tx),
+            status => BacklogEntry::with_status(request, status),
+        }
     }
 
     async fn insert_bidirectional_with_status(
@@ -1451,7 +1453,7 @@ mod tests {
             create_execution_entry(
                 tx1.clone(),
                 Chain::Ethereum,
-                SignStatus::PendingGeneration,
+                pending_execution_status(&tx1),
                 "ethereum",
             ),
         );
@@ -1465,7 +1467,7 @@ mod tests {
         assert_eq!(checkpoint, deserialized);
         assert_eq!(
             checkpoint_digest(&checkpoint).unwrap(),
-            digest_hex("5a3f743ba792e69b970bef34c3dbb1c8649ee0f049fb7f3fb66f70b869106415")
+            digest_hex("ebe96b88e51f1c6a128563289f3cf83b6d282b40f2dafc81fef7f2f073f5436f")
         );
         assert_eq!(
             checkpoint_digest(&checkpoint).unwrap(),
@@ -1477,7 +1479,8 @@ mod tests {
             let backlog_entry: BacklogEntry =
                 ciborium::de::from_reader(pending.transaction.as_slice()).unwrap();
             let tx = backlog_entry
-                .take_execution_tx()
+                .execution_tx()
+                .cloned()
                 .expect("Expected pending execution entry");
             (pending.sign_id, tx)
         };

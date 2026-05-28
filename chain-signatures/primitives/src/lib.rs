@@ -185,6 +185,21 @@ pub enum ChainFromError {
 }
 
 impl Chain {
+    pub const fn to_byte(self) -> u8 {
+        match self {
+            Chain::NEAR => 0,
+            Chain::Ethereum => 1,
+            Chain::Solana => 2,
+            Chain::Bitcoin => 3,
+            Chain::Hydration => 4,
+            Chain::Canton => 5,
+        }
+    }
+
+    pub const fn to_bytes(self) -> [u8; 1] {
+        [self.to_byte()]
+    }
+
     pub const fn as_str(&self) -> &'static str {
         match self {
             Chain::NEAR => "NEAR",

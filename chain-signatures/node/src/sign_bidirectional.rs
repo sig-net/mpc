@@ -53,16 +53,10 @@ impl PublishState {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SignStatus {
     PendingGeneration,
-    PendingPublish {
-        publish: PublishState,
-    },
-    PendingExecution {
-        tx: BidirectionalTx,
-    },
+    PendingPublish { publish: PublishState },
+    PendingExecution { tx: BidirectionalTx },
     PendingGenerationBidirectional,
-    PendingPublishBidirectional {
-        publish: PublishState,
-    },
+    PendingPublishBidirectional { publish: PublishState },
 }
 
 impl SignStatus {
@@ -109,8 +103,7 @@ impl SignStatus {
             SignStatus::PendingExecution { tx } => {
                 let mut bytes = vec![2];
                 bytes.extend_from_slice(tx.id.0.as_slice());
-                bytes
-                    .extend(borsh_to_vec(&tx.target_chain).expect("chain serialization is infallible"));
+                bytes.extend_from_slice(&tx.target_chain.to_bytes());
                 bytes
             }
             SignStatus::PendingGenerationBidirectional => vec![3],
@@ -119,13 +112,6 @@ impl SignStatus {
     }
 
     pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
-        match self {
-            SignStatus::PendingExecution { tx } => Some(tx),
-            _ => None,
-        }
-    }
-
-    pub fn into_execution_tx(self) -> Option<BidirectionalTx> {
         match self {
             SignStatus::PendingExecution { tx } => Some(tx),
             _ => None,
