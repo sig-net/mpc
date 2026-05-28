@@ -8,12 +8,14 @@ use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers::EthereumSandbox;
 use integration_tests::eth::{self, ChainSignatures, SignRequest};
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+use k256::{AffinePoint, Scalar};
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign, SignKind};
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
+use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::ops::SignBidirectionalEvent as NodeSignBidirectionalEvent;
 use mpc_node::stream::ops::SignatureRespondedEvent;
@@ -545,6 +547,23 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         nonce: checkpoint_nonce,
     };
     backlog
+        .set_status(
+            execution_tx.source_chain,
+            &execution_sign_id,
+            SignStatus::PendingPublish {
+                publish: PublishState {
+                    signature: mpc_primitives::Signature::new(
+                        AffinePoint::GENERATOR,
+                        Scalar::ONE,
+                        0,
+                    ),
+                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                    is_proposer: true,
+                },
+            },
+        )
+        .await;
+    backlog
         .advance(Chain::Solana, execution_sign_id, execution_tx)
         .await
         .context("failed to seed execution watcher")?;
@@ -827,6 +846,23 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
             current_unix_timestamp(),
             test_bidirectional_event(),
         ))
+        .await;
+    backlog
+        .set_status(
+            tx.source_chain,
+            &sign_id,
+            SignStatus::PendingPublish {
+                publish: PublishState {
+                    signature: mpc_primitives::Signature::new(
+                        AffinePoint::GENERATOR,
+                        Scalar::ONE,
+                        0,
+                    ),
+                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                    is_proposer: true,
+                },
+            },
+        )
         .await;
     backlog
         .advance(Chain::Solana, sign_id, tx)
