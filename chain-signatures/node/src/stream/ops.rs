@@ -1461,7 +1461,7 @@ mod tests {
 
         // Source chain should now wait for final bidirectional response.
         let waiting = backlog
-            .get_by_status(tx.source_chain, SignStatus::PendingGenerationBidirectional)
+            .pending_generation_bidirectionals(tx.source_chain)
             .await;
         assert!(waiting.contains_key(&sign_id));
 

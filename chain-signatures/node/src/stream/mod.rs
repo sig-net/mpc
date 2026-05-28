@@ -851,6 +851,20 @@ mod tests {
             _ => panic!("expected sign request"),
         }
 
+        backlog
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingPublish {
+                    publish: crate::sign_bidirectional::PublishState {
+                        signature: Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
+                        participants: vec![cait_sith::protocol::Participant::from(0u32)],
+                        is_proposer: true,
+                    },
+                },
+            )
+            .await;
+
         // Prepare a SignatureRespondedEvent that will advance to bidirectional and register watcher
         // Construct a valid signature (use generator point for big_r and small s)
         use k256::elliptic_curve::sec1::ToEncodedPoint;

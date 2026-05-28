@@ -66,11 +66,18 @@ impl PendingRequests {
         self.requests.len()
     }
 
-    /// Returns all sign-respond transactions with a specific status
-    pub fn get_by_status(&self, status: SignStatus) -> HashMap<SignId, BacklogEntry> {
+    fn pending_generations(&self) -> HashMap<SignId, BacklogEntry> {
         self.requests
             .iter()
-            .filter(|(_, entry)| entry.status().is_same_kind(&status))
+            .filter(|(_, entry)| entry.status() == SignStatus::PendingGeneration)
+            .map(|(id, entry)| (*id, entry.clone()))
+            .collect()
+    }
+
+    fn pending_generation_bidirectionals(&self) -> HashMap<SignId, BacklogEntry> {
+        self.requests
+            .iter()
+            .filter(|(_, entry)| entry.status() == SignStatus::PendingGenerationBidirectional)
             .map(|(id, entry)| (*id, entry.clone()))
             .collect()
     }
@@ -364,17 +371,24 @@ impl Backlog {
         publishable
     }
 
-    /// Returns all sign-respond transactions with a specific status
-    pub async fn get_by_status(
+    pub async fn pending_generations(&self, chain: Chain) -> HashMap<SignId, BacklogEntry> {
+        self.requests
+            .read()
+            .await
+            .get(&chain)
+            .map(PendingRequests::pending_generations)
+            .unwrap_or_default()
+    }
+
+    pub async fn pending_generation_bidirectionals(
         &self,
         chain: Chain,
-        status: SignStatus,
     ) -> HashMap<SignId, BacklogEntry> {
         self.requests
             .read()
             .await
             .get(&chain)
-            .map(|requests| requests.get_by_status(status))
+            .map(PendingRequests::pending_generation_bidirectionals)
             .unwrap_or_default()
     }
 
@@ -840,10 +854,7 @@ impl BacklogEntry {
         bidirectional_tx: BidirectionalTx,
     ) -> Result<(), BacklogError> {
         match (&self.request.kind, self.status.clone()) {
-            (
-                SignKind::SignBidirectional(_),
-                SignStatus::PendingGeneration | SignStatus::PendingPublish { .. },
-            ) => {
+            (SignKind::SignBidirectional(_), SignStatus::PendingPublish { .. }) => {
                 self.status = SignStatus::PendingExecution {
                     tx: bidirectional_tx,
                 };
@@ -856,14 +867,14 @@ impl BacklogEntry {
     /// Get target chain if this is a bidirectional transaction
     // TODO: looks a bit weird having two different ways to get target_chain in the match
     pub fn target_chain(&self) -> Option<Chain> {
-        self.status
-            .execution_tx()
-            .map(|tx| tx.target_chain)
-            .or_else(|| match &self.request.kind {
-                SignKind::Sign => None,
-                SignKind::SignBidirectional(event) => event.target_chain().ok(),
-                SignKind::RespondBidirectional(_) => None,
-            })
+        match &self.request.kind {
+            SignKind::Sign => None,
+            SignKind::SignBidirectional(event) => self
+                .execution_tx()
+                .map(|tx| tx.target_chain)
+                .or_else(|| event.target_chain().ok()),
+            SignKind::RespondBidirectional(_) => None,
+        }
     }
 
     /// Check if this is a bidirectional transaction
@@ -1224,14 +1235,12 @@ mod tests {
             .await;
         assert!(eth_pending.is_some());
 
-        let eth_awaiting = backlog
-            .get_by_status(Chain::Ethereum, SignStatus::PendingGeneration)
-            .await;
+        let eth_awaiting = backlog.pending_generations(Chain::Ethereum).await;
         assert_eq!(eth_awaiting.len(), 1);
 
         // Filter Ethereum by bidirectional completion awaiting final respond
         let eth_completion = backlog
-            .get_by_status(Chain::Ethereum, SignStatus::PendingGenerationBidirectional)
+            .pending_generation_bidirectionals(Chain::Ethereum)
             .await;
         assert_eq!(eth_completion.len(), 1);
 
@@ -1845,7 +1854,7 @@ mod tests {
             )
             .await;
         let successes = backlog
-            .get_by_status(tx.source_chain, SignStatus::PendingGenerationBidirectional)
+            .pending_generation_bidirectionals(tx.source_chain)
             .await;
         assert!(successes.contains_key(&sign_id));
     }
@@ -1957,7 +1966,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_advance_accepts_pending_generation_bidirectional_entry() {
+    async fn test_advance_rejects_pending_generation_bidirectional() {
         let backlog = Backlog::new();
         let tx = create_test_tx(9);
         let sign_id = SignId::new(tx.request_id);
@@ -1971,10 +1980,42 @@ mod tests {
             ))
             .await;
 
+        let err = backlog
+            .advance(tx.source_chain, sign_id, tx)
+            .await
+            .expect_err("advance should require PendingPublish for bidirectional requests");
+
+        assert!(matches!(err, BacklogError::InvalidAdvanceTransition));
+    }
+
+    #[tokio::test]
+    async fn test_advance_accepts_pending_publish_bidirectional() {
+        let backlog = Backlog::new();
+        let tx = create_test_tx(10);
+        let sign_id = SignId::new(tx.request_id);
+
+        backlog
+            .insert(create_bidirectional_request(
+                sign_id,
+                tx.source_chain,
+                "ethereum",
+                0,
+            ))
+            .await;
+        backlog
+            .set_status(
+                tx.source_chain,
+                &sign_id,
+                SignStatus::PendingPublish {
+                    publish: test_publish_state(true),
+                },
+            )
+            .await;
+
         backlog
             .advance(tx.source_chain, sign_id, tx.clone())
             .await
-            .expect("advance should succeed once a real respond event is observed");
+            .expect("advance should succeed once respond() is confirmed from PendingPublish");
 
         let entry = backlog
             .get(tx.source_chain, &sign_id)

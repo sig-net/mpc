@@ -71,31 +71,6 @@ impl SignStatus {
         matches!(self, SignStatus::PendingExecution { .. })
     }
 
-    pub fn is_same_kind(&self, other: &Self) -> bool {
-        matches!(
-            (self, other),
-            (SignStatus::PendingGeneration, SignStatus::PendingGeneration)
-                | (
-                    SignStatus::PendingPublish { .. },
-                    SignStatus::PendingPublish { .. }
-                )
-                | (
-                    SignStatus::PendingGenerationBidirectional,
-                    SignStatus::PendingGenerationBidirectional,
-                )
-                | (
-                    SignStatus::PendingPublishBidirectional { .. },
-                    SignStatus::PendingPublishBidirectional { .. },
-                )
-        ) || matches!(
-            (self, other),
-            (
-                SignStatus::PendingExecution { tx: left_tx },
-                SignStatus::PendingExecution { tx: right_tx }
-            ) if left_tx.id == right_tx.id && left_tx.target_chain == right_tx.target_chain
-        )
-    }
-
     pub fn digest_bytes(&self) -> Vec<u8> {
         match self {
             SignStatus::PendingGeneration => vec![0],
