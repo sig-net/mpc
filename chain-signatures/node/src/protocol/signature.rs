@@ -14,7 +14,7 @@ use crate::protocol::presignature::PresignatureId;
 use crate::protocol::SignKind;
 use crate::protocol::{Chain, ProtocolState};
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
-use crate::sign_bidirectional::SignStatus;
+use crate::sign_bidirectional::{PublishState, SignStatus};
 use crate::storage::presignature_storage::{
     PresignatureReservation, PresignatureTaken, PresignatureTakenDropper,
 };
@@ -1255,22 +1255,26 @@ impl SignGenerator {
                         .observe(self.created.elapsed().as_secs_f64());
                     crate::metrics::protocols::SIGNATURE_GENERATOR_SUCCESS.inc();
 
-                    if self.proposer == me {
-                        crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS.inc();
-                        if let Some(status) = publish_status(
-                            ctx.governance.public_key,
-                            &self.indexed,
-                            &output,
-                        ) {
-                            if ctx
-                                .backlog
-                                .set_status(self.indexed.chain, &sign_id, status)
-                                .await
-                                .is_none()
-                            {
-                                tracing::warn!(?sign_id, "failed to persist publish status in backlog");
-                            }
+                    let is_proposer = self.proposer == me;
+                    if let Some(status) = publish_status(
+                        ctx.governance.public_key,
+                        &self.indexed,
+                        &output,
+                        self.participants.clone(),
+                        is_proposer,
+                    ) {
+                        if ctx
+                            .backlog
+                            .set_status(self.indexed.chain, &sign_id, status)
+                            .await
+                            .is_none()
+                        {
+                            tracing::warn!(?sign_id, "failed to persist publish status in backlog");
                         }
+                    }
+
+                    if is_proposer {
+                        crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS.inc();
                         ctx.rpc.publish(
                             ctx.governance.public_key,
                             self.indexed.clone(),
@@ -1310,6 +1314,8 @@ fn publish_status(
     public_key: mpc_crypto::PublicKey,
     indexed: &IndexedSignRequest,
     output: &cait_sith::FullSignature<Secp256k1>,
+    participants: Vec<Participant>,
+    is_proposer: bool,
 ) -> Option<SignStatus> {
     let expected_public_key = derive_key(public_key, indexed.args.epsilon);
     let signature = crate::kdf::into_signature(
@@ -1319,10 +1325,15 @@ fn publish_status(
         indexed.args.payload,
     )
     .ok()?;
+    let publish = PublishState {
+        signature,
+        participants,
+        is_proposer,
+    };
 
     Some(match indexed.kind {
-        SignKind::RespondBidirectional(_) => SignStatus::PendingPublishBidirectional { signature },
-        _ => SignStatus::PendingPublish { signature },
+        SignKind::RespondBidirectional(_) => SignStatus::PendingPublishBidirectional { publish },
+        _ => SignStatus::PendingPublish { publish },
     })
 }
 

@@ -390,15 +390,18 @@ pub(crate) async fn resume_pending_publish_requests(
         tracing::warn!(%source_chain, count = publishable.len(), "cannot resume pending publish requests without a public key");
         return;
     };
-    let Some(participants) = contract_watcher.participants() else {
-        tracing::warn!(%source_chain, count = publishable.len(), "cannot resume pending publish requests without participants");
-        return;
-    };
-    let participants = participants.keys_vec();
+    for (sign_request, publish) in publishable {
+        if !publish.is_proposer {
+            continue;
+        }
 
-    for (sign_request, signature) in publishable {
         let sign_id = sign_request.id;
-        rpc.publish_signature(public_key, sign_request, signature, participants.clone());
+        rpc.publish_signature(
+            public_key,
+            sign_request,
+            publish.signature,
+            publish.participants,
+        );
         tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
     }
 }

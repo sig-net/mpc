@@ -1213,7 +1213,13 @@ mod tests {
             .set_status(
                 Chain::Solana,
                 &sign_id,
-                SignStatus::PendingPublish { signature },
+                SignStatus::PendingPublish {
+                    publish: crate::sign_bidirectional::PublishState {
+                        signature,
+                        participants: vec![cait_sith::protocol::Participant::from(0u32)],
+                        is_proposer: true,
+                    },
+                },
             )
             .await;
 
@@ -1258,6 +1264,73 @@ mod tests {
                 assert_eq!(action.signature, signature);
             }
         }
+
+        run_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup() {
+        use crate::sign_bidirectional::SignStatus;
+
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([78u8; 32]);
+        let signature = Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0);
+
+        backlog
+            .insert(IndexedSignRequest::sign(
+                sign_id,
+                SignArgs {
+                    entropy: [10u8; 32],
+                    epsilon: Scalar::from(1u64),
+                    payload: Scalar::from(2u64),
+                    path: "test".to_string(),
+                    key_version: 1,
+                },
+                Chain::Solana,
+                current_unix_timestamp(),
+            ))
+            .await;
+        backlog
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingPublish {
+                    publish: crate::sign_bidirectional::PublishState {
+                        signature,
+                        participants: vec![cait_sith::protocol::Participant::from(0u32)],
+                        is_proposer: false,
+                    },
+                },
+            )
+            .await;
+
+        let client = SolanaTestStream::new(vec![Some(ChainEvent::CatchupCompleted), None]);
+        let (sign_tx, _sign_rx) = mpsc::channel(4);
+        let (rpc, mut rpc_rx) = test_rpc_channel(4);
+        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+            &"test.near".parse::<AccountId>().unwrap(),
+            k256::ProjectivePoint::GENERATOR.to_affine(),
+            0,
+            Default::default(),
+        );
+        let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
+        let node_client = NodeClient::new(&Default::default());
+
+        let run_handle = tokio::spawn(async move {
+            run_stream(
+                client,
+                sign_tx,
+                rpc,
+                backlog,
+                contract_watcher,
+                mesh_state_rx,
+                node_client,
+            )
+            .await;
+        });
+
+        let no_publish = timeout(Duration::from_millis(100), rpc_rx.recv()).await;
+        assert!(matches!(no_publish, Err(_) | Ok(None)));
 
         run_handle.abort();
     }

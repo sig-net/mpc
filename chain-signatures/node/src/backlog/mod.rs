@@ -4,11 +4,11 @@ use self::selection::select_checkpoints;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, SignKind};
-use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, SignStatus};
+use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PublishState, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use anyhow::Context;
-use mpc_primitives::{PendingTx, SignId, Signature};
+use mpc_primitives::{PendingTx, SignId};
 use sha3::{Digest, Sha3_256};
 use std::collections::{hash_map, HashMap};
 use std::hash::{Hash, Hasher};
@@ -327,7 +327,10 @@ impl Backlog {
         requeueable
     }
 
-    pub async fn publishable_requests(&self, chain: Chain) -> Vec<(IndexedSignRequest, Signature)> {
+    pub async fn publishable_requests(
+        &self,
+        chain: Chain,
+    ) -> Vec<(IndexedSignRequest, PublishState)> {
         let requests = self.requests.read().await;
         let Some(pending) = requests.get(&chain) else {
             return Vec::new();
@@ -337,9 +340,9 @@ impl Backlog {
             .requests
             .values()
             .filter_map(|entry| match entry.status() {
-                SignStatus::PendingPublish { signature }
-                | SignStatus::PendingPublishBidirectional { signature } => {
-                    Some((entry.request.clone(), signature))
+                SignStatus::PendingPublish { publish }
+                | SignStatus::PendingPublishBidirectional { publish } => {
+                    Some((entry.request.clone(), publish))
                 }
                 _ => None,
             })
@@ -933,11 +936,12 @@ mod tests {
     use crate::{
         protocol::SignKind,
         respond_bidirectional::RespondBidirectionalTx,
-        sign_bidirectional::{BidirectionalTx, BidirectionalTxId, SignStatus},
+        sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PublishState, SignStatus},
         stream::ops::SignBidirectionalEvent,
     };
     use alloy::primitives::{Address, B256};
     use anchor_lang::prelude::Pubkey;
+    use cait_sith::protocol::Participant;
     use k256::{AffinePoint, Scalar};
     use std::convert::TryInto;
     use mpc_primitives::{SignArgs, SignId};
@@ -951,6 +955,14 @@ mod tests {
 
     fn test_signature() -> mpc_primitives::Signature {
         mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0)
+    }
+
+    fn test_publish_state(is_proposer: bool) -> PublishState {
+        PublishState {
+            signature: test_signature(),
+            participants: vec![Participant::from(0u32), Participant::from(1u32)],
+            is_proposer,
+        }
     }
 
     fn pending_execution_status(tx: &BidirectionalTx) -> SignStatus {
@@ -1098,7 +1110,7 @@ mod tests {
                         chain,
                         &sign_id,
                         SignStatus::PendingPublish {
-                            signature: test_signature(),
+                            publish: test_publish_state(true),
                         },
                     )
                     .await;
@@ -1346,7 +1358,7 @@ mod tests {
         assert_eq!(checkpoint.pending_requests.len(), 2);
         assert_eq!(
             checkpoint_digest(&checkpoint).unwrap(),
-            digest_hex("69f27e7699ec4cd50a16123f478679fdef45702d46f8908f1ab8c50ac0811024")
+            digest_hex("287237dc78e67eb9695b1472da0353a64a97a2b76d643cf50b4ce0ccdb28073b")
         );
     }
 
@@ -1722,7 +1734,7 @@ mod tests {
                 Chain::Solana,
                 &sign_id,
                 SignStatus::PendingPublish {
-                    signature: test_signature(),
+                    publish: test_publish_state(true),
                 },
             )
             .await;
@@ -1752,7 +1764,7 @@ mod tests {
                 Chain::Solana,
                 &sign_id,
                 SignStatus::PendingPublishBidirectional {
-                    signature: test_signature(),
+                    publish: test_publish_state(true),
                 },
             )
             .await;

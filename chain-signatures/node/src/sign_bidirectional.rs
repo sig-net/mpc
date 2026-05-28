@@ -2,6 +2,7 @@ use crate::protocol::{Chain, IndexedSignRequest};
 use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
 use borsh::{to_vec as borsh_to_vec, BorshSerialize};
+use cait_sith::protocol::Participant;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
@@ -32,15 +33,35 @@ struct AbiField {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PublishState {
+    pub signature: Signature,
+    pub participants: Vec<Participant>,
+    pub is_proposer: bool,
+}
+
+impl PublishState {
+    fn digest_bytes(&self, tag: u8) -> Vec<u8> {
+        let mut bytes = vec![tag];
+        bytes.extend(
+            borsh_to_vec(&self.signature).expect("signature serialization is infallible"),
+        );
+        ciborium::ser::into_writer(&self.participants, &mut bytes)
+            .expect("participant serialization is infallible");
+        bytes.push(u8::from(self.is_proposer));
+        bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SignStatus {
     PendingGeneration,
-    PendingPublish { signature: Signature },
+    PendingPublish { publish: PublishState },
     PendingExecution {
         tx_hash: BidirectionalTxId,
         target_chain: Chain,
     },
     PendingGenerationBidirectional,
-    PendingPublishBidirectional { signature: Signature },
+    PendingPublishBidirectional { publish: PublishState },
 }
 
 impl SignStatus {
@@ -86,11 +107,7 @@ impl SignStatus {
     pub fn digest_bytes(&self) -> Vec<u8> {
         match self {
             SignStatus::PendingGeneration => vec![0],
-            SignStatus::PendingPublish { signature } => {
-                let mut bytes = vec![1];
-                bytes.extend(borsh_to_vec(signature).expect("signature serialization is infallible"));
-                bytes
-            }
+            SignStatus::PendingPublish { publish } => publish.digest_bytes(1),
             SignStatus::PendingExecution {
                 tx_hash,
                 target_chain,
@@ -103,11 +120,7 @@ impl SignStatus {
                 bytes
             }
             SignStatus::PendingGenerationBidirectional => vec![3],
-            SignStatus::PendingPublishBidirectional { signature } => {
-                let mut bytes = vec![4];
-                bytes.extend(borsh_to_vec(signature).expect("signature serialization is infallible"));
-                bytes
-            }
+            SignStatus::PendingPublishBidirectional { publish } => publish.digest_bytes(4),
         }
     }
 }
