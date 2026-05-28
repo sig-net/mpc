@@ -1256,7 +1256,10 @@ async fn execute_publish(client: ChainClient, action: PublishAction, backlog: Ba
         );
     }
 
-    if matches!(action.indexed.kind, SignKind::SignBidirectional(_)) {
+    if matches!(
+        action.indexed.kind,
+        SignKind::SignBidirectional(_) | SignKind::RespondBidirectional(_)
+    ) {
         if let Err(err) = backlog.mark_published(chain, &sign_id, publish_ok).await {
             tracing::warn!(?sign_id, ?err, "failed to mark publish status in backlog");
         }

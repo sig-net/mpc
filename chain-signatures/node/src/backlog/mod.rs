@@ -353,12 +353,28 @@ impl Backlog {
     /// Mark a request as published (success or failure)
     pub async fn mark_published(
         &self,
-        _chain: Chain,
-        _id: &SignId,
-        _success: bool,
+        chain: Chain,
+        id: &SignId,
+        success: bool,
     ) -> Result<(), BacklogError> {
-        // TODO: implement
-        Ok(())
+        let requests = self.requests.read().await;
+        let pending = requests.get(&chain).ok_or(BacklogError::ChainNotFound)?;
+        let entry = pending
+            .requests
+            .get(id)
+            .ok_or(BacklogError::NotFound { chain, id: *id })?;
+
+        match (&entry.request.kind, &entry.status) {
+            (SignKind::SignBidirectional(_), SignStatus::PendingPublish { .. })
+            | (
+                SignKind::RespondBidirectional(_),
+                SignStatus::PendingPublishBidirectional { .. },
+            ) => {
+                tracing::info!(?chain, ?id, success, status = ?entry.status, "publish attempt recorded");
+                Ok(())
+            }
+            _ => Err(BacklogError::InvalidPublishTransition),
+        }
     }
 
     // TODO: the backlog is a bit bloated with transition functions, so we need to do a proper cleanup
@@ -722,6 +738,8 @@ pub enum BacklogError {
     TransactionNotFound,
     #[error("cannot advance non-bidirectional or already-advanced backlog entry")]
     InvalidAdvanceTransition,
+    #[error("cannot mark publish for current backlog state")]
+    InvalidPublishTransition,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1090,7 +1108,7 @@ mod tests {
             &backlog,
             Chain::Ethereum,
             tx_eth.clone(),
-            SignStatus::AwaitingResponse,
+            SignStatus::PendingGeneration,
             "ethereum",
         )
         .await;
@@ -1098,7 +1116,7 @@ mod tests {
             &backlog,
             Chain::Solana,
             tx_sol.clone(),
-            SignStatus::AwaitingResponse,
+            SignStatus::PendingGeneration,
             "solana",
         )
         .await;
@@ -1106,7 +1124,7 @@ mod tests {
             &backlog,
             Chain::NEAR,
             tx_near.clone(),
-            SignStatus::AwaitingResponse,
+            SignStatus::PendingGeneration,
             "near",
         )
         .await;
@@ -1133,7 +1151,7 @@ mod tests {
             &backlog,
             Chain::Ethereum,
             tx1,
-            SignStatus::AwaitingResponse,
+            SignStatus::PendingGeneration,
             "ethereum",
         )
         .await;
@@ -1141,7 +1159,7 @@ mod tests {
             &backlog,
             Chain::Ethereum,
             tx2,
-            SignStatus::AwaitingResponseBidirectional,
+            SignStatus::PendingGenerationBidirectional,
             "ethereum",
         )
         .await;
@@ -1172,13 +1190,13 @@ mod tests {
         assert_eq!(eth_pending.len(), 1);
 
         let eth_awaiting = backlog
-            .get_by_status(Chain::Ethereum, SignStatus::AwaitingResponse)
+            .get_by_status(Chain::Ethereum, SignStatus::PendingGeneration)
             .await;
         assert_eq!(eth_awaiting.len(), 1);
 
         // Filter Ethereum by bidirectional completion awaiting final respond
         let eth_completion = backlog
-            .get_by_status(Chain::Ethereum, SignStatus::AwaitingResponseBidirectional)
+            .get_by_status(Chain::Ethereum, SignStatus::PendingGenerationBidirectional)
             .await;
         assert_eq!(eth_completion.len(), 1);
 
@@ -1209,7 +1227,7 @@ mod tests {
                     &backlog,
                     Chain::Ethereum,
                     tx,
-                    SignStatus::AwaitingResponse,
+                    SignStatus::PendingGeneration,
                     "ethereum",
                 )
                 .await;
@@ -1225,7 +1243,7 @@ mod tests {
                     &backlog,
                     Chain::Solana,
                     tx,
-                    SignStatus::AwaitingResponse,
+                    SignStatus::PendingGeneration,
                     "solana",
                 )
                 .await;
@@ -1283,7 +1301,7 @@ mod tests {
             &backlog,
             Chain::Ethereum,
             tx2.clone(),
-            SignStatus::AwaitingResponseBidirectional,
+            SignStatus::PendingGenerationBidirectional,
             "ethereum",
         )
         .await;
@@ -1308,7 +1326,7 @@ mod tests {
             create_execution_entry(
                 tx1.clone(),
                 Chain::Ethereum,
-                SignStatus::AwaitingResponse,
+                SignStatus::PendingGeneration,
                 "ethereum",
             ),
         );
@@ -1317,7 +1335,7 @@ mod tests {
             create_execution_entry(
                 tx2.clone(),
                 Chain::Ethereum,
-                SignStatus::AwaitingResponse,
+                SignStatus::PendingGeneration,
                 "ethereum",
             ),
         );
@@ -1329,7 +1347,7 @@ mod tests {
             create_execution_entry(
                 tx1.clone(),
                 Chain::Ethereum,
-                SignStatus::AwaitingResponse,
+                SignStatus::PendingGeneration,
                 "ethereum",
             ),
         );
@@ -1338,7 +1356,7 @@ mod tests {
             create_execution_entry(
                 tx2.clone(),
                 Chain::Ethereum,
-                SignStatus::AwaitingResponse,
+                SignStatus::PendingGeneration,
                 "ethereum",
             ),
         );
@@ -1366,7 +1384,7 @@ mod tests {
             create_execution_entry(
                 tx.clone(),
                 Chain::Ethereum,
-                SignStatus::AwaitingResponse,
+                SignStatus::PendingGeneration,
                 "ethereum",
             ),
         );
@@ -1407,7 +1425,7 @@ mod tests {
             create_execution_entry(
                 tx1.clone(),
                 Chain::Ethereum,
-                SignStatus::AwaitingResponse,
+                SignStatus::PendingGeneration,
                 "ethereum",
             ),
         );
@@ -1561,7 +1579,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_recovered_completed_bidirectional_requests_are_requeued_for_final_respond() {
-        let status = SignStatus::AwaitingResponseBidirectional;
+        let status = SignStatus::PendingGenerationBidirectional;
         for offset in 0..2 {
             let backlog = Backlog::new();
             let tx = create_test_tx(8 + offset as u8);
@@ -1604,7 +1622,7 @@ mod tests {
                 .set_status(
                     Chain::Solana,
                     &sign_id,
-                    SignStatus::AwaitingResponseBidirectional,
+                    SignStatus::PendingGenerationBidirectional,
                 )
                 .await;
 
@@ -1644,7 +1662,7 @@ mod tests {
             .set_status(
                 Chain::Solana,
                 &sign_id,
-                SignStatus::AwaitingResponseBidirectional,
+                SignStatus::PendingGenerationBidirectional,
             )
             .await;
 
@@ -1654,6 +1672,78 @@ mod tests {
             requeued[0].kind,
             SignKind::RespondBidirectional(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_mark_published_accepts_publish_states() {
+        let backlog = Backlog::new();
+        let tx = create_test_tx(43);
+        let sign_id = SignId::new(tx.request_id);
+
+        backlog
+            .insert(create_bidirectional_request(sign_id, Chain::Solana, "ethereum", 0))
+            .await;
+        backlog
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingPublish {
+                    signature: test_signature(),
+                },
+            )
+            .await;
+
+        backlog
+            .mark_published(Chain::Solana, &sign_id, true)
+            .await
+            .expect("pending publish should be accepted");
+
+        let completion_request = IndexedSignRequest::respond_bidirectional(
+            sign_id,
+            create_test_args(sign_id.request_id[0]),
+            Chain::Solana,
+            0,
+            RespondBidirectionalTx {
+                tx_id: tx.id,
+                output: vec![],
+                chain_ctx: None,
+            },
+        );
+        backlog
+            .set_request(Chain::Solana, &sign_id, completion_request)
+            .await
+            .unwrap();
+        backlog
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingPublishBidirectional {
+                    signature: test_signature(),
+                },
+            )
+            .await;
+
+        backlog
+            .mark_published(Chain::Solana, &sign_id, false)
+            .await
+            .expect("pending publish bidirectional should be accepted");
+    }
+
+    #[tokio::test]
+    async fn test_mark_published_rejects_non_publish_state() {
+        let backlog = Backlog::new();
+        let tx = create_test_tx(44);
+        let sign_id = SignId::new(tx.request_id);
+
+        backlog
+            .insert(create_bidirectional_request(sign_id, Chain::Solana, "ethereum", 0))
+            .await;
+
+        let err = backlog
+            .mark_published(Chain::Solana, &sign_id, true)
+            .await
+            .expect_err("pending generation should not be accepted as published");
+        assert!(matches!(err, BacklogError::InvalidPublishTransition));
     }
 
     #[tokio::test]
@@ -1699,11 +1789,11 @@ mod tests {
             .set_status(
                 tx.source_chain,
                 &sign_id,
-                SignStatus::AwaitingResponseBidirectional,
+                SignStatus::PendingGenerationBidirectional,
             )
             .await;
         let successes = backlog
-            .get_by_status(tx.source_chain, SignStatus::AwaitingResponseBidirectional)
+            .get_by_status(tx.source_chain, SignStatus::PendingGenerationBidirectional)
             .await;
         assert!(successes.contains_key(&sign_id));
     }

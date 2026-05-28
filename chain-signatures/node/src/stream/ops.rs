@@ -1427,7 +1427,7 @@ mod tests {
 
         // Source chain should now wait for final bidirectional response.
         let waiting = backlog
-            .get_by_status(tx.source_chain, SignStatus::AwaitingResponseBidirectional)
+            .get_by_status(tx.source_chain, SignStatus::PendingGenerationBidirectional)
             .await;
         assert!(waiting.contains_key(&sign_id));
 
@@ -1579,7 +1579,7 @@ mod tests {
 
         assert!(backlog.pending_execution(tx.target_chain).await.is_empty());
         let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
-        assert_eq!(tx_after.status(), SignStatus::AwaitingResponseBidirectional);
+        assert_eq!(tx_after.status(), SignStatus::PendingGenerationBidirectional);
         match &tx_after.request.kind {
             SignKind::RespondBidirectional(res) => {
                 assert_eq!(res.tx_id, tx.id);

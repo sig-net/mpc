@@ -44,12 +44,6 @@ pub enum SignStatus {
 }
 
 impl SignStatus {
-    #[allow(non_upper_case_globals)]
-    pub const AwaitingResponse: Self = Self::PendingGeneration;
-
-    #[allow(non_upper_case_globals)]
-    pub const AwaitingResponseBidirectional: Self = Self::PendingGenerationBidirectional;
-
     pub fn is_pending_generation(&self) -> bool {
         matches!(
             self,
