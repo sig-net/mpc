@@ -60,7 +60,7 @@ const ACCEPT_POSIT_TIMEOUT: Duration = Duration::from_millis(if cfg!(feature = "
 });
 
 /// Metric channel label shared by every entry in `SignatureSpawner.inboxes`.
-const SIGNATURE_SPAWNER_POSIT_INBOX_LABEL: &str = "signature_spawner_posit_inbox";
+const SIGN_POSIT_INBOX_LABEL: &str = "sign_posit_inbox";
 
 /// All relevant info pertaining to an indexed sign request.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1302,7 +1302,7 @@ impl SignatureSpawner {
         let inbox = self
             .inboxes
             .entry(sign_id)
-            .or_insert_with(|| Subscriber::unsubscribed(SIGNATURE_SPAWNER_POSIT_INBOX_LABEL));
+            .or_insert_with(|| Subscriber::unsubscribed(SIGN_POSIT_INBOX_LABEL));
         let rx = inbox.subscribe();
         inbox.report_capacity();
         let task = SignTask {
@@ -1340,7 +1340,7 @@ impl SignatureSpawner {
         let inbox = self
             .inboxes
             .entry(sign_id)
-            .or_insert_with(|| Subscriber::unsubscribed(SIGNATURE_SPAWNER_POSIT_INBOX_LABEL));
+            .or_insert_with(|| Subscriber::unsubscribed(SIGN_POSIT_INBOX_LABEL));
         let _ = inbox
             .send(SignTaskMessage::PositMessage {
                 presignature_id,
