@@ -777,7 +777,6 @@ pub enum BacklogError {
 pub struct BacklogEntry {
     pub request: IndexedSignRequest,
     pub status: SignStatus,
-    pub execution: Option<BidirectionalTx>,
 }
 
 impl BacklogEntry {
@@ -785,31 +784,15 @@ impl BacklogEntry {
         Self {
             request,
             status: SignStatus::PendingGeneration,
-            execution: None,
         }
     }
 
-    pub fn with_status(
-        request: IndexedSignRequest,
-        status: SignStatus,
-        execution: Option<BidirectionalTx>,
-    ) -> Self {
-        Self {
-            request,
-            status,
-            execution,
-        }
+    pub fn with_status(request: IndexedSignRequest, status: SignStatus) -> Self {
+        Self { request, status }
     }
 
     pub fn pending_execution(request: IndexedSignRequest, tx: BidirectionalTx) -> Self {
-        Self::with_status(
-            request,
-            SignStatus::PendingExecution {
-                tx_hash: tx.id,
-                target_chain: tx.target_chain,
-            },
-            Some(tx),
-        )
+        Self::with_status(request, SignStatus::PendingExecution { tx })
     }
 
     pub fn sign_id(&self) -> SignId {
@@ -849,11 +832,7 @@ impl BacklogEntry {
                 SignKind::SignBidirectional(_),
                 SignStatus::PendingGeneration | SignStatus::PendingPublish { .. },
             ) => {
-                self.status = SignStatus::PendingExecution {
-                    tx_hash: bidirectional_tx.id,
-                    target_chain: bidirectional_tx.target_chain,
-                };
-                self.execution = Some(bidirectional_tx);
+                self.status = SignStatus::PendingExecution { tx: bidirectional_tx };
                 Ok(())
             }
             _ => Err(BacklogError::InvalidAdvanceTransition),
@@ -863,8 +842,8 @@ impl BacklogEntry {
     /// Get target chain if this is a bidirectional transaction
     // TODO: looks a bit weird having two different ways to get target_chain in the match
     pub fn target_chain(&self) -> Option<Chain> {
-        self.execution
-            .as_ref()
+        self.status
+            .execution_tx()
             .map(|tx| tx.target_chain)
             .or_else(|| match &self.request.kind {
                 SignKind::Sign => None,
@@ -879,25 +858,27 @@ impl BacklogEntry {
     }
 
     pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
-        self.execution.as_ref()
+        self.status.execution_tx()
     }
 
     pub fn take_execution_tx(self) -> Option<BidirectionalTx> {
-        self.execution
+        self.status.into_execution_tx()
     }
 
     pub fn typename(&self) -> &'static str {
-        match (&self.request.kind, self.execution.is_some(), &self.status) {
-            (SignKind::Sign, _, _) => "Sign",
-            (SignKind::SignBidirectional(_), true, _) => "BidirectionalExecution",
-            (SignKind::SignBidirectional(_), false, SignStatus::PendingGeneration) => {
+        match (&self.request.kind, &self.status) {
+            (SignKind::Sign, _) => "Sign",
+            (SignKind::SignBidirectional(_), SignStatus::PendingExecution { .. }) => {
+                "BidirectionalExecution"
+            }
+            (SignKind::SignBidirectional(_), SignStatus::PendingGeneration) => {
                 "BidirectionalPending"
             }
-            (SignKind::SignBidirectional(_), false, _) => "BidirectionalPending",
-            (SignKind::RespondBidirectional(_), _, SignStatus::PendingGenerationBidirectional) => {
+            (SignKind::SignBidirectional(_), _) => "BidirectionalPending",
+            (SignKind::RespondBidirectional(_), SignStatus::PendingGenerationBidirectional) => {
                 "BidirectionalRespondPending"
             }
-            (SignKind::RespondBidirectional(_), _, _) => "RespondBidirectional",
+            (SignKind::RespondBidirectional(_), _) => "RespondBidirectional",
         }
     }
 }
@@ -962,10 +943,7 @@ mod tests {
     }
 
     fn pending_execution_status(tx: &BidirectionalTx) -> SignStatus {
-        SignStatus::PendingExecution {
-            tx_hash: tx.id,
-            target_chain: tx.target_chain,
-        }
+        SignStatus::PendingExecution { tx: tx.clone() }
     }
 
     fn create_test_tx(id: u8) -> BidirectionalTx {
@@ -1060,7 +1038,7 @@ mod tests {
             0,
             SignKind::SignBidirectional(create_test_event(dest)),
         );
-        BacklogEntry::with_status(request, status, Some(tx))
+        BacklogEntry::with_status(request, status)
     }
 
     async fn insert_bidirectional_with_status(

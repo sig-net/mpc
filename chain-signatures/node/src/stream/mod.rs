@@ -909,10 +909,7 @@ mod tests {
             .set_status(
                 Chain::Solana,
                 &sign_id,
-                SignStatus::PendingExecution {
-                    tx_hash: execution.id,
-                    target_chain: execution.target_chain,
-                },
+                SignStatus::PendingExecution { tx: execution },
             )
             .await;
 

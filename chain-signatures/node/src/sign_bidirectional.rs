@@ -57,8 +57,7 @@ pub enum SignStatus {
         publish: PublishState,
     },
     PendingExecution {
-        tx_hash: BidirectionalTxId,
-        target_chain: Chain,
+        tx: BidirectionalTx,
     },
     PendingGenerationBidirectional,
     PendingPublishBidirectional {
@@ -97,15 +96,9 @@ impl SignStatus {
         ) || matches!(
             (self, other),
             (
-                SignStatus::PendingExecution {
-                    tx_hash: left_tx_hash,
-                    target_chain: left_target_chain,
-                },
-                SignStatus::PendingExecution {
-                    tx_hash: right_tx_hash,
-                    target_chain: right_target_chain,
-                }
-            ) if left_tx_hash == right_tx_hash && left_target_chain == right_target_chain
+                SignStatus::PendingExecution { tx: left_tx },
+                SignStatus::PendingExecution { tx: right_tx }
+            ) if left_tx.id == right_tx.id && left_tx.target_chain == right_tx.target_chain
         )
     }
 
@@ -113,23 +106,34 @@ impl SignStatus {
         match self {
             SignStatus::PendingGeneration => vec![0],
             SignStatus::PendingPublish { publish } => publish.digest_bytes(1),
-            SignStatus::PendingExecution {
-                tx_hash,
-                target_chain,
-            } => {
+            SignStatus::PendingExecution { tx } => {
                 let mut bytes = vec![2];
-                bytes.extend_from_slice(tx_hash.0.as_slice());
+                bytes.extend_from_slice(tx.id.0.as_slice());
                 bytes
-                    .extend(borsh_to_vec(target_chain).expect("chain serialization is infallible"));
+                    .extend(borsh_to_vec(&tx.target_chain).expect("chain serialization is infallible"));
                 bytes
             }
             SignStatus::PendingGenerationBidirectional => vec![3],
             SignStatus::PendingPublishBidirectional { publish } => publish.digest_bytes(4),
         }
     }
+
+    pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
+        match self {
+            SignStatus::PendingExecution { tx } => Some(tx),
+            _ => None,
+        }
+    }
+
+    pub fn into_execution_tx(self) -> Option<BidirectionalTx> {
+        match self {
+            SignStatus::PendingExecution { tx } => Some(tx),
+            _ => None,
+        }
+    }
 }
 
-#[derive(Debug, Clone, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BidirectionalTx {
     pub id: BidirectionalTxId,
     pub sender: [u8; 32],
