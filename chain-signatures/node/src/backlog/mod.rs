@@ -70,12 +70,16 @@ impl PendingRequests {
     pub fn get_by_status(&self, status: SignStatus) -> HashMap<SignId, BacklogEntry> {
         self.requests
             .iter()
-            .filter(|(_, entry)| entry.status().same_kind(&status))
+            .filter(|(_, entry)| entry.status().is_same_kind(&status))
             .map(|(id, entry)| (*id, entry.clone()))
             .collect()
     }
 
-    fn pending_execution(&self) -> Vec<(SignId, BacklogEntry)> {
+    fn pending_execution(&self, id: &SignId) -> Option<&BacklogEntry> {
+        self.requests.get(id).filter(|entry| entry.status().is_pending_execution())
+    }
+
+    fn pending_executions(&self) -> Vec<(SignId, BacklogEntry)> {
         self.requests
             .iter()
             .filter(|(_, entry)| entry.status().is_pending_execution())
@@ -639,7 +643,7 @@ impl Backlog {
         let execution_to_watch = if checkpoint_height > previous_height {
             let cleared = pending.len();
             *pending = PendingRequests::from_checkpoint(checkpoint)?;
-            let execution_to_watch = pending.pending_execution();
+            let execution_to_watch = pending.pending_executions();
 
             tracing::info!(
                 ?chain,

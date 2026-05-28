@@ -71,7 +71,7 @@ impl SignStatus {
         matches!(self, SignStatus::PendingExecution { .. })
     }
 
-    pub fn same_kind(&self, other: &Self) -> bool {
+    pub fn is_same_kind(&self, other: &Self) -> bool {
         matches!(
             (self, other),
             (SignStatus::PendingGeneration, SignStatus::PendingGeneration)
