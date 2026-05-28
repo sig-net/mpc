@@ -451,9 +451,10 @@ mod derive_tests {
         let mpc_pk = hex::decode(mpc_key).unwrap();
         let mpc_pk = EncodedPoint::from_bytes(mpc_pk).unwrap();
         let mpc_pk = AffinePoint::from_encoded_point(&mpc_pk).unwrap();
-        let derivation_epsilon =
-            derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test");
-        let expected: Address = "0x083c8776b5e447e91bae43b7883a92a9bdb66d1d".parse().unwrap();
+        let derivation_epsilon = derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test");
+        let expected: Address = "0x083c8776b5e447e91bae43b7883a92a9bdb66d1d"
+            .parse()
+            .unwrap();
 
         assert_eq!(derive_user_address(mpc_pk, derivation_epsilon), expected);
     }
