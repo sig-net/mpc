@@ -5,8 +5,9 @@ use crate::stream::ops::{SignatureEvent, SignatureEventBox};
 use crate::stream::{ChainEvent, ChainIndexer, ChainStream};
 use crate::util::ethabi_request_id;
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
+use anyhow::Context;
 
-use std::collections::{btree_map, BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -30,13 +31,13 @@ use signet_program::{
 use solana_client::{
     nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient},
     rpc_client::GetConfirmedSignaturesForAddress2Config,
-    rpc_config::{RpcTransactionLogsConfig, RpcTransactionLogsFilter},
+    rpc_config::{RpcBlockConfig, RpcTransactionLogsConfig, RpcTransactionLogsFilter},
 };
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
 use solana_transaction_status::option_serializer::OptionSerializer;
 use solana_transaction_status::{
-    EncodedConfirmedBlock, EncodedConfirmedTransactionWithStatusMeta, EncodedTransaction,
-    EncodedTransactionWithStatusMeta, UiTransactionEncoding,
+    EncodedConfirmedTransactionWithStatusMeta, EncodedTransaction,
+    EncodedTransactionWithStatusMeta, TransactionDetails, UiConfirmedBlock, UiTransactionEncoding,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -306,6 +307,12 @@ pub struct SolanaIndexer {
     live_rx: Option<mpsc::Receiver<ChainEvent>>,
 }
 
+#[derive(Debug)]
+pub enum SolanaCatchupBlock {
+    Block(u64, UiConfirmedBlock),
+    Missing(u64),
+}
+
 struct SolanaStreamStartState {
     program_id: Pubkey,
     rpc_http_url: String,
@@ -383,8 +390,8 @@ impl ChainStream for SolanaStream {
 #[async_trait]
 impl ChainIndexer for SolanaIndexer {
     const CHAIN: Chain = Chain::Solana;
-    type Block = (u64, EncodedConfirmedBlock);
-    type Iter = btree_map::IntoIter<u64, EncodedConfirmedBlock>;
+    type Block = SolanaCatchupBlock;
+    type Iter = std::vec::IntoIter<Self::Block>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         let (live_tx, live_rx) = crate::stream::channel();
@@ -419,8 +426,8 @@ impl ChainIndexer for SolanaIndexer {
             .map(|n| n.saturating_add(1))
             .unwrap_or(anchor_height);
         let end_slot = anchor_height.saturating_sub(1); // We want to catch up to just before the anchor
-        if start_slot >= end_slot {
-            return BTreeMap::new().into_iter();
+        if start_slot > end_slot {
+            return Vec::new().into_iter();
         }
 
         // This fetches a sparse list of transactions based on whether our program received
@@ -480,8 +487,16 @@ impl ChainIndexer for SolanaIndexer {
         items.into_iter()
     }
 
-    async fn process_catchup(&mut self, (height, block): &Self::Block) -> anyhow::Result<()> {
-        self.process_block(*height, block).await
+    async fn process_catchup(&mut self, block: &Self::Block) -> anyhow::Result<()> {
+        match block {
+            SolanaCatchupBlock::Block(height, block) => self.process_block(*height, block).await,
+            SolanaCatchupBlock::Missing(slot) => {
+                let block = self.get_block(*slot).await.with_context(|| {
+                    format!("failed to refetch Solana catchup block for slot {slot}")
+                })?;
+                self.process_block(*slot, &block).await
+            }
+        }
     }
 
     async fn process_next_block(&mut self) -> bool {
@@ -505,14 +520,28 @@ impl ChainIndexer for SolanaIndexer {
 }
 
 impl SolanaIndexer {
-    async fn fetch_blocks_for_slots(
-        &self,
-        slots: BTreeSet<u64>,
-    ) -> BTreeMap<u64, EncodedConfirmedBlock> {
+    fn block_fetch_config() -> RpcBlockConfig {
+        RpcBlockConfig {
+            encoding: Some(UiTransactionEncoding::Json),
+            transaction_details: Some(TransactionDetails::Full),
+            rewards: Some(false),
+            commitment: Some(CommitmentConfig::confirmed()),
+            max_supported_transaction_version: Some(0),
+        }
+    }
+
+    async fn get_block(&self, slot: u64) -> anyhow::Result<UiConfirmedBlock> {
+        self.rpc_client
+            .get_block_with_config(slot, Self::block_fetch_config())
+            .await
+            .with_context(|| format!("failed to fetch Solana block for slot {slot}"))
+    }
+
+    async fn fetch_blocks_for_slots(&self, slots: BTreeSet<u64>) -> Vec<SolanaCatchupBlock> {
         let mut blocks_by_height = BTreeMap::new();
 
-        for slot in slots {
-            match self.rpc_client.get_block(slot).await {
+        for &slot in &slots {
+            match self.get_block(slot).await {
                 Ok(block) => {
                     blocks_by_height.insert(slot, block);
                 }
@@ -522,15 +551,22 @@ impl SolanaIndexer {
             }
         }
 
-        blocks_by_height
+        slots
+            .into_iter()
+            .map(|slot| match blocks_by_height.remove(&slot) {
+                Some(block) => SolanaCatchupBlock::Block(slot, block),
+                None => SolanaCatchupBlock::Missing(slot),
+            })
+            .collect()
     }
 
-    async fn process_block(
-        &mut self,
-        height: u64,
-        block: &EncodedConfirmedBlock,
-    ) -> anyhow::Result<()> {
-        for tx in &block.transactions {
+    async fn process_block(&mut self, height: u64, block: &UiConfirmedBlock) -> anyhow::Result<()> {
+        let Some(transactions) = &block.transactions else {
+            self.events_tx.send(ChainEvent::Block(height)).await?;
+            return Ok(());
+        };
+
+        for tx in transactions {
             let Some(logs) = tx
                 .meta
                 .as_ref()
@@ -551,35 +587,29 @@ impl SolanaIndexer {
     }
 
     /// Fetches blocks from start_slot to end_slot. The range is inclusive `[start_slot, endslot]`
-    async fn fetch_sparse_blocks(
-        &self,
-        start_slot: u64,
-        end_slot: u64,
-    ) -> BTreeMap<u64, EncodedConfirmedBlock> {
-        let mut blocks_by_height = BTreeMap::new();
-
-        // Fetch all blocks in the range from start_slot to end_slot
-        let Ok(block_slots) = self.rpc_client.get_blocks(start_slot, Some(end_slot)).await else {
-            tracing::warn!(start_slot, end_slot, "failed to fetch blocks for range");
-            return BTreeMap::new();
+    async fn fetch_sparse_blocks(&self, start_slot: u64, end_slot: u64) -> Vec<SolanaCatchupBlock> {
+        let block_slots = loop {
+            match self.rpc_client.get_blocks(start_slot, Some(end_slot)).await {
+                Ok(block_slots) => break block_slots,
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        start_slot,
+                        end_slot,
+                        "failed to fetch Solana block range for catchup; retrying"
+                    );
+                    tokio::time::sleep(Self::RETRY_DELAY).await;
+                }
+            }
         };
 
-        for slot in block_slots {
-            if slot > end_slot {
-                continue;
-            }
-
-            match self.rpc_client.get_block(slot).await {
-                Ok(block) => {
-                    blocks_by_height.insert(slot, block);
-                }
-                Err(err) => {
-                    tracing::warn!(?err, slot, "failed to cache Solana block for catchup");
-                }
-            }
-        }
-
-        blocks_by_height
+        self.fetch_blocks_for_slots(
+            block_slots
+                .into_iter()
+                .filter(|slot| *slot <= end_slot)
+                .collect(),
+        )
+        .await
     }
 }
 
@@ -1126,6 +1156,7 @@ async fn get_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solana_sdk::commitment_config::CommitmentLevel;
 
     #[test]
     fn request_id_matches_ethabi() {
@@ -1145,6 +1176,20 @@ mod tests {
         assert_eq!(
             hex::encode(event.generate_request_id()),
             "7f7aee49c2a994cc17f85058f7e0b19a44603d619a7e738522f9aa329e457879"
+        );
+    }
+
+    #[test]
+    fn block_fetch_config_sets_max_supported_transaction_version() {
+        let config = SolanaIndexer::block_fetch_config();
+
+        assert_eq!(config.max_supported_transaction_version, Some(0));
+        assert_eq!(config.transaction_details, Some(TransactionDetails::Full));
+        assert_eq!(config.encoding, Some(UiTransactionEncoding::Json));
+        assert_eq!(config.rewards, Some(false));
+        assert_eq!(
+            config.commitment.map(|commitment| commitment.commitment),
+            Some(CommitmentLevel::Confirmed)
         );
     }
 }
