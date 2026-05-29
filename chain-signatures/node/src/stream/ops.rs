@@ -1391,10 +1391,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_respond_event_advances_bidirectional_from_pending_generation() {
+    async fn process_respond_event_advances_bidirectional_from_pending_publish() {
         let backlog = Backlog::new();
         let tx = test_bidirectional_tx(14, Chain::Ethereum, Chain::Solana);
         let sign_id = SignId::new(tx.request_id);
+
+        let mut rlp_s = rlp::RlpStream::new_list(9);
+        rlp_s.append(&0u64);
+        rlp_s.append(&0u64);
+        rlp_s.append(&0u64);
+        rlp_s.append(&Vec::<u8>::new());
+        rlp_s.append(&0u64);
+        rlp_s.append(&Vec::<u8>::new());
+        rlp_s.append(&1u64);
+        rlp_s.append(&0u64);
+        rlp_s.append(&0u64);
+        let unsigned_rlp = rlp_s.out().to_vec();
 
         backlog
             .insert(IndexedSignRequest::sign_bidirectional(
@@ -1404,7 +1416,7 @@ mod tests {
                 current_unix_timestamp(),
                 SignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
                     sender: Default::default(),
-                    serialized_transaction: tx.serialized_transaction.clone(),
+                    serialized_transaction: unsigned_rlp,
                     dest: tx.dest.clone(),
                     caip2_id: tx.caip2_id.clone(),
                     key_version: tx.key_version,
@@ -1417,6 +1429,24 @@ mod tests {
                     respond_serialization_schema: tx.respond_serialization_schema.clone(),
                 }),
             ))
+            .await;
+
+        backlog
+            .set_status(
+                Chain::Ethereum,
+                &sign_id,
+                crate::sign_bidirectional::SignStatus::PendingPublish {
+                    publish: crate::sign_bidirectional::PublishState {
+                        signature: Signature::new(
+                            ProjectivePoint::GENERATOR.to_affine(),
+                            Scalar::ONE,
+                            0,
+                        ),
+                        participants: vec![],
+                        is_proposer: true,
+                    },
+                },
+            )
             .await;
 
         let event = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
@@ -1434,7 +1464,7 @@ mod tests {
 
         process_respond_event(event, sign_tx, &mut contract_watcher, &backlog, false)
             .await
-            .expect("respond event should advance pending generation bidirectional entries");
+            .expect("respond event should advance pending publish bidirectional entries");
 
         let entry = backlog
             .get(Chain::Ethereum, &sign_id)
@@ -1444,10 +1474,14 @@ mod tests {
             entry.status(),
             SignStatus::PendingExecution { .. }
         ));
+        let execution_tx_id = entry
+            .execution_tx()
+            .expect("pending execution entries should store the execution transaction")
+            .id;
 
         let watchers = backlog.execution_watchers(Chain::Solana).await;
         assert_eq!(watchers.len(), 1);
-        assert!(watchers.contains_key(&tx.id));
+        assert!(watchers.contains_key(&execution_tx_id));
     }
 
     #[tokio::test]
