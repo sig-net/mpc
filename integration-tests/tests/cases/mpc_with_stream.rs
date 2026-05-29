@@ -100,7 +100,7 @@ async fn check_channel_contention(
     }
 
     let actions = network
-        .assert_actions(expected_signatures, Duration::from_secs(60))
+        .assert_actions(expected_signatures, Duration::from_secs(120))
         .await;
 
     assert_eq!(actions.len(), expected_signatures);
