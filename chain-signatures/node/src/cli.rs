@@ -305,15 +305,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
 
-            let (rpc_channel, rpc) = RpcExecutor::new(
-                &near_client,
-                &eth,
-                &sol,
-                &hydration,
-                &canton,
-                backlog.clone(),
-            )
-            .await;
+            let (rpc_channel, rpc) =
+                RpcExecutor::new(&near_client, &eth, &sol, &hydration, &canton).await;
 
             let (sync_channel, sync) = SyncTask::new(
                 &client,

@@ -43,8 +43,10 @@ impl PublishState {
     fn digest_bytes(&self, tag: u8) -> Vec<u8> {
         let mut bytes = vec![tag];
         bytes.extend_from_slice(&self.signature.to_bytes());
-        ciborium::ser::into_writer(&self.participants, &mut bytes)
-            .expect("participant serialization is infallible");
+        bytes.extend_from_slice(&(self.participants.len() as u32).to_le_bytes());
+        for participant in &self.participants {
+            bytes.extend_from_slice(&participant.bytes());
+        }
         bytes.push(u8::from(self.is_proposer));
         bytes
     }

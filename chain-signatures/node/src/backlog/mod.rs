@@ -409,6 +409,23 @@ impl Backlog {
             .unwrap_or(0)
     }
 
+    pub async fn mark_publishing(
+        &self,
+        chain: Chain,
+        id: &SignId,
+        publish: PublishState,
+    ) -> Result<(), BacklogError> {
+        let mut requests = self.requests.write().await;
+        let Some(pending) = requests.get_mut(&chain) else {
+            return Err(BacklogError::ChainNotFound);
+        };
+        let Some(entry) = pending.requests.get_mut(id) else {
+            return Err(BacklogError::NotFound { chain, id: *id });
+        };
+
+        entry.mark_publishing(publish)
+    }
+
     // TODO: the backlog is a bit bloated with transition functions, so we need to do a proper cleanup
     // where we can have proper typestate on a set of types. With these types, we can easily guide
     // ourselves into the right transitions. For now, this is used to set the request in
@@ -768,6 +785,8 @@ pub enum BacklogError {
     ChainNotFound,
     #[error("transaction not found")]
     TransactionNotFound,
+    #[error("cannot mark publishing for current backlog state")]
+    InvalidPublishingTransition,
     #[error("cannot advance non-bidirectional or already-advanced backlog entry")]
     InvalidAdvanceTransition,
 }
@@ -820,6 +839,20 @@ impl BacklogEntry {
 
     pub fn set_request(&mut self, request: IndexedSignRequest) {
         self.request = request;
+    }
+
+    pub fn mark_publishing(&mut self, publish: PublishState) -> Result<(), BacklogError> {
+        match (&self.request.kind, self.status.clone()) {
+            (SignKind::Sign | SignKind::SignBidirectional(_), SignStatus::PendingGeneration) => {
+                self.status = SignStatus::PendingPublish { publish };
+                Ok(())
+            }
+            (SignKind::RespondBidirectional(_), SignStatus::PendingGenerationBidirectional) => {
+                self.status = SignStatus::PendingPublishBidirectional { publish };
+                Ok(())
+            }
+            _ => Err(BacklogError::InvalidPublishingTransition),
+        }
     }
 
     pub fn advance_to_execution(
@@ -1698,6 +1731,75 @@ mod tests {
         assert!(matches!(
             requeued[0].kind,
             SignKind::RespondBidirectional(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_mark_publishing_accepts_bidirectional_pending_generation() {
+        let backlog = Backlog::new();
+        let tx = create_test_tx(43);
+        let sign_id = SignId::new(tx.request_id);
+
+        backlog
+            .insert(create_bidirectional_request(
+                sign_id,
+                Chain::Solana,
+                "ethereum",
+                0,
+            ))
+            .await;
+
+        backlog
+            .mark_publishing(Chain::Solana, &sign_id, test_publish_state(true))
+            .await
+            .expect("pending generation should transition to pending publish");
+
+        let entry = backlog
+            .get(Chain::Solana, &sign_id)
+            .await
+            .expect("entry should remain in backlog");
+        assert!(matches!(entry.status(), SignStatus::PendingPublish { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_mark_publishing_accepts_final_respond_generation() {
+        let backlog = Backlog::new();
+        let tx = create_test_tx(44);
+        let sign_id = SignId::new(tx.request_id);
+
+        let completion_request = IndexedSignRequest::respond_bidirectional(
+            sign_id,
+            create_test_args(sign_id.request_id[0]),
+            Chain::Solana,
+            0,
+            RespondBidirectionalTx {
+                tx_id: tx.id,
+                output: vec![],
+                chain_ctx: None,
+            },
+        );
+
+        backlog.insert(completion_request).await;
+        backlog
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingGenerationBidirectional,
+            )
+            .await;
+
+        backlog
+            .mark_publishing(Chain::Solana, &sign_id, test_publish_state(true))
+            .await
+            .expect("pending generation bidirectional should transition to pending publish bidirectional");
+
+        let entry = backlog
+            .get(Chain::Solana, &sign_id)
+            .await
+            .expect("entry should remain in backlog");
+        assert!(matches!(
+            entry.status(),
+            SignStatus::PendingPublishBidirectional { .. }
         ));
     }
 

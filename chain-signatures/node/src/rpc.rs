@@ -1,4 +1,3 @@
-use crate::backlog::Backlog;
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
@@ -409,7 +408,6 @@ pub struct RpcExecutor {
     hydration: Option<HydrationClient>,
     canton: Option<CantonClient>,
     action_rx: mpsc::Receiver<RpcAction>,
-    backlog: Backlog,
 }
 
 impl RpcExecutor {
@@ -419,7 +417,6 @@ impl RpcExecutor {
         solana: &Option<SolConfig>,
         hydration: &Option<HydrationConfig>,
         canton: &Option<CantonConfig>,
-        backlog: Backlog,
     ) -> (RpcChannel, Self) {
         let eth = eth.as_ref().map(EthClient::new);
         let solana = solana.as_ref().map(SolanaClient::new);
@@ -453,7 +450,6 @@ impl RpcExecutor {
                 hydration,
                 canton,
                 action_rx: rx,
-                backlog,
             },
         )
     }
@@ -496,12 +492,11 @@ impl RpcExecutor {
             let chain = action.indexed.chain;
             let client = self.client(&chain);
             let eth_rpc_tx = eth_rpc_tx.clone(); // clone for task use
-            let backlog = self.backlog.clone();
 
             tokio::spawn(async move {
                 match chain {
                     Chain::NEAR | Chain::Solana | Chain::Hydration | Chain::Canton => {
-                        execute_publish(client, action, backlog).await;
+                        execute_publish(client, action).await;
                     }
                     Chain::Ethereum => {
                         if let Err(err) = eth_rpc_tx.send(action).await {
@@ -1178,7 +1173,7 @@ async fn update_config(near: NearClient, config: watch::Sender<Config>) {
 }
 
 /// Publish the signature and retry if it fails
-async fn execute_publish(client: ChainClient, action: PublishAction, backlog: Backlog) {
+async fn execute_publish(client: ChainClient, action: PublishAction) {
     let chain = action.indexed.chain;
     let sign_id = action.indexed.id;
 
