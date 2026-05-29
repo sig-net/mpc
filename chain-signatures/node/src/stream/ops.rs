@@ -1440,7 +1440,10 @@ mod tests {
             .get(Chain::Ethereum, &sign_id)
             .await
             .expect("entry should remain in backlog");
-        assert!(matches!(entry.status(), SignStatus::PendingExecution { .. }));
+        assert!(matches!(
+            entry.status(),
+            SignStatus::PendingExecution { .. }
+        ));
 
         let watchers = backlog.execution_watchers(Chain::Solana).await;
         assert_eq!(watchers.len(), 1);

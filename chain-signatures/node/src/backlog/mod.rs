@@ -409,31 +409,6 @@ impl Backlog {
             .unwrap_or(0)
     }
 
-    /// Mark a request as published (success or failure)
-    pub async fn mark_published(
-        &self,
-        chain: Chain,
-        id: &SignId,
-        success: bool,
-    ) -> Result<(), BacklogError> {
-        let requests = self.requests.read().await;
-        let pending = requests.get(&chain).ok_or(BacklogError::ChainNotFound)?;
-        let entry = pending
-            .requests
-            .get(id)
-            .ok_or(BacklogError::NotFound { chain, id: *id })?;
-
-        match (&entry.request.kind, &entry.status) {
-            (SignKind::SignBidirectional(_), SignStatus::PendingPublish { .. })
-            | (SignKind::RespondBidirectional(_), SignStatus::PendingPublishBidirectional { .. }) =>
-            {
-                tracing::info!(?chain, ?id, success, status = ?entry.status, "publish attempt recorded");
-                Ok(())
-            }
-            _ => Err(BacklogError::InvalidPublishTransition),
-        }
-    }
-
     // TODO: the backlog is a bit bloated with transition functions, so we need to do a proper cleanup
     // where we can have proper typestate on a set of types. With these types, we can easily guide
     // ourselves into the right transitions. For now, this is used to set the request in
@@ -795,8 +770,6 @@ pub enum BacklogError {
     TransactionNotFound,
     #[error("cannot advance non-bidirectional or already-advanced backlog entry")]
     InvalidAdvanceTransition,
-    #[error("cannot mark publish for current backlog state")]
-    InvalidPublishTransition,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -854,7 +827,10 @@ impl BacklogEntry {
         bidirectional_tx: BidirectionalTx,
     ) -> Result<(), BacklogError> {
         match (&self.request.kind, self.status.clone()) {
-            (SignKind::SignBidirectional(_), SignStatus::PendingGeneration | SignStatus::PendingPublish { .. }) => {
+            (
+                SignKind::SignBidirectional(_),
+                SignStatus::PendingGeneration | SignStatus::PendingPublish { .. },
+            ) => {
                 self.status = SignStatus::PendingExecution {
                     tx: bidirectional_tx,
                 };
@@ -1723,88 +1699,6 @@ mod tests {
             requeued[0].kind,
             SignKind::RespondBidirectional(_)
         ));
-    }
-
-    #[tokio::test]
-    async fn test_mark_published_accepts_publish_states() {
-        let backlog = Backlog::new();
-        let tx = create_test_tx(43);
-        let sign_id = SignId::new(tx.request_id);
-
-        backlog
-            .insert(create_bidirectional_request(
-                sign_id,
-                Chain::Solana,
-                "ethereum",
-                0,
-            ))
-            .await;
-        backlog
-            .set_status(
-                Chain::Solana,
-                &sign_id,
-                SignStatus::PendingPublish {
-                    publish: test_publish_state(true),
-                },
-            )
-            .await;
-
-        backlog
-            .mark_published(Chain::Solana, &sign_id, true)
-            .await
-            .expect("pending publish should be accepted");
-
-        let completion_request = IndexedSignRequest::respond_bidirectional(
-            sign_id,
-            create_test_args(sign_id.request_id[0]),
-            Chain::Solana,
-            0,
-            RespondBidirectionalTx {
-                tx_id: tx.id,
-                output: vec![],
-                chain_ctx: None,
-            },
-        );
-        backlog
-            .set_request(Chain::Solana, &sign_id, completion_request)
-            .await
-            .unwrap();
-        backlog
-            .set_status(
-                Chain::Solana,
-                &sign_id,
-                SignStatus::PendingPublishBidirectional {
-                    publish: test_publish_state(true),
-                },
-            )
-            .await;
-
-        backlog
-            .mark_published(Chain::Solana, &sign_id, false)
-            .await
-            .expect("pending publish bidirectional should be accepted");
-    }
-
-    #[tokio::test]
-    async fn test_mark_published_rejects_non_publish_state() {
-        let backlog = Backlog::new();
-        let tx = create_test_tx(44);
-        let sign_id = SignId::new(tx.request_id);
-
-        backlog
-            .insert(create_bidirectional_request(
-                sign_id,
-                Chain::Solana,
-                "ethereum",
-                0,
-            ))
-            .await;
-
-        let err = backlog
-            .mark_published(Chain::Solana, &sign_id, true)
-            .await
-            .expect_err("pending generation should not be accepted as published");
-        assert!(matches!(err, BacklogError::InvalidPublishTransition));
     }
 
     #[tokio::test]

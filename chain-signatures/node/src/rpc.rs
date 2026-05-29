@@ -1280,15 +1280,6 @@ async fn execute_publish(client: ChainClient, action: PublishAction, backlog: Ba
             "exceeded max retries, trashing publish request"
         );
     }
-
-    if matches!(
-        action.indexed.kind,
-        SignKind::SignBidirectional(_) | SignKind::RespondBidirectional(_)
-    ) {
-        if let Err(err) = backlog.mark_published(chain, &sign_id, publish_ok).await {
-            tracing::warn!(?sign_id, ?err, "failed to mark publish status in backlog");
-        }
-    }
 }
 
 async fn run_batch_respond(
