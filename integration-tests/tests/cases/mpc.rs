@@ -5,7 +5,7 @@ use integration_tests::mpc_fixture::MpcFixtureBuilder;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState, Sign};
 use mpc_node::storage::triple_storage::TriplePair;
-use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::SignId;
 use test_log::test;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
@@ -292,22 +292,10 @@ async fn test_sign_request_during_resharing() {
 fn sign_request(seed: u8) -> Sign {
     Sign::Request(IndexedSignRequest::sign(
         SignId::new([seed; 32]),
-        sign_arg(seed),
+        super::helpers::test_sign_arg(seed),
         Chain::NEAR,
         0,
     ))
-}
-
-fn sign_arg(seed: u8) -> SignArgs {
-    let mut entropy = [1; 32];
-    entropy[0] = seed;
-    SignArgs {
-        entropy,
-        epsilon: k256::Scalar::default(),
-        payload: k256::Scalar::default(),
-        path: "test".to_owned(),
-        key_version: LATEST_MPC_KEY_VERSION,
-    }
 }
 
 /// drop the first 20 presignature messages on each node and see if the system

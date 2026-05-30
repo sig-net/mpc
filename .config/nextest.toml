@@ -3,17 +3,17 @@ cluster = { max-threads = 1 }
 fixture = { max-threads = "num-cpus" }
 
 [[profile.default.overrides]]
-filter = 'test(cases::mpc) | test(cases::state_sync)'
+filter = 'test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream)'
 test-group = 'fixture'
 
 [[profile.default.overrides]]
-filter = 'not (test(cases::mpc) | test(cases::state_sync))'
+filter = 'not (test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream))'
 test-group = 'cluster'
 
 # Usage: cargo nextest run -p integration-tests --profile fixture
 [profile.fixture]
-default-filter = 'test(cases::mpc) | test(cases::state_sync)'
+default-filter = 'test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream)'
 
 # Usage: cargo nextest run -p integration-tests --profile cluster
 [profile.cluster]
-default-filter = 'not (test(cases::mpc) | test(cases::state_sync))'
+default-filter = 'not (test(cases::mpc) | test(cases::state_sync) | test(cases::mpc_with_stream))'

@@ -6058,6 +6058,7 @@ dependencies = [
  "anchor-client",
  "anyhow",
  "async-process 1.8.1",
+ "async-trait",
  "backon",
  "bip32",
  "bip39",
