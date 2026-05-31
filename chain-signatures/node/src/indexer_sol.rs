@@ -7,7 +7,7 @@ use crate::util::ethabi_request_id;
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 use anyhow::Context;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{btree_map, BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -309,8 +309,8 @@ pub struct SolanaIndexer {
 
 #[derive(Debug)]
 pub enum SolanaCatchupBlock {
-    Block(u64, UiConfirmedBlock),
-    Missing(u64),
+    Block(UiConfirmedBlock),
+    Missing,
 }
 
 struct SolanaStreamStartState {
@@ -390,8 +390,8 @@ impl ChainStream for SolanaStream {
 #[async_trait]
 impl ChainIndexer for SolanaIndexer {
     const CHAIN: Chain = Chain::Solana;
-    type Block = SolanaCatchupBlock;
-    type Iter = std::vec::IntoIter<Self::Block>;
+    type Block = (u64, SolanaCatchupBlock);
+    type Iter = btree_map::IntoIter<u64, SolanaCatchupBlock>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         let (live_tx, live_rx) = crate::stream::channel();
@@ -427,7 +427,7 @@ impl ChainIndexer for SolanaIndexer {
             .unwrap_or(anchor_height);
         let end_slot = anchor_height.saturating_sub(1); // We want to catch up to just before the anchor
         if start_slot > end_slot {
-            return Vec::new().into_iter();
+            return BTreeMap::new().into_iter();
         }
 
         // This fetches a sparse list of transactions based on whether our program received
@@ -487,10 +487,10 @@ impl ChainIndexer for SolanaIndexer {
         items.into_iter()
     }
 
-    async fn process_catchup(&mut self, block: &Self::Block) -> anyhow::Result<()> {
+    async fn process_catchup(&mut self, (slot, block): &Self::Block) -> anyhow::Result<()> {
         match block {
-            SolanaCatchupBlock::Block(height, block) => self.process_block(*height, block).await,
-            SolanaCatchupBlock::Missing(slot) => {
+            SolanaCatchupBlock::Block(block) => self.process_block(*slot, block).await,
+            SolanaCatchupBlock::Missing => {
                 let block = self.get_block(*slot).await.with_context(|| {
                     format!("failed to refetch Solana catchup block for slot {slot}")
                 })?;
@@ -537,13 +537,16 @@ impl SolanaIndexer {
             .with_context(|| format!("failed to fetch Solana block for slot {slot}"))
     }
 
-    async fn fetch_blocks_for_slots(&self, slots: BTreeSet<u64>) -> Vec<SolanaCatchupBlock> {
+    async fn fetch_blocks_for_slots(
+        &self,
+        slots: BTreeSet<u64>,
+    ) -> BTreeMap<u64, SolanaCatchupBlock> {
         let mut blocks_by_height = BTreeMap::new();
 
         for &slot in &slots {
             match self.get_block(slot).await {
                 Ok(block) => {
-                    blocks_by_height.insert(slot, block);
+                    blocks_by_height.insert(slot, SolanaCatchupBlock::Block(block));
                 }
                 Err(err) => {
                     tracing::warn!(?err, slot, "failed to fetch Solana block for catchup slot");
@@ -554,8 +557,8 @@ impl SolanaIndexer {
         slots
             .into_iter()
             .map(|slot| match blocks_by_height.remove(&slot) {
-                Some(block) => SolanaCatchupBlock::Block(slot, block),
-                None => SolanaCatchupBlock::Missing(slot),
+                Some(block) => (slot, block),
+                None => (slot, SolanaCatchupBlock::Missing),
             })
             .collect()
     }
@@ -587,7 +590,11 @@ impl SolanaIndexer {
     }
 
     /// Fetches blocks from start_slot to end_slot. The range is inclusive `[start_slot, endslot]`
-    async fn fetch_sparse_blocks(&self, start_slot: u64, end_slot: u64) -> Vec<SolanaCatchupBlock> {
+    async fn fetch_sparse_blocks(
+        &self,
+        start_slot: u64,
+        end_slot: u64,
+    ) -> BTreeMap<u64, SolanaCatchupBlock> {
         let block_slots = loop {
             match self.rpc_client.get_blocks(start_slot, Some(end_slot)).await {
                 Ok(block_slots) => break block_slots,
@@ -1191,5 +1198,21 @@ mod tests {
             config.commitment.map(|commitment| commitment.commitment),
             Some(CommitmentLevel::Confirmed)
         );
+    }
+
+    #[test]
+    fn btree_extend_preserves_slot_order_for_catchup() {
+        let mut from_signatures = BTreeMap::new();
+        from_signatures.insert(10_u64, SolanaCatchupBlock::Missing);
+        from_signatures.insert(12_u64, SolanaCatchupBlock::Missing);
+
+        let mut from_sparse = BTreeMap::new();
+        from_sparse.insert(8_u64, SolanaCatchupBlock::Missing);
+        from_sparse.insert(9_u64, SolanaCatchupBlock::Missing);
+
+        from_signatures.extend(from_sparse);
+
+        let slots: Vec<_> = from_signatures.into_iter().map(|(slot, _)| slot).collect();
+        assert_eq!(slots, vec![8, 9, 10, 12]);
     }
 }
