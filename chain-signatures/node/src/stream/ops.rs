@@ -1972,8 +1972,8 @@ mod tests {
             Chain::Solana => {
                 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
                 let encoded_point = signature.big_r.to_encoded_point(false);
-                let x = encoded_point.x().unwrap().clone();
-                let y = encoded_point.y().unwrap().clone();
+                let x = *encoded_point.x().unwrap();
+                let y = *encoded_point.y().unwrap();
                 let mut s_bytes = [0u8; 32];
                 s_bytes.copy_from_slice(&signature.s.to_bytes());
                 RespondBidirectionalEvent::Solana(signet_program::RespondBidirectionalEvent {

@@ -355,6 +355,26 @@ mod tests {
         (RpcChannel { tx }, rx)
     }
 
+    fn valid_signature(root_sk: &k256::SecretKey, args: &SignArgs) -> Signature {
+        use k256::ecdsa::signature::hazmat::PrehashSigner as _;
+        use k256::elliptic_curve::point::DecompressPoint as _;
+
+        let derived_secret_key = mpc_crypto::kdf::derive_secret_key(root_sk, args.epsilon);
+        let signing_key = k256::ecdsa::SigningKey::from(&derived_secret_key);
+        let (ecdsa_sig, _): (k256::ecdsa::Signature, _) = signing_key
+            .sign_prehash(&args.payload.to_bytes())
+            .expect("signing should succeed");
+        let (r_bytes, _) = ecdsa_sig.split_bytes();
+        let big_r =
+            k256::AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
+                .unwrap();
+        let s = *ecdsa_sig.s().as_ref();
+        let expected_public_key = mpc_crypto::derive_key(root_sk.public_key().into(), args.epsilon);
+
+        crate::kdf::into_signature(&expected_public_key, &big_r, &s, args.payload)
+            .expect("signature should validate")
+    }
+
     struct VecEventStreamState {
         started: bool,
         events: Vec<Option<ChainEvent>>,
@@ -636,18 +656,31 @@ mod tests {
             current_unix_timestamp(),
         );
 
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let root_pk = root_sk.public_key().to_projective().to_affine();
+
         // Prepare a respond event that matches the sign id
+        let mpc_sig = valid_signature(&root_sk, &args);
+        use k256::elliptic_curve::sec1::ToEncodedPoint;
+        let enc = mpc_sig.big_r.to_encoded_point(false);
+        let mut x_bytes = [0u8; 32];
+        let mut y_bytes = [0u8; 32];
+        x_bytes.copy_from_slice(enc.x().unwrap().as_slice());
+        y_bytes.copy_from_slice(enc.y().unwrap().as_slice());
+        let mut s_bytes = [0u8; 32];
+        s_bytes.copy_from_slice(&mpc_sig.s.to_bytes());
+
         let sig_responded =
             SignatureRespondedEvent::Solana(signet_program::SignatureRespondedEvent {
                 request_id: sign_id.request_id,
                 responder: solana_sdk::pubkey::Pubkey::new_unique(),
                 signature: signet_program::Signature {
                     big_r: signet_program::AffinePoint {
-                        x: [0u8; 32],
-                        y: [0u8; 32],
+                        x: x_bytes,
+                        y: y_bytes,
                     },
-                    s: [0u8; 32],
-                    recovery_id: 0,
+                    s: s_bytes,
+                    recovery_id: mpc_sig.recovery_id,
                 },
             });
         let client = SolanaTestStream::new(vec![
@@ -661,7 +694,7 @@ mod tests {
 
         let (contract_watcher, _tx) = ContractStateWatcher::with_running(
             &"test.near".parse::<AccountId>().unwrap(),
-            k256::ProjectivePoint::GENERATOR.to_affine(),
+            root_pk,
             0,
             Default::default(),
         );
@@ -703,6 +736,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_handles_sign_bidirectional_block_and_recover() {
+        let _ = tracing_subscriber::fmt::try_init();
         use crate::sign_bidirectional::SignStatus;
         use crate::stream::ops::RespondBidirectionalEvent as RBE;
         use crate::stream::ops::SignBidirectionalEvent as SBE;
@@ -768,9 +802,12 @@ mod tests {
 
         let (sign_tx, mut sign_rx) = mpsc::channel(8);
 
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let root_pk = root_sk.public_key().to_projective().to_affine();
+
         let (contract_watcher, _tx) = ContractStateWatcher::with_running(
             &"test.near".parse::<AccountId>().unwrap(),
-            k256::ProjectivePoint::GENERATOR.to_affine(),
+            root_pk,
             0,
             Default::default(),
         );
@@ -780,10 +817,11 @@ mod tests {
 
         // Start indexer in background (clone backlog so the test retains ownership)
         let backlog_for_run = backlog.clone();
+        let sign_tx_for_run = sign_tx.clone();
         let run_handle = tokio::spawn(async move {
             run_stream(
                 client,
-                sign_tx,
+                sign_tx_for_run,
                 rpc,
                 backlog_for_run,
                 contract_watcher,
@@ -857,13 +895,15 @@ mod tests {
             _ => panic!("expected sign request"),
         }
 
+        let mpc_sig = valid_signature(&root_sk, &args);
+
         backlog
             .set_status(
                 Chain::Solana,
                 &sign_id,
                 SignStatus::PendingPublish {
                     publish: crate::sign_bidirectional::PublishState {
-                        signature: Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0),
+                        signature: mpc_sig,
                         participants: vec![cait_sith::protocol::Participant::from(0u32)],
                         is_proposer: true,
                     },
@@ -872,16 +912,15 @@ mod tests {
             .await;
 
         // Prepare a SignatureRespondedEvent that will advance to bidirectional and register watcher
-        // Construct a valid signature (use generator point for big_r and small s)
         use k256::elliptic_curve::sec1::ToEncodedPoint;
-        let enc = k256::ProjectivePoint::GENERATOR.to_encoded_point(false);
+        let enc = mpc_sig.big_r.to_encoded_point(false);
         let x_bytes = enc.x().unwrap().as_slice();
         let y_bytes = enc.y().unwrap().as_slice();
         let mut big_r_x = [0u8; 32];
         let mut big_r_y = [0u8; 32];
         big_r_x.copy_from_slice(x_bytes);
         big_r_y.copy_from_slice(y_bytes);
-        let s_bytes = k256::Scalar::from(1u64).to_bytes();
+        let s_bytes = mpc_sig.s.to_bytes();
         let mut s_arr = [0u8; 32];
         s_arr.copy_from_slice(&s_bytes);
 
@@ -894,7 +933,7 @@ mod tests {
                     y: big_r_y,
                 },
                 s: s_arr,
-                recovery_id: 0,
+                recovery_id: mpc_sig.recovery_id,
             },
         });
         events_tx
@@ -929,7 +968,7 @@ mod tests {
             .set_status(
                 Chain::Solana,
                 &sign_id,
-                SignStatus::PendingExecution { tx: execution },
+                SignStatus::PendingExecution { tx: execution.clone() },
             )
             .await;
 
@@ -959,6 +998,47 @@ mod tests {
             assert_eq!(new_watchers.get(&tx_id).unwrap().0, s);
         }
 
+        // now send an execution confirmation event to advance to RespondBidirectional
+        crate::stream::ops::process_execution_confirmed(
+            execution.id,
+            sign_id,
+            Chain::Solana,
+            block,
+            crate::stream::ExecutionOutcome::Success { output: vec![] },
+            &backlog,
+            sign_tx.clone(),
+            Chain::Ethereum,
+            true,
+        )
+        .await
+        .unwrap();
+
+        // we should receive a Sign::Request because of the execution being confirmed
+        let msg_req = timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match msg_req {
+            Sign::Request(req) => assert_eq!(req.id, sign_id),
+            _ => panic!("expected sign request for RespondBidirectional"),
+        }
+
+        // Fetch the updated request from the backlog to get the new epsilon and payload
+        let entry = backlog.get(Chain::Solana, &sign_id).await.unwrap();
+        let new_args = &entry.request.args;
+        let new_mpc_sig = valid_signature(&root_sk, new_args);
+
+        let new_enc = new_mpc_sig.big_r.to_encoded_point(false);
+        let new_x_bytes = new_enc.x().unwrap().as_slice();
+        let new_y_bytes = new_enc.y().unwrap().as_slice();
+        let mut new_big_r_x = [0u8; 32];
+        let mut new_big_r_y = [0u8; 32];
+        new_big_r_x.copy_from_slice(new_x_bytes);
+        new_big_r_y.copy_from_slice(new_y_bytes);
+        let new_s_bytes = new_mpc_sig.s.to_bytes();
+        let mut new_s_arr = [0u8; 32];
+        new_s_arr.copy_from_slice(&new_s_bytes);
+
         // now send a RespondBidirectional event to complete the request
         // RespondBidirectional should also carry a valid signature
         let respond_bidirectional = RBE::Solana(signet_program::RespondBidirectionalEvent {
@@ -967,11 +1047,11 @@ mod tests {
             serialized_output: vec![],
             signature: signet_program::Signature {
                 big_r: signet_program::AffinePoint {
-                    x: big_r_x,
-                    y: big_r_y,
+                    x: new_big_r_x,
+                    y: new_big_r_y,
                 },
-                s: s_arr,
-                recovery_id: 0,
+                s: new_s_arr,
+                recovery_id: new_mpc_sig.recovery_id,
             },
         });
         events_tx
@@ -1023,10 +1103,14 @@ mod tests {
             .await;
         seeded_backlog.checkpoint(Chain::Ethereum).await;
 
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let root_pk = root_sk.public_key().to_projective().to_affine();
+        let mpc_sig = valid_signature(&root_sk, &args);
+
         let respond = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
             request_id: sign_id.request_id,
             responder: Address::ZERO,
-            signature: Signature::new(k256::ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
+            signature: mpc_sig,
         });
 
         let client = EthereumTestStream::new(vec![
@@ -1040,7 +1124,7 @@ mod tests {
 
         let (contract_watcher, _tx) = ContractStateWatcher::with_running(
             &"test.near".parse::<AccountId>().unwrap(),
-            k256::ProjectivePoint::GENERATOR.to_affine(),
+            root_pk,
             2,
             Default::default(),
         );

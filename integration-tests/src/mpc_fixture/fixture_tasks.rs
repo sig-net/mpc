@@ -11,7 +11,7 @@ use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::message::{MessageOutbox, SendMessage, SignedMessage};
 use mpc_node::protocol::Sign;
-use mpc_node::rpc::{ContractStateWatcher, RpcAction};
+use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::stream::run_stream;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -104,6 +104,7 @@ pub(super) fn test_mock_network(
 pub(super) fn start_mock_stream_tasks(
     mock_streams: &[MockStream],
     sign_tx: mpsc::Sender<Sign>,
+    rpc: RpcChannel,
     backlog: Backlog,
     contract_watcher: ContractStateWatcher,
     mesh_state: &watch::Receiver<MeshState>,
@@ -112,6 +113,7 @@ pub(super) fn start_mock_stream_tasks(
         tokio::spawn(run_stream(
             stream.clone(),
             sign_tx.clone(),
+            rpc.clone(),
             backlog.clone(),
             contract_watcher.clone(),
             mesh_state.clone(),
