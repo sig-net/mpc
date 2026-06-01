@@ -274,9 +274,14 @@ pub async fn run_stream<S: ChainStream>(
                 }
             }
             ChainEvent::RespondBidirectional(ev) => {
-                if let Err(err) =
-                    process_respond_bidirectional_event(ev, sign_tx.clone(), &backlog, caught_up)
-                        .await
+                if let Err(err) = process_respond_bidirectional_event(
+                    ev,
+                    sign_tx.clone(),
+                    &mut contract_watcher,
+                    &backlog,
+                    caught_up,
+                )
+                .await
                 {
                     tracing::error!(?err, %chain, "failed to process respond bidirectional event");
                 }

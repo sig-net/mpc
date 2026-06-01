@@ -425,6 +425,22 @@ pub(crate) async fn process_respond_event(
         return Ok(());
     };
 
+    let responded_signature = respond_event.signature();
+
+    let root_public_key = contract_watcher.wait_public_key().await;
+    mpc_crypto::verify_responded_signature(
+        root_public_key,
+        entry.request.args.epsilon,
+        entry.request.args.payload,
+        &responded_signature,
+    )
+    .map_err(|err| {
+        anyhow::anyhow!(
+            "respond event carried invalid signature for sign id {:?}: {err}",
+            sign_id
+        )
+    })?;
+
     let event = match &entry.request.kind {
         SignKind::Sign => {
             tracing::info!(?sign_id, "sign request completed successfully");
@@ -458,11 +474,10 @@ pub(crate) async fn process_respond_event(
     })?;
 
     // Get the MPC public key and derive the from_address.
-    let root_public_key = contract_watcher.wait_public_key().await;
     let epsilon = event.epsilon()?;
     let from_address = crate::sign_bidirectional::derive_user_address(root_public_key, epsilon);
 
-    let mpc_sig = respond_event.signature();
+    let mpc_sig = responded_signature;
 
     // Sign and hash the transaction to get the correct tx_id and nonce
     let (signed_tx_hash, nonce) = crate::sign_bidirectional::sign_and_hash_transaction(
@@ -529,16 +544,41 @@ pub(crate) async fn process_respond_event(
 pub(crate) async fn process_respond_bidirectional_event(
     event: RespondBidirectionalEvent,
     sign_tx: mpsc::Sender<Sign>,
+    contract_watcher: &mut ContractStateWatcher,
     backlog: &Backlog,
     caught_up: bool,
 ) -> anyhow::Result<()> {
     let sign_id = SignId::new(event.request_id());
+    let source_chain = event.source_chain();
     tracing::info!(?sign_id, "processing RespondBidirectionalEvent");
-    if backlog
-        .remove(event.source_chain(), &sign_id)
-        .await
-        .is_some()
-    {
+
+    let Some(entry) = backlog.get(source_chain, &sign_id).await else {
+        tracing::warn!(?sign_id, "bidirectional tx not found on completion");
+        return Ok(());
+    };
+
+    if !matches!(entry.request.kind, SignKind::RespondBidirectional(_)) {
+        anyhow::bail!(
+            "unexpected sign type for RespondBidirectionalEvent: {:?}",
+            entry.request.kind
+        );
+    }
+
+    let root_public_key = contract_watcher.wait_public_key().await;
+    mpc_crypto::verify_responded_signature(
+        root_public_key,
+        entry.request.args.epsilon,
+        entry.request.args.payload,
+        &event.signature(),
+    )
+    .map_err(|err| {
+        anyhow::anyhow!(
+            "respond event carried invalid signature for sign id {:?}: {err}",
+            sign_id
+        )
+    })?;
+
+    if backlog.remove(source_chain, &sign_id).await.is_some() {
         tracing::info!(?sign_id, "bidirectional tx completed");
     } else {
         tracing::warn!(?sign_id, "bidirectional tx not found on completion");
@@ -1794,19 +1834,12 @@ mod tests {
         );
     }
 
-    fn respond_event(sign_id: SignId) -> RespondBidirectionalEvent {
-        RespondBidirectionalEvent::Solana(signet_program::RespondBidirectionalEvent {
+    fn respond_event(sign_id: SignId, signature: Signature) -> RespondBidirectionalEvent {
+        RespondBidirectionalEvent::Hydration(HydrationRespondBidirectionalEvent {
             request_id: sign_id.request_id,
-            responder: Pubkey::new_unique(),
+            responder: [0u8; 32],
             serialized_output: vec![1, 2, 3],
-            signature: signet_program::Signature {
-                big_r: signet_program::AffinePoint {
-                    x: [0u8; 32],
-                    y: [0u8; 32],
-                },
-                s: [1u8; 32],
-                recovery_id: 0,
-            },
+            signature,
         })
     }
 }

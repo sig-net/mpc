@@ -589,6 +589,7 @@ pub async fn run(
                 if let Err(e) = crate::stream::ops::process_respond_bidirectional_event(
                     crate::stream::ops::RespondBidirectionalEvent::Hydration(event),
                     sign_tx.clone(),
+                    &mut contract_watcher,
                     &backlog,
                     true,
                 )
