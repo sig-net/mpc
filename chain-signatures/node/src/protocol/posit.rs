@@ -52,9 +52,6 @@ pub enum PositAction {
     Propose,
     Start(Vec<Participant>),
     Accept,
-    /// Kept for wire compatibility with older nodes
-    #[deprecated = "use `RejectWithReason` instead"]
-    Reject,
     RejectWithReason(PositRejectReason),
 }
 
