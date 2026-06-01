@@ -779,6 +779,26 @@ mod tests {
         }
     }
 
+    fn valid_signature(root_sk: &k256::SecretKey, args: &SignArgs) -> Signature {
+        use k256::ecdsa::signature::hazmat::PrehashSigner as _;
+        use k256::elliptic_curve::point::DecompressPoint as _;
+
+        let derived_secret_key = mpc_crypto::kdf::derive_secret_key(root_sk, args.epsilon);
+        let signing_key = k256::ecdsa::SigningKey::from(&derived_secret_key);
+        let (ecdsa_sig, _): (k256::ecdsa::Signature, _) = signing_key
+            .sign_prehash(&args.payload.to_bytes())
+            .expect("signing should succeed");
+        let (r_bytes, _) = ecdsa_sig.split_bytes();
+        let big_r =
+            k256::AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
+                .unwrap();
+        let s = *ecdsa_sig.s().as_ref();
+        let expected_public_key = mpc_crypto::derive_key(root_sk.public_key().into(), args.epsilon);
+
+        crate::kdf::into_signature(&expected_public_key, &big_r, &s, args.payload)
+            .expect("signature should validate")
+    }
+
     fn test_canton_sign_bidirectional_request(
         sign_id: SignId,
         sign_event_contract_id: &str,
@@ -1232,7 +1252,7 @@ mod tests {
         backlog
             .insert(IndexedSignRequest::sign_bidirectional(
                 sign_id,
-                args,
+                args.clone(),
                 Chain::Ethereum,
                 current_unix_timestamp(),
                 SignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
@@ -1252,14 +1272,16 @@ mod tests {
             ))
             .await;
 
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+
         let event = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
             request_id: sign_id.request_id,
             responder: alloy::primitives::Address::from_slice(&[0u8; 20]),
-            signature: Signature::new(ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
+            signature: valid_signature(&root_sk, &args),
         });
 
         let account_id: AccountId = "test.near".parse().unwrap();
-        let public_key = ProjectivePoint::GENERATOR.to_affine();
+        let public_key = root_sk.public_key().into();
         let (mut contract_watcher, _tx) =
             ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
@@ -1303,21 +1325,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_respond_event_rejects_invalid_signature() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([15u8; 32]);
+        let args = test_sign_args(15);
+
+        backlog
+            .insert(test_indexed_request(
+                sign_id,
+                Chain::Ethereum,
+                args.clone(),
+                current_unix_timestamp(),
+                SignKind::Sign,
+            ))
+            .await;
+
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let mut invalid_signature = valid_signature(&root_sk, &args);
+        invalid_signature.s += Scalar::ONE;
+
+        let event = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
+            request_id: sign_id.request_id,
+            responder: alloy::primitives::Address::from_slice(&[0u8; 20]),
+            signature: invalid_signature,
+        });
+
+        let account_id: AccountId = "test.near".parse().unwrap();
+        let public_key = root_sk.public_key().into();
+        let (mut contract_watcher, _tx) =
+            ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+
+        let err = process_respond_event(event, sign_tx, &mut contract_watcher, &backlog, true)
+            .await
+            .expect_err("invalid signature should be rejected");
+        assert!(err.to_string().contains("invalid signature"));
+        assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_some());
+        assert!(matches!(
+            timeout(Duration::from_millis(100), sign_rx.recv()).await,
+            Err(_) | Ok(None)
+        ));
+    }
+
+    #[tokio::test]
     async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
         let backlog = Backlog::new();
         let sign_id = SignId::new([13u8; 32]);
-        let args = SignArgs {
-            entropy: [13u8; 32],
-            epsilon: Scalar::from(1u64),
-            payload: Scalar::from(2u64),
-            path: "test".to_string(),
-            key_version: 1,
-        };
+        let args = test_sign_args(13);
 
         backlog
             .insert(IndexedSignRequest::respond_bidirectional(
                 sign_id,
-                args,
+                args.clone(),
                 Chain::Solana,
                 current_unix_timestamp(),
                 RespondBidirectionalTx {
@@ -1328,18 +1388,38 @@ mod tests {
             ))
             .await;
 
-        let duplicate_event0 = respond_event(sign_id);
-        let duplicate_event1 = respond_event(sign_id);
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let signature = valid_signature(&root_sk, &args);
+
+        let duplicate_event0 = respond_event(sign_id, signature, Chain::Solana);
+        let duplicate_event1 = respond_event(sign_id, signature, Chain::Solana);
+
+        let account_id: AccountId = "test.near".parse().unwrap();
+        let public_key = root_sk.public_key().into();
+        let (mut contract_watcher, _tx) =
+            ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
 
-        process_respond_bidirectional_event(duplicate_event0, sign_tx.clone(), &backlog, true)
-            .await
-            .expect("first completion should succeed");
+        process_respond_bidirectional_event(
+            duplicate_event0,
+            sign_tx.clone(),
+            &mut contract_watcher,
+            &backlog,
+            true,
+        )
+        .await
+        .expect("first completion should succeed");
 
-        process_respond_bidirectional_event(duplicate_event1, sign_tx, &backlog, true)
-            .await
-            .expect("duplicate completion should be ignored");
+        process_respond_bidirectional_event(
+            duplicate_event1,
+            sign_tx,
+            &mut contract_watcher,
+            &backlog,
+            true,
+        )
+        .await
+        .expect("duplicate completion should be ignored");
 
         let first = timeout(Duration::from_secs(1), sign_rx.recv())
             .await
@@ -1355,35 +1435,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_respond_bidirectional_event_rejects_invalid_signature() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([16u8; 32]);
+        let args = test_sign_args(16);
+
+        backlog
+            .insert(IndexedSignRequest::respond_bidirectional(
+                sign_id,
+                args.clone(),
+                Chain::Hydration,
+                current_unix_timestamp(),
+                RespondBidirectionalTx {
+                    tx_id: BidirectionalTxId(B256::from([16u8; 32])),
+                    output: vec![1, 2, 3],
+                    chain_ctx: None,
+                },
+            ))
+            .await;
+
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let mut invalid_signature = valid_signature(&root_sk, &args);
+        invalid_signature.s += Scalar::ONE;
+
+        let event = respond_event(sign_id, invalid_signature, Chain::Hydration);
+
+        let account_id: AccountId = "test.near".parse().unwrap();
+        let public_key = root_sk.public_key().into();
+        let (mut contract_watcher, _tx) =
+            ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
+
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+
+        let err = process_respond_bidirectional_event(
+            event,
+            sign_tx,
+            &mut contract_watcher,
+            &backlog,
+            true,
+        )
+        .await
+        .expect_err("invalid signature should be rejected");
+        assert!(err.to_string().contains("invalid signature"));
+        assert!(backlog.get(Chain::Hydration, &sign_id).await.is_some());
+        assert!(matches!(
+            timeout(Duration::from_millis(100), sign_rx.recv()).await,
+            Err(_) | Ok(None)
+        ));
+    }
+
+    #[tokio::test]
     async fn process_respond_event_duplicate_ethereum_is_idempotent() {
         let backlog = Backlog::new();
         let sign_id = SignId::new([3u8; 32]);
-        let args = SignArgs {
-            entropy: [1u8; 32],
-            epsilon: Scalar::from(1u64),
-            payload: Scalar::from(2u64),
-            path: "test".to_string(),
-            key_version: 1,
-        };
+        let args = test_sign_args(1);
 
         backlog
             .insert(test_indexed_request(
                 sign_id,
                 Chain::Ethereum,
-                args,
+                args.clone(),
                 current_unix_timestamp(),
                 SignKind::Sign,
             ))
             .await;
 
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+
         let event = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
             request_id: sign_id.request_id,
             responder: alloy::primitives::Address::from_slice(&[0u8; 20]),
-            signature: Signature::new(ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
+            signature: valid_signature(&root_sk, &args),
         });
 
         let account_id: AccountId = "test.near".parse().unwrap();
-        let public_key = ProjectivePoint::GENERATOR.to_affine();
+        let public_key = root_sk.public_key().into();
         let (mut contract_watcher, _tx) =
             ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
@@ -1436,6 +1562,7 @@ mod tests {
         let backlog = Backlog::new();
         let tx = test_bidirectional_tx(14, Chain::Ethereum, Chain::Solana);
         let sign_id = SignId::new(tx.request_id);
+        let args = test_sign_args(14);
 
         let mut rlp_s = rlp::RlpStream::new_list(9);
         rlp_s.append(&0u64);
@@ -1452,7 +1579,7 @@ mod tests {
         backlog
             .insert(IndexedSignRequest::sign_bidirectional(
                 sign_id,
-                test_sign_args(14),
+                args.clone(),
                 Chain::Ethereum,
                 current_unix_timestamp(),
                 SignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
@@ -1490,14 +1617,16 @@ mod tests {
             )
             .await;
 
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+
         let event = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
             request_id: sign_id.request_id,
             responder: alloy::primitives::Address::from_slice(&[0u8; 20]),
-            signature: Signature::new(ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
+            signature: valid_signature(&root_sk, &args),
         });
 
         let account_id: AccountId = "test.near".parse().unwrap();
-        let public_key = ProjectivePoint::GENERATOR.to_affine();
+        let public_key = root_sk.public_key().into();
         let (mut contract_watcher, _tx) =
             ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
@@ -1834,12 +1963,42 @@ mod tests {
         );
     }
 
-    fn respond_event(sign_id: SignId, signature: Signature) -> RespondBidirectionalEvent {
-        RespondBidirectionalEvent::Hydration(HydrationRespondBidirectionalEvent {
-            request_id: sign_id.request_id,
-            responder: [0u8; 32],
-            serialized_output: vec![1, 2, 3],
-            signature,
-        })
+    fn respond_event(
+        sign_id: SignId,
+        signature: Signature,
+        source_chain: Chain,
+    ) -> RespondBidirectionalEvent {
+        match source_chain {
+            Chain::Solana => {
+                use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+                let encoded_point = signature.big_r.to_encoded_point(false);
+                let x = encoded_point.x().unwrap().clone();
+                let y = encoded_point.y().unwrap().clone();
+                let mut s_bytes = [0u8; 32];
+                s_bytes.copy_from_slice(&signature.s.to_bytes());
+                RespondBidirectionalEvent::Solana(signet_program::RespondBidirectionalEvent {
+                    request_id: sign_id.request_id,
+                    responder: Default::default(),
+                    serialized_output: vec![1, 2, 3],
+                    signature: signet_program::Signature {
+                        big_r: signet_program::AffinePoint {
+                            x: x.into(),
+                            y: y.into(),
+                        },
+                        s: s_bytes,
+                        recovery_id: signature.recovery_id,
+                    },
+                })
+            }
+            Chain::Hydration => {
+                RespondBidirectionalEvent::Hydration(HydrationRespondBidirectionalEvent {
+                    request_id: sign_id.request_id,
+                    responder: [0u8; 32],
+                    serialized_output: vec![1, 2, 3],
+                    signature,
+                })
+            }
+            other => panic!("Unsupported source chain for mock respond event: {other:?}"),
+        }
     }
 }
