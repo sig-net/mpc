@@ -1212,7 +1212,7 @@ mod tests {
 
         from_signatures.extend(from_sparse);
 
-        let slots: Vec<_> = from_signatures.into_iter().map(|(slot, _)| slot).collect();
+        let slots: Vec<_> = from_signatures.into_keys().collect();
         assert_eq!(slots, vec![8, 9, 10, 12]);
     }
 }
