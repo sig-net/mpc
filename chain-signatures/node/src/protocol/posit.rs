@@ -253,8 +253,7 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                     Positor::Deliberator(from),
                 )
             }
-            #[allow(deprecated)]
-            PositAction::Accept | PositAction::Reject | PositAction::RejectWithReason(_) => {
+            PositAction::Accept | PositAction::RejectWithReason(_) => {
                 let mut entry = match self.posits.entry(id) {
                     Entry::Occupied(entry) => entry,
                     Entry::Vacant(_) => {
@@ -480,10 +479,6 @@ impl SinglePositCounter {
         match action {
             PositAction::Accept => {
                 self.accepts.insert(from);
-            }
-            #[allow(deprecated)]
-            PositAction::Reject => {
-                self.rejects.insert(from, PositRejectReason::Unknown);
             }
             PositAction::RejectWithReason(reason) => {
                 self.rejects.insert(from, *reason);
