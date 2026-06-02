@@ -3,6 +3,7 @@ use integration_tests::canton::{
     test_evm_type2_anvil_cases, test_sign_request_event, CantonSandbox,
 };
 use mpc_node::backlog::Backlog;
+use mpc_node::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
 use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
 use mpc_node::protocol::{Chain, IndexedSignRequest, SignKind};
 use mpc_node::stream::ops::SignatureRespondedEvent;
@@ -377,6 +378,10 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     let mpc_sig = Signature::new(expected_big_r, expected_s, expected_recovery_id);
     let der_bytes = der_encode_signature(&mpc_sig)?;
     let der_hex = hex::encode(&der_bytes);
+    let canton_signature = serde_json::to_value(CantonSignature::EcdsaSig(EcdsaSigData {
+        der: der_hex,
+        recovery_id: expected_recovery_id,
+    }))?;
 
     sandbox
         .sig_network_runtime_client
@@ -388,13 +393,7 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
             json!({
                 "signEventCid": &sign_event_cid,
                 "requestId": &request_id,
-                "signature": {
-                    "tag": "EcdsaSig",
-                    "value": {
-                        "der": &der_hex,
-                        "recoveryId": expected_recovery_id,
-                    },
-                },
+                "signature": canton_signature,
             }),
             &[],
         )
