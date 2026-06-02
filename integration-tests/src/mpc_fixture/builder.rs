@@ -517,7 +517,7 @@ impl MpcFixtureNodeBuilder {
         let channels = protocol::test_setup::TestProtocolChannels {
             sign_rx,
             msg_channel: self.messaging.channel.clone(),
-            rpc_channel,
+            rpc_channel: rpc_channel.clone(),
             config: config_rx.clone(),
             mesh_state: mesh_rx.clone(),
         };
@@ -559,6 +559,7 @@ impl MpcFixtureNodeBuilder {
         fixture_tasks::start_mock_stream_tasks(
             &flat_mock_streams,
             sign_tx.clone(),
+            rpc_channel.clone(),
             backlog.clone(),
             context.contract_state.clone(),
             &mesh_rx,
