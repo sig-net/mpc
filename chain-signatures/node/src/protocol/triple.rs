@@ -4,7 +4,7 @@ use super::MpcSignProtocol;
 use crate::config::Config;
 use crate::mesh::MeshState;
 
-use crate::protocol::posit::Positor;
+use crate::protocol::posit::{PositRejectReason, Positor};
 use crate::storage::triple_storage::{TriplePair, TriplePairSlot, TripleStorage};
 use crate::types::TripleProtocol;
 use crate::util::{AffinePointExt, JoinMap};
@@ -405,10 +405,14 @@ impl TripleSpawner {
     ) {
         let internal_action = if self.contains_ongoing(id) {
             tracing::warn!(id, ?from, ?action, "triple already generating");
-            PositInternalAction::Reply(PositAction::Reject)
+            PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::AlreadyGenerating,
+            ))
         } else if self.contains(id).await {
             tracing::warn!(id, ?from, ?action, "triple already generated");
-            PositInternalAction::Reply(PositAction::Reject)
+            PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::AlreadyGenerating,
+            ))
         } else {
             let internal_action = self.posits.act(id, from, self.threshold, &action);
             #[cfg(feature = "debug-page")]
