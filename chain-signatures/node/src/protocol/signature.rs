@@ -813,7 +813,17 @@ impl SignPositor {
         let posit_participants = active.iter().copied().collect::<Vec<_>>();
         let mut counter = SinglePositCounter::new(ctx.governance.me, &posit_participants);
 
-        let remaining = state.budget.remaining();
+        let mut remaining = state.budget.remaining();
+        if is_deliberator {
+            // We just sent an Accept to the proposer. The proposer might wait up to ACCEPT_POSIT_TIMEOUT
+            // to gather more accepts before sending Start.
+            // We must wait at least that long so we don't abandon the round after promising to participate,
+            // which would cause the proposer's generation phase to hang.
+            let min_wait = ACCEPT_POSIT_TIMEOUT + Duration::from_millis(500);
+            if remaining < min_wait {
+                remaining = min_wait;
+            }
+        }
         let posit_deadline = tokio::time::sleep(remaining);
         tokio::pin!(posit_deadline);
         let accept_deadline = tokio::time::sleep(ACCEPT_POSIT_TIMEOUT);
