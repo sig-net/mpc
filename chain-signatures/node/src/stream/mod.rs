@@ -968,7 +968,9 @@ mod tests {
             .set_status(
                 Chain::Solana,
                 &sign_id,
-                SignStatus::PendingExecution { tx: execution.clone() },
+                SignStatus::PendingExecution {
+                    tx: execution.clone(),
+                },
             )
             .await;
 
