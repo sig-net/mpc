@@ -312,20 +312,18 @@ async fn sync(
 
 #[derive(Debug, Deserialize)]
 pub struct CheckpointQuery {
-    /// Combined chain selection and hash filter. Entries are separated by commas.
+    /// Combined chain selection and digest filter. Entries are separated by commas.
     /// Examples:
-    /// - "Ethereum" -> latest Ethereum checkpoint
-    /// - "Solana:1234" -> specific Solana checkpoint by hash
-    /// - "Solana:1234,Ethereum" -> mix of filters
+    /// - `"Ethereum"` -> latest Ethereum checkpoint
+    /// - `"Solana:0x<64 hex chars>"` -> specific Solana checkpoint by digest
+    /// - `"Solana:0x...,Ethereum"` -> mix of filters
     #[serde(default)]
     query: Option<String>,
-    #[serde(default)]
-    digest: Option<String>,
 }
 
 impl CheckpointQuery {
     #[allow(clippy::result_large_err)]
-    fn parse(self) -> Result<Vec<(Chain, Option<u64>)>, Error> {
+    fn parse(self) -> Result<Vec<(Chain, Option<[u8; 32]>)>, Error> {
         let Some(query) = self.query else {
             return Ok(Chain::iter()
                 .into_iter()
@@ -351,24 +349,35 @@ impl CheckpointQuery {
                 Error::InvalidParameters(format!("Invalid chain '{}': {}", chain_part, e))
             })?;
 
-            let hash = match parts.next() {
-                Some(hash_part) => {
-                    let hash_part = hash_part.trim();
-                    if hash_part.is_empty() {
+            let digest = match parts.next() {
+                Some(suffix) => {
+                    let suffix = suffix.trim();
+                    let hex = suffix.strip_prefix("0x").ok_or_else(|| {
+                        Error::InvalidParameters(format!(
+                            "Digest for '{}' must start with '0x' (got '{}').",
+                            chain_part, suffix
+                        ))
+                    })?;
+                    if hex.len() != 64 {
                         return Err(Error::InvalidParameters(format!(
-                            "Invalid hash format for '{}'. Expected 'chain:hash'",
-                            chain_part
+                            "Digest for '{}' must be 64 hex chars, got {}.",
+                            chain_part,
+                            hex.len()
                         )));
                     }
-
-                    Some(hash_part.parse::<u64>().map_err(|e| {
-                        Error::InvalidParameters(format!("Invalid hash '{}': {}", hash_part, e))
-                    })?)
+                    let mut bytes = [0u8; 32];
+                    hex::decode_to_slice(hex, &mut bytes).map_err(|e| {
+                        Error::InvalidParameters(format!(
+                            "Invalid hex digest for '{}': {}",
+                            chain_part, e
+                        ))
+                    })?;
+                    Some(bytes)
                 }
                 None => None,
             };
 
-            selections.push((chain, hash));
+            selections.push((chain, digest));
         }
 
         Ok(selections)
@@ -383,34 +392,21 @@ async fn checkpoint(
     let start = Instant::now();
 
     let mut resp = HashMap::new();
+    let selections = query.parse()?;
 
-    if let Some(digest_str) = &query.digest {
-        let mut digest = [0u8; 32];
-        hex::decode_to_slice(digest_str, &mut digest)
-            .map_err(|e| Error::InvalidParameters(format!("Invalid hex digest: {e}")))?;
+    for (chain, digest) in selections {
+        let checkpoint = if let Some(digest) = digest {
+            state.backlog.find_checkpoint_by_digest(chain, digest).await
+        } else {
+            state.backlog.latest_checkpoint(chain).await
+        };
 
-        let selections = query.parse()?;
-        for (chain, _) in selections {
-            if let Some(cp) = state.backlog.find_checkpoint_by_digest(chain, digest).await {
-                resp.insert(chain, cp);
-            }
-        }
-    } else {
-        let selections = query.parse()?;
-        for (chain, hash) in selections {
-            let checkpoint = if let Some(hash) = hash {
-                state.backlog.find_checkpoint_by_hash(chain, hash).await
-            } else {
-                state.backlog.latest_checkpoint(chain).await
-            };
+        let Some(checkpoint) = checkpoint else {
+            tracing::debug!(?chain, ?digest, "unable to find checkpoint");
+            continue;
+        };
 
-            let Some(checkpoint) = checkpoint else {
-                tracing::warn!(?chain, ?hash, "unable to find checkpoint");
-                continue;
-            };
-
-            resp.insert(chain, checkpoint);
-        }
+        resp.insert(chain, checkpoint);
     }
 
     WEB_ENDPOINT_LATENCY

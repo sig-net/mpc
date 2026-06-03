@@ -3,7 +3,7 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::IndexedSignRequest;
 use crate::protocol::{Chain, Sign};
-use crate::rpc::{CheckpointDigestMap, ContractStateWatcher, RpcChannel};
+use crate::rpc::{CheckpointDigest, ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::BidirectionalTxId;
 use crate::stream::ops::{
     process_execution_confirmed, process_respond_bidirectional_event, process_respond_event,
@@ -181,9 +181,6 @@ pub async fn catchup_then_livestream<I: ChainIndexer>(
     let chain = I::CHAIN;
     tracing::info!(%chain, "starting ChainStream catchup then livestream");
 
-    // Initialize livestream (idempotent, populates indexer state for test linear streams)
-    let _ = indexer.livestream().await;
-
     let mut current_state = *state_rx.borrow_and_update();
 
     loop {
@@ -286,16 +283,17 @@ async fn handle_block_event(
 async fn check_and_perform_regression(
     chain: Chain,
     backlog: &Backlog,
-    mut checkpoints_rx: watch::Receiver<CheckpointDigestMap>,
+    mut checkpoints_rx: watch::Receiver<CheckpointDigest>,
     mesh_state: &watch::Receiver<MeshState>,
     node_client: &NodeClient,
     state_tx: &watch::Sender<ChainStreaming>,
     caught_up: &mut bool,
 ) {
-    let digests = checkpoints_rx.borrow_and_update().clone();
-    let Some(checkpoint_digest) = digests.get(&chain) else {
+    let checkpoint_digest = checkpoints_rx.borrow_and_update().clone();
+    // Ignore the default zero-digest (no consensus checkpoint observed yet).
+    if checkpoint_digest.digest == [0u8; 32] {
         return;
-    };
+    }
 
     let current_checkpoint = backlog.checkpoint(chain).await;
     let matches_digest = match crate::backlog::checkpoint_digest(&current_checkpoint) {
@@ -308,13 +306,12 @@ async fn check_and_perform_regression(
     }
 
     tracing::warn!(?chain, ?checkpoint_digest.digest, "Consensus checkpoint mismatch/divergence detected! Triggering regression.");
-    let target_digest_channel = watch::channel(Some(checkpoint_digest.digest));
     let fetched_checkpoint = crate::stream::ops::fetch_checkpoint_by_digest_loop(
         mesh_state,
         node_client,
         chain,
         checkpoint_digest.digest,
-        target_digest_channel.1,
+        &mut checkpoints_rx,
     )
     .await;
 
@@ -343,7 +340,7 @@ pub async fn run_stream<S: ChainStream>(
     mut contract_watcher: ContractStateWatcher,
     mut mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
-    mut checkpoints_rx: watch::Receiver<CheckpointDigestMap>,
+    mut checkpoints_rx: watch::Receiver<CheckpointDigest>,
 ) {
     let chain = S::Indexer::CHAIN;
     tracing::info!(%chain, "starting stream");
@@ -720,7 +717,8 @@ mod tests {
     #[tokio::test]
     async fn test_run_linearized_source_orders_catchup_before_live() {
         let mut stream = TestLinearStream::new(TestLinearControl::new(Some(1), vec![4, 5]));
-        let indexer = stream.start().await.unwrap();
+        let mut indexer = stream.start().await.unwrap();
+        indexer.livestream().await.unwrap();
         let (_state_tx, state_rx) = watch::channel(ChainStreaming::Catchup { anchor_height: 4 });
         catchup_then_livestream(indexer, state_rx).await;
 
@@ -746,7 +744,8 @@ mod tests {
                 .fail_catchup_once(3)
                 .fail_live_once(4),
         );
-        let indexer = stream.start().await.unwrap();
+        let mut indexer = stream.start().await.unwrap();
+        indexer.livestream().await.unwrap();
         let (_state_tx, state_rx) = watch::channel(ChainStreaming::Catchup { anchor_height: 4 });
         catchup_then_livestream(indexer, state_rx).await;
 
@@ -816,7 +815,10 @@ mod tests {
             Default::default(),
         );
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
-        let (_cp_tx, cp_rx) = tokio::sync::watch::channel(HashMap::new());
+        let (_cp_tx, cp_rx) = tokio::sync::watch::channel(crate::rpc::CheckpointDigest {
+            height: 0,
+            digest: [0u8; 32],
+        });
         let node_client = NodeClient::new(&Default::default());
         let (rpc, _rpc_rx) = test_rpc_channel(4);
 
@@ -927,7 +929,10 @@ mod tests {
             Default::default(),
         );
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
-        let (_cp_tx, cp_rx) = tokio::sync::watch::channel(HashMap::new());
+        let (_cp_tx, cp_rx) = tokio::sync::watch::channel(crate::rpc::CheckpointDigest {
+            height: 0,
+            digest: [0u8; 32],
+        });
         let node_client = NodeClient::new(&Default::default());
         let (rpc, _rpc_rx) = test_rpc_channel(8);
 
@@ -1234,7 +1239,10 @@ mod tests {
             );
         }
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(mesh_state);
-        let (_cp_tx, cp_rx) = tokio::sync::watch::channel(HashMap::new());
+        let (_cp_tx, cp_rx) = tokio::sync::watch::channel(crate::rpc::CheckpointDigest {
+            height: 0,
+            digest: [0u8; 32],
+        });
         let node_client = NodeClient::new(&Default::default());
         let (rpc, _rpc_rx) = test_rpc_channel(8);
 
@@ -1332,7 +1340,10 @@ mod tests {
             );
         }
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(mesh_state);
-        let (_cp_tx, cp_rx) = tokio::sync::watch::channel(HashMap::new());
+        let (_cp_tx, cp_rx) = tokio::sync::watch::channel(crate::rpc::CheckpointDigest {
+            height: 0,
+            digest: [0u8; 32],
+        });
         let node_client = NodeClient::new(&Default::default());
         let (rpc, _rpc_rx) = test_rpc_channel(8);
 
@@ -1413,7 +1424,10 @@ mod tests {
             Default::default(),
         );
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
-        let (_cp_tx, cp_rx) = tokio::sync::watch::channel(HashMap::new());
+        let (_cp_tx, cp_rx) = tokio::sync::watch::channel(crate::rpc::CheckpointDigest {
+            height: 0,
+            digest: [0u8; 32],
+        });
         let node_client = NodeClient::new(&Default::default());
 
         let run_handle = tokio::spawn(async move {
@@ -1496,7 +1510,10 @@ mod tests {
             Default::default(),
         );
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
-        let (_cp_tx, cp_rx) = tokio::sync::watch::channel(HashMap::new());
+        let (_cp_tx, cp_rx) = tokio::sync::watch::channel(crate::rpc::CheckpointDigest {
+            height: 0,
+            digest: [0u8; 32],
+        });
         let node_client = NodeClient::new(&Default::default());
 
         let run_handle = tokio::spawn(async move {

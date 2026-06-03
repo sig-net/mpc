@@ -10,8 +10,7 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 use anyhow::Context;
 use mpc_primitives::{PendingTx, SignId};
 use sha3::{Digest, Sha3_256};
-use std::collections::{hash_map, HashMap};
-use std::hash::{Hash, Hasher};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -226,8 +225,8 @@ pub struct Backlog {
     storage: CheckpointStorage,
     requests: Arc<RwLock<HashMap<Chain, PendingRequests>>>,
     execution_watchers: Arc<RwLock<HashMap<Chain, ExecutionWatchers>>>,
-    /// Historical checkpoints kept for 30 minutes, indexed by chain
-    historical_checkpoints: Arc<RwLock<HashMap<Chain, Vec<HistoricalCheckpoint>>>>,
+    /// Historical checkpoints kept for 30 minutes, indexed by (chain, height).
+    historical_checkpoints: Arc<RwLock<HashMap<Chain, BTreeMap<u64, HistoricalCheckpoint>>>>,
 }
 
 impl Default for Backlog {
@@ -250,14 +249,18 @@ impl Backlog {
         }
     }
 
-    async fn remember_checkpoint(&self, checkpoint: &Checkpoint) {
+    async fn remember_checkpoint(&self, checkpoint: Checkpoint) {
         let mut historical = self.historical_checkpoints.write().await;
-        let historical = historical.entry(checkpoint.chain).or_insert_with(Vec::new);
-        historical.push(HistoricalCheckpoint {
-            checkpoint: checkpoint.clone(),
-            created_at: Instant::now(),
-        });
-        historical.retain(|hcp| hcp.created_at.elapsed() < RETENTION_DURATION);
+        let chain = checkpoint.chain;
+        let btree = historical.entry(chain).or_default();
+        btree.insert(
+            checkpoint.height,
+            HistoricalCheckpoint {
+                checkpoint,
+                created_at: Instant::now(),
+            },
+        );
+        btree.retain(|_, hcp| hcp.created_at.elapsed() < RETENTION_DURATION);
     }
 
     pub async fn insert(&self, request: IndexedSignRequest) -> Option<BacklogEntry> {
@@ -600,52 +603,34 @@ impl Backlog {
             .map(|pr| pr.checkpoint(chain))
             .unwrap_or_else(|| Checkpoint::empty(chain));
 
-        self.remember_checkpoint(&checkpoint).await;
-
         if let Err(err) = self.storage.persist(&checkpoint).await {
             tracing::warn!(?chain, %err, "failed to persist checkpoint");
         }
 
+        self.remember_checkpoint(checkpoint.clone()).await;
         checkpoint
     }
 
     pub async fn latest_checkpoint(&self, chain: Chain) -> Option<Checkpoint> {
         let historical = self.historical_checkpoints.read().await;
-        historical.get(&chain).and_then(|checkpoints| {
-            checkpoints
-                .iter()
-                .max_by_key(|hcp| hcp.checkpoint.height)
-                .map(|hcp| hcp.checkpoint.clone())
-        })
+        // BTreeMap is ordered by height; last entry is the most recent.
+        historical
+            .get(&chain)
+            .and_then(|btree| btree.values().next_back())
+            .map(|hcp| hcp.checkpoint.clone())
     }
 
-    /// Find a historical checkpoint by digest
+    /// Find a historical checkpoint by its consensus digest.
     pub async fn find_checkpoint_by_digest(
         &self,
         chain: Chain,
         digest: [u8; 32],
     ) -> Option<Checkpoint> {
         let historical = self.historical_checkpoints.read().await;
-        if let Some(checkpoints) = historical.get(&chain) {
-            for hcp in checkpoints {
-                if let Ok(d) = checkpoint_digest(&hcp.checkpoint) {
-                    if d == digest {
-                        return Some(hcp.checkpoint.clone());
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    /// Find a historical checkpoint by hash
-    pub async fn find_checkpoint_by_hash(&self, chain: Chain, hash: u64) -> Option<Checkpoint> {
-        let historical = self.historical_checkpoints.read().await;
-        if let Some(checkpoints) = historical.get(&chain) {
-            for hcp in checkpoints {
-                let mut hasher = hash_map::DefaultHasher::new();
-                hcp.checkpoint.hash(&mut hasher);
-                if hasher.finish() == hash {
+        let btree = historical.get(&chain)?;
+        for hcp in btree.values() {
+            if let Ok(d) = checkpoint_digest(&hcp.checkpoint) {
+                if d == digest {
                     return Some(hcp.checkpoint.clone());
                 }
             }
@@ -710,7 +695,7 @@ impl Backlog {
                 .get(&chain)
                 .map(|pending| pending.checkpoint(chain));
             if let Some(checkpoint) = checkpoint {
-                self.remember_checkpoint(&checkpoint).await;
+                self.remember_checkpoint(checkpoint).await;
             }
         }
 
@@ -756,7 +741,7 @@ impl Backlog {
         );
         drop(requests);
 
-        self.remember_checkpoint(&checkpoint).await;
+        self.remember_checkpoint(checkpoint).await;
 
         for (sign_id, tx) in execution_to_watch {
             if let Some(tx) = tx.execution_tx().cloned() {

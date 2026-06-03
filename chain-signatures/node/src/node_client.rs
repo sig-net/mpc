@@ -278,7 +278,7 @@ impl NodeClient {
         let mut url = base.into_url()?;
         url.set_path("checkpoint");
         url.set_query(Some(&format!(
-            "query={}&digest={}",
+            "query={}:0x{}",
             chain.as_str(),
             hex::encode(digest)
         )));

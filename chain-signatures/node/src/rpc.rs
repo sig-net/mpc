@@ -16,8 +16,6 @@ pub struct CheckpointDigest {
     pub digest: [u8; 32],
 }
 
-pub type CheckpointDigestMap = HashMap<Chain, CheckpointDigest>;
-
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signer::keypair::Keypair;
@@ -473,7 +471,7 @@ impl RpcExecutor {
         mut self,
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
-        checkpoints: watch::Sender<CheckpointDigestMap>,
+        checkpoints: HashMap<Chain, watch::Sender<CheckpointDigest>>,
     ) {
         // spin up update task for updating contract state, config and checkpoints
         let near = self.near.clone();
@@ -1225,7 +1223,7 @@ async fn update_contract_data(
     near: NearClient,
     contract: watch::Sender<Option<ProtocolState>>,
     config: watch::Sender<Config>,
-    checkpoints: watch::Sender<CheckpointDigestMap>,
+    checkpoints: HashMap<Chain, watch::Sender<CheckpointDigest>>,
 ) {
     let reads = vec![Read::State, Read::Config, Read::Checkpoints];
     let views = match near.read(reads).await {
@@ -1273,24 +1271,21 @@ async fn update_contract_data(
     }
 
     if let Some(signed_checkpoints) = checkpoints_view {
-        let mut digests = HashMap::new();
         for (chain, sc) in signed_checkpoints {
-            digests.insert(
-                chain,
-                CheckpointDigest {
-                    height: sc.checkpoint.height,
-                    digest: sc.checkpoint.digest,
-                },
-            );
-        }
-        checkpoints.send_if_modified(|old_digests| {
-            if *old_digests == digests {
-                false
-            } else {
-                *old_digests = digests;
-                true
+            let new_digest = CheckpointDigest {
+                height: sc.checkpoint.height,
+                digest: sc.checkpoint.digest,
+            };
+            if let Some(tx) = checkpoints.get(&chain) {
+                tx.send_if_modified(|old| {
+                    if *old == new_digest {
+                        return false;
+                    }
+                    *old = new_digest;
+                    true
+                });
             }
-        });
+        }
     }
 }
 

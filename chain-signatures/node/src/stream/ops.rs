@@ -412,42 +412,55 @@ pub(crate) async fn fetch_checkpoint_by_digest_loop(
     mesh_state: &watch::Receiver<MeshState>,
     node_client: &NodeClient,
     chain: Chain,
-    digest: [u8; 32],
-    mut target_digest_rx: watch::Receiver<Option<[u8; 32]>>,
+    target_digest: [u8; 32],
+    consensus_rx: &mut watch::Receiver<crate::rpc::CheckpointDigest>,
 ) -> Option<mpc_primitives::Checkpoint> {
     use rand::seq::SliceRandom;
     use rand::thread_rng;
 
     loop {
-        // Check if the desired digest has changed or cleared
-        let current_target = *target_digest_rx.borrow();
-        if current_target != Some(digest) {
-            tracing::info!(?chain, "Target digest changed, aborting fetch loop");
+        // Abort if consensus has moved to a different target digest.
+        if consensus_rx.borrow().digest != target_digest {
+            tracing::info!(?chain, "Consensus digest changed, aborting fetch loop");
             return None;
         }
 
-        // Get participants
         let participants_info = mesh_state.borrow().active().participants.clone();
         let mut peers: Vec<_> = participants_info.into_iter().collect();
         peers.shuffle(&mut thread_rng());
 
         for (_id, info) in peers {
-            // Check again inside loop
-            if *target_digest_rx.borrow() != Some(digest) {
+            if consensus_rx.borrow().digest != target_digest {
                 return None;
             }
 
             tracing::debug!(?chain, url = %info.url, "Querying peer for checkpoint by digest");
             match node_client
-                .fetch_checkpoint_by_digest(&info.url, chain, digest)
+                .fetch_checkpoint_by_digest(&info.url, chain, target_digest)
                 .await
             {
                 Ok(Some(checkpoint)) => {
-                    tracing::info!(
-                        ?chain,
-                        "Successfully fetched checkpoint by digest from peer"
-                    );
-                    return Some(checkpoint);
+                    // Verify the checkpoint's digest actually matches before returning.
+                    match crate::backlog::checkpoint_digest(&checkpoint) {
+                        Ok(digest) if digest == target_digest => {
+                            tracing::info!(?chain, ?digest, "Fetched checkpoint digest verified");
+                            return Some(checkpoint);
+                        }
+                        Ok(digest) => {
+                            tracing::warn!(
+                                ?chain,
+                                ?digest,
+                                "Peer returned checkpoint with mismatched digest; skipping"
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                ?chain,
+                                ?err,
+                                "Could not compute digest for fetched checkpoint; skipping"
+                            );
+                        }
+                    }
                 }
                 Ok(None) => {
                     tracing::debug!(?chain, "Peer does not have the checkpoint");
@@ -458,11 +471,13 @@ pub(crate) async fn fetch_checkpoint_by_digest_loop(
             }
         }
 
-        // Wait before retrying
+        // Wait before retrying, but abort early if consensus moves.
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(5)) => {}
-            _ = target_digest_rx.changed() => {
-                if *target_digest_rx.borrow() != Some(digest) {
+            _ = consensus_rx.changed() => {
+                let _ = consensus_rx.borrow_and_update();
+                if consensus_rx.borrow().digest != target_digest {
+                    tracing::info!(?chain, "Consensus digest changed during wait, aborting fetch");
                     return None;
                 }
             }
