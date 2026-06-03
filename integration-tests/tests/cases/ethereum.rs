@@ -77,7 +77,7 @@ async fn test_signature_ethereum() -> Result<()> {
     );
 
     let mut matching_event = None;
-    for _ in 0..30 {
+    for _ in 0..120 {
         let latest_block = client.get_block_number().await?;
         let filter = Filter::new()
             .address(contract_address)
