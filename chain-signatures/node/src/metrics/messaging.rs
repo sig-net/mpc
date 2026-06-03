@@ -109,7 +109,8 @@ pub(crate) static TASK_QUEUE_CAPACITY: LazyLock<HistogramVec> = LazyLock::new(||
         "Distribution of queue capacities across message channels",
         &["channel"],
         Some(vec![
-            0.0, 1.0, 10.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 4096.0,
+            0.0, 1.0, 10.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 2500.0, 3000.0, 3500.0,
+            4000.0, 4096.0,
         ]),
     )
     .unwrap()
