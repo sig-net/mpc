@@ -728,6 +728,7 @@ mod tests {
     use crate::util::current_unix_timestamp;
     use alloy::primitives::{Address, B256};
     use cait_sith::protocol::Participant;
+    use k256::elliptic_curve::sec1::ToEncodedPoint as _;
     use k256::{ProjectivePoint, Scalar};
     use mpc_primitives::SignArgs;
     use near_primitives::types::AccountId;
@@ -1372,8 +1373,8 @@ mod tests {
         let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
         let signature = valid_signature(&root_sk, &args);
 
-        let duplicate_event0 = respond_event(sign_id, signature, Chain::Solana);
-        let duplicate_event1 = respond_event(sign_id, signature, Chain::Solana);
+        let duplicate_event0 = respond_event(sign_id, signature);
+        let duplicate_event1 = respond_event(sign_id, signature);
 
         let account_id: AccountId = "test.near".parse().unwrap();
         let public_key = root_sk.public_key().into();
@@ -1425,7 +1426,7 @@ mod tests {
             .insert(IndexedSignRequest::respond_bidirectional(
                 sign_id,
                 args.clone(),
-                Chain::Hydration,
+                Chain::Solana,
                 current_unix_timestamp(),
                 RespondBidirectionalTx {
                     tx_id: BidirectionalTxId(B256::from([16u8; 32])),
@@ -1439,7 +1440,7 @@ mod tests {
         let mut invalid_signature = valid_signature(&root_sk, &args);
         invalid_signature.s += Scalar::ONE;
 
-        let event = respond_event(sign_id, invalid_signature, Chain::Hydration);
+        let event = respond_event(sign_id, invalid_signature);
 
         let account_id: AccountId = "test.near".parse().unwrap();
         let public_key = root_sk.public_key().into();
@@ -1458,7 +1459,7 @@ mod tests {
         .await
         .expect_err("invalid signature should be rejected");
         assert!(err.to_string().contains("invalid signature"));
-        assert!(backlog.get(Chain::Hydration, &sign_id).await.is_some());
+        assert!(backlog.get(Chain::Solana, &sign_id).await.is_some());
         assert!(matches!(
             timeout(Duration::from_millis(100), sign_rx.recv()).await,
             Err(_) | Ok(None)
@@ -1944,33 +1945,15 @@ mod tests {
         );
     }
 
-    fn respond_event(
-        sign_id: SignId,
-        signature: Signature,
-        source_chain: Chain,
-    ) -> RespondBidirectionalEvent {
-        match source_chain {
-            Chain::Solana => {
-                use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-                RespondBidirectionalEvent::Solana(signet_program::RespondBidirectionalEvent {
-                    request_id: sign_id.request_id,
-                    responder: Default::default(),
-                    serialized_output: vec![1, 2, 3],
-                    signature: crate::util::mpc_to_sol_signature(
-                        &signature,
-                        signature.big_r.to_encoded_point(false),
-                    ),
-                })
-            }
-            Chain::Hydration => {
-                RespondBidirectionalEvent::Hydration(HydrationRespondBidirectionalEvent {
-                    request_id: sign_id.request_id,
-                    responder: [0u8; 32],
-                    serialized_output: vec![1, 2, 3],
-                    signature,
-                })
-            }
-            other => panic!("Unsupported source chain for mock respond event: {other:?}"),
-        }
+    fn respond_event(sign_id: SignId, signature: Signature) -> RespondBidirectionalEvent {
+        RespondBidirectionalEvent::Solana(signet_program::RespondBidirectionalEvent {
+            request_id: sign_id.request_id,
+            responder: Default::default(),
+            serialized_output: vec![1, 2, 3],
+            signature: crate::util::mpc_to_sol_signature(
+                &signature,
+                signature.big_r.to_encoded_point(false),
+            ),
+        })
     }
 }
