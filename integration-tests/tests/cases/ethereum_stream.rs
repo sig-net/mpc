@@ -256,14 +256,15 @@ async fn submit_eth_transfer_with_block(ctx: &EthereumTestEnvironment) -> Result
 async fn submit_respond_for_request_id<P>(
     contract: ChainSignatures::ChainSignaturesInstance<P>,
     request_id: [u8; 32],
+    signature: mpc_primitives::Signature,
 ) -> Result<B256>
 where
     P: Provider + Clone + Send + Sync + 'static,
 {
-    let enc = k256::ProjectivePoint::GENERATOR.to_encoded_point(false);
-    let x = enc.x().expect("generator must have x coordinate");
-    let y = enc.y().expect("generator must have y coordinate");
-    let s = U256::from_be_bytes(k256::Scalar::from(11u64).to_bytes().into());
+    let enc = signature.big_r.to_encoded_point(false);
+    let x = enc.x().expect("big_r must have x coordinate");
+    let y = enc.y().expect("big_r must have y coordinate");
+    let s = U256::from_be_bytes(signature.s.to_bytes().into());
 
     let response = ChainSignatures::Response {
         requestId: request_id.into(),
@@ -273,7 +274,7 @@ where
                 y: U256::from_be_slice(y),
             },
             s,
-            recoveryId: 1,
+            recoveryId: signature.recovery_id,
         },
     };
 
@@ -305,6 +306,8 @@ fn test_sign_args(seed: u8) -> SignArgs {
         key_version: LATEST_MPC_KEY_VERSION,
     }
 }
+
+use mpc_node::kdf::valid_signature;
 
 fn test_bidirectional_event() -> NodeSignBidirectionalEvent {
     let mut rlp_s = rlp::RlpStream::new_list(9);
@@ -570,7 +573,18 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
 
     let responder_contract = ChainSignatures::new(ctx.contract_address, responder_signer.clone());
 
-    submit_respond_for_request_id(responder_contract, resolved_sign_id.request_id).await?;
+    let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let root_pk = root_sk.public_key().to_projective().to_affine();
+
+    let resolved_args = test_sign_args(0x11);
+    let resolved_sig = valid_signature(&root_sk, &resolved_args);
+
+    submit_respond_for_request_id(
+        responder_contract,
+        resolved_sign_id.request_id,
+        resolved_sig,
+    )
+    .await?;
     submit_eth_transfer(&ctx).await?;
     let catchup_payload = [0x55; 32];
     submit_sign_request(&ctx, catchup_payload, "catchup-linear-path").await?;
@@ -579,7 +593,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
-        k256::ProjectivePoint::GENERATOR.to_affine(),
+        root_pk,
         1,
         Default::default(),
     );

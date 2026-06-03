@@ -779,25 +779,7 @@ mod tests {
         }
     }
 
-    fn valid_signature(root_sk: &k256::SecretKey, args: &SignArgs) -> Signature {
-        use k256::ecdsa::signature::hazmat::PrehashSigner as _;
-        use k256::elliptic_curve::point::DecompressPoint as _;
-
-        let derived_secret_key = mpc_crypto::kdf::derive_secret_key(root_sk, args.epsilon);
-        let signing_key = k256::ecdsa::SigningKey::from(&derived_secret_key);
-        let (ecdsa_sig, _): (k256::ecdsa::Signature, _) = signing_key
-            .sign_prehash(&args.payload.to_bytes())
-            .expect("signing should succeed");
-        let (r_bytes, _) = ecdsa_sig.split_bytes();
-        let big_r =
-            k256::AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
-                .unwrap();
-        let s = *ecdsa_sig.s().as_ref();
-        let expected_public_key = mpc_crypto::derive_key(root_sk.public_key().into(), args.epsilon);
-
-        crate::kdf::into_signature(&expected_public_key, &big_r, &s, args.payload)
-            .expect("signature should validate")
-    }
+    use crate::kdf::valid_signature;
 
     fn test_canton_sign_bidirectional_request(
         sign_id: SignId,
