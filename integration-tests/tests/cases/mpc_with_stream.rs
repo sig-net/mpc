@@ -153,53 +153,77 @@ async fn test_channel_contention_1M_requests() {
     check_channel_contention(1000, 1000, 75, None).await;
 }
 
-/// Demonstrates that when a node participates in generation but its generation
-/// times out (while other nodes complete), and it never receives the respond
-/// event, the stale task keeps sending Posit messages that eventually clog the
-/// other nodes' message inboxes.
+/// When node 2 misses the respond event for a failed generation, its stale
+/// task keeps proposing and eventually clogs other nodes' message inboxes.
 ///
-/// The clogging cascade:
-/// 1. Nodes 0+1 complete generation, their tasks exit, inboxes removed
-/// 2. Node 2's generation times out → falls back to Organizing → keeps proposing
-/// 3. handle_posit on nodes 0+1 creates dead-letter inboxes for the completed sign_id
-/// 4. Dead-letter inbox fills (POSIT_INBOX_CHANNEL_SIZE=4 under test-feature)
-/// 5. handle_posit blocks → SignatureSpawner blocks → MessageInbox blocks
-/// 6. Nodes 0+1 can no longer process any new signatures
+/// Scenario:
+/// - Requests 0..2 succeed normally. Respond events clean up all tasks.
+/// - Request 3: node 2 is excluded from generation (Accept dropped) AND
+///   misses the respond event → stale task keeps proposing.
+/// - Requests 4+: node 2's stale posit messages fill dead-letter inboxes on
+///   nodes 0+1 (POSIT_INBOX_CHANNEL_SIZE=4 under test-feature). Once full,
+///   handle_posit blocks → SignatureSpawner freezes → no more signatures.
 #[test(tokio::test(flavor = "multi_thread"))]
-async fn test_missed_respond_clogs_inbox() {
+async fn test_missed_respond_event_clogs_inbox() {
+    run_stale_task_test(true).await;
+}
+
+/// Control test: same setup as [`test_missed_respond_event_clogs_inbox`] but
+/// node 2 DOES receive the respond event. The respond event aborts node 2's
+/// stale task, so the dead-letter inbox never fills and all requests complete.
+#[test(tokio::test(flavor = "multi_thread"))]
+async fn test_respond_event_prevents_clog() {
+    run_stale_task_test(false).await;
+}
+
+/// Shared implementation for the clog / no-clog test pair.
+///
+/// When `drop_respond_event` is true, node 2 misses the respond event for the
+/// bad request and the system clogs. When false, the respond event cleans up
+/// the stale task and all requests complete.
+async fn run_stale_task_test(drop_respond_event: bool) {
     use cait_sith::protocol::Participant;
     use integration_tests::mpc_fixture::message_collector::CollectMessages;
+    use integration_tests::mpc_fixture::mock_chain::EventDelivery;
     use mpc_node::protocol::message::{PositProtocolId, SendMessage};
     use mpc_node::protocol::Message;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use mpc_node::stream::ChainEvent;
+    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    struct PostClogTracker {
-        tracking_active: Arc<AtomicBool>,
-        node_01_propose_count: Arc<AtomicUsize>,
-        node_01_signature_count: Arc<AtomicUsize>,
-        node_2_propose_count: Arc<AtomicUsize>,
+    #[derive(Default, Clone, Debug)]
+    struct MessageCounts {
+        posit: usize,
+        signature: usize,
     }
-    impl CollectMessages for PostClogTracker {
+
+    #[derive(Default)]
+    struct SignatureTracker {
+        counts: Arc<std::sync::Mutex<HashMap<(Participant, SignId), MessageCounts>>>,
+    }
+
+    impl CollectMessages for SignatureTracker {
         fn observe_message(&mut self, msg: &SendMessage, _passed_filter: bool) {
-            if !self.tracking_active.load(Ordering::Relaxed) {
-                return;
-            }
             let (message, (from, _to, _ts)) = msg;
-            let from_node_01 = *from == Participant::from(0) || *from == Participant::from(1);
             match message {
                 Message::Posit(posit_msg) => {
-                    if let PositProtocolId::Signature(..) = posit_msg.id {
-                        if from_node_01 {
-                            self.node_01_propose_count.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            self.node_2_propose_count.fetch_add(1, Ordering::Relaxed);
-                        }
+                    if let PositProtocolId::Signature(sign_id, ..) = posit_msg.id {
+                        self.counts
+                            .lock()
+                            .unwrap()
+                            .entry((*from, sign_id))
+                            .or_default()
+                            .posit += 1;
                     }
                 }
-                Message::Signature(_) if from_node_01 => {
-                    self.node_01_signature_count.fetch_add(1, Ordering::Relaxed);
+                Message::Signature(sig_msg) => {
+                    self.counts
+                        .lock()
+                        .unwrap()
+                        .entry((*from, sig_msg.id))
+                        .or_default()
+                        .signature += 1;
                 }
                 _ => {}
             }
@@ -207,103 +231,199 @@ async fn test_missed_respond_clogs_inbox() {
         fn print_summary(&self) {}
     }
 
-    use std::sync::atomic::AtomicBool;
-    let tracking_active = Arc::new(AtomicBool::new(false));
-    let node_01_propose_count = Arc::new(AtomicUsize::new(0));
-    let node_01_signature_count = Arc::new(AtomicUsize::new(0));
-    let node_2_propose_count = Arc::new(AtomicUsize::new(0));
-
-    let tracker = PostClogTracker {
-        tracking_active: Arc::clone(&tracking_active),
-        node_01_propose_count: Arc::clone(&node_01_propose_count),
-        node_01_signature_count: Arc::clone(&node_01_signature_count),
-        node_2_propose_count: Arc::clone(&node_2_propose_count),
-    };
-
+    let node_0 = Participant::from(0);
+    let node_1 = Participant::from(1);
     let node_2 = Participant::from(2);
+    let bad_request_seed = 3u32;
+    let bad_sign_id = sign_request(bad_request_seed).id;
     let signature_timeout_ms = 5_000;
 
-    let network = MpcFixtureBuilder::new(3, 2)
+    let tracker = SignatureTracker::default();
+    let tracker_counts = Arc::clone(&tracker.counts);
+
+    let mut builder = MpcFixtureBuilder::new(3, 2)
         .only_generate_signatures()
         .with_signature_timeout_ms(signature_timeout_ms)
         .with_mock_stream(Chain::Solana, MockStream::default())
         .await
-        // Drop Signature protocol messages from node 0 → node 2.
-        // Nodes 0+1 can still complete with threshold=2 messages between them.
-        // Node 2's generation will time out because it never receives protocol messages.
+        // Drop node 2's Accept for the bad request so it is excluded from
+        // generation. Dropping Accept guarantees node 2 is never selected
+        // as a participant (the fast mock completes cait-sith in milliseconds,
+        // so dropping Signature messages wouldn't prevent completion).
         .with_outgoing_message_filter(
+            2,
+            Box::new(move |msg: &SendMessage| {
+                let (message, (_from, _to, _ts)) = msg;
+                if let Message::Posit(posit_msg) = message {
+                    if let PositProtocolId::Signature(sign_id, ..) = posit_msg.id {
+                        if sign_id == bad_sign_id
+                            && matches!(
+                                posit_msg.action,
+                                mpc_node::protocol::posit::PositAction::Accept
+                            )
+                        {
+                            return false;
+                        }
+                    }
+                }
+                true
+            }),
+        )
+        .with_message_collector(Arc::new(Mutex::new(tracker)));
+
+    if drop_respond_event {
+        builder = builder.with_chain_event_filter(
+            2,
+            Box::new(move |event: &ChainEvent| {
+                if let ChainEvent::Respond(respond) = event {
+                    if respond.request_id() == bad_sign_id.request_id {
+                        return EventDelivery::Drop;
+                    }
+                }
+                EventDelivery::Deliver
+            }),
+        );
+    }
+
+    let network = builder.build().await;
+
+    let per_request_timeout = Duration::from_secs(60);
+
+    // Send requests one at a time with delays between them so the stale task
+    // (if any) has time to send proposals.
+    let mut completed = 0u32;
+    for seed in 0..20 {
+        network
+            .process_sign_requests(Chain::Solana, &[sign_request(seed)])
+            .await;
+
+        match tokio::time::timeout(
+            per_request_timeout,
+            network.wait_for_actions(completed as usize + 1),
+        )
+        .await
+        {
+            Ok(_) => {
+                completed += 1;
+                tracing::info!(seed, completed, "request completed successfully");
+            }
+            Err(_) => {
+                tracing::info!(seed, completed, "request timed out — clog detected");
+                break;
+            }
+        }
+
+        // Give the stale task time to send proposals between requests.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+
+    if drop_respond_event {
+        // With missed respond event: clog should have occurred.
+        // At minimum, the bad request itself must have been sent and completed
+        // by nodes 0+1 (even though node 2 was excluded).
+        assert!(
+            completed > bad_request_seed,
+            "expected more than {bad_request_seed} successful requests (including the bad one), got {completed}"
+        );
+        assert!(
+            completed < 20,
+            "expected clog to prevent some requests, but all 20 completed"
+        );
+
+        // Verify the bad request: nodes 0+1 generated, node 2 did not.
+        let n0_bad = tracker_counts
+            .lock()
+            .unwrap()
+            .get(&(node_0, bad_sign_id))
+            .cloned()
+            .unwrap_or_default();
+        let n1_bad = tracker_counts
+            .lock()
+            .unwrap()
+            .get(&(node_1, bad_sign_id))
+            .cloned()
+            .unwrap_or_default();
+        let n2_bad = tracker_counts
+            .lock()
+            .unwrap()
+            .get(&(node_2, bad_sign_id))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            n0_bad.signature > 0 && n1_bad.signature > 0,
+            "bad request: nodes 0+1 should have exchanged signature messages (n0={}, n1={})",
+            n0_bad.signature,
+            n1_bad.signature
+        );
+        assert_eq!(
+            n2_bad.signature, 0,
+            "bad request: node 2 should have 0 signature messages, got {}",
+            n2_bad.signature
+        );
+
+        // Verify clog: send a fresh request (not the timed-out one), wait for
+        // node 2 to be active on both sign_ids, then check nodes 0+1 are silent.
+        let fresh_seed = completed + 100;
+        let new_sign_id = sign_request(fresh_seed).id;
+        let n2_bad_before = tracker_counts
+            .lock()
+            .unwrap()
+            .get(&(node_2, bad_sign_id))
+            .cloned()
+            .unwrap_or_default()
+            .posit;
+
+        network
+            .process_sign_requests(Chain::Solana, &[sign_request(fresh_seed)])
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                let ready = {
+                    let counts = tracker_counts.lock().unwrap();
+                    let bad_posits = counts
+                        .get(&(node_2, bad_sign_id))
+                        .map_or(0, |c| c.posit.saturating_sub(n2_bad_before));
+                    let new_posits = counts.get(&(node_2, new_sign_id)).map_or(0, |c| c.posit);
+                    bad_posits >= 2 && new_posits >= 2
+                };
+                if ready {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("node 2 should be sending posit messages for both bad and new requests");
+
+        let n0_new = tracker_counts
+            .lock()
+            .unwrap()
+            .get(&(node_0, new_sign_id))
+            .cloned()
+            .unwrap_or_default();
+        let n1_new = tracker_counts
+            .lock()
+            .unwrap()
+            .get(&(node_1, new_sign_id))
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            n0_new.posit + n0_new.signature,
             0,
-            Box::new(move |msg: &SendMessage| {
-                let (message, (_from, to, _ts)) = msg;
-                !(matches!(message, Message::Signature(_)) && *to == node_2)
-            }),
-        )
-        .with_outgoing_message_filter(
-            1,
-            Box::new(move |msg: &SendMessage| {
-                let (message, (_from, to, _ts)) = msg;
-                !(matches!(message, Message::Signature(_)) && *to == node_2)
-            }),
-        )
-        .with_message_collector(Arc::new(Mutex::new(tracker)))
-        .build()
-        .await;
-
-    // Send first sign request — nodes 0+1 will complete, node 2's generation will time out
-    network
-        .process_sign_requests(Chain::Solana, &[sign_request(0)])
-        .await;
-
-    let actions = network.assert_actions(1, Duration::from_secs(30)).await;
-    assert_eq!(actions.len(), 1);
-
-    // Start tracking messages after the first signature is published.
-    // From this point, nodes 0+1 should have no generators in flight.
-    tracking_active.store(true, Ordering::Relaxed);
-
-    // Wait for node 2's generation to time out and start proposing again,
-    // then for enough proposals to fill the dead-letter inbox on nodes 0+1.
-    //
-    // After generation_timeout (5s), node 2 re-enters Organizing and cycles
-    // through rounds. It is proposer ~1/3 of rounds (round-robin with 3 active
-    // nodes in the mesh). Each round takes ORGANIZE_POSIT_TIMEOUT (5s).
-    // With POSIT_INBOX_CHANNEL_SIZE=4, we need 5 Propose messages to block
-    // (4 to fill the channel + 1 that blocks on send).
-    // Time: generation_timeout + 5 proposals × 3 rounds/proposal × ORGANIZE_POSIT_TIMEOUT
-    //     = 5s + 5 × 3 × 5s = 80s
-    let organize_timeout = mpc_node::protocol::signature::organize_posit_timeout();
-    let clog_wait = Duration::from_millis(signature_timeout_ms) + 18 * organize_timeout;
-    tokio::time::sleep(clog_wait).await;
-
-    // Verify nodes 0+1 have no signature generators in flight: they should not
-    // have sent any Posit or Signature protocol messages since tracking started.
-    let n01_posits = node_01_propose_count.load(Ordering::Relaxed);
-    let n01_sigs = node_01_signature_count.load(Ordering::Relaxed);
-    let n2_posits = node_2_propose_count.load(Ordering::Relaxed);
-    assert_eq!(
-        n01_posits, 0,
-        "nodes 0+1 sent {n01_posits} posit messages after completing — expected 0 (no generators in flight)"
-    );
-    assert_eq!(
-        n01_sigs, 0,
-        "nodes 0+1 sent {n01_sigs} signature messages after completing — expected 0 (no generators in flight)"
-    );
-    assert!(
-        n2_posits > 0,
-        "node 2 should have sent posit messages (stale task proposing), but count was 0"
-    );
-
-    // Send another sign request — should NOT be processable because nodes 0+1 are clogged.
-    // Their SignatureSpawner is blocked on a dead-letter inbox send, so it cannot
-    // process new Sign::Request or Posit messages.
-    network
-        .process_sign_requests(Chain::Solana, &[sign_request(1)])
-        .await;
-
-    let result = tokio::time::timeout(Duration::from_secs(30), network.wait_for_actions(2)).await;
-
-    assert!(
-        result.is_err(),
-        "expected second signature to NOT be produced (inbox clogged), but it was"
-    );
+            "node 0 sent messages for new request — expected 0 (spawner clogged)"
+        );
+        assert_eq!(
+            n1_new.posit + n1_new.signature,
+            0,
+            "node 1 sent messages for new request — expected 0 (spawner clogged)"
+        );
+    } else {
+        // Without missed respond event: respond event cleans up the stale task,
+        // so all requests should complete without clogging.
+        assert_eq!(
+            completed, 20,
+            "expected all 20 requests to complete (respond event prevents clog), got {completed}"
+        );
+    }
 }
