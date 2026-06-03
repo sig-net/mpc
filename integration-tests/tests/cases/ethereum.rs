@@ -1,7 +1,7 @@
-use alloy::network::{Ethereum, TransactionBuilder};
+use alloy::network::TransactionBuilder;
 use alloy::primitives::U256;
 use alloy::providers::Provider;
-use alloy::rpc::types::request::TransactionRequest;
+use alloy::rpc::types::TransactionRequest;
 use alloy::rpc::types::Filter;
 use alloy::sol_types::SolEvent;
 use anyhow::{anyhow, Context, Result};
@@ -464,22 +464,12 @@ async fn produce_empty_eth_blocks(
 
     for _ in 0..block_count {
         let nonce = client.get_transaction_count(sender).pending().await?;
-        let tx = <TransactionRequest as TransactionBuilder<Ethereum>>::with_nonce(
-            <TransactionRequest as TransactionBuilder<Ethereum>>::with_gas_limit(
-                <TransactionRequest as TransactionBuilder<Ethereum>>::with_value(
-                    <TransactionRequest as TransactionBuilder<Ethereum>>::with_to(
-                        <TransactionRequest as TransactionBuilder<Ethereum>>::with_from(
-                            TransactionRequest::default(),
-                            sender,
-                        ),
-                        sink,
-                    ),
-                    U256::ZERO,
-                ),
-                21_000,
-            ),
-            nonce,
-        );
+        let tx = TransactionRequest::default()
+            .with_from(sender)
+            .with_to(sink)
+            .with_value(U256::ZERO)
+            .with_gas_limit(21_000)
+            .with_nonce(nonce);
 
         client.send_transaction(tx).await?.get_receipt().await?;
     }

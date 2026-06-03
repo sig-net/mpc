@@ -802,7 +802,7 @@ impl EthereumClient {
     async fn get_latest_block_number(&self) -> Option<u64> {
         self.get_block(BlockId::Number(alloy::rpc::types::BlockNumberOrTag::Latest))
             .await
-            .map(|block| block.header.number)
+            .map(|block| block.header.inner.number)
     }
 
     fn clamp_oldest_supported(
@@ -936,7 +936,7 @@ impl EthereumIndexer {
 
     /// Process the block and emit relevant ChainEvents from the block.
     async fn process_block(&self, block: &Block) -> anyhow::Result<()> {
-        let block_number = block.header.number;
+        let block_number = block.header.inner.number;
         crate::metrics::indexers::LATEST_BLOCK_NUMBER
             .with_label_values(&[Chain::Ethereum.as_str(), "indexed"])
             .set(block_number as i64);
@@ -948,9 +948,9 @@ impl EthereumIndexer {
     }
 
     async fn parse_block(&self, block: &Block) -> anyhow::Result<BlockAndRequests> {
-        let block_number = block.header.number;
+        let block_number = block.header.inner.number;
         let block_hash = block.header.hash;
-        let block_timestamp = block.header.timestamp;
+        let block_timestamp = block.header.inner.timestamp;
         tracing::info!(
             "Processing block number {} with hash {:?}",
             block_number,
@@ -1344,7 +1344,7 @@ impl EthereumIndexer {
                 continue;
             };
 
-            let new_final_block_number = finalized_block.header.number;
+            let new_final_block_number = finalized_block.header.inner.number;
             let prev_final_block_number = last_final_block_number.replace(new_final_block_number);
 
             if prev_final_block_number.is_none_or(|n| new_final_block_number > n) {
@@ -1452,7 +1452,7 @@ impl ChainIndexer for EthereumIndexer {
             }
         };
 
-        let height = block.header.number;
+        let height = block.header.inner.number;
         if height.is_multiple_of(10) {
             tracing::info!(height, "processed ethereum catchup block attempt");
         }
@@ -1732,12 +1732,12 @@ mod tests {
         let blocks = client.get_blocks(&block_ids).await;
 
         assert_eq!(blocks.len(), 3);
-        assert!(matches!(&blocks[0], MaybeBlock::Block(block) if block.header.number == 7));
+        assert!(matches!(&blocks[0], MaybeBlock::Block(block) if block.header.inner.number == 7));
         assert!(matches!(
             &blocks[1],
             MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(8)))
         ));
-        assert!(matches!(&blocks[2], MaybeBlock::Block(block) if block.header.number == 9));
+        assert!(matches!(&blocks[2], MaybeBlock::Block(block) if block.header.inner.number == 9));
     }
 
     #[tokio::test]
@@ -1783,12 +1783,12 @@ mod tests {
         let blocks = client.get_blocks(&block_ids).await;
 
         assert_eq!(blocks.len(), 3);
-        assert!(matches!(&blocks[0], MaybeBlock::Block(block) if block.header.number == 20));
+        assert!(matches!(&blocks[0], MaybeBlock::Block(block) if block.header.inner.number == 20));
         assert!(matches!(
             &blocks[1],
             MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(21)))
         ));
-        assert!(matches!(&blocks[2], MaybeBlock::Block(block) if block.header.number == 22));
+        assert!(matches!(&blocks[2], MaybeBlock::Block(block) if block.header.inner.number == 22));
     }
 
     #[tokio::test]
@@ -1830,7 +1830,7 @@ mod tests {
             let next = iter.next().await;
             assert!(matches!(
                 next,
-                Some(MaybeBlock::Block(block)) if block.header.number == expected_number
+                Some(MaybeBlock::Block(block)) if block.header.inner.number == expected_number
             ));
         }
 
@@ -1838,7 +1838,7 @@ mod tests {
         assert!(!second_batch_mock.matched_async().await);
 
         let next = iter.next().await;
-        assert!(matches!(next, Some(MaybeBlock::Block(block)) if block.header.number == 42));
+        assert!(matches!(next, Some(MaybeBlock::Block(block)) if block.header.inner.number == 42));
         assert!(second_batch_mock.matched_async().await);
         assert!(iter.next().await.is_none());
     }
@@ -1896,7 +1896,7 @@ mod tests {
             let next = iter.next().await;
             assert!(matches!(
                 next,
-                Some(MaybeBlock::Block(block)) if block.header.number == expected_number
+                Some(MaybeBlock::Block(block)) if block.header.inner.number == expected_number
             ));
         }
 

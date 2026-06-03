@@ -1,7 +1,7 @@
-use alloy::network::{Ethereum, TransactionBuilder};
+use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::Provider;
-use alloy::rpc::types::request::TransactionRequest;
+use alloy::rpc::types::TransactionRequest;
 use anyhow::{Context, Result};
 use cait_sith::protocol::Participant;
 use integration_tests::cluster::spawner::ClusterSpawner;
@@ -60,13 +60,9 @@ fn random_secret_key() -> String {
 }
 
 fn transfer_tx(to: Address, value: U256) -> TransactionRequest {
-    <TransactionRequest as TransactionBuilder<Ethereum>>::with_value(
-        <TransactionRequest as TransactionBuilder<Ethereum>>::with_to(
-            TransactionRequest::default(),
-            to,
-        ),
-        value,
-    )
+    TransactionRequest::default()
+        .with_to(to)
+        .with_value(value)
 }
 
 impl EthereumTestEnvironment {

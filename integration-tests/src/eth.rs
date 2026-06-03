@@ -1,8 +1,8 @@
-use alloy::network::{Ethereum, EthereumWallet, TransactionBuilder};
-use alloy::primitives::{Address, Bytes, B256, U256};
+use alloy::network::{EthereumWallet, TransactionBuilder};
+use alloy::primitives::{Address, B256, U256};
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
 use alloy::providers::{Provider, ProviderBuilder, RootProvider, WalletProvider};
-use alloy::rpc::types::request::TransactionRequest;
+use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
 use alloy::sol_types::SolValue;
@@ -72,15 +72,9 @@ where
     };
     deployment.extend_from_slice(&constructor_args.abi_encode());
 
-    let tx = <TransactionRequest as TransactionBuilder<Ethereum>>::with_input(
-        <TransactionRequest as TransactionBuilder<Ethereum>>::with_from(
-            <TransactionRequest as TransactionBuilder<Ethereum>>::into_create(
-                TransactionRequest::default(),
-            ),
-            deployer_address,
-        ),
-        Bytes::from(deployment),
-    );
+    let tx = TransactionRequest::default()
+        .with_from(deployer_address)
+        .with_deploy_code(deployment);
 
     let pending = client.send_transaction(tx).await?;
     let receipt = pending.get_receipt().await?;
