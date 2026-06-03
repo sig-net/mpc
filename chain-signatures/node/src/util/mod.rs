@@ -71,6 +71,20 @@ impl AffinePointExt for AffinePoint {
     }
 }
 
+pub fn mpc_to_sol_signature(
+    signature: &mpc_primitives::Signature,
+    big_r: k256::EncodedPoint,
+) -> signet_program::Signature {
+    signet_program::Signature {
+        big_r: signet_program::AffinePoint {
+            x: big_r.as_bytes()[1..33].try_into().unwrap(),
+            y: big_r.as_bytes()[33..65].try_into().unwrap(),
+        },
+        s: signature.s.to_bytes().into(),
+        recovery_id: signature.recovery_id,
+    }
+}
+
 pub fn is_elapsed_longer_than_timeout(timestamp_sec: u64, timeout: u64) -> bool {
     if let LocalResult::Single(msg_timestamp) = Utc.timestamp_opt(timestamp_sec as i64, 0) {
         let timeout = Duration::from_millis(timeout);
@@ -90,6 +104,65 @@ pub fn current_unix_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
         .as_secs()
+}
+
+/// Encode `(string, bytes, string, uint256, string, string, string, string)`
+/// exactly like the legacy `ethabi` path so request IDs stay stable.
+#[allow(clippy::too_many_arguments)]
+pub fn ethabi_request_id(
+    sender: String,
+    payload: [u8; 32],
+    path: String,
+    key_version: u32,
+    chain_id: String,
+    algo: String,
+    dest: String,
+    params: String,
+) -> [u8; 32] {
+    const HEAD_WORDS: usize = 8;
+    const WORD_SIZE: usize = 32;
+
+    fn u256_word(value: u64) -> [u8; WORD_SIZE] {
+        let mut word = [0u8; WORD_SIZE];
+        word[WORD_SIZE - 8..].copy_from_slice(&value.to_be_bytes());
+        word
+    }
+
+    fn push_dynamic(
+        heads: &mut Vec<[u8; WORD_SIZE]>,
+        tails: &mut Vec<u8>,
+        head_size: usize,
+        bytes: &[u8],
+    ) {
+        let offset = head_size + tails.len();
+        heads.push(u256_word(offset as u64));
+        tails.extend_from_slice(&u256_word(bytes.len() as u64));
+        tails.extend_from_slice(bytes);
+
+        let padding = (WORD_SIZE - (bytes.len() % WORD_SIZE)) % WORD_SIZE;
+        tails.extend(std::iter::repeat_n(0u8, padding));
+    }
+
+    let head_size = HEAD_WORDS * WORD_SIZE;
+    let mut heads = Vec::with_capacity(HEAD_WORDS);
+    let mut tails = Vec::new();
+
+    push_dynamic(&mut heads, &mut tails, head_size, sender.as_bytes());
+    push_dynamic(&mut heads, &mut tails, head_size, payload.as_slice());
+    push_dynamic(&mut heads, &mut tails, head_size, path.as_bytes());
+    heads.push(u256_word(key_version as u64));
+    push_dynamic(&mut heads, &mut tails, head_size, chain_id.as_bytes());
+    push_dynamic(&mut heads, &mut tails, head_size, algo.as_bytes());
+    push_dynamic(&mut heads, &mut tails, head_size, dest.as_bytes());
+    push_dynamic(&mut heads, &mut tails, head_size, params.as_bytes());
+
+    let mut encoded = Vec::with_capacity(head_size + tails.len());
+    for head in heads {
+        encoded.extend_from_slice(&head);
+    }
+    encoded.extend_from_slice(&tails);
+
+    *alloy::primitives::keccak256(encoded)
 }
 
 /// Calculate elapsed time from a unix timestamp to now
@@ -229,4 +302,8 @@ impl TimeoutBudget {
         self.started = Instant::now();
         self.timeout = timeout;
     }
+}
+
+pub fn channel_len(tx: &tokio::sync::mpsc::Sender<impl Sized>) -> usize {
+    tx.max_capacity() - tx.capacity()
 }

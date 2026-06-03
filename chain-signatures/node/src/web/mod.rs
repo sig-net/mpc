@@ -100,9 +100,18 @@ pub async fn run(
         .layer(Extension(Arc::new(axum_state)));
 
     let addr = format!("0.0.0.0:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            tracing::error!(?addr, ?err, "failed to bind web server");
+            return;
+        }
+    };
+
     tracing::info!(?addr, "starting http server");
-    axum::serve(listener, app).await.unwrap();
+    if let Err(err) = axum::serve(listener, app).await {
+        tracing::error!(?addr, ?err, "web server exited with an error");
+    }
 }
 
 async fn request_id_middleware(mut req: Request<Body>, next: Next) -> Response {
@@ -133,9 +142,7 @@ async fn msg(
     for encrypted in encrypted.into_iter() {
         let msg_channel = state.msg_channel.clone();
         tokio::spawn(async move {
-            if let Err(err) = msg_channel.inbox.send(encrypted).await {
-                tracing::error!(?err, "failed to forward an encrypted protocol message");
-            }
+            msg_channel.send_inbox(encrypted).await;
         });
     }
     WEB_ENDPOINT_LATENCY

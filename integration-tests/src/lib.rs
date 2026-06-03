@@ -1,4 +1,6 @@
 pub mod actions;
+pub mod canton;
+mod canton_auth;
 pub mod cluster;
 pub mod containers;
 pub mod eth;
@@ -14,9 +16,9 @@ use std::time::Duration;
 use self::local::NodeEnvConfig;
 use crate::containers::DockerClient;
 
+use alloy::primitives::{Address, U256};
 use anyhow::Context as _;
 use cluster::spawner::ClusterSpawner;
-use ethers::types::{Address, U256};
 use mpc_contract::config::{PresignatureConfig, ProtocolConfig, TripleConfig};
 use mpc_contract::primitives::CandidateInfo;
 use mpc_node::gcp::GcpService;
@@ -61,6 +63,7 @@ pub struct NodeConfig {
     pub eth: Option<EthConfig>,
     pub sol: Option<SolConfig>,
     pub hydration: Option<HydrationConfig>,
+    pub canton: Option<mpc_node::indexer_canton::CantonConfig>,
 }
 
 impl Default for NodeConfig {
@@ -86,6 +89,7 @@ impl Default for NodeConfig {
             eth: None,
             sol: None,
             hydration: None,
+            canton: None,
         }
     }
 }
@@ -203,8 +207,22 @@ impl Nodes {
                 }
             }
             Nodes::Docker { nodes, .. } => {
-                for node in nodes.drain(..) {
-                    tokio::spawn(node.kill());
+                let handles = nodes
+                    .drain(..)
+                    .map(|node| {
+                        std::thread::spawn(move || {
+                            let runtime = tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                                .expect("failed to build runtime for docker node cleanup");
+
+                            let _ = runtime.block_on(node.kill());
+                        })
+                    })
+                    .collect::<Vec<_>>();
+
+                for handle in handles {
+                    let _ = handle.join();
                 }
             }
         }
@@ -355,7 +373,8 @@ pub async fn setup(spawner: &mut ClusterSpawner) -> anyhow::Result<Context> {
             sandbox.chain_id,
         )?;
         let contract_address =
-            eth::deploy_chain_signatures(client, deployer_address, U256::zero()).await?;
+            eth::deploy_chain_signatures(client, deployer_address, deployer_address, U256::ZERO)
+                .await?;
 
         let rpc_endpoint = if cfg!(feature = "docker-test") {
             sandbox.internal_http_endpoint.clone()

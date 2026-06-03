@@ -7,7 +7,9 @@ use crate::mpc_fixture::fixture_tasks::MessageFilter;
 use crate::mpc_fixture::input::FixtureInput;
 use crate::mpc_fixture::message_collector::CollectMessages;
 use crate::mpc_fixture::mock_governance::MockGovernance;
+use crate::mpc_fixture::mock_stream::MockStream;
 use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
+
 use cait_sith::protocol::Participant;
 use mpc_contract::config::{
     min_to_ms, PresignatureConfig, ProtocolConfig, SignatureConfig, TripleConfig,
@@ -31,11 +33,12 @@ use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
 use mpc_node::storage::{secret_storage, triple_storage::TriplePair, Options};
+use mpc_primitives::Chain;
 use near_sdk::AccountId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, Sender};
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{watch, Mutex};
 
 pub struct MpcFixtureBuilder {
     prepared_nodes: Vec<MpcFixtureNodeBuilder>,
@@ -56,6 +59,7 @@ struct MpcFixtureNodeBuilder {
     config: Config,
     messaging: NodeMessagingBuilder,
     key_info: Option<NodeKeyInfo>,
+    mock_streams: HashMap<Chain, MockStream>,
 }
 
 /// Config options for the test setup.
@@ -420,6 +424,22 @@ impl MpcFixtureBuilder {
             .with_node_min_triples(0)
             .with_node_min_presignatures(0)
     }
+
+    /// Add a mock stream to all nodes.
+    ///
+    /// Each node will have a independent deep-clone of the provided stream.
+    /// Events are thus delivered to all nodes.
+    pub async fn with_mock_stream(mut self, chain: Chain, stream: MockStream) -> Self {
+        for node in &mut self.prepared_nodes {
+            let cloned = stream.deep_clone().await;
+            let prev = node.mock_streams.insert(chain, cloned);
+            assert!(
+                prev.is_none(),
+                "test setup only supports one stream per chain"
+            );
+        }
+        self
+    }
 }
 
 impl MpcFixtureNodeBuilder {
@@ -467,6 +487,7 @@ impl MpcFixtureNodeBuilder {
             config,
             messaging,
             key_info: None,
+            mock_streams: Default::default(),
         }
     }
 
@@ -494,9 +515,9 @@ impl MpcFixtureNodeBuilder {
         let (config_tx, config_rx) = watch::channel(self.config);
 
         let channels = protocol::test_setup::TestProtocolChannels {
-            sign_rx: Arc::new(RwLock::new(sign_rx)),
+            sign_rx,
             msg_channel: self.messaging.channel.clone(),
-            rpc_channel,
+            rpc_channel: rpc_channel.clone(),
             config: config_rx.clone(),
             mesh_state: mesh_rx.clone(),
         };
@@ -532,6 +553,18 @@ impl MpcFixtureNodeBuilder {
             mesh_rx.clone(),
         ));
 
+        let backlog = Backlog::new();
+
+        let flat_mock_streams = self.mock_streams.values().cloned().collect::<Vec<_>>();
+        fixture_tasks::start_mock_stream_tasks(
+            &flat_mock_streams,
+            sign_tx.clone(),
+            rpc_channel.clone(),
+            backlog.clone(),
+            context.contract_state.clone(),
+            &mesh_rx,
+        );
+
         // handle outbox messages manually, we want them before they are
         // encrypted and we want to send them directly to other node's inboxes
         let _mock_network_handle = fixture_tasks::test_mock_network(
@@ -542,6 +575,7 @@ impl MpcFixtureNodeBuilder {
             mesh_tx.clone(),
             config_tx.clone(),
             self.messaging.filter,
+            flat_mock_streams.clone(),
         );
 
         // --- SyncChannel and SyncTask setup ---
@@ -563,14 +597,16 @@ impl MpcFixtureNodeBuilder {
             config: config_tx,
             sign_tx,
             msg_channel: self.messaging.channel,
+            mock_streams: self.mock_streams,
             triple_storage,
             presignature_storage,
-            backlog: Backlog::new(),
+            backlog,
             sync_channel,
             web_handle: None,
         };
 
-        node.start_web_interface(self.participant_info.account_id);
+        node.start_web_interface(self.participant_info.account_id)
+            .await;
 
         node
     }
@@ -661,7 +697,6 @@ impl MpcFixtureNodeBuilder {
 
 async fn redis() -> Redis {
     let spawner = crate::cluster::spawner::ClusterSpawner::default()
-        .network("mpc-test")
         .init_network()
         .await
         .expect("failed setting up redis container");
