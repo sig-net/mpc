@@ -8,12 +8,14 @@ use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers::EthereumSandbox;
 use integration_tests::eth::{self, ChainSignatures, SignRequest};
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+use k256::{AffinePoint, Scalar};
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign, SignKind};
-use mpc_node::rpc::ContractStateWatcher;
+use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
+use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::ops::SignBidirectionalEvent as NodeSignBidirectionalEvent;
 use mpc_node::stream::ops::SignatureRespondedEvent;
@@ -27,6 +29,11 @@ use tokio::time::timeout;
 
 fn signature_deposit() -> U256 {
     U256::from(1u64)
+}
+
+fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<mpc_node::rpc::RpcAction>) {
+    let (tx, rx) = mpsc::channel(buffer);
+    (RpcChannel { tx }, rx)
 }
 
 // Integration tests for EthereumStream
@@ -418,10 +425,12 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     info.url = "http://127.0.0.1:1".to_string();
     mesh_state.update(Participant::from(0u32), NodeStatus::Active, info);
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
+    let (rpc, _rpc_rx) = test_rpc_channel(16);
 
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
+        rpc,
         backlog,
         contract_watcher,
         mesh_rx,
@@ -538,6 +547,23 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         nonce: checkpoint_nonce,
     };
     backlog
+        .set_status(
+            execution_tx.source_chain,
+            &execution_sign_id,
+            SignStatus::PendingPublish {
+                publish: PublishState {
+                    signature: mpc_primitives::Signature::new(
+                        AffinePoint::GENERATOR,
+                        Scalar::ONE,
+                        0,
+                    ),
+                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                    is_proposer: true,
+                },
+            },
+        )
+        .await;
+    backlog
         .advance(Chain::Solana, execution_sign_id, execution_tx)
         .await
         .context("failed to seed execution watcher")?;
@@ -563,10 +589,12 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     info.url = "http://127.0.0.1:1".to_string();
     mesh_state.update(Participant::from(0u32), NodeStatus::Active, info);
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
+    let (rpc, _rpc_rx) = test_rpc_channel(16);
 
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
+        rpc,
         backlog.clone(),
         contract_watcher,
         mesh_rx,
@@ -746,10 +774,12 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     info.url = "http://127.0.0.1:1".to_string();
     mesh_state.update(Participant::from(0u32), NodeStatus::Active, info);
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
+    let (rpc, _rpc_rx) = test_rpc_channel(16);
 
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
+        rpc,
         backlog.clone(),
         contract_watcher,
         mesh_rx,
@@ -818,6 +848,23 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         ))
         .await;
     backlog
+        .set_status(
+            tx.source_chain,
+            &sign_id,
+            SignStatus::PendingPublish {
+                publish: PublishState {
+                    signature: mpc_primitives::Signature::new(
+                        AffinePoint::GENERATOR,
+                        Scalar::ONE,
+                        0,
+                    ),
+                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                    is_proposer: true,
+                },
+            },
+        )
+        .await;
+    backlog
         .advance(Chain::Solana, sign_id, tx)
         .await
         .context("failed to seed late execution watcher")?;
@@ -841,7 +888,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         other => panic!("expected Sign::Request from late watcher backfill, got {other:?}"),
     }
 
-    let watchers = backlog.pending_execution(Chain::Ethereum).await;
+    let watchers = backlog.execution_watchers(Chain::Ethereum).await;
     assert!(
         watchers.is_empty(),
         "late watcher should be cleared after backfill"

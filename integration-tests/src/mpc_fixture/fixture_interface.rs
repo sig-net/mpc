@@ -3,6 +3,7 @@
 
 use crate::containers::Redis;
 use crate::mpc_fixture::message_collector::{CollectMessages, MessagePrinter};
+use crate::mpc_fixture::mock_stream::MockStream;
 use cait_sith::protocol::Participant;
 use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;
@@ -10,10 +11,11 @@ use mpc_node::mesh::MeshState;
 use mpc_node::protocol::state::NodeStateWatcher;
 use mpc_node::protocol::state::NodeStatus;
 use mpc_node::protocol::sync::{SyncChannel, SyncUpdate};
-use mpc_node::protocol::{MessageChannel, ProtocolState, Sign};
+use mpc_node::protocol::{IndexedSignRequest, MessageChannel, ProtocolState, Sign};
 use mpc_node::storage::{PresignatureStorage, TripleStorage};
+use mpc_primitives::Chain;
 use near_sdk::AccountId;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -34,6 +36,7 @@ pub struct MpcFixtureNode {
 
     pub sign_tx: mpsc::Sender<Sign>,
     pub msg_channel: MessageChannel,
+    pub mock_streams: HashMap<Chain, MockStream>,
 
     pub triple_storage: TripleStorage,
     pub presignature_storage: PresignatureStorage,
@@ -178,9 +181,22 @@ impl MpcFixture {
         let actions: tokio::sync::MutexGuard<'_, HashSet<String>> =
             self.output.rpc_actions.lock().await;
 
-        tracing::info!("All published RPC actions:");
+        tracing::info!(count = actions.len(), "All published RPC actions:");
         for action in actions.iter() {
             tracing::info!("{action}");
+        }
+    }
+
+    /// Add a block that contains signature requesting events, visible to all
+    /// nodes, then progress the chain to execute it immediately.
+    pub async fn process_sign_requests(&self, chain: Chain, requests: &[IndexedSignRequest]) {
+        for node in &self.nodes {
+            let stream = node
+                .mock_streams
+                .get(&chain)
+                .expect("must have mock stream configured");
+            stream.prepare_block_of_sign_requests(requests).await;
+            stream.progress_block_height(1).await;
         }
     }
 }

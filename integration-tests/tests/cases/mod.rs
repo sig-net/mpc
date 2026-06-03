@@ -24,6 +24,7 @@ pub mod ethereum;
 pub mod ethereum_stream;
 pub mod helpers;
 pub mod mpc;
+pub mod mpc_with_stream;
 pub mod nightly;
 pub mod solana;
 pub mod solana_stream;

@@ -4,7 +4,7 @@ use super::triple::TripleId;
 use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::contract::primitives::intersect_vec;
-use crate::protocol::posit::PositInternalAction;
+use crate::protocol::posit::{PositInternalAction, PositRejectReason};
 use crate::protocol::MpcSignProtocol;
 use crate::storage::presignature_storage::{PresignatureSlot, PresignatureStorage};
 use crate::storage::protocol_storage::ProtocolArtifact;
@@ -415,13 +415,19 @@ impl PresignatureSpawner {
                 ?action,
                 "presignature id does not match the expected hash"
             );
-            PositInternalAction::Reply(PositAction::Reject)
+            PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::InvalidRequest,
+            ))
         } else if self.contains_ongoing(id.id) {
             tracing::warn!(?id, ?from, ?action, "presignature already generating");
-            PositInternalAction::Reply(PositAction::Reject)
+            PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::AlreadyGenerating,
+            ))
         } else if self.contains(id.id).await {
             tracing::warn!(?id, ?from, ?action, "presignature already generated");
-            PositInternalAction::Reply(PositAction::Reject)
+            PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::AlreadyGenerating,
+            ))
         } else if !{
             // TODO: we can potentially wait for the triples to exist first to then be able to accept.
             // whereas we just blatantly reject here. The problem with waiting is that the other side
@@ -435,7 +441,9 @@ impl PresignatureSpawner {
                 ?action,
                 "presignature required triples are not known"
             );
-            PositInternalAction::Reply(PositAction::Reject)
+            PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::MissingArtifact,
+            ))
         } else {
             let internal_action = self.posits.act(id, from, self.threshold, &action);
             #[cfg(feature = "debug-page")]

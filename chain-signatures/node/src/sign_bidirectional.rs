@@ -2,6 +2,7 @@ use crate::protocol::{Chain, IndexedSignRequest};
 use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
 use borsh::BorshSerialize;
+use cait_sith::protocol::Participant;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
@@ -32,19 +33,71 @@ struct AbiField {
     typ: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum SignStatus {
-    /// Request has been received on the source chain and is waiting for a `respond`
-    /// transaction to be observed.
-    AwaitingResponse,
-    /// Request has been responded to and the derived transaction is now waiting to
-    /// execute on the destination chain.
-    PendingExecution,
-    /// Execution was confirmed and final respond request is waiting to be signed.
-    AwaitingResponseBidirectional,
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PublishState {
+    pub signature: Signature,
+    pub participants: Vec<Participant>,
+    pub is_proposer: bool,
 }
 
-#[derive(Debug, Clone, Hash, serde::Serialize, serde::Deserialize)]
+impl PublishState {
+    fn digest_bytes(&self, tag: u8) -> Vec<u8> {
+        let mut bytes = vec![tag];
+        bytes.extend_from_slice(&self.signature.to_bytes());
+        bytes.extend_from_slice(&(self.participants.len() as u32).to_le_bytes());
+        for participant in &self.participants {
+            bytes.extend_from_slice(&participant.bytes());
+        }
+        bytes.push(u8::from(self.is_proposer));
+        bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SignStatus {
+    PendingGeneration,
+    PendingPublish { publish: PublishState },
+    PendingExecution { tx: BidirectionalTx },
+    PendingGenerationBidirectional,
+    PendingPublishBidirectional { publish: PublishState },
+}
+
+impl SignStatus {
+    pub fn is_pending_generation(&self) -> bool {
+        matches!(
+            self,
+            SignStatus::PendingGeneration | SignStatus::PendingGenerationBidirectional
+        )
+    }
+
+    pub fn is_pending_execution(&self) -> bool {
+        matches!(self, SignStatus::PendingExecution { .. })
+    }
+
+    pub fn digest_bytes(&self) -> Vec<u8> {
+        match self {
+            SignStatus::PendingGeneration => vec![0],
+            SignStatus::PendingPublish { publish } => publish.digest_bytes(1),
+            SignStatus::PendingExecution { tx } => {
+                let mut bytes = vec![2];
+                bytes.extend_from_slice(tx.id.0.as_slice());
+                bytes.extend_from_slice(&tx.target_chain.to_bytes());
+                bytes
+            }
+            SignStatus::PendingGenerationBidirectional => vec![3],
+            SignStatus::PendingPublishBidirectional { publish } => publish.digest_bytes(4),
+        }
+    }
+
+    pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
+        match self {
+            SignStatus::PendingExecution { tx } => Some(tx),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BidirectionalTx {
     pub id: BidirectionalTxId,
     pub sender: [u8; 32],

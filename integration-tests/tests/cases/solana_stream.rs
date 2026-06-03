@@ -1,15 +1,24 @@
 use anyhow::{Context, Result};
+use cait_sith::protocol::Participant;
 use integration_tests::containers::Solana;
-use k256::Scalar;
+use k256::{AffinePoint, Scalar};
 use mpc_crypto::ScalarExt;
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_sol::{SolConfig, SolanaStream};
+use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
-use mpc_node::protocol::{Chain, IndexedSignRequest};
-use mpc_node::stream::{catchup_then_livestream, ChainEvent, ChainStream};
+use mpc_node::protocol::contract::primitives::{ParticipantInfo, Participants};
+use mpc_node::protocol::{Chain, IndexedSignRequest, Sign};
+use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
+use mpc_node::sign_bidirectional::{PublishState, SignStatus};
+use mpc_node::storage::checkpoint_storage::CheckpointStorage;
+use mpc_node::stream::{catchup_then_livestream, run_stream, ChainEvent, ChainStream};
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
+use mpc_primitives::{SignArgs, SignId, Signature};
+use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::time::timeout;
 use tokio::time::Instant;
@@ -380,5 +389,124 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
     .context("timeout waiting for event")?
     .context("client returned None")?;
 
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recovery() -> Result<()> {
+    let solana = solana_sandbox().await?;
+    let program_address = solana.program_keypair.pubkey().to_string();
+    let config = solana.get_config(program_address);
+
+    let storage = CheckpointStorage::in_memory();
+    let seeded_backlog = Backlog::persisted(storage.clone());
+    let sign_id = SignId::new([77u8; 32]);
+    let signature = Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0);
+    let checkpoint_slot = solana.rpc_client.get_slot().await?;
+
+    seeded_backlog
+        .insert(IndexedSignRequest::sign(
+            sign_id,
+            SignArgs {
+                entropy: [9u8; 32],
+                epsilon: Scalar::from(1u64),
+                payload: Scalar::from(2u64),
+                path: "test".to_string(),
+                key_version: LATEST_MPC_KEY_VERSION,
+            },
+            Chain::Solana,
+            0,
+        ))
+        .await;
+    seeded_backlog
+        .set_status(
+            Chain::Solana,
+            &sign_id,
+            SignStatus::PendingPublish {
+                publish: PublishState {
+                    signature,
+                    participants: vec![Participant::from(0u32)],
+                    is_proposer: true,
+                },
+            },
+        )
+        .await;
+    seeded_backlog
+        .set_processed_block(Chain::Solana, checkpoint_slot)
+        .await;
+    seeded_backlog.checkpoint(Chain::Solana).await;
+
+    let recovered_backlog = Backlog::persisted(storage);
+    let stream = SolanaStream::new(Some(config), recovered_backlog.clone())
+        .context("failed to create SolanaStream")?;
+
+    let (sign_tx, mut sign_rx) = mpsc::channel::<Sign>(4);
+    let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcAction>(4);
+    let rpc = RpcChannel { tx: rpc_tx };
+
+    let account_id: AccountId = "test.near".parse().unwrap();
+    let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
+        &account_id,
+        AffinePoint::GENERATOR,
+        1,
+        Participants::default(),
+    );
+
+    let mut mesh_state = MeshState::default();
+    mesh_state.update(
+        Participant::from(0u32),
+        NodeStatus::Active,
+        ParticipantInfo::new(0),
+    );
+    let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
+    let node_client = NodeClient::new(&Default::default());
+
+    let run_handle = tokio::spawn(async move {
+        run_stream(
+            stream,
+            sign_tx,
+            rpc,
+            recovered_backlog,
+            contract_watcher,
+            mesh_rx,
+            node_client,
+        )
+        .await;
+    });
+
+    solana
+        .sign(
+            [3u8; 32],
+            "recovery-anchor",
+            LATEST_MPC_KEY_VERSION,
+            "secp256k1",
+            "",
+            "",
+        )
+        .await?;
+
+    let action = timeout(Duration::from_secs(15), rpc_rx.recv())
+        .await
+        .context("timeout waiting for recovered publish action")?
+        .context("rpc channel closed before publish action")?;
+
+    while let Ok(Some(message)) = timeout(Duration::from_millis(50), sign_rx.recv()).await {
+        if let Sign::Request(req) = &message {
+            if req.id == sign_id {
+                anyhow::bail!("recovered publish request was incorrectly requeued for signing");
+            }
+        }
+    }
+
+    match action {
+        RpcAction::Publish(action) => {
+            assert_eq!(action.indexed.id, sign_id);
+            assert_eq!(action.indexed.chain, Chain::Solana);
+            assert_eq!(action.signature, signature);
+            assert_eq!(action.participants, vec![Participant::from(0u32)]);
+        }
+    }
+
+    run_handle.abort();
     Ok(())
 }
