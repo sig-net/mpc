@@ -153,34 +153,19 @@ async fn test_channel_contention_1M_requests() {
     check_channel_contention(1000, 1000, 75, None).await;
 }
 
-/// When node 2 misses the respond event for a failed generation, its stale
-/// task keeps proposing and eventually clogs other nodes' message inboxes.
-///
-/// Scenario:
-/// - Requests 0..2 succeed normally. Respond events clean up all tasks.
-/// - Request 3: node 2 is excluded from generation (Accept dropped) AND
-///   misses the respond event → stale task keeps proposing.
-/// - Requests 4+: node 2's stale posit messages fill dead-letter inboxes on
-///   nodes 0+1 (POSIT_INBOX_CHANNEL_SIZE=4 under test-feature). Once full,
-///   handle_posit blocks → SignatureSpawner freezes → no more signatures.
+/// A missed respond event leaves a stale task that clogs other nodes' inboxes.
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_missed_respond_event_clogs_inbox() {
     run_stale_task_test(true).await;
 }
 
-/// Control test: same setup as [`test_missed_respond_event_clogs_inbox`] but
-/// node 2 DOES receive the respond event. The respond event aborts node 2's
-/// stale task, so the dead-letter inbox never fills and all requests complete.
+/// Control: same setup but with respond event delivered — no clog.
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_respond_event_prevents_clog() {
     run_stale_task_test(false).await;
 }
 
 /// Shared implementation for the clog / no-clog test pair.
-///
-/// When `drop_respond_event` is true, node 2 misses the respond event for the
-/// bad request and the system clogs. When false, the respond event cleans up
-/// the stale task and all requests complete.
 async fn run_stale_task_test(drop_respond_event: bool) {
     use cait_sith::protocol::Participant;
     use integration_tests::mpc_fixture::message_collector::CollectMessages;
@@ -246,10 +231,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
         .with_signature_timeout_ms(signature_timeout_ms)
         .with_mock_stream(Chain::Solana, MockStream::default())
         .await
-        // Drop node 2's Accept for the bad request so it is excluded from
-        // generation. Dropping Accept guarantees node 2 is never selected
-        // as a participant (the fast mock completes cait-sith in milliseconds,
-        // so dropping Signature messages wouldn't prevent completion).
+        // Exclude node 2 from generation for the bad request by dropping its Accept.
         .with_outgoing_message_filter(
             2,
             Box::new(move |msg: &SendMessage| {
@@ -289,8 +271,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
 
     let per_request_timeout = Duration::from_secs(60);
 
-    // Send requests one at a time with delays between them so the stale task
-    // (if any) has time to send proposals.
+    // Send requests with delays so the stale task has time to send proposals.
     let mut completed = 0u32;
     for seed in 0..20 {
         network
@@ -313,14 +294,11 @@ async fn run_stale_task_test(drop_respond_event: bool) {
             }
         }
 
-        // Give the stale task time to send proposals between requests.
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 
     if drop_respond_event {
-        // With missed respond event: clog should have occurred.
-        // At minimum, the bad request itself must have been sent and completed
-        // by nodes 0+1 (even though node 2 was excluded).
+        // Clog: bad request must have been processed, but not all 20.
         assert!(
             completed > bad_request_seed,
             "expected more than {bad_request_seed} successful requests (including the bad one), got {completed}"
@@ -330,7 +308,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
             "expected clog to prevent some requests, but all 20 completed"
         );
 
-        // Verify the bad request: nodes 0+1 generated, node 2 did not.
+        // Bad request: nodes 0+1 generated, node 2 was excluded.
         let n0_bad = tracker_counts
             .lock()
             .unwrap()
@@ -361,8 +339,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
             n2_bad.signature
         );
 
-        // Verify clog: send a fresh request (not the timed-out one), wait for
-        // node 2 to be active on both sign_ids, then check nodes 0+1 are silent.
+        // Send a fresh request and verify nodes 0+1 are durably silent.
         let fresh_seed = completed + 100;
         let new_sign_id = sign_request(fresh_seed).id;
         let n2_bad_before = tracker_counts
@@ -396,31 +373,58 @@ async fn run_stale_task_test(drop_respond_event: bool) {
         .await
         .expect("node 2 should be sending posit messages for both bad and new requests");
 
-        let n0_new = tracker_counts
+        // Two snapshots with a quiet period prove durable silence.
+        let n0_snap1 = tracker_counts
             .lock()
             .unwrap()
             .get(&(node_0, new_sign_id))
             .cloned()
             .unwrap_or_default();
-        let n1_new = tracker_counts
+        let n1_snap1 = tracker_counts
             .lock()
             .unwrap()
             .get(&(node_1, new_sign_id))
             .cloned()
             .unwrap_or_default();
+
+        let quiet_period = 2 * mpc_node::protocol::signature::organize_posit_timeout();
+        tokio::time::sleep(quiet_period).await;
+
+        let n0_snap2 = tracker_counts
+            .lock()
+            .unwrap()
+            .get(&(node_0, new_sign_id))
+            .cloned()
+            .unwrap_or_default();
+        let n1_snap2 = tracker_counts
+            .lock()
+            .unwrap()
+            .get(&(node_1, new_sign_id))
+            .cloned()
+            .unwrap_or_default();
+
         assert_eq!(
-            n0_new.posit + n0_new.signature,
+            n0_snap1.posit + n0_snap1.signature,
             0,
             "node 0 sent messages for new request — expected 0 (spawner clogged)"
         );
         assert_eq!(
-            n1_new.posit + n1_new.signature,
+            n1_snap1.posit + n1_snap1.signature,
             0,
             "node 1 sent messages for new request — expected 0 (spawner clogged)"
         );
+        assert_eq!(
+            n0_snap2.posit + n0_snap2.signature,
+            0,
+            "node 0 sent messages during quiet period — clog is not durable"
+        );
+        assert_eq!(
+            n1_snap2.posit + n1_snap2.signature,
+            0,
+            "node 1 sent messages during quiet period — clog is not durable"
+        );
     } else {
-        // Without missed respond event: respond event cleans up the stale task,
-        // so all requests should complete without clogging.
+        // Respond event cleans up the stale task — all requests complete.
         assert_eq!(
             completed, 20,
             "expected all 20 requests to complete (respond event prevents clog), got {completed}"

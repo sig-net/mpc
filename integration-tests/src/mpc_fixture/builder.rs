@@ -232,8 +232,6 @@ impl MpcFixtureBuilder {
         let output = self.output;
         let mut nodes = vec![];
 
-        // Build MockChain from all nodes' streams if any mock streams are configured.
-        // Each node already has deep-cloned streams from with_mock_stream().
         let has_mock_streams = self
             .prepared_nodes
             .iter()
@@ -415,8 +413,7 @@ impl MpcFixtureBuilder {
         self
     }
 
-    /// Specify a filter for chain events delivered to the given node.
-    /// Events returning [`EventDelivery::Drop`] are not delivered to the node's stream.
+    /// Filter chain events for a specific node. Dropped events are not delivered.
     pub fn with_chain_event_filter(mut self, node_idx: usize, filter: ChainEventFilter) -> Self {
         self.chain_event_filters.insert(node_idx, filter);
         self

@@ -1,9 +1,5 @@
-//! A simulated chain that distributes events to all nodes' streams.
-//!
-//! In production, all nodes independently observe the same on-chain events via
-//! their indexers. `MockChain` replicates this: sign requests and respond events
-//! are pushed to every node's [`MockStream`], with optional per-node filters for
-//! simulating event misses or delays.
+//! Simulated chain that distributes events to all nodes' streams with
+//! optional per-node filters for simulating event misses.
 
 use crate::mpc_fixture::mock_stream::MockStream;
 use mpc_node::protocol::IndexedSignRequest;
@@ -12,15 +8,11 @@ use mpc_node::stream::ChainEvent;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// Controls whether a [`ChainEvent`] is delivered to a particular node.
 pub enum EventDelivery {
-    /// Deliver the event immediately.
     Deliver,
-    /// Drop the event — the node never sees it.
     Drop,
 }
 
-/// Per-node filter applied before delivering a chain event.
 pub type ChainEventFilter = Box<dyn FnMut(&ChainEvent) -> EventDelivery + Send>;
 
 struct MockChainInner {
@@ -28,11 +20,6 @@ struct MockChainInner {
     filters: Vec<Option<ChainEventFilter>>,
 }
 
-/// Simulates a shared chain that all nodes observe independently.
-///
-/// When events are added (sign requests, respond events from RPC publish
-/// actions), they are distributed to each node's [`MockStream`] after passing
-/// through an optional per-node filter.
 #[derive(Clone)]
 pub struct MockChain {
     inner: Arc<Mutex<MockChainInner>>,
@@ -49,13 +36,10 @@ impl MockChain {
         }
     }
 
-    /// Set a per-node event filter. Events that return [`EventDelivery::Drop`]
-    /// are not delivered to this node's stream.
     pub async fn set_filter(&self, node_idx: usize, filter: ChainEventFilter) {
         self.inner.lock().await.filters[node_idx] = Some(filter);
     }
 
-    /// Push sign requests to all nodes' streams, applying per-node filters.
     pub async fn add_sign_requests(&self, requests: &[IndexedSignRequest]) {
         let mut inner = self.inner.lock().await;
         let events: Vec<ChainEvent> = requests
@@ -65,9 +49,7 @@ impl MockChain {
         inner.distribute_events(&events).await;
     }
 
-    /// Handle an RPC publish action: convert it to respond event(s) and
-    /// distribute to all nodes. Called by `test_mock_network` when a node
-    /// publishes a signature.
+    /// Convert an RPC publish into respond event(s) and distribute to all nodes.
     pub async fn on_rpc_publish(&self, action: &RpcAction) {
         let events = Self::rpc_action_to_events(action);
         if events.is_empty() {
@@ -76,8 +58,6 @@ impl MockChain {
         self.inner.lock().await.distribute_events(&events).await;
     }
 
-    /// Convert an RPC action to chain events (same logic as
-    /// `MockStream::prepare_block_of_rpc_actions`).
     fn rpc_action_to_events(action: &RpcAction) -> Vec<ChainEvent> {
         use elliptic_curve::sec1::ToEncodedPoint;
         use mpc_node::protocol::SignKind;
@@ -123,10 +103,8 @@ impl MockChainInner {
                 .cloned()
                 .collect();
 
-            if !filtered.is_empty() {
-                stream.prepare_block_of_events(&filtered).await;
-                stream.progress_block_height(1).await;
-            }
+            stream.prepare_block_of_events(&filtered).await;
+            stream.progress_block_height(1).await;
         }
     }
 }
