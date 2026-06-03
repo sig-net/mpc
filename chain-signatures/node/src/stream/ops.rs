@@ -1952,23 +1952,14 @@ mod tests {
         match source_chain {
             Chain::Solana => {
                 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
-                let encoded_point = signature.big_r.to_encoded_point(false);
-                let x = *encoded_point.x().unwrap();
-                let y = *encoded_point.y().unwrap();
-                let mut s_bytes = [0u8; 32];
-                s_bytes.copy_from_slice(&signature.s.to_bytes());
                 RespondBidirectionalEvent::Solana(signet_program::RespondBidirectionalEvent {
                     request_id: sign_id.request_id,
                     responder: Default::default(),
                     serialized_output: vec![1, 2, 3],
-                    signature: signet_program::Signature {
-                        big_r: signet_program::AffinePoint {
-                            x: x.into(),
-                            y: y.into(),
-                        },
-                        s: s_bytes,
-                        recovery_id: signature.recovery_id,
-                    },
+                    signature: crate::util::mpc_to_sol_signature(
+                        &signature,
+                        signature.big_r.to_encoded_point(false),
+                    ),
                 })
             }
             Chain::Hydration => {

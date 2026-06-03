@@ -644,26 +644,15 @@ mod tests {
 
         // Prepare a respond event that matches the sign id
         let mpc_sig = valid_signature(&root_sk, &args);
-        let enc = mpc_sig.big_r.to_encoded_point(false);
-        let mut x_bytes = [0u8; 32];
-        let mut y_bytes = [0u8; 32];
-        x_bytes.copy_from_slice(enc.x().unwrap().as_slice());
-        y_bytes.copy_from_slice(enc.y().unwrap().as_slice());
-        let mut s_bytes = [0u8; 32];
-        s_bytes.copy_from_slice(&mpc_sig.s.to_bytes());
 
         let sig_responded =
             SignatureRespondedEvent::Solana(signet_program::SignatureRespondedEvent {
                 request_id: sign_id.request_id,
                 responder: solana_sdk::pubkey::Pubkey::new_unique(),
-                signature: signet_program::Signature {
-                    big_r: signet_program::AffinePoint {
-                        x: x_bytes,
-                        y: y_bytes,
-                    },
-                    s: s_bytes,
-                    recovery_id: mpc_sig.recovery_id,
-                },
+                signature: crate::util::mpc_to_sol_signature(
+                    &mpc_sig,
+                    mpc_sig.big_r.to_encoded_point(false),
+                ),
             });
         let client = SolanaTestStream::new(vec![
             Some(ChainEvent::CatchupCompleted),
@@ -894,28 +883,13 @@ mod tests {
             .await;
 
         // Prepare a SignatureRespondedEvent that will advance to bidirectional and register watcher
-        let enc = mpc_sig.big_r.to_encoded_point(false);
-        let x_bytes = enc.x().unwrap().as_slice();
-        let y_bytes = enc.y().unwrap().as_slice();
-        let mut big_r_x = [0u8; 32];
-        let mut big_r_y = [0u8; 32];
-        big_r_x.copy_from_slice(x_bytes);
-        big_r_y.copy_from_slice(y_bytes);
-        let s_bytes = mpc_sig.s.to_bytes();
-        let mut s_arr = [0u8; 32];
-        s_arr.copy_from_slice(&s_bytes);
-
         let sig_responded = SRE::Solana(signet_program::SignatureRespondedEvent {
             request_id: sign_id.request_id,
             responder: solana_sdk::pubkey::Pubkey::new_unique(),
-            signature: signet_program::Signature {
-                big_r: signet_program::AffinePoint {
-                    x: big_r_x,
-                    y: big_r_y,
-                },
-                s: s_arr,
-                recovery_id: mpc_sig.recovery_id,
-            },
+            signature: crate::util::mpc_to_sol_signature(
+                &mpc_sig,
+                mpc_sig.big_r.to_encoded_point(false),
+            ),
         });
         events_tx
             .send(ChainEvent::Respond(sig_responded))
@@ -1011,31 +985,16 @@ mod tests {
         let new_args = &entry.request.args;
         let new_mpc_sig = valid_signature(&root_sk, new_args);
 
-        let new_enc = new_mpc_sig.big_r.to_encoded_point(false);
-        let new_x_bytes = new_enc.x().unwrap().as_slice();
-        let new_y_bytes = new_enc.y().unwrap().as_slice();
-        let mut new_big_r_x = [0u8; 32];
-        let mut new_big_r_y = [0u8; 32];
-        new_big_r_x.copy_from_slice(new_x_bytes);
-        new_big_r_y.copy_from_slice(new_y_bytes);
-        let new_s_bytes = new_mpc_sig.s.to_bytes();
-        let mut new_s_arr = [0u8; 32];
-        new_s_arr.copy_from_slice(&new_s_bytes);
-
         // now send a RespondBidirectional event to complete the request
         // RespondBidirectional should also carry a valid signature
         let respond_bidirectional = RBE::Solana(signet_program::RespondBidirectionalEvent {
             request_id: sign_id.request_id,
             responder: solana_sdk::pubkey::Pubkey::new_unique(),
             serialized_output: vec![],
-            signature: signet_program::Signature {
-                big_r: signet_program::AffinePoint {
-                    x: new_big_r_x,
-                    y: new_big_r_y,
-                },
-                s: new_s_arr,
-                recovery_id: new_mpc_sig.recovery_id,
-            },
+            signature: crate::util::mpc_to_sol_signature(
+                &new_mpc_sig,
+                new_mpc_sig.big_r.to_encoded_point(false),
+            ),
         });
         events_tx
             .send(ChainEvent::RespondBidirectional(respond_bidirectional))
