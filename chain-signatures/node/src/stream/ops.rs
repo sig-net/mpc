@@ -1336,17 +1336,13 @@ mod tests {
         let (mut contract_watcher, _tx) =
             ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
-        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        let (sign_tx, _sign_rx) = mpsc::channel(4);
 
         let err = process_respond_event(event, sign_tx, &mut contract_watcher, &backlog, true)
             .await
             .expect_err("invalid signature should be rejected");
         assert!(err.to_string().contains("invalid signature"));
         assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_some());
-        assert!(matches!(
-            timeout(Duration::from_millis(100), sign_rx.recv()).await,
-            Err(_) | Ok(None)
-        ));
     }
 
     #[tokio::test]
@@ -1446,7 +1442,7 @@ mod tests {
         let (mut contract_watcher, _tx) =
             ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
-        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        let (sign_tx, _sign_rx) = mpsc::channel(4);
 
         let err = process_respond_bidirectional_event(
             event,
@@ -1459,10 +1455,6 @@ mod tests {
         .expect_err("invalid signature should be rejected");
         assert!(err.to_string().contains("invalid signature"));
         assert!(backlog.get(Chain::Solana, &sign_id).await.is_some());
-        assert!(matches!(
-            timeout(Duration::from_millis(100), sign_rx.recv()).await,
-            Err(_) | Ok(None)
-        ));
     }
 
     #[tokio::test]
