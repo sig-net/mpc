@@ -407,6 +407,28 @@ pub(crate) async fn resume_pending_publish_requests(
     }
 }
 
+async fn verify_entry_signature(
+    contract_watcher: &mut ContractStateWatcher,
+    entry: &crate::backlog::BacklogEntry,
+    signature: &Signature,
+    sign_id: SignId,
+) -> anyhow::Result<mpc_primitives::PublicKey> {
+    let root_public_key = contract_watcher.wait_public_key().await;
+    mpc_crypto::verify_signature(
+        root_public_key,
+        entry.request.args.epsilon,
+        entry.request.args.payload,
+        signature,
+    )
+    .map_err(|err| {
+        anyhow::anyhow!(
+            "respond event carried invalid signature for sign id {:?}: {err}",
+            sign_id
+        )
+    })?;
+    Ok(root_public_key)
+}
+
 pub(crate) async fn process_respond_event(
     respond_event: SignatureRespondedEvent,
     sign_tx: mpsc::Sender<Sign>,
@@ -427,19 +449,8 @@ pub(crate) async fn process_respond_event(
 
     let responded_signature = respond_event.signature();
 
-    let root_public_key = contract_watcher.wait_public_key().await;
-    mpc_crypto::verify_signature(
-        root_public_key,
-        entry.request.args.epsilon,
-        entry.request.args.payload,
-        &responded_signature,
-    )
-    .map_err(|err| {
-        anyhow::anyhow!(
-            "respond event carried invalid signature for sign id {:?}: {err}",
-            sign_id
-        )
-    })?;
+    let root_public_key =
+        verify_entry_signature(contract_watcher, &entry, &responded_signature, sign_id).await?;
 
     let event = match &entry.request.kind {
         SignKind::Sign => {
@@ -564,19 +575,7 @@ pub(crate) async fn process_respond_bidirectional_event(
         );
     }
 
-    let root_public_key = contract_watcher.wait_public_key().await;
-    mpc_crypto::verify_signature(
-        root_public_key,
-        entry.request.args.epsilon,
-        entry.request.args.payload,
-        &event.signature(),
-    )
-    .map_err(|err| {
-        anyhow::anyhow!(
-            "respond event carried invalid signature for sign id {:?}: {err}",
-            sign_id
-        )
-    })?;
+    verify_entry_signature(contract_watcher, &entry, &event.signature(), sign_id).await?;
 
     if backlog.remove(source_chain, &sign_id).await.is_some() {
         tracing::info!(?sign_id, "bidirectional tx completed");
