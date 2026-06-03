@@ -407,13 +407,12 @@ pub(crate) async fn resume_pending_publish_requests(
     }
 }
 
-async fn verify_entry_signature(
-    contract_watcher: &mut ContractStateWatcher,
+fn verify_entry_signature(
+    root_public_key: mpc_primitives::PublicKey,
     entry: &crate::backlog::BacklogEntry,
     signature: &Signature,
     sign_id: SignId,
-) -> anyhow::Result<mpc_primitives::PublicKey> {
-    let root_public_key = contract_watcher.wait_public_key().await;
+) -> anyhow::Result<()> {
     mpc_crypto::verify_signature(
         root_public_key,
         entry.request.args.epsilon,
@@ -425,8 +424,7 @@ async fn verify_entry_signature(
             "respond event carried invalid signature for sign id {:?}: {err}",
             sign_id
         )
-    })?;
-    Ok(root_public_key)
+    })
 }
 
 pub(crate) async fn process_respond_event(
@@ -449,8 +447,8 @@ pub(crate) async fn process_respond_event(
 
     let responded_signature = respond_event.signature();
 
-    let root_public_key =
-        verify_entry_signature(contract_watcher, &entry, &responded_signature, sign_id).await?;
+    let root_public_key = contract_watcher.wait_public_key().await;
+    verify_entry_signature(root_public_key, &entry, &responded_signature, sign_id)?;
 
     let event = match &entry.request.kind {
         SignKind::Sign => {
@@ -575,7 +573,8 @@ pub(crate) async fn process_respond_bidirectional_event(
         );
     }
 
-    verify_entry_signature(contract_watcher, &entry, &event.signature(), sign_id).await?;
+    let root_public_key = contract_watcher.wait_public_key().await;
+    verify_entry_signature(root_public_key, &entry, &event.signature(), sign_id)?;
 
     if backlog.remove(source_chain, &sign_id).await.is_some() {
         tracing::info!(?sign_id, "bidirectional tx completed");
