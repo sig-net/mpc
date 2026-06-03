@@ -50,7 +50,7 @@ pub async fn request_batch_random_sign(
         };
         let function = Function::new("sign")
             .args_json(serde_json::json!({
-                 "request": request,
+                "request": request,
             }))
             .gas(near_primitives::types::Gas::from_teragas(50))
             .deposit(NearToken::from_yoctonear(1));
@@ -84,7 +84,7 @@ pub async fn request_batch_duplicate_sign(
         };
         let function = Function::new("sign")
             .args_json(serde_json::json!({
-                 "request": request,
+                "request": request,
             }))
             .gas(near_primitives::types::Gas::from_teragas(50))
             .deposit(NearToken::from_yoctonear(1));

@@ -20,8 +20,8 @@ use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
 use near_sdk::store::IterableMap;
 use near_sdk::{
-    env, log, near, AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise,
-    PromiseError, PublicKey,
+    env, log, near, AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise, PromiseError,
+    PublicKey,
 };
 use primitives::{
     CandidateInfo, Candidates, InternalSignRequest, Participants, PendingRequest, PkVotes,
@@ -287,7 +287,7 @@ impl VersionedMpcContract {
             return Err(RespondError::InvalidSignature.into());
         }
 
-        env::promise_yield_resume(&index.data_id, &serde_json::to_vec(&signature).unwrap());
+        env::promise_yield_resume(&index.data_id, serde_json::to_vec(&signature).unwrap());
         Ok(())
     }
 
@@ -761,7 +761,7 @@ impl VersionedMpcContract {
     pub fn sign_helper(&mut self, request: InternalSignRequest) {
         let yield_promise = env::promise_yield_create(
             "clear_state_on_finish",
-            &serde_json::to_vec(&(&request,)).unwrap(),
+            serde_json::to_vec(&(&request,)).unwrap(),
             CLEAR_STATE_ON_FINISH_CALL_GAS,
             GasWeight(0),
             DATA_ID_REGISTER,
@@ -785,7 +785,7 @@ impl VersionedMpcContract {
             yield_promise,
             env::current_account_id(),
             "return_signature_on_finish",
-            &[],
+            [],
             NearToken::from_near(0),
             RETURN_SIGNATURE_ON_FINISH_CALL_GAS,
         );
