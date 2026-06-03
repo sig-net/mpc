@@ -1708,10 +1708,12 @@ impl SignatureSpawner {
         if from == me {
             return;
         }
-        let inbox = self
-            .inboxes
-            .entry(sign_id)
-            .or_insert_with(|| Subscriber::unsubscribed(SIGN_POSIT_INBOX_LABEL));
+        let inbox = self.inboxes.entry(sign_id).or_insert_with(|| {
+            Subscriber::unsubscribed_with_capacity(
+                SIGN_POSIT_INBOX_LABEL,
+                crate::protocol::message::POSIT_INBOX_CHANNEL_SIZE,
+            )
+        });
         let _ = inbox
             .send(SignTaskMessage::PositMessage {
                 presignature_id,

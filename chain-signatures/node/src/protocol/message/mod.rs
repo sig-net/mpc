@@ -2,7 +2,7 @@ mod filter;
 mod sub;
 mod types;
 
-pub use sub::Subscriber;
+pub use sub::{Subscriber, POSIT_INBOX_CHANNEL_SIZE};
 
 use super::contract::primitives::{ParticipantMap, Participants};
 use super::presignature::PresignatureId;

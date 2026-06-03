@@ -18,6 +18,15 @@ use crate::util::channel_len;
 /// This should be enough to hold a few messages in the inbox.
 pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
 
+/// Channel size for posit inboxes in SignatureSpawner::handle_posit.
+/// Kept small under test-feature so dead-letter inboxes (created for completed
+/// sign_ids) fill quickly and expose the clogging cascade in component tests.
+pub const POSIT_INBOX_CHANNEL_SIZE: usize = if cfg!(feature = "test-feature") {
+    4
+} else {
+    MAX_MESSAGE_SUB_CHANNEL_SIZE
+};
+
 pub enum SubscribeId {
     Generating,
     Resharing,
