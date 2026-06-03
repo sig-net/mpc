@@ -113,7 +113,7 @@ pub fn check_ec_signature(
     anyhow::bail!("cannot use either recovery id={recovery_id} to recover pubic key")
 }
 
-pub fn verify_responded_signature(
+pub fn verify_signature(
     root_public_key: PublicKey,
     epsilon: Scalar,
     payload: Scalar,

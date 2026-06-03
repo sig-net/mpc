@@ -338,6 +338,7 @@ mod tests {
     use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
     use crate::util::current_unix_timestamp;
     use alloy::primitives::Address;
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
     use k256::{AffinePoint, Scalar};
     use mockito::Server;
     use mpc_primitives::SignArgs;
@@ -643,7 +644,6 @@ mod tests {
 
         // Prepare a respond event that matches the sign id
         let mpc_sig = valid_signature(&root_sk, &args);
-        use k256::elliptic_curve::sec1::ToEncodedPoint;
         let enc = mpc_sig.big_r.to_encoded_point(false);
         let mut x_bytes = [0u8; 32];
         let mut y_bytes = [0u8; 32];
@@ -894,7 +894,6 @@ mod tests {
             .await;
 
         // Prepare a SignatureRespondedEvent that will advance to bidirectional and register watcher
-        use k256::elliptic_curve::sec1::ToEncodedPoint;
         let enc = mpc_sig.big_r.to_encoded_point(false);
         let x_bytes = enc.x().unwrap().as_slice();
         let y_bytes = enc.y().unwrap().as_slice();

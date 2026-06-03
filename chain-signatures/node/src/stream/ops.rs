@@ -428,7 +428,7 @@ pub(crate) async fn process_respond_event(
     let responded_signature = respond_event.signature();
 
     let root_public_key = contract_watcher.wait_public_key().await;
-    mpc_crypto::verify_responded_signature(
+    mpc_crypto::verify_signature(
         root_public_key,
         entry.request.args.epsilon,
         entry.request.args.payload,
@@ -565,7 +565,7 @@ pub(crate) async fn process_respond_bidirectional_event(
     }
 
     let root_public_key = contract_watcher.wait_public_key().await;
-    mpc_crypto::verify_responded_signature(
+    mpc_crypto::verify_signature(
         root_public_key,
         entry.request.args.epsilon,
         entry.request.args.payload,
