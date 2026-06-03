@@ -556,6 +556,7 @@ impl MpcFixtureNodeBuilder {
         let backlog = Backlog::new();
 
         let flat_mock_streams = self.mock_streams.values().cloned().collect::<Vec<_>>();
+        let (_, checkpoints_rx) = watch::channel(HashMap::new());
         fixture_tasks::start_mock_stream_tasks(
             &flat_mock_streams,
             sign_tx.clone(),
@@ -563,6 +564,7 @@ impl MpcFixtureNodeBuilder {
             backlog.clone(),
             context.contract_state.clone(),
             &mesh_rx,
+            checkpoints_rx,
         );
 
         // handle outbox messages manually, we want them before they are

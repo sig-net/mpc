@@ -433,7 +433,7 @@ async fn require_checkpoint(
         loop {
             let checkpoints = nodes.fetch_checkpoints(id).await?;
             if let Some(checkpoint) = checkpoints.get(&chain) {
-                if checkpoint.block_height >= block_height {
+                if checkpoint.height >= block_height {
                     return Ok(checkpoint.clone());
                 }
             }

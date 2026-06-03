@@ -6,14 +6,14 @@ use near_sdk::{AccountId, PublicKey};
 
 use crate::primitives::{Candidates, Participants, PkVotes, Votes};
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct InitializingContractState {
     pub candidates: Candidates,
     pub threshold: usize,
     pub pk_votes: PkVotes,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct RunningContractState {
     pub epoch: u64,
     pub participants: Participants,
@@ -24,7 +24,7 @@ pub struct RunningContractState {
     pub leave_votes: Votes,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct ResharingContractState {
     pub old_epoch: u64,
     pub old_participants: Participants,
@@ -35,7 +35,7 @@ pub struct ResharingContractState {
     pub cancel_votes: HashSet<AccountId>,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub enum ProtocolContractState {
     NotInitialized,
     Initializing(InitializingContractState),

@@ -19,7 +19,9 @@ use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::ops::SignBidirectionalEvent as NodeSignBidirectionalEvent;
 use mpc_node::stream::ops::SignatureRespondedEvent;
-use mpc_node::stream::{catchup_then_livestream, run_stream, ChainEvent, ChainStream};
+use mpc_node::stream::{
+    catchup_then_livestream, run_stream, ChainEvent, ChainStream, ChainStreaming,
+};
 use mpc_node::util::current_unix_timestamp;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use near_primitives::types::AccountId;
@@ -376,7 +378,8 @@ async fn stream_ethereum(
 ) -> Result<StartedEthereumStream> {
     let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog).await?;
     let indexer = stream.start().await?;
-    let indexer_task = tokio::spawn(catchup_then_livestream(indexer));
+    let (_, state_rx) = watch::channel(ChainStreaming::Live);
+    let indexer_task = tokio::spawn(catchup_then_livestream(indexer, state_rx));
 
     Ok(StartedEthereumStream {
         stream,
@@ -427,6 +430,7 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
+    let (_, checkpoints_rx) = watch::channel(std::collections::HashMap::new());
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
@@ -435,6 +439,7 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
         contract_watcher,
         mesh_rx,
         NodeClient::new(&Default::default()),
+        checkpoints_rx,
     ));
 
     let mut saw_replayed_payload = false;
@@ -591,6 +596,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
+    let (_, checkpoints_rx) = watch::channel(std::collections::HashMap::new());
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
@@ -599,6 +605,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         contract_watcher,
         mesh_rx,
         NodeClient::new(&Default::default()),
+        checkpoints_rx,
     ));
 
     let mut saw_execution_follow_up = false;
@@ -776,6 +783,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
+    let (_, checkpoints_rx) = watch::channel(std::collections::HashMap::new());
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
@@ -784,6 +792,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         contract_watcher,
         mesh_rx,
         NodeClient::new(&Default::default()),
+        checkpoints_rx,
     ));
 
     let mut saw_catchup_flush = false;

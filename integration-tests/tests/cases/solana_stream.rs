@@ -13,7 +13,9 @@ use mpc_node::protocol::{Chain, IndexedSignRequest, Sign};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{catchup_then_livestream, run_stream, ChainEvent, ChainStream};
+use mpc_node::stream::{
+    catchup_then_livestream, run_stream, ChainEvent, ChainStream, ChainStreaming,
+};
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use mpc_primitives::{SignArgs, SignId, Signature};
 use near_primitives::types::AccountId;
@@ -47,7 +49,8 @@ async fn stream_solana_with_backlog(config: SolConfig, backlog: Backlog) -> Resu
     let mut stream =
         SolanaStream::new(Some(config), backlog).context("failed to create SolanaStream")?;
     let indexer = ChainStream::start(&mut stream).await?;
-    tokio::spawn(catchup_then_livestream(indexer));
+    let (_, state_rx) = watch::channel(ChainStreaming::Live);
+    tokio::spawn(catchup_then_livestream(indexer, state_rx));
     Ok(stream)
 }
 
@@ -461,6 +464,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let node_client = NodeClient::new(&Default::default());
 
+    let (_, checkpoints_rx) = watch::channel(std::collections::HashMap::new());
     let run_handle = tokio::spawn(async move {
         run_stream(
             stream,
@@ -470,6 +474,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
             contract_watcher,
             mesh_rx,
             node_client,
+            checkpoints_rx,
         )
         .await;
     });

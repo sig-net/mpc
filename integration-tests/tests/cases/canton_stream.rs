@@ -7,7 +7,7 @@ use mpc_node::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
 use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
 use mpc_node::protocol::{Chain, IndexedSignRequest, SignKind};
 use mpc_node::stream::ops::SignatureRespondedEvent;
-use mpc_node::stream::{catchup_then_livestream, ChainEvent, ChainStream};
+use mpc_node::stream::{catchup_then_livestream, ChainEvent, ChainStream, ChainStreaming};
 use mpc_primitives::{ScalarExt, Signature, LATEST_MPC_KEY_VERSION};
 use serde_json::json;
 use serial_test::serial;
@@ -23,7 +23,8 @@ async fn stream_canton(sandbox: &CantonSandbox, backlog: Backlog) -> Result<Cant
     let mut stream =
         CantonStream::new(Some(config), backlog).context("failed to create CantonStream")?;
     let indexer = ChainStream::start(&mut stream).await?;
-    tokio::spawn(catchup_then_livestream(indexer));
+    let (_, state_rx) = tokio::sync::watch::channel(ChainStreaming::Live);
+    tokio::spawn(catchup_then_livestream(indexer, state_rx));
     Ok(stream)
 }
 
@@ -271,7 +272,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
         1,
         "expected one pending request in checkpoint"
     );
-    let checkpoint_height = checkpoint.block_height;
+    let checkpoint_height = checkpoint.height;
     let phase1_request_id = checkpoint.pending_requests[0].sign_id.request_id;
     drop(stream);
 

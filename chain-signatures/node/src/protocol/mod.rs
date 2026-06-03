@@ -226,6 +226,7 @@ pub enum SignKind {
     Sign,
     SignBidirectional(crate::stream::ops::SignBidirectionalEvent),
     RespondBidirectional(RespondBidirectionalTx),
+    Checkpoint(mpc_primitives::ConsensusCheckpoint),
 }
 
 #[cfg(test)]

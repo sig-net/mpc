@@ -63,7 +63,7 @@ pub async fn select_checkpoints(
 
         tracing::info!(
             ?chain,
-            block_height = checkpoint.block_height,
+            height = checkpoint.height,
             "found selected checkpoint"
         );
         selections.insert(chain, checkpoint.clone());
@@ -154,15 +154,15 @@ async fn select_checkpoint_for_chain(
         return None;
     }
 
-    // Sort checkpoints by block height (ascending)
-    checkpoints.sort_by_key(|c| c.block_height);
+    // Sort checkpoints by height (ascending)
+    checkpoints.sort_by_key(|c| c.height);
 
     // Take the threshold-lowest checkpoint (at index n - threshold)
     let selected_checkpoint = checkpoints.swap_remove(checkpoints.len() - threshold);
 
     tracing::info!(
         ?chain,
-        block_height = selected_checkpoint.block_height,
+        height = selected_checkpoint.height,
         total_checkpoints = checkpoints.len(),
         threshold,
         "selected threshold-lowest checkpoint"
@@ -185,7 +185,7 @@ mod tests {
             Chain::Ethereum,
             Checkpoint {
                 chain: Chain::Ethereum,
-                block_height: 100,
+                height: 100,
                 pending_requests: vec![],
             },
         );
@@ -197,7 +197,7 @@ mod tests {
             Chain::Ethereum,
             Checkpoint {
                 chain: Chain::Ethereum,
-                block_height: 105,
+                height: 105,
                 pending_requests: vec![],
             },
         );
@@ -209,7 +209,7 @@ mod tests {
             Chain::Ethereum,
             Checkpoint {
                 chain: Chain::Ethereum,
-                block_height: 110,
+                height: 110,
                 pending_requests: vec![],
             },
         );
@@ -219,7 +219,7 @@ mod tests {
         // should select height 105 (3rd lowest)
         let threshold = 3;
         let result = select_checkpoint_for_chain(&checkpoints, Chain::Ethereum, threshold).await;
-        assert_eq!(result.unwrap().block_height, 105);
+        assert_eq!(result.unwrap().height, 105);
     }
 
     #[tokio::test]
@@ -231,7 +231,7 @@ mod tests {
             Chain::Ethereum,
             Checkpoint {
                 chain: Chain::Ethereum,
-                block_height: 100,
+                height: 100,
                 pending_requests: vec![],
             },
         );

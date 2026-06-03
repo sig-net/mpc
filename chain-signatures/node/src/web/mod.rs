@@ -319,6 +319,8 @@ pub struct CheckpointQuery {
     /// - "Solana:1234,Ethereum" -> mix of filters
     #[serde(default)]
     query: Option<String>,
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 impl CheckpointQuery {
@@ -379,21 +381,36 @@ async fn checkpoint(
     Query(query): Query<CheckpointQuery>,
 ) -> Result<Cbor<HashMap<Chain, Checkpoint>>> {
     let start = Instant::now();
-    let selections = query.parse()?;
+
     let mut resp = HashMap::new();
-    for (chain, hash) in selections {
-        let checkpoint = if let Some(hash) = hash {
-            state.backlog.find_checkpoint_by_hash(chain, hash).await
-        } else {
-            state.backlog.latest_checkpoint(chain).await
-        };
 
-        let Some(checkpoint) = checkpoint else {
-            tracing::warn!(?chain, ?hash, "unable to find checkpoint");
-            continue;
-        };
+    if let Some(digest_str) = &query.digest {
+        let mut digest = [0u8; 32];
+        hex::decode_to_slice(digest_str, &mut digest)
+            .map_err(|e| Error::InvalidParameters(format!("Invalid hex digest: {e}")))?;
 
-        resp.insert(chain, checkpoint);
+        let selections = query.parse()?;
+        for (chain, _) in selections {
+            if let Some(cp) = state.backlog.find_checkpoint_by_digest(chain, digest).await {
+                resp.insert(chain, cp);
+            }
+        }
+    } else {
+        let selections = query.parse()?;
+        for (chain, hash) in selections {
+            let checkpoint = if let Some(hash) = hash {
+                state.backlog.find_checkpoint_by_hash(chain, hash).await
+            } else {
+                state.backlog.latest_checkpoint(chain).await
+            };
+
+            let Some(checkpoint) = checkpoint else {
+                tracing::warn!(?chain, ?hash, "unable to find checkpoint");
+                continue;
+            };
+
+            resp.insert(chain, checkpoint);
+        }
     }
 
     WEB_ENDPOINT_LATENCY

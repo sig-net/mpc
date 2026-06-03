@@ -93,6 +93,15 @@ impl SignId {
         let request_id: [u8; 32] = hasher.finalize().into();
         Self { request_id }
     }
+
+    pub fn checkpoint(payload: &[u8; 32]) -> Self {
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(b"checkpoint");
+        hasher.update(payload);
+        hasher.update(LATEST_MPC_KEY_VERSION.to_le_bytes());
+        let request_id: [u8; 32] = hasher.finalize().into();
+        Self::new(request_id)
+    }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -365,7 +374,7 @@ impl fmt::Debug for PendingTx {
     }
 }
 
-/// A checkpoint represents the backlog state at a specific block height.
+/// A checkpoint represents the backlog state at a specific height.
 #[derive(
     BorshDeserialize,
     BorshSerialize,
@@ -382,7 +391,7 @@ impl fmt::Debug for PendingTx {
 #[borsh(crate = "near_sdk::borsh")]
 pub struct Checkpoint {
     pub chain: Chain,
-    pub block_height: u64,
+    pub height: u64,
     pub pending_requests: Vec<PendingTx>,
 }
 
@@ -390,9 +399,68 @@ impl Checkpoint {
     pub fn empty(chain: Chain) -> Self {
         Self {
             chain,
-            block_height: 0,
+            height: 0,
             pending_requests: Vec::new(),
         }
+    }
+}
+
+#[derive(
+    BorshDeserialize,
+    BorshSerialize,
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct ConsensusCheckpoint {
+    pub chain: Chain,
+    pub height: u64,
+    #[serde(with = "serde_bytes")]
+    pub digest: [u8; 32],
+}
+
+impl ConsensusCheckpoint {
+    pub fn new(chain: Chain, height: u64, digest: [u8; 32]) -> Self {
+        Self {
+            chain,
+            height,
+            digest,
+        }
+    }
+
+    pub fn sign_payload_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(1 + std::mem::size_of::<u64>() + 32);
+        bytes.extend_from_slice(&self.chain.to_bytes());
+        bytes.extend_from_slice(&self.height.to_le_bytes());
+        bytes.extend_from_slice(&self.digest);
+        bytes
+    }
+
+    pub fn sign_payload_hash(&self) -> [u8; 32] {
+        use sha3::digest::FixedOutput;
+
+        <Secp256k1 as k256::ecdsa::hazmat::DigestPrimitive>::Digest::new_with_prefix(
+            self.sign_payload_bytes(),
+        )
+        .finalize_fixed()
+        .into()
+    }
+
+    pub fn sign_payload_scalar(&self) -> Scalar {
+        use k256::elliptic_curve::ops::Reduce;
+        let bytes: k256::elliptic_curve::FieldBytes<Secp256k1> = self.sign_payload_hash().into();
+        <Scalar as Reduce<<Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(&bytes)
+    }
+
+    pub fn sign_path(&self) -> String {
+        format!("checkpoint/{}/{}", self.chain.as_str(), self.height)
     }
 }
 

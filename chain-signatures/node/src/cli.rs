@@ -348,6 +348,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 network,
             });
             let (config_tx, config_rx) = watch::channel(config);
+            let (checkpoints_tx, checkpoints_rx) = watch::channel(std::collections::HashMap::new());
 
             let node = Node::new();
             let node_watcher = node.watch();
@@ -382,7 +383,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tracing::info!("protocol initialized");
             tokio::spawn(sync.run());
-            tokio::spawn(rpc.run(contract_state_tx, config_tx.clone()));
+            tokio::spawn(rpc.run(contract_state_tx, config_tx.clone(), checkpoints_tx));
 
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics().await;
@@ -419,6 +420,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                         contract_watcher.clone(),
                         mesh_state.clone(),
                         client.clone(),
+                        checkpoints_rx.clone(),
                     ));
                 }
                 Err(err) => {
@@ -435,6 +437,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     contract_watcher.clone(),
                     mesh_state.clone(),
                     client.clone(),
+                    checkpoints_rx.clone(),
                 ));
             }
             tokio::spawn(indexer_hydration::run(
@@ -455,6 +458,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     contract_watcher.clone(),
                     mesh_state.clone(),
                     client.clone(),
+                    checkpoints_rx.clone(),
                 ));
             }
             tracing::info!("protocol http server spawned");

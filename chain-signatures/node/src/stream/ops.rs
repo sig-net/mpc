@@ -20,6 +20,7 @@ use alloy::primitives::keccak256;
 use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
 use mpc_primitives::{SignId, Signature};
+use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -407,6 +408,68 @@ pub(crate) async fn resume_pending_publish_requests(
     }
 }
 
+pub(crate) async fn fetch_checkpoint_by_digest_loop(
+    mesh_state: &watch::Receiver<MeshState>,
+    node_client: &NodeClient,
+    chain: Chain,
+    digest: [u8; 32],
+    mut target_digest_rx: watch::Receiver<Option<[u8; 32]>>,
+) -> Option<mpc_primitives::Checkpoint> {
+    use rand::seq::SliceRandom;
+    use rand::thread_rng;
+
+    loop {
+        // Check if the desired digest has changed or cleared
+        let current_target = *target_digest_rx.borrow();
+        if current_target != Some(digest) {
+            tracing::info!(?chain, "Target digest changed, aborting fetch loop");
+            return None;
+        }
+
+        // Get participants
+        let participants_info = mesh_state.borrow().active().participants.clone();
+        let mut peers: Vec<_> = participants_info.into_iter().collect();
+        peers.shuffle(&mut thread_rng());
+
+        for (_id, info) in peers {
+            // Check again inside loop
+            if *target_digest_rx.borrow() != Some(digest) {
+                return None;
+            }
+
+            tracing::debug!(?chain, url = %info.url, "Querying peer for checkpoint by digest");
+            match node_client
+                .fetch_checkpoint_by_digest(&info.url, chain, digest)
+                .await
+            {
+                Ok(Some(checkpoint)) => {
+                    tracing::info!(
+                        ?chain,
+                        "Successfully fetched checkpoint by digest from peer"
+                    );
+                    return Some(checkpoint);
+                }
+                Ok(None) => {
+                    tracing::debug!(?chain, "Peer does not have the checkpoint");
+                }
+                Err(err) => {
+                    tracing::debug!(?chain, ?err, "Failed to query peer for checkpoint");
+                }
+            }
+        }
+
+        // Wait before retrying
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+            _ = target_digest_rx.changed() => {
+                if *target_digest_rx.borrow() != Some(digest) {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
 pub(crate) async fn process_respond_event(
     respond_event: SignatureRespondedEvent,
     sign_tx: mpsc::Sender<Sign>,
@@ -439,6 +502,11 @@ pub(crate) async fn process_respond_event(
         SignKind::SignBidirectional(event) => event,
         SignKind::RespondBidirectional(_) => {
             anyhow::bail!("unexpected sign type: RespondBidirectional should not be generated from a sign event");
+        }
+        SignKind::Checkpoint(_) => {
+            anyhow::bail!(
+                "unexpected sign type: Checkpoint should not be generated from a sign event"
+            );
         }
     };
 

@@ -5,8 +5,8 @@ pub mod state;
 pub mod update;
 
 use errors::{
-    ConversionError, InitError, InvalidParameters, InvalidState, JoinError, PublicKeyError,
-    RespondError, SignError, VoteError,
+    CheckpointError, ConversionError, InitError, InvalidParameters, InvalidState, JoinError,
+    PublicKeyError, RespondError, SignError, VoteError,
 };
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::Scalar;
@@ -14,7 +14,7 @@ use mpc_crypto::{
     derive_epsilon_near, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
     ScalarExt as _,
 };
-use mpc_primitives::{SignId, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{Chain, ConsensusCheckpoint, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
@@ -24,8 +24,8 @@ use near_sdk::{
     PromiseError, PublicKey,
 };
 use primitives::{
-    CandidateInfo, Candidates, InternalSignRequest, Participants, PendingRequest, PkVotes,
-    SignPoll, SignRequest, StorageKey, Votes, YieldIndex,
+    CandidateInfo, Candidates, InternalSignRequest, Participants, PendingRequest, PkVotes, Read,
+    SignPoll, SignRequest, SignedCheckpoint, StorageKey, View, Votes, YieldIndex,
 };
 use std::collections::{BTreeMap, HashSet};
 
@@ -72,6 +72,7 @@ pub struct MpcContract {
     pending_requests: IterableMap<SignId, PendingRequest>,
     proposed_updates: ProposedUpdates,
     config: Config,
+    latest_checkpoints: IterableMap<Chain, SignedCheckpoint>,
 }
 
 impl MpcContract {
@@ -112,6 +113,7 @@ impl MpcContract {
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
             config: config.unwrap_or_default(),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpoints),
         }
     }
 }
@@ -702,6 +704,7 @@ impl VersionedMpcContract {
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
             config: config.unwrap_or_default(),
+            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpoints),
         }))
     }
 
@@ -731,6 +734,76 @@ impl VersionedMpcContract {
         match self {
             Self::V0(mpc_contract) => &mpc_contract.config,
         }
+    }
+
+    pub fn latest_checkpoint(&self, chain: Chain) -> Option<SignedCheckpoint> {
+        self.checkpoints().get(&chain).cloned()
+    }
+
+    pub fn read(&self, reads: Vec<Read>) -> Vec<View> {
+        let mut views = Vec::with_capacity(reads.len());
+
+        for read in reads {
+            let view = match read {
+                Read::State => View::State(self.state().clone()),
+                Read::Config => View::Config(self.config().clone()),
+                Read::Checkpoints => View::Checkpoints(
+                    self.checkpoints()
+                        .iter()
+                        .map(|(chain, checkpoint)| (*chain, checkpoint.clone()))
+                        .collect(),
+                ),
+            };
+            views.push(view);
+        }
+
+        views
+    }
+
+    #[handle_result]
+    pub fn respond_checkpoint(
+        &mut self,
+        checkpoint: ConsensusCheckpoint,
+        signature: Signature,
+    ) -> Result<(), Error> {
+        let protocol_state = self.state();
+        if !matches!(protocol_state, ProtocolContractState::Running(_)) {
+            return Err(InvalidState::ProtocolStateNotRunning.into());
+        }
+
+        let expected_public_key = near_public_key_to_affine_point(self.public_key()?);
+        if check_ec_signature(
+            &expected_public_key,
+            &signature.big_r,
+            &signature.s,
+            checkpoint.sign_payload_scalar(),
+            signature.recovery_id,
+        )
+        .is_err()
+        {
+            return Err(CheckpointError::InvalidSignature.into());
+        }
+
+        if let Some(existing) = self.checkpoints().get(&checkpoint.chain) {
+            if existing.checkpoint.height > checkpoint.height {
+                return Ok(());
+            }
+
+            if existing.checkpoint.height == checkpoint.height
+                && existing.checkpoint.digest != checkpoint.digest
+            {
+                return Err(CheckpointError::ConflictingCheckpoint.into());
+            }
+        }
+
+        self.mutable_checkpoints().insert(
+            checkpoint.chain,
+            SignedCheckpoint {
+                checkpoint,
+                signature,
+            },
+        );
+        Ok(())
     }
 
     pub fn system_load(&self) -> u32 {
@@ -949,5 +1022,17 @@ impl VersionedMpcContract {
             },
         }
         Ok(voter)
+    }
+
+    fn checkpoints(&self) -> &IterableMap<Chain, SignedCheckpoint> {
+        match self {
+            Self::V0(mpc_contract) => &mpc_contract.latest_checkpoints,
+        }
+    }
+
+    fn mutable_checkpoints(&mut self) -> &mut IterableMap<Chain, SignedCheckpoint> {
+        match self {
+            Self::V0(mpc_contract) => &mut mpc_contract.latest_checkpoints,
+        }
     }
 }

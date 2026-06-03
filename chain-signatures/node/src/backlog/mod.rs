@@ -124,7 +124,7 @@ impl PendingRequests {
 
         Checkpoint {
             chain,
-            block_height: self.processed_block_height.unwrap_or(0),
+            height: self.processed_block_height.unwrap_or(0),
             pending_requests: encoded,
         }
     }
@@ -148,7 +148,7 @@ impl PendingRequests {
         }
         Ok(Self {
             requests,
-            processed_block_height: Some(checkpoint.block_height),
+            processed_block_height: Some(checkpoint.height),
         })
     }
 }
@@ -614,9 +614,28 @@ impl Backlog {
         historical.get(&chain).and_then(|checkpoints| {
             checkpoints
                 .iter()
-                .max_by_key(|hcp| hcp.checkpoint.block_height)
+                .max_by_key(|hcp| hcp.checkpoint.height)
                 .map(|hcp| hcp.checkpoint.clone())
         })
+    }
+
+    /// Find a historical checkpoint by digest
+    pub async fn find_checkpoint_by_digest(
+        &self,
+        chain: Chain,
+        digest: [u8; 32],
+    ) -> Option<Checkpoint> {
+        let historical = self.historical_checkpoints.read().await;
+        if let Some(checkpoints) = historical.get(&chain) {
+            for hcp in checkpoints {
+                if let Ok(d) = checkpoint_digest(&hcp.checkpoint) {
+                    if d == digest {
+                        return Some(hcp.checkpoint.clone());
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Find a historical checkpoint by hash
@@ -640,7 +659,7 @@ impl Backlog {
         let chain = checkpoint.chain;
         tracing::info!(
             ?chain,
-            block_height = checkpoint.block_height,
+            height = checkpoint.height,
             num_pending = checkpoint.pending_requests.len(),
             "recovering from checkpoint"
         );
@@ -651,7 +670,7 @@ impl Backlog {
             .or_insert_with(PendingRequests::new);
 
         let previous_height = pending.processed_block_height().unwrap_or(0);
-        let checkpoint_height = checkpoint.block_height;
+        let checkpoint_height = checkpoint.height;
 
         // Execution watchers are ephemeral, we need to get all the execution watchers here
         let execution_to_watch = if checkpoint_height > previous_height {
@@ -672,7 +691,7 @@ impl Backlog {
         } else {
             tracing::warn!(
                 chain = ?checkpoint.chain,
-                checkpoint_block = checkpoint.block_height,
+                checkpoint_block = checkpoint.height,
                 previous_height,
                 "checkpoint block is not newer than current block, skipping recovery"
             );
@@ -706,6 +725,48 @@ impl Backlog {
         Ok(())
     }
 
+    pub async fn regress_to_checkpoint(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
+        let chain = checkpoint.chain;
+        tracing::info!(
+            ?chain,
+            height = checkpoint.height,
+            num_pending = checkpoint.pending_requests.len(),
+            "regressing to checkpoint"
+        );
+
+        let mut requests = self.requests.write().await;
+        let pending = requests
+            .entry(checkpoint.chain)
+            .or_insert_with(PendingRequests::new);
+
+        let previous_height = pending.processed_block_height().unwrap_or(0);
+        let checkpoint_height = checkpoint.height;
+
+        let cleared = pending.len();
+        *pending = PendingRequests::from_checkpoint(checkpoint.clone())?;
+        let execution_to_watch = pending.pending_executions();
+
+        tracing::info!(
+            ?chain,
+            old_block = previous_height,
+            new_block = checkpoint_height,
+            cleared_requests = cleared,
+            restored_requests = pending.len(),
+            "successfully regressed to checkpoint"
+        );
+        drop(requests);
+
+        self.remember_checkpoint(&checkpoint).await;
+
+        for (sign_id, tx) in execution_to_watch {
+            if let Some(tx) = tx.execution_tx().cloned() {
+                self.watch_execution(tx.target_chain, sign_id, tx).await;
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn recover(
         &self,
         mesh_state: &MeshState,
@@ -722,7 +783,7 @@ impl Backlog {
                 Ok(Some(checkpoint)) => {
                     tracing::info!(
                         ?chain,
-                        block_height = checkpoint.block_height,
+                        height = checkpoint.height,
                         "loaded local checkpoint"
                     );
                     local_checkpoints.insert(chain, checkpoint);
@@ -759,7 +820,7 @@ impl Backlog {
             };
             tracing::info!(
                 ?chain,
-                block_height = checkpoint.block_height,
+                height = checkpoint.height,
                 "found selected checkpoint, attempting recovery"
             );
             if let Err(err) = self.recover_by_checkpoint(checkpoint).await {
@@ -883,6 +944,7 @@ impl BacklogEntry {
                 .map(|tx| tx.target_chain)
                 .or_else(|| event.target_chain().ok()),
             SignKind::RespondBidirectional(_) => None,
+            SignKind::Checkpoint(_) => None,
         }
     }
 
@@ -909,6 +971,7 @@ impl BacklogEntry {
                 "BidirectionalRespondPending"
             }
             (SignKind::RespondBidirectional(_), _) => "RespondBidirectional",
+            (SignKind::Checkpoint(_), _) => "Checkpoint",
         }
     }
 }
@@ -922,7 +985,7 @@ fn select_recovery_checkpoint(
         (Some(local), None) => local,
         (None, Some(remote)) => remote,
         (Some(local), Some(remote)) => {
-            if local.block_height >= remote.block_height {
+            if local.height >= remote.height {
                 local
             } else {
                 remote
@@ -1360,7 +1423,7 @@ mod tests {
         .await;
 
         let checkpoint = backlog.checkpoint(Chain::Ethereum).await;
-        assert_eq!(checkpoint.block_height, 100);
+        assert_eq!(checkpoint.height, 100);
         assert_eq!(checkpoint.chain, Chain::Ethereum);
         assert_eq!(checkpoint.pending_requests.len(), 2);
         assert_eq!(
@@ -1426,7 +1489,7 @@ mod tests {
 
         // Different block height should not be equal
         let mut checkpoint3 = pending2.checkpoint(Chain::Ethereum);
-        checkpoint3.block_height = 101;
+        checkpoint3.height = 101;
         assert_ne!(checkpoint1, checkpoint3);
     }
 
@@ -1882,7 +1945,7 @@ mod tests {
         let checkpoint = backlog.set_processed_block(Chain::Ethereum, interval).await;
         assert!(checkpoint.is_some());
         let checkpoint = checkpoint.unwrap();
-        assert_eq!(checkpoint.block_height, interval);
+        assert_eq!(checkpoint.height, interval);
         assert_eq!(checkpoint.chain, Chain::Ethereum);
         assert_eq!(checkpoint.pending_requests.len(), 1);
 
@@ -1896,7 +1959,7 @@ mod tests {
             .await;
         assert!(checkpoint.is_some());
         let checkpoint = checkpoint.unwrap();
-        assert_eq!(checkpoint.block_height, 2 * interval);
+        assert_eq!(checkpoint.height, 2 * interval);
     }
 
     #[tokio::test]
@@ -1925,7 +1988,7 @@ mod tests {
         let checkpoint = backlog.set_processed_block(Chain::Solana, interval).await;
         assert!(checkpoint.is_some());
         let checkpoint = checkpoint.unwrap();
-        assert_eq!(checkpoint.block_height, interval);
+        assert_eq!(checkpoint.height, interval);
         assert_eq!(checkpoint.chain, Chain::Solana);
     }
 
