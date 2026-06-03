@@ -461,6 +461,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher.clone(),
                 mesh_state.clone(),
                 client.clone(),
+                checkpoints_rx[&Chain::Hydration].clone(),
             ));
             if let Some(canton_stream) = indexer_canton::CantonStream::new(canton, backlog.clone())
             {

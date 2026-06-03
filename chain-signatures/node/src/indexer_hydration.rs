@@ -372,6 +372,7 @@ pub async fn run(
     mut contract_watcher: ContractStateWatcher,
     mut mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
+    mut checkpoints_rx: watch::Receiver<crate::rpc::CheckpointDigest>,
 ) {
     let Some(hydration) = hydration else {
         tracing::warn!("hydration indexer is disabled");
@@ -409,6 +410,7 @@ pub async fn run(
         &mut mesh_state,
         &node_client,
         Chain::Hydration,
+        &mut checkpoints_rx,
     )
     .await;
 

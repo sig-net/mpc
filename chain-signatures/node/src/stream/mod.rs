@@ -289,46 +289,21 @@ async fn check_and_perform_regression(
     state_tx: &watch::Sender<ChainStreaming>,
     caught_up: &mut bool,
 ) {
-    let checkpoint_digest = checkpoints_rx.borrow_and_update().clone();
-    // Ignore the default zero-digest (no consensus checkpoint observed yet).
-    if checkpoint_digest.digest == [0u8; 32] {
-        return;
-    }
-
-    let current_checkpoint = backlog.checkpoint(chain).await;
-    let matches_digest = match crate::backlog::checkpoint_digest(&current_checkpoint) {
-        Ok(d) => d == checkpoint_digest.digest,
-        Err(_) => false,
-    };
-
-    if matches_digest {
-        return;
-    }
-
-    tracing::warn!(?chain, ?checkpoint_digest.digest, "Consensus checkpoint mismatch/divergence detected! Triggering regression.");
-    let fetched_checkpoint = crate::stream::ops::fetch_checkpoint_by_digest_loop(
+    if let Some(height) = crate::stream::ops::align_backlog_with_consensus(
+        chain,
+        backlog,
+        &mut checkpoints_rx,
         mesh_state,
         node_client,
-        chain,
-        checkpoint_digest.digest,
-        &mut checkpoints_rx,
     )
-    .await;
-
-    let Some(cp) = fetched_checkpoint else {
-        return;
-    };
-
-    if let Err(err) = backlog.regress_to_checkpoint(cp).await {
-        tracing::error!(?err, %chain, "Failed to regress backlog to checkpoint");
-        return;
+    .await
+    {
+        tracing::info!(%chain, height, "Backlog regressed to consensus checkpoint. Restarting indexer at catchup.");
+        *caught_up = false;
+        let _ = state_tx.send(ChainStreaming::Catchup {
+            anchor_height: height,
+        });
     }
-
-    tracing::info!(%chain, height = checkpoint_digest.height, "Backlog regressed to consensus checkpoint. Restarting indexer at catchup.");
-    *caught_up = false;
-    let _ = state_tx.send(ChainStreaming::Catchup {
-        anchor_height: checkpoint_digest.height,
-    });
 }
 
 /// Shared indexer loop: recovers backlog then processes events from the stream
@@ -351,6 +326,7 @@ pub async fn run_stream<S: ChainStream>(
         &mut mesh_state,
         &node_client,
         chain,
+        &mut checkpoints_rx,
     )
     .await;
 

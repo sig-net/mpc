@@ -337,12 +337,63 @@ pub(crate) async fn process_sign_request(
     Ok(())
 }
 
+pub(crate) async fn align_backlog_with_consensus(
+    chain: Chain,
+    backlog: &Backlog,
+    checkpoints_rx: &mut watch::Receiver<crate::rpc::CheckpointDigest>,
+    mesh_state: &watch::Receiver<MeshState>,
+    node_client: &NodeClient,
+) -> Option<u64> {
+    let checkpoint_digest = checkpoints_rx.borrow_and_update().clone();
+    // Ignore the default zero-digest (no consensus checkpoint observed yet).
+    if checkpoint_digest.digest == [0u8; 32] {
+        return None;
+    }
+
+    let current_checkpoint = backlog.checkpoint(chain).await;
+    let matches_digest = match crate::backlog::checkpoint_digest(&current_checkpoint) {
+        Ok(digest) => digest == checkpoint_digest.digest,
+        Err(_) => false,
+    };
+
+    if matches_digest {
+        return None;
+    }
+
+    tracing::warn!(
+        ?chain,
+        ?checkpoint_digest.digest,
+        "Consensus checkpoint mismatch/divergence detected! Triggering regression."
+    );
+    let fetched_checkpoint = fetch_checkpoint_by_digest_loop(
+        mesh_state,
+        node_client,
+        chain,
+        checkpoint_digest.digest,
+        checkpoints_rx,
+    )
+    .await;
+
+    let Some(cp) = fetched_checkpoint else {
+        return None;
+    };
+
+    let height = cp.height;
+    if let Err(err) = backlog.regress_to_checkpoint(cp).await {
+        tracing::error!(?err, %chain, "Failed to regress backlog to checkpoint");
+        return None;
+    }
+
+    Some(height)
+}
+
 pub(crate) async fn recover_backlog(
     backlog: &Backlog,
     contract_watcher: &mut ContractStateWatcher,
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
     source_chain: Chain,
+    checkpoints_rx: &mut watch::Receiver<crate::rpc::CheckpointDigest>,
 ) {
     // Recover backlog before doing anything.
     // Wait for threshold to be available
@@ -352,10 +403,35 @@ pub(crate) async fn recover_backlog(
     }
     wait_threshold_active(mesh_state, threshold).await;
 
-    let mesh_state = mesh_state.borrow().clone();
-    backlog
-        .recover(&mesh_state, node_client, threshold, &[source_chain])
-        .await;
+    // Load local checkpoint from storage first
+    match backlog.storage.load_latest(source_chain).await {
+        Ok(Some(checkpoint)) => {
+            tracing::info!(
+                ?source_chain,
+                height = checkpoint.height,
+                "loaded local checkpoint"
+            );
+            if let Err(err) = backlog.recover_by_checkpoint(checkpoint).await {
+                tracing::warn!(?source_chain, %err, "failed to recover from local checkpoint");
+            }
+        }
+        Ok(None) => {
+            tracing::info!(?source_chain, "no local checkpoint found");
+        }
+        Err(err) => {
+            tracing::warn!(?source_chain, %err, "failed to load local checkpoint");
+        }
+    }
+
+    // Align with consensus
+    let _ = align_backlog_with_consensus(
+        source_chain,
+        backlog,
+        checkpoints_rx,
+        mesh_state,
+        node_client,
+    )
+    .await;
 }
 
 pub(crate) async fn requeue_pending_sign_requests(
@@ -910,12 +986,17 @@ mod tests {
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let node_client = NodeClient::new(&Default::default());
 
+        let (_cp_tx, mut cp_rx) = watch::channel(crate::rpc::CheckpointDigest {
+            height: 0,
+            digest: [0u8; 32],
+        });
         recover_backlog(
             &backlog,
             &mut contract_watcher,
             &mut mesh_rx,
             &node_client,
             Chain::Solana,
+            &mut cp_rx,
         )
         .await;
 
@@ -1224,12 +1305,17 @@ mod tests {
         let node_client = NodeClient::new(&Default::default());
         let recovered = Backlog::persisted(storage.clone());
 
+        let (_cp_tx, mut cp_rx) = watch::channel(crate::rpc::CheckpointDigest {
+            height: 0,
+            digest: [0u8; 32],
+        });
         recover_backlog(
             &recovered,
             &mut contract_watcher,
             &mut mesh_rx,
             &node_client,
             tx.source_chain,
+            &mut cp_rx,
         )
         .await;
 

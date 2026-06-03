@@ -1,8 +1,3 @@
-pub mod selection;
-
-use self::selection::select_checkpoints;
-use crate::mesh::MeshState;
-use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, SignKind};
 use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PublishState, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
@@ -222,7 +217,7 @@ struct HistoricalCheckpoint {
 /// publish queues.
 #[derive(Debug, Clone)]
 pub struct Backlog {
-    storage: CheckpointStorage,
+    pub(crate) storage: CheckpointStorage,
     requests: Arc<RwLock<HashMap<Chain, PendingRequests>>>,
     execution_watchers: Arc<RwLock<HashMap<Chain, ExecutionWatchers>>>,
     /// Historical checkpoints kept for 30 minutes, indexed by (chain, height).
@@ -751,73 +746,6 @@ impl Backlog {
 
         Ok(())
     }
-
-    pub async fn recover(
-        &self,
-        mesh_state: &MeshState,
-        node_client: &NodeClient,
-        threshold: usize,
-        chains: &[Chain],
-    ) {
-        tracing::info!("attempting to recover from latest checkpoints via node selection");
-
-        // Load local checkpoints first
-        let mut local_checkpoints = HashMap::new();
-        for &chain in chains {
-            match self.storage.load_latest(chain).await {
-                Ok(Some(checkpoint)) => {
-                    tracing::info!(
-                        ?chain,
-                        height = checkpoint.height,
-                        "loaded local checkpoint"
-                    );
-                    local_checkpoints.insert(chain, checkpoint);
-                }
-                Ok(None) => {
-                    tracing::info!(?chain, "no local checkpoint found");
-                }
-                Err(err) => {
-                    tracing::warn!(?chain, %err, "failed to load local checkpoint");
-                }
-            }
-        }
-
-        // p2p node selection to find checkpoints.
-        // Fetches all checkpoints from active participants and creates a selected checkpoint:
-        // - sorts all checkpoints by block height
-        // - selects threshold lowest block height checkpoint
-        let mut remote_checkpoints =
-            select_checkpoints(mesh_state, node_client, threshold, chains).await;
-
-        if local_checkpoints.is_empty() && remote_checkpoints.is_empty() {
-            tracing::info!("no selected checkpoints found, starting with empty state");
-            return;
-        }
-
-        for &chain in chains {
-            let local_checkpoint = local_checkpoints.remove(&chain);
-            let remote_checkpoint = remote_checkpoints.remove(&chain);
-
-            let Some(checkpoint) =
-                select_recovery_checkpoint(chain, local_checkpoint, remote_checkpoint)
-            else {
-                continue;
-            };
-            tracing::info!(
-                ?chain,
-                height = checkpoint.height,
-                "found selected checkpoint, attempting recovery"
-            );
-            if let Err(err) = self.recover_by_checkpoint(checkpoint).await {
-                tracing::warn!(
-                    ?chain,
-                    %err,
-                    "failed to recover from selected checkpoint, continuing with empty state"
-                );
-                continue;
-            }
-        }
-    }
 }
 
 /// Errors that can occur when working with Backlog
@@ -959,30 +887,6 @@ impl BacklogEntry {
             (SignKind::Checkpoint(_), _) => "Checkpoint",
         }
     }
-}
-
-fn select_recovery_checkpoint(
-    chain: Chain,
-    local_checkpoint: Option<Checkpoint>,
-    remote_checkpoint: Option<Checkpoint>,
-) -> Option<Checkpoint> {
-    let checkpoint = match (local_checkpoint, remote_checkpoint) {
-        (Some(local), None) => local,
-        (None, Some(remote)) => remote,
-        (Some(local), Some(remote)) => {
-            if local.height >= remote.height {
-                local
-            } else {
-                remote
-            }
-        }
-        (None, None) => {
-            tracing::warn!(?chain, "no checkpoint available for recovery");
-            return None;
-        }
-    };
-
-    Some(checkpoint)
 }
 
 #[cfg(test)]
