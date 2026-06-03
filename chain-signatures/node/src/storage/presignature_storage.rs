@@ -4,7 +4,9 @@ use redis::{FromRedisValue, RedisError, RedisWrite, ToRedisArgs};
 
 use cait_sith::protocol::Participant;
 
-use super::protocol_storage::{ArtifactSlot, ArtifactTaken, ArtifactTakenDropper, ProtocolStorage};
+use super::protocol_storage::{
+    ArtifactReservation, ArtifactSlot, ArtifactTaken, ArtifactTakenDropper, ProtocolStorage,
+};
 use crate::protocol::presignature::{Presignature, PresignatureId};
 use crate::storage::protocol_storage::ProtocolArtifact;
 
@@ -12,6 +14,7 @@ pub type PresignatureStorage = ProtocolStorage<Presignature>;
 pub type PresignatureSlot = ArtifactSlot<Presignature>;
 pub type PresignatureTaken = ArtifactTaken<Presignature>;
 pub type PresignatureTakenDropper = ArtifactTakenDropper<Presignature>;
+pub type PresignatureReservation = ArtifactReservation<Presignature>;
 
 impl Presignature {
     pub fn storage(pool: &Pool, account_id: &AccountId) -> PresignatureStorage {

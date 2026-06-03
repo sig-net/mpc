@@ -1,6 +1,6 @@
 use std::num::NonZeroUsize;
 
-use tokio::sync::mpsc::{self, error::TryRecvError};
+use tokio::sync::mpsc;
 
 use super::types::{MessageFilterId, Protocols};
 
@@ -13,13 +13,18 @@ pub const MAX_FILTER_SIZE: NonZeroUsize = NonZeroUsize::new(64 * 1024).unwrap();
 
 #[derive(Debug)]
 pub(crate) struct MessageFilter {
+    filter_tx: mpsc::Sender<(Protocols, u64)>,
     filter_rx: mpsc::Receiver<(Protocols, u64)>,
     filter: lru::LruCache<(Protocols, u64), ()>,
 }
 
 impl MessageFilter {
-    pub fn new(filter_rx: mpsc::Receiver<(Protocols, u64)>) -> Self {
+    pub fn new(
+        filter_tx: mpsc::Sender<(Protocols, u64)>,
+        filter_rx: mpsc::Receiver<(Protocols, u64)>,
+    ) -> Self {
         Self {
+            filter_tx,
             filter_rx,
             filter: lru::LruCache::new(MAX_FILTER_SIZE),
         }
@@ -37,15 +42,18 @@ impl MessageFilter {
         };
 
         self.filter.put((msg_type, id), ());
+        crate::metrics::messaging::set_channel_capacity("filter", self.filter_tx.capacity());
     }
 
     pub fn try_update(&mut self) {
-        loop {
-            let (msg_type, id) = match self.filter_rx.try_recv() {
-                Ok(filter) => filter,
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return,
-            };
+        let mut updated = false;
+        while let Ok((msg_type, id)) = self.filter_rx.try_recv() {
             self.filter.put((msg_type, id), ());
+            updated = true;
+        }
+
+        if updated {
+            crate::metrics::messaging::set_channel_capacity("filter", self.filter_tx.capacity());
         }
     }
 

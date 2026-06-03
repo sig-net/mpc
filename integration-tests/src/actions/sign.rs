@@ -20,6 +20,7 @@ use generic_array::GenericArray;
 use k256::Secp256k1;
 use mpc_contract::primitives::SignRequest;
 use mpc_crypto::ScalarExt as _;
+use mpc_node::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
@@ -42,65 +43,6 @@ use crate::cluster::Cluster;
 use crate::containers;
 
 use signet_program::{RespondBidirectionalEvent, SignatureRespondedEvent};
-
-// ChainSignatures contract ABI
-alloy::sol! {
-    #[sol(rpc)]
-    interface ChainSignatures {
-        struct SignRequest {
-            bytes32 payload;
-            string path;
-            uint32 keyVersion;
-            string algo;
-            string dest;
-            string params;
-        }
-
-        struct AffinePoint {
-            uint256 x;
-            uint256 y;
-        }
-
-        struct Signature {
-            AffinePoint bigR;
-            uint256 s;
-            uint8 recoveryId;
-        }
-
-        function sign(SignRequest memory _request) external payable;
-        function getSignatureDeposit() external view returns (uint256);
-
-        event SignatureRequested(
-            address indexed sender,
-            bytes32 payload,
-            uint32 keyVersion,
-            uint256 deposit,
-            uint256 chainId,
-            string path,
-            string algo,
-            string dest,
-            string params
-        );
-
-        event SignatureResponded(
-            bytes32 indexed requestId,
-            address indexed responder,
-            Signature signature
-        );
-    }
-
-    // Event encoding for request_id calculation
-    event SignatureRequestedEncoding(
-        address sender,
-        bytes payload,
-        string path,
-        uint32 keyVersion,
-        uint256 chainId,
-        string algo,
-        string dest,
-        string params
-    );
-}
 
 pub const SIGN_GAS: Gas = Gas::from_tgas(50);
 pub const SIGN_DEPOSIT: NearToken = NearToken::from_yoctonear(1);
@@ -799,16 +741,43 @@ pub async fn wait_for_respond_bidirectional(
 
     tracing::info!(
         request_id = %hex::encode(expected_request_id),
+        timeout_secs = timeout.as_secs(),
         "subscribed to RespondBidirectionalEvent, waiting for MPC response...",
     );
-    let result = tokio::time::timeout(timeout, rx).await;
+
+    // Wrap the oneshot receiver with periodic progress logging so CI
+    // output shows the test is still alive and how long it has been waiting.
+    let request_id_hex = hex::encode(expected_request_id);
+    let result = tokio::time::timeout(timeout, async {
+        let mut elapsed_secs = 0u64;
+        let mut rx = rx;
+        loop {
+            tokio::select! {
+                res = &mut rx => { return res; }
+                _ = tokio::time::sleep(Duration::from_secs(15)) => {
+                    elapsed_secs += 15;
+                    tracing::info!(
+                        request_id = %request_id_hex,
+                        elapsed_secs,
+                        "still waiting for RespondBidirectionalEvent..."
+                    );
+                }
+            }
+        }
+    })
+    .await;
     event_unsub.unsubscribe().await;
 
     match result {
         Ok(Ok(Ok(outcome))) => Ok(outcome),
         Ok(Ok(Err(e))) => anyhow::bail!("failed to parse sol respond bidirectional signature: {e}"),
-        Ok(Err(_)) => anyhow::bail!("sol respond bidirectional event channel closed unexpectedly"),
-        Err(_) => anyhow::bail!("timeout waiting for respond bidirectional on sol"),
+        Ok(Err(_)) => anyhow::bail!(
+            "sol respond bidirectional event channel closed unexpectedly \
+             (request_id={request_id_hex})",
+        ),
+        Err(_) => anyhow::bail!(
+            "timeout ({timeout:?}) waiting for respond bidirectional on sol (request_id={request_id_hex})",
+        ),
     }
 }
 

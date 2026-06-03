@@ -1,12 +1,12 @@
-use crate::backlog::Backlog;
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
-use crate::metrics::requests::{record_request_latency, SignRequestStep};
+use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, SignKind};
 use crate::util::AffinePointExt as _;
+use std::collections::BTreeSet;
 
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
@@ -36,6 +36,11 @@ use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 use near_fetch::result::ExecutionFinalResult;
 use serde_json::json;
+use sp_core::{sr25519, Pair as _};
+use sp_runtime::{
+    traits::{IdentifyAccount, Verify},
+    MultiSignature as SpMultiSignature,
+};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -43,15 +48,21 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
+use crate::indexer_canton::ledger_api::{
+    ActiveContractEntry, CumulativeFilter, EventFormat, GetActiveContractsRequest,
+    IdentifierFilter, JsCommands, LedgerEndResponse, PartyFilter,
+    SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse, TemplateFilterValue,
+};
+use crate::indexer_canton::{CantonAuthProvider, CantonConfig};
 use crate::indexer_hydration::HydrationConfig;
 use parity_scale_codec::{Decode, Encode};
 use subxt::config::substrate::{
-    BlakeTwo256, SubstrateConfig, SubstrateExtrinsicParams, SubstrateHeader,
+    AccountId32, BlakeTwo256, MultiSignature, SubstrateConfig, SubstrateExtrinsicParams,
+    SubstrateHeader,
 };
 use subxt::tx::Payload;
 use subxt::Config as SubxtConfig;
 use subxt::OnlineClient;
-use subxt_signer::{sr25519, SecretUri};
 
 /// The maximum amount of times to retry publishing a signature.
 const MAX_PUBLISH_RETRY: usize = 6;
@@ -65,7 +76,6 @@ const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
 const ETH_RESPOND_BATCH_SIZE: usize = 10;
 /// The maximum number of attempts to fetch eth tx and its receipt
 const ETH_TX_RECEIPT_MAX_ATTEMPTS: usize = 6;
-
 type EthContractFillProvider = FillProvider<
     JoinFill<
         JoinFill<
@@ -126,6 +136,16 @@ pub enum RpcAction {
     Publish(PublishAction),
 }
 
+#[derive(Debug, Clone)]
+pub struct GovernanceInfo {
+    pub me: Participant,
+    pub threshold: usize,
+    pub epoch: u64,
+    pub public_key: mpc_crypto::PublicKey,
+    pub participants: BTreeSet<Participant>,
+    pub is_running: bool,
+}
+
 #[derive(Clone)]
 pub struct RpcChannel {
     pub tx: mpsc::Sender<RpcAction>,
@@ -150,6 +170,31 @@ impl RpcChannel {
         let rpc = self.clone();
         tokio::spawn(async move {
             if let Err(err) = rpc.tx.send(RpcAction::Publish(action)).await {
+                tracing::error!(%err, "failed to send publish action");
+            }
+        });
+    }
+
+    pub fn publish_signature(
+        &self,
+        public_key: mpc_crypto::PublicKey,
+        indexed: IndexedSignRequest,
+        signature: Signature,
+        participants: Vec<Participant>,
+    ) {
+        let rpc = self.clone();
+        tokio::spawn(async move {
+            if let Err(err) = rpc
+                .tx
+                .send(RpcAction::Publish(PublishAction {
+                    public_key,
+                    indexed,
+                    signature,
+                    participants,
+                    timestamp: Instant::now(),
+                }))
+                .await
+            {
                 tracing::error!(%err, "failed to send publish action");
             }
         });
@@ -220,6 +265,19 @@ impl ContractStateWatcher {
 
     pub fn state(&self) -> Option<ProtocolState> {
         self.borrow_state().clone()
+    }
+
+    pub fn governance(&self) -> Option<GovernanceInfo> {
+        self.state()?.governance(&self.account_id)
+    }
+
+    pub async fn wait_governance(&mut self) -> GovernanceInfo {
+        loop {
+            if let Some(governance) = self.governance() {
+                return governance;
+            }
+            let _ = self.contract_state.changed().await;
+        }
     }
 
     pub async fn next_state(&mut self) -> Option<ProtocolState> {
@@ -353,8 +411,8 @@ pub struct RpcExecutor {
     eth: Option<EthClient>,
     solana: Option<SolanaClient>,
     hydration: Option<HydrationClient>,
+    canton: Option<CantonClient>,
     action_rx: mpsc::Receiver<RpcAction>,
-    backlog: Backlog,
 }
 
 impl RpcExecutor {
@@ -363,7 +421,7 @@ impl RpcExecutor {
         eth: &Option<EthConfig>,
         solana: &Option<SolConfig>,
         hydration: &Option<HydrationConfig>,
-        backlog: Backlog,
+        canton: &Option<CantonConfig>,
     ) -> (RpcChannel, Self) {
         let eth = eth.as_ref().map(EthClient::new);
         let solana = solana.as_ref().map(SolanaClient::new);
@@ -377,6 +435,16 @@ impl RpcExecutor {
             },
             None => None,
         };
+        let canton = match canton {
+            Some(c) => match CantonClient::new(c).await {
+                Ok(client) => Some(client),
+                Err(e) => {
+                    tracing::error!(%e, "failed to create canton client");
+                    None
+                }
+            },
+            None => None,
+        };
         let (tx, rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
         (
             RpcChannel { tx },
@@ -385,8 +453,8 @@ impl RpcExecutor {
                 eth,
                 solana,
                 hydration,
+                canton,
                 action_rx: rx,
-                backlog,
             },
         )
     }
@@ -429,12 +497,11 @@ impl RpcExecutor {
             let chain = action.indexed.chain;
             let client = self.client(&chain);
             let eth_rpc_tx = eth_rpc_tx.clone(); // clone for task use
-            let backlog = self.backlog.clone();
 
             tokio::spawn(async move {
                 match chain {
-                    Chain::NEAR | Chain::Solana | Chain::Hydration => {
-                        execute_publish(client, action, backlog).await;
+                    Chain::NEAR | Chain::Solana | Chain::Hydration | Chain::Canton => {
+                        execute_publish(client, action).await;
                     }
                     Chain::Ethereum => {
                         if let Err(err) = eth_rpc_tx.send(action).await {
@@ -475,6 +542,13 @@ impl RpcExecutor {
                     ChainClient::Hydration(hydration.clone())
                 } else {
                     ChainClient::Err("no hydration client available for node")
+                }
+            }
+            Chain::Canton => {
+                if let Some(canton) = &self.canton {
+                    ChainClient::Canton(canton.clone())
+                } else {
+                    ChainClient::Err("no canton client available for node")
                 }
             }
             Chain::Bitcoin => ChainClient::Err("no bitcoin client available for node"),
@@ -710,9 +784,37 @@ impl SubxtConfig for HydradxConfig {
 }
 
 #[derive(Clone)]
+struct HydrationSigner {
+    account_id: AccountId32,
+    signer: sr25519::Pair,
+}
+
+impl HydrationSigner {
+    fn from_uri(uri: &str) -> anyhow::Result<Self> {
+        let signer = sr25519::Pair::from_string(uri, None)?;
+        let account_id = <SpMultiSignature as Verify>::Signer::from(signer.public()).into_account();
+
+        Ok(Self {
+            account_id: AccountId32(account_id.into()),
+            signer,
+        })
+    }
+}
+
+impl subxt::tx::Signer<HydradxConfig> for HydrationSigner {
+    fn account_id(&self) -> <HydradxConfig as SubxtConfig>::AccountId {
+        self.account_id.clone()
+    }
+
+    fn sign(&self, signer_payload: &[u8]) -> <HydradxConfig as SubxtConfig>::Signature {
+        MultiSignature::Sr25519(self.signer.sign(signer_payload).0)
+    }
+}
+
+#[derive(Clone)]
 pub struct HydrationClient {
     api: OnlineClient<HydradxConfig>,
-    signer: sr25519::Keypair,
+    signer: HydrationSigner,
 }
 
 const PALLET_SIGNET: &str = "Signet";
@@ -823,8 +925,7 @@ impl Payload for HydrationRespondBidirectionalTx {
 impl HydrationClient {
     pub async fn new(config: &HydrationConfig) -> anyhow::Result<Self> {
         let api = OnlineClient::<HydradxConfig>::from_url(&config.rpc_ws_url).await?;
-        let uri = SecretUri::from_str(&config.signer_uri)?;
-        let signer = sr25519::Keypair::from_uri(&uri)?;
+        let signer = HydrationSigner::from_uri(&config.signer_uri)?;
         Ok(Self { api, signer })
     }
 
@@ -893,6 +994,178 @@ impl HydrationClient {
     }
 }
 
+#[derive(Clone)]
+pub struct CantonClient {
+    pub(crate) config: CantonConfig,
+    http_client: reqwest::Client,
+    auth_provider: CantonAuthProvider,
+}
+
+impl std::fmt::Debug for CantonClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CantonClient")
+            .field("config", &self.config)
+            .field("auth_provider", &"<hidden>")
+            .finish()
+    }
+}
+
+impl CantonClient {
+    pub async fn new(config: &CantonConfig) -> anyhow::Result<Self> {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
+
+        let auth_provider = CantonAuthProvider::new(config.auth.clone())?;
+
+        if !config.signer_contract_id.is_empty() || !config.signer_template_id.is_empty() {
+            tracing::info!(
+                signer_cid = %config.signer_contract_id,
+                signer_template_id = %config.signer_template_id,
+                "canton Signer contract configured"
+            );
+        }
+
+        Ok(Self {
+            config: config.clone(),
+            http_client,
+            auth_provider,
+        })
+    }
+
+    pub fn ledger_api_user(&self) -> &str {
+        &self.config.ledger_api_user
+    }
+
+    pub async fn bearer_token(&self) -> anyhow::Result<String> {
+        self.auth_provider.bearer_token().await
+    }
+
+    fn json_api_endpoint(&self, path: &str) -> String {
+        format!("{}{}", self.config.json_api_url, path)
+    }
+
+    pub async fn auth_post(&self, path: &str) -> anyhow::Result<reqwest::RequestBuilder> {
+        let token = self.bearer_token().await?;
+        Ok(self
+            .http_client
+            .post(self.json_api_endpoint(path))
+            .bearer_auth(token))
+    }
+
+    pub async fn auth_get(&self, path: &str) -> anyhow::Result<reqwest::RequestBuilder> {
+        let token = self.bearer_token().await?;
+        Ok(self
+            .http_client
+            .get(self.json_api_endpoint(path))
+            .bearer_auth(token))
+    }
+
+    pub async fn fetch_ledger_end(&self) -> anyhow::Result<u64> {
+        let resp = self.auth_get("/v2/state/ledger-end").await?.send().await?;
+        let resp = check_response(resp, "ledger-end").await?;
+        let body: LedgerEndResponse = resp.json().await?;
+        Ok(body.offset)
+    }
+
+    pub async fn fetch_active_contracts(
+        &self,
+        parties: &[&str],
+        template_id: Option<&str>,
+        include_blob: bool,
+    ) -> anyhow::Result<Vec<ActiveContractEntry>> {
+        let offset = self.fetch_ledger_end().await?;
+
+        let mut filters = serde_json::Map::new();
+        for party in parties {
+            let value = match template_id {
+                Some(tid) => serde_json::to_value(PartyFilter {
+                    cumulative: vec![CumulativeFilter {
+                        identifier_filter: IdentifierFilter::TemplateFilter {
+                            value: TemplateFilterValue {
+                                template_id: tid.to_string(),
+                                include_created_event_blob: include_blob,
+                            },
+                        },
+                    }],
+                })?,
+                None => serde_json::json!({}),
+            };
+            filters.insert(party.to_string(), value);
+        }
+
+        let req = GetActiveContractsRequest {
+            active_at_offset: offset,
+            event_format: EventFormat {
+                filters_by_party: filters,
+                verbose: true,
+            },
+        };
+
+        let resp = self
+            .auth_post("/v2/state/active-contracts")
+            .await?
+            .json(&req)
+            .send()
+            .await?;
+
+        let resp = check_response(resp, "active-contracts query").await?;
+        Ok(resp.json().await?)
+    }
+
+    pub async fn submit_and_wait(
+        &self,
+        commands: JsCommands,
+        context: &str,
+    ) -> anyhow::Result<SubmitAndWaitForTransactionResponse> {
+        let resp = self
+            .auth_post("/v2/commands/submit-and-wait-for-transaction")
+            .await?
+            .json(&SubmitAndWaitForTransactionRequest { commands })
+            .send()
+            .await?;
+        let resp = check_response(resp, context).await?;
+        Ok(resp.json().await?)
+    }
+
+    pub async fn exercise_choice(
+        &self,
+        command_id: &str,
+        choice: &str,
+        choice_argument: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        use crate::indexer_canton::ledger_api::{Command, JsCommands};
+        let commands = JsCommands {
+            command_id: command_id.to_string(),
+            user_id: self.config.ledger_api_user.clone(),
+            act_as: vec![self.config.party_id.clone()],
+            read_as: vec![self.config.party_id.clone()],
+            commands: vec![Command::ExerciseCommand {
+                template_id: self.config.signer_template_id.clone(),
+                contract_id: self.config.signer_contract_id.clone(),
+                choice: choice.to_string(),
+                choice_argument,
+            }],
+            disclosed_contracts: vec![],
+        };
+        self.submit_and_wait(commands, &format!("canton {choice}"))
+            .await?;
+        Ok(())
+    }
+}
+
+async fn check_response(
+    resp: reqwest::Response,
+    context: &str,
+) -> anyhow::Result<reqwest::Response> {
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("{context} failed: {status} {text}");
+    }
+    Ok(resp)
+}
+
 /// Client related to a specific chain
 #[allow(clippy::large_enum_variant)]
 pub enum ChainClient {
@@ -901,6 +1174,7 @@ pub enum ChainClient {
     Ethereum(EthClient),
     Solana(SolanaClient),
     Hydration(HydrationClient),
+    Canton(CantonClient),
 }
 
 async fn update_contract(near: NearClient, contract: watch::Sender<Option<ProtocolState>>) {
@@ -932,7 +1206,7 @@ async fn update_config(near: NearClient, config: watch::Sender<Config>) {
 }
 
 /// Publish the signature and retry if it fails
-async fn execute_publish(client: ChainClient, action: PublishAction, backlog: Backlog) {
+async fn execute_publish(client: ChainClient, action: PublishAction) {
     let chain = action.indexed.chain;
     let sign_id = action.indexed.id;
 
@@ -968,6 +1242,11 @@ async fn execute_publish(client: ChainClient, action: PublishAction, backlog: Ba
                 }
                 ChainClient::Hydration(hyd) => {
                     try_publish_hydration(hyd, &action, &action.timestamp, &action.signature)
+                        .await
+                        .map_err(|_| ())
+                }
+                ChainClient::Canton(canton) => {
+                    try_publish_canton(canton, &action, &action.timestamp, &action.signature)
                         .await
                         .map_err(|_| ())
                 }
@@ -1007,33 +1286,27 @@ async fn execute_publish(client: ChainClient, action: PublishAction, backlog: Ba
         let elapsed_secs =
             crate::util::unix_elapsed(action.indexed.unix_timestamp_indexed).as_secs();
         if elapsed_secs <= chain.expected_response_time_secs() {
-            record_request_latency(
+            record_request_latency_since(
                 chain,
                 SignRequestStep::Total,
                 "in_time",
                 action.indexed.unix_timestamp_indexed,
             );
         } else {
-            record_request_latency(
+            record_request_latency_since(
                 chain,
                 SignRequestStep::Total,
                 "expired",
                 action.indexed.unix_timestamp_indexed,
             );
         }
-        record_request_latency(chain, SignRequestStep::Responding, "ok", action.timestamp);
+        record_request_latency_since(chain, SignRequestStep::Responding, "ok", action.timestamp);
     } else {
         tracing::info!(
             ?sign_id,
             elapsed = ?action.timestamp.elapsed(),
             "exceeded max retries, trashing publish request"
         );
-    }
-
-    if matches!(action.indexed.kind, SignKind::SignBidirectional(_)) {
-        if let Err(err) = backlog.mark_published(chain, &sign_id, publish_ok).await {
-            tracing::warn!(?sign_id, ?err, "failed to mark publish status in backlog");
-        }
     }
 }
 
@@ -1547,6 +1820,10 @@ async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAc
                     tracing::error!("Hydration has no batch publish");
                     Ok(())
                 }
+                ChainClient::Canton(_) => {
+                    tracing::error!("Canton does not support batch publish");
+                    Ok(())
+                }
                 ChainClient::Err(msg) => {
                     tracing::error!(msg, "no client for chain");
                     Ok(())
@@ -1572,21 +1849,26 @@ async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAc
             let chain = action.indexed.chain;
             let elapsed = crate::util::unix_elapsed(action.indexed.unix_timestamp_indexed);
             if elapsed.as_secs() <= chain.expected_response_time_secs() {
-                record_request_latency(
+                record_request_latency_since(
                     chain,
                     SignRequestStep::Total,
                     "in_time",
                     action.indexed.unix_timestamp_indexed,
                 );
             } else {
-                record_request_latency(
+                record_request_latency_since(
                     chain,
                     SignRequestStep::Total,
                     "expired",
                     action.indexed.unix_timestamp_indexed,
                 );
             }
-            record_request_latency(chain, SignRequestStep::Responding, "ok", action.timestamp);
+            record_request_latency_since(
+                chain,
+                SignRequestStep::Responding,
+                "ok",
+                action.timestamp,
+            );
         }
         actions.clear();
         return;
@@ -1600,8 +1882,6 @@ use signet_program::accounts::Respond as SolanaRespondAccount;
 use signet_program::accounts::RespondBidirectional as SolanaRespondBidirectionalAccount;
 use signet_program::instruction::Respond as SolanaRespond;
 use signet_program::instruction::RespondBidirectional as SolanaRespondBidirectional;
-use signet_program::AffinePoint as SolanaContractAffinePoint;
-use signet_program::Signature as SolanaContractSignature;
 use solana_sdk::signature::Signer as SolanaSigner;
 async fn try_publish_sol(
     sol: &SolanaClient,
@@ -1614,14 +1894,7 @@ async fn try_publish_sol(
     let sign_id = action.indexed.id;
     let request_ids = vec![action.indexed.id.request_id];
     let big_r = signature.big_r.to_encoded_point(false);
-    let signature = SolanaContractSignature {
-        big_r: SolanaContractAffinePoint {
-            x: big_r.as_bytes()[1..33].try_into().unwrap(),
-            y: big_r.as_bytes()[33..65].try_into().unwrap(),
-        },
-        s: signature.s.to_bytes().into(),
-        recovery_id: signature.recovery_id,
-    };
+    let signature = crate::util::mpc_to_sol_signature(signature, big_r);
 
     tracing::debug!(
         ?sign_id,
@@ -1764,9 +2037,91 @@ async fn try_publish_hydration(
     Ok(())
 }
 
+async fn try_publish_canton(
+    canton: &CantonClient,
+    action: &PublishAction,
+    timestamp: &std::time::Instant,
+    signature: &mpc_primitives::Signature,
+) -> anyhow::Result<()> {
+    let sign_id = action.indexed.id;
+    let request_id_hex = hex::encode(action.indexed.id.request_id);
+
+    tracing::info!(
+        ?sign_id,
+        chain = ?action.indexed.chain,
+        elapsed = ?timestamp.elapsed(),
+        request_id = %request_id_hex,
+        "canton: publishing signature"
+    );
+
+    use crate::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
+    let der_sig = hex::encode(crate::indexer_canton::der_encode_signature(signature)?);
+    let canton_signature = serde_json::to_value(CantonSignature::EcdsaSig(EcdsaSigData {
+        der: der_sig,
+        recovery_id: signature.recovery_id,
+    }))?;
+
+    let (choice, command_id, choice_argument) = match &action.indexed.kind {
+        SignKind::SignBidirectional(crate::stream::ops::SignBidirectionalEvent::Canton(event)) => (
+            "Respond",
+            format!("mpc-respond-{request_id_hex}"),
+            serde_json::json!({
+                "signEventCid": &event.sign_event_contract_id,
+                "requestId": request_id_hex,
+                "signature": canton_signature,
+            }),
+        ),
+        SignKind::RespondBidirectional(respond_tx) => {
+            let chain_ctx_bytes = respond_tx
+                .chain_ctx
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("missing chain_ctx on Canton response"))?;
+            let ctx: crate::indexer_canton::CantonChainCtx = borsh::from_slice(chain_ctx_bytes)
+                .map_err(|e| anyhow::anyhow!("failed to deserialize CantonChainCtx: {e}"))?;
+            (
+                "RespondBidirectional",
+                format!("mpc-respond-bidir-{request_id_hex}"),
+                serde_json::json!({
+                    "signEventCid": ctx.sign_event_contract_id,
+                    "requestId": request_id_hex,
+                    "serializedOutput": hex::encode(&respond_tx.output),
+                    "signature": canton_signature,
+                }),
+            )
+        }
+        _ => anyhow::bail!("Canton supports only Canton SignBidirectional or RespondBidirectional"),
+    };
+
+    canton
+        .exercise_choice(&command_id, choice, choice_argument)
+        .await
+        .inspect_err(|err| {
+            tracing::error!(
+                ?sign_id,
+                choice,
+                request_id = %request_id_hex,
+                error = %err,
+                "canton: failed to publish signature"
+            );
+        })?;
+
+    tracing::info!(
+        ?sign_id,
+        choice,
+        elapsed = ?timestamp.elapsed(),
+        "published canton {choice} successfully"
+    );
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
+    use crate::protocol::contract::{ResharingContractState, RunningContractState};
+    use crate::protocol::ProtocolState;
+    use cait_sith::protocol::Participant;
     use k256::elliptic_curve::ops::Reduce;
     use k256::elliptic_curve::point::DecompressPoint;
     use mpc_crypto::kdf::derive_secret_key;
@@ -1813,6 +2168,69 @@ mod tests {
             unix_timestamp_indexed: 0,
             kind: SignKind::Sign,
         }
+    }
+
+    fn test_participants() -> Participants {
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+        participants.insert(&Participant::from(1), ParticipantInfo::new(1));
+        participants.insert(&Participant::from(2), ParticipantInfo::new(2));
+        participants
+    }
+
+    #[tokio::test]
+    async fn wait_governance_tracks_resharing_state() {
+        let account_id: AccountId = "p-0".parse().unwrap();
+        let participants = test_participants();
+        let (mut watcher, tx) = ContractStateWatcher::new(&account_id);
+
+        let initial = RunningContractState {
+            epoch: 0,
+            public_key: AffinePoint::default(),
+            participants: participants.clone(),
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+            threshold: 2,
+        };
+        tx.send(Some(ProtocolState::Running(initial))).unwrap();
+
+        let governance = watcher.governance().expect("running governance");
+        assert_eq!(governance.epoch, 0);
+        assert_eq!(governance.threshold, 2);
+        assert_eq!(governance.me, Participant::from(0));
+
+        let resharing = ResharingContractState {
+            old_epoch: 0,
+            old_participants: participants.clone(),
+            new_participants: participants.clone(),
+            threshold: 2,
+            public_key: AffinePoint::default(),
+            finished_votes: Default::default(),
+            cancel_votes: Default::default(),
+        };
+        tx.send(Some(ProtocolState::Resharing(resharing))).unwrap();
+
+        let paused = watcher.governance().expect("resharing governance");
+        assert_eq!(paused.epoch, 1);
+        assert_eq!(paused.threshold, 2);
+        assert_eq!(paused.me, Participant::from(0));
+
+        let running = RunningContractState {
+            epoch: 1,
+            public_key: AffinePoint::default(),
+            participants,
+            candidates: Default::default(),
+            join_votes: Default::default(),
+            leave_votes: Default::default(),
+            threshold: 2,
+        };
+        tx.send(Some(ProtocolState::Running(running))).unwrap();
+
+        let resumed = watcher.wait_governance().await;
+        assert_eq!(resumed.epoch, 1);
+        assert_eq!(resumed.threshold, 2);
+        assert_eq!(resumed.me, Participant::from(0));
     }
 
     #[test]

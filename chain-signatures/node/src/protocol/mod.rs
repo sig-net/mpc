@@ -21,14 +21,14 @@ pub use mpc_primitives::Chain;
 pub use signature::{IndexedSignRequest, Sign};
 pub use state::{Node, NodeState};
 
-use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::mesh::MeshState;
 use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
+use crate::protocol::signature::SignatureSpawnerTask;
 use crate::respond_bidirectional::RespondBidirectionalTx;
-use crate::rpc::{ContractStateWatcher, RpcChannel};
+use crate::rpc::ContractStateWatcher;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageBox;
 use crate::storage::triple_storage::TripleStorage;
@@ -36,10 +36,8 @@ use crate::storage::triple_storage::TripleStorage;
 use near_account_id::AccountId;
 use semver::Version;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, Disks, RefreshKind, System};
-use tokio::sync::RwLock;
 use tokio::sync::{mpsc, watch};
 
 pub struct MpcSignProtocol {
@@ -47,16 +45,19 @@ pub struct MpcSignProtocol {
     pub(crate) secret_storage: SecretNodeStorageBox,
     pub(crate) triple_storage: TripleStorage,
     pub(crate) presignature_storage: PresignatureStorage,
-    pub(crate) sign_rx: Arc<RwLock<mpsc::Receiver<Sign>>>,
+    pub(crate) sign_task: SignatureSpawnerTask,
     pub(crate) generating: mpsc::Receiver<GeneratingMessage>,
     pub(crate) resharing: mpsc::Receiver<ResharingMessage>,
     pub(crate) ready: mpsc::Receiver<ReadyMessage>,
     pub(crate) msg_channel: MessageChannel,
-    pub(crate) rpc_channel: RpcChannel,
-    pub(crate) contract: ContractStateWatcher,
     pub(crate) config: watch::Receiver<Config>,
     pub(crate) mesh_state: watch::Receiver<MeshState>,
-    pub(crate) backlog: Backlog,
+}
+
+impl Drop for MpcSignProtocol {
+    fn drop(&mut self) {
+        self.sign_task.abort();
+    }
 }
 
 /// Interface required by the [`MpcSignProtocol`] to participate in the

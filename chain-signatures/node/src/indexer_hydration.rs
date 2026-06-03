@@ -1,20 +1,18 @@
 use crate::backlog::Backlog;
-use crate::indexer_sol::MAX_SECP256K1_SCALAR;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::ops::SignatureEvent;
+use crate::util::ethabi_request_id;
 use alloy_sol_types::SolValue;
 use anyhow::{anyhow, Result};
-use ethabi::{encode, Token};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::Signature;
-use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
-use sha3::{Digest, Keccak256};
+use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR};
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{twox_128, H256};
 use sp_runtime::traits::BlakeTwo256;
@@ -107,21 +105,16 @@ pub struct HydrationSignatureRequestedEvent {
 
 impl SignatureEvent for HydrationSignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
-        // Encode the event data in ABI format
-        let encoded = encode(&[
-            Token::String(self.sender_string()),
-            Token::Bytes(self.payload.to_vec()),
-            Token::String(self.path.clone()),
-            Token::Uint(self.key_version.into()),
-            Token::String(self.chain_id.clone()),
-            Token::String(self.algo.clone()),
-            Token::String(self.dest.clone()),
-            Token::String(self.params.clone()),
-        ]);
-        // Calculate keccak256 hash
-        let mut hasher = Keccak256::new();
-        hasher.update(&encoded);
-        hasher.finalize().into()
+        ethabi_request_id(
+            self.sender_string(),
+            self.payload,
+            self.path.clone(),
+            self.key_version,
+            self.chain_id.clone(),
+            self.algo.clone(),
+            self.dest.clone(),
+            self.params.clone(),
+        )
     }
 
     fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest> {
@@ -181,18 +174,53 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {
     }
 }
 
+/// The deserialized representation of a bidirectional signing request
+/// event emitted from the Hydration chain.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct HydrationSignBidirectionalRequestedEvent {
+    /// The 32-byte identifier of the sender.
     pub sender: [u8; 32],
+
+    /// The serialized transaction payload to be signed.
     pub serialized_transaction: Vec<u8>,
+
+    /// CAIP-2 chain ID of the *target chain* where the signed transaction will be sent.
+    ///
+    /// Note: This is NOT the chain where `respond()` or `respond_bidirectional()` is executed.
     pub caip2_id: String,
+
+    /// Version of the key to be used for signing.
     pub key_version: u32,
+
+    /// Deposit associated with the request.
     pub deposit: u64,
+
+    /// Derivation path used for signing.
     pub path: String,
+
+    /// Signing algorithm identifier.
+    ///
+    /// If empty (`""`), ECDSA will be used by default.
     pub algo: String,
+
+    /// Destination field (currently unused).
+    ///
+    /// Should be left empty (`""`).
     pub dest: String,
+
+    /// Additional parameters encoded as a string (currently unused).
+    ///
+    /// Should be left empty (`""`).
     pub params: String,
+
+    /// Schema used to deserialize the output of the signed transaction.
+    ///
+    /// MUST be provided.
     pub output_deserialization_schema: Vec<u8>,
+
+    /// Schema used to serialize the `respond_bidirectional` payload.
+    ///
+    /// MUST be provided.
     pub respond_serialization_schema: Vec<u8>,
 }
 
@@ -381,7 +409,6 @@ pub async fn run(
         &mut mesh_state,
         &node_client,
         Chain::Hydration,
-        sign_tx.clone(),
     )
     .await;
 
@@ -481,6 +508,7 @@ pub async fn run(
                     entropy,
                     sign_tx.clone(),
                     backlog.clone(),
+                    true,
                 )
                 .await
                 {
@@ -505,6 +533,7 @@ pub async fn run(
                     sign_tx.clone(),
                     &mut contract_watcher,
                     &backlog,
+                    true,
                 )
                 .await
                 {
@@ -535,6 +564,7 @@ pub async fn run(
                     entropy,
                     sign_tx.clone(),
                     backlog.clone(),
+                    true,
                 )
                 .await
                 {
@@ -560,6 +590,7 @@ pub async fn run(
                     crate::stream::ops::RespondBidirectionalEvent::Hydration(event),
                     sign_tx.clone(),
                     &backlog,
+                    true,
                 )
                 .await
                 {
@@ -657,6 +688,9 @@ fn decode_sign_bidirectional_requested(
 
     let output_deserialization_schema = get_named_vec_u8(&fields, "output_deserialization_schema")?;
     let respond_serialization_schema = get_named_vec_u8(&fields, "respond_serialization_schema")?;
+
+    Chain::from_caip2_chain_id(&caip2_id)
+        .map_err(|e| anyhow!("invalid caip2 chain id in sign bidirectional event: {e:?}"))?;
 
     Ok(HydrationSignBidirectionalRequestedEvent {
         sender,
@@ -829,5 +863,30 @@ fn value_to_vec_u8(v: &Value<u32>) -> Result<Vec<u8>> {
             Ok(out)
         }
         other => Err(anyhow!("unsupported Vec<u8> shape: {other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_id_matches_ethabi() {
+        let event = HydrationSignatureRequestedEvent {
+            sender: [0xAA; 32],
+            payload: [0xBB; 32],
+            path: "m/44'/60'/0'/0/0".to_string(),
+            key_version: 3,
+            deposit: 999,
+            chain_id: "hydration-testnet".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "dest-address".to_string(),
+            params: "payload-params".to_string(),
+        };
+
+        assert_eq!(
+            hex::encode(event.generate_request_id()),
+            "67a3a9bf9d424d85bef21cf9780a0634c6a06061265ce9d1063f30f1eec84821"
+        );
     }
 }

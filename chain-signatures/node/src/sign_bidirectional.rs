@@ -1,15 +1,17 @@
 use crate::protocol::{Chain, IndexedSignRequest};
-use crate::respond_bidirectional::SerDeserFormat;
 use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
 use borsh::BorshSerialize;
+use cait_sith::protocol::Participant;
 use k256::elliptic_curve::point::AffineCoordinates;
+use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
-use mpc_primitives::Signature;
+use mpc_primitives::{SerDeserFormat, Signature};
 use rlp::{Rlp, RlpStream};
 use serde_json::Value;
 use sha3::{Digest, Keccak256};
+
 use std::collections::HashMap;
 use std::io::Write;
 
@@ -31,25 +33,79 @@ struct AbiField {
     typ: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum SignStatus {
-    /// Request has been received on the source chain and is waiting for a `respond`
-    /// transaction to be observed.
-    AwaitingResponse,
-    /// Request has been responded to and the derived transaction is now waiting to
-    /// execute on the destination chain.
-    PendingExecution,
-    Failed,
-    Success,
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PublishState {
+    pub signature: Signature,
+    pub participants: Vec<Participant>,
+    pub is_proposer: bool,
 }
 
-#[derive(Debug, Clone, Hash, serde::Serialize, serde::Deserialize)]
+impl PublishState {
+    fn digest_bytes(&self, tag: u8) -> Vec<u8> {
+        let mut bytes = vec![tag];
+        bytes.extend_from_slice(&self.signature.to_bytes());
+        bytes.extend_from_slice(&(self.participants.len() as u32).to_le_bytes());
+        for participant in &self.participants {
+            bytes.extend_from_slice(&participant.bytes());
+        }
+        bytes.push(u8::from(self.is_proposer));
+        bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SignStatus {
+    PendingGeneration,
+    PendingPublish { publish: PublishState },
+    PendingExecution { tx: BidirectionalTx },
+    PendingGenerationBidirectional,
+    PendingPublishBidirectional { publish: PublishState },
+}
+
+impl SignStatus {
+    pub fn is_pending_generation(&self) -> bool {
+        matches!(
+            self,
+            SignStatus::PendingGeneration | SignStatus::PendingGenerationBidirectional
+        )
+    }
+
+    pub fn is_pending_execution(&self) -> bool {
+        matches!(self, SignStatus::PendingExecution { .. })
+    }
+
+    pub fn digest_bytes(&self) -> Vec<u8> {
+        match self {
+            SignStatus::PendingGeneration => vec![0],
+            SignStatus::PendingPublish { publish } => publish.digest_bytes(1),
+            SignStatus::PendingExecution { tx } => {
+                let mut bytes = vec![2];
+                bytes.extend_from_slice(tx.id.0.as_slice());
+                bytes.extend_from_slice(&tx.target_chain.to_bytes());
+                bytes
+            }
+            SignStatus::PendingGenerationBidirectional => vec![3],
+            SignStatus::PendingPublishBidirectional { publish } => publish.digest_bytes(4),
+        }
+    }
+
+    pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
+        match self {
+            SignStatus::PendingExecution { tx } => Some(tx),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BidirectionalTx {
     pub id: BidirectionalTxId,
     pub sender: [u8; 32],
     pub serialized_transaction: Vec<u8>,
     pub source_chain: Chain,
     pub target_chain: Chain,
+    // mainnet caip2_id of the target chain where the signed transaction will be sent
+    // This must be a supported chain in the Chain enum in primitives.
     pub caip2_id: String,
     pub key_version: u32,
     pub deposit: u64,
@@ -62,11 +118,13 @@ pub struct BidirectionalTx {
     pub request_id: [u8; 32],
     pub from_address: Address,
     pub nonce: u64,
-    pub status: SignStatus,
 }
 
 impl BidirectionalTx {
     pub(crate) fn sender_string(&self) -> anyhow::Result<String> {
+        if self.source_chain == Chain::Canton {
+            return Ok(hex::encode(self.sender));
+        }
         crate::stream::ops::sender_string(self.sender, self.source_chain)
     }
 
@@ -82,69 +140,81 @@ impl BidirectionalTx {
                 &self.sender_string()?,
                 path,
             )),
+            Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
+                self.key_version,
+                &self.sender_string()?,
+                path,
+            )),
             _ => anyhow::bail!("Unsupported chain: {}", self.source_chain),
         }
     }
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Output(pub HashMap<String, DynSolValue>);
+pub struct Output {
+    fields: HashMap<String, DynSolValue>,
+    /// `true` when this `Output` was built from a real ETH contract-call return
+    /// (via `TransactionOutput::from_call_result`); `false` for the
+    /// `non_contract_call_output()` path (plain transfers). Drives whether
+    /// `serialize` encodes real data or synthesizes per-schema defaults.
+    from_contract_call: bool,
+}
 
 impl Output {
-    pub fn is_function_call(&self) -> bool {
-        self.0
-            .get("is_function_call")
-            .is_some_and(|v| v.as_bool().unwrap_or(false))
+    pub fn is_contract_call(&self) -> bool {
+        self.from_contract_call
     }
 
-    pub fn serialize(&self, format: SerDeserFormat, schema: &[u8]) -> anyhow::Result<Vec<u8>> {
+    /// Encode this output for the given format using `schema_json_bytes` as
+    /// the field shape. For non-contract-call outputs (plain transfers),
+    /// synthesizes per-field default values from the schema. Real decoded
+    /// data from `from_call_result` flows through unchanged.
+    pub fn serialize(
+        &self,
+        format: SerDeserFormat,
+        schema_json_bytes: &[u8],
+    ) -> anyhow::Result<Vec<u8>> {
+        let schema = parse_schema_fields(schema_json_bytes)?;
+        let data_owned;
+        let data = if self.is_contract_call() {
+            self
+        } else {
+            data_owned = default_output_for_non_contract_call(&schema)?;
+            &data_owned
+        };
         match format {
-            SerDeserFormat::Abi => self.serialize_abi(schema),
-            SerDeserFormat::Borsh => self.serialize_borsh(schema),
+            SerDeserFormat::Abi => encode_abi(data, &schema),
+            SerDeserFormat::Borsh => encode_borsh(data, &schema),
         }
     }
+}
 
-    fn serialize_abi(&self, schema: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let schema: Vec<AbiField> = serde_json::from_slice(schema)
-            .map_err(|e| anyhow::anyhow!("Failed to get abi fields from schema: {e:?}"))?;
+fn encode_abi(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
+    let values = schema
+        .iter()
+        .map(|field| match data.fields.get(&field.name) {
+            Some(value) => Ok(value.clone()),
+            None => Err(anyhow::anyhow!(
+                "Missing required field '{}' in output",
+                field.name
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    encode_abi_values(schema, &values)
+}
 
-        let mut data_to_encode = self.clone();
-        if !self.is_function_call() {
-            data_to_encode = create_abi_data(schema.clone())?;
-        }
-
-        let values = schema
-            .iter()
-            .map(|field| match data_to_encode.0.get(&field.name) {
-                Some(value) => Ok(value.clone()),
-                None => Err(anyhow::anyhow!(
-                    "Missing required field '{}' in output",
-                    field.name
-                )),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        encode_abi_values(&schema, &values)
-    }
-
-    /// Serialize `Output` to Borsh using the **order from `schema_json_bytes`**
-    /// Schema is a JSON array like: `[{"name":"...", "type":"..."}, ...]`
-    pub fn serialize_borsh(&self, schema_json_bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let fields: Vec<AbiField> = parse_borsh_schema_fields(schema_json_bytes)?;
-
-        tracing::info!("serialize borsh schema: {fields:?}");
-
-        let mut buf = Vec::with_capacity(128);
-
-        assert!(fields.len() == 1);
-        let val = self
-            .0
-            .get(&fields[0].name)
-            .ok_or_else(|| anyhow::anyhow!("missing value for field '{}'", fields[0].name))?;
-        serialize_dynsol(&mut buf, val)?;
-
-        Ok(buf)
-    }
+fn encode_borsh(data: &Output, schema: &[AbiField]) -> anyhow::Result<Vec<u8>> {
+    assert!(
+        schema.len() == 1,
+        "borsh schema must have exactly one field"
+    );
+    let val = data
+        .fields
+        .get(&schema[0].name)
+        .ok_or_else(|| anyhow::anyhow!("missing value for field '{}'", schema[0].name))?;
+    let mut buf = Vec::with_capacity(128);
+    serialize_dynsol(&mut buf, val)?;
+    Ok(buf)
 }
 
 #[derive(Debug)]
@@ -154,10 +224,13 @@ pub struct TransactionOutput {
 }
 
 impl TransactionOutput {
-    pub fn non_function_call_output() -> Self {
+    pub fn non_contract_call_output() -> Self {
         Self {
             success: true,
-            output: Output(HashMap::new()),
+            output: Output {
+                fields: HashMap::new(),
+                from_contract_call: false,
+            },
         }
     }
 
@@ -184,13 +257,16 @@ impl TransactionOutput {
 
         // Map to named output
         let mut output_map = HashMap::new();
-        for (field, value) in schema.into_iter().zip(values.into_iter()) {
+        for (field, value) in schema.into_iter().zip(values) {
             output_map.insert(field.name, value);
         }
 
         Ok(TransactionOutput {
             success: true,
-            output: Output(output_map),
+            output: Output {
+                fields: output_map,
+                from_contract_call: true,
+            },
         })
     }
 }
@@ -277,14 +353,14 @@ pub fn sign_and_hash_eip1559_from_unsigned(
     let nonce: u64 = rlp.val_at::<u64>(1)?;
 
     // Re-encode with signature fields appended
-    let mut srlp = RlpStream::new_list(12);
+    let mut srlp = EthereumTxRlp::new_list(12);
     for i in 0..9 {
-        srlp.append_raw(rlp.at(i)?.as_raw(), 1);
+        srlp.append_raw_field(rlp.at(i)?.as_raw());
     }
     let y: u8 = if y_parity { 1 } else { 0 };
-    srlp.append(&y);
-    srlp.append(&r);
-    srlp.append(&s);
+    srlp.append_u8(y);
+    srlp.append_uint_bytes(r);
+    srlp.append_uint_bytes(s);
 
     let srlp_body = srlp.as_raw(); // &[u8]
     let mut signed_bytes = Vec::with_capacity(1 + srlp_body.len());
@@ -310,28 +386,66 @@ pub fn sign_and_hash_legacy_from_unsigned(
     );
 
     let nonce: u64 = rlp.val_at::<u64>(0)?;
-    let mut out = RlpStream::new_list(9);
+    let mut out = EthereumTxRlp::new_list(9);
     for i in 0..6 {
-        out.append_raw(rlp.at(i)?.as_raw(), 1);
+        out.append_raw_field(rlp.at(i)?.as_raw());
     }
     let v: u64 = 35 + 2 * chain_id.unwrap_or(0) + if y_parity { 1 } else { 0 };
-    out.append(&v);
-    out.append(&r);
-    out.append(&s);
+    out.append_u64(v);
+    out.append_uint_bytes(r);
+    out.append_uint_bytes(s);
 
-    let signed_bytes = out.out().to_vec();
+    let signed_bytes = out.into_vec();
     let hash = alloy_primitives::keccak256(&signed_bytes);
     Ok((hash.into(), nonce))
 }
 
-/// Get the x coordinate of a point, as a scalar
-fn x_coordinate<C: cait_sith::CSCurve>(point: &C::AffinePoint) -> C::Scalar {
-    <C::Scalar as k256::elliptic_curve::ops::Reduce<<C as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(&point.x())
+struct EthereumTxRlp {
+    stream: RlpStream,
 }
 
-fn public_key_to_address(public_key: &secp256k1::PublicKey) -> Address {
-    let public_key = public_key.serialize_uncompressed();
+impl EthereumTxRlp {
+    fn new_list(len: usize) -> Self {
+        Self {
+            stream: RlpStream::new_list(len),
+        }
+    }
 
+    fn append_raw_field(&mut self, raw: &[u8]) {
+        self.stream.append_raw(raw, 1);
+    }
+
+    fn append_u8(&mut self, value: u8) {
+        self.stream.append(&value);
+    }
+
+    fn append_u64(&mut self, value: u64) {
+        self.stream.append(&value);
+    }
+
+    fn append_uint_bytes(&mut self, value: &[u8]) {
+        let first_nonzero = value
+            .iter()
+            .position(|&byte| byte != 0)
+            .unwrap_or(value.len());
+        if first_nonzero == value.len() {
+            self.stream.append_empty_data();
+            return;
+        }
+
+        self.stream.append(&value[first_nonzero..].to_vec());
+    }
+
+    fn as_raw(&self) -> &[u8] {
+        self.stream.as_raw()
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        self.stream.out().to_vec()
+    }
+}
+
+pub fn public_key_to_address(public_key: &[u8]) -> Address {
     debug_assert_eq!(public_key[0], 0x04);
     let hash: [u8; 32] = *alloy::primitives::keccak256(&public_key[1..]);
 
@@ -340,38 +454,63 @@ fn public_key_to_address(public_key: &secp256k1::PublicKey) -> Address {
 
 pub fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Scalar) -> Address {
     let user_pk: AffinePoint = derive_key(mpc_pk, derivation_epsilon);
-    let parity = match user_pk.y_is_odd().unwrap_u8() {
-        0 => secp256k1::Parity::Even,
-        1 => secp256k1::Parity::Odd,
-        _ => unreachable!(),
-    };
 
-    let x_coord = x_coordinate::<k256::Secp256k1>(&user_pk);
-    let x_only = secp256k1::XOnlyPublicKey::from_slice(&x_coord.to_bytes()).unwrap();
-    let secp_pk = secp256k1::PublicKey::from_x_only_public_key(x_only, parity);
-
-    public_key_to_address(&secp_pk)
+    public_key_to_address(user_pk.to_encoded_point(false).as_bytes())
 }
 
-fn create_abi_data(schema: Vec<AbiField>) -> anyhow::Result<Output> {
+/// Synthesize per-field default values for an `Output` whose source tx was
+/// not a contract function call. The destination chain's contract still needs
+/// shaped bytes back, so we fill defaults from the schema: `bool` → `true`,
+/// `string` → `"non_function_call_success"`. Other field types are unsupported.
+fn default_output_for_non_contract_call(schema: &[AbiField]) -> anyhow::Result<Output> {
     let mut data = HashMap::new();
     for field in schema {
-        if field.typ == "string" {
-            data.insert(
-                field.name,
-                DynSolValue::String("non_function_call_success".to_string()),
-            );
-        } else if field.typ == "bool" {
-            data.insert(field.name, DynSolValue::Bool(true));
-        } else {
-            anyhow::bail!(
-                "Cannot serialize non-function call success as type {}",
-                field.typ
-            );
+        match field.typ.as_str() {
+            "string" => {
+                data.insert(
+                    field.name.clone(),
+                    DynSolValue::String("non_function_call_success".to_string()),
+                );
+            }
+            "bool" => {
+                data.insert(field.name.clone(), DynSolValue::Bool(true));
+            }
+            other => anyhow::bail!(
+                "cannot synthesize default for non-function-call output of type {other}"
+            ),
         }
     }
+    Ok(Output {
+        fields: data,
+        from_contract_call: false,
+    })
+}
 
-    Ok(Output(data))
+#[cfg(test)]
+mod derive_tests {
+    use super::derive_user_address;
+    use alloy::primitives::Address;
+    use k256::elliptic_curve::sec1::FromEncodedPoint;
+    use k256::{AffinePoint, EncodedPoint};
+    use mpc_crypto::derive_epsilon_near;
+    use mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
+
+    #[test]
+    fn derive_user_address_matches_golden() {
+        let mpc_key = "045b4fa179e005361fd858f8a6f896d7afc23a53d3f95d6566a88cde954e7b2f1cb77c554705c35d4ffced67aeafbcda46d9d89d6f200c3a3d109f92872863b3dc";
+        let account_id = "dev-20250212213501-93636560094065.test.near"
+            .parse()
+            .unwrap();
+        let mpc_pk = hex::decode(mpc_key).unwrap();
+        let mpc_pk = EncodedPoint::from_bytes(mpc_pk).unwrap();
+        let mpc_pk = AffinePoint::from_encoded_point(&mpc_pk).unwrap();
+        let derivation_epsilon = derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test");
+        let expected: Address = "0x083c8776b5e447e91bae43b7883a92a9bdb66d1d"
+            .parse()
+            .unwrap();
+
+        assert_eq!(derive_user_address(mpc_pk, derivation_epsilon), expected);
+    }
 }
 
 fn encode_abi_values(schema: &[AbiField], values: &[DynSolValue]) -> anyhow::Result<Vec<u8>> {
@@ -465,7 +604,11 @@ fn write_i256<W: Write>(w: &mut W, x: I256, size: usize) -> anyhow::Result<()> {
         .map_err(Into::into)
 }
 
-fn parse_borsh_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<AbiField>> {
+/// Parse a schema JSON describing the response shape. Accepts a JSON array of
+/// `{name, type}` objects (canonical form), a single object (treated as a
+/// one-field schema), or a bare string (treated as a single typed field with
+/// an empty name).
+fn parse_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<AbiField>> {
     let v: Value = serde_json::from_slice(schema_json_bytes)
         .map_err(|e| anyhow::anyhow!("schema JSON parse failed: {e:?}"))?;
 
@@ -494,4 +637,46 @@ pub struct SignBidirectionalSignature {
     pub public_key: mpc_crypto::PublicKey,
     pub indexed: IndexedSignRequest,
     pub signature: Signature,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sign_and_hash_eip1559_from_unsigned;
+    use alloy::consensus::{SignableTransaction, TxEip1559};
+    use alloy::eips::eip2718::Encodable2718;
+    use alloy::primitives::{Bytes, FixedBytes, Signature, TxKind, U256};
+
+    #[test]
+    fn eip1559_hash_matches_alloy_for_create_with_leading_zero_r() {
+        let tx = TxEip1559 {
+            chain_id: 31_337,
+            nonce: 3,
+            gas_limit: 100_000,
+            max_fee_per_gas: 100_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            to: TxKind::Create,
+            value: U256::ZERO,
+            access_list: Default::default(),
+            input: Bytes::new(),
+        };
+        let unsigned = tx.encoded_for_signing();
+        let mut r = [0u8; 32];
+        let mut s = [0u8; 32];
+        r[31] = 1;
+        s[31] = 2;
+
+        let (hash, nonce) = sign_and_hash_eip1559_from_unsigned(&unsigned, &r, &s, true).unwrap();
+
+        let signed = tx
+            .into_signed(Signature::from_scalars_and_parity(
+                FixedBytes::from_slice(&r),
+                FixedBytes::from_slice(&s),
+                true,
+            ))
+            .encoded_2718();
+        let expected_hash: [u8; 32] = alloy::primitives::keccak256(&signed).into();
+
+        assert_eq!(hash, expected_hash);
+        assert_eq!(nonce, 3);
+    }
 }
