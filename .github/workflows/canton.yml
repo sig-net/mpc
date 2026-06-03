@@ -43,11 +43,11 @@ jobs:
           export PATH="$HOME/.dpm/bin:$PATH"
           dpm --version
 
-      - name: Install Rust (1.81.0)
+      - name: Install Rust (1.86.0)
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.81.0
+          toolchain: 1.86.0
           target: wasm32-unknown-unknown
 
       - name: Install Node.js
@@ -112,11 +112,11 @@ jobs:
           export PATH="$HOME/.dpm/bin:$PATH"
           dpm --version
 
-      - name: Install Rust (1.81.0)
+      - name: Install Rust (1.86.0)
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.81.0
+          toolchain: 1.86.0
           target: wasm32-unknown-unknown
 
       - name: Install Node.js

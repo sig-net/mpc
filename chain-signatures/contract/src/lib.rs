@@ -20,7 +20,7 @@ use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
 use near_sdk::store::IterableMap;
 use near_sdk::{
-    env, log, near_bindgen, AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise,
+    env, log, near, AccountId, CryptoHash, Gas, GasWeight, NearToken, Promise,
     PromiseError, PublicKey,
 };
 use primitives::{
@@ -54,8 +54,8 @@ const UPDATE_CONFIG_GAS: Gas = Gas::from_tgas(5);
 // Maximum number of concurrent requests
 const MAX_CONCURRENT_REQUESTS: u32 = 128;
 
-#[near_bindgen]
-#[derive(BorshDeserialize, BorshSerialize, Debug)]
+#[near(contract_state)]
+#[derive(Debug)]
 pub enum VersionedMpcContract {
     V0(MpcContract),
 }
@@ -117,7 +117,7 @@ impl MpcContract {
 }
 
 // User contract API
-#[near_bindgen]
+#[near]
 impl VersionedMpcContract {
     /// `key_version` must be less than or equal to the value at `latest_key_version`
     /// To avoid overloading the network with too many requests,
@@ -243,7 +243,7 @@ impl VersionedMpcContract {
 }
 
 // Node API
-#[near_bindgen]
+#[near]
 impl VersionedMpcContract {
     #[handle_result]
     pub fn respond(&mut self, sign_id: SignId, signature: Signature) -> Result<(), Error> {
@@ -601,7 +601,7 @@ impl VersionedMpcContract {
         // Refund the difference if the propser attached more than required.
         if let Some(diff) = attached.checked_sub(required) {
             if diff > NearToken::from_yoctonear(0) {
-                Promise::new(proposer).transfer(diff);
+                Promise::new(proposer).transfer(diff).detach();
             }
         }
 
@@ -640,7 +640,7 @@ impl VersionedMpcContract {
 }
 
 // Contract developer helper API
-#[near_bindgen]
+#[near]
 impl VersionedMpcContract {
     #[handle_result]
     #[init]
@@ -813,7 +813,7 @@ impl VersionedMpcContract {
         let amount = request.deposit;
         let to = request.requester.clone();
         log!("refund {amount} to {to} due to fail");
-        Promise::new(to).transfer(amount);
+        Promise::new(to).transfer(amount).detach();
     }
 
     fn refund_on_success(request: &InternalSignRequest) {
@@ -823,7 +823,7 @@ impl VersionedMpcContract {
             if diff > NearToken::from_yoctonear(0) {
                 let to = request.requester.clone();
                 log!("refund more than required deposit {diff} to {to}");
-                Promise::new(to).transfer(diff);
+                Promise::new(to).transfer(diff).detach();
             }
         }
     }

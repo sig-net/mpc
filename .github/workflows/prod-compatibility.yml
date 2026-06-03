@@ -37,8 +37,13 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.81.0
+          toolchain: 1.86.0
           target: wasm32-unknown-unknown
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       - uses: WarpBuilds/cache@v1
         with:

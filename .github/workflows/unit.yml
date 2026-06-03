@@ -25,12 +25,12 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.81.0
-      - name: Install Rust (1.81.0)
+          toolchain: 1.86.0
+      - name: Install Rust (1.86.0)
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.81.0
+          toolchain: 1.86.0
           target: wasm32-unknown-unknown
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -68,7 +68,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: 1.81.0
+          toolchain: 1.86.0
       - name: Install Audit
         run: cargo install cargo-audit
       - name: Run Audit

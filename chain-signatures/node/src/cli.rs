@@ -25,7 +25,7 @@ use k256::sha2::Sha256;
 use local_ip_address::local_ip;
 use mpc_keys::hpke;
 use near_account_id::AccountId;
-use near_crypto::{InMemorySigner, PublicKey, SecretKey};
+use near_crypto::{InMemorySigner, PublicKey, SecretKey, Signer};
 use sha3::Digest;
 use tokio::sync::{mpsc, watch};
 use url::Url;
@@ -273,7 +273,10 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tracing::info!(%my_address, "address detected");
 
             let client = NodeClient::new(&message_options);
-            let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
+            let signer = match InMemorySigner::from_secret_key(account_id.clone(), account_sk) {
+                Signer::InMemory(s) => s,
+                _ => unreachable!(),
+            };
             let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
             let mesh = Mesh::new(&client, mesh_options, &account_id, synced_peer_rx);
             let mesh_state = mesh.watch();

@@ -66,9 +66,9 @@ solana-client = "2.2.7"
 futures-util = "0.3.31"
 parity-scale-codec = { version = "3", features = ["derive"] }
 
-near-account-id = "1.0.0"
-near-primitives = "0.26.0"
-near-sdk = { version = "5.6.0", features = ["unstable", "unit-testing"] }
+near-account-id = "2.6.0"
+near-primitives = "0.35.1"
+near-sdk = { version = "5.27.0", features = ["unstable", "unit-testing"] }
 
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }
