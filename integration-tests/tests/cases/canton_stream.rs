@@ -29,8 +29,8 @@ async fn stream_canton(sandbox: &CantonSandbox, backlog: Backlog) -> Result<Cant
     let (_cp_tx, cp_rx) = tokio::sync::watch::channel(CheckpointDigest::default());
     let (_mesh_tx, mesh_rx) = tokio::sync::watch::channel(MeshState::default());
     let node_client = NodeClient::new(&Default::default());
-    let (pipeline, _state_rx) = ChainPipeline::from_state(
-        ChainStreaming::Live,
+    let (pipeline, mut state_rx) = ChainPipeline::from_state(
+        ChainStreaming::Recovery,
         indexer,
         cp_rx,
         backlog,
@@ -40,6 +40,21 @@ async fn stream_canton(sandbox: &CantonSandbox, backlog: Backlog) -> Result<Cant
         "test.near".parse().unwrap(),
     );
     tokio::spawn(pipeline.run());
+
+    // Wait until the pipeline is live so the subscription and anchor are established
+    // before callers begin submitting transactions.
+    timeout(Duration::from_secs(30), async {
+        loop {
+            if *state_rx.borrow() == ChainStreaming::Live {
+                return Ok(());
+            }
+            if state_rx.changed().await.is_err() {
+                anyhow::bail!("pipeline shut down before reaching Live state");
+            }
+        }
+    })
+    .await
+    .context("timed out waiting for pipeline to reach Live state")??;
     Ok(stream)
 }
 

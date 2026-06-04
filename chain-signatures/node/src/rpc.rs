@@ -22,8 +22,7 @@ use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
 use mpc_keys::hpke;
-use mpc_primitives::SignId;
-use mpc_primitives::Signature;
+use mpc_primitives::{ConsensusCheckpoint, SignId, Signature};
 
 use crate::util::retry::{retry_async, Backoff, RetryConfig, RetryError, RetryReason};
 use alloy::contract::{ContractInstance, Interface};
@@ -722,11 +721,8 @@ impl NearClient {
             .await
     }
 
-    pub async fn read(
-        &self,
-        reads: Vec<mpc_contract::primitives::Read>,
-    ) -> anyhow::Result<Vec<mpc_contract::primitives::View>> {
-        let views: Vec<mpc_contract::primitives::View> = self
+    pub async fn read(&self, reads: Vec<Read>) -> anyhow::Result<Vec<View>> {
+        let views: Vec<View> = self
             .client
             .view(&self.contract_id, "read")
             .args_json(json!({ "reads": reads }))
@@ -737,7 +733,7 @@ impl NearClient {
 
     pub async fn call_respond_checkpoint(
         &self,
-        checkpoint: &mpc_primitives::ConsensusCheckpoint,
+        checkpoint: &ConsensusCheckpoint,
         signature: &Signature,
     ) -> Result<ExecutionFinalResult, near_fetch::Error> {
         self.client
