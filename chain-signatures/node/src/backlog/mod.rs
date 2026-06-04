@@ -633,93 +633,15 @@ impl Backlog {
         None
     }
 
-    /// Recover backlog state from a checkpoint
-    /// This is called when a node restarts and needs to catch up
+    /// Recover backlog state from a checkpoint.
+    /// This is called when a node restarts or when it needs to align/regress to consensus.
     pub async fn recover_by_checkpoint(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
         let chain = checkpoint.chain;
         tracing::info!(
             ?chain,
             height = checkpoint.height,
             num_pending = checkpoint.pending_requests.len(),
-            "recovering from checkpoint"
-        );
-
-        let mut requests = self.requests.write().await;
-        let pending = requests
-            .entry(checkpoint.chain)
-            .or_insert_with(PendingRequests::new);
-
-        let previous_height = pending.processed_block_height().unwrap_or(0);
-        let checkpoint_height = checkpoint.height;
-
-        // Execution watchers are ephemeral, we need to get all the execution watchers here
-        let execution_to_watch = if checkpoint_height > previous_height {
-            let cleared = pending.len();
-            *pending = PendingRequests::from_checkpoint(checkpoint)?;
-            let execution_to_watch = pending.pending_executions();
-
-            tracing::info!(
-                ?chain,
-                old_block = previous_height,
-                new_block = checkpoint_height,
-                cleared_requests = cleared,
-                restored_requests = pending.len(),
-                "successfully recovered from checkpoint"
-            );
-
-            execution_to_watch
-        } else {
-            tracing::warn!(
-                chain = ?checkpoint.chain,
-                checkpoint_block = checkpoint.height,
-                previous_height,
-                "checkpoint block is not newer than current block, skipping recovery"
-            );
-
-            Vec::new()
-        };
-        drop(requests);
-
-        // Need to set the checkpoint as latest in our historical checkpoints
-        // when we initially recover for this particular chain.
-        if checkpoint_height > previous_height {
-            let checkpoint = self
-                .requests
-                .read()
-                .await
-                .get(&chain)
-                .map(|pending| pending.checkpoint(chain));
-            if let Some(checkpoint) = checkpoint {
-                self.remember_checkpoint(checkpoint).await;
-            }
-        }
-        if checkpoint_height > previous_height {
-            let mut watchers = self.execution_watchers.write().await;
-            for watchers_entry in watchers.values_mut() {
-                watchers_entry
-                    .watchers
-                    .retain(|_, watcher| watcher.tx.source_chain != chain);
-            }
-        }
-
-        // now repopulate our execution watchers
-        for (sign_id, tx) in execution_to_watch {
-            // Only restore execution watchers for bidirectional transactions
-            if let Some(tx) = tx.execution_tx().cloned() {
-                self.watch_execution(tx.target_chain, sign_id, tx).await;
-            }
-        }
-
-        Ok(())
-    }
-
-    pub async fn regress_to_checkpoint(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
-        let chain = checkpoint.chain;
-        tracing::info!(
-            ?chain,
-            height = checkpoint.height,
-            num_pending = checkpoint.pending_requests.len(),
-            "regressing to checkpoint"
+            "recovering backlog to checkpoint"
         );
 
         let mut requests = self.requests.write().await;
@@ -740,7 +662,7 @@ impl Backlog {
             new_block = checkpoint_height,
             cleared_requests = cleared,
             restored_requests = pending.len(),
-            "successfully regressed to checkpoint"
+            "successfully recovered backlog to checkpoint"
         );
         drop(requests);
 
@@ -755,7 +677,9 @@ impl Backlog {
             }
         }
 
+        // now repopulate our execution watchers
         for (sign_id, tx) in execution_to_watch {
+            // Only restore execution watchers for bidirectional transactions
             if let Some(tx) = tx.execution_tx().cloned() {
                 self.watch_execution(tx.target_chain, sign_id, tx).await;
             }

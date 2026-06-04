@@ -379,8 +379,8 @@ pub(crate) async fn align_backlog_with_consensus(
     };
 
     let height = cp.height;
-    if let Err(err) = backlog.regress_to_checkpoint(cp).await {
-        tracing::error!(?err, %chain, "Failed to regress backlog to checkpoint");
+    if let Err(err) = backlog.recover_by_checkpoint(cp).await {
+        tracing::error!(?err, %chain, "Failed to recover backlog to checkpoint");
         return None;
     }
 
