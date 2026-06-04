@@ -258,13 +258,10 @@ pub async fn run_stream<S: ChainStream>(
         }
     };
 
-    let (state_tx, mut state_rx) = watch::channel(ChainStreaming::Recovery);
-    let pipeline = ChainPipeline::new(
+    let (pipeline, mut state_rx) = ChainPipeline::new(
         indexer,
-        state_tx,
-        state_rx.clone(),
-        backlog.clone(),
         checkpoints_rx.clone(),
+        backlog.clone(),
         mesh_state.clone(),
         node_client.clone(),
         threshold,
@@ -607,24 +604,22 @@ mod tests {
         let mut stream = TestLinearStream::new(TestLinearControl::new(Some(1), vec![4, 5]));
         let mut indexer = stream.start().await.unwrap();
         indexer.livestream().await.unwrap();
-        let (state_tx, state_rx) = watch::channel(ChainStreaming::Catchup { anchor_height: 4 });
         let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest {
             height: 0,
             digest: [0u8; 32],
         });
         let (_m_tx, m_rx) = watch::channel(MeshState::default());
-        ChainPipeline::new(
+        let (pipeline, state_rx) = ChainPipeline::from_state(
+            ChainStreaming::Catchup { anchor_height: 4 },
             indexer,
-            state_tx,
-            state_rx,
-            Backlog::new(),
             cp_rx,
+            Backlog::new(),
             m_rx,
             NodeClient::new(&Default::default()),
             0,
-        )
-        .run()
-        .await;
+        );
+
+        pipeline.run().await;
 
         let mut observed = Vec::new();
         while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
@@ -650,24 +645,21 @@ mod tests {
         );
         let mut indexer = stream.start().await.unwrap();
         indexer.livestream().await.unwrap();
-        let (state_tx, state_rx) = watch::channel(ChainStreaming::Catchup { anchor_height: 4 });
         let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest {
             height: 0,
             digest: [0u8; 32],
         });
         let (_m_tx, m_rx) = watch::channel(MeshState::default());
-        ChainPipeline::new(
+        let (pipeline, state_rx) = ChainPipeline::from_state(
+            ChainStreaming::Catchup { anchor_height: 4 },
             indexer,
-            state_tx,
-            state_rx,
-            Backlog::new(),
             cp_rx,
+            Backlog::new(),
             m_rx,
             NodeClient::new(&Default::default()),
             0,
-        )
-        .run()
-        .await;
+        );
+        pipeline.run().await;
 
         let mut observed = Vec::new();
         while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
@@ -1512,7 +1504,6 @@ mod tests {
         backlog.set_processed_block(Chain::Solana, 5).await;
         let checkpoint = backlog.checkpoint(Chain::Solana).await;
 
-        let (state_tx, state_rx) = watch::channel(ChainStreaming::Recovery);
         let (_cp_tx, cp_rx) = watch::channel(crate::rpc::CheckpointDigest {
             height: 5,
             digest: crate::backlog::checkpoint_digest(&checkpoint).unwrap(),
@@ -1524,11 +1515,9 @@ mod tests {
             catchup_started_tx: Arc::new(Mutex::new(Some(catchup_tx))),
         };
 
-        let pipeline = ChainPipeline::new(
+        let (pipeline, state_rx) = ChainPipeline::from_state(
+            ChainStreaming::Recovery,
             indexer,
-            state_tx,
-            state_rx.clone(),
-            backlog,
             cp_rx,
             mesh_rx,
             NodeClient::new(&Default::default()),
@@ -1607,12 +1596,11 @@ mod tests {
             next_called_tx: Arc::new(Mutex::new(Some(next_called_tx))),
         };
 
-        let pipeline = ChainPipeline::new(
+        let (pipeline, state_rx) = ChainPipeline::from_state(
+            ChainStreaming::Live,
             indexer,
-            state_tx,
-            state_rx.clone(),
-            backlog,
             cp_rx,
+            backlog,
             mesh_rx,
             NodeClient::new(&Default::default()),
             1,

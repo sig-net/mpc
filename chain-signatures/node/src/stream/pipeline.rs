@@ -12,8 +12,8 @@ pub struct ChainPipeline<I: ChainIndexer> {
     indexer: I,
     state_tx: watch::Sender<ChainStreaming>,
     state_rx: watch::Receiver<ChainStreaming>,
-    backlog: Backlog,
     checkpoints_rx: watch::Receiver<CheckpointDigest>,
+    backlog: Backlog,
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
     threshold: usize,
@@ -22,24 +22,44 @@ pub struct ChainPipeline<I: ChainIndexer> {
 impl<I: ChainIndexer> ChainPipeline<I> {
     pub fn new(
         indexer: I,
-        state_tx: watch::Sender<ChainStreaming>,
-        state_rx: watch::Receiver<ChainStreaming>,
-        backlog: Backlog,
         checkpoints_rx: watch::Receiver<CheckpointDigest>,
+        backlog: Backlog,
         mesh_state: watch::Receiver<MeshState>,
         node_client: NodeClient,
         threshold: usize,
-    ) -> Self {
-        Self {
+    ) -> (Self, watch::Receiver<ChainStreaming>) {
+        Self::from_state(
+            ChainStreaming::Recovery,
+            indexer,
+            checkpoints_rx,
+            backlog,
+            mesh_state,
+            node_client,
+            threshold,
+        )
+    }
+
+    pub fn from_state(
+        state: ChainStreaming,
+        indexer: I,
+        checkpoints_rx: watch::Receiver<CheckpointDigest>,
+        backlog: Backlog,
+        mesh_state: watch::Receiver<MeshState>,
+        node_client: NodeClient,
+        threshold: usize,
+    ) -> (Self, watch::Receiver<ChainStreaming>) {
+        let (state_tx, state_rx) = watch::channel(state);
+        let this = Self {
             indexer,
             state_tx,
-            state_rx,
+            state_rx: state_rx.clone(),
             backlog,
             checkpoints_rx,
             mesh_state,
             node_client,
             threshold,
-        }
+        };
+        (this, state_rx)
     }
 
     pub async fn run(mut self) {
