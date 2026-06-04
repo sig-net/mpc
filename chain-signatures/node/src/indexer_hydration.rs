@@ -315,13 +315,6 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HydrationSignatureRespondedEvent {
-    pub request_id: [u8; 32],
-    pub responder: [u8; 32],
-    pub signature: Signature,
-}
-
 /// Storage key for `frame_system::Events`.
 fn system_events_key() -> Vec<u8> {
     let mut key = Vec::with_capacity(32);
@@ -531,16 +524,10 @@ pub async fn run(
                     }
                 };
                 tracing::info!(
-                    "Hydration::Signet::SignatureResponded in block #{number} ({hash:?}): {:?}",
-                    event
+                    "Hydration::Signet::SignatureResponded in block #{number} ({hash:?})"
                 );
-                let respond_event = crate::stream::ops::SignatureRespondedEvent {
-                    request_id: event.request_id,
-                    signature: event.signature,
-                    chain: Chain::Hydration,
-                };
                 if let Err(e) = crate::stream::ops::process_respond_event(
-                    respond_event,
+                    event,
                     sign_tx.clone(),
                     &mut contract_watcher,
                     &backlog,
@@ -672,20 +659,19 @@ fn decode_signature_requested(
 
 fn decode_signature_responded(
     ev: &EventDetails<SubstrateConfig>,
-) -> anyhow::Result<HydrationSignatureRespondedEvent> {
+) -> anyhow::Result<crate::stream::ops::SignatureRespondedEvent> {
     let fields = ev.field_values()?;
 
     let request_id = get_named_bytes32(&fields, "request_id")?;
-    let responder = get_named_bytes32(&fields, "responder")?; // Hydration 一般是 AccountId32
 
     // signature: pallet 的 Signature 结构（嵌套）
     let sig_value = get_named(&fields, "signature")?;
     let mpc_sig = parse_signature(sig_value)?;
 
-    Ok(HydrationSignatureRespondedEvent {
+    Ok(crate::stream::ops::SignatureRespondedEvent {
         request_id,
-        responder,
         signature: mpc_sig,
+        chain: Chain::Hydration,
     })
 }
 

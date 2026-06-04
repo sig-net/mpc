@@ -19,10 +19,7 @@ use tokio_tungstenite::tungstenite::http::header;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-use super::{
-    contracts, ledger_api, CantonConfig, CantonSignBidirectionalRequestedEvent,
-    CantonSignatureRespondedEvent,
-};
+use super::{contracts, ledger_api, CantonConfig, CantonSignBidirectionalRequestedEvent};
 
 type CantonWs = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type CantonWsRead = SplitStream<CantonWs>;
@@ -421,12 +418,7 @@ async fn process_canton_event(
         ledger_api::templates::SIGNATURE_RESPONDED_EVENT,
     ) {
         match parse_signature_responded_event(created) {
-            Ok(responded) => {
-                let event = SignatureRespondedEvent {
-                    request_id: responded.request_id,
-                    signature: responded.signature,
-                    chain: Chain::Canton,
-                };
+            Ok(event) => {
                 if events_tx.send(ChainEvent::Respond(event)).await.is_err() {
                     tracing::error!("canton event channel closed");
                 }
@@ -524,17 +516,17 @@ fn verify_sign_event(
 
 fn parse_signature_responded_event(
     created: &ledger_api::CreatedEvent,
-) -> anyhow::Result<CantonSignatureRespondedEvent> {
+) -> anyhow::Result<SignatureRespondedEvent> {
     let payload: contracts::SignatureRespondedEventPayload =
         serde_json::from_value(created.payload.clone())?;
     let mut request_id = [0u8; 32];
     hex::decode_to_slice(&payload.request_id, &mut request_id)
         .map_err(|e| anyhow::anyhow!("invalid request_id hex: {e}"))?;
 
-    Ok(CantonSignatureRespondedEvent {
+    Ok(SignatureRespondedEvent {
         request_id,
-        responder: payload.responder,
         signature: parse_canton_signature(&payload.signature)?,
+        chain: Chain::Canton,
     })
 }
 

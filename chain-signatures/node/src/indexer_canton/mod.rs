@@ -16,7 +16,7 @@ use crate::stream::ops::{SignBidirectionalEvent, SignatureEvent};
 use alloy::consensus::{SignableTransaction, TxEip1559};
 use borsh::{BorshDeserialize, BorshSerialize};
 use k256::Scalar;
-use mpc_primitives::{ScalarExt, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{ScalarExt, SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use std::fmt;
 
 use contracts::TxParams as CantonTxParams;
@@ -85,14 +85,6 @@ impl CantonSignBidirectionalRequestedEvent {
         })
     }
 }
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct CantonSignatureRespondedEvent {
-    pub request_id: [u8; 32],
-    pub responder: String,
-    pub signature: Signature,
-}
-// NOTE: No Hash, PartialEq, Eq derives — matches HydrationSignatureRespondedEvent
 
 impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
