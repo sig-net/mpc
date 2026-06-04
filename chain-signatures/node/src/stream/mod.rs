@@ -909,13 +909,12 @@ mod tests {
                 (watched_sign_id == sign_id).then_some(watched_tx)
             })
             .expect("expected execution watcher to exist");
+        let execution_id = execution.id;
         backlog
             .set_status(
                 Chain::Solana,
                 &sign_id,
-                SignStatus::PendingExecution {
-                    tx: execution.clone(),
-                },
+                SignStatus::PendingExecution { tx: execution },
             )
             .await;
 
@@ -947,7 +946,7 @@ mod tests {
 
         // now send an execution confirmation event to advance to RespondBidirectional
         crate::stream::ops::process_execution_confirmed(
-            execution.id,
+            execution_id,
             sign_id,
             Chain::Solana,
             block,
