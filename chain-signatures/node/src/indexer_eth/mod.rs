@@ -8,7 +8,7 @@ use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::respond_bidirectional::CompletedTx;
-use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
+use crate::stream::ops::SignatureRespondedEvent;
 use crate::stream::{AsyncCatchupIter, ChainEvent, ChainIndexer, ChainStream, ExecutionOutcome};
 use crate::util::retry;
 
@@ -489,8 +489,6 @@ async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEvent>) 
             continue;
         }
 
-        // responder: offset 0..32 (address right-padded)
-        let responder_addr = Address::from_slice(&data[12..32]);
         // signature struct encoding layout:
         // bigR.x at 32..64, bigR.y at 64..96, s at 96..128, recoveryId at 159
         let big_r_x = &data[32..64];
@@ -513,13 +511,11 @@ async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEvent>) 
 
         let signature = MpcSignature::new(big_r, s, recovery_id);
 
-        let eth_event = EthereumSignatureRespondedEvent {
+        let respond_event = SignatureRespondedEvent {
             request_id: sign_id.request_id,
-            responder: responder_addr,
             signature,
+            chain: Chain::Ethereum,
         };
-
-        let respond_event = SignatureRespondedEvent::Ethereum(eth_event);
         tracing::info!(?sign_id, "emitting SignatureResponded event");
         if let Err(err) = events_tx.send(ChainEvent::Respond(respond_event)).await {
             tracing::error!(?err, "failed to emit Respond event");

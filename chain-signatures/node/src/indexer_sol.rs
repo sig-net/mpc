@@ -1044,15 +1044,24 @@ async fn emit_events(
             for ev in bidirectional {
                 let _ = events_tx
                     .send(ChainEvent::RespondBidirectional(
-                        crate::stream::ops::RespondBidirectionalEvent::Solana(ev),
+                        crate::stream::ops::RespondBidirectionalEvent {
+                            request_id: ev.request_id,
+                            chain: crate::protocol::Chain::Solana,
+                        },
                     ))
                     .await;
             }
 
             for ev in responded {
+                let signature = to_mpc_signature(ev.signature.clone())
+                    .context("failed to parse Solana signature")?;
                 let _ = events_tx
                     .send(ChainEvent::Respond(
-                        crate::stream::ops::SignatureRespondedEvent::Solana(ev),
+                        crate::stream::ops::SignatureRespondedEvent {
+                            request_id: ev.request_id,
+                            signature,
+                            chain: Chain::Solana,
+                        },
                     ))
                     .await;
             }

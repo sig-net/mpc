@@ -316,14 +316,6 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HydrationRespondBidirectionalEvent {
-    pub request_id: [u8; 32],
-    pub responder: [u8; 32],
-    pub serialized_output: Vec<u8>,
-    pub signature: Signature,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HydrationSignatureRespondedEvent {
     pub request_id: [u8; 32],
     pub responder: [u8; 32],
@@ -542,8 +534,13 @@ pub async fn run(
                     "Hydration::Signet::SignatureResponded in block #{number} ({hash:?}): {:?}",
                     event
                 );
+                let respond_event = crate::stream::ops::SignatureRespondedEvent {
+                    request_id: event.request_id,
+                    signature: event.signature,
+                    chain: Chain::Hydration,
+                };
                 if let Err(e) = crate::stream::ops::process_respond_event(
-                    crate::stream::ops::SignatureRespondedEvent::Hydration(event),
+                    respond_event,
                     sign_tx.clone(),
                     &mut contract_watcher,
                     &backlog,
@@ -589,19 +586,28 @@ pub async fn run(
             // Bidirectional response
             if ev.pallet_name() == PALLET_SIGNET && ev.variant_name() == EVENT_RESPOND_BIDIRECTIONAL
             {
-                let event = match decode_respond_bidirectional(&ev) {
-                    Ok(event) => event,
+                let fields = match ev.field_values() {
+                    Ok(f) => f,
                     Err(e) => {
-                        tracing::error!("failed to decode respond bidirectional event: {e}");
+                        tracing::error!("failed to get fields for respond bidirectional: {e}");
+                        continue;
+                    }
+                };
+                let request_id = match get_named_bytes32(&fields, "request_id") {
+                    Ok(id) => id,
+                    Err(e) => {
+                        tracing::error!("failed to get request_id: {e}");
                         continue;
                     }
                 };
                 tracing::info!(
-                    "Hydration::Signet::RespondBidirectionalEvent in block #{number} ({hash:?}): {:?}",
-                    event
+                    "Hydration::Signet::RespondBidirectionalEvent in block #{number} ({hash:?})"
                 );
                 if let Err(e) = crate::stream::ops::process_respond_bidirectional_event(
-                    crate::stream::ops::RespondBidirectionalEvent::Hydration(event),
+                    crate::stream::ops::RespondBidirectionalEvent {
+                        request_id,
+                        chain: crate::protocol::Chain::Hydration,
+                    },
                     sign_tx.clone(),
                     &backlog,
                     true,
@@ -718,26 +724,6 @@ fn decode_sign_bidirectional_requested(
         params,
         output_deserialization_schema,
         respond_serialization_schema,
-    })
-}
-
-fn decode_respond_bidirectional(
-    ev: &EventDetails<SubstrateConfig>,
-) -> anyhow::Result<HydrationRespondBidirectionalEvent> {
-    let fields = ev.field_values()?;
-
-    let request_id = get_named_bytes32(&fields, "request_id")?;
-    let responder = get_named_bytes32(&fields, "responder")?;
-    let serialized_output = get_named_vec_u8(&fields, "serialized_output")?;
-
-    let sig_val = get_named(&fields, "signature")?;
-    let mpc_sig = parse_signature(sig_val)?;
-
-    Ok(HydrationRespondBidirectionalEvent {
-        request_id,
-        responder,
-        serialized_output,
-        signature: mpc_sig,
     })
 }
 

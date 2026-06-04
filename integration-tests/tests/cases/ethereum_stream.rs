@@ -18,7 +18,6 @@ use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::ops::SignBidirectionalEvent as NodeSignBidirectionalEvent;
-use mpc_node::stream::ops::SignatureRespondedEvent;
 use mpc_node::stream::{catchup_then_livestream, run_stream, ChainEvent, ChainStream};
 use mpc_node::util::current_unix_timestamp;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
@@ -1109,7 +1108,8 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     let mut saw_respond = false;
     for _ in 0..8 {
         match next_event_within(&mut stream, Duration::from_secs(10)).await? {
-            ChainEvent::Respond(SignatureRespondedEvent::Ethereum(ev)) => {
+            ChainEvent::Respond(ev) => {
+                assert_eq!(ev.chain, mpc_primitives::Chain::Ethereum);
                 assert_eq!(ev.request_id, sign_req.id.request_id);
                 assert_eq!(ev.signature.big_r, expected_big_r);
                 assert_eq!(ev.signature.s, expected_s);

@@ -86,15 +86,6 @@ impl CantonSignBidirectionalRequestedEvent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CantonRespondBidirectionalEvent {
-    pub request_id: [u8; 32],
-    pub responder: String,
-    pub serialized_output: Vec<u8>,
-    pub signature: Signature,
-}
-// NOTE: No Hash derive — Signature contains k256 types that don't impl Hash
-
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CantonSignatureRespondedEvent {
     pub request_id: [u8; 32],

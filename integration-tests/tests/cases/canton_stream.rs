@@ -6,7 +6,6 @@ use mpc_node::backlog::Backlog;
 use mpc_node::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
 use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
 use mpc_node::protocol::{Chain, IndexedSignRequest, SignKind};
-use mpc_node::stream::ops::SignatureRespondedEvent;
 use mpc_node::stream::{catchup_then_livestream, ChainEvent, ChainStream};
 use mpc_primitives::{ScalarExt, Signature, LATEST_MPC_KEY_VERSION};
 use serde_json::json;
@@ -408,7 +407,8 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     let mut saw_respond = false;
     for _ in 0..10 {
         match timeout(Duration::from_secs(5), stream.next_event()).await {
-            Ok(Some(ChainEvent::Respond(SignatureRespondedEvent::Canton(ev)))) => {
+            Ok(Some(ChainEvent::Respond(ev))) => {
+                assert_eq!(ev.chain, mpc_primitives::Chain::Canton);
                 assert_eq!(hex::encode(ev.request_id), request_id);
                 assert_eq!(ev.signature.big_r, expected_big_r);
                 assert_eq!(ev.signature.s, expected_s);

@@ -20,8 +20,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use super::{
-    contracts, ledger_api, CantonConfig, CantonRespondBidirectionalEvent,
-    CantonSignBidirectionalRequestedEvent, CantonSignatureRespondedEvent,
+    contracts, ledger_api, CantonConfig, CantonSignBidirectionalRequestedEvent,
+    CantonSignatureRespondedEvent,
 };
 
 type CantonWs = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -422,7 +422,11 @@ async fn process_canton_event(
     ) {
         match parse_signature_responded_event(created) {
             Ok(responded) => {
-                let event = SignatureRespondedEvent::Canton(responded);
+                let event = SignatureRespondedEvent {
+                    request_id: responded.request_id,
+                    signature: responded.signature,
+                    chain: Chain::Canton,
+                };
                 if events_tx.send(ChainEvent::Respond(event)).await.is_err() {
                     tracing::error!("canton event channel closed");
                 }
@@ -435,15 +439,25 @@ async fn process_canton_event(
         template_id,
         ledger_api::templates::RESPOND_BIDIRECTIONAL_EVENT,
     ) {
-        match parse_respond_bidirectional_event(created) {
-            Ok(respond) => {
-                let event = RespondBidirectionalEvent::Canton(respond);
-                if events_tx
-                    .send(ChainEvent::RespondBidirectional(event))
-                    .await
-                    .is_err()
-                {
-                    tracing::error!("canton event channel closed");
+        match serde_json::from_value::<contracts::RespondBidirectionalEventPayload>(
+            created.payload.clone(),
+        ) {
+            Ok(payload) => {
+                let mut request_id = [0u8; 32];
+                if let Err(e) = hex::decode_to_slice(&payload.request_id, &mut request_id) {
+                    tracing::warn!("invalid request_id hex: {e}");
+                } else {
+                    let event = RespondBidirectionalEvent {
+                        request_id,
+                        chain: crate::protocol::Chain::Canton,
+                    };
+                    if events_tx
+                        .send(ChainEvent::RespondBidirectional(event))
+                        .await
+                        .is_err()
+                    {
+                        tracing::error!("canton event channel closed");
+                    }
                 }
             }
             Err(e) => {
@@ -520,26 +534,6 @@ fn parse_signature_responded_event(
     Ok(CantonSignatureRespondedEvent {
         request_id,
         responder: payload.responder,
-        signature: parse_canton_signature(&payload.signature)?,
-    })
-}
-
-fn parse_respond_bidirectional_event(
-    created: &ledger_api::CreatedEvent,
-) -> anyhow::Result<CantonRespondBidirectionalEvent> {
-    let payload: contracts::RespondBidirectionalEventPayload =
-        serde_json::from_value(created.payload.clone())?;
-    let mut request_id = [0u8; 32];
-    hex::decode_to_slice(&payload.request_id, &mut request_id)
-        .map_err(|e| anyhow::anyhow!("invalid request_id hex: {e}"))?;
-
-    let serialized_output = hex::decode(&payload.serialized_output)
-        .map_err(|e| anyhow::anyhow!("invalid serializedOutput hex: {e}"))?;
-
-    Ok(CantonRespondBidirectionalEvent {
-        request_id,
-        responder: payload.responder,
-        serialized_output,
         signature: parse_canton_signature(&payload.signature)?,
     })
 }
@@ -755,11 +749,16 @@ mod tests {
             package_name: None,
         };
 
-        let event = parse_respond_bidirectional_event(&created).expect("payload should parse");
-        assert_eq!(event.request_id, [5u8; 32]);
-        assert_eq!(event.responder, "alice");
-        assert_eq!(event.serialized_output, vec![8u8, 9u8]);
-        assert_eq!(event.signature.recovery_id, 0);
+        let payload: contracts::RespondBidirectionalEventPayload =
+            serde_json::from_value(created.payload.clone()).expect("payload should parse");
+        let mut request_id = [0u8; 32];
+        hex::decode_to_slice(&payload.request_id, &mut request_id).unwrap();
+        assert_eq!(request_id, [5u8; 32]);
+        assert_eq!(payload.responder, "alice");
+        assert_eq!(
+            hex::decode(&payload.serialized_output).unwrap(),
+            vec![8u8, 9u8]
+        );
     }
 
     #[tokio::test]
@@ -789,7 +788,8 @@ mod tests {
         .await;
 
         match events_rx.recv().await {
-            Some(ChainEvent::Respond(SignatureRespondedEvent::Canton(event))) => {
+            Some(ChainEvent::Respond(event)) => {
+                assert_eq!(event.chain, Chain::Canton);
                 assert_eq!(event.request_id, [6u8; 32]);
             }
             other => panic!("expected Canton respond event, got {other:?}"),
