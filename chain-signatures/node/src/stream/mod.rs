@@ -175,154 +175,208 @@ pub trait ChainStream: Send + 'static {
     async fn next_event(&mut self) -> Option<ChainEvent>;
 }
 
-pub async fn catchup_then_livestream<I: ChainIndexer>(
-    mut indexer: I,
+pub struct ChainPipeline<I: ChainIndexer> {
+    indexer: I,
     state_tx: watch::Sender<ChainStreaming>,
-    mut state_rx: watch::Receiver<ChainStreaming>,
+    state_rx: watch::Receiver<ChainStreaming>,
     backlog: Backlog,
-    mut checkpoints_rx: watch::Receiver<CheckpointDigest>,
+    checkpoints_rx: watch::Receiver<CheckpointDigest>,
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
     threshold: usize,
-) {
-    let chain = I::CHAIN;
-    tracing::info!(%chain, "starting ChainStream catchup then livestream");
+}
 
-    let mut current_state = *state_rx.borrow_and_update();
+impl<I: ChainIndexer> ChainPipeline<I> {
+    pub fn new(
+        indexer: I,
+        state_tx: watch::Sender<ChainStreaming>,
+        state_rx: watch::Receiver<ChainStreaming>,
+        backlog: Backlog,
+        checkpoints_rx: watch::Receiver<CheckpointDigest>,
+        mesh_state: watch::Receiver<MeshState>,
+        node_client: NodeClient,
+        threshold: usize,
+    ) -> Self {
+        Self {
+            indexer,
+            state_tx,
+            state_rx,
+            backlog,
+            checkpoints_rx,
+            mesh_state,
+            node_client,
+            threshold,
+        }
+    }
 
-    loop {
-        match current_state {
-            ChainStreaming::Recovery => {
-                tracing::info!(%chain, "starting Recovery state");
-                crate::mesh::wait_threshold_active(&mut mesh_state.clone(), threshold).await;
+    pub async fn run(mut self) {
+        let chain = I::CHAIN;
+        tracing::info!(%chain, "starting ChainStream pipeline");
+        let mut current_state = *self.state_rx.borrow_and_update();
 
-                // Load local checkpoint from storage first
-                match backlog.storage.load_latest(chain).await {
-                    Ok(Some(checkpoint)) => {
-                        tracing::info!(
-                            ?chain,
-                            height = checkpoint.height,
-                            "loaded local checkpoint"
-                        );
-                        if let Err(err) = backlog.recover_by_checkpoint(checkpoint).await {
-                            tracing::warn!(?chain, %err, "failed to recover from local checkpoint");
-                        }
-                    }
-                    Ok(None) => {
-                        tracing::info!(?chain, "no local checkpoint found");
-                    }
-                    Err(err) => {
-                        tracing::warn!(?chain, %err, "failed to load local checkpoint");
-                    }
-                }
-
-                // Perform consensus checkpoint alignment
-                let _ = crate::stream::ops::align_backlog_with_consensus(
-                    chain,
-                    &backlog,
-                    &mut checkpoints_rx,
-                    &mesh_state,
-                    &node_client,
-                )
-                .await;
-
-                // Determine anchor height
-                let anchor_height = loop {
-                    match indexer.livestream().await {
-                        Ok(anchor_height) => break anchor_height,
-                        Err(err) => {
-                            tracing::error!(?err, %chain, "failed to initialize livestream; retrying");
-                            tokio::time::sleep(I::RETRY_DELAY).await;
-                        }
-                    }
-                };
-
-                let catchup_height = anchor_height.unwrap_or(0);
-                current_state = ChainStreaming::Catchup {
-                    anchor_height: catchup_height,
-                };
-                let _ = state_tx.send(current_state);
-            }
-            ChainStreaming::Catchup { anchor_height } => {
-                tracing::info!(%chain, anchor_height, "starting/re-starting catchup");
-                let mut catchup_iter = indexer.catchup_range(anchor_height).await;
-                let mut catchup_done = false;
-
-                while !catchup_done {
-                    tokio::select! {
-                        catchup_item = catchup_iter.next() => {
-                            let Some(catchup_item) = catchup_item else {
-                                catchup_done = true;
-                                break;
-                            };
-                            while let Err(err) = indexer.process_catchup(&catchup_item).await {
-                                tracing::warn!(?err, %chain, "catchup item processing failed; retrying");
-                                tokio::time::sleep(I::RETRY_DELAY).await;
-                            }
-                        }
-                        _ = state_rx.changed() => {
-                            let new_state = *state_rx.borrow_and_update();
-                            if new_state != current_state {
-                                current_state = new_state;
-                                break;
-                            }
-                        }
-                        _ = checkpoints_rx.changed() => {
-                            if threshold > 0 {
-                                if let Some(new_state) = check_regression_and_get_state(
-                                    chain,
-                                    &backlog,
-                                    &mut checkpoints_rx,
-                                ).await {
-                                    current_state = new_state;
-                                    let _ = state_tx.send(current_state);
-                                    break;
-                                }
-                            }
-                        }
+        loop {
+            match current_state {
+                ChainStreaming::Recovery => {
+                    if let Some(next_state) = self.handle_recovery().await {
+                        current_state = next_state;
+                    } else {
+                        break;
                     }
                 }
-
-                if catchup_done {
-                    tracing::info!(%chain, "catchup completed => transitioning to livestream");
-                    if let Err(err) = indexer.notify_catchup_completed().await {
-                        tracing::warn!(?err, %chain, "failed to signal catchup completion");
+                ChainStreaming::Catchup { anchor_height } => {
+                    if let Some(next_state) = self.handle_catchup(anchor_height).await {
+                        current_state = next_state;
+                    } else {
+                        break;
                     }
-                    current_state = ChainStreaming::Live;
-                    let _ = state_tx.send(current_state);
+                }
+                ChainStreaming::Live => {
+                    if let Some(next_state) = self.handle_live().await {
+                        current_state = next_state;
+                    } else {
+                        break;
+                    }
                 }
             }
-            ChainStreaming::Live => {
-                loop {
-                    tokio::select! {
-                        block = indexer.next() => {
-                            let Some(block) = block else {
-                                return; // shutdown
-                            };
-                            while let Err(err) = indexer.process(&block).await {
-                                tracing::warn!(?err, "live block processing failed; retrying");
-                                tokio::time::sleep(I::RETRY_DELAY).await;
-                            }
+        }
+    }
+
+    async fn handle_recovery(&mut self) -> Option<ChainStreaming> {
+        let chain = I::CHAIN;
+        tracing::info!(%chain, "starting Recovery state");
+        crate::mesh::wait_threshold_active(&mut self.mesh_state.clone(), self.threshold).await;
+
+        // Load local checkpoint from storage first
+        match self.backlog.storage.load_latest(chain).await {
+            Ok(Some(checkpoint)) => {
+                tracing::info!(
+                    ?chain,
+                    height = checkpoint.height,
+                    "loaded local checkpoint"
+                );
+                if let Err(err) = self.backlog.recover_by_checkpoint(checkpoint).await {
+                    tracing::warn!(?chain, %err, "failed to recover from local checkpoint");
+                }
+            }
+            Ok(None) => {
+                tracing::info!(?chain, "no local checkpoint found");
+            }
+            Err(err) => {
+                tracing::warn!(?chain, %err, "failed to load local checkpoint");
+            }
+        }
+
+        // Perform consensus checkpoint alignment
+        let _ = crate::stream::ops::align_backlog_with_consensus(
+            chain,
+            &self.backlog,
+            &mut self.checkpoints_rx,
+            &self.mesh_state,
+            &self.node_client,
+        )
+        .await;
+
+        // Determine anchor height
+        let anchor_height = loop {
+            match self.indexer.livestream().await {
+                Ok(anchor_height) => break anchor_height,
+                Err(err) => {
+                    tracing::error!(?err, %chain, "failed to initialize livestream; retrying");
+                    tokio::time::sleep(I::RETRY_DELAY).await;
+                }
+            }
+        };
+
+        let catchup_height = anchor_height.unwrap_or(0);
+        let next_state = ChainStreaming::Catchup {
+            anchor_height: catchup_height,
+        };
+        let _ = self.state_tx.send(next_state);
+        Some(next_state)
+    }
+
+    async fn handle_catchup(&mut self, anchor_height: u64) -> Option<ChainStreaming> {
+        let chain = I::CHAIN;
+        tracing::info!(%chain, anchor_height, "starting/re-starting catchup");
+        let mut catchup_iter = self.indexer.catchup_range(anchor_height).await;
+        let mut catchup_done = false;
+
+        let current_state = ChainStreaming::Catchup { anchor_height };
+
+        while !catchup_done {
+            tokio::select! {
+                catchup_item = catchup_iter.next() => {
+                    let Some(catchup_item) = catchup_item else {
+                        catchup_done = true;
+                        break;
+                    };
+                    while let Err(err) = self.indexer.process_catchup(&catchup_item).await {
+                        tracing::warn!(?err, %chain, "catchup item processing failed; retrying");
+                        tokio::time::sleep(I::RETRY_DELAY).await;
+                    }
+                }
+                _ = self.state_rx.changed() => {
+                    let new_state = *self.state_rx.borrow_and_update();
+                    if new_state != current_state {
+                        return Some(new_state);
+                    }
+                }
+                _ = self.checkpoints_rx.changed() => {
+                    if self.threshold > 0 {
+                        if let Some(new_state) = check_regression_and_get_state(
+                            chain,
+                            &self.backlog,
+                            &mut self.checkpoints_rx,
+                        ).await {
+                            let _ = self.state_tx.send(new_state);
+                            return Some(new_state);
                         }
-                        _ = state_rx.changed() => {
-                            let new_state = *state_rx.borrow_and_update();
-                            if new_state != current_state {
-                                current_state = new_state;
-                                break;
-                            }
-                        }
-                        _ = checkpoints_rx.changed() => {
-                            if threshold > 0 {
-                                if let Some(new_state) = check_regression_and_get_state(
-                                    chain,
-                                    &backlog,
-                                    &mut checkpoints_rx,
-                                ).await {
-                                    current_state = new_state;
-                                    let _ = state_tx.send(current_state);
-                                    break;
-                                }
-                            }
+                    }
+                }
+            }
+        }
+
+        let mut final_state = current_state;
+        if catchup_done {
+            tracing::info!(%chain, "catchup completed => transitioning to livestream");
+            if let Err(err) = self.indexer.notify_catchup_completed().await {
+                tracing::warn!(?err, %chain, "failed to signal catchup completion");
+            }
+            final_state = ChainStreaming::Live;
+            let _ = self.state_tx.send(final_state);
+        }
+        Some(final_state)
+    }
+
+    async fn handle_live(&mut self) -> Option<ChainStreaming> {
+        let chain = I::CHAIN;
+        let current_state = ChainStreaming::Live;
+        loop {
+            tokio::select! {
+                block = self.indexer.next() => {
+                    let Some(block) = block else {
+                        return None; // shutdown
+                    };
+                    while let Err(err) = self.indexer.process(&block).await {
+                        tracing::warn!(?err, "live block processing failed; retrying");
+                        tokio::time::sleep(I::RETRY_DELAY).await;
+                    }
+                }
+                _ = self.state_rx.changed() => {
+                    let new_state = *self.state_rx.borrow_and_update();
+                    if new_state != current_state {
+                        return Some(new_state);
+                    }
+                }
+                _ = self.checkpoints_rx.changed() => {
+                    if self.threshold > 0 {
+                        if let Some(new_state) = check_regression_and_get_state(
+                            chain,
+                            &self.backlog,
+                            &mut self.checkpoints_rx,
+                        ).await {
+                            let _ = self.state_tx.send(new_state);
+                            return Some(new_state);
                         }
                     }
                 }
@@ -413,7 +467,7 @@ pub async fn run_stream<S: ChainStream>(
     };
 
     let (state_tx, mut state_rx) = watch::channel(ChainStreaming::Recovery);
-    let indexer_task = tokio::spawn(catchup_then_livestream(
+    let pipeline = ChainPipeline::new(
         indexer,
         state_tx,
         state_rx.clone(),
@@ -422,7 +476,8 @@ pub async fn run_stream<S: ChainStream>(
         mesh_state.clone(),
         node_client.clone(),
         threshold,
-    ));
+    );
+    let indexer_task = tokio::spawn(pipeline.run());
 
     let mut caught_up = false;
     loop {
@@ -766,7 +821,7 @@ mod tests {
             digest: [0u8; 32],
         });
         let (_m_tx, m_rx) = watch::channel(MeshState::default());
-        catchup_then_livestream(
+        ChainPipeline::new(
             indexer,
             state_tx,
             state_rx,
@@ -776,6 +831,7 @@ mod tests {
             NodeClient::new(&Default::default()),
             0,
         )
+        .run()
         .await;
 
         let mut observed = Vec::new();
@@ -808,7 +864,7 @@ mod tests {
             digest: [0u8; 32],
         });
         let (_m_tx, m_rx) = watch::channel(MeshState::default());
-        catchup_then_livestream(
+        ChainPipeline::new(
             indexer,
             state_tx,
             state_rx,
@@ -818,6 +874,7 @@ mod tests {
             NodeClient::new(&Default::default()),
             0,
         )
+        .run()
         .await;
 
         let mut observed = Vec::new();
@@ -1675,7 +1732,7 @@ mod tests {
             catchup_started_tx: Arc::new(Mutex::new(Some(catchup_tx))),
         };
 
-        let task_handle = tokio::spawn(catchup_then_livestream(
+        let pipeline = ChainPipeline::new(
             indexer,
             state_tx,
             state_rx.clone(),
@@ -1684,7 +1741,8 @@ mod tests {
             mesh_rx,
             NodeClient::new(&Default::default()),
             0,
-        ));
+        );
+        let task_handle = tokio::spawn(pipeline.run());
 
         timeout(Duration::from_secs(1), catchup_rx)
             .await
@@ -1757,7 +1815,7 @@ mod tests {
             next_called_tx: Arc::new(Mutex::new(Some(next_called_tx))),
         };
 
-        let task_handle = tokio::spawn(catchup_then_livestream(
+        let pipeline = ChainPipeline::new(
             indexer,
             state_tx,
             state_rx.clone(),
@@ -1766,7 +1824,8 @@ mod tests {
             mesh_rx,
             NodeClient::new(&Default::default()),
             1,
-        ));
+        );
+        let task_handle = tokio::spawn(pipeline.run());
 
         timeout(Duration::from_secs(1), next_called_rx)
             .await
