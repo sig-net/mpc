@@ -172,15 +172,9 @@ pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I) {
     let chain = I::CHAIN;
     tracing::info!(%chain, "starting ChainStream catchup then livestream");
 
-    // TODO: on failure, we currently send catchup_completed due to some streams not enabling
-    // this particular catchup_then_livestream function (i.e. Solana & Hydration). Once
-    // those are implemented, we can remove the catchup_completed sending on error here.
     let anchor_height = match indexer.livestream().await {
         Ok(anchor_height) => anchor_height,
         Err(err) => {
-            if let Err(err) = indexer.notify_catchup_completed().await {
-                tracing::warn!(?err, %chain, "failed to signal catchup completion");
-            }
             tracing::error!(?err, %chain, "failed to initialize livestream");
             return;
         }
