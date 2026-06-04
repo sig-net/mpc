@@ -125,7 +125,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             chain,
             &self.backlog,
             &mut self.checkpoints_rx,
-            &self.mesh_state,
+            &mut self.mesh_state,
             &self.node_client,
         )
         .await;
@@ -153,15 +153,12 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         let chain = I::CHAIN;
         tracing::info!(%chain, anchor_height, "starting/re-starting catchup");
         let mut catchup_iter = self.indexer.catchup_range(anchor_height).await;
-        let mut catchup_done = false;
-
         let current_state = ChainStreaming::Catchup { anchor_height };
 
-        while !catchup_done {
+        loop {
             tokio::select! {
                 catchup_item = catchup_iter.next() => {
                     let Some(catchup_item) = catchup_item else {
-                        catchup_done = true;
                         break;
                     };
                     while let Err(err) = self.indexer.process_catchup(&catchup_item).await {
@@ -183,14 +180,12 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         }
 
         let mut final_state = current_state;
-        if catchup_done {
-            tracing::info!(%chain, "catchup completed => transitioning to livestream");
-            if let Err(err) = self.indexer.notify_catchup_completed().await {
-                tracing::warn!(?err, %chain, "failed to signal catchup completion");
-            }
-            final_state = ChainStreaming::Live;
-            let _ = self.state_tx.send(final_state);
+        tracing::info!(%chain, "catchup completed => transitioning to livestream");
+        if let Err(err) = self.indexer.notify_catchup_completed().await {
+            tracing::warn!(?err, %chain, "failed to signal catchup completion");
         }
+        final_state = ChainStreaming::Live;
+        let _ = self.state_tx.send(final_state);
         Some(final_state)
     }
 

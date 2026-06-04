@@ -16,7 +16,7 @@ pub(crate) async fn align_backlog_with_consensus(
     chain: Chain,
     backlog: &Backlog,
     checkpoints_rx: &mut watch::Receiver<CheckpointDigest>,
-    mesh_state: &watch::Receiver<MeshState>,
+    mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
 ) -> Option<u64> {
     let checkpoint_digest = checkpoints_rx.borrow_and_update().clone();
@@ -34,7 +34,7 @@ pub(crate) async fn align_backlog_with_consensus(
     tracing::warn!(
         ?chain,
         ?checkpoint_digest.digest,
-        "Consensus checkpoint mismatch/divergence detected! Triggering regression."
+        "Consensus checkpoint mismatch/divergence detected: triggering regression"
     );
     let fetched_checkpoint = find_consensus_checkpoint(
         mesh_state,
@@ -47,7 +47,7 @@ pub(crate) async fn align_backlog_with_consensus(
 
     let height = fetched_checkpoint.height;
     if let Err(err) = backlog.recover_by_checkpoint(fetched_checkpoint).await {
-        tracing::error!(?err, %chain, "Failed to recover backlog to checkpoint");
+        tracing::error!(?err, %chain, "failed to recover backlog to checkpoint");
         return None;
     }
 
@@ -136,82 +136,75 @@ async fn fetch_checkpoint_from_peer(
     }
 }
 
-async fn query_peers_until_consensus_change(
-    peers: Vec<(Participant, ParticipantInfo)>,
+async fn query_peers_checkpoint(
+    peers: &[(Participant, ParticipantInfo)],
     node_client: &NodeClient,
     chain: Chain,
     target_digest: [u8; 32],
-    consensus_rx: &mut watch::Receiver<CheckpointDigest>,
-) -> Result<Option<Checkpoint>, ()> {
+) -> Option<Checkpoint> {
     for (peer, info) in peers {
-        if consensus_rx.borrow().digest != target_digest {
-            return Err(());
-        }
-
         tracing::debug!(?peer, ?chain, "querying peer for checkpoint");
-        let fetch_fut = fetch_checkpoint_from_peer(node_client, &info.url, chain, target_digest);
-        tokio::select! {
-            checkpoint = fetch_fut => {
-                if let Some(checkpoint) = checkpoint {
-                    return Ok(Some(checkpoint));
-                }
-            }
-            changed = consensus_rx.changed() => {
-                if changed.is_err() {
-                    return Err(());
-                }
-                let cp_digest = consensus_rx.borrow_and_update();
-                if cp_digest.digest != target_digest {
-                    tracing::info!(?chain, "consensus digest changed during query, aborting");
-                    return Err(());
-                }
-            }
+        let checkpoint = fetch_checkpoint_from_peer(node_client, &info.url, chain, target_digest).await;
+        if let Some(checkpoint) = checkpoint {
+            return Some(checkpoint);
         }
     }
-    Ok(None)
+    None
 }
 
+/// Find the consensus checkpoint from other nodes; this will keep retrying until
+/// the checkpoint is found. If the consensus checkpoint changes during the querying
+/// process, this function will return None.
 pub(crate) async fn find_consensus_checkpoint(
-    mesh_state: &watch::Receiver<MeshState>,
+    mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
     chain: Chain,
     target_digest: [u8; 32],
     consensus_rx: &mut watch::Receiver<CheckpointDigest>,
 ) -> Option<Checkpoint> {
+    let mut peers: Vec<_> = mesh_state.borrow().active().participants.clone().into_iter().collect();
+    peers.shuffle(&mut thread_rng());
+
     loop {
-        // Abort if consensus has moved to a different target digest.
-        if consensus_rx.borrow().digest != target_digest {
-            tracing::info!(?chain, "consensus digest changed, aborting fetch loop");
-            return None;
-        }
-
-        let participants_info = mesh_state.borrow().active().participants.clone();
-        let mut peers: Vec<_> = participants_info.into_iter().collect();
-        peers.shuffle(&mut thread_rng());
-
-        match query_peers_until_consensus_change(
-            peers,
-            node_client,
-            chain,
-            target_digest,
-            consensus_rx,
-        )
-        .await
-        {
-            Ok(Some(checkpoint)) => return Some(checkpoint),
-            Ok(None) => {}
-            Err(()) => return None,
-        }
-
-        // Wait before retrying, but abort early if consensus moves.
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
-            _ = consensus_rx.changed() => {
-                let _ = consensus_rx.borrow_and_update();
-                if consensus_rx.borrow().digest != target_digest {
-                    tracing::info!(?chain, "consensus digest changed during wait, aborting fetch");
+            // we should biased towards seeing whether the consensus digest has changed
+            biased;
+
+            changed = consensus_rx.changed() => {
+                if changed.is_err() {
                     return None;
                 }
+                let checkpoint_digest = consensus_rx.borrow_and_update();
+                if checkpoint_digest.digest != target_digest {
+                    tracing::info!(?chain, "consensus digest changed during wait, aborting...");
+                    return None;
+                }
+            }
+            changed = mesh_state.changed() => {
+                if changed.is_err() {
+                    return None;
+                }
+                let active = mesh_state.borrow_and_update().active().participants.clone();
+                peers = active.into_iter().collect();
+                peers.shuffle(&mut thread_rng());
+            }
+
+            checkpoint = query_peers_checkpoint(
+                &peers,
+                node_client,
+                chain,
+                target_digest,
+            ) => {
+                let Some(checkpoint) = checkpoint else {
+                    // this should not happen in normal circumstances, but just in case
+                    // all nodes do not have the checkpoint, we will retry in 3 seconds.
+                    // In that span of time, either the consensus digest must have changed
+                    // or one of the nodes should have set the digest checkpoint.
+                    tracing::warn!("all peers do not have the checkpoint, retrying in 3 seconds");
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    continue;
+                };
+                break Some(checkpoint);
             }
         }
     }
