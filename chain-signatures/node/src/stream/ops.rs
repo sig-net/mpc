@@ -10,6 +10,7 @@ use crate::indexer_hydration::{
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::metrics::requests::record_indexing_step_reached;
 use crate::node_client::NodeClient;
+use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignKind};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
@@ -18,6 +19,7 @@ use crate::stream::ExecutionOutcome;
 
 use alloy::primitives::keccak256;
 use anchor_lang::prelude::Pubkey;
+use cait_sith::protocol::Participant;
 use k256::Scalar;
 use mpc_primitives::{SignId, Signature};
 use std::time::Duration;
@@ -363,7 +365,7 @@ pub(crate) async fn align_backlog_with_consensus(
         ?checkpoint_digest.digest,
         "Consensus checkpoint mismatch/divergence detected! Triggering regression."
     );
-    let fetched_checkpoint = fetch_checkpoint_by_digest_loop(
+    let fetched_checkpoint = find_consensus_checkpoint(
         mesh_state,
         node_client,
         chain,
@@ -478,7 +480,77 @@ pub(crate) async fn resume_pending_publish_requests(
     }
 }
 
-pub(crate) async fn fetch_checkpoint_by_digest_loop(
+async fn fetch_checkpoint_from_peer(
+    node_client: &NodeClient,
+    url: &str,
+    chain: Chain,
+    target_digest: [u8; 32],
+) -> Option<mpc_primitives::Checkpoint> {
+    let result = node_client
+        .fetch_checkpoint_by_digest(url, chain, target_digest)
+        .await;
+    match result {
+        Ok(Some(checkpoint)) => {
+            let digest = checkpoint.digest();
+            if digest == target_digest {
+                Some(checkpoint)
+            } else {
+                tracing::warn!(
+                    ?url,
+                    ?chain,
+                    ?digest,
+                    "peer checkpoint with mismatched digest; skipping"
+                );
+                None
+            }
+        }
+        Ok(None) => {
+            tracing::debug!(?url, ?chain, "peer does not have the checkpoint");
+            None
+        }
+        Err(err) => {
+            tracing::debug!(?url, ?chain, ?err, "failed to query peer for checkpoint");
+            None
+        }
+    }
+}
+
+async fn query_peers_until_consensus_change(
+    peers: Vec<(Participant, ParticipantInfo)>,
+    node_client: &NodeClient,
+    chain: Chain,
+    target_digest: [u8; 32],
+    consensus_rx: &mut watch::Receiver<crate::rpc::CheckpointDigest>,
+) -> Result<Option<mpc_primitives::Checkpoint>, ()> {
+    for (peer, info) in peers {
+        if consensus_rx.borrow().digest != target_digest {
+            return Err(());
+        }
+
+        tracing::debug!(?peer, ?chain, "querying peer for checkpoint");
+        let fetch_fut = fetch_checkpoint_from_peer(node_client, &info.url, chain, target_digest);
+        tokio::select! {
+            checkpoint = fetch_fut => {
+                if let Some(checkpoint) = checkpoint {
+                    return Ok(Some(checkpoint));
+                }
+            }
+            changed = consensus_rx.changed() => {
+                if changed.is_err() {
+                    return Err(());
+                }
+                let cp_digest = consensus_rx.borrow_and_update();
+                if cp_digest.digest != target_digest {
+                    tracing::info!(?chain, "consensus digest changed during query, aborting");
+                    return Err(());
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) async fn find_consensus_checkpoint(
     mesh_state: &watch::Receiver<MeshState>,
     node_client: &NodeClient,
     chain: Chain,
@@ -499,37 +571,18 @@ pub(crate) async fn fetch_checkpoint_by_digest_loop(
         let mut peers: Vec<_> = participants_info.into_iter().collect();
         peers.shuffle(&mut thread_rng());
 
-        for (peer, info) in peers {
-            if consensus_rx.borrow().digest != target_digest {
-                return None;
-            }
-
-            tracing::debug!(?peer, ?chain, "querying peer for checkpoint");
-            match node_client
-                .fetch_checkpoint_by_digest(&info.url, chain, target_digest)
-                .await
-            {
-                Ok(Some(checkpoint)) => {
-                    let digest = checkpoint.digest();
-                    if digest == target_digest {
-                        tracing::info!(?chain, ?digest, "fetched checkpoint digest verified");
-                        return Some(checkpoint);
-                    } else {
-                        tracing::warn!(
-                            ?peer,
-                            ?chain,
-                            ?digest,
-                            "peer checkpoint with mismatched digest; skipping"
-                        );
-                    }
-                }
-                Ok(None) => {
-                    tracing::debug!(?peer, ?chain, "peer does not have the checkpoint");
-                }
-                Err(err) => {
-                    tracing::debug!(?peer, ?chain, ?err, "failed to query peer for checkpoint");
-                }
-            }
+        match query_peers_until_consensus_change(
+            peers,
+            node_client,
+            chain,
+            target_digest,
+            consensus_rx,
+        )
+        .await
+        {
+            Ok(Some(checkpoint)) => return Some(checkpoint),
+            Ok(None) => {}
+            Err(()) => return None,
         }
 
         // Wait before retrying, but abort early if consensus moves.

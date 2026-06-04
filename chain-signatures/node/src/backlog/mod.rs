@@ -147,8 +147,6 @@ impl PendingRequests {
     }
 }
 
-
-
 #[derive(Debug, Clone)]
 struct ExecutionWatcher {
     sign_id: SignId,
@@ -1286,10 +1284,7 @@ mod tests {
         let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
         // Same data should be equal
         assert_eq!(checkpoint1, checkpoint2);
-        assert_eq!(
-            checkpoint1.digest(),
-            checkpoint2.digest()
-        );
+        assert_eq!(checkpoint1.digest(), checkpoint2.digest());
 
         // Different block height should not be equal
         let mut checkpoint3 = pending2.checkpoint(Chain::Ethereum);
@@ -1364,10 +1359,7 @@ mod tests {
             checkpoint.digest(),
             digest_hex("2be41dda15403530e69be4415e3a0f6408ea78de770a796bb8952889ef155852")
         );
-        assert_eq!(
-            checkpoint.digest(),
-            deserialized.digest()
-        );
+        assert_eq!(checkpoint.digest(), deserialized.digest());
 
         let (sign_id, restored_tx) = {
             let pending = &deserialized.pending_requests[0];
