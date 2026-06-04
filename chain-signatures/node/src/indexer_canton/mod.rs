@@ -136,6 +136,12 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
         let sign_id = SignId::new(request_id);
         tracing::info!(?sign_id, "canton signature requested");
 
+        let ctx = CantonChainCtx {
+            sign_event_contract_id: self.sign_event_contract_id.clone(),
+        };
+        let chain_ctx =
+            Some(borsh::to_vec(&ctx).expect("CantonChainCtx Borsh serialization is infallible"));
+
         Ok(crate::protocol::IndexedSignRequest::sign_bidirectional(
             sign_id,
             SignArgs {
@@ -147,7 +153,21 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
             },
             Chain::Canton,
             crate::util::current_unix_timestamp(),
-            SignBidirectionalEvent::Canton(self.clone()),
+            SignBidirectionalEvent {
+                sender: self.sender,
+                serialized_transaction: self.serialized_transaction.clone(),
+                caip2_id: self.caip2_id.clone(),
+                key_version: self.key_version,
+                deposit: 0,
+                path: self.path.clone(),
+                algo: self.algo.clone(),
+                dest: self.dest.clone(),
+                params: self.params.clone(),
+                output_deserialization_schema: self.output_deserialization_schema.clone(),
+                respond_serialization_schema: self.respond_serialization_schema.clone(),
+                chain: Chain::Canton,
+                chain_ctx,
+            },
         ))
     }
 

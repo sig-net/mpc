@@ -1,11 +1,7 @@
 use crate::backlog::Backlog;
-use crate::indexer_canton::{
-    CantonRespondBidirectionalEvent, CantonSignBidirectionalRequestedEvent,
-    CantonSignatureRespondedEvent,
-};
+use crate::indexer_canton::{CantonRespondBidirectionalEvent, CantonSignatureRespondedEvent};
 use crate::indexer_hydration::{
-    HydrationRespondBidirectionalEvent, HydrationSignBidirectionalRequestedEvent,
-    HydrationSignatureRespondedEvent,
+    HydrationRespondBidirectionalEvent, HydrationSignatureRespondedEvent,
 };
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::metrics::requests::record_indexing_step_reached;
@@ -23,151 +19,106 @@ use mpc_primitives::{SignId, Signature};
 use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[allow(clippy::large_enum_variant)]
-pub enum SignBidirectionalEvent {
-    Solana(signet_program::SignBidirectionalEvent),
-    Hydration(HydrationSignBidirectionalRequestedEvent),
-    Canton(CantonSignBidirectionalRequestedEvent),
+pub struct SignBidirectionalEvent {
+    pub sender: [u8; 32],
+    pub serialized_transaction: Vec<u8>,
+    pub caip2_id: String,
+    pub key_version: u32,
+    pub deposit: u64,
+    pub path: String,
+    pub algo: String,
+    pub dest: String,
+    pub params: String,
+    pub output_deserialization_schema: Vec<u8>,
+    pub respond_serialization_schema: Vec<u8>,
+    pub chain: Chain,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_ctx: Option<Vec<u8>>,
 }
 
 impl SignBidirectionalEvent {
     pub fn sender(&self) -> [u8; 32] {
-        match self {
-            SignBidirectionalEvent::Solana(event) => event.sender.to_bytes(),
-            SignBidirectionalEvent::Hydration(event) => event.sender,
-            SignBidirectionalEvent::Canton(event) => event.sender,
-        }
+        self.sender
     }
 
     pub(crate) fn sender_string(&self) -> anyhow::Result<String> {
-        match self {
-            SignBidirectionalEvent::Canton(event) => Ok(hex::encode(event.sender)),
-            _ => sender_string(self.sender(), self.source_chain()),
+        match self.chain {
+            Chain::Canton => Ok(hex::encode(self.sender)),
+            _ => sender_string(self.sender, self.chain),
         }
     }
 
     pub(crate) fn source_chain(&self) -> Chain {
-        match self {
-            SignBidirectionalEvent::Solana(_) => Chain::Solana,
-            SignBidirectionalEvent::Hydration(_) => Chain::Hydration,
-            SignBidirectionalEvent::Canton(_) => Chain::Canton,
-        }
+        self.chain
     }
 
     pub(crate) fn chain_ctx(&self) -> Option<Vec<u8>> {
-        match self {
-            SignBidirectionalEvent::Canton(event) => {
-                let ctx = crate::indexer_canton::CantonChainCtx {
-                    sign_event_contract_id: event.sign_event_contract_id.clone(),
-                };
-                Some(borsh::to_vec(&ctx).expect("CantonChainCtx Borsh serialization is infallible"))
-            }
-            _ => None,
-        }
+        self.chain_ctx.clone()
     }
 
     pub fn path(&self) -> String {
-        match self {
-            SignBidirectionalEvent::Solana(event) => event.path.clone(),
-            SignBidirectionalEvent::Hydration(event) => event.path.clone(),
-            SignBidirectionalEvent::Canton(event) => event.path.clone(),
-        }
+        self.path.clone()
     }
 
     pub fn dest(&self) -> String {
-        match self {
-            SignBidirectionalEvent::Solana(event) => event.dest.clone(),
-            SignBidirectionalEvent::Hydration(event) => event.dest.clone(),
-            SignBidirectionalEvent::Canton(event) => event.dest.clone(),
-        }
+        self.dest.clone()
     }
 
     pub(crate) fn algo(&self) -> String {
-        match self {
-            SignBidirectionalEvent::Solana(event) => event.algo.clone(),
-            SignBidirectionalEvent::Hydration(event) => event.algo.clone(),
-            SignBidirectionalEvent::Canton(event) => event.algo.clone(),
-        }
+        self.algo.clone()
     }
 
     pub fn params(&self) -> String {
-        match self {
-            SignBidirectionalEvent::Solana(event) => event.params.clone(),
-            SignBidirectionalEvent::Hydration(event) => event.params.clone(),
-            SignBidirectionalEvent::Canton(event) => event.params.clone(),
-        }
+        self.params.clone()
     }
 
     pub fn output_deserialization_schema(&self) -> Vec<u8> {
-        match self {
-            SignBidirectionalEvent::Solana(event) => event.output_deserialization_schema.clone(),
-            SignBidirectionalEvent::Hydration(event) => event.output_deserialization_schema.clone(),
-            SignBidirectionalEvent::Canton(event) => event.output_deserialization_schema.clone(),
-        }
+        self.output_deserialization_schema.clone()
     }
 
     pub fn respond_serialization_schema(&self) -> Vec<u8> {
-        match self {
-            SignBidirectionalEvent::Solana(event) => event.respond_serialization_schema.clone(),
-            SignBidirectionalEvent::Hydration(event) => event.respond_serialization_schema.clone(),
-            SignBidirectionalEvent::Canton(event) => event.respond_serialization_schema.clone(),
-        }
+        self.respond_serialization_schema.clone()
     }
 
     pub fn key_version(&self) -> u32 {
-        match self {
-            SignBidirectionalEvent::Solana(event) => event.key_version,
-            SignBidirectionalEvent::Hydration(event) => event.key_version,
-            SignBidirectionalEvent::Canton(event) => event.key_version,
-        }
+        self.key_version
     }
 
     pub(crate) fn deposit(&self) -> u64 {
-        match self {
-            SignBidirectionalEvent::Solana(event) => event.deposit,
-            SignBidirectionalEvent::Hydration(event) => event.deposit,
-            SignBidirectionalEvent::Canton(_) => 0,
-        }
+        self.deposit
     }
 
     pub fn serialized_transaction(&self) -> Vec<u8> {
-        match self {
-            SignBidirectionalEvent::Solana(event) => event.serialized_transaction.clone(),
-            SignBidirectionalEvent::Hydration(event) => event.serialized_transaction.clone(),
-            SignBidirectionalEvent::Canton(event) => event.serialized_transaction.clone(),
-        }
+        self.serialized_transaction.clone()
     }
 
     pub fn caip2_id(&self) -> String {
-        match self {
-            SignBidirectionalEvent::Solana(event) => event.caip2_id.clone(),
-            SignBidirectionalEvent::Hydration(event) => event.caip2_id.clone(),
-            SignBidirectionalEvent::Canton(event) => event.caip2_id.clone(),
-        }
+        self.caip2_id.clone()
     }
 
     pub fn epsilon(&self) -> anyhow::Result<Scalar> {
-        match self {
-            SignBidirectionalEvent::Solana(_) => Ok(mpc_crypto::kdf::derive_epsilon_sol(
-                self.key_version(),
+        match self.chain {
+            Chain::Solana => Ok(mpc_crypto::kdf::derive_epsilon_sol(
+                self.key_version,
                 &self.sender_string()?,
-                &self.path(),
+                &self.path,
             )),
-            SignBidirectionalEvent::Hydration(_) => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
-                self.key_version(),
+            Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
+                self.key_version,
                 &self.sender_string()?,
-                &self.path(),
+                &self.path,
             )),
-            SignBidirectionalEvent::Canton(_) => Ok(mpc_crypto::kdf::derive_epsilon_canton(
-                self.key_version(),
+            Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
+                self.key_version,
                 &self.sender_string()?,
-                &self.path(),
+                &self.path,
             )),
+            _ => anyhow::bail!("Unsupported chain for epsilon derivation: {:?}", self.chain),
         }
     }
 
     pub fn target_chain(&self) -> Result<Chain, mpc_primitives::ChainFromError> {
-        Chain::from_caip2_chain_id(&self.caip2_id())
+        Chain::from_caip2_chain_id(&self.caip2_id)
     }
 }
 
@@ -743,25 +694,31 @@ mod tests {
         sign_id: SignId,
         sign_event_contract_id: &str,
     ) -> IndexedSignRequest {
+        let ctx = crate::indexer_canton::CantonChainCtx {
+            sign_event_contract_id: sign_event_contract_id.to_string(),
+        };
+        let chain_ctx =
+            Some(borsh::to_vec(&ctx).expect("CantonChainCtx Borsh serialization is infallible"));
         IndexedSignRequest::sign_bidirectional(
             sign_id,
             test_sign_args(sign_id.request_id[0]),
             Chain::Canton,
             current_unix_timestamp(),
-            SignBidirectionalEvent::Canton(CantonSignBidirectionalRequestedEvent {
-                sign_event_contract_id: sign_event_contract_id.to_string(),
+            SignBidirectionalEvent {
                 sender: [7u8; 32],
-                request_id: sign_id.request_id,
                 serialized_transaction: vec![1, 2, 3],
                 caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
                 key_version: 1,
+                deposit: 0,
                 path: "test_path".to_string(),
                 algo: "ECDSA".to_string(),
                 dest: "0x1234567890123456789012345678901234567890".to_string(),
                 params: "{}".to_string(),
                 output_deserialization_schema: vec![],
                 respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-            }),
+                chain: Chain::Canton,
+                chain_ctx,
+            },
         )
     }
 
@@ -1195,7 +1152,7 @@ mod tests {
                 args,
                 Chain::Ethereum,
                 current_unix_timestamp(),
-                SignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
+                SignBidirectionalEvent {
                     sender: Default::default(),
                     serialized_transaction: unsigned_rlp,
                     dest: "0x1234567890123456789012345678901234567890".to_string(),
@@ -1205,10 +1162,11 @@ mod tests {
                     path: "m/0".to_string(),
                     algo: "ECDSA".to_string(),
                     params: "{}".to_string(),
-                    program_id: Pubkey::new_unique(),
+                    chain: Chain::Solana,
+                    chain_ctx: Some(Pubkey::new_unique().to_bytes().to_vec()),
                     output_deserialization_schema: vec![],
                     respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-                }),
+                },
             ))
             .await;
 
@@ -1415,7 +1373,7 @@ mod tests {
                 test_sign_args(14),
                 Chain::Ethereum,
                 current_unix_timestamp(),
-                SignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
+                SignBidirectionalEvent {
                     sender: Default::default(),
                     serialized_transaction: unsigned_rlp,
                     dest: tx.dest.clone(),
@@ -1425,10 +1383,11 @@ mod tests {
                     path: tx.path.clone(),
                     algo: tx.algo.clone(),
                     params: tx.params.clone(),
-                    program_id: Pubkey::new_unique(),
+                    chain: Chain::Solana,
+                    chain_ctx: Some(Pubkey::new_unique().to_bytes().to_vec()),
                     output_deserialization_schema: tx.output_deserialization_schema.clone(),
                     respond_serialization_schema: tx.respond_serialization_schema.clone(),
-                }),
+                },
             ))
             .await;
 

@@ -288,7 +288,21 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
             },
             Chain::Hydration,
             crate::util::current_unix_timestamp(),
-            crate::stream::ops::SignBidirectionalEvent::Hydration(self.clone()),
+            crate::stream::ops::SignBidirectionalEvent {
+                sender: self.sender,
+                serialized_transaction: self.serialized_transaction.clone(),
+                caip2_id: self.caip2_id.clone(),
+                key_version: self.key_version,
+                deposit: self.deposit,
+                path: self.path.clone(),
+                algo: self.algo.clone(),
+                dest: self.dest.clone(),
+                params: self.params.clone(),
+                output_deserialization_schema: self.output_deserialization_schema.clone(),
+                respond_serialization_schema: self.respond_serialization_schema.clone(),
+                chain: Chain::Hydration,
+                chain_ctx: None,
+            },
         ))
     }
 

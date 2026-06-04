@@ -696,7 +696,6 @@ mod tests {
         use crate::stream::ops::RespondBidirectionalEvent as RBE;
         use crate::stream::ops::SignBidirectionalEvent as SBE;
         use crate::stream::ops::SignatureRespondedEvent as SRE;
-        use signet_program::SignBidirectionalEvent;
 
         // shared storage so checkpoint persistence is visible to recovered backlog
         let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
@@ -805,17 +804,18 @@ mod tests {
         rlp_s.append(&0u64);
         let unsigned_rlp = rlp_s.out().to_vec();
 
-        let sign_bidir = SignBidirectionalEvent {
+        let sign_bidir = SBE {
             sender: Default::default(),
             serialized_transaction: unsigned_rlp,
-            dest: Chain::Ethereum.to_string(),
             caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
             key_version: 0,
             deposit: 0,
             path: "".to_string(),
             algo: "".to_string(),
+            dest: Chain::Ethereum.to_string(),
             params: "".to_string(),
-            program_id,
+            chain: Chain::Solana,
+            chain_ctx: Some(program_id.to_bytes().to_vec()),
             output_deserialization_schema: vec![],
             respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         };
@@ -825,7 +825,7 @@ mod tests {
             args.clone(),
             Chain::Solana,
             current_unix_timestamp(),
-            SBE::Solana(sign_bidir.clone()),
+            sign_bidir,
         );
 
         events_tx.send(ChainEvent::CatchupCompleted).await.unwrap();

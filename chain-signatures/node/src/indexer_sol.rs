@@ -273,7 +273,21 @@ impl SignatureEvent for SignBidirectionalEvent {
             },
             Chain::Solana,
             crate::util::current_unix_timestamp(),
-            crate::stream::ops::SignBidirectionalEvent::Solana(self.clone()),
+            crate::stream::ops::SignBidirectionalEvent {
+                sender: self.sender.to_bytes(),
+                serialized_transaction: self.serialized_transaction.clone(),
+                caip2_id: self.caip2_id.clone(),
+                key_version: self.key_version,
+                deposit: self.deposit,
+                path: self.path.clone(),
+                algo: self.algo.clone(),
+                dest: self.dest.clone(),
+                params: self.params.clone(),
+                output_deserialization_schema: self.output_deserialization_schema.clone(),
+                respond_serialization_schema: self.respond_serialization_schema.clone(),
+                chain: Chain::Solana,
+                chain_ctx: None,
+            },
         ))
     }
 

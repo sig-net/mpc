@@ -318,20 +318,21 @@ fn test_bidirectional_event() -> NodeSignBidirectionalEvent {
     rlp_s.append(&0u64);
     rlp_s.append(&0u64);
 
-    NodeSignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
-        sender: solana_sdk::pubkey::Pubkey::new_unique(),
+    NodeSignBidirectionalEvent {
+        sender: solana_sdk::pubkey::Pubkey::new_unique().to_bytes(),
         serialized_transaction: rlp_s.out().to_vec(),
-        dest: Chain::Ethereum.to_string(),
         caip2_id: "eip155:31337".to_string(),
         key_version: LATEST_MPC_KEY_VERSION,
         deposit: 1,
         path: "bidirectional-test-path".to_string(),
         algo: "secp256k1".to_string(),
+        dest: Chain::Ethereum.to_string(),
         params: "{}".to_string(),
-        program_id: solana_sdk::pubkey::Pubkey::new_unique(),
+        chain: Chain::Solana,
+        chain_ctx: Some(solana_sdk::pubkey::Pubkey::new_unique().to_bytes().to_vec()),
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-    })
+    }
 }
 
 struct StartedEthereumStream {

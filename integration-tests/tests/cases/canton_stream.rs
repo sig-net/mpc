@@ -363,9 +363,15 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     assert_eq!(sign_event.chain, Chain::Canton);
     let request_id = hex::encode(sign_event.id.request_id);
     let sign_event_cid = match &sign_event.kind {
-        SignKind::SignBidirectional(mpc_node::stream::ops::SignBidirectionalEvent::Canton(
-            canton_event,
-        )) => canton_event.sign_event_contract_id.clone(),
+        SignKind::SignBidirectional(event) if event.chain == Chain::Canton => {
+            let chain_ctx_bytes = event
+                .chain_ctx
+                .as_deref()
+                .expect("missing chain_ctx on Canton sign request");
+            let ctx: mpc_node::indexer_canton::CantonChainCtx =
+                borsh::from_slice(chain_ctx_bytes).expect("failed to deserialize CantonChainCtx");
+            ctx.sign_event_contract_id.clone()
+        }
         _ => panic!("expected Canton SignBidirectional event"),
     };
 
@@ -450,13 +456,7 @@ async fn test_canton_stream_parse_sign_bidirectional_fields() -> Result<()> {
         bidir.sender(),
         <[u8; 32]>::try_from(expected_sender.as_slice())?
     );
-    assert!(
-        matches!(
-            bidir,
-            mpc_node::stream::ops::SignBidirectionalEvent::Canton(_)
-        ),
-        "expected Canton variant"
-    );
+    assert_eq!(bidir.chain, Chain::Canton, "expected Canton chain");
     assert_eq!(
         bidir.target_chain()?,
         Chain::Ethereum,
