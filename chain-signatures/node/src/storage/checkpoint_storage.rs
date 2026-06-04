@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-const CHECKPOINT_VERSION: &str = "v7";
+const CHECKPOINT_VERSION: &str = "v8";
 
 #[derive(Clone, Debug)]
 pub enum CheckpointStorage {
