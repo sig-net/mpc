@@ -351,10 +351,7 @@ pub(crate) async fn align_backlog_with_consensus(
     }
 
     let current_checkpoint = backlog.checkpoint(chain).await;
-    let matches_digest = match crate::backlog::checkpoint_digest(&current_checkpoint) {
-        Ok(digest) => digest == checkpoint_digest.digest,
-        Err(_) => false,
-    };
+    let matches_digest = current_checkpoint.digest() == checkpoint_digest.digest;
 
     // No mismatch/divergence, we are aligned with the consensus.
     if matches_digest {
@@ -494,7 +491,7 @@ pub(crate) async fn fetch_checkpoint_by_digest_loop(
     loop {
         // Abort if consensus has moved to a different target digest.
         if consensus_rx.borrow().digest != target_digest {
-            tracing::info!(?chain, "Consensus digest changed, aborting fetch loop");
+            tracing::info!(?chain, "consensus digest changed, aborting fetch loop");
             return None;
         }
 
@@ -502,44 +499,35 @@ pub(crate) async fn fetch_checkpoint_by_digest_loop(
         let mut peers: Vec<_> = participants_info.into_iter().collect();
         peers.shuffle(&mut thread_rng());
 
-        for (_id, info) in peers {
+        for (peer, info) in peers {
             if consensus_rx.borrow().digest != target_digest {
                 return None;
             }
 
-            tracing::debug!(?chain, url = %info.url, "Querying peer for checkpoint by digest");
+            tracing::debug!(?peer, ?chain, "querying peer for checkpoint");
             match node_client
                 .fetch_checkpoint_by_digest(&info.url, chain, target_digest)
                 .await
             {
                 Ok(Some(checkpoint)) => {
-                    // Verify the checkpoint's digest actually matches before returning.
-                    match crate::backlog::checkpoint_digest(&checkpoint) {
-                        Ok(digest) if digest == target_digest => {
-                            tracing::info!(?chain, ?digest, "Fetched checkpoint digest verified");
-                            return Some(checkpoint);
-                        }
-                        Ok(digest) => {
-                            tracing::warn!(
-                                ?chain,
-                                ?digest,
-                                "Peer returned checkpoint with mismatched digest; skipping"
-                            );
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                ?chain,
-                                ?err,
-                                "Could not compute digest for fetched checkpoint; skipping"
-                            );
-                        }
+                    let digest = checkpoint.digest();
+                    if digest == target_digest {
+                        tracing::info!(?chain, ?digest, "fetched checkpoint digest verified");
+                        return Some(checkpoint);
+                    } else {
+                        tracing::warn!(
+                            ?peer,
+                            ?chain,
+                            ?digest,
+                            "peer checkpoint with mismatched digest; skipping"
+                        );
                     }
                 }
                 Ok(None) => {
-                    tracing::debug!(?chain, "Peer does not have the checkpoint");
+                    tracing::debug!(?peer, ?chain, "peer does not have the checkpoint");
                 }
                 Err(err) => {
-                    tracing::debug!(?chain, ?err, "Failed to query peer for checkpoint");
+                    tracing::debug!(?peer, ?chain, ?err, "failed to query peer for checkpoint");
                 }
             }
         }
@@ -550,7 +538,7 @@ pub(crate) async fn fetch_checkpoint_by_digest_loop(
             _ = consensus_rx.changed() => {
                 let _ = consensus_rx.borrow_and_update();
                 if consensus_rx.borrow().digest != target_digest {
-                    tracing::info!(?chain, "Consensus digest changed during wait, aborting fetch");
+                    tracing::info!(?chain, "consensus digest changed during wait, aborting fetch");
                     return None;
                 }
             }

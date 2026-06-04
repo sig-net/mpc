@@ -4,7 +4,7 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use anyhow::Context;
 use mpc_primitives::{PendingTx, SignId};
-use sha3::{Digest, Sha3_256};
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -147,31 +147,7 @@ impl PendingRequests {
     }
 }
 
-pub fn checkpoint_digest(checkpoint: &Checkpoint) -> anyhow::Result<[u8; 32]> {
-    let mut pending_entries = checkpoint
-        .pending_requests
-        .iter()
-        .map(|pending| {
-            let entry: BacklogEntry = ciborium::de::from_reader(pending.transaction.as_slice())
-                .with_context(|| {
-                    format!(
-                        "failed to deserialize pending backlog entry for sign_id {:?}",
-                        pending.sign_id
-                    )
-                })?;
-            Ok((pending.sign_id, entry.status()))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    pending_entries.sort_by_key(|(sign_id, _)| *sign_id);
 
-    let mut digest = Sha3_256::new();
-    for (sign_id, status) in pending_entries {
-        digest.update(sign_id.request_id);
-        digest.update(status.digest_bytes());
-    }
-
-    Ok(digest.finalize().into())
-}
 
 #[derive(Debug, Clone)]
 struct ExecutionWatcher {
@@ -624,10 +600,8 @@ impl Backlog {
         let historical = self.historical_checkpoints.read().await;
         let btree = historical.get(&chain)?;
         for hcp in btree.values() {
-            if let Ok(d) = checkpoint_digest(&hcp.checkpoint) {
-                if d == digest {
-                    return Some(hcp.checkpoint.clone());
-                }
+            if hcp.checkpoint.digest() == digest {
+                return Some(hcp.checkpoint.clone());
             }
         }
         None
@@ -1257,8 +1231,8 @@ mod tests {
         assert_eq!(checkpoint.chain, Chain::Ethereum);
         assert_eq!(checkpoint.pending_requests.len(), 2);
         assert_eq!(
-            checkpoint_digest(&checkpoint).unwrap(),
-            digest_hex("287237dc78e67eb9695b1472da0353a64a97a2b76d643cf50b4ce0ccdb28073b")
+            checkpoint.digest(),
+            digest_hex("f40d1ffd8d7789c38a3d65f56821ad39b32a1ce54980ad42483bdcb2f04ac879")
         );
     }
 
@@ -1313,8 +1287,8 @@ mod tests {
         // Same data should be equal
         assert_eq!(checkpoint1, checkpoint2);
         assert_eq!(
-            checkpoint_digest(&checkpoint1).unwrap(),
-            checkpoint_digest(&checkpoint2).unwrap()
+            checkpoint1.digest(),
+            checkpoint2.digest()
         );
 
         // Different block height should not be equal
@@ -1355,12 +1329,12 @@ mod tests {
         let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
 
         assert_eq!(
-            checkpoint_digest(&checkpoint1).unwrap(),
-            digest_hex("009a777d41ac9c8dbae41c1b1a582142b68923e350975eb055e695ff2796d0df")
+            checkpoint1.digest(),
+            digest_hex("f8005ed51dbbac64e19c4dce2d5e9687313f87c50d018894cc2e148c84960514")
         );
         assert_eq!(
-            checkpoint_digest(&checkpoint2).unwrap(),
-            digest_hex("6fc5d31bd61077c86d7fc7ec3df209b9bd6ee18cb17c3bc34b1302c996bb58b0")
+            checkpoint2.digest(),
+            digest_hex("634bbc74638f64bfa62369e0ac737b678d65a4e46d524647d1c472549e34c81a")
         );
     }
 
@@ -1387,12 +1361,12 @@ mod tests {
 
         assert_eq!(checkpoint, deserialized);
         assert_eq!(
-            checkpoint_digest(&checkpoint).unwrap(),
-            digest_hex("ebe96b88e51f1c6a128563289f3cf83b6d282b40f2dafc81fef7f2f073f5436f")
+            checkpoint.digest(),
+            digest_hex("2be41dda15403530e69be4415e3a0f6408ea78de770a796bb8952889ef155852")
         );
         assert_eq!(
-            checkpoint_digest(&checkpoint).unwrap(),
-            checkpoint_digest(&deserialized).unwrap()
+            checkpoint.digest(),
+            deserialized.digest()
         );
 
         let (sign_id, restored_tx) = {

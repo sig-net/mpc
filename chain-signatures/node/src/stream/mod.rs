@@ -187,10 +187,7 @@ async fn check_regression_and_get_state(
     }
 
     let current_checkpoint = backlog.checkpoint(chain).await;
-    let matches_digest = match crate::backlog::checkpoint_digest(&current_checkpoint) {
-        Ok(d) => d == checkpoint_digest.digest,
-        Err(_) => false,
-    };
+    let matches_digest = current_checkpoint.digest() == checkpoint_digest.digest;
 
     if matches_digest {
         return None;
@@ -213,9 +210,7 @@ async fn handle_block_event(
     };
 
     tracing::info!(block, ?checkpoint, %chain, "created checkpoint");
-    let Ok(digest) = crate::backlog::checkpoint_digest(&checkpoint) else {
-        return;
-    };
+    let digest = checkpoint.digest();
 
     let consensus_checkpoint = mpc_primitives::ConsensusCheckpoint {
         chain,
@@ -1482,7 +1477,7 @@ mod tests {
 
         let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest {
             height: 5,
-            digest: crate::backlog::checkpoint_digest(&checkpoint).unwrap(),
+            digest: checkpoint.digest(),
         });
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
 
@@ -1562,7 +1557,7 @@ mod tests {
             .await;
         backlog.set_processed_block(Chain::Solana, 10).await;
         let checkpoint = backlog.checkpoint(Chain::Solana).await;
-        let digest = crate::backlog::checkpoint_digest(&checkpoint).unwrap();
+        let digest = checkpoint.digest();
 
         let (cp_tx, cp_rx) = watch::channel(CheckpointDigest { height: 10, digest });
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());

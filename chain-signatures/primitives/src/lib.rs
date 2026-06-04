@@ -403,6 +403,15 @@ impl Checkpoint {
             pending_requests: Vec::new(),
         }
     }
+
+    pub fn digest(&self) -> [u8; 32] {
+        let mut hasher = sha3::Sha3_256::new();
+        for pending in &self.pending_requests {
+            hasher.update(pending.sign_id.request_id);
+            hasher.update(&pending.transaction);
+        }
+        hasher.finalize().into()
+    }
 }
 
 #[derive(
