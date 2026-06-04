@@ -718,10 +718,64 @@ impl VersionedMpcContract {
     #[init(ignore_state)]
     #[handle_result]
     pub fn migrate() -> Result<Self, Error> {
-        // If old state read failed, try reading as new state (no migration needed)
-        let new_contract: MpcContract =
-            env::state_read().ok_or(InvalidState::ContractStateIsMissing)?;
-        Ok(VersionedMpcContract::V0(new_contract))
+        #[derive(BorshDeserialize)]
+        struct OldMpcContract {
+            protocol_state: ProtocolContractState,
+            pending_requests: IterableMap<SignId, PendingRequest>,
+            proposed_updates: ProposedUpdates,
+            config: Config,
+        }
+
+        #[derive(BorshDeserialize)]
+        enum VersionedOldMpcContract {
+            V0(OldMpcContract),
+        }
+
+        let state_bytes =
+            env::storage_read(b"STATE").ok_or(InvalidState::ContractStateIsMissing)?;
+
+        // 1. Try deserializing into the current VersionedMpcContract (idempotent path)
+        if let Ok(new_contract) = VersionedMpcContract::try_from_slice(&state_bytes) {
+            log!("No migration needed: already deserialized into current VersionedMpcContract");
+            return Ok(new_contract);
+        }
+
+        // 2. Try deserializing as VersionedOldMpcContract
+        if let Ok(VersionedOldMpcContract::V0(old_contract)) =
+            VersionedOldMpcContract::try_from_slice(&state_bytes)
+        {
+            log!("Migrating from VersionedOldMpcContract to VersionedMpcContract");
+            let new_contract = MpcContract {
+                protocol_state: old_contract.protocol_state,
+                pending_requests: old_contract.pending_requests,
+                proposed_updates: old_contract.proposed_updates,
+                config: old_contract.config,
+                latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpoints),
+            };
+            return Ok(VersionedMpcContract::V0(new_contract));
+        }
+
+        // 3. Try deserializing as OldMpcContract directly (older unversioned state)
+        if let Ok(old_contract) = OldMpcContract::try_from_slice(&state_bytes) {
+            log!("Migrating from OldMpcContract directly to VersionedMpcContract");
+            let new_contract = MpcContract {
+                protocol_state: old_contract.protocol_state,
+                pending_requests: old_contract.pending_requests,
+                proposed_updates: old_contract.proposed_updates,
+                config: old_contract.config,
+                latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpoints),
+            };
+            return Ok(VersionedMpcContract::V0(new_contract));
+        }
+
+        // 4. Try deserializing as current MpcContract directly (just in case)
+        if let Ok(new_contract) = MpcContract::try_from_slice(&state_bytes) {
+            log!("Migrating from MpcContract directly to VersionedMpcContract");
+            return Ok(VersionedMpcContract::V0(new_contract));
+        }
+
+        Err(InvalidState::ContractStateIsMissing
+            .message("Failed to deserialize state into any known contract format"))
     }
 
     pub fn state(&self) -> &ProtocolContractState {
@@ -1033,6 +1087,81 @@ impl VersionedMpcContract {
     fn mutable_checkpoints(&mut self) -> &mut IterableMap<Chain, SignedCheckpoint> {
         match self {
             Self::V0(mpc_contract) => &mut mpc_contract.latest_checkpoints,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use near_sdk::test_utils::VMContextBuilder;
+    use near_sdk::testing_env;
+
+    #[derive(BorshSerialize)]
+    struct OldMpcContractTest {
+        protocol_state: ProtocolContractState,
+        pending_requests: IterableMap<SignId, PendingRequest>,
+        proposed_updates: ProposedUpdates,
+        config: Config,
+    }
+
+    #[derive(BorshSerialize)]
+    enum VersionedOldMpcContractTest {
+        V0(OldMpcContractTest),
+    }
+
+    #[test]
+    fn test_migrate_idempotent() {
+        let context = VMContextBuilder::new()
+            .current_account_id("contract.near".parse().unwrap())
+            .build();
+        testing_env!(context);
+
+        // 1. Serialize and write the OLD contract state to storage
+        let old_contract = OldMpcContractTest {
+            protocol_state: ProtocolContractState::NotInitialized,
+            pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            proposed_updates: ProposedUpdates::default(),
+            config: Config::default(),
+        };
+        let versioned_old = VersionedOldMpcContractTest::V0(old_contract);
+        let old_bytes = borsh::to_vec(&versioned_old).unwrap();
+        env::storage_write(b"STATE", &old_bytes);
+
+        // 2. Call migrate for the first time
+        let migrated_res = VersionedMpcContract::migrate();
+        assert!(
+            migrated_res.is_ok(),
+            "First migrate failed: {:?}",
+            migrated_res.err()
+        );
+        let migrated = migrated_res.unwrap();
+
+        // Write the migrated state to storage (simulate what near_bindgen does on success)
+        let migrated_bytes = borsh::to_vec(&migrated).unwrap();
+        env::storage_write(b"STATE", &migrated_bytes);
+
+        // Verify the migrated state has latest_checkpoints initialized
+        match &migrated {
+            VersionedMpcContract::V0(contract) => {
+                assert!(contract.latest_checkpoints.is_empty());
+            }
+        }
+
+        // 3. Call migrate for the second time (idempotent check)
+        let second_migrated_res = VersionedMpcContract::migrate();
+        assert!(
+            second_migrated_res.is_ok(),
+            "Second migrate (idempotent) failed: {:?}",
+            second_migrated_res.err()
+        );
+        let second_migrated = second_migrated_res.unwrap();
+
+        // Verify the second migrated state matches
+        match &second_migrated {
+            VersionedMpcContract::V0(contract) => {
+                assert!(contract.latest_checkpoints.is_empty());
+            }
         }
     }
 }
