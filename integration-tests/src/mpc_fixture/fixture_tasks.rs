@@ -11,7 +11,7 @@ use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::message::{MessageOutbox, SendMessage, SignedMessage};
 use mpc_node::protocol::Sign;
-use mpc_node::rpc::{CheckpointDigestMap, ContractStateWatcher, RpcAction, RpcChannel};
+use mpc_node::rpc::{CheckpointDigest, ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::stream::run_stream;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -108,7 +108,7 @@ pub(super) fn start_mock_stream_tasks(
     backlog: Backlog,
     contract_watcher: ContractStateWatcher,
     mesh_state: &watch::Receiver<MeshState>,
-    checkpoints_rx: watch::Receiver<CheckpointDigestMap>,
+    checkpoints_rx: watch::Receiver<CheckpointDigest>,
 ) {
     for stream in mock_streams {
         tokio::spawn(run_stream(

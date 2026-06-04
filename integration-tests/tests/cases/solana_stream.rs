@@ -10,7 +10,7 @@ use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::contract::primitives::{ParticipantInfo, Participants};
 use mpc_node::protocol::{Chain, IndexedSignRequest, Sign};
-use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
+use mpc_node::rpc::{CheckpointDigest, ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{
@@ -464,7 +464,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let node_client = NodeClient::new(&Default::default());
 
-    let (_, checkpoints_rx) = watch::channel(std::collections::HashMap::new());
+    let (_, checkpoints_rx) = watch::channel(CheckpointDigest::default());
     let run_handle = tokio::spawn(async move {
         run_stream(
             stream,

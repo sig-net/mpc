@@ -30,8 +30,7 @@ use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::state::NodeKeyInfo;
 use mpc_node::protocol::sync::SyncTask;
 use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
-use mpc_node::rpc::ContractStateWatcher;
-use mpc_node::rpc::RpcChannel;
+use mpc_node::rpc::{CheckpointDigest, ContractStateWatcher, RpcChannel};
 use mpc_node::storage::{secret_storage, triple_storage::TriplePair, Options};
 use mpc_primitives::Chain;
 use near_sdk::AccountId;
@@ -556,7 +555,7 @@ impl MpcFixtureNodeBuilder {
         let backlog = Backlog::new();
 
         let flat_mock_streams = self.mock_streams.values().cloned().collect::<Vec<_>>();
-        let (_, checkpoints_rx) = watch::channel(HashMap::new());
+        let (_, checkpoints_rx) = watch::channel(CheckpointDigest::default());
         fixture_tasks::start_mock_stream_tasks(
             &flat_mock_streams,
             sign_tx.clone(),

@@ -14,7 +14,7 @@ use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign, SignKind};
-use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
+use mpc_node::rpc::{CheckpointDigest, ContractStateWatcher, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::ops::SignBidirectionalEvent as NodeSignBidirectionalEvent;
@@ -430,7 +430,7 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
-    let (_, checkpoints_rx) = watch::channel(std::collections::HashMap::new());
+    let (_, checkpoints_rx) = watch::channel(CheckpointDigest::default());
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
@@ -596,7 +596,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
-    let (_, checkpoints_rx) = watch::channel(std::collections::HashMap::new());
+    let (_, checkpoints_rx) = watch::channel(CheckpointDigest::default());
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
@@ -783,7 +783,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
-    let (_, checkpoints_rx) = watch::channel(std::collections::HashMap::new());
+    let (_, checkpoints_rx) = watch::channel(CheckpointDigest::default());
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,

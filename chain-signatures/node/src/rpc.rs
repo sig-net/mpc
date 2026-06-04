@@ -10,12 +10,6 @@ use std::collections::BTreeSet;
 
 pub use mpc_contract::primitives::{Read, View};
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CheckpointDigest {
-    pub height: u64,
-    pub digest: [u8; 32],
-}
-
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signer::keypair::Keypair;
@@ -105,6 +99,12 @@ type EthContractFillProvider = FillProvider<
 >;
 
 type EthContractInstance = ContractInstance<EthContractFillProvider>;
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CheckpointDigest {
+    pub height: u64,
+    pub digest: [u8; 32],
+}
 
 #[derive(Clone)]
 pub struct PublishAction {
