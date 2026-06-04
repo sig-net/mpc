@@ -241,6 +241,8 @@ pub async fn run_stream<S: ChainStream>(
     };
     let indexer_task = tokio::spawn(catchup_then_livestream(indexer));
 
+    let root_pk = contract_watcher.wait_public_key().await;
+
     let mut caught_up = false;
     while let Some(event) = stream.next_event().await {
         match event {
@@ -261,14 +263,8 @@ pub async fn run_stream<S: ChainStream>(
                 }
             }
             ChainEvent::Respond(ev) => {
-                if let Err(err) = process_respond_event(
-                    ev,
-                    sign_tx.clone(),
-                    &mut contract_watcher,
-                    &backlog,
-                    caught_up,
-                )
-                .await
+                if let Err(err) =
+                    process_respond_event(ev, sign_tx.clone(), root_pk, &backlog, caught_up).await
                 {
                     tracing::error!(?err, %chain, "failed to process respond event");
                 }
@@ -277,7 +273,7 @@ pub async fn run_stream<S: ChainStream>(
                 if let Err(err) = process_respond_bidirectional_event(
                     ev,
                     sign_tx.clone(),
-                    &mut contract_watcher,
+                    root_pk,
                     &backlog,
                     caught_up,
                 )

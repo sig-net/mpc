@@ -430,7 +430,7 @@ fn verify_entry_signature(
 pub(crate) async fn process_respond_event(
     respond_event: SignatureRespondedEvent,
     sign_tx: mpsc::Sender<Sign>,
-    contract_watcher: &mut ContractStateWatcher,
+    root_pk: mpc_primitives::PublicKey,
     backlog: &Backlog,
     caught_up: bool,
 ) -> anyhow::Result<()> {
@@ -447,8 +447,7 @@ pub(crate) async fn process_respond_event(
 
     let responded_signature = respond_event.signature();
 
-    let root_public_key = contract_watcher.wait_public_key().await;
-    verify_entry_signature(root_public_key, &entry, &responded_signature, sign_id)?;
+    verify_entry_signature(root_pk, &entry, &responded_signature, sign_id)?;
 
     let event = match &entry.request.kind {
         SignKind::Sign => {
@@ -484,7 +483,7 @@ pub(crate) async fn process_respond_event(
 
     // Get the MPC public key and derive the from_address.
     let epsilon = event.epsilon()?;
-    let from_address = crate::sign_bidirectional::derive_user_address(root_public_key, epsilon);
+    let from_address = crate::sign_bidirectional::derive_user_address(root_pk, epsilon);
 
     let mpc_sig = responded_signature;
 
@@ -553,7 +552,7 @@ pub(crate) async fn process_respond_event(
 pub(crate) async fn process_respond_bidirectional_event(
     event: RespondBidirectionalEvent,
     sign_tx: mpsc::Sender<Sign>,
-    contract_watcher: &mut ContractStateWatcher,
+    root_pk: mpc_primitives::PublicKey,
     backlog: &Backlog,
     caught_up: bool,
 ) -> anyhow::Result<()> {
@@ -573,8 +572,7 @@ pub(crate) async fn process_respond_bidirectional_event(
         );
     }
 
-    let root_public_key = contract_watcher.wait_public_key().await;
-    verify_entry_signature(root_public_key, &entry, &event.signature(), sign_id)?;
+    verify_entry_signature(root_pk, &entry, &event.signature(), sign_id)?;
 
     if backlog.remove(source_chain, &sign_id).await.is_some() {
         tracing::info!(?sign_id, "bidirectional tx completed");
@@ -1263,12 +1261,12 @@ mod tests {
 
         let account_id: AccountId = "test.near".parse().unwrap();
         let public_key = root_sk.public_key().into();
-        let (mut contract_watcher, _tx) =
+        let (_contract_watcher, _tx) =
             ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
         let (sign_tx, _sign_rx) = mpsc::channel(4);
 
-        let err = process_respond_event(event, sign_tx, &mut contract_watcher, &backlog, true)
+        let err = process_respond_event(event, sign_tx, public_key, &backlog, true)
             .await
             .expect_err("invalid chain should fail");
         assert!(err.to_string().contains("UnknownCaip2Id(\"not-a-chain\")"));
@@ -1333,12 +1331,12 @@ mod tests {
 
         let account_id: AccountId = "test.near".parse().unwrap();
         let public_key = root_sk.public_key().into();
-        let (mut contract_watcher, _tx) =
+        let (_contract_watcher, _tx) =
             ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
         let (sign_tx, _sign_rx) = mpsc::channel(4);
 
-        let err = process_respond_event(event, sign_tx, &mut contract_watcher, &backlog, true)
+        let err = process_respond_event(event, sign_tx, public_key, &backlog, true)
             .await
             .expect_err("invalid signature should be rejected");
         assert!(err.to_string().contains("invalid signature"));
@@ -1373,7 +1371,7 @@ mod tests {
 
         let account_id: AccountId = "test.near".parse().unwrap();
         let public_key = root_sk.public_key().into();
-        let (mut contract_watcher, _tx) =
+        let (_contract_watcher, _tx) =
             ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
@@ -1381,22 +1379,16 @@ mod tests {
         process_respond_bidirectional_event(
             duplicate_event0,
             sign_tx.clone(),
-            &mut contract_watcher,
+            public_key,
             &backlog,
             true,
         )
         .await
         .expect("first completion should succeed");
 
-        process_respond_bidirectional_event(
-            duplicate_event1,
-            sign_tx,
-            &mut contract_watcher,
-            &backlog,
-            true,
-        )
-        .await
-        .expect("duplicate completion should be ignored");
+        process_respond_bidirectional_event(duplicate_event1, sign_tx, public_key, &backlog, true)
+            .await
+            .expect("duplicate completion should be ignored");
 
         let first = timeout(Duration::from_secs(1), sign_rx.recv())
             .await
@@ -1439,20 +1431,14 @@ mod tests {
 
         let account_id: AccountId = "test.near".parse().unwrap();
         let public_key = root_sk.public_key().into();
-        let (mut contract_watcher, _tx) =
+        let (_contract_watcher, _tx) =
             ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
         let (sign_tx, _sign_rx) = mpsc::channel(4);
 
-        let err = process_respond_bidirectional_event(
-            event,
-            sign_tx,
-            &mut contract_watcher,
-            &backlog,
-            true,
-        )
-        .await
-        .expect_err("invalid signature should be rejected");
+        let err = process_respond_bidirectional_event(event, sign_tx, public_key, &backlog, true)
+            .await
+            .expect_err("invalid signature should be rejected");
         assert!(err.to_string().contains("invalid signature"));
         assert!(backlog.get(Chain::Solana, &sign_id).await.is_some());
     }
@@ -1483,21 +1469,15 @@ mod tests {
 
         let account_id: AccountId = "test.near".parse().unwrap();
         let public_key = root_sk.public_key().into();
-        let (mut contract_watcher, _tx) =
+        let (_contract_watcher, _tx) =
             ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
 
         // First event should complete the request.
-        process_respond_event(
-            event.clone(),
-            sign_tx.clone(),
-            &mut contract_watcher,
-            &backlog,
-            true,
-        )
-        .await
-        .expect("first respond event should succeed");
+        process_respond_event(event.clone(), sign_tx.clone(), public_key, &backlog, true)
+            .await
+            .expect("first respond event should succeed");
 
         let msg = timeout(Duration::from_secs(1), sign_rx.recv())
             .await
@@ -1512,15 +1492,9 @@ mod tests {
         // This mirrors production behavior where the same respond log can be
         // emitted repeatedly by the Ethereum indexer pipeline.
         for _ in 0..16 {
-            process_respond_event(
-                event.clone(),
-                sign_tx.clone(),
-                &mut contract_watcher,
-                &backlog,
-                true,
-            )
-            .await
-            .expect("duplicate respond event should be idempotent");
+            process_respond_event(event.clone(), sign_tx.clone(), public_key, &backlog, true)
+                .await
+                .expect("duplicate respond event should be idempotent");
         }
 
         let no_extra = timeout(Duration::from_millis(100), sign_rx.recv()).await;
@@ -1600,12 +1574,12 @@ mod tests {
 
         let account_id: AccountId = "test.near".parse().unwrap();
         let public_key = root_sk.public_key().into();
-        let (mut contract_watcher, _tx) =
+        let (_contract_watcher, _tx) =
             ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
         let (sign_tx, _sign_rx) = mpsc::channel(4);
 
-        process_respond_event(event, sign_tx, &mut contract_watcher, &backlog, false)
+        process_respond_event(event, sign_tx, public_key, &backlog, false)
             .await
             .expect("respond event should advance pending publish bidirectional entries");
 
