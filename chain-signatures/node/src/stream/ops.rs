@@ -356,6 +356,7 @@ pub(crate) async fn align_backlog_with_consensus(
         Err(_) => false,
     };
 
+    // No mismatch/divergence, we are aligned with the consensus.
     if matches_digest {
         return None;
     }
@@ -372,14 +373,10 @@ pub(crate) async fn align_backlog_with_consensus(
         checkpoint_digest.digest,
         checkpoints_rx,
     )
-    .await;
+    .await?;
 
-    let Some(cp) = fetched_checkpoint else {
-        return None;
-    };
-
-    let height = cp.height;
-    if let Err(err) = backlog.recover_by_checkpoint(cp).await {
+    let height = fetched_checkpoint.height;
+    if let Err(err) = backlog.recover_by_checkpoint(fetched_checkpoint).await {
         tracing::error!(?err, %chain, "Failed to recover backlog to checkpoint");
         return None;
     }

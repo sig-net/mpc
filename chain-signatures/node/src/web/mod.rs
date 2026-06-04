@@ -310,6 +310,8 @@ async fn sync(
     Ok(Cbor(response))
 }
 
+type ChainAndDigest = (Chain, Option<[u8; 32]>);
+
 #[derive(Debug, Deserialize)]
 pub struct CheckpointQuery {
     /// Combined chain selection and digest filter. Entries are separated by commas.
@@ -323,7 +325,7 @@ pub struct CheckpointQuery {
 
 impl CheckpointQuery {
     #[allow(clippy::result_large_err)]
-    fn parse(self) -> Result<Vec<(Chain, Option<[u8; 32]>)>, Error> {
+    fn parse(self) -> Result<Vec<ChainAndDigest>, Error> {
         let Some(query) = self.query else {
             return Ok(Chain::iter()
                 .into_iter()
