@@ -150,9 +150,8 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             }
         };
 
-        let catchup_height = anchor_height.unwrap_or(0);
         let next_state = ChainStreaming::Catchup {
-            anchor_height: catchup_height,
+            anchor_height: anchor_height.unwrap_or(0),
         };
         let _ = self.state_tx.send(next_state);
         Some(next_state)

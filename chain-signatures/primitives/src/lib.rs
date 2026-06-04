@@ -94,9 +94,11 @@ impl SignId {
         Self { request_id }
     }
 
-    pub fn checkpoint(payload: &[u8; 32]) -> Self {
+    pub fn checkpoint(chain: Chain, height: u64, payload: &[u8; 32]) -> Self {
         let mut hasher = sha3::Sha3_256::new();
         hasher.update(b"checkpoint");
+        hasher.update(chain.caip2_chain_id().as_bytes());
+        hasher.update(height.to_le_bytes());
         hasher.update(payload);
         hasher.update(LATEST_MPC_KEY_VERSION.to_le_bytes());
         let request_id: [u8; 32] = hasher.finalize().into();

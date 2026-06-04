@@ -48,6 +48,16 @@ fn keccak(derivation_path: impl AsRef<[u8]>) -> Scalar {
     Scalar::from_non_biased(hash)
 }
 
+pub fn derive_epsilon_checkpoint(
+    key_version: u32,
+    chain: Chain,
+    sender: &str,
+    height: u64,
+) -> Scalar {
+    let derivation_path = derivation_path(key_version, chain, sender, &height.to_string());
+    sha3(derivation_path)
+}
+
 pub fn derive_epsilon_near(key_version: u32, predecessor_id: &AccountId, path: &str) -> Scalar {
     let derivation_path = derivation_path(key_version, Chain::NEAR, predecessor_id.as_str(), path);
     sha3(derivation_path)

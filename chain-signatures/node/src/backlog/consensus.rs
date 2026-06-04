@@ -94,7 +94,7 @@ pub(crate) async fn recover_backlog(
     }
 
     // Align with consensus
-    let _ = align_backlog_with_consensus(
+    align_backlog_with_consensus(
         source_chain,
         backlog,
         checkpoints_rx,
