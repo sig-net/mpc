@@ -13,7 +13,7 @@ use crate::stream::ops::{
     process_respond_event, process_sign_request, requeue_pending_sign_requests,
     resume_pending_publish_requests, RespondBidirectionalEvent, SignatureRespondedEvent,
 };
-use crate::stream::pipeline::ChainPipeline;
+pub use crate::stream::pipeline::ChainPipeline;
 
 use async_trait::async_trait;
 use std::time::Duration;

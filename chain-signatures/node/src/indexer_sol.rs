@@ -633,8 +633,9 @@ fn build_sign_request(
 /// in `live_tx`. The anchor slot (current confirmed slot at subscription time) is sent
 /// via `anchor_tx` so that `livestream()` can return it to the catchup logic.
 ///
-/// Events accumulate in the channel while catchup runs; `process_next_block` drains them
-/// only after catchup completes (enforced by `catchup_then_livestream`).
+/// The anchor is resolved inside `subscribe_to_program_events` immediately after the WS
+/// subscription is established — ensuring the subscription is live before we anchor, so
+/// catchup covers `[persisted_block, anchor)` with no gaps.
 async fn subscribe_and_buffer_live_events(
     program_id: Pubkey,
     rpc_url: String,
@@ -642,7 +643,6 @@ async fn subscribe_and_buffer_live_events(
     live_tx: mpsc::Sender<ChainEvent>,
     anchor_tx: oneshot::Sender<u64>,
 ) {
-    // Get anchor slot immediately so livestream() can return without waiting for an event.
     let rpc = RpcClient::new(rpc_url);
     let mut anchor_tx = Some(anchor_tx);
     loop {
@@ -770,6 +770,29 @@ async fn subscribe_to_program_events(
 
     let (mut stream, _unsubscriber) = pubsub_client.logs_subscribe(filter, config).await?;
 
+    // The WS subscription is now live. Fetch the current confirmed slot via RPC as the
+    // anchor: this is the correct boundary because the subscription is already buffering
+    // all new events, so catchup can safely cover [persisted_block, anchor) via RPC history
+    // with no gaps. We do not wait for the first WS event because that could deadlock if
+    // no program-mentioning transactions arrive (e.g. in tests after a single sign call).
+    if let Some(anchor_tx) = anchor_tx.take() {
+        match rpc_client
+            .get_slot_with_commitment(CommitmentConfig::confirmed())
+            .await
+        {
+            Ok(slot) => {
+                let _ = anchor_tx.send(slot);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "failed to fetch anchor slot after WS subscribe; retry on reconnect"
+                );
+                // Drop anchor_tx — livestream() will receive a RecvError and propagate the failure.
+            }
+        }
+    }
+
     // stall watchdog
     let stall_timeout = Duration::from_secs(60);
     let mut last_ws_msg = Instant::now();
@@ -791,10 +814,6 @@ async fn subscribe_to_program_events(
                         last_ws_msg = Instant::now();
 
                         let slot = response.context.slot;
-                        if let Some(anchor_tx) = anchor_tx.take() {
-                            // Send the anchor slot back to livestream() on the first received message
-                            let _ = anchor_tx.send(slot);
-                        }
 
                         let logs = &response.value.logs;
                         if response.value.err.is_some() || !has_log_starts_with(logs, &program_invoke_log) {

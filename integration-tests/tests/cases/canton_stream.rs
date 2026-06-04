@@ -5,9 +5,12 @@ use integration_tests::canton::{
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
 use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
+use mpc_node::mesh::MeshState;
+use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest, SignKind};
+use mpc_node::rpc::CheckpointDigest;
 use mpc_node::stream::ops::SignatureRespondedEvent;
-use mpc_node::stream::{catchup_then_livestream, ChainEvent, ChainStream, ChainStreaming};
+use mpc_node::stream::{ChainEvent, ChainPipeline, ChainStream, ChainStreaming};
 use mpc_primitives::{ScalarExt, Signature, LATEST_MPC_KEY_VERSION};
 use serde_json::json;
 use serial_test::serial;
@@ -20,11 +23,23 @@ use tokio::time::timeout;
 /// Accepts Backlog as parameter (needed for checkpoint tests).
 async fn stream_canton(sandbox: &CantonSandbox, backlog: Backlog) -> Result<CantonStream> {
     let config = sandbox.get_config();
-    let mut stream =
-        CantonStream::new(Some(config), backlog).context("failed to create CantonStream")?;
+    let mut stream = CantonStream::new(Some(config), backlog.clone())
+        .context("failed to create CantonStream")?;
     let indexer = ChainStream::start(&mut stream).await?;
-    let (_, state_rx) = tokio::sync::watch::channel(ChainStreaming::Live);
-    tokio::spawn(catchup_then_livestream(indexer, state_rx));
+    let (_cp_tx, cp_rx) = tokio::sync::watch::channel(CheckpointDigest::default());
+    let (_mesh_tx, mesh_rx) = tokio::sync::watch::channel(MeshState::default());
+    let node_client = NodeClient::new(&Default::default());
+    let (pipeline, _state_rx) = ChainPipeline::from_state(
+        ChainStreaming::Live,
+        indexer,
+        cp_rx,
+        backlog,
+        mesh_rx,
+        node_client,
+        0,
+        "test.near".parse().unwrap(),
+    );
+    tokio::spawn(pipeline.run());
     Ok(stream)
 }
 

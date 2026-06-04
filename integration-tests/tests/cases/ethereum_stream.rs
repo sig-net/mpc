@@ -19,9 +19,7 @@ use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::ops::SignBidirectionalEvent as NodeSignBidirectionalEvent;
 use mpc_node::stream::ops::SignatureRespondedEvent;
-use mpc_node::stream::{
-    catchup_then_livestream, run_stream, ChainEvent, ChainStream, ChainStreaming,
-};
+use mpc_node::stream::{run_stream, ChainEvent, ChainPipeline, ChainStream, ChainStreaming};
 use mpc_node::util::current_unix_timestamp;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use near_primitives::types::AccountId;
@@ -376,10 +374,22 @@ async fn stream_ethereum(
     ctx: &EthereumTestEnvironment,
     backlog: Backlog,
 ) -> Result<StartedEthereumStream> {
-    let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog).await?;
+    let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
     let indexer = stream.start().await?;
-    let (_, state_rx) = watch::channel(ChainStreaming::Live);
-    let indexer_task = tokio::spawn(catchup_then_livestream(indexer, state_rx));
+    let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+    let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+    let node_client = NodeClient::new(&Default::default());
+    let (pipeline, _state_rx) = ChainPipeline::from_state(
+        ChainStreaming::Live,
+        indexer,
+        cp_rx,
+        backlog,
+        mesh_rx,
+        node_client,
+        0,
+        "test.near".parse().unwrap(),
+    );
+    let indexer_task = tokio::spawn(pipeline.run());
 
     Ok(StartedEthereumStream {
         stream,

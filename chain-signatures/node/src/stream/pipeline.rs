@@ -126,7 +126,9 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             }
         }
 
-        // Perform consensus checkpoint alignment
+        // Perform consensus checkpoint alignment. Returns None when no alignment is
+        // needed (the normal case); returns Some(height) when the backlog was aligned.
+        // Either way, continue to livestream initialization.
         crate::backlog::consensus::align_backlog_with_consensus(
             chain,
             &self.backlog,
@@ -135,7 +137,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             &self.node_client,
             &self.my_account_id,
         )
-        .await?;
+        .await;
 
         // Determine anchor height
         let anchor_height = loop {
@@ -199,13 +201,9 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         let chain = I::CHAIN;
         loop {
             tokio::select! {
-                block = self.indexer.next() => {
-                    let Some(block) = block else {
+                alive = self.indexer.process_next_block() => {
+                    if !alive {
                         return None; // shutdown
-                    };
-                    while let Err(err) = self.indexer.process(&block).await {
-                        tracing::warn!(?err, "live block processing failed; retrying");
-                        tokio::time::sleep(I::RETRY_DELAY).await;
                     }
                 }
                 new_state = wait_state_change_or_regression(
