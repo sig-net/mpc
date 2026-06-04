@@ -29,8 +29,7 @@ async fn stream_canton(sandbox: &CantonSandbox, backlog: Backlog) -> Result<Cant
     let (_cp_tx, cp_rx) = tokio::sync::watch::channel(CheckpointDigest::default());
     let (_mesh_tx, mesh_rx) = tokio::sync::watch::channel(MeshState::default());
     let node_client = NodeClient::new(&Default::default());
-    let (pipeline, mut state_rx) = ChainPipeline::from_state(
-        ChainStreaming::Recovery,
+    let (pipeline, mut state_rx) = ChainPipeline::new(
         indexer,
         cp_rx,
         backlog,

@@ -176,36 +176,6 @@ pub trait ChainStream: Send + 'static {
     async fn next_event(&mut self) -> Option<ChainEvent>;
 }
 
-async fn check_regression_and_get_state(
-    chain: Chain,
-    backlog: &Backlog,
-    checkpoints_rx: &mut watch::Receiver<CheckpointDigest>,
-) -> Option<ChainStreaming> {
-    let checkpoint_digest = checkpoints_rx.borrow_and_update().clone();
-    if checkpoint_digest.digest == [0u8; 32] {
-        return None;
-    }
-
-    let current_checkpoint = backlog.checkpoint(chain).await;
-    if current_checkpoint.digest() == checkpoint_digest.digest {
-        return None;
-    }
-
-    // Check if we are ahead of consensus and aligned
-    if current_checkpoint.height > checkpoint_digest.height {
-        if let Some(historical) = backlog
-            .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
-            .await
-        {
-            if historical.height == checkpoint_digest.height {
-                return None;
-            }
-        }
-    }
-
-    Some(ChainStreaming::Recovery { load_local: false })
-}
-
 /// Shared indexer loop: recovers backlog then processes events from the stream
 #[allow(clippy::too_many_arguments)]
 pub async fn run_stream<S: ChainStream>(
@@ -1467,8 +1437,7 @@ mod tests {
             catchup_started_tx: Arc::new(Mutex::new(Some(catchup_tx))),
         };
 
-        let (pipeline, state_rx) = ChainPipeline::from_state(
-            ChainStreaming::Recovery { load_local: true },
+        let (pipeline, state_rx) = ChainPipeline::new(
             indexer,
             cp_rx,
             backlog,

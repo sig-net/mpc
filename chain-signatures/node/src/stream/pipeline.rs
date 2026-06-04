@@ -3,9 +3,7 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::Chain;
 use crate::rpc::CheckpointDigest;
-use crate::stream::{
-    check_regression_and_get_state, AsyncCatchupIter, ChainIndexer, ChainStreaming,
-};
+use crate::stream::{AsyncCatchupIter, ChainIndexer, ChainStreaming};
 use near_account_id::AccountId;
 use tokio::sync::watch;
 
@@ -175,7 +173,6 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         let chain = I::CHAIN;
         tracing::info!(%chain, anchor_height, "starting/re-starting catchup");
         let mut catchup_iter = self.indexer.catchup_range(anchor_height).await;
-        let current_state = ChainStreaming::Catchup { anchor_height };
 
         loop {
             tokio::select! {
@@ -188,13 +185,11 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                         tokio::time::sleep(I::RETRY_DELAY).await;
                     }
                 }
-                new_state = wait_state_change_or_regression(
-                    &mut self.state_rx,
+                new_state = wait_detected_regression(
                     &mut self.checkpoints_rx,
                     &self.state_tx,
                     &self.backlog,
                     chain,
-                    current_state,
                 ) => {
                     return Some(new_state);
                 }
@@ -219,13 +214,11 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                         return None; // shutdown
                     }
                 }
-                new_state = wait_state_change_or_regression(
-                    &mut self.state_rx,
+                new_state = wait_detected_regression(
                     &mut self.checkpoints_rx,
                     &self.state_tx,
                     &self.backlog,
                     chain,
-                    ChainStreaming::Live,
                 ) => {
                     return Some(new_state);
                 }
@@ -234,32 +227,51 @@ impl<I: ChainIndexer> ChainPipeline<I> {
     }
 }
 
-async fn wait_state_change_or_regression(
-    state_rx: &mut watch::Receiver<ChainStreaming>,
+async fn wait_detected_regression(
     checkpoints_rx: &mut watch::Receiver<CheckpointDigest>,
     state_tx: &watch::Sender<ChainStreaming>,
     backlog: &Backlog,
     chain: Chain,
-    current_state: ChainStreaming,
 ) -> ChainStreaming {
     loop {
-        tokio::select! {
-            _ = state_rx.changed() => {
-                let new_state = *state_rx.borrow_and_update();
-                if new_state != current_state {
-                    return new_state;
-                }
-            }
-            _ = checkpoints_rx.changed() => {
-                if let Some(new_state) = check_regression_and_get_state(
-                    chain,
-                    backlog,
-                    checkpoints_rx,
-                ).await {
-                    let _ = state_tx.send(new_state);
-                    return new_state;
-                }
+        if checkpoints_rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+        if let Some(new_state) = detect_regression(chain, backlog, checkpoints_rx).await {
+            let _ = state_tx.send(new_state);
+            return new_state;
+        }
+    }
+}
+
+/// Returns `Some(ChainStreaming::Recovery)` if a regression is detected
+/// Otherwise returns `None` in the case we are normal.
+async fn detect_regression(
+    chain: Chain,
+    backlog: &Backlog,
+    checkpoints_rx: &mut watch::Receiver<CheckpointDigest>,
+) -> Option<ChainStreaming> {
+    let checkpoint_digest = checkpoints_rx.borrow_and_update().clone();
+    if checkpoint_digest.digest == [0u8; 32] {
+        return None;
+    }
+
+    let current_checkpoint = backlog.checkpoint(chain).await;
+    if current_checkpoint.digest() == checkpoint_digest.digest {
+        return None;
+    }
+
+    // Check if we are ahead of consensus and aligned
+    if current_checkpoint.height > checkpoint_digest.height {
+        if let Some(historical) = backlog
+            .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
+            .await
+        {
+            if historical.height == checkpoint_digest.height {
+                return None;
             }
         }
     }
+
+    Some(ChainStreaming::Recovery { load_local: false })
 }

@@ -299,3 +299,72 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[test(tokio::test)]
+async fn test_checkpoint_persistence() -> anyhow::Result<()> {
+    use deadpool_redis::redis::AsyncCommands;
+    use mpc_node::storage::checkpoint_storage::CheckpointStorage;
+    use mpc_primitives::{Chain, Checkpoint};
+    use near_account_id::AccountId;
+
+    let spawner = ClusterSpawner::default()
+        .network("test-checkpoint-persistence")
+        .init_network()
+        .await?;
+
+    let redis = containers::Redis::run(&spawner).await;
+    let pool = redis.pool();
+    let account_id: AccountId = "party0.near".parse().unwrap();
+    let storage = CheckpointStorage::Redis(pool.clone(), account_id);
+
+    // 1. Clean storage returns None / empty history
+    assert!(storage.load_latest(Chain::Solana).await?.is_none());
+    assert!(storage.load_history(Chain::Solana).await?.is_empty());
+
+    // 2. Persist first checkpoint
+    let cp1 = Checkpoint {
+        chain: Chain::Solana,
+        height: 10,
+        pending_requests: vec![],
+    };
+    storage.persist(&cp1).await?;
+
+    // 3. Verify latest and history
+    let latest = storage.load_latest(Chain::Solana).await?.unwrap();
+    assert_eq!(latest.height, 10);
+    let history = storage.load_history(Chain::Solana).await?;
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].height, 10);
+
+    // 4. Persist second checkpoint at higher height
+    let cp2 = Checkpoint {
+        chain: Chain::Solana,
+        height: 20,
+        pending_requests: vec![],
+    };
+    storage.persist(&cp2).await?;
+
+    // 5. Verify latest is updated and history has both
+    let latest = storage.load_latest(Chain::Solana).await?.unwrap();
+    assert_eq!(latest.height, 20);
+    let history = storage.load_history(Chain::Solana).await?;
+    assert_eq!(history.len(), 2);
+    let mut heights: Vec<u64> = history.iter().map(|cp| cp.height).collect();
+    heights.sort();
+    assert_eq!(heights, vec![10, 20]);
+
+    // 6. Test expiration/pruning: modify score of cp1 to be expired (e.g. now - 2000s)
+    let mut conn = pool.get().await?;
+    let history_key = "party0.near:checkpoint:history:v7:Solana";
+    let cp1_str = serde_json::to_string(&cp1)?;
+    let expired_score = mpc_node::util::current_unix_timestamp() - 2000;
+
+    let _: () = conn.zadd(history_key, cp1_str, expired_score).await?;
+
+    // 7. Load history again - this triggers pruning in the Lua script!
+    let history = storage.load_history(Chain::Solana).await?;
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].height, 20); // cp1 is pruned, only cp2 remains
+
+    Ok(())
+}

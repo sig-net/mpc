@@ -53,8 +53,7 @@ async fn stream_solana_with_backlog(config: SolConfig, backlog: Backlog) -> Resu
     // Start from Recovery so that handle_recovery() calls livestream(), which
     // spawns the live event subscription and initializes the live_rx channel.
     // Starting in Live would skip this initialization and produce no events.
-    let (pipeline, mut state_rx) = ChainPipeline::from_state(
-        ChainStreaming::Recovery,
+    let (pipeline, mut state_rx) = ChainPipeline::new(
         indexer,
         cp_rx,
         backlog,
