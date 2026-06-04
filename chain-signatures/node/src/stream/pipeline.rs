@@ -19,7 +19,6 @@ pub struct ChainPipeline<I: ChainIndexer> {
     node_client: NodeClient,
     threshold: usize,
     my_account_id: AccountId,
-    is_first_recovery: bool,
 }
 
 impl<I: ChainIndexer> ChainPipeline<I> {
@@ -33,7 +32,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         my_account_id: AccountId,
     ) -> (Self, watch::Receiver<ChainStreaming>) {
         Self::from_state(
-            ChainStreaming::Recovery,
+            ChainStreaming::Recovery { load_local: true },
             indexer,
             checkpoints_rx,
             backlog,
@@ -66,7 +65,6 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             node_client,
             threshold,
             my_account_id,
-            is_first_recovery: true,
         };
         (this, state_rx)
     }
@@ -78,8 +76,8 @@ impl<I: ChainIndexer> ChainPipeline<I> {
 
         loop {
             match current_state {
-                ChainStreaming::Recovery => {
-                    if let Some(next_state) = self.handle_recovery().await {
+                ChainStreaming::Recovery { load_local } => {
+                    if let Some(next_state) = self.handle_recovery(load_local).await {
                         current_state = next_state;
                     } else {
                         break;
@@ -103,13 +101,12 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         }
     }
 
-    async fn handle_recovery(&mut self) -> Option<ChainStreaming> {
+    async fn handle_recovery(&mut self, load_local: bool) -> Option<ChainStreaming> {
         let chain = I::CHAIN;
-        tracing::info!(%chain, "starting Recovery state");
+        tracing::info!(%chain, load_local, "starting checkpoint recovery or regression");
         crate::mesh::wait_threshold_active(&mut self.mesh_state.clone(), self.threshold).await;
 
-        if self.is_first_recovery {
-            self.is_first_recovery = false;
+        if load_local {
             // Load local checkpoint from storage first
             match self.backlog.storage.load_latest(chain).await {
                 Ok(Some(checkpoint)) => {

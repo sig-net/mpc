@@ -23,7 +23,7 @@ pub const CHAIN_EVENT_STREAM_SIZE: usize = 16384;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChainStreaming {
-    Recovery,
+    Recovery { load_local: bool },
     Catchup { anchor_height: u64 },
     Live,
 }
@@ -203,7 +203,7 @@ async fn check_regression_and_get_state(
         }
     }
 
-    Some(ChainStreaming::Recovery)
+    Some(ChainStreaming::Recovery { load_local: false })
 }
 
 /// Shared indexer loop: recovers backlog then processes events from the stream
@@ -317,7 +317,7 @@ pub async fn run_stream<S: ChainStream>(
             }
             _ = state_rx.changed() => {
                 let state = *state_rx.borrow_and_update();
-                if matches!(state, ChainStreaming::Recovery | ChainStreaming::Catchup { .. }) {
+                if matches!(state, ChainStreaming::Recovery { .. } | ChainStreaming::Catchup { .. }) {
                     caught_up = false;
                 }
             }
@@ -1468,7 +1468,7 @@ mod tests {
         };
 
         let (pipeline, state_rx) = ChainPipeline::from_state(
-            ChainStreaming::Recovery,
+            ChainStreaming::Recovery { load_local: true },
             indexer,
             cp_rx,
             backlog,
@@ -1576,7 +1576,7 @@ mod tests {
         timeout(Duration::from_secs(1), async {
             loop {
                 let s = *state_rx.borrow_and_update();
-                if matches!(s, ChainStreaming::Recovery) {
+                if matches!(s, ChainStreaming::Recovery { .. }) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;

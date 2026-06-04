@@ -69,24 +69,27 @@ impl CheckpointStorage {
                 let value = serde_json::to_string(checkpoint)
                     .context("failed to serialize checkpoint persistence")?;
 
-                // 1. Persist the latest checkpoint
-                conn.set::<_, _, ()>(self.checkpoint_key(checkpoint.chain), &value)
-                    .await
-                    .context("failed to set checkpoint in redis")?;
+                const PERSIST_SCRIPT: &str = r#"
+                    local latest_key = KEYS[1]
+                    local history_key = KEYS[2]
+                    local index_key = KEYS[3]
+                    local value = ARGV[1]
+                    local height = ARGV[2]
 
-                // 2. Persist the historical checkpoint with 30-minute (1800s) TTL
-                let history_key = self.checkpoint_history_key(checkpoint.chain, checkpoint.height);
-                conn.set_ex::<_, _, ()>(history_key, &value, 1800)
-                    .await
-                    .context("failed to set historical checkpoint in redis")?;
+                    redis.call("SET", latest_key, value)
+                    redis.call("SETEX", history_key, 1800, value)
+                    redis.call("SADD", index_key, height)
+                "#;
 
-                // 3. Add to index set
-                conn.sadd::<_, _, ()>(
-                    self.checkpoint_history_index_key(checkpoint.chain),
-                    checkpoint.height,
-                )
-                .await
-                .context("failed to add height to checkpoint history index")?;
+                let _: () = redis::Script::new(PERSIST_SCRIPT)
+                    .key(self.checkpoint_key(checkpoint.chain))
+                    .key(self.checkpoint_history_key(checkpoint.chain, checkpoint.height))
+                    .key(self.checkpoint_history_index_key(checkpoint.chain))
+                    .arg(&value)
+                    .arg(checkpoint.height)
+                    .invoke_async(&mut conn)
+                    .await
+                    .context("failed to persist checkpoint via lua script")?;
             }
             CheckpointStorage::InMemory { latest, history } => {
                 latest
@@ -131,42 +134,54 @@ impl CheckpointStorage {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
-                let heights: Vec<u64> = conn
-                    .smembers(self.checkpoint_history_index_key(chain))
-                    .await
-                    .context("failed to get checkpoint history heights")?;
-                if heights.is_empty() {
-                    return Ok(Vec::new());
-                }
+                let history_key_prefix = match self {
+                    CheckpointStorage::Redis(_, account_id) => {
+                        format!("{account_id}:checkpoint:history:{CHECKPOINT_VERSION}:{chain}:")
+                    }
+                    _ => unreachable!(),
+                };
 
-                let keys: Vec<String> = heights
-                    .iter()
-                    .map(|h| self.checkpoint_history_key(chain, *h))
-                    .collect();
-                let values: Vec<Option<String>> = conn
-                    .mget(&keys)
+                const LOAD_HISTORY_SCRIPT: &str = r#"
+                    local index_key = KEYS[1]
+                    local history_key_prefix = ARGV[1]
+
+                    local heights = redis.call("SMEMBERS", index_key)
+                    if #heights == 0 then
+                        return {}
+                    end
+
+                    local values = {}
+                    local expired_heights = {}
+                    for _, height in ipairs(heights) do
+                        local key = history_key_prefix .. height
+                        local val = redis.call("GET", key)
+                        if val then
+                            table.insert(values, val)
+                        else
+                            table.insert(expired_heights, height)
+                        end
+                    end
+
+                    if #expired_heights > 0 then
+                        redis.call("SREM", index_key, unpack(expired_heights))
+                    end
+
+                    return values
+                "#;
+
+                let values: Vec<String> = redis::Script::new(LOAD_HISTORY_SCRIPT)
+                    .key(self.checkpoint_history_index_key(chain))
+                    .arg(&history_key_prefix)
+                    .invoke_async(&mut conn)
                     .await
-                    .context("failed to get historical checkpoints")?;
+                    .context("failed to load historical checkpoints")?;
 
                 let mut checkpoints = Vec::new();
-                let mut expired_heights = Vec::new();
-                for (height, value) in heights.into_iter().zip(values) {
-                    if let Some(v) = value {
-                        let checkpoint: Checkpoint = serde_json::from_str(&v)
-                            .context("failed to deserialize historical checkpoint")?;
-                        checkpoints.push(checkpoint);
-                    } else {
-                        expired_heights.push(height);
-                    }
+                for v in values {
+                    let checkpoint: Checkpoint = serde_json::from_str(&v)
+                        .context("failed to deserialize historical checkpoint")?;
+                    checkpoints.push(checkpoint);
                 }
-
-                if !expired_heights.is_empty() {
-                    let _: () = conn
-                        .srem(self.checkpoint_history_index_key(chain), &expired_heights)
-                        .await
-                        .context("failed to remove expired heights from index")?;
-                }
-
                 Ok(checkpoints)
             }
             CheckpointStorage::InMemory { history, .. } => {
