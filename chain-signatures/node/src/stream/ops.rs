@@ -641,6 +641,38 @@ pub async fn process_execution_confirmed(
     Ok(())
 }
 
+pub(crate) async fn process_block_event(
+    chain: Chain,
+    block: u64,
+    backlog: &Backlog,
+    sign_tx: &mpsc::Sender<Sign>,
+) {
+    let Some(checkpoint) = backlog.set_processed_block(chain, block).await else {
+        crate::metrics::indexers::LATEST_BLOCK_NUMBER
+            .with_label_values(&[chain.as_str(), "finalized"])
+            .set(block as i64);
+        return;
+    };
+
+    tracing::info!(block, ?checkpoint, %chain, "created checkpoint");
+    let digest = checkpoint.digest();
+
+    let consensus_checkpoint = mpc_primitives::ConsensusCheckpoint {
+        chain,
+        height: checkpoint.height,
+        digest,
+    };
+    let indexed = IndexedSignRequest::checkpoint(consensus_checkpoint);
+    let sign = Sign::Checkpoint(indexed);
+    if let Err(err) = sign_tx.send(sign).await {
+        tracing::error!(?err, %chain, "failed to enqueue checkpoint sign request");
+    }
+
+    crate::metrics::indexers::LATEST_BLOCK_NUMBER
+        .with_label_values(&[chain.as_str(), "finalized"])
+        .set(block as i64);
+}
+
 /// Decode a [u8; 32] sender into its canonical on-chain address string.
 /// Canton is intentionally absent: its sender is a variable-length party ID
 /// hashed irreversibly into the [u8; 32] slot, so callers with access to the
@@ -663,6 +695,7 @@ mod tests {
     use crate::backlog::Backlog;
     use crate::mesh::connection::NodeStatus;
     use crate::mesh::wait_threshold_active;
+    use crate::mesh::MeshState;
     use crate::node_client::NodeClient;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::SignKind;
@@ -678,7 +711,7 @@ mod tests {
     use near_primitives::types::AccountId;
     use solana_sdk::pubkey::Pubkey;
     use std::time::Duration;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, watch};
     use tokio::time::timeout;
 
     fn test_indexed_request(

@@ -7,6 +7,7 @@ use crate::rpc::{CheckpointDigest, ContractStateWatcher};
 
 use cait_sith::protocol::Participant;
 use mpc_primitives::Checkpoint;
+use near_account_id::AccountId;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use std::time::Duration;
@@ -18,6 +19,7 @@ pub(crate) async fn align_backlog_with_consensus(
     checkpoints_rx: &mut watch::Receiver<CheckpointDigest>,
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
+    my_account_id: &AccountId,
 ) -> Option<u64> {
     let checkpoint_digest = checkpoints_rx.borrow_and_update().clone();
     // Ignore the default zero-digest (no consensus checkpoint observed yet).
@@ -42,6 +44,7 @@ pub(crate) async fn align_backlog_with_consensus(
         chain,
         checkpoint_digest.digest,
         checkpoints_rx,
+        my_account_id,
     )
     .await?;
 
@@ -97,11 +100,12 @@ pub(crate) async fn recover_backlog(
         checkpoints_rx,
         mesh_state,
         node_client,
+        contract_watcher.account_id(),
     )
     .await;
 }
 
-async fn fetch_checkpoint_from_peer(
+async fn fetch_peer_checkpoint(
     node_client: &NodeClient,
     url: &str,
     chain: Chain,
@@ -144,7 +148,7 @@ async fn query_peers_checkpoint(
 ) -> Option<Checkpoint> {
     for (peer, info) in peers {
         tracing::debug!(?peer, ?chain, "querying peer for checkpoint");
-        let checkpoint = fetch_checkpoint_from_peer(node_client, &info.url, chain, target_digest).await;
+        let checkpoint = fetch_peer_checkpoint(node_client, &info.url, chain, target_digest).await;
         if let Some(checkpoint) = checkpoint {
             return Some(checkpoint);
         }
@@ -161,8 +165,16 @@ pub(crate) async fn find_consensus_checkpoint(
     chain: Chain,
     target_digest: [u8; 32],
     consensus_rx: &mut watch::Receiver<CheckpointDigest>,
+    my_account_id: &AccountId,
 ) -> Option<Checkpoint> {
-    let mut peers: Vec<_> = mesh_state.borrow().active().participants.clone().into_iter().collect();
+    let mut peers: Vec<_> = mesh_state
+        .borrow()
+        .active()
+        .participants
+        .clone()
+        .into_iter()
+        .filter(|(_, info)| &info.account_id != my_account_id)
+        .collect();
     peers.shuffle(&mut thread_rng());
 
     loop {
@@ -185,7 +197,10 @@ pub(crate) async fn find_consensus_checkpoint(
                     return None;
                 }
                 let active = mesh_state.borrow_and_update().active().participants.clone();
-                peers = active.into_iter().collect();
+                peers = active
+                    .into_iter()
+                    .filter(|(_, info)| &info.account_id != my_account_id)
+                    .collect();
                 peers.shuffle(&mut thread_rng());
             }
 

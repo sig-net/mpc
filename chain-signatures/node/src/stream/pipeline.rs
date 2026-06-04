@@ -6,6 +6,7 @@ use crate::rpc::CheckpointDigest;
 use crate::stream::{
     check_regression_and_get_state, AsyncCatchupIter, ChainIndexer, ChainStreaming,
 };
+use near_account_id::AccountId;
 use tokio::sync::watch;
 
 pub struct ChainPipeline<I: ChainIndexer> {
@@ -17,6 +18,7 @@ pub struct ChainPipeline<I: ChainIndexer> {
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
     threshold: usize,
+    my_account_id: AccountId,
 }
 
 impl<I: ChainIndexer> ChainPipeline<I> {
@@ -27,6 +29,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         mesh_state: watch::Receiver<MeshState>,
         node_client: NodeClient,
         threshold: usize,
+        my_account_id: AccountId,
     ) -> (Self, watch::Receiver<ChainStreaming>) {
         Self::from_state(
             ChainStreaming::Recovery,
@@ -36,9 +39,11 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             mesh_state,
             node_client,
             threshold,
+            my_account_id,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn from_state(
         state: ChainStreaming,
         indexer: I,
@@ -47,6 +52,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         mesh_state: watch::Receiver<MeshState>,
         node_client: NodeClient,
         threshold: usize,
+        my_account_id: AccountId,
     ) -> (Self, watch::Receiver<ChainStreaming>) {
         let (state_tx, state_rx) = watch::channel(state);
         let this = Self {
@@ -58,6 +64,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             mesh_state,
             node_client,
             threshold,
+            my_account_id,
         };
         (this, state_rx)
     }
@@ -65,7 +72,6 @@ impl<I: ChainIndexer> ChainPipeline<I> {
     pub async fn run(mut self) {
         let chain = I::CHAIN;
         tracing::info!(%chain, "starting ChainStream pipeline");
-
         let mut current_state = *self.state_rx.borrow_and_update();
 
         loop {
@@ -121,14 +127,15 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         }
 
         // Perform consensus checkpoint alignment
-        let _ = crate::backlog::consensus::align_backlog_with_consensus(
+        crate::backlog::consensus::align_backlog_with_consensus(
             chain,
             &self.backlog,
             &mut self.checkpoints_rx,
             &mut self.mesh_state,
             &self.node_client,
+            &self.my_account_id,
         )
-        .await;
+        .await?;
 
         // Determine anchor height
         let anchor_height = loop {
@@ -179,19 +186,17 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             }
         }
 
-        let mut final_state = current_state;
         tracing::info!(%chain, "catchup completed => transitioning to livestream");
         if let Err(err) = self.indexer.notify_catchup_completed().await {
             tracing::warn!(?err, %chain, "failed to signal catchup completion");
         }
-        final_state = ChainStreaming::Live;
+        let final_state = ChainStreaming::Live;
         let _ = self.state_tx.send(final_state);
         Some(final_state)
     }
 
     async fn handle_live(&mut self) -> Option<ChainStreaming> {
         let chain = I::CHAIN;
-        let current_state = ChainStreaming::Live;
         loop {
             tokio::select! {
                 block = self.indexer.next() => {
@@ -209,7 +214,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     &self.state_tx,
                     &self.backlog,
                     chain,
-                    current_state,
+                    ChainStreaming::Live,
                 ) => {
                     return Some(new_state);
                 }

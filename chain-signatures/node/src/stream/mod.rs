@@ -9,9 +9,9 @@ use crate::protocol::{Chain, Sign};
 use crate::rpc::{CheckpointDigest, ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::BidirectionalTxId;
 use crate::stream::ops::{
-    process_execution_confirmed, process_respond_bidirectional_event, process_respond_event,
-    process_sign_request, requeue_pending_sign_requests, resume_pending_publish_requests,
-    RespondBidirectionalEvent, SignatureRespondedEvent,
+    process_block_event, process_execution_confirmed, process_respond_bidirectional_event,
+    process_respond_event, process_sign_request, requeue_pending_sign_requests,
+    resume_pending_publish_requests, RespondBidirectionalEvent, SignatureRespondedEvent,
 };
 use crate::stream::pipeline::ChainPipeline;
 
@@ -196,38 +196,6 @@ async fn check_regression_and_get_state(
     Some(ChainStreaming::Recovery)
 }
 
-async fn handle_block_event(
-    chain: Chain,
-    block: u64,
-    backlog: &Backlog,
-    sign_tx: &mpsc::Sender<Sign>,
-) {
-    let Some(checkpoint) = backlog.set_processed_block(chain, block).await else {
-        crate::metrics::indexers::LATEST_BLOCK_NUMBER
-            .with_label_values(&[chain.as_str(), "finalized"])
-            .set(block as i64);
-        return;
-    };
-
-    tracing::info!(block, ?checkpoint, %chain, "created checkpoint");
-    let digest = checkpoint.digest();
-
-    let consensus_checkpoint = mpc_primitives::ConsensusCheckpoint {
-        chain,
-        height: checkpoint.height,
-        digest,
-    };
-    let indexed = IndexedSignRequest::checkpoint(consensus_checkpoint);
-    let sign = Sign::Checkpoint(indexed);
-    if let Err(err) = sign_tx.send(sign).await {
-        tracing::error!(?err, %chain, "failed to enqueue checkpoint sign request");
-    }
-
-    crate::metrics::indexers::LATEST_BLOCK_NUMBER
-        .with_label_values(&[chain.as_str(), "finalized"])
-        .set(block as i64);
-}
-
 /// Shared indexer loop: recovers backlog then processes events from the stream
 #[allow(clippy::too_many_arguments)]
 pub async fn run_stream<S: ChainStream>(
@@ -260,6 +228,7 @@ pub async fn run_stream<S: ChainStream>(
         mesh_state.clone(),
         node_client,
         threshold,
+        contract_watcher.account_id().clone(),
     );
     let indexer_task = tokio::spawn(pipeline.run());
 
@@ -309,7 +278,7 @@ pub async fn run_stream<S: ChainStream>(
                         }
                     }
                     ChainEvent::Block(block) => {
-                        handle_block_event(chain, block, &backlog, &sign_tx).await;
+                        process_block_event(chain, block, &backlog, &sign_tx).await;
                     }
                     ChainEvent::ExecutionConfirmed {
                         tx_id,
@@ -609,6 +578,7 @@ mod tests {
             m_rx,
             NodeClient::new(&Default::default()),
             0,
+            "test.near".parse().unwrap(),
         );
 
         pipeline.run().await;
@@ -647,6 +617,7 @@ mod tests {
             m_rx,
             NodeClient::new(&Default::default()),
             0,
+            "test.near".parse().unwrap(),
         );
         pipeline.run().await;
 
@@ -1494,6 +1465,7 @@ mod tests {
             mesh_rx,
             NodeClient::new(&Default::default()),
             0,
+            "test.near".parse().unwrap(),
         );
         let task_handle = tokio::spawn(pipeline.run());
 
@@ -1574,6 +1546,7 @@ mod tests {
             mesh_rx,
             NodeClient::new(&Default::default()),
             1,
+            "test.near".parse().unwrap(),
         );
         let task_handle = tokio::spawn(pipeline.run());
 
