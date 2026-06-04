@@ -322,15 +322,13 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     }
                 }
                 _ = self.checkpoints_rx.changed() => {
-                    if self.threshold > 0 {
-                        if let Some(new_state) = check_regression_and_get_state(
-                            chain,
-                            &self.backlog,
-                            &mut self.checkpoints_rx,
-                        ).await {
-                            let _ = self.state_tx.send(new_state);
-                            return Some(new_state);
-                        }
+                    if let Some(new_state) = check_regression_and_get_state(
+                        chain,
+                        &self.backlog,
+                        &mut self.checkpoints_rx,
+                    ).await {
+                        let _ = self.state_tx.send(new_state);
+                        return Some(new_state);
                     }
                 }
             }
@@ -369,15 +367,13 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     }
                 }
                 _ = self.checkpoints_rx.changed() => {
-                    if self.threshold > 0 {
-                        if let Some(new_state) = check_regression_and_get_state(
-                            chain,
-                            &self.backlog,
-                            &mut self.checkpoints_rx,
-                        ).await {
-                            let _ = self.state_tx.send(new_state);
-                            return Some(new_state);
-                        }
+                    if let Some(new_state) = check_regression_and_get_state(
+                        chain,
+                        &self.backlog,
+                        &mut self.checkpoints_rx,
+                    ).await {
+                        let _ = self.state_tx.send(new_state);
+                        return Some(new_state);
                     }
                 }
             }
