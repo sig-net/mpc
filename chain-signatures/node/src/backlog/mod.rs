@@ -693,6 +693,14 @@ impl Backlog {
                 self.remember_checkpoint(checkpoint).await;
             }
         }
+        if checkpoint_height > previous_height {
+            let mut watchers = self.execution_watchers.write().await;
+            for watchers_entry in watchers.values_mut() {
+                watchers_entry
+                    .watchers
+                    .retain(|_, watcher| watcher.tx.source_chain != chain);
+            }
+        }
 
         // now repopulate our execution watchers
         for (sign_id, tx) in execution_to_watch {
@@ -737,6 +745,15 @@ impl Backlog {
         drop(requests);
 
         self.remember_checkpoint(checkpoint).await;
+
+        {
+            let mut watchers = self.execution_watchers.write().await;
+            for watchers_entry in watchers.values_mut() {
+                watchers_entry
+                    .watchers
+                    .retain(|_, watcher| watcher.tx.source_chain != chain);
+            }
+        }
 
         for (sign_id, tx) in execution_to_watch {
             if let Some(tx) = tx.execution_tx().cloned() {
