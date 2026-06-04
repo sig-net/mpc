@@ -121,7 +121,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         }
 
         // Perform consensus checkpoint alignment
-        let _ = crate::stream::ops::align_backlog_with_consensus(
+        let _ = crate::backlog::consensus::align_backlog_with_consensus(
             chain,
             &self.backlog,
             &mut self.checkpoints_rx,

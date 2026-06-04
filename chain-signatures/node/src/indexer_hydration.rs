@@ -404,7 +404,7 @@ pub async fn run(
     let legacy_rpc = LegacyRpcMethods::<SubstrateConfig>::new(rpc_client);
 
     // Wait for threshold to be available
-    crate::stream::ops::recover_backlog(
+    crate::backlog::consensus::recover_backlog(
         &backlog,
         &mut contract_watcher,
         &mut mesh_state,

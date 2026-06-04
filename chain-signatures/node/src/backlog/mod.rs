@@ -1,3 +1,5 @@
+pub mod consensus;
+
 use crate::protocol::{Chain, IndexedSignRequest, SignKind};
 use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PublishState, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
