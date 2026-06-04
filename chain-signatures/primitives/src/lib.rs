@@ -408,6 +408,8 @@ impl Checkpoint {
 
     pub fn digest(&self) -> [u8; 32] {
         let mut hasher = sha3::Sha3_256::new();
+        hasher.update(self.chain.caip2_chain_id().as_bytes());
+        hasher.update(self.height.to_le_bytes());
         for pending in &self.pending_requests {
             hasher.update(pending.sign_id.request_id);
             hasher.update(&pending.transaction);

@@ -19,6 +19,7 @@ pub struct ChainPipeline<I: ChainIndexer> {
     node_client: NodeClient,
     threshold: usize,
     my_account_id: AccountId,
+    is_first_recovery: bool,
 }
 
 impl<I: ChainIndexer> ChainPipeline<I> {
@@ -65,6 +66,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             node_client,
             threshold,
             my_account_id,
+            is_first_recovery: true,
         };
         (this, state_rx)
     }
@@ -106,23 +108,38 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         tracing::info!(%chain, "starting Recovery state");
         crate::mesh::wait_threshold_active(&mut self.mesh_state.clone(), self.threshold).await;
 
-        // Load local checkpoint from storage first
-        match self.backlog.storage.load_latest(chain).await {
-            Ok(Some(checkpoint)) => {
-                tracing::info!(
-                    ?chain,
-                    height = checkpoint.height,
-                    "loaded local checkpoint"
-                );
-                if let Err(err) = self.backlog.recover_by_checkpoint(checkpoint).await {
-                    tracing::warn!(?chain, %err, "failed to recover from local checkpoint");
+        if self.is_first_recovery {
+            self.is_first_recovery = false;
+            // Load local checkpoint from storage first
+            match self.backlog.storage.load_latest(chain).await {
+                Ok(Some(checkpoint)) => {
+                    tracing::info!(
+                        ?chain,
+                        height = checkpoint.height,
+                        "loaded local checkpoint"
+                    );
+                    if let Err(err) = self.backlog.recover_by_checkpoint(checkpoint).await {
+                        tracing::warn!(?chain, %err, "failed to recover from local checkpoint");
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!(?chain, "no local checkpoint found");
+                }
+                Err(err) => {
+                    tracing::warn!(?chain, %err, "failed to load local checkpoint");
                 }
             }
-            Ok(None) => {
-                tracing::info!(?chain, "no local checkpoint found");
-            }
-            Err(err) => {
-                tracing::warn!(?chain, %err, "failed to load local checkpoint");
+
+            // Load historical checkpoints from storage
+            match self.backlog.storage.load_history(chain).await {
+                Ok(history) => {
+                    for checkpoint in history {
+                        self.backlog.remember_checkpoint(checkpoint).await;
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(?chain, %err, "failed to load historical checkpoints");
+                }
             }
         }
 

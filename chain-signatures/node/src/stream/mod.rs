@@ -187,10 +187,20 @@ async fn check_regression_and_get_state(
     }
 
     let current_checkpoint = backlog.checkpoint(chain).await;
-    let matches_digest = current_checkpoint.digest() == checkpoint_digest.digest;
-
-    if matches_digest {
+    if current_checkpoint.digest() == checkpoint_digest.digest {
         return None;
+    }
+
+    // Check if we are ahead of consensus and aligned
+    if current_checkpoint.height > checkpoint_digest.height {
+        if let Some(historical) = backlog
+            .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
+            .await
+        {
+            if historical.height == checkpoint_digest.height {
+                return None;
+            }
+        }
     }
 
     Some(ChainStreaming::Recovery)

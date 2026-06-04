@@ -33,6 +33,25 @@ pub(crate) async fn align_backlog_with_consensus(
         return None;
     }
 
+    // If our current height is greater than consensus height,
+    // check if we have a historical checkpoint that matches the consensus digest.
+    if current_checkpoint.height > checkpoint_digest.height {
+        if let Some(historical) = backlog
+            .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
+            .await
+        {
+            if historical.height == checkpoint_digest.height {
+                tracing::info!(
+                    ?chain,
+                    local_height = current_checkpoint.height,
+                    consensus_height = checkpoint_digest.height,
+                    "local backlog is ahead of consensus and matches past consensus checkpoint; no regression needed"
+                );
+                return None;
+            }
+        }
+    }
+
     tracing::warn!(
         ?chain,
         ?checkpoint_digest.digest,
@@ -90,6 +109,18 @@ pub(crate) async fn recover_backlog(
         }
         Err(err) => {
             tracing::warn!(?source_chain, %err, "failed to load local checkpoint");
+        }
+    }
+
+    // Load historical checkpoints from storage
+    match backlog.storage.load_history(source_chain).await {
+        Ok(history) => {
+            for checkpoint in history {
+                backlog.remember_checkpoint(checkpoint).await;
+            }
+        }
+        Err(err) => {
+            tracing::warn!(?source_chain, %err, "failed to load historical checkpoints");
         }
     }
 

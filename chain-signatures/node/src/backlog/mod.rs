@@ -220,7 +220,7 @@ impl Backlog {
         }
     }
 
-    async fn remember_checkpoint(&self, checkpoint: Checkpoint) {
+    pub(crate) async fn remember_checkpoint(&self, checkpoint: Checkpoint) {
         let mut historical = self.historical_checkpoints.write().await;
         let chain = checkpoint.chain;
         let btree = historical.entry(chain).or_default();
@@ -1232,7 +1232,7 @@ mod tests {
         assert_eq!(checkpoint.pending_requests.len(), 2);
         assert_eq!(
             checkpoint.digest(),
-            digest_hex("f40d1ffd8d7789c38a3d65f56821ad39b32a1ce54980ad42483bdcb2f04ac879")
+            digest_hex("cda40bc6a6ddf5783311686ae9ecfbd415315358d4c2a48bd204a4efb5430dd2")
         );
     }
 
@@ -1327,11 +1327,11 @@ mod tests {
 
         assert_eq!(
             checkpoint1.digest(),
-            digest_hex("f8005ed51dbbac64e19c4dce2d5e9687313f87c50d018894cc2e148c84960514")
+            digest_hex("2607b4f5c40463fe118b992642f768231b3faa5a6a6f6f510d765e643be187b1")
         );
         assert_eq!(
             checkpoint2.digest(),
-            digest_hex("634bbc74638f64bfa62369e0ac737b678d65a4e46d524647d1c472549e34c81a")
+            digest_hex("f9c763c10e79f375f13e1e9b4171e0b9df33e795bd56ce88c9ce79b97e030ba0")
         );
     }
 
@@ -1359,7 +1359,7 @@ mod tests {
         assert_eq!(checkpoint, deserialized);
         assert_eq!(
             checkpoint.digest(),
-            digest_hex("2be41dda15403530e69be4415e3a0f6408ea78de770a796bb8952889ef155852")
+            digest_hex("671a17aaf9550c47144630e5792c081ae1698c093020ddac2c38728d160fe73f")
         );
         assert_eq!(checkpoint.digest(), deserialized.digest());
 
