@@ -1,5 +1,6 @@
 pub mod bytes;
 
+use enum_map::Enum;
 use k256::elliptic_curve::{
     bigint::ArrayEncoding, sec1::ToEncodedPoint, CurveArithmetic, PrimeField,
 };
@@ -187,6 +188,7 @@ pub enum SerDeserFormat {
     PartialOrd,
     Ord,
     Hash,
+    Enum,
 )]
 #[borsh(crate = "near_sdk::borsh")]
 pub enum Chain {
@@ -393,6 +395,7 @@ impl fmt::Debug for PendingTx {
 #[borsh(crate = "near_sdk::borsh")]
 pub struct Checkpoint {
     pub chain: Chain,
+    #[serde(alias = "block_height")]
     pub height: u64,
     pub pending_requests: Vec<PendingTx>,
 }
@@ -432,14 +435,14 @@ impl Checkpoint {
     Hash,
 )]
 #[borsh(crate = "near_sdk::borsh")]
-pub struct ConsensusCheckpoint {
+pub struct ConsensusCheckpointDigest {
     pub chain: Chain,
     pub height: u64,
     #[serde(with = "serde_bytes")]
     pub digest: [u8; 32],
 }
 
-impl ConsensusCheckpoint {
+impl ConsensusCheckpointDigest {
     pub fn new(chain: Chain, height: u64, digest: [u8; 32]) -> Self {
         Self {
             chain,
@@ -475,6 +478,12 @@ impl ConsensusCheckpoint {
     pub fn sign_path(&self) -> String {
         format!("checkpoint/{}/{}", self.chain.as_str(), self.height)
     }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckpointDigest {
+    pub height: u64,
+    pub digest: [u8; 32],
 }
 
 #[cfg(test)]

@@ -29,7 +29,7 @@ use chrono::Utc;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::{derive_key, kdf::derive_epsilon_checkpoint};
-use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{ConsensusCheckpointDigest, SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
@@ -128,9 +128,8 @@ impl IndexedSignRequest {
         )
     }
 
-    pub fn checkpoint(checkpoint: mpc_primitives::ConsensusCheckpoint) -> Self {
+    pub fn checkpoint(checkpoint: ConsensusCheckpointDigest) -> Self {
         const SENDER: &str = "checkpoint|sender";
-        const PATH: &str = "checkpoint|path";
 
         let payload = checkpoint.sign_payload_scalar();
         let epsilon = derive_epsilon_checkpoint(
@@ -149,7 +148,7 @@ impl IndexedSignRequest {
             entropy,
             epsilon,
             payload,
-            path: PATH.into(),
+            path: checkpoint.sign_path(),
             key_version: LATEST_MPC_KEY_VERSION,
         };
         Self::new(

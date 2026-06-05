@@ -4,9 +4,8 @@ pub mod pipeline;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::IndexedSignRequest;
-use crate::protocol::{Chain, Sign};
-use crate::rpc::{CheckpointDigest, ContractStateWatcher, RpcChannel};
+use crate::protocol::{IndexedSignRequest, Sign};
+use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::BidirectionalTxId;
 use crate::stream::ops::{
     process_block_event, process_execution_confirmed, process_respond_bidirectional_event,
@@ -14,6 +13,7 @@ use crate::stream::ops::{
     resume_pending_publish_requests, RespondBidirectionalEvent, SignatureRespondedEvent,
 };
 pub use crate::stream::pipeline::ChainPipeline;
+use mpc_primitives::{Chain, CheckpointDigest};
 
 use async_trait::async_trait;
 use std::time::Duration;
@@ -306,14 +306,14 @@ mod tests {
     use crate::node_client::NodeClient;
     use crate::protocol::ParticipantInfo;
     use crate::protocol::Sign;
-    use crate::protocol::{Chain, IndexedSignRequest};
-    use crate::rpc::{CheckpointDigest, ContractStateWatcher, RpcAction, RpcChannel};
+    use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
     use crate::storage::checkpoint_storage::CheckpointStorage;
     use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
     use crate::util::current_unix_timestamp;
     use alloy::primitives::Address;
     use k256::{AffinePoint, Scalar};
     use mockito::Server;
+    use mpc_primitives::CheckpointDigest;
     use mpc_primitives::SignArgs;
     use mpc_primitives::SignId;
     use mpc_primitives::Signature;

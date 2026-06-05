@@ -656,14 +656,13 @@ pub(crate) async fn process_block_event(
 
     tracing::info!(block, ?checkpoint, %chain, "created checkpoint");
     let digest = checkpoint.digest();
-
-    let consensus_checkpoint = mpc_primitives::ConsensusCheckpoint {
-        chain,
-        height: checkpoint.height,
-        digest,
-    };
-    let indexed = IndexedSignRequest::checkpoint(consensus_checkpoint);
-    let sign = Sign::Checkpoint(indexed);
+    let sign = Sign::Checkpoint(IndexedSignRequest::checkpoint(
+        mpc_primitives::ConsensusCheckpointDigest {
+            chain,
+            height: checkpoint.height,
+            digest,
+        },
+    ));
     if let Err(err) = sign_tx.send(sign).await {
         tracing::error!(?err, %chain, "failed to enqueue checkpoint sign request");
     }
@@ -707,7 +706,7 @@ mod tests {
     use alloy::primitives::{Address, B256};
     use cait_sith::protocol::Participant;
     use k256::{ProjectivePoint, Scalar};
-    use mpc_primitives::SignArgs;
+    use mpc_primitives::{CheckpointDigest, SignArgs};
     use near_primitives::types::AccountId;
     use solana_sdk::pubkey::Pubkey;
     use std::time::Duration;
@@ -844,7 +843,7 @@ mod tests {
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let node_client = NodeClient::new(&Default::default());
 
-        let (_cp_tx, mut cp_rx) = watch::channel(crate::rpc::CheckpointDigest {
+        let (_cp_tx, mut cp_rx) = watch::channel(CheckpointDigest {
             height: 0,
             digest: [0u8; 32],
         });
@@ -1163,7 +1162,7 @@ mod tests {
         let node_client = NodeClient::new(&Default::default());
         let recovered = Backlog::persisted(storage.clone());
 
-        let (_cp_tx, mut cp_rx) = watch::channel(crate::rpc::CheckpointDigest {
+        let (_cp_tx, mut cp_rx) = watch::channel(CheckpointDigest {
             height: 0,
             digest: [0u8; 32],
         });

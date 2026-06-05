@@ -1,4 +1,4 @@
-pub use mpc_primitives::{Chain, Checkpoint, ConsensusCheckpoint, PendingTx};
+pub use mpc_primitives::{Chain, Checkpoint, ConsensusCheckpointDigest, PendingTx};
 
 use crate::config::Config;
 use crate::state::ProtocolContractState;
@@ -24,7 +24,7 @@ pub enum StorageKey {
 #[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 #[borsh(crate = "near_sdk::borsh")]
 pub struct SignedCheckpoint {
-    pub checkpoint: ConsensusCheckpoint,
+    pub checkpoint: ConsensusCheckpointDigest,
     pub signature: Signature,
 }
 

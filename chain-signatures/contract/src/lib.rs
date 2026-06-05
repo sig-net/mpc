@@ -14,7 +14,7 @@ use mpc_crypto::{
     derive_epsilon_near, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
     ScalarExt as _,
 };
-use mpc_primitives::{Chain, ConsensusCheckpoint, SignId, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{Chain, ConsensusCheckpointDigest, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::env::panic_str;
 use near_sdk::json_types::U128;
@@ -817,7 +817,7 @@ impl VersionedMpcContract {
     #[handle_result]
     pub fn respond_checkpoint(
         &mut self,
-        checkpoint: ConsensusCheckpoint,
+        checkpoint: ConsensusCheckpointDigest,
         signature: Signature,
     ) -> Result<(), Error> {
         let protocol_state = self.state();

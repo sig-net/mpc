@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 
 pub use mpc_contract::primitives::{Read, View};
 
+use enum_map::EnumMap;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signer::keypair::Keypair;
@@ -22,7 +23,7 @@ use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
 use mpc_keys::hpke;
-use mpc_primitives::{ConsensusCheckpoint, SignId, Signature};
+use mpc_primitives::{CheckpointDigest, ConsensusCheckpointDigest, SignId, Signature};
 
 use crate::util::retry::{retry_async, Backoff, RetryConfig, RetryError, RetryReason};
 use alloy::contract::{ContractInstance, Interface};
@@ -98,12 +99,6 @@ type EthContractFillProvider = FillProvider<
 >;
 
 type EthContractInstance = ContractInstance<EthContractFillProvider>;
-
-#[derive(Default, Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CheckpointDigest {
-    pub height: u64,
-    pub digest: [u8; 32],
-}
 
 #[derive(Clone)]
 pub struct PublishAction {
@@ -470,7 +465,7 @@ impl RpcExecutor {
         mut self,
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
-        checkpoints: HashMap<Chain, watch::Sender<CheckpointDigest>>,
+        checkpoints: EnumMap<Chain, watch::Sender<CheckpointDigest>>,
     ) {
         // spin up update task for updating contract state, config and checkpoints
         let near = self.near.clone();
@@ -733,7 +728,7 @@ impl NearClient {
 
     pub async fn call_respond_checkpoint(
         &self,
-        checkpoint: &ConsensusCheckpoint,
+        checkpoint: &ConsensusCheckpointDigest,
         signature: &Signature,
     ) -> Result<ExecutionFinalResult, near_fetch::Error> {
         self.client
@@ -1219,7 +1214,7 @@ async fn update_contract_data(
     near: NearClient,
     contract: watch::Sender<Option<ProtocolState>>,
     config: watch::Sender<Config>,
-    checkpoints: HashMap<Chain, watch::Sender<CheckpointDigest>>,
+    checkpoints: EnumMap<Chain, watch::Sender<CheckpointDigest>>,
 ) {
     let reads = vec![Read::State, Read::Config, Read::Checkpoints];
     let views = match near.read(reads).await {
@@ -1272,15 +1267,14 @@ async fn update_contract_data(
                 height: sc.checkpoint.height,
                 digest: sc.checkpoint.digest,
             };
-            if let Some(tx) = checkpoints.get(&chain) {
-                tx.send_if_modified(|old| {
-                    if *old == new_digest {
-                        return false;
-                    }
-                    *old = new_digest;
-                    true
-                });
-            }
+            let tx = &checkpoints[chain];
+            tx.send_if_modified(|old| {
+                if *old == new_digest {
+                    return false;
+                }
+                *old = new_digest;
+                true
+            });
         }
     }
 }

@@ -2,8 +2,8 @@ use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::Chain;
-use crate::rpc::CheckpointDigest;
 use crate::stream::{AsyncCatchupIter, ChainIndexer, ChainStreaming};
+use mpc_primitives::CheckpointDigest;
 use near_account_id::AccountId;
 use tokio::sync::watch;
 

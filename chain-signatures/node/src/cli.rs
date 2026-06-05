@@ -12,7 +12,7 @@ use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
 use crate::protocol::Chain;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
-use crate::rpc::{CheckpointDigest, ContractStateWatcher, NearClient, RpcExecutor};
+use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::triple_storage::TriplePair;
 use crate::stream::run_stream;
@@ -22,13 +22,14 @@ use crate::{
 
 use clap::Parser;
 use deadpool_redis::Runtime;
+use enum_map::EnumMap;
 use k256::sha2::Sha256;
 use local_ip_address::local_ip;
 use mpc_keys::hpke;
+use mpc_primitives::CheckpointDigest;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
-use std::collections::HashMap;
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
@@ -350,20 +351,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 network,
             });
             let (config_tx, config_rx) = watch::channel(config);
-            let default_digest = CheckpointDigest {
-                height: 0,
-                digest: [0u8; 32],
-            };
-            let mut checkpoints_tx: HashMap<Chain, watch::Sender<CheckpointDigest>> =
-                HashMap::new();
-            let mut checkpoints_rx: HashMap<Chain, watch::Receiver<CheckpointDigest>> =
-                HashMap::new();
-            for chain in Chain::iter() {
-                let (tx, rx) = watch::channel(default_digest.clone());
-                checkpoints_tx.insert(chain, tx);
-                checkpoints_rx.insert(chain, rx);
-            }
-
+            let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
             let node = Node::new();
             let node_watcher = node.watch();
 
@@ -434,7 +422,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                         contract_watcher.clone(),
                         mesh_state.clone(),
                         client.clone(),
-                        checkpoints_rx[&Chain::Ethereum].clone(),
+                        checkpoints_rx[Chain::Ethereum].clone(),
                     ));
                 }
                 Err(err) => {
@@ -451,7 +439,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     contract_watcher.clone(),
                     mesh_state.clone(),
                     client.clone(),
-                    checkpoints_rx[&Chain::Solana].clone(),
+                    checkpoints_rx[Chain::Solana].clone(),
                 ));
             }
             tokio::spawn(indexer_hydration::run(
@@ -461,7 +449,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher.clone(),
                 mesh_state.clone(),
                 client.clone(),
-                checkpoints_rx[&Chain::Hydration].clone(),
+                checkpoints_rx[Chain::Hydration].clone(),
             ));
             if let Some(canton_stream) = indexer_canton::CantonStream::new(canton, backlog.clone())
             {
@@ -473,7 +461,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     contract_watcher.clone(),
                     mesh_state.clone(),
                     client.clone(),
-                    checkpoints_rx[&Chain::Canton].clone(),
+                    checkpoints_rx[Chain::Canton].clone(),
                 ));
             }
             tracing::info!("protocol http server spawned");
@@ -543,6 +531,22 @@ fn calculate_digest(
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&result[..8]);
     i64::from_le_bytes(bytes)
+}
+
+fn checkpoint_watchers() -> (
+    EnumMap<Chain, watch::Sender<CheckpointDigest>>,
+    EnumMap<Chain, watch::Receiver<CheckpointDigest>>,
+) {
+    let channels = EnumMap::from_fn(|_| {
+        watch::channel(CheckpointDigest::default())
+    });
+    let checkpoints_tx = EnumMap::from_fn(|chain| {
+        channels[chain].0.clone()
+    });
+    let checkpoints_rx = EnumMap::from_fn(|chain| {
+        channels[chain].1.clone()
+    });
+    (checkpoints_tx, checkpoints_rx)
 }
 
 #[cfg(test)]

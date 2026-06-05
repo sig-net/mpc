@@ -17,7 +17,7 @@ pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
-pub use mpc_primitives::Chain;
+pub use mpc_primitives::{Chain, ConsensusCheckpointDigest};
 pub use signature::{IndexedSignRequest, Sign};
 pub use state::{Node, NodeState};
 
@@ -226,7 +226,7 @@ pub enum SignKind {
     Sign,
     SignBidirectional(crate::stream::ops::SignBidirectionalEvent),
     RespondBidirectional(RespondBidirectionalTx),
-    Checkpoint(mpc_primitives::ConsensusCheckpoint),
+    Checkpoint(ConsensusCheckpointDigest),
 }
 
 #[cfg(test)]

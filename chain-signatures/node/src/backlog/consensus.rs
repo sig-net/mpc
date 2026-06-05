@@ -3,10 +3,11 @@ use crate::mesh::{wait_threshold_active, MeshState};
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::protocol::Chain;
-use crate::rpc::{CheckpointDigest, ContractStateWatcher};
+use crate::rpc::ContractStateWatcher;
 
 use cait_sith::protocol::Participant;
 use mpc_primitives::Checkpoint;
+use mpc_primitives::CheckpointDigest;
 use near_account_id::AccountId;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
