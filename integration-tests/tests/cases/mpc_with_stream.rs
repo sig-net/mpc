@@ -51,6 +51,7 @@ async fn test_sign() {
             break filtered_actions;
         }
         if start.elapsed() > timeout {
+            drop(rpc_actions);
             network.print_actions().await;
             panic!(
                 "timed out waiting for 1 signature, got {}",
@@ -130,6 +131,7 @@ async fn check_channel_contention(
             break filtered_actions;
         }
         if start.elapsed() > timeout {
+            drop(rpc_actions);
             network.print_actions().await;
             panic!(
                 "timed out waiting for {} signatures, got {}",
