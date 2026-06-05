@@ -537,15 +537,9 @@ fn checkpoint_watchers() -> (
     EnumMap<Chain, watch::Sender<CheckpointDigest>>,
     EnumMap<Chain, watch::Receiver<CheckpointDigest>>,
 ) {
-    let channels = EnumMap::from_fn(|_| {
-        watch::channel(CheckpointDigest::default())
-    });
-    let checkpoints_tx = EnumMap::from_fn(|chain| {
-        channels[chain].0.clone()
-    });
-    let checkpoints_rx = EnumMap::from_fn(|chain| {
-        channels[chain].1.clone()
-    });
+    let channels = EnumMap::from_fn(|_| watch::channel(CheckpointDigest::default()));
+    let checkpoints_tx = EnumMap::from_fn(|chain| channels[chain].0.clone());
+    let checkpoints_rx = EnumMap::from_fn(|chain| channels[chain].1.clone());
     (checkpoints_tx, checkpoints_rx)
 }
 

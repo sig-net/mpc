@@ -646,6 +646,7 @@ pub(crate) async fn process_block_event(
     block: u64,
     backlog: &Backlog,
     sign_tx: &mpsc::Sender<Sign>,
+    caught_up: bool,
 ) {
     let Some(checkpoint) = backlog.set_processed_block(chain, block).await else {
         crate::metrics::indexers::LATEST_BLOCK_NUMBER
@@ -655,16 +656,18 @@ pub(crate) async fn process_block_event(
     };
 
     tracing::info!(block, ?checkpoint, %chain, "created checkpoint");
-    let digest = checkpoint.digest();
-    let sign = Sign::Checkpoint(IndexedSignRequest::checkpoint(
-        mpc_primitives::ConsensusCheckpointDigest {
-            chain,
-            height: checkpoint.height,
-            digest,
-        },
-    ));
-    if let Err(err) = sign_tx.send(sign).await {
-        tracing::error!(?err, %chain, "failed to enqueue checkpoint sign request");
+    if caught_up {
+        let digest = checkpoint.digest();
+        let sign = Sign::Checkpoint(IndexedSignRequest::checkpoint(
+            mpc_primitives::ConsensusCheckpointDigest {
+                chain,
+                height: checkpoint.height,
+                digest,
+            },
+        ));
+        if let Err(err) = sign_tx.send(sign).await {
+            tracing::error!(?err, %chain, "failed to enqueue checkpoint sign request");
+        }
     }
 
     crate::metrics::indexers::LATEST_BLOCK_NUMBER
