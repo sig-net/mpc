@@ -355,7 +355,10 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
 
     // 6. Test expiration/pruning: modify score of cp1 to be expired (e.g. now - 2000s)
     let mut conn = pool.get().await?;
-    let history_key = "party0.near:checkpoint:history:v7:Solana";
+    let history_key = format!(
+        "party0.near:checkpoint:history:{}:Solana",
+        mpc_node::storage::checkpoint_storage::CHECKPOINT_VERSION
+    );
     let cp1_str = serde_json::to_string(&cp1)?;
     let expired_score = mpc_node::util::current_unix_timestamp() - 2000;
 
