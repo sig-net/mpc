@@ -47,7 +47,7 @@ async fn test_sign() {
             .filter(|action| !action.contains("kind: Checkpoint"))
             .cloned()
             .collect();
-        if filtered_actions.len() >= 1 {
+        if !filtered_actions.is_empty() {
             break filtered_actions;
         }
         if start.elapsed() > timeout {
@@ -60,7 +60,7 @@ async fn test_sign() {
         drop(rpc_actions);
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    let action_str = actions.iter().next().unwrap();
+    let action_str = actions.first().unwrap();
     assert!(
         action_str.contains("RpcAction::Publish"),
         "unexpected rpc action {action_str}"
@@ -140,7 +140,7 @@ async fn check_channel_contention(
         drop(rpc_actions);
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    let action_str = actions.iter().next().unwrap();
+    let action_str = actions.first().unwrap();
     assert!(
         action_str.contains("RpcAction::Publish"),
         "unexpected rpc action {action_str}"

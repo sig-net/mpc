@@ -258,7 +258,7 @@ pub async fn run_stream<S: ChainStream>(
                         }
                     }
                     ChainEvent::Block(block) => {
-                        process_block_event(chain, block, &backlog, &sign_tx).await;
+                        process_block_event(chain, block, &backlog, &sign_tx, caught_up).await;
                     }
                     ChainEvent::ExecutionConfirmed {
                         tx_id,
