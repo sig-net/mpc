@@ -407,10 +407,30 @@ pub(crate) async fn resume_pending_publish_requests(
     }
 }
 
+fn verify_entry_signature(
+    root_public_key: mpc_primitives::PublicKey,
+    entry: &crate::backlog::BacklogEntry,
+    signature: &Signature,
+    sign_id: SignId,
+) -> anyhow::Result<()> {
+    mpc_crypto::verify_signature(
+        root_public_key,
+        entry.request.args.epsilon,
+        entry.request.args.payload,
+        signature,
+    )
+    .map_err(|err| {
+        anyhow::anyhow!(
+            "respond event carried invalid signature for sign id {:?}: {err}",
+            sign_id
+        )
+    })
+}
+
 pub(crate) async fn process_respond_event(
     respond_event: SignatureRespondedEvent,
     sign_tx: mpsc::Sender<Sign>,
-    contract_watcher: &mut ContractStateWatcher,
+    root_pk: mpc_primitives::PublicKey,
     backlog: &Backlog,
     caught_up: bool,
 ) -> anyhow::Result<()> {
@@ -424,6 +444,10 @@ pub(crate) async fn process_respond_event(
         );
         return Ok(());
     };
+
+    let responded_signature = respond_event.signature();
+
+    verify_entry_signature(root_pk, &entry, &responded_signature, sign_id)?;
 
     let event = match &entry.request.kind {
         SignKind::Sign => {
@@ -458,11 +482,10 @@ pub(crate) async fn process_respond_event(
     })?;
 
     // Get the MPC public key and derive the from_address.
-    let root_public_key = contract_watcher.wait_public_key().await;
     let epsilon = event.epsilon()?;
-    let from_address = crate::sign_bidirectional::derive_user_address(root_public_key, epsilon);
+    let from_address = crate::sign_bidirectional::derive_user_address(root_pk, epsilon);
 
-    let mpc_sig = respond_event.signature();
+    let mpc_sig = responded_signature;
 
     // Sign and hash the transaction to get the correct tx_id and nonce
     let (signed_tx_hash, nonce) = crate::sign_bidirectional::sign_and_hash_transaction(
@@ -529,16 +552,29 @@ pub(crate) async fn process_respond_event(
 pub(crate) async fn process_respond_bidirectional_event(
     event: RespondBidirectionalEvent,
     sign_tx: mpsc::Sender<Sign>,
+    root_pk: mpc_primitives::PublicKey,
     backlog: &Backlog,
     caught_up: bool,
 ) -> anyhow::Result<()> {
     let sign_id = SignId::new(event.request_id());
+    let source_chain = event.source_chain();
     tracing::info!(?sign_id, "processing RespondBidirectionalEvent");
-    if backlog
-        .remove(event.source_chain(), &sign_id)
-        .await
-        .is_some()
-    {
+
+    let Some(entry) = backlog.get(source_chain, &sign_id).await else {
+        tracing::warn!(?sign_id, "bidirectional tx not found on completion");
+        return Ok(());
+    };
+
+    if !matches!(entry.request.kind, SignKind::RespondBidirectional(_)) {
+        anyhow::bail!(
+            "unexpected sign type for RespondBidirectionalEvent: {:?}",
+            entry.request.kind
+        );
+    }
+
+    verify_entry_signature(root_pk, &entry, &event.signature(), sign_id)?;
+
+    if backlog.remove(source_chain, &sign_id).await.is_some() {
         tracing::info!(?sign_id, "bidirectional tx completed");
     } else {
         tracing::warn!(?sign_id, "bidirectional tx not found on completion");
@@ -689,6 +725,7 @@ mod tests {
     use crate::util::current_unix_timestamp;
     use alloy::primitives::{Address, B256};
     use cait_sith::protocol::Participant;
+    use k256::elliptic_curve::sec1::ToEncodedPoint as _;
     use k256::{ProjectivePoint, Scalar};
     use mpc_primitives::SignArgs;
     use near_primitives::types::AccountId;
@@ -738,6 +775,8 @@ mod tests {
             key_version: 1,
         }
     }
+
+    use crate::kdf::valid_signature;
 
     fn test_canton_sign_bidirectional_request(
         sign_id: SignId,
@@ -1192,7 +1231,7 @@ mod tests {
         backlog
             .insert(IndexedSignRequest::sign_bidirectional(
                 sign_id,
-                args,
+                args.clone(),
                 Chain::Ethereum,
                 current_unix_timestamp(),
                 SignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
@@ -1212,20 +1251,22 @@ mod tests {
             ))
             .await;
 
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+
         let event = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
             request_id: sign_id.request_id,
             responder: alloy::primitives::Address::from_slice(&[0u8; 20]),
-            signature: Signature::new(ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
+            signature: valid_signature(&root_sk, &args),
         });
 
         let account_id: AccountId = "test.near".parse().unwrap();
-        let public_key = ProjectivePoint::GENERATOR.to_affine();
-        let (mut contract_watcher, _tx) =
+        let public_key = root_sk.public_key().into();
+        let (_contract_watcher, _tx) =
             ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
         let (sign_tx, _sign_rx) = mpsc::channel(4);
 
-        let err = process_respond_event(event, sign_tx, &mut contract_watcher, &backlog, true)
+        let err = process_respond_event(event, sign_tx, public_key, &backlog, true)
             .await
             .expect_err("invalid chain should fail");
         assert!(err.to_string().contains("UnknownCaip2Id(\"not-a-chain\")"));
@@ -1263,21 +1304,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_respond_event_rejects_invalid_signature() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([15u8; 32]);
+        let args = test_sign_args(15);
+
+        backlog
+            .insert(test_indexed_request(
+                sign_id,
+                Chain::Ethereum,
+                args.clone(),
+                current_unix_timestamp(),
+                SignKind::Sign,
+            ))
+            .await;
+
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let mut invalid_signature = valid_signature(&root_sk, &args);
+        invalid_signature.s += Scalar::ONE;
+
+        let event = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
+            request_id: sign_id.request_id,
+            responder: alloy::primitives::Address::from_slice(&[0u8; 20]),
+            signature: invalid_signature,
+        });
+
+        let account_id: AccountId = "test.near".parse().unwrap();
+        let public_key = root_sk.public_key().into();
+        let (_contract_watcher, _tx) =
+            ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
+
+        let (sign_tx, _sign_rx) = mpsc::channel(4);
+
+        let err = process_respond_event(event, sign_tx, public_key, &backlog, true)
+            .await
+            .expect_err("invalid signature should be rejected");
+        assert!(err.to_string().contains("invalid signature"));
+        assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_some());
+    }
+
+    #[tokio::test]
     async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
         let backlog = Backlog::new();
         let sign_id = SignId::new([13u8; 32]);
-        let args = SignArgs {
-            entropy: [13u8; 32],
-            epsilon: Scalar::from(1u64),
-            payload: Scalar::from(2u64),
-            path: "test".to_string(),
-            key_version: 1,
-        };
+        let args = test_sign_args(13);
 
         backlog
             .insert(IndexedSignRequest::respond_bidirectional(
                 sign_id,
-                args,
+                args.clone(),
                 Chain::Solana,
                 current_unix_timestamp(),
                 RespondBidirectionalTx {
@@ -1288,16 +1363,30 @@ mod tests {
             ))
             .await;
 
-        let duplicate_event0 = respond_event(sign_id);
-        let duplicate_event1 = respond_event(sign_id);
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let signature = valid_signature(&root_sk, &args);
+
+        let duplicate_event0 = respond_event(sign_id, signature);
+        let duplicate_event1 = respond_event(sign_id, signature);
+
+        let account_id: AccountId = "test.near".parse().unwrap();
+        let public_key = root_sk.public_key().into();
+        let (_contract_watcher, _tx) =
+            ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
 
-        process_respond_bidirectional_event(duplicate_event0, sign_tx.clone(), &backlog, true)
-            .await
-            .expect("first completion should succeed");
+        process_respond_bidirectional_event(
+            duplicate_event0,
+            sign_tx.clone(),
+            public_key,
+            &backlog,
+            true,
+        )
+        .await
+        .expect("first completion should succeed");
 
-        process_respond_bidirectional_event(duplicate_event1, sign_tx, &backlog, true)
+        process_respond_bidirectional_event(duplicate_event1, sign_tx, public_key, &backlog, true)
             .await
             .expect("duplicate completion should be ignored");
 
@@ -1315,50 +1404,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_respond_bidirectional_event_rejects_invalid_signature() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([16u8; 32]);
+        let args = test_sign_args(16);
+
+        backlog
+            .insert(IndexedSignRequest::respond_bidirectional(
+                sign_id,
+                args.clone(),
+                Chain::Solana,
+                current_unix_timestamp(),
+                RespondBidirectionalTx {
+                    tx_id: BidirectionalTxId(B256::from([16u8; 32])),
+                    output: vec![1, 2, 3],
+                    chain_ctx: None,
+                },
+            ))
+            .await;
+
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let mut invalid_signature = valid_signature(&root_sk, &args);
+        invalid_signature.s += Scalar::ONE;
+
+        let event = respond_event(sign_id, invalid_signature);
+
+        let account_id: AccountId = "test.near".parse().unwrap();
+        let public_key = root_sk.public_key().into();
+        let (_contract_watcher, _tx) =
+            ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
+
+        let (sign_tx, _sign_rx) = mpsc::channel(4);
+
+        let err = process_respond_bidirectional_event(event, sign_tx, public_key, &backlog, true)
+            .await
+            .expect_err("invalid signature should be rejected");
+        assert!(err.to_string().contains("invalid signature"));
+        assert!(backlog.get(Chain::Solana, &sign_id).await.is_some());
+    }
+
+    #[tokio::test]
     async fn process_respond_event_duplicate_ethereum_is_idempotent() {
         let backlog = Backlog::new();
         let sign_id = SignId::new([3u8; 32]);
-        let args = SignArgs {
-            entropy: [1u8; 32],
-            epsilon: Scalar::from(1u64),
-            payload: Scalar::from(2u64),
-            path: "test".to_string(),
-            key_version: 1,
-        };
+        let args = test_sign_args(1);
 
         backlog
             .insert(test_indexed_request(
                 sign_id,
                 Chain::Ethereum,
-                args,
+                args.clone(),
                 current_unix_timestamp(),
                 SignKind::Sign,
             ))
             .await;
 
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+
         let event = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
             request_id: sign_id.request_id,
             responder: alloy::primitives::Address::from_slice(&[0u8; 20]),
-            signature: Signature::new(ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
+            signature: valid_signature(&root_sk, &args),
         });
 
         let account_id: AccountId = "test.near".parse().unwrap();
-        let public_key = ProjectivePoint::GENERATOR.to_affine();
-        let (mut contract_watcher, _tx) =
+        let public_key = root_sk.public_key().into();
+        let (_contract_watcher, _tx) =
             ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
 
         // First event should complete the request.
-        process_respond_event(
-            event.clone(),
-            sign_tx.clone(),
-            &mut contract_watcher,
-            &backlog,
-            true,
-        )
-        .await
-        .expect("first respond event should succeed");
+        process_respond_event(event.clone(), sign_tx.clone(), public_key, &backlog, true)
+            .await
+            .expect("first respond event should succeed");
 
         let msg = timeout(Duration::from_secs(1), sign_rx.recv())
             .await
@@ -1373,15 +1492,9 @@ mod tests {
         // This mirrors production behavior where the same respond log can be
         // emitted repeatedly by the Ethereum indexer pipeline.
         for _ in 0..16 {
-            process_respond_event(
-                event.clone(),
-                sign_tx.clone(),
-                &mut contract_watcher,
-                &backlog,
-                true,
-            )
-            .await
-            .expect("duplicate respond event should be idempotent");
+            process_respond_event(event.clone(), sign_tx.clone(), public_key, &backlog, true)
+                .await
+                .expect("duplicate respond event should be idempotent");
         }
 
         let no_extra = timeout(Duration::from_millis(100), sign_rx.recv()).await;
@@ -1396,6 +1509,7 @@ mod tests {
         let backlog = Backlog::new();
         let tx = test_bidirectional_tx(14, Chain::Ethereum, Chain::Solana);
         let sign_id = SignId::new(tx.request_id);
+        let args = test_sign_args(14);
 
         let mut rlp_s = rlp::RlpStream::new_list(9);
         rlp_s.append(&0u64);
@@ -1412,7 +1526,7 @@ mod tests {
         backlog
             .insert(IndexedSignRequest::sign_bidirectional(
                 sign_id,
-                test_sign_args(14),
+                args.clone(),
                 Chain::Ethereum,
                 current_unix_timestamp(),
                 SignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
@@ -1450,20 +1564,22 @@ mod tests {
             )
             .await;
 
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+
         let event = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
             request_id: sign_id.request_id,
             responder: alloy::primitives::Address::from_slice(&[0u8; 20]),
-            signature: Signature::new(ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
+            signature: valid_signature(&root_sk, &args),
         });
 
         let account_id: AccountId = "test.near".parse().unwrap();
-        let public_key = ProjectivePoint::GENERATOR.to_affine();
-        let (mut contract_watcher, _tx) =
+        let public_key = root_sk.public_key().into();
+        let (_contract_watcher, _tx) =
             ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
         let (sign_tx, _sign_rx) = mpsc::channel(4);
 
-        process_respond_event(event, sign_tx, &mut contract_watcher, &backlog, false)
+        process_respond_event(event, sign_tx, public_key, &backlog, false)
             .await
             .expect("respond event should advance pending publish bidirectional entries");
 
@@ -1794,19 +1910,15 @@ mod tests {
         );
     }
 
-    fn respond_event(sign_id: SignId) -> RespondBidirectionalEvent {
+    fn respond_event(sign_id: SignId, signature: Signature) -> RespondBidirectionalEvent {
         RespondBidirectionalEvent::Solana(signet_program::RespondBidirectionalEvent {
             request_id: sign_id.request_id,
-            responder: Pubkey::new_unique(),
+            responder: Default::default(),
             serialized_output: vec![1, 2, 3],
-            signature: signet_program::Signature {
-                big_r: signet_program::AffinePoint {
-                    x: [0u8; 32],
-                    y: [0u8; 32],
-                },
-                s: [1u8; 32],
-                recovery_id: 0,
-            },
+            signature: crate::util::mpc_to_sol_signature(
+                &signature,
+                signature.big_r.to_encoded_point(false),
+            ),
         })
     }
 }
