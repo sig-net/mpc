@@ -12,7 +12,7 @@ exclude = ["infra/scripts/generate_keys"]
 resolver = "2"
 
 [workspace.package]
-version = "1.15.1"
+version = "1.16.2"
 
 [workspace.dependencies]
 alloy = { version = "=1.0.38", features = ["contract", "json"] }
@@ -24,7 +24,6 @@ clap = { version = "4.5.4", features = ["derive", "env"] }
 deadpool-redis = "0.18.0"
 hex = "0.4.3"
 hyper = { version = "0.14", features = ["full"] }
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 k256 = { version = "0.13.1", features = [
     "sha256",
     "ecdsa",
@@ -32,6 +31,8 @@ k256 = { version = "0.13.1", features = [
     "arithmetic",
     "expose-field",
 ] }
+mockito = "1.7.0"
+oauth2 = { version = "4.4.2", default-features = false, features = ["reqwest"] }
 rand = "0.8.5"
 reqwest = { version = "0.11.16", features = ["blocking", "json"] }
 semver = "1.0.23"
@@ -52,8 +53,8 @@ tracing-subscriber = { version = "0.3.20", default-features = false, features = 
 url = { version = "2.4.0", features = ["serde"] }
 anchor-client = { version = "0.31.0", features = ["async"] }
 anchor-lang = "0.31.0"
-solana-sdk = "2.2.2"
-solana-transaction-status = "2.2.6"
+solana-sdk = "2.3.1"
+solana-transaction-status = "2.3.13"
 alloy-dyn-abi = "1.4.1"
 secp256k1 = "0.28.2"
 rlp = "0.5"
@@ -61,14 +62,13 @@ alloy-consensus = { version = "1.0.38", features = ["serde"] }
 alloy-primitives = "1.4.1"
 alloy-json-abi = "1.4.1"
 alloy-rlp = "0.3.12"
-solana-client = "2.2.7"
+solana-client = "2.3.13"
 futures-util = "0.3.31"
-p256 = { version = "0.13.2", features = ["ecdsa"] }
 parity-scale-codec = { version = "3", features = ["derive"] }
 
 near-account-id = "1.0.0"
 near-primitives = "0.26.0"
-near-sdk = { version = "5.6.0", features = ["unit-testing", "unstable"] }
+near-sdk = { version = "5.6.0", features = ["unstable", "unit-testing"] }
 
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }

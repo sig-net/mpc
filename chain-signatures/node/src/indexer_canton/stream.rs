@@ -200,7 +200,7 @@ impl CantonIndexer {
     }
 
     async fn connect_and_subscribe(&mut self, begin_exclusive: u64) -> anyhow::Result<()> {
-        let jwt_token = self.client.generate_jwt()?;
+        let jwt_token = self.client.bearer_token().await?;
         let ws_url = format!("{}/v2/updates", self.client.config.json_api_ws_url);
         let party_id = &self.client.config.party_id;
         self.ws_conn =

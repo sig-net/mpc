@@ -12,6 +12,7 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, PublicKey as K256PublicKey};
 use mpc_crypto::derive_key;
 use mpc_crypto::kdf::derive_epsilon_eth;
+use mpc_node::sign_bidirectional::public_key_to_address;
 use mpc_primitives::{Chain, Checkpoint, LATEST_MPC_KEY_VERSION};
 use test_log::test;
 use tokio::time::Duration;
@@ -147,9 +148,7 @@ async fn test_signature_ethereum() -> Result<()> {
         .map_err(|_| anyhow!("invalid derived public key"))?;
     let verifying_key = VerifyingKey::from(&user_public_key);
     let verifying_key = verifying_key.to_encoded_point(false);
-    let secp_public_key =
-        secp256k1::PublicKey::from_slice(verifying_key.as_bytes()).context("invalid secp key")?;
-    let expected_address = actions::public_key_to_address(&secp_public_key);
+    let expected_address = public_key_to_address(verifying_key.as_bytes());
 
     anyhow::ensure!(
         recovered_address == expected_address,

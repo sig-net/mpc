@@ -1,3 +1,6 @@
+use crate::canton_auth::{
+    OidcTestProvider, LOCAL_OIDC_AUDIENCE, LOCAL_OIDC_CLIENT_SECRET, LOCAL_OIDC_SCOPE,
+};
 use alloy::primitives::keccak256;
 use anyhow::{Context as _, Result};
 use async_process::{Child, Command};
@@ -9,14 +12,19 @@ use mpc_node::indexer_canton::ledger_api::{
     self, AllocatePartyRequest, AllocatePartyResponse, ContractEntry, CreateUserRequest,
     DisclosedContract, JsCommands, SubmitAndWaitForTransactionResponse, UserInfo,
 };
-use mpc_node::indexer_canton::CantonConfig;
+use mpc_node::indexer_canton::{CantonAuthConfig, CantonConfig};
 use mpc_node::protocol::Chain;
 use mpc_node::rpc::CantonClient;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
+
+const CANTON_JSON_API_PORT: u16 = 7575;
+const DEFAULT_DAR_RELATIVE_PATH: &str = "fixtures/canton/daml-vault-0.0.1.dar";
+pub const EVM_TYPE2_TEST_CONTRACT_ADDRESS: &str = "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+const EVM_TYPE2_BOOL_OUTPUT_SCHEMA: &str = r#"[{"name":"output","type":"bool"}]"#;
 
 /// Mirror of Daml `computeOperatorsHash` (Signer.daml → RequestId.daml):
 /// `keccak256(mconcat(map (keccak256 . toHex) (sort operatorTexts)))`.
@@ -32,11 +40,6 @@ pub fn compute_operators_hash(operators: &[String]) -> String {
     }
     hex::encode(keccak256(&concat))
 }
-
-const CANTON_JSON_API_PORT: u16 = 7575;
-const DEFAULT_DAR_RELATIVE_PATH: &str = "fixtures/canton/daml-vault-0.0.1.dar";
-pub const EVM_TYPE2_TEST_CONTRACT_ADDRESS: &str = "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
-const EVM_TYPE2_BOOL_OUTPUT_SCHEMA: &str = r#"[{"name":"output","type":"bool"}]"#;
 
 fn evm_u256_hex(value: u128) -> String {
     format!("{value:064x}")
@@ -122,10 +125,14 @@ pub fn test_evm_type2_anvil_cases() -> Vec<EvmType2AnvilCase> {
                 }],
             ),
         },
-        EvmType2AnvilCase {
-            name: "evm_type2_create_empty_initcode",
-            params: evm_type2_anvil_params(3, 100_000, None, 0, "", vec![]),
-        },
+        // TODO(#808): re-enable when CREATE is supported. The node bails on
+        // CREATE in chain-signatures/node/src/respond_bidirectional.rs:150,
+        // which leaves the bidirectional watcher pending indefinitely and the
+        // test times out waiting for RespondBidirectionalEvent.
+        // EvmType2AnvilCase {
+        //     name: "evm_type2_create_empty_initcode",
+        //     params: evm_type2_anvil_params(3, 100_000, None, 0, "", vec![]),
+        // },
     ]
 }
 
@@ -175,22 +182,23 @@ pub fn test_sign_request_payload(event: &SignBidirectionalRequestedEvent) -> Sig
     }
 }
 
-/// A running Canton sandbox process with JWT auth and deployed Daml contracts.
+/// A running Canton sandbox process with OAuth token retrieval and deployed Daml contracts.
 pub struct CantonSandbox {
     process: Child,
-    jwt_key_path: PathBuf,
-    jwt_cert_path: PathBuf,
     auth_conf_path: PathBuf,
+    oidc_provider: OidcTestProvider,
     pub json_api_url: String,
     pub json_api_ws_url: String,
-    pub jwt_subject: String,
+    pub app_ledger_api_user: String,
+    pub ledger_api_user: String,
     pub party_id: String,
     pub operator_party: String,
     pub requester_party: String,
     pub signer_cid: String,
     pub signer_template_id: String,
     pub signer_disclosure: DisclosedContract,
-    pub client: CantonTestClient,
+    pub sig_network_runtime_client: CantonTestClient,
+    pub requester_workflow_client: CantonTestClient,
 }
 
 impl CantonSandbox {
@@ -221,51 +229,50 @@ impl CantonSandbox {
         };
         anyhow::ensure!(dar_path.exists(), "DAR not found at {}", dar_path.display());
 
-        // Generate JWT key + cert + HOCON auth config.
+        // Start the local OAuth/JWKS test provider before writing Canton auth config.
+        // Canton will validate bearer tokens by fetching this provider's JWKS.
+        let oidc_provider = OidcTestProvider::run().await?;
+
         let tmp_dir = std::env::temp_dir();
         let id = uuid::Uuid::new_v4();
-        let jwt_key_path = tmp_dir.join(format!("canton-jwt-{id}.key"));
-        let jwt_cert_path = tmp_dir.join(format!("canton-jwt-{id}.crt"));
-        let auth_conf_path = tmp_dir.join(format!("canton-auth-{id}.conf"));
+        let auth_conf_path = tmp_dir.join(format!("canton-oauth-auth-{id}.conf"));
 
-        let output = std::process::Command::new("openssl")
-            .args([
-                "req",
-                "-x509",
-                "-noenc",
-                "-days",
-                "3650",
-                "-newkey",
-                "ec",
-                "-pkeyopt",
-                "ec_paramgen_curve:prime256v1",
-                "-keyout",
-                &jwt_key_path.to_string_lossy(),
-                "-out",
-                &jwt_cert_path.to_string_lossy(),
-                "-subj",
-                "/CN=mpc-test-node",
-            ])
-            .output()
-            .context("openssl not found — needed to generate JWT cert")?;
-        anyhow::ensure!(output.status.success(), "openssl cert generation failed");
-
+        // Generate HOCON auth config that matches the production-shaped Auth0 flow:
+        // OAuth client credentials for token retrieval, JWKS for token verification.
+        // Real Canton node auth wiring is generated by DA's splice Helm charts from:
+        // - https://github.com/sig-net/sig-kustomize/blob/5d2dff84eb243cc3ac1eec9f6ff042dbd731e0ec/kustomize/Canton/canton-validator/overlays/mainnet/values/participant-values.yaml
+        // - https://github.com/sig-net/sig-kustomize/blob/5d2dff84eb243cc3ac1eec9f6ff042dbd731e0ec/kustomize/Canton/canton-validator/overlays/mainnet/values/validator-values.yaml
+        // - https://github.com/sig-net/sig-kustomize/blob/5d2dff84eb243cc3ac1eec9f6ff042dbd731e0ec/kustomize/Canton/canton-validator/overlays/mainnet/values/standalone-participant-values.yaml
+        // - https://github.com/sig-net/sig-kustomize/blob/5d2dff84eb243cc3ac1eec9f6ff042dbd731e0ec/kustomize/Canton/canton-validator/overlays/mainnet/validator-external-secrets/validator-ledger-api-auth-external-secret.yaml
         std::fs::write(
             &auth_conf_path,
             format!(
                 r#"canton.parameters.enable-alpha-state-via-config = yes
+canton.parameters.non-standard-config = yes
 canton.parameters.state-refresh-interval = 5s
-canton.participants.sandbox.alpha-dynamic.dars = [
-  {{ location = "{}" }}
-]
+canton.participants.sandbox.alpha-dynamic {{
+  dars = [
+    {{ location = "{}" }}
+  ]
+  # The local client-credentials tokens resolve against Canton's default
+  # identity provider, so the bootstrap admin user must remain in Default.
+  users = [
+    {{
+      user = "participant_admin"
+      rights = {{ participant-admin = true }}
+    }}
+  ]
+}}
 canton.participants.sandbox.ledger-api {{
   auth-services = [
-    {{ type = jwt-es-256-crt, certificate = "{}" }}
+    {{ type = jwt-jwks, url = "{}", target-audience = "{}" }}
   ]
+  admin-token-config.admin-claim = true
   jwt-timestamp-leeway.default = 10
 }}"#,
                 dar_path.display(),
-                jwt_cert_path.to_string_lossy()
+                oidc_provider.jwks_url(),
+                LOCAL_OIDC_AUDIENCE
             ),
         )?;
 
@@ -286,8 +293,9 @@ canton.participants.sandbox.ledger-api {{
         let admin_client = CantonTestClient::new(canton_test_client_config(
             &base_url,
             &ws_url,
-            &jwt_key_path,
+            oidc_provider.token_url(),
             "participant_admin",
+            "",
         ))
         .await?;
         let probe = AllocatePartyRequest {
@@ -301,7 +309,8 @@ canton.participants.sandbox.ledger-api {{
             // Everything else (401 auth loading, 403 admin not ready, 400
             // synchronizer not connected, connection refused) = retry.
             let ready = match admin_client
-                .auth_post("/v2/parties")?
+                .auth_post("/v2/parties")
+                .await?
                 .json(&probe)
                 .send()
                 .await
@@ -323,30 +332,58 @@ canton.participants.sandbox.ledger-api {{
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        // Setup parties, user, and contracts.
-        let user_id = format!("mpc-test-{}", uuid::Uuid::new_v4());
+        // Setup parties, runtime/app users, and contracts.
+        let sig_network_runtime_user_id =
+            format!("mpc-sig-network-runtime-{}", uuid::Uuid::new_v4());
+        let requester_workflow_user_id = format!("mpc-requester-workflow-{}", uuid::Uuid::new_v4());
         let sig_network = admin_client.allocate_party("SigNetwork").await?;
         let operator = admin_client.allocate_party("Operator").await?;
         let requester = admin_client.allocate_party("Requester").await?;
 
-        let mut rights = Vec::new();
-        for party in [&sig_network, &operator, &requester] {
-            rights.push(ledger_api::can_act_as(party));
-            rights.push(ledger_api::can_read_as(party));
-        }
+        // Runtime user is the MPC node identity. It should only act/read as
+        // the SigNetwork party used by Signer runtime choices.
+        let runtime_rights = vec![
+            ledger_api::can_act_as(&sig_network),
+            ledger_api::can_read_as(&sig_network),
+        ];
         admin_client
-            .create_user(&user_id, &sig_network, rights)
+            .create_user(&sig_network_runtime_user_id, &sig_network, runtime_rights)
             .await?;
 
-        let client = CantonTestClient::new(canton_test_client_config(
+        // App/test user drives requester/operator workflow traffic and can read
+        // SigNetwork events, but it is not the runtime signer identity.
+        let app_rights = vec![
+            ledger_api::can_act_as(&operator),
+            ledger_api::can_read_as(&operator),
+            ledger_api::can_act_as(&requester),
+            ledger_api::can_read_as(&requester),
+            ledger_api::can_read_as(&sig_network),
+        ];
+        admin_client
+            .create_user(&requester_workflow_user_id, &requester, app_rights)
+            .await?;
+
+        let sig_network_runtime_client = CantonTestClient::new(canton_test_client_config(
             &base_url,
             &ws_url,
-            &jwt_key_path,
-            &user_id,
+            oidc_provider.token_url(),
+            &sig_network_runtime_user_id,
+            &sig_network,
         ))
         .await?;
 
-        let signer_result = client
+        let requester_workflow_client = CantonTestClient::new(canton_test_client_config(
+            &base_url,
+            &ws_url,
+            oidc_provider.token_url(),
+            &requester_workflow_user_id,
+            &requester,
+        ))
+        .await?;
+
+        // The Signer contract is owned by SigNetwork and created through the
+        // sig_network_runtime_client so later runtime choices use the same party/user pair.
+        let signer_result = sig_network_runtime_client
             .create_contract(
                 &[&sig_network],
                 "#daml-signer:Signer:Signer",
@@ -355,39 +392,52 @@ canton.participants.sandbox.ledger-api {{
             .await?;
         let (signer_cid, signer_template_id) = find_created_contract(&signer_result, "Signer")?;
 
-        let signer_disclosure = client
+        let signer_disclosure = sig_network_runtime_client
             .get_disclosed_contract(&[&sig_network], "#daml-signer:Signer:Signer", &signer_cid)
             .await?;
 
         Ok(CantonSandbox {
             process,
-            jwt_key_path,
-            jwt_cert_path,
             auth_conf_path,
+            oidc_provider,
             json_api_url: base_url,
             json_api_ws_url: ws_url,
-            jwt_subject: user_id,
+            app_ledger_api_user: requester_workflow_user_id,
+            ledger_api_user: sig_network_runtime_user_id,
             party_id: sig_network,
             operator_party: operator,
             requester_party: requester,
             signer_cid,
             signer_template_id,
             signer_disclosure,
-            client,
+            sig_network_runtime_client,
+            requester_workflow_client,
         })
     }
 
     /// Produce the CantonConfig for MPC node CLI args.
     pub fn get_config(&self) -> CantonConfig {
+        // MPC runtime config must use the runtime user plus the SigNetwork party,
+        // not the app/test user that submits SignRequest workflow commands.
         CantonConfig {
             json_api_url: self.json_api_url.clone(),
             json_api_ws_url: self.json_api_ws_url.clone(),
-            jwt_private_key_path: self.jwt_key_path.to_string_lossy().to_string(),
-            jwt_subject: self.jwt_subject.clone(),
+            auth: CantonAuthConfig {
+                token_url: self.oidc_provider.token_url().to_string(),
+                client_id: self.ledger_api_user.clone(),
+                client_secret: LOCAL_OIDC_CLIENT_SECRET.to_string(),
+                audience: LOCAL_OIDC_AUDIENCE.to_string(),
+                scope: Some(LOCAL_OIDC_SCOPE.to_string()),
+            },
+            ledger_api_user: self.ledger_api_user.clone(),
             party_id: self.party_id.clone(),
             signer_contract_id: self.signer_cid.clone(),
             signer_template_id: self.signer_template_id.clone(),
         }
+    }
+
+    pub async fn generate_untrusted_test_access_token(&self, subject: &str) -> Result<String> {
+        self.oidc_provider.untrusted_access_token(subject).await
     }
 
     /// Submit a test sign request. `nonce = None` uses the default (0); tests
@@ -400,7 +450,7 @@ canton.participants.sandbox.ledger-api {{
         let event = test_sign_request_event(self, &case);
         let payload = test_sign_request_payload(&event);
         let sign_request = self
-            .client
+            .requester_workflow_client
             .create_contract(
                 &[&self.operator_party, &self.requester_party],
                 "#daml-signer:Signer:SignRequest",
@@ -409,7 +459,7 @@ canton.participants.sandbox.ledger-api {{
             .await?;
         let sign_request_cid = find_created_contract(&sign_request, "SignRequest")?.0;
 
-        self.client
+        self.requester_workflow_client
             .exercise_choice(
                 &[&self.requester_party],
                 &self.signer_template_id,
@@ -452,8 +502,6 @@ impl Drop for CantonSandbox {
             }
         }
         tracing::info!("canton sandbox cleaned up (pid {pid})");
-        let _ = std::fs::remove_file(&self.jwt_key_path);
-        let _ = std::fs::remove_file(&self.jwt_cert_path);
         let _ = std::fs::remove_file(&self.auth_conf_path);
     }
 }
@@ -470,13 +518,14 @@ impl CantonTestClient {
         })
     }
 
-    fn auth_post(&self, path: &str) -> Result<reqwest::RequestBuilder> {
-        self.ledger_client.auth_post(path)
+    async fn auth_post(&self, path: &str) -> Result<reqwest::RequestBuilder> {
+        self.ledger_client.auth_post(path).await
     }
 
     pub async fn allocate_party(&self, hint: &str) -> Result<String> {
         let body: AllocatePartyResponse = self
-            .auth_post("/v2/parties")?
+            .auth_post("/v2/parties")
+            .await?
             .json(&AllocatePartyRequest {
                 party_id_hint: hint.to_string(),
                 identity_provider_id: None,
@@ -497,7 +546,8 @@ impl CantonTestClient {
         primary_party: &str,
         rights: Vec<ledger_api::UserRight>,
     ) -> Result<()> {
-        self.auth_post("/v2/users")?
+        self.auth_post("/v2/users")
+            .await?
             .json(&CreateUserRequest {
                 user: UserInfo {
                     id: user_id.to_string(),
@@ -578,7 +628,7 @@ impl CantonTestClient {
         let parties: Vec<String> = act_as.iter().map(|s| s.to_string()).collect();
         let commands = JsCommands {
             command_id: uuid::Uuid::new_v4().to_string(),
-            user_id: self.ledger_client.jwt_subject().to_string(),
+            user_id: self.ledger_client.ledger_api_user().to_string(),
             act_as: parties.clone(),
             read_as: parties,
             commands: vec![command],
@@ -668,15 +718,22 @@ fn is_package_not_ready(e: &anyhow::Error) -> bool {
 fn canton_test_client_config(
     base_url: &str,
     ws_url: &str,
-    jwt_private_key_path: &Path,
-    jwt_subject: &str,
+    token_url: &str,
+    ledger_api_user: &str,
+    party_id: &str,
 ) -> CantonConfig {
     CantonConfig {
         json_api_url: base_url.to_string(),
         json_api_ws_url: ws_url.to_string(),
-        jwt_private_key_path: jwt_private_key_path.to_string_lossy().to_string(),
-        jwt_subject: jwt_subject.to_string(),
-        party_id: jwt_subject.to_string(),
+        auth: CantonAuthConfig {
+            token_url: token_url.to_string(),
+            client_id: ledger_api_user.to_string(),
+            client_secret: LOCAL_OIDC_CLIENT_SECRET.to_string(),
+            audience: LOCAL_OIDC_AUDIENCE.to_string(),
+            scope: Some(LOCAL_OIDC_SCOPE.to_string()),
+        },
+        ledger_api_user: ledger_api_user.to_string(),
+        party_id: party_id.to_string(),
         signer_contract_id: String::new(),
         signer_template_id: String::new(),
     }

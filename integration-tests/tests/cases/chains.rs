@@ -9,12 +9,11 @@ use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
 use mpc_crypto::kdf::check_ec_signature;
 use mpc_crypto::{derive_epsilon_sol, derive_key, near_public_key_to_affine_point};
+use mpc_node::sign_bidirectional::public_key_to_address;
 use mpc_primitives::Chain;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use reqwest::Client;
 use rlp::RlpStream;
-use secp256k1::PublicKey as SecpPublicKey;
-use secp256k1::{Secp256k1 as LibSecp256k1, SecretKey as SecpSecretKey};
 use serde_json::json;
 use sha3::{Digest, Keccak256};
 use solana_sdk::signer::Signer as _;
@@ -61,9 +60,7 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
     let epsilon = derive_epsilon_sol(key_version, &signer_account, path);
     let user_pk = derive_key(root_pk, epsilon);
     let user_pk_bytes = user_pk.to_encoded_point(false);
-    let user_secp_pk = SecpPublicKey::from_slice(user_pk_bytes.as_bytes())
-        .context("failed to convert user public key")?;
-    let user_address = actions::public_key_to_address(&user_secp_pk);
+    let user_address = public_key_to_address(user_pk_bytes.as_bytes());
     let user_alloy_address = AlloyAddress::from_slice(user_address.as_slice());
 
     let client = Client::new();
@@ -275,12 +272,14 @@ async fn ensure_eth_signer_funded(
         .as_slice()
         .try_into()
         .map_err(|_| anyhow::anyhow!("expected 32-byte ethereum secret key"))?;
-    let payer_sk = SecpSecretKey::from_slice(&payer_sk_array)?;
-    let secp = LibSecp256k1::signing_only();
-    let payer_pk = SecpPublicKey::from_secret_key(&secp, &payer_sk);
-    let payer_address = actions::public_key_to_address(&payer_pk);
-    let payer_alloy = AlloyAddress::from_slice(payer_address.as_slice());
     let signing_key = SigningKey::from_bytes(&payer_sk_array.into())?;
+    let payer_address = public_key_to_address(
+        signing_key
+            .verifying_key()
+            .to_encoded_point(false)
+            .as_bytes(),
+    );
+    let payer_alloy = AlloyAddress::from_slice(payer_address.as_slice());
 
     let mut gas_price = fetch_gas_price(client, rpc_url).await?;
     if gas_price < default_gas_price {

@@ -3,12 +3,12 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::IndexedSignRequest;
 use crate::protocol::{Chain, Sign};
-use crate::rpc::ContractStateWatcher;
+use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::BidirectionalTxId;
 use crate::stream::ops::{
     process_execution_confirmed, process_respond_bidirectional_event, process_respond_event,
     process_sign_request, recover_backlog, requeue_pending_sign_requests,
-    RespondBidirectionalEvent, SignatureRespondedEvent,
+    resume_pending_publish_requests, RespondBidirectionalEvent, SignatureRespondedEvent,
 };
 
 pub mod ops;
@@ -26,6 +26,7 @@ pub fn channel() -> (mpsc::Sender<ChainEvent>, mpsc::Receiver<ChainEvent>) {
 
 /// Unified event produced by a chain stream
 #[allow(clippy::large_enum_variant)]
+#[derive(Clone)]
 pub enum ChainEvent {
     SignRequest(IndexedSignRequest),
     Respond(SignatureRespondedEvent),
@@ -171,15 +172,9 @@ pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I) {
     let chain = I::CHAIN;
     tracing::info!(%chain, "starting ChainStream catchup then livestream");
 
-    // TODO: on failure, we currently send catchup_completed due to some streams not enabling
-    // this particular catchup_then_livestream function (i.e. Solana & Hydration). Once
-    // those are implemented, we can remove the catchup_completed sending on error here.
     let anchor_height = match indexer.livestream().await {
         Ok(anchor_height) => anchor_height,
         Err(err) => {
-            if let Err(err) = indexer.notify_catchup_completed().await {
-                tracing::warn!(?err, %chain, "failed to signal catchup completion");
-            }
             tracing::error!(?err, %chain, "failed to initialize livestream");
             return;
         }
@@ -213,6 +208,7 @@ pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I) {
 pub async fn run_stream<S: ChainStream>(
     mut stream: S,
     sign_tx: mpsc::Sender<Sign>,
+    rpc: RpcChannel,
     backlog: Backlog,
     mut contract_watcher: ContractStateWatcher,
     mut mesh_state: watch::Receiver<MeshState>,
@@ -239,6 +235,8 @@ pub async fn run_stream<S: ChainStream>(
     };
     let indexer_task = tokio::spawn(catchup_then_livestream(indexer));
 
+    let root_pk = contract_watcher.wait_public_key().await;
+
     let mut caught_up = false;
     while let Some(event) = stream.next_event().await {
         match event {
@@ -249,6 +247,7 @@ pub async fn run_stream<S: ChainStream>(
                 caught_up = true;
 
                 requeue_pending_sign_requests(&backlog, chain, sign_tx.clone()).await;
+                resume_pending_publish_requests(&backlog, chain, &contract_watcher, &rpc).await;
             }
             ChainEvent::SignRequest(req) => {
                 if let Err(err) =
@@ -258,22 +257,21 @@ pub async fn run_stream<S: ChainStream>(
                 }
             }
             ChainEvent::Respond(ev) => {
-                if let Err(err) = process_respond_event(
-                    ev,
-                    sign_tx.clone(),
-                    &mut contract_watcher,
-                    &backlog,
-                    caught_up,
-                )
-                .await
+                if let Err(err) =
+                    process_respond_event(ev, sign_tx.clone(), root_pk, &backlog, caught_up).await
                 {
                     tracing::error!(?err, %chain, "failed to process respond event");
                 }
             }
             ChainEvent::RespondBidirectional(ev) => {
-                if let Err(err) =
-                    process_respond_bidirectional_event(ev, sign_tx.clone(), &backlog, caught_up)
-                        .await
+                if let Err(err) = process_respond_bidirectional_event(
+                    ev,
+                    sign_tx.clone(),
+                    root_pk,
+                    &backlog,
+                    caught_up,
+                )
+                .await
                 {
                     tracing::error!(?err, %chain, "failed to process respond bidirectional event");
                 }
@@ -325,12 +323,13 @@ mod tests {
     use crate::protocol::ParticipantInfo;
     use crate::protocol::Sign;
     use crate::protocol::{Chain, IndexedSignRequest};
-    use crate::rpc::ContractStateWatcher;
+    use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
     use crate::storage::checkpoint_storage::CheckpointStorage;
     use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
     use crate::util::current_unix_timestamp;
     use alloy::primitives::Address;
-    use k256::Scalar;
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
+    use k256::{AffinePoint, Scalar};
     use mockito::Server;
     use mpc_primitives::SignArgs;
     use mpc_primitives::SignId;
@@ -341,6 +340,13 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
+
+    fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<RpcAction>) {
+        let (tx, rx) = mpsc::channel(buffer);
+        (RpcChannel { tx }, rx)
+    }
+
+    use crate::kdf::valid_signature;
 
     struct VecEventStreamState {
         started: bool,
@@ -623,19 +629,20 @@ mod tests {
             current_unix_timestamp(),
         );
 
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let root_pk = root_sk.public_key().to_projective().to_affine();
+
         // Prepare a respond event that matches the sign id
+        let mpc_sig = valid_signature(&root_sk, &args);
+
         let sig_responded =
             SignatureRespondedEvent::Solana(signet_program::SignatureRespondedEvent {
                 request_id: sign_id.request_id,
                 responder: solana_sdk::pubkey::Pubkey::new_unique(),
-                signature: signet_program::Signature {
-                    big_r: signet_program::AffinePoint {
-                        x: [0u8; 32],
-                        y: [0u8; 32],
-                    },
-                    s: [0u8; 32],
-                    recovery_id: 0,
-                },
+                signature: crate::util::mpc_to_sol_signature(
+                    &mpc_sig,
+                    mpc_sig.big_r.to_encoded_point(false),
+                ),
             });
         let client = SolanaTestStream::new(vec![
             Some(ChainEvent::CatchupCompleted),
@@ -648,17 +655,19 @@ mod tests {
 
         let (contract_watcher, _tx) = ContractStateWatcher::with_running(
             &"test.near".parse::<AccountId>().unwrap(),
-            k256::ProjectivePoint::GENERATOR.to_affine(),
+            root_pk,
             0,
             Default::default(),
         );
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
         let node_client = NodeClient::new(&Default::default());
+        let (rpc, _rpc_rx) = test_rpc_channel(4);
 
         // Run the indexer
         run_stream(
             client,
             sign_tx.clone(),
+            rpc,
             backlog.clone(),
             contract_watcher,
             mesh_state_rx,
@@ -688,6 +697,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_handles_sign_bidirectional_block_and_recover() {
+        let _ = tracing_subscriber::fmt::try_init();
         use crate::sign_bidirectional::SignStatus;
         use crate::stream::ops::RespondBidirectionalEvent as RBE;
         use crate::stream::ops::SignBidirectionalEvent as SBE;
@@ -753,21 +763,27 @@ mod tests {
 
         let (sign_tx, mut sign_rx) = mpsc::channel(8);
 
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let root_pk = root_sk.public_key().to_projective().to_affine();
+
         let (contract_watcher, _tx) = ContractStateWatcher::with_running(
             &"test.near".parse::<AccountId>().unwrap(),
-            k256::ProjectivePoint::GENERATOR.to_affine(),
+            root_pk,
             0,
             Default::default(),
         );
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
         let node_client = NodeClient::new(&Default::default());
+        let (rpc, _rpc_rx) = test_rpc_channel(8);
 
         // Start indexer in background (clone backlog so the test retains ownership)
         let backlog_for_run = backlog.clone();
+        let sign_tx_for_run = sign_tx.clone();
         let run_handle = tokio::spawn(async move {
             run_stream(
                 client,
-                sign_tx,
+                sign_tx_for_run,
+                rpc,
                 backlog_for_run,
                 contract_watcher,
                 mesh_state_rx,
@@ -840,31 +856,30 @@ mod tests {
             _ => panic!("expected sign request"),
         }
 
-        // Prepare a SignatureRespondedEvent that will advance to bidirectional and register watcher
-        // Construct a valid signature (use generator point for big_r and small s)
-        use k256::elliptic_curve::sec1::ToEncodedPoint;
-        let enc = k256::ProjectivePoint::GENERATOR.to_encoded_point(false);
-        let x_bytes = enc.x().unwrap().as_slice();
-        let y_bytes = enc.y().unwrap().as_slice();
-        let mut big_r_x = [0u8; 32];
-        let mut big_r_y = [0u8; 32];
-        big_r_x.copy_from_slice(x_bytes);
-        big_r_y.copy_from_slice(y_bytes);
-        let s_bytes = k256::Scalar::from(1u64).to_bytes();
-        let mut s_arr = [0u8; 32];
-        s_arr.copy_from_slice(&s_bytes);
+        let mpc_sig = valid_signature(&root_sk, &args);
 
+        backlog
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingPublish {
+                    publish: crate::sign_bidirectional::PublishState {
+                        signature: mpc_sig,
+                        participants: vec![cait_sith::protocol::Participant::from(0u32)],
+                        is_proposer: true,
+                    },
+                },
+            )
+            .await;
+
+        // Prepare a SignatureRespondedEvent that will advance to bidirectional and register watcher
         let sig_responded = SRE::Solana(signet_program::SignatureRespondedEvent {
             request_id: sign_id.request_id,
             responder: solana_sdk::pubkey::Pubkey::new_unique(),
-            signature: signet_program::Signature {
-                big_r: signet_program::AffinePoint {
-                    x: big_r_x,
-                    y: big_r_y,
-                },
-                s: s_arr,
-                recovery_id: 0,
-            },
+            signature: crate::util::mpc_to_sol_signature(
+                &mpc_sig,
+                mpc_sig.big_r.to_encoded_point(false),
+            ),
         });
         events_tx
             .send(ChainEvent::Respond(sig_responded))
@@ -875,7 +890,7 @@ mod tests {
         let target_chain = Chain::Ethereum;
         timeout(Duration::from_secs(1), async {
             loop {
-                let watchers = backlog.pending_execution(target_chain).await;
+                let watchers = backlog.execution_watchers(target_chain).await;
                 if watchers.values().any(|(s, _)| *s == sign_id) {
                     break;
                 }
@@ -886,8 +901,21 @@ mod tests {
         .unwrap();
 
         // mark status as PendingExecution so it will be included in checkpoints
+        let execution = backlog
+            .execution_watchers(target_chain)
+            .await
+            .into_iter()
+            .find_map(|(_, (watched_sign_id, watched_tx))| {
+                (watched_sign_id == sign_id).then_some(watched_tx)
+            })
+            .expect("expected execution watcher to exist");
+        let execution_id = execution.id;
         backlog
-            .set_status(Chain::Solana, &sign_id, SignStatus::PendingExecution)
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingExecution { tx: execution },
+            )
             .await;
 
         // send a block event for this chain and ensure checkpoint is persisted
@@ -908,13 +936,43 @@ mod tests {
             .await
             .expect("recovery failed");
 
-        let old_watchers = backlog.pending_execution(target_chain).await;
-        let new_watchers = recovered.pending_execution(target_chain).await;
+        let old_watchers = backlog.execution_watchers(target_chain).await;
+        let new_watchers = recovered.execution_watchers(target_chain).await;
         assert_eq!(old_watchers.len(), new_watchers.len());
         for (tx_id, (s, _)) in old_watchers {
             assert!(new_watchers.contains_key(&tx_id));
             assert_eq!(new_watchers.get(&tx_id).unwrap().0, s);
         }
+
+        // now send an execution confirmation event to advance to RespondBidirectional
+        crate::stream::ops::process_execution_confirmed(
+            execution_id,
+            sign_id,
+            Chain::Solana,
+            block,
+            crate::stream::ExecutionOutcome::Success { output: vec![] },
+            &backlog,
+            sign_tx.clone(),
+            Chain::Ethereum,
+            true,
+        )
+        .await
+        .unwrap();
+
+        // we should receive a Sign::Request because of the execution being confirmed
+        let msg_req = timeout(Duration::from_secs(1), sign_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match msg_req {
+            Sign::Request(req) => assert_eq!(req.id, sign_id),
+            _ => panic!("expected sign request for RespondBidirectional"),
+        }
+
+        // Fetch the updated request from the backlog to get the new epsilon and payload
+        let entry = backlog.get(Chain::Solana, &sign_id).await.unwrap();
+        let new_args = &entry.request.args;
+        let new_mpc_sig = valid_signature(&root_sk, new_args);
 
         // now send a RespondBidirectional event to complete the request
         // RespondBidirectional should also carry a valid signature
@@ -922,14 +980,10 @@ mod tests {
             request_id: sign_id.request_id,
             responder: solana_sdk::pubkey::Pubkey::new_unique(),
             serialized_output: vec![],
-            signature: signet_program::Signature {
-                big_r: signet_program::AffinePoint {
-                    x: big_r_x,
-                    y: big_r_y,
-                },
-                s: s_arr,
-                recovery_id: 0,
-            },
+            signature: crate::util::mpc_to_sol_signature(
+                &new_mpc_sig,
+                new_mpc_sig.big_r.to_encoded_point(false),
+            ),
         });
         events_tx
             .send(ChainEvent::RespondBidirectional(respond_bidirectional))
@@ -980,10 +1034,14 @@ mod tests {
             .await;
         seeded_backlog.checkpoint(Chain::Ethereum).await;
 
+        let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let root_pk = root_sk.public_key().to_projective().to_affine();
+        let mpc_sig = valid_signature(&root_sk, &args);
+
         let respond = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
             request_id: sign_id.request_id,
             responder: Address::ZERO,
-            signature: Signature::new(k256::ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
+            signature: mpc_sig,
         });
 
         let client = EthereumTestStream::new(vec![
@@ -997,7 +1055,7 @@ mod tests {
 
         let (contract_watcher, _tx) = ContractStateWatcher::with_running(
             &"test.near".parse::<AccountId>().unwrap(),
-            k256::ProjectivePoint::GENERATOR.to_affine(),
+            root_pk,
             2,
             Default::default(),
         );
@@ -1032,10 +1090,12 @@ mod tests {
         }
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(mesh_state);
         let node_client = NodeClient::new(&Default::default());
+        let (rpc, _rpc_rx) = test_rpc_channel(8);
 
         run_stream(
             client,
             sign_tx,
+            rpc,
             backlog.clone(),
             contract_watcher,
             mesh_state_rx,
@@ -1126,10 +1186,12 @@ mod tests {
         }
         let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(mesh_state);
         let node_client = NodeClient::new(&Default::default());
+        let (rpc, _rpc_rx) = test_rpc_channel(8);
 
         run_stream(
             client,
             sign_tx,
+            rpc,
             backlog.clone(),
             contract_watcher,
             mesh_state_rx,
@@ -1154,5 +1216,153 @@ mod tests {
             .await
             .expect("replayed entry should remain in backlog");
         assert_eq!(entry.request.unix_timestamp_indexed, replayed_timestamp);
+    }
+
+    #[tokio::test]
+    async fn test_stream_resumes_pending_publish_after_catchup() {
+        use crate::sign_bidirectional::SignStatus;
+
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([77u8; 32]);
+        let signature = Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0);
+
+        backlog
+            .insert(IndexedSignRequest::sign(
+                sign_id,
+                SignArgs {
+                    entropy: [9u8; 32],
+                    epsilon: Scalar::from(1u64),
+                    payload: Scalar::from(2u64),
+                    path: "test".to_string(),
+                    key_version: 1,
+                },
+                Chain::Solana,
+                current_unix_timestamp(),
+            ))
+            .await;
+        backlog
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingPublish {
+                    publish: crate::sign_bidirectional::PublishState {
+                        signature,
+                        participants: vec![cait_sith::protocol::Participant::from(0u32)],
+                        is_proposer: true,
+                    },
+                },
+            )
+            .await;
+
+        let client = SolanaTestStream::new(vec![Some(ChainEvent::CatchupCompleted), None]);
+        let (sign_tx, mut sign_rx) = mpsc::channel(4);
+        let (rpc, mut rpc_rx) = test_rpc_channel(4);
+        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+            &"test.near".parse::<AccountId>().unwrap(),
+            k256::ProjectivePoint::GENERATOR.to_affine(),
+            0,
+            Default::default(),
+        );
+        let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
+        let node_client = NodeClient::new(&Default::default());
+
+        let run_handle = tokio::spawn(async move {
+            run_stream(
+                client,
+                sign_tx,
+                rpc,
+                backlog,
+                contract_watcher,
+                mesh_state_rx,
+                node_client,
+            )
+            .await;
+        });
+
+        match timeout(Duration::from_millis(100), sign_rx.recv()).await {
+            Err(_) | Ok(None) => {}
+            Ok(Some(msg)) => panic!("unexpected sign message during publish resume: {msg:?}"),
+        }
+
+        let action = timeout(Duration::from_secs(1), rpc_rx.recv())
+            .await
+            .expect("publish resume should not timeout")
+            .expect("publish resume should enqueue an RPC action");
+        match action {
+            RpcAction::Publish(action) => {
+                assert_eq!(action.indexed.id, sign_id);
+                assert_eq!(action.indexed.chain, Chain::Solana);
+                assert_eq!(action.signature, signature);
+            }
+        }
+
+        run_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup() {
+        use crate::sign_bidirectional::SignStatus;
+
+        let backlog = Backlog::new();
+        let sign_id = SignId::new([78u8; 32]);
+        let signature = Signature::new(AffinePoint::GENERATOR, Scalar::ONE, 0);
+
+        backlog
+            .insert(IndexedSignRequest::sign(
+                sign_id,
+                SignArgs {
+                    entropy: [10u8; 32],
+                    epsilon: Scalar::from(1u64),
+                    payload: Scalar::from(2u64),
+                    path: "test".to_string(),
+                    key_version: 1,
+                },
+                Chain::Solana,
+                current_unix_timestamp(),
+            ))
+            .await;
+        backlog
+            .set_status(
+                Chain::Solana,
+                &sign_id,
+                SignStatus::PendingPublish {
+                    publish: crate::sign_bidirectional::PublishState {
+                        signature,
+                        participants: vec![cait_sith::protocol::Participant::from(0u32)],
+                        is_proposer: false,
+                    },
+                },
+            )
+            .await;
+
+        let client = SolanaTestStream::new(vec![Some(ChainEvent::CatchupCompleted), None]);
+        let (sign_tx, _sign_rx) = mpsc::channel(4);
+        let (rpc, mut rpc_rx) = test_rpc_channel(4);
+        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+            &"test.near".parse::<AccountId>().unwrap(),
+            k256::ProjectivePoint::GENERATOR.to_affine(),
+            0,
+            Default::default(),
+        );
+        let (_mesh_state_tx, mesh_state_rx) = tokio::sync::watch::channel(MeshState::default());
+        let node_client = NodeClient::new(&Default::default());
+
+        let run_handle = tokio::spawn(async move {
+            run_stream(
+                client,
+                sign_tx,
+                rpc,
+                backlog,
+                contract_watcher,
+                mesh_state_rx,
+                node_client,
+            )
+            .await;
+        });
+
+        let no_publish = timeout(Duration::from_millis(100), rpc_rx.recv()).await;
+        assert!(matches!(no_publish, Err(_) | Ok(None)));
+
+        run_handle.abort();
     }
 }

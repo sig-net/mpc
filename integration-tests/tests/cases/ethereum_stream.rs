@@ -8,12 +8,14 @@ use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers::EthereumSandbox;
 use integration_tests::eth::{self, ChainSignatures, SignRequest};
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+use k256::{AffinePoint, Scalar};
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign, SignKind};
-use mpc_node::rpc::ContractStateWatcher;
+use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
+use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::ops::SignBidirectionalEvent as NodeSignBidirectionalEvent;
 use mpc_node::stream::ops::SignatureRespondedEvent;
@@ -27,6 +29,11 @@ use tokio::time::timeout;
 
 fn signature_deposit() -> U256 {
     U256::from(1u64)
+}
+
+fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<mpc_node::rpc::RpcAction>) {
+    let (tx, rx) = mpsc::channel(buffer);
+    (RpcChannel { tx }, rx)
 }
 
 // Integration tests for EthereumStream
@@ -249,14 +256,15 @@ async fn submit_eth_transfer_with_block(ctx: &EthereumTestEnvironment) -> Result
 async fn submit_respond_for_request_id<P>(
     contract: ChainSignatures::ChainSignaturesInstance<P>,
     request_id: [u8; 32],
+    signature: mpc_primitives::Signature,
 ) -> Result<B256>
 where
     P: Provider + Clone + Send + Sync + 'static,
 {
-    let enc = k256::ProjectivePoint::GENERATOR.to_encoded_point(false);
-    let x = enc.x().expect("generator must have x coordinate");
-    let y = enc.y().expect("generator must have y coordinate");
-    let s = U256::from_be_bytes(k256::Scalar::from(11u64).to_bytes().into());
+    let enc = signature.big_r.to_encoded_point(false);
+    let x = enc.x().expect("big_r must have x coordinate");
+    let y = enc.y().expect("big_r must have y coordinate");
+    let s = U256::from_be_bytes(signature.s.to_bytes().into());
 
     let response = ChainSignatures::Response {
         requestId: request_id.into(),
@@ -266,7 +274,7 @@ where
                 y: U256::from_be_slice(y),
             },
             s,
-            recoveryId: 1,
+            recoveryId: signature.recovery_id,
         },
     };
 
@@ -298,6 +306,8 @@ fn test_sign_args(seed: u8) -> SignArgs {
         key_version: LATEST_MPC_KEY_VERSION,
     }
 }
+
+use mpc_node::kdf::valid_signature;
 
 fn test_bidirectional_event() -> NodeSignBidirectionalEvent {
     let mut rlp_s = rlp::RlpStream::new_list(9);
@@ -418,10 +428,12 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     info.url = "http://127.0.0.1:1".to_string();
     mesh_state.update(Participant::from(0u32), NodeStatus::Active, info);
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
+    let (rpc, _rpc_rx) = test_rpc_channel(16);
 
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
+        rpc,
         backlog,
         contract_watcher,
         mesh_rx,
@@ -538,13 +550,41 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         nonce: checkpoint_nonce,
     };
     backlog
+        .set_status(
+            execution_tx.source_chain,
+            &execution_sign_id,
+            SignStatus::PendingPublish {
+                publish: PublishState {
+                    signature: mpc_primitives::Signature::new(
+                        AffinePoint::GENERATOR,
+                        Scalar::ONE,
+                        0,
+                    ),
+                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                    is_proposer: true,
+                },
+            },
+        )
+        .await;
+    backlog
         .advance(Chain::Solana, execution_sign_id, execution_tx)
         .await
         .context("failed to seed execution watcher")?;
 
     let responder_contract = ChainSignatures::new(ctx.contract_address, responder_signer.clone());
 
-    submit_respond_for_request_id(responder_contract, resolved_sign_id.request_id).await?;
+    let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let root_pk = root_sk.public_key().to_projective().to_affine();
+
+    let resolved_args = test_sign_args(0x11);
+    let resolved_sig = valid_signature(&root_sk, &resolved_args);
+
+    submit_respond_for_request_id(
+        responder_contract,
+        resolved_sign_id.request_id,
+        resolved_sig,
+    )
+    .await?;
     submit_eth_transfer(&ctx).await?;
     let catchup_payload = [0x55; 32];
     submit_sign_request(&ctx, catchup_payload, "catchup-linear-path").await?;
@@ -553,7 +593,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
-        k256::ProjectivePoint::GENERATOR.to_affine(),
+        root_pk,
         1,
         Default::default(),
     );
@@ -563,10 +603,12 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     info.url = "http://127.0.0.1:1".to_string();
     mesh_state.update(Participant::from(0u32), NodeStatus::Active, info);
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
+    let (rpc, _rpc_rx) = test_rpc_channel(16);
 
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
+        rpc,
         backlog.clone(),
         contract_watcher,
         mesh_rx,
@@ -746,10 +788,12 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     info.url = "http://127.0.0.1:1".to_string();
     mesh_state.update(Participant::from(0u32), NodeStatus::Active, info);
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
+    let (rpc, _rpc_rx) = test_rpc_channel(16);
 
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
+        rpc,
         backlog.clone(),
         contract_watcher,
         mesh_rx,
@@ -818,6 +862,23 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         ))
         .await;
     backlog
+        .set_status(
+            tx.source_chain,
+            &sign_id,
+            SignStatus::PendingPublish {
+                publish: PublishState {
+                    signature: mpc_primitives::Signature::new(
+                        AffinePoint::GENERATOR,
+                        Scalar::ONE,
+                        0,
+                    ),
+                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                    is_proposer: true,
+                },
+            },
+        )
+        .await;
+    backlog
         .advance(Chain::Solana, sign_id, tx)
         .await
         .context("failed to seed late execution watcher")?;
@@ -841,7 +902,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         other => panic!("expected Sign::Request from late watcher backfill, got {other:?}"),
     }
 
-    let watchers = backlog.pending_execution(Chain::Ethereum).await;
+    let watchers = backlog.execution_watchers(Chain::Ethereum).await;
     assert!(
         watchers.is_empty(),
         "late watcher should be cleared after backfill"

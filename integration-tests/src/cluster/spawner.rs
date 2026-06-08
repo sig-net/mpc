@@ -338,8 +338,14 @@ impl ClusterSpawner {
             self.cfg.canton = Some(mpc_node::indexer_canton::CantonConfig {
                 json_api_url: String::new(),
                 json_api_ws_url: String::new(),
-                jwt_private_key_path: String::new(),
-                jwt_subject: String::new(),
+                auth: mpc_node::indexer_canton::CantonAuthConfig {
+                    token_url: String::new(),
+                    client_id: String::new(),
+                    client_secret: String::new(),
+                    audience: String::new(),
+                    scope: None,
+                },
+                ledger_api_user: String::new(),
                 party_id: String::new(),
                 signer_contract_id: String::new(),
                 signer_template_id: String::new(),

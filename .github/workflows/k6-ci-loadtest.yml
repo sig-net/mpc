@@ -102,6 +102,7 @@ jobs:
         env:
           K6_CLOUD_TOKEN: ${{ secrets.K6_CLOUD_TOKEN }}
           K6_CLOUD_PROJECT_ID: ${{ secrets.K6_CLOUD_PROJECT_ID }}
+          K6_CLOUD_STACK_ID: ${{ secrets.K6_CLOUD_STACK_ID }}
           LT_PINGER_API_KEY: ${{ secrets.LT_PINGER_API_KEY }}
           LT_CHAIN: ${{ steps.normalized.outputs.lt_chain }}
           LT_CHAIN_ENV: ${{ steps.normalized.outputs.lt_env }}

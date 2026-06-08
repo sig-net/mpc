@@ -113,6 +113,22 @@ pub fn check_ec_signature(
     anyhow::bail!("cannot use either recovery id={recovery_id} to recover pubic key")
 }
 
+pub fn verify_signature(
+    root_public_key: PublicKey,
+    epsilon: Scalar,
+    payload: Scalar,
+    signature: &mpc_primitives::Signature,
+) -> anyhow::Result<()> {
+    let expected_public_key = derive_key(root_public_key, epsilon);
+    check_ec_signature(
+        &expected_public_key,
+        &signature.big_r,
+        &signature.s,
+        payload,
+        signature.recovery_id,
+    )
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn recover(
     prehash: &[u8],

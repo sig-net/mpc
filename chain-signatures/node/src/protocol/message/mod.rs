@@ -2,13 +2,11 @@ mod filter;
 mod sub;
 mod types;
 
-pub use sub::{Subscriber, MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE};
-
 use super::contract::primitives::{ParticipantMap, Participants};
 use super::presignature::PresignatureId;
 use super::triple::TripleId;
 use crate::metrics;
-use crate::metrics::messaging::set_channel_capacity_tx;
+use crate::metrics::messaging::{set_channel_capacity_tx, set_inbox_count};
 use crate::node_client::NodeClient;
 use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::message::sub::{
@@ -25,6 +23,7 @@ pub use crate::protocol::message::types::{
     PresignatureMessage, Protocols, ReadyMessage, ResharingMessage, SignatureMessage,
     TripleMessage,
 };
+pub use sub::{Subscriber, POSIT_INBOX_CHANNEL_SIZE};
 
 use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
@@ -152,27 +151,31 @@ impl MessageInbox {
                 self.ready.report_capacity_global();
             }
             Message::Triple(message) => {
-                // NOTE: not logging the error because this is simply just channel closure.
-                // The error message should be reported on the generator side.
-                let _ = self
+                let sub = self
                     .triple
                     .entry(message.id)
-                    .or_insert_with(|| Subscriber::unsubscribed("triple_task"))
-                    .try_send_lossy(message);
+                    .or_insert_with(|| Subscriber::unsubscribed("triple_task"));
+                let _ = sub.try_send_lossy(message);
+                sub.report_capacity();
+                set_inbox_count("triple_task", self.triple.len());
             }
             Message::Presignature(message) => {
-                let _ = self
+                let sub = self
                     .presignature
                     .entry(message.id)
-                    .or_insert_with(|| Subscriber::unsubscribed("presign_task"))
-                    .try_send_lossy(message);
+                    .or_insert_with(|| Subscriber::unsubscribed("presign_task"));
+                let _ = sub.try_send_lossy(message);
+                sub.report_capacity();
+                set_inbox_count("presign_task", self.presignature.len());
             }
             Message::Signature(message) => {
-                let _ = self
+                let sub = self
                     .signature
                     .entry((message.id, message.presignature_id))
-                    .or_insert_with(|| Subscriber::unsubscribed("sign_task"))
-                    .try_send_lossy(message);
+                    .or_insert_with(|| Subscriber::unsubscribed("sign_task"));
+                let _ = sub.try_send_lossy(message);
+                sub.report_capacity();
+                set_inbox_count("sign_task", self.signature.len());
             }
             Message::Unknown(entries) => {
                 tracing::warn!(
@@ -284,6 +287,7 @@ impl MessageInbox {
                     } else {
                         tracing::warn!(id, "trying to unsub from an unknown triple subscription");
                     }
+                    set_inbox_count("triple_task", self.triple.len());
                 }
             },
             SubscribeId::Presignature(id) => match sub.action {
@@ -304,6 +308,7 @@ impl MessageInbox {
                             "trying to unsub from an unknown presignature subscription"
                         );
                     }
+                    set_inbox_count("presign_task", self.presignature.len());
                 }
             },
             SubscribeId::Signature(sign_id, presignature_id) => match sub.action {
@@ -325,6 +330,7 @@ impl MessageInbox {
                             "trying to unsub from an unknown signature subscription"
                         );
                     }
+                    set_inbox_count("sign_task", self.signature.len());
                 }
             },
             SubscribeId::Ready => match sub.action {

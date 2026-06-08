@@ -2,7 +2,9 @@ use crate::protocol::{Chain, IndexedSignRequest};
 use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
 use borsh::BorshSerialize;
+use cait_sith::protocol::Participant;
 use k256::elliptic_curve::point::AffineCoordinates;
+use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
 use mpc_primitives::{SerDeserFormat, Signature};
@@ -31,19 +33,71 @@ struct AbiField {
     typ: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum SignStatus {
-    /// Request has been received on the source chain and is waiting for a `respond`
-    /// transaction to be observed.
-    AwaitingResponse,
-    /// Request has been responded to and the derived transaction is now waiting to
-    /// execute on the destination chain.
-    PendingExecution,
-    /// Execution was confirmed and final respond request is waiting to be signed.
-    AwaitingResponseBidirectional,
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PublishState {
+    pub signature: Signature,
+    pub participants: Vec<Participant>,
+    pub is_proposer: bool,
 }
 
-#[derive(Debug, Clone, Hash, serde::Serialize, serde::Deserialize)]
+impl PublishState {
+    fn digest_bytes(&self, tag: u8) -> Vec<u8> {
+        let mut bytes = vec![tag];
+        bytes.extend_from_slice(&self.signature.to_bytes());
+        bytes.extend_from_slice(&(self.participants.len() as u32).to_le_bytes());
+        for participant in &self.participants {
+            bytes.extend_from_slice(&participant.bytes());
+        }
+        bytes.push(u8::from(self.is_proposer));
+        bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SignStatus {
+    PendingGeneration,
+    PendingPublish { publish: PublishState },
+    PendingExecution { tx: BidirectionalTx },
+    PendingGenerationBidirectional,
+    PendingPublishBidirectional { publish: PublishState },
+}
+
+impl SignStatus {
+    pub fn is_pending_generation(&self) -> bool {
+        matches!(
+            self,
+            SignStatus::PendingGeneration | SignStatus::PendingGenerationBidirectional
+        )
+    }
+
+    pub fn is_pending_execution(&self) -> bool {
+        matches!(self, SignStatus::PendingExecution { .. })
+    }
+
+    pub fn digest_bytes(&self) -> Vec<u8> {
+        match self {
+            SignStatus::PendingGeneration => vec![0],
+            SignStatus::PendingPublish { publish } => publish.digest_bytes(1),
+            SignStatus::PendingExecution { tx } => {
+                let mut bytes = vec![2];
+                bytes.extend_from_slice(tx.id.0.as_slice());
+                bytes.extend_from_slice(&tx.target_chain.to_bytes());
+                bytes
+            }
+            SignStatus::PendingGenerationBidirectional => vec![3],
+            SignStatus::PendingPublishBidirectional { publish } => publish.digest_bytes(4),
+        }
+    }
+
+    pub fn execution_tx(&self) -> Option<&BidirectionalTx> {
+        match self {
+            SignStatus::PendingExecution { tx } => Some(tx),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BidirectionalTx {
     pub id: BidirectionalTxId,
     pub sender: [u8; 32],
@@ -391,14 +445,7 @@ impl EthereumTxRlp {
     }
 }
 
-/// Get the x coordinate of a point, as a scalar
-fn x_coordinate<C: cait_sith::CSCurve>(point: &C::AffinePoint) -> C::Scalar {
-    <C::Scalar as k256::elliptic_curve::ops::Reduce<<C as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(&point.x())
-}
-
-fn public_key_to_address(public_key: &secp256k1::PublicKey) -> Address {
-    let public_key = public_key.serialize_uncompressed();
-
+pub fn public_key_to_address(public_key: &[u8]) -> Address {
     debug_assert_eq!(public_key[0], 0x04);
     let hash: [u8; 32] = *alloy::primitives::keccak256(&public_key[1..]);
 
@@ -407,17 +454,8 @@ fn public_key_to_address(public_key: &secp256k1::PublicKey) -> Address {
 
 pub fn derive_user_address(mpc_pk: mpc_crypto::PublicKey, derivation_epsilon: Scalar) -> Address {
     let user_pk: AffinePoint = derive_key(mpc_pk, derivation_epsilon);
-    let parity = match user_pk.y_is_odd().unwrap_u8() {
-        0 => secp256k1::Parity::Even,
-        1 => secp256k1::Parity::Odd,
-        _ => unreachable!(),
-    };
 
-    let x_coord = x_coordinate::<k256::Secp256k1>(&user_pk);
-    let x_only = secp256k1::XOnlyPublicKey::from_slice(&x_coord.to_bytes()).unwrap();
-    let secp_pk = secp256k1::PublicKey::from_x_only_public_key(x_only, parity);
-
-    public_key_to_address(&secp_pk)
+    public_key_to_address(user_pk.to_encoded_point(false).as_bytes())
 }
 
 /// Synthesize per-field default values for an `Output` whose source tx was
@@ -446,6 +484,33 @@ fn default_output_for_non_contract_call(schema: &[AbiField]) -> anyhow::Result<O
         fields: data,
         from_contract_call: false,
     })
+}
+
+#[cfg(test)]
+mod derive_tests {
+    use super::derive_user_address;
+    use alloy::primitives::Address;
+    use k256::elliptic_curve::sec1::FromEncodedPoint;
+    use k256::{AffinePoint, EncodedPoint};
+    use mpc_crypto::derive_epsilon_near;
+    use mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
+
+    #[test]
+    fn derive_user_address_matches_golden() {
+        let mpc_key = "045b4fa179e005361fd858f8a6f896d7afc23a53d3f95d6566a88cde954e7b2f1cb77c554705c35d4ffced67aeafbcda46d9d89d6f200c3a3d109f92872863b3dc";
+        let account_id = "dev-20250212213501-93636560094065.test.near"
+            .parse()
+            .unwrap();
+        let mpc_pk = hex::decode(mpc_key).unwrap();
+        let mpc_pk = EncodedPoint::from_bytes(mpc_pk).unwrap();
+        let mpc_pk = AffinePoint::from_encoded_point(&mpc_pk).unwrap();
+        let derivation_epsilon = derive_epsilon_near(LEGACY_MPC_KEY_VERSION_0, &account_id, "test");
+        let expected: Address = "0x083c8776b5e447e91bae43b7883a92a9bdb66d1d"
+            .parse()
+            .unwrap();
+
+        assert_eq!(derive_user_address(mpc_pk, derivation_epsilon), expected);
+    }
 }
 
 fn encode_abi_values(schema: &[AbiField], values: &[DynSolValue]) -> anyhow::Result<Vec<u8>> {

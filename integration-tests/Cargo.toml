@@ -9,6 +9,7 @@ publish = false
 alloy = { workspace = true, features = ["provider-anvil-api"] }
 anyhow.workspace = true
 async-process = "1"
+async-trait = "0.1"
 backon = "0.4"
 bollard = "0.17.0"
 borsh.workspace = true
@@ -36,7 +37,6 @@ uuid = { version = "1.0", features = ["v4"] }
 sha3.workspace = true
 sha2 = "0.10"
 rlp = "0.5"
-jsonwebtoken = { workspace = true }
 
 # solana dependencies
 anchor-client.workspace = true
@@ -52,7 +52,6 @@ ecdsa = "0.16.9"
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
 elliptic-curve = { version = "0.13.5", default-features = false }
 k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
-secp256k1.workspace = true
 
 # near dependencies
 near-account-id.workspace = true

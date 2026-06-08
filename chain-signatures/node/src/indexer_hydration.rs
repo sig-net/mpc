@@ -413,6 +413,9 @@ pub async fn run(
     .await;
 
     spawn_runtime_updater(hydration_api.clone());
+
+    let root_pk = contract_watcher.wait_public_key().await;
+
     // Subscribe to finalized Hydration blocks.
     let mut blocks = match hydration_api.blocks().subscribe_finalized().await {
         Ok(blocks) => blocks,
@@ -531,7 +534,7 @@ pub async fn run(
                 if let Err(e) = crate::stream::ops::process_respond_event(
                     crate::stream::ops::SignatureRespondedEvent::Hydration(event),
                     sign_tx.clone(),
-                    &mut contract_watcher,
+                    root_pk,
                     &backlog,
                     true,
                 )
@@ -589,6 +592,7 @@ pub async fn run(
                 if let Err(e) = crate::stream::ops::process_respond_bidirectional_event(
                     crate::stream::ops::RespondBidirectionalEvent::Hydration(event),
                     sign_tx.clone(),
+                    root_pk,
                     &backlog,
                     true,
                 )

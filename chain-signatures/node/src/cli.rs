@@ -291,11 +291,16 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     .to_string()
             });
             let hydration_signer_address = hydration.signer_uri.as_ref().and_then(|uri| {
-                use std::str::FromStr;
-                use subxt_signer::{sr25519, SecretUri};
-                let uri = SecretUri::from_str(uri).ok()?;
-                let kp = sr25519::Keypair::from_uri(&uri).ok()?;
-                Some(kp.public_key().to_account_id().to_string())
+                use sp_core::sr25519;
+                use sp_core::Pair as _;
+                use sp_runtime::traits::{IdentifyAccount, Verify};
+                use sp_runtime::MultiSignature as SpMultiSignature;
+                use subxt::config::substrate::AccountId32;
+
+                let pair = sr25519::Pair::from_string(uri, None).ok()?;
+                let account_id =
+                    <SpMultiSignature as Verify>::Signer::from(pair.public()).into_account();
+                Some(AccountId32(account_id.into()).to_string())
             });
             let eth = eth.into_config();
             let sol = sol.into_config();
@@ -305,15 +310,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
 
-            let (rpc_channel, rpc) = RpcExecutor::new(
-                &near_client,
-                &eth,
-                &sol,
-                &hydration,
-                &canton,
-                backlog.clone(),
-            )
-            .await;
+            let (rpc_channel, rpc) =
+                RpcExecutor::new(&near_client, &eth, &sol, &hydration, &canton).await;
 
             let (sync_channel, sync) = SyncTask::new(
                 &client,
@@ -416,6 +414,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     tokio::spawn(run_stream(
                         eth_stream,
                         sign_tx.clone(),
+                        rpc_channel.clone(),
                         backlog.clone(),
                         contract_watcher.clone(),
                         mesh_state.clone(),
@@ -431,6 +430,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 tokio::spawn(run_stream(
                     sol_stream,
                     sign_tx.clone(),
+                    rpc_channel.clone(),
                     backlog.clone(),
                     contract_watcher.clone(),
                     mesh_state.clone(),
@@ -450,6 +450,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 tokio::spawn(run_stream(
                     canton_stream,
                     sign_tx.clone(),
+                    rpc_channel.clone(),
                     backlog.clone(),
                     contract_watcher.clone(),
                     mesh_state.clone(),

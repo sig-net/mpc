@@ -1,11 +1,11 @@
+mod auth;
 pub mod contracts;
-mod jwt;
 pub mod ledger_api;
 mod request_id;
 mod signature;
 mod stream;
 
-pub use jwt::generate_jwt_with_key;
+pub use auth::{CantonAuthConfig, CantonAuthProvider};
 pub use request_id::compute_request_id;
 pub use signature::der_encode_signature;
 pub use stream::{parse_canton_signature, CantonStream};
@@ -172,8 +172,8 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
 pub struct CantonConfig {
     pub json_api_url: String,
     pub json_api_ws_url: String,
-    pub jwt_private_key_path: String,
-    pub jwt_subject: String,
+    pub auth: CantonAuthConfig,
+    pub ledger_api_user: String,
     pub party_id: String,
     /// The Signer contract ID on the Canton ledger. Changes on every DAR
     /// redeployment — requires MPC node restart with the new value.
@@ -188,8 +188,8 @@ impl fmt::Debug for CantonConfig {
         f.debug_struct("CantonConfig")
             .field("json_api_url", &self.json_api_url)
             .field("json_api_ws_url", &self.json_api_ws_url)
-            .field("jwt_private_key_path", &"<hidden>")
-            .field("jwt_subject", &self.jwt_subject)
+            .field("auth", &self.auth.kind())
+            .field("ledger_api_user", &self.ledger_api_user)
             .field("party_id", &self.party_id)
             .field("signer_contract_id", &self.signer_contract_id)
             .field("signer_template_id", &self.signer_template_id)
@@ -206,8 +206,11 @@ pub struct CantonArgs {
         env("MPC_CANTON_JSON_API_URL"),
         requires_all = [
             "canton_json_api_ws_url",
-            "canton_jwt_private_key_path",
-            "canton_jwt_subject",
+            "canton_ledger_api_user",
+            "canton_oidc_token_url",
+            "canton_oidc_client_id",
+            "canton_oidc_client_secret",
+            "canton_oidc_audience",
             "canton_party_id",
             "canton_signer_contract_id",
             "canton_signer_template_id",
@@ -222,12 +225,36 @@ pub struct CantonArgs {
     pub canton_json_api_ws_url: Option<String>,
     #[arg(
         long,
-        env("MPC_CANTON_JWT_PRIVATE_KEY_PATH"),
+        env("MPC_CANTON_LEDGER_API_USER"),
         requires = "canton_json_api_url"
     )]
-    pub canton_jwt_private_key_path: Option<String>,
-    #[arg(long, env("MPC_CANTON_JWT_SUBJECT"), requires = "canton_json_api_url")]
-    pub canton_jwt_subject: Option<String>,
+    pub canton_ledger_api_user: Option<String>,
+    #[arg(
+        long,
+        env("MPC_CANTON_OIDC_TOKEN_URL"),
+        requires = "canton_json_api_url"
+    )]
+    pub canton_oidc_token_url: Option<String>,
+    #[arg(
+        long,
+        env("MPC_CANTON_OIDC_CLIENT_ID"),
+        requires = "canton_json_api_url"
+    )]
+    pub canton_oidc_client_id: Option<String>,
+    #[arg(
+        long,
+        env("MPC_CANTON_OIDC_CLIENT_SECRET"),
+        requires = "canton_json_api_url"
+    )]
+    pub canton_oidc_client_secret: Option<String>,
+    #[arg(
+        long,
+        env("MPC_CANTON_OIDC_AUDIENCE"),
+        requires = "canton_json_api_url"
+    )]
+    pub canton_oidc_audience: Option<String>,
+    #[arg(long, env("MPC_CANTON_OIDC_SCOPE"), requires = "canton_json_api_url")]
+    pub canton_oidc_scope: Option<String>,
     #[arg(long, env("MPC_CANTON_PARTY_ID"), requires = "canton_json_api_url")]
     pub canton_party_id: Option<String>,
     /// The Signer contract ID on the Canton ledger. Must be updated if the contract is re-deployed.
@@ -256,11 +283,23 @@ impl CantonArgs {
         if let Some(v) = self.canton_json_api_ws_url {
             args.extend(["--canton-json-api-ws-url".to_string(), v]);
         }
-        if let Some(v) = self.canton_jwt_private_key_path {
-            args.extend(["--canton-jwt-private-key-path".to_string(), v]);
+        if let Some(v) = self.canton_ledger_api_user {
+            args.extend(["--canton-ledger-api-user".to_string(), v]);
         }
-        if let Some(v) = self.canton_jwt_subject {
-            args.extend(["--canton-jwt-subject".to_string(), v]);
+        if let Some(v) = self.canton_oidc_token_url {
+            args.extend(["--canton-oidc-token-url".to_string(), v]);
+        }
+        if let Some(v) = self.canton_oidc_client_id {
+            args.extend(["--canton-oidc-client-id".to_string(), v]);
+        }
+        if let Some(v) = self.canton_oidc_client_secret {
+            args.extend(["--canton-oidc-client-secret".to_string(), v]);
+        }
+        if let Some(v) = self.canton_oidc_audience {
+            args.extend(["--canton-oidc-audience".to_string(), v]);
+        }
+        if let Some(v) = self.canton_oidc_scope {
+            args.extend(["--canton-oidc-scope".to_string(), v]);
         }
         if let Some(v) = self.canton_party_id {
             args.extend(["--canton-party-id".to_string(), v]);
@@ -275,11 +314,18 @@ impl CantonArgs {
     }
 
     pub fn into_config(self) -> Option<CantonConfig> {
+        let auth = CantonAuthConfig {
+            token_url: self.canton_oidc_token_url?,
+            client_id: self.canton_oidc_client_id?,
+            client_secret: self.canton_oidc_client_secret?,
+            audience: self.canton_oidc_audience?,
+            scope: self.canton_oidc_scope,
+        };
         Some(CantonConfig {
             json_api_url: self.canton_json_api_url?,
             json_api_ws_url: self.canton_json_api_ws_url?,
-            jwt_private_key_path: self.canton_jwt_private_key_path?,
-            jwt_subject: self.canton_jwt_subject?,
+            auth,
+            ledger_api_user: self.canton_ledger_api_user?,
             party_id: self.canton_party_id?,
             signer_contract_id: self.canton_signer_contract_id?,
             signer_template_id: self.canton_signer_template_id?,
@@ -288,21 +334,38 @@ impl CantonArgs {
 
     pub fn from_config(config: Option<CantonConfig>) -> Self {
         match config {
-            Some(c) => CantonArgs {
-                canton_json_api_url: Some(c.json_api_url),
-                canton_json_api_ws_url: Some(c.json_api_ws_url),
-                canton_jwt_private_key_path: Some(c.jwt_private_key_path),
-                canton_jwt_subject: Some(c.jwt_subject),
-                canton_party_id: Some(c.party_id),
+            Some(c) => {
+                let CantonAuthConfig {
+                    token_url,
+                    client_id,
+                    client_secret,
+                    audience,
+                    scope,
+                } = c.auth;
+                CantonArgs {
+                    canton_json_api_url: Some(c.json_api_url),
+                    canton_json_api_ws_url: Some(c.json_api_ws_url),
+                    canton_ledger_api_user: Some(c.ledger_api_user),
+                    canton_oidc_token_url: Some(token_url),
+                    canton_oidc_client_id: Some(client_id),
+                    canton_oidc_client_secret: Some(client_secret),
+                    canton_oidc_audience: Some(audience),
+                    canton_oidc_scope: scope,
+                    canton_party_id: Some(c.party_id),
 
-                canton_signer_contract_id: Some(c.signer_contract_id),
-                canton_signer_template_id: Some(c.signer_template_id),
-            },
+                    canton_signer_contract_id: Some(c.signer_contract_id),
+                    canton_signer_template_id: Some(c.signer_template_id),
+                }
+            }
             None => CantonArgs {
                 canton_json_api_url: None,
                 canton_json_api_ws_url: None,
-                canton_jwt_private_key_path: None,
-                canton_jwt_subject: None,
+                canton_ledger_api_user: None,
+                canton_oidc_token_url: None,
+                canton_oidc_client_id: None,
+                canton_oidc_client_secret: None,
+                canton_oidc_audience: None,
+                canton_oidc_scope: None,
                 canton_party_id: None,
 
                 canton_signer_contract_id: None,

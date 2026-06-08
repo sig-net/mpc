@@ -6,7 +6,9 @@ use crate::mpc_fixture::fixture_interface::SharedOutput;
 use crate::mpc_fixture::fixture_tasks::MessageFilter;
 use crate::mpc_fixture::input::FixtureInput;
 use crate::mpc_fixture::message_collector::CollectMessages;
+use crate::mpc_fixture::mock_chain::{ChainEventFilter, MockChain};
 use crate::mpc_fixture::mock_governance::MockGovernance;
+use crate::mpc_fixture::mock_stream::MockStream;
 use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
 
 use cait_sith::protocol::Participant;
@@ -32,6 +34,7 @@ use mpc_node::protocol::{self, MessageChannel, MpcSignProtocol, ProtocolState};
 use mpc_node::rpc::ContractStateWatcher;
 use mpc_node::rpc::RpcChannel;
 use mpc_node::storage::{secret_storage, triple_storage::TriplePair, Options};
+use mpc_primitives::Chain;
 use near_sdk::AccountId;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -48,6 +51,7 @@ pub struct MpcFixtureBuilder {
     candidates: Candidates,
     fixture_config: FixtureConfig,
     output: SharedOutput,
+    chain_event_filters: HashMap<usize, ChainEventFilter>,
 }
 
 struct MpcFixtureNodeBuilder {
@@ -57,6 +61,7 @@ struct MpcFixtureNodeBuilder {
     config: Config,
     messaging: NodeMessagingBuilder,
     key_info: Option<NodeKeyInfo>,
+    mock_streams: HashMap<Chain, MockStream>,
 }
 
 /// Config options for the test setup.
@@ -170,6 +175,7 @@ impl MpcFixtureBuilder {
             candidates,
             fixture_config: FixtureConfig::new(num_nodes, threshold),
             output: SharedOutput::default(),
+            chain_event_filters: HashMap::new(),
         }
     }
 
@@ -226,6 +232,25 @@ impl MpcFixtureBuilder {
         let output = self.output;
         let mut nodes = vec![];
 
+        let has_mock_streams = self
+            .prepared_nodes
+            .iter()
+            .any(|n| !n.mock_streams.is_empty());
+        let mock_chain = if has_mock_streams {
+            let all_streams: Vec<MockStream> = self
+                .prepared_nodes
+                .iter()
+                .flat_map(|n| n.mock_streams.values().cloned())
+                .collect();
+            let chain = MockChain::new(all_streams);
+            for (node_idx, filter) in self.chain_event_filters.drain() {
+                chain.set_filter(node_idx, filter).await;
+            }
+            Some(chain)
+        } else {
+            None
+        };
+
         let account_ids: Vec<_> = self
             .prepared_nodes
             .iter()
@@ -251,6 +276,7 @@ impl MpcFixtureBuilder {
                     shared_contract_state_tx.clone(),
                     &mut fixture_input,
                     &output,
+                    mock_chain.clone(),
                 )
                 .await;
 
@@ -262,6 +288,7 @@ impl MpcFixtureBuilder {
             nodes,
             output,
             shared_contract_state: shared_contract_state_tx,
+            mock_chain,
         }
     }
 
@@ -386,6 +413,12 @@ impl MpcFixtureBuilder {
         self
     }
 
+    /// Filter chain events for a specific node. Dropped events are not delivered.
+    pub fn with_chain_event_filter(mut self, node_idx: usize, filter: ChainEventFilter) -> Self {
+        self.chain_event_filters.insert(node_idx, filter);
+        self
+    }
+
     /// Specify a method that acts as message filter for all sent messages the given node.
     pub fn with_message_collector(
         mut self,
@@ -420,6 +453,22 @@ impl MpcFixtureBuilder {
             .with_preshared_presignatures()
             .with_node_min_triples(0)
             .with_node_min_presignatures(0)
+    }
+
+    /// Add a mock stream to all nodes.
+    ///
+    /// Each node will have a independent deep-clone of the provided stream.
+    /// Events are thus delivered to all nodes.
+    pub async fn with_mock_stream(mut self, chain: Chain, stream: MockStream) -> Self {
+        for node in &mut self.prepared_nodes {
+            let cloned = stream.deep_clone().await;
+            let prev = node.mock_streams.insert(chain, cloned);
+            assert!(
+                prev.is_none(),
+                "test setup only supports one stream per chain"
+            );
+        }
+        self
     }
 }
 
@@ -468,6 +517,7 @@ impl MpcFixtureNodeBuilder {
             config,
             messaging,
             key_info: None,
+            mock_streams: Default::default(),
         }
     }
 
@@ -477,6 +527,7 @@ impl MpcFixtureNodeBuilder {
         protocol_state_tx: watch::Sender<Option<ProtocolState>>,
         fixture_input: &mut Option<FixtureInput>,
         shared_output: &SharedOutput,
+        mock_chain: Option<MockChain>,
     ) -> MpcFixtureNode {
         // overwrite the default protocol config with the built config
         self.config.protocol = context.protocol_config.clone();
@@ -497,7 +548,7 @@ impl MpcFixtureNodeBuilder {
         let channels = protocol::test_setup::TestProtocolChannels {
             sign_rx,
             msg_channel: self.messaging.channel.clone(),
-            rpc_channel,
+            rpc_channel: rpc_channel.clone(),
             config: config_rx.clone(),
             mesh_state: mesh_rx.clone(),
         };
@@ -533,6 +584,18 @@ impl MpcFixtureNodeBuilder {
             mesh_rx.clone(),
         ));
 
+        let backlog = Backlog::new();
+
+        let flat_mock_streams = self.mock_streams.values().cloned().collect::<Vec<_>>();
+        fixture_tasks::start_mock_stream_tasks(
+            &flat_mock_streams,
+            sign_tx.clone(),
+            rpc_channel.clone(),
+            backlog.clone(),
+            context.contract_state.clone(),
+            &mesh_rx,
+        );
+
         // handle outbox messages manually, we want them before they are
         // encrypted and we want to send them directly to other node's inboxes
         let _mock_network_handle = fixture_tasks::test_mock_network(
@@ -543,6 +606,7 @@ impl MpcFixtureNodeBuilder {
             mesh_tx.clone(),
             config_tx.clone(),
             self.messaging.filter,
+            mock_chain,
         );
 
         // --- SyncChannel and SyncTask setup ---
@@ -564,9 +628,10 @@ impl MpcFixtureNodeBuilder {
             config: config_tx,
             sign_tx,
             msg_channel: self.messaging.channel,
+            mock_streams: self.mock_streams,
             triple_storage,
             presignature_storage,
-            backlog: Backlog::new(),
+            backlog,
             sync_channel,
             web_handle: None,
         };

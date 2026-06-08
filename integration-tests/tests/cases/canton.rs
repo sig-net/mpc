@@ -43,7 +43,7 @@ fn encode_signed_eip1559(
         .encoded_2718())
 }
 
-#[ignore] // requires dpm + openssl + Docker (for Ethereum)
+#[ignore] // requires dpm + Docker (for Ethereum)
 #[serial]
 #[test(tokio::test)]
 async fn test_canton_eth_bidirectional_flow() -> Result<()> {
@@ -74,7 +74,7 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
         .canton
         .as_ref()
         .context("canton sandbox not available")?;
-    let client = &canton.client;
+    let client = &canton.requester_workflow_client;
 
     let root_pk: k256::AffinePoint = nodes.root_public_key().await?.into_affine_point();
 
@@ -266,7 +266,7 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
 
 // These are auth wiring smoke tests for our Canton sandbox setup, not Canton
 // auth implementation tests. They verify the sandbox is actually enforcing the
-// JWT key/cert configuration that the MPC integration relies on.
+// OAuth bearer token signing configuration that the MPC integration relies on.
 #[ignore] // requires dpm
 #[serial]
 #[test(tokio::test)]
@@ -277,66 +277,51 @@ async fn test_canton_rejects_unauthenticated_requests() -> Result<()> {
 
     // No Authorization header at all.
     let status = http.get(&url).send().await?.status();
-    assert_eq!(status, 401, "missing JWT should be rejected, got {status}");
+    assert_eq!(
+        status, 401,
+        "missing OAuth bearer token should be rejected, got {status}"
+    );
 
     // Malformed Bearer token.
     let status = http
         .get(&url)
-        .bearer_auth("not-a-valid-jwt")
-        .send()
-        .await?
-        .status();
-    assert_eq!(status, 401, "invalid JWT should be rejected, got {status}");
-
-    Ok(())
-}
-
-#[ignore] // requires dpm + openssl
-#[serial]
-#[test(tokio::test)]
-async fn test_canton_rejects_jwt_signed_by_unconfigured_key() -> Result<()> {
-    use mpc_node::indexer_canton::generate_jwt_with_key;
-
-    let sandbox = integration_tests::canton::CantonSandbox::run().await?;
-
-    // Generate a fresh EC P-256 keypair NOT configured in Canton's auth-services.
-    // Use genpkey (PKCS#8 output) instead of ecparam (SEC1 output) for jsonwebtoken compatibility.
-    let tmp = std::env::temp_dir();
-    let rogue_key_path = tmp.join(format!("rogue-jwt-{}.key", uuid::Uuid::new_v4()));
-    let output = std::process::Command::new("openssl")
-        .args([
-            "genpkey",
-            "-algorithm",
-            "EC",
-            "-pkeyopt",
-            "ec_paramgen_curve:prime256v1",
-            "-out",
-            &rogue_key_path.to_string_lossy(),
-        ])
-        .output()
-        .context("openssl not found")?;
-    anyhow::ensure!(output.status.success(), "openssl genpkey failed");
-
-    let rogue_pem = std::fs::read_to_string(&rogue_key_path)?;
-    let _ = std::fs::remove_file(&rogue_key_path);
-
-    let rogue_encoding_key = jsonwebtoken::EncodingKey::from_ec_pem(rogue_pem.as_bytes())?;
-
-    // Mint a structurally valid JWT with correct claims, but signed by the wrong key.
-    let rogue_jwt = generate_jwt_with_key(&rogue_encoding_key, &sandbox.jwt_subject)?;
-
-    // Canton should reject it — signature doesn't match any configured certificate.
-    let http = reqwest::Client::new();
-    let url = format!("{}/v2/state/ledger-end", sandbox.json_api_url);
-    let status = http
-        .get(&url)
-        .bearer_auth(&rogue_jwt)
+        .bearer_auth("not-a-valid-token")
         .send()
         .await?
         .status();
     assert_eq!(
         status, 401,
-        "JWT signed by unconfigured key should be rejected, got {status}"
+        "invalid OAuth bearer token should be rejected, got {status}"
+    );
+
+    Ok(())
+}
+
+#[ignore] // requires dpm
+#[serial]
+#[test(tokio::test)]
+async fn test_canton_rejects_token_signed_by_untrusted_jwks_key() -> Result<()> {
+    let sandbox = integration_tests::canton::CantonSandbox::run().await?;
+
+    // Mint a structurally valid bearer token for the runtime user, but sign it
+    // with a key that is not exposed by the trusted JWKS endpoint.
+    let rogue_token = sandbox
+        .generate_untrusted_test_access_token(&sandbox.ledger_api_user)
+        .await?;
+
+    // Canton should reject it because the token signature does not match the
+    // configured OAuth/JWKS issuer key.
+    let http = reqwest::Client::new();
+    let url = format!("{}/v2/state/ledger-end", sandbox.json_api_url);
+    let status = http
+        .get(&url)
+        .bearer_auth(&rogue_token)
+        .send()
+        .await?
+        .status();
+    assert_eq!(
+        status, 401,
+        "token signed by an untrusted JWKS key should be rejected, got {status}"
     );
 
     Ok(())
