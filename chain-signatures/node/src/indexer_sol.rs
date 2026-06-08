@@ -1164,6 +1164,7 @@ async fn get_tx(
 mod tests {
     use super::*;
     use solana_sdk::commitment_config::CommitmentLevel;
+    use solana_transaction_status::UiTransactionStatusMeta;
 
     #[test]
     fn request_id_matches_ethabi() {
@@ -1214,5 +1215,86 @@ mod tests {
 
         let slots: Vec<_> = from_signatures.into_keys().collect();
         assert_eq!(slots, vec![8, 9, 10, 12]);
+    }
+
+    /// Check we can still parse the old format for failed transactions.
+    ///
+    /// Note that there are some SDK versions that can parse the new format but
+    /// not the new, and other versions that have the opposite problem.
+    /// See: https://github.com/anza-xyz/solana-sdk/pull/410
+    /// and https://github.com/anza-xyz/solana-sdk/issues/394
+    ///
+    /// We want a version that can parse both.
+    #[test]
+    fn transaction_error_borsh_io_error_object_deserialization() {
+        // Exact error shape returned _before_ Solana 4.0 RPC for a failed transaction.
+        let json = r#"{"InstructionError": [0, { "BorshIoError": "Reason for the error" }]}"#;
+        let result: std::result::Result<solana_sdk::transaction::TransactionError, _> =
+            serde_json::from_str(json);
+        assert!(
+            result.is_ok(),
+            "BorshIoError unit-variant deserialization failed: {:?}",
+            result.err()
+        );
+    }
+
+    /// Check we can parse the new format for failed transactions.
+    ///
+    /// Note that there are some SDK versions that can parse the new format but
+    /// not the new, and other versions that have the opposite problem.
+    /// See: https://github.com/anza-xyz/solana-sdk/pull/410
+    /// and https://github.com/anza-xyz/solana-sdk/issues/394
+    ///
+    /// We want a version that can parse both.
+    #[test]
+    fn transaction_error_borsh_io_error_unit_variant_deserialization() {
+        // Exact error shape returned by Solana 4.0 RPC for a failed transaction.
+        let json = r#"{"InstructionError": [0, "BorshIoError"]}"#;
+        let result: std::result::Result<solana_sdk::transaction::TransactionError, _> =
+            serde_json::from_str(json);
+        assert!(
+            result.is_ok(),
+            "BorshIoError unit-variant deserialization failed: {:?}",
+            result.err()
+        );
+    }
+
+    /// Regression test for being able to deserialize devnet slot 466737912 (TX
+    /// index 32).
+    ///
+    /// This is the exact UiTransactionStatusMeta captured from the devnet slot.
+    /// It got the SOL indexer stuck as reported in
+    /// https://github.com/sig-net/mpc/issues/844.
+    #[test]
+    fn ui_transaction_meta_with_borsh_io_error_deserializes() {
+        let meta_json = r#"{
+            "err": {"InstructionError": [0, "BorshIoError"]},
+            "status": {"Err": {"InstructionError": [0, "BorshIoError"]}},
+            "fee": 5000,
+            "preBalances":  [1130764920,0,0,1,1461600,1003361680,1141440,0,1009200,12051573357],
+            "postBalances": [1130759920,0,0,1,1461600,1003361680,1141440,0,1009200,12051573357],
+            "innerInstructions": [],
+            "logMessages": [
+                "Program 3kjK4HA6A4K86NgNB93gGhSt257wtN4QAqXMNPQ4fVTm invoke [1]",
+                "Program log: Instruction 12: WithdrawFromFeeAccount",
+                "Program 3kjK4HA6A4K86NgNB93gGhSt257wtN4QAqXMNPQ4fVTm consumed 5299 of 200000 compute units",
+                "Program 3kjK4HA6A4K86NgNB93gGhSt257wtN4QAqXMNPQ4fVTm failed: Failed to serialize or deserialize account data"
+            ],
+            "preTokenBalances": [],
+            "postTokenBalances": [],
+            "rewards": null,
+            "loadedAddresses": {"readonly": [], "writable": []},
+            "computeUnitsConsumed": 5299
+        }"#;
+
+        let result: std::result::Result<UiTransactionStatusMeta, _> =
+            serde_json::from_str(meta_json);
+        assert!(
+            result.is_ok(),
+            "UiTransactionStatusMeta with BorshIoError failed to deserialize: {:?}",
+            result.err()
+        );
+        let meta = result.unwrap();
+        assert!(meta.err.is_some(), "expected err to be set");
     }
 }

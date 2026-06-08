@@ -53,8 +53,8 @@ tracing-subscriber = { version = "0.3.20", default-features = false, features = 
 url = { version = "2.4.0", features = ["serde"] }
 anchor-client = { version = "0.31.0", features = ["async"] }
 anchor-lang = "0.31.0"
-solana-sdk = "2.2.2"
-solana-transaction-status = "2.2.6"
+solana-sdk = "2.3.1"
+solana-transaction-status = "2.3.13"
 alloy-dyn-abi = "1.4.1"
 secp256k1 = "0.28.2"
 rlp = "0.5"
@@ -62,7 +62,7 @@ alloy-consensus = { version = "1.0.38", features = ["serde"] }
 alloy-primitives = "1.4.1"
 alloy-json-abi = "1.4.1"
 alloy-rlp = "0.3.12"
-solana-client = "2.2.7"
+solana-client = "2.3.13"
 futures-util = "0.3.31"
 parity-scale-codec = { version = "3", features = ["derive"] }
 
