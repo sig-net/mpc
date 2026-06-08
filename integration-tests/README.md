@@ -2,13 +2,21 @@
 
 ## Prerequisites
 
-Install [cargo-nextest](https://nexte.st) for race-free parallelization:
+1. Install [cargo-nextest](https://nexte.st) for race-free parallelization:
 
 ```bash
 # Linux
 curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin
 # macOS:
 curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C ~/.cargo/bin
+```
+
+2. Install the WebAssembly `wasm32-unknown-unknown` target:
+
+```bash
+rustup target add wasm32-unknown-unknown
+# Or, if forced by a rust-toolchain file:
+rustup target add wasm32-unknown-unknown --toolchain 1.81.0
 ```
 
 Alternatively, you may run all tests sequentially with `cargo test -p integration-tests --jobs 1 -- --test-threads 1`.
@@ -23,7 +31,18 @@ docker pull redis:7.4.2
 
 In case of authorization issues make sure you have logged into docker using your [access token](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic).
 
-Then run the integration tests:
+### ⚠️ First-Time Setup
+
+`cargo nextest` runs tests in parallel, running it immediately on a fresh clone can cause multiple background processes to try to compile the WASM smart contract (or download toolchains) at the exact same time, resulting in corrupted caches or `can't find crate for core` errors.
+
+To prevent this, **always pre-build the tests sequentially on your first run**:
+
+```bash
+# Run 1 job to safely cache the WASM contract and heavy dependencies
+cargo nextest run -p integration-tests --profile fixture -j 1
+```
+
+Once that completes successfully, you can run the tests normally (in parallel):
 
 ```BASH
 cargo nextest run -p integration-tests
