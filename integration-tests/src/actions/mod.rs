@@ -4,9 +4,9 @@ pub mod wait_for;
 
 use crate::cluster::Cluster;
 
+use alloy::primitives::Address;
 use anyhow::Context as _;
 use cait_sith::FullSignature;
-use elliptic_curve::sec1::ToEncodedPoint;
 use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -26,11 +26,6 @@ use rand::Rng;
 use wait_for::{SignatureError, WaitForError};
 
 use std::time::Duration;
-
-use k256::{
-    ecdsa::{Signature as RecoverableSignature, Signature as K256Signature},
-    PublicKey as K256PublicKey,
-};
 
 pub async fn request_batch_random_sign(
     nodes: &Cluster,
@@ -156,82 +151,20 @@ pub fn x_coordinate<C: cait_sith::CSCurve>(point: &C::AffinePoint) -> C::Scalar 
     <C::Scalar as k256::elliptic_curve::ops::Reduce<<C as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(&point.x())
 }
 
-pub fn recover<M>(
-    signature: ethers_core::types::Signature,
-    message: M,
-) -> Result<ethers_core::types::Address, ethers_core::types::SignatureError>
-where
-    M: Into<ethers_core::types::RecoveryMessage>,
-{
-    let message_hash = match message.into() {
-        ethers_core::types::RecoveryMessage::Data(ref message) => {
-            println!("identified as data");
-            ethers_core::utils::hash_message(message)
-        }
-        ethers_core::types::RecoveryMessage::Hash(hash) => hash,
-    };
-    println!("message_hash {message_hash:#?}");
-
-    let (recoverable_sig, recovery_id) = as_signature(signature)?;
-    let verifying_key =
-        VerifyingKey::recover_from_prehash(message_hash.as_ref(), &recoverable_sig, recovery_id)?;
-    println!("verifying_key {verifying_key:#?}");
-
-    let public_key = K256PublicKey::from(&verifying_key);
-    //println!("ethercore public key from verifying key {public_key:#?}");
-
-    let public_key = public_key.to_encoded_point(/* compress = */ false);
-    println!("ethercore recover encoded point pk {public_key:#?}");
-    let public_key = public_key.as_bytes();
-    debug_assert_eq!(public_key[0], 0x04);
-    let hash = ethers_core::utils::keccak256(&public_key[1..]);
-    let result = ethers_core::types::Address::from_slice(&hash[12..]);
-    println!("ethercore recover result {result:#?}");
-    Ok(ethers_core::types::Address::from_slice(&hash[12..]))
-}
-
-/// Retrieves the recovery signature.
-fn as_signature(
-    signature: ethers_core::types::Signature,
-) -> Result<(RecoverableSignature, k256::ecdsa::RecoveryId), ethers_core::types::SignatureError> {
-    let mut recovery_id = signature.recovery_id()?;
-    let mut signature = {
-        let mut r_bytes = [0u8; 32];
-        let mut s_bytes = [0u8; 32];
-        signature.r.to_big_endian(&mut r_bytes);
-        signature.s.to_big_endian(&mut s_bytes);
-        let gar: &generic_array::GenericArray<u8, elliptic_curve::consts::U32> =
-            generic_array::GenericArray::from_slice(&r_bytes);
-        let gas: &generic_array::GenericArray<u8, elliptic_curve::consts::U32> =
-            generic_array::GenericArray::from_slice(&s_bytes);
-        K256Signature::from_scalars(*gar, *gas)?
-    };
-
-    // Normalize into "low S" form. See:
-    // - https://github.com/RustCrypto/elliptic-curves/issues/988
-    // - https://github.com/bluealloy/revm/pull/870
-    if let Some(normalized) = signature.normalize_s() {
-        signature = normalized;
-        recovery_id = k256::ecdsa::RecoveryId::from_byte(recovery_id.to_byte() ^ 1).unwrap();
-    }
-
-    Ok((signature, recovery_id))
-}
-
-pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> ethers_core::types::Address {
+pub fn public_key_to_address(public_key: &secp256k1::PublicKey) -> Address {
     let public_key = public_key.serialize_uncompressed();
 
     debug_assert_eq!(public_key[0], 0x04);
     let hash: [u8; 32] = *alloy::primitives::keccak256(&public_key[1..]);
 
-    ethers_core::types::Address::from_slice(&hash[12..])
+    Address::from_slice(&hash[12..])
 }
 
 pub fn recover_eth_address(
     msg_hash: &[u8; 32],
     signature_bytes: &[u8; 64],
     recovery_id: u8,
-) -> ethers_core::types::H160 {
+) -> Address {
     let r = k256::Scalar::from_bytes(signature_bytes[..32].try_into().unwrap()).unwrap();
     let s = k256::Scalar::from_bytes(signature_bytes[32..].try_into().unwrap()).unwrap();
     let signature = k256::ecdsa::Signature::from_scalars(r, s).expect("valid r,s");
@@ -258,14 +191,12 @@ mod tests {
     use mpc_crypto::{derive_epsilon_near, derive_key, ScalarExt as _};
     use mpc_primitives::LEGACY_MPC_KEY_VERSION_0;
 
-    use super::{public_key_to_address, recover, recover_eth_address, x_coordinate};
+    use super::{public_key_to_address, recover_eth_address, x_coordinate};
 
     // This test hardcodes the output of the signing process and checks that everything verifies as expected
     // If you find yourself changing the constants in this test you are likely breaking backwards compatibility
     #[test]
     fn signatures_havent_changed() {
-        const CHAIN_ID_ETH: u64 = 31337;
-
         let big_r = "029b1b94bf4511b1a25986ba858cfa0fbdd5e4077c02e1d1102a194389b1f72df7";
         let s = "25f3494bb7e7b3349a4b4d939d3e5ae1787a0863e4f698fb8ed2d3e11c195035";
         let mpc_key = "045b4fa179e005361fd858f8a6f896d7afc23a53d3f95d6566a88cde954e7b2f1cb77c554705c35d4ffced67aeafbcda46d9d89d6f200c3a3d109f92872863b3dc";
@@ -354,26 +285,9 @@ mod tests {
         // let k256_verify_result = k256_verify_key.verify(&payload_hash_reversed, &k256_sig);
         // assert!(k256_verify_result.is_ok());
 
-        // Check signature using etheres tooling
-        let ethers_r = ethers_core::types::U256::from_big_endian(r.to_bytes().as_slice());
-        let ethers_s = ethers_core::types::U256::from_big_endian(s.to_bytes().as_slice());
-        let ethers_v = to_eip155_v(multichain_sig.recovery_id, CHAIN_ID_ETH);
-
-        let signature = ethers_core::types::Signature {
-            r: ethers_r,
-            s: ethers_s,
-            v: ethers_v,
-        };
-
-        let verifying_user_pk = ecdsa::VerifyingKey::from(&user_pk_k256);
-        let user_address_ethers: ethers_core::types::H160 =
-            ethers_core::utils::public_key_to_address(&verifying_user_pk);
-
-        assert!(signature.verify(payload_hash, user_address_ethers).is_ok());
-
         // Check if recovered address is the same as the user address
         let signature_for_recovery: [u8; 64] = {
-            let mut signature = [0u8; 64]; // TODO: is there a better way to get these bytes?
+            let mut signature = [0u8; 64];
             signature[..32].copy_from_slice(&r.to_bytes());
             signature[32..].copy_from_slice(&s.to_bytes());
             signature
@@ -385,21 +299,6 @@ mod tests {
             multichain_sig.recovery_id,
         );
         assert_eq!(user_address_from_pk, recovered_from_signature_address_web3);
-
-        let recovered_from_signature_address_ethers = signature.recover(payload_hash).unwrap();
-        assert_eq!(
-            user_address_from_pk,
-            recovered_from_signature_address_ethers
-        );
-
-        let recovered_from_signature_address_local_function =
-            recover(signature, payload_hash).unwrap();
-        assert_eq!(
-            user_address_from_pk,
-            recovered_from_signature_address_local_function
-        );
-
-        assert_eq!(user_address_from_pk, user_address_ethers);
     }
 
     fn verify(
@@ -462,9 +361,5 @@ mod tests {
         l: &Scalar,
     ) -> ProjectivePoint<k256::Secp256k1> {
         (*x * k) + (*y * l)
-    }
-
-    pub fn to_eip155_v(recovery_id: u8, chain_id: u64) -> u64 {
-        (recovery_id as u64) + 35 + chain_id * 2
     }
 }

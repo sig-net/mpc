@@ -4,25 +4,27 @@ mod types;
 
 pub use sub::{Subscriber, MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE};
 
+use super::contract::primitives::{ParticipantMap, Participants};
+use super::presignature::PresignatureId;
+use super::triple::TripleId;
+use crate::metrics;
+use crate::metrics::messaging::set_channel_capacity_tx;
+use crate::node_client::NodeClient;
+use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
 use crate::protocol::message::sub::{
     SubscribeId, SubscribeRequest, SubscribeRequestAction, SubscribeResponse,
 };
 use crate::protocol::message::types::Round;
+use crate::protocol::posit::PositAction;
+use crate::protocol::presignature::FullPresignatureId;
+use crate::protocol::Config;
+use crate::rpc::ContractStateWatcher;
+
 pub use crate::protocol::message::types::{
     GeneratingMessage, Message, MessageError, MessageFilterId, PositMessage, PositProtocolId,
     PresignatureMessage, Protocols, ReadyMessage, ResharingMessage, SignatureMessage,
     TripleMessage,
 };
-use crate::protocol::posit::PositAction;
-use crate::protocol::presignature::FullPresignatureId;
-use crate::rpc::ContractStateWatcher;
-
-use super::contract::primitives::{ParticipantMap, Participants};
-use super::presignature::PresignatureId;
-use super::triple::TripleId;
-use crate::node_client::NodeClient;
-use crate::protocol::message::filter::{MessageFilter, MAX_FILTER_SIZE};
-use crate::protocol::Config;
 
 use cait_sith::protocol::Participant;
 use mpc_contract::config::ProtocolConfig;
@@ -55,9 +57,11 @@ pub struct MessageInbox {
     filter: MessageFilter,
 
     /// Incoming messages that are pending to be processed. These are encrypted and signed.
+    inbox_tx: mpsc::Sender<Ciphered>,
     inbox_rx: mpsc::Receiver<Ciphered>,
 
     /// Subscription requests from MessageChannel
+    subscribe_tx: mpsc::Sender<SubscribeRequest>,
     subscribe_rx: mpsc::Receiver<SubscribeRequest>,
 
     generating: Subscriber<GeneratingMessage>,
@@ -73,19 +77,24 @@ pub struct MessageInbox {
 
 impl MessageInbox {
     pub fn new(
+        inbox_tx: mpsc::Sender<Ciphered>,
         inbox_rx: mpsc::Receiver<Ciphered>,
+        filter_tx: mpsc::Sender<(Protocols, u64)>,
         filter_rx: mpsc::Receiver<(Protocols, u64)>,
+        subscribe_tx: mpsc::Sender<SubscribeRequest>,
         subscribe_rx: mpsc::Receiver<SubscribeRequest>,
     ) -> Self {
         Self {
             try_decrypt: VecDeque::new(),
             idempotent: lru::LruCache::new(MAX_FILTER_SIZE),
-            filter: MessageFilter::new(filter_rx),
+            filter: MessageFilter::new(filter_tx, filter_rx),
+            inbox_tx,
             inbox_rx,
+            subscribe_tx,
             subscribe_rx,
-            generating: Subscriber::unsubscribed(),
-            resharing: Subscriber::unsubscribed(),
-            ready: Subscriber::unsubscribed(),
+            generating: Subscriber::unsubscribed("generating"),
+            resharing: Subscriber::unsubscribed("resharing"),
+            ready: Subscriber::unsubscribed("ready"),
             triple: HashMap::new(),
             triple_init: Subscriber::unsubscribed_with_capacity(
                 "triple_posit",
@@ -111,11 +120,13 @@ impl MessageInbox {
                     let _ = self
                         .triple_init
                         .try_send_lossy((id, message.from, message.action));
+                    self.triple_init.report_capacity_global();
                 }
                 PositProtocolId::Presignature(id) => {
                     let _ =
                         self.presignature_init
                             .try_send_lossy((id, message.from, message.action));
+                    self.presignature_init.report_capacity_global();
                 }
                 PositProtocolId::Signature(sign_id, presignature_id, round) => {
                     let _ = self.signature_init.try_send_lossy((
@@ -125,16 +136,20 @@ impl MessageInbox {
                         message.from,
                         message.action,
                     ));
+                    self.signature_init.report_capacity_global();
                 }
             },
             Message::Generating(message) => {
                 let _ = self.generating.try_send_lossy(message);
+                self.generating.report_capacity_global();
             }
             Message::Resharing(message) => {
                 let _ = self.resharing.try_send_lossy(message);
+                self.resharing.report_capacity_global();
             }
             Message::Ready(message) => {
                 let _ = self.ready.try_send_lossy(message);
+                self.ready.report_capacity_global();
             }
             Message::Triple(message) => {
                 // NOTE: not logging the error because this is simply just channel closure.
@@ -256,22 +271,34 @@ impl MessageInbox {
             },
             SubscribeId::Triple(id) => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self.triple.entry(id).or_default().subscribe();
+                    let sub = self
+                        .triple
+                        .entry(id)
+                        .or_insert_with(|| Subscriber::unsubscribed("triple_task"));
+                    let rx = sub.subscribe();
                     let _ = resp.send(SubscribeResponse::Triple(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
-                    if self.triple.remove(&id).is_none() {
+                    if let Some(sub) = self.triple.remove(&id) {
+                        sub.clear_capacity_global();
+                    } else {
                         tracing::warn!(id, "trying to unsub from an unknown triple subscription");
                     }
                 }
             },
             SubscribeId::Presignature(id) => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self.presignature.entry(id).or_default().subscribe();
+                    let sub = self
+                        .presignature
+                        .entry(id)
+                        .or_insert_with(|| Subscriber::unsubscribed("presign_task"));
+                    let rx = sub.subscribe();
                     let _ = resp.send(SubscribeResponse::Presignature(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
-                    if self.presignature.remove(&id).is_none() {
+                    if let Some(sub) = self.presignature.remove(&id) {
+                        sub.clear_capacity_global();
+                    } else {
                         tracing::warn!(
                             id,
                             "trying to unsub from an unknown presignature subscription"
@@ -281,15 +308,17 @@ impl MessageInbox {
             },
             SubscribeId::Signature(sign_id, presignature_id) => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self
+                    let sub = self
                         .signature
                         .entry((sign_id, presignature_id))
-                        .or_default()
-                        .subscribe();
+                        .or_insert_with(|| Subscriber::unsubscribed("sign_task"));
+                    let rx = sub.subscribe();
                     let _ = resp.send(SubscribeResponse::Signature(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
-                    if self.signature.remove(&(sign_id, presignature_id)).is_none() {
+                    if let Some(sub) = self.signature.remove(&(sign_id, presignature_id)) {
+                        sub.clear_capacity_global();
+                    } else {
                         tracing::warn!(
                             ?sign_id,
                             ?presignature_id,
@@ -305,6 +334,7 @@ impl MessageInbox {
                 }
                 SubscribeRequestAction::Unsubscribe => {
                     self.ready.unsubscribe();
+                    self.ready.clear_capacity_global();
                 }
             },
             SubscribeId::Triples => match sub.action {
@@ -342,9 +372,11 @@ impl MessageInbox {
             tokio::select! {
                 _ = self.filter.update() => {}
                 Some(sub) = self.subscribe_rx.recv() => {
+                    set_channel_capacity_tx("subscribe", &self.subscribe_tx);
                     self.process_subscribe(sub);
                 }
                 Some(encrypted) = self.inbox_rx.recv() => {
+                    set_channel_capacity_tx("incoming", &self.inbox_tx);
                     let config = config.borrow().clone();
                     let expiration = Duration::from_millis(config.protocol.message_timeout);
                     let participants = contract.participant_map().await;
@@ -383,8 +415,15 @@ impl MessageChannel {
         let (outbox_tx, outbox_rx) = mpsc::channel(MAX_MESSAGE_OUTGOING);
         let (filter_tx, filter_rx) = mpsc::channel(MAX_FILTER_SIZE.into());
         let (subscribe_tx, subscribe_rx) = mpsc::channel(16384);
-        let inbox = MessageInbox::new(inbox_rx, filter_rx, subscribe_rx);
-        let outbox = MessageOutbox::new(outbox_rx);
+        let inbox = MessageInbox::new(
+            inbox_tx.clone(),
+            inbox_rx,
+            filter_tx.clone(),
+            filter_rx,
+            subscribe_tx.clone(),
+            subscribe_rx,
+        );
+        let outbox = MessageOutbox::new(outbox_tx.clone(), outbox_rx);
 
         let channel = Self {
             inbox: inbox_tx,
@@ -392,6 +431,11 @@ impl MessageChannel {
             subscribe: subscribe_tx,
             filter: filter_tx,
         };
+
+        set_channel_capacity_tx("incoming", &channel.inbox);
+        set_channel_capacity_tx("outgoing", &channel.outgoing);
+        set_channel_capacity_tx("filter", &channel.filter);
+        set_channel_capacity_tx("subscribe", &channel.subscribe);
 
         (inbox, outbox, channel)
     }
@@ -416,6 +460,16 @@ impl MessageChannel {
             .await
         {
             tracing::error!(?err, "outbox: failed to send message to participants");
+        } else {
+            set_channel_capacity_tx("outgoing", &self.outgoing);
+        }
+    }
+
+    pub async fn send_inbox(&self, encrypted: Ciphered) {
+        if let Err(err) = self.inbox.send(encrypted).await {
+            tracing::error!(?err, "failed to forward an encrypted protocol message");
+        } else {
+            set_channel_capacity_tx("incoming", &self.inbox);
         }
     }
 
@@ -424,18 +478,24 @@ impl MessageChannel {
     pub async fn filter<M: MessageFilterId>(&self, msg: &M) {
         if let Err(err) = self.filter.send((M::PROTOCOL, msg.id())).await {
             tracing::warn!(?err, "failed to send filter message");
+        } else {
+            set_channel_capacity_tx("filter", &self.filter);
         }
     }
 
     pub async fn filter_triple(&self, id: TripleId) {
         if let Err(err) = self.filter.send((Protocols::Triple, id)).await {
             tracing::warn!(?err, "failed to send filter message");
+        } else {
+            set_channel_capacity_tx("filter", &self.filter);
         }
     }
 
     pub async fn filter_presignature(&self, id: PresignatureId) {
         if let Err(err) = self.filter.send((Protocols::Presignature, id)).await {
             tracing::warn!(?err, "failed to send filter message");
+        } else {
+            set_channel_capacity_tx("filter", &self.filter);
         }
     }
 
@@ -448,6 +508,7 @@ impl MessageChannel {
         if self.subscribe.send(req).await.is_err() {
             return None;
         };
+        set_channel_capacity_tx("subscribe", &self.subscribe);
         let Ok(subscription) = resp.await else {
             return None;
         };
@@ -476,6 +537,8 @@ impl MessageChannel {
             .is_err()
         {
             tracing::warn!(id, "unable to send unsubscribe request for triple message");
+        } else {
+            set_channel_capacity_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -506,6 +569,8 @@ impl MessageChannel {
             .is_err()
         {
             tracing::warn!("unable to send unsubscribe request for triple posits");
+        } else {
+            set_channel_capacity_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -537,6 +602,8 @@ impl MessageChannel {
             .is_err()
         {
             tracing::warn!("unable to send unsubscribe request for presignature");
+        } else {
+            set_channel_capacity_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -564,6 +631,8 @@ impl MessageChannel {
             .is_err()
         {
             tracing::warn!("unable to send unsubscribe request for presignature posits");
+        } else {
+            set_channel_capacity_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -611,6 +680,8 @@ impl MessageChannel {
                 ?presignature_id,
                 "unable to send unsubscribe request for signature"
             );
+        } else {
+            set_channel_capacity_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -639,6 +710,8 @@ impl MessageChannel {
             .is_err()
         {
             tracing::warn!("unable to send unsubscribe request for signature posit");
+        } else {
+            set_channel_capacity_tx("subscribe", &self.subscribe);
         };
     }
 
@@ -770,6 +843,7 @@ pub struct Partition {
 /// These messages will be signed and encrypted before being sent out.
 pub struct MessageOutbox {
     /// The messages that are pending to be sent to other nodes.
+    outbox_tx: mpsc::Sender<SendMessage>,
     outbox_rx: mpsc::Receiver<SendMessage>,
 
     // NOTE: we have FromParticipant here to circumvent the chance that we change Participant
@@ -781,8 +855,12 @@ pub struct MessageOutbox {
 }
 
 impl MessageOutbox {
-    pub fn new(outbox_rx: mpsc::Receiver<SendMessage>) -> Self {
+    pub fn new(
+        outbox_tx: mpsc::Sender<SendMessage>,
+        outbox_rx: mpsc::Receiver<SendMessage>,
+    ) -> Self {
         Self {
+            outbox_tx,
             outbox_rx,
             messages: HashMap::new(),
         }
@@ -861,12 +939,12 @@ impl MessageOutbox {
                 let info = participants.get(&to).unwrap();
                 let url = info.url.clone();
 
-                crate::metrics::messaging::NUM_SEND_ENCRYPTED_TOTAL.inc_by(message_len as f64);
+                metrics::messaging::NUM_SEND_ENCRYPTED_TOTAL.inc_by(message_len as f64);
 
                 let client = client.clone();
                 tokio::spawn(async move {
                     let instant = Instant::now();
-                    crate::metrics::messaging::MSG_CLIENT_SEND_DELAY
+                    metrics::messaging::MSG_CLIENT_SEND_DELAY
                         .observe((instant - timestamp).as_millis() as f64);
                     let payload = &[&encrypted_partition];
                     let timeout = tokio::time::sleep(timeout);
@@ -931,6 +1009,7 @@ impl MessageOutbox {
         loop {
             tokio::select! {
                 Some((msg, (from, to, timestamp))) = self.outbox_rx.recv() => {
+                    set_channel_capacity_tx("outgoing", &self.outbox_tx);
                     // add it to the outbox and sort it by from and to participant
                     let entry = self.messages.entry((from, to)).or_default();
                     entry.push((msg, timestamp));
@@ -1367,7 +1446,7 @@ mod tests {
                 }),
             ];
             let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
-            channel.inbox.send(encrypted).await.unwrap();
+            channel.send_inbox(encrypted).await;
 
             let mut recv1 = channel.subscribe_triple(1).await;
             let mut recv2 = channel.subscribe_triple(2).await;
@@ -1421,7 +1500,7 @@ mod tests {
             let mut recv3 = channel.subscribe_triple(3).await;
 
             channel.filter_triple(filter_id).await;
-            channel.inbox.send(encrypted).await.unwrap();
+            channel.send_inbox(encrypted).await;
 
             let (m1, m3) = match tokio::join!(recv1.recv(), recv3.recv()) {
                 (Some(m1), Some(m3)) => (m1, m3),
@@ -1446,7 +1525,7 @@ mod tests {
         // should be received by the subscribers.
         {
             let encrypted = SignedMessage::encrypt(&batch, from, &sign_sk, &cipher_pk).unwrap();
-            channel.inbox.send(encrypted).await.unwrap();
+            channel.send_inbox(encrypted).await;
             let mut recv1 =
                 tokio::time::timeout(Duration::from_millis(300), channel.subscribe_triple(1))
                     .await

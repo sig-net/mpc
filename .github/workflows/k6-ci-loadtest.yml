@@ -54,7 +54,7 @@ on:
 jobs:
   load-test:
     if: ${{ github.event_name == 'push' || github.event.pull_request.merged == true || github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
-    runs-on: ${{ github.event_name == 'schedule' && 'arc-runners-arc-runner-set' || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'schedule' && 'arc-runner-set' || 'ubuntu-latest' }}
     steps:
       - name: Wait for 1 hour due to new version deployment
         if: ${{ github.event.pull_request.merged == true }}

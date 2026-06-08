@@ -2,6 +2,9 @@ use cait_sith::protocol::Participant;
 use mpc_primitives::SignId;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::metrics::messaging::{
+    observe_queue_capacity, remove_channel_capacity, set_channel_capacity,
+};
 use crate::protocol::message::types::Round;
 use crate::protocol::message::{
     GeneratingMessage, PresignatureMessage, ReadyMessage, ResharingMessage, SignatureMessage,
@@ -10,6 +13,7 @@ use crate::protocol::message::{
 use crate::protocol::posit::PositAction;
 use crate::protocol::presignature::{FullPresignatureId, PresignatureId};
 use crate::protocol::triple::TripleId;
+use crate::util::channel_len;
 
 /// This should be enough to hold a few messages in the inbox.
 pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
@@ -71,7 +75,12 @@ impl SubscribeRequest {
     }
 }
 
-pub enum Subscriber<T> {
+pub struct Subscriber<T> {
+    metrics: SubscriberMetrics,
+    kind: SubscriberKind<T>,
+}
+
+pub enum SubscriberKind<T> {
     /// Temporary/replaceable value, and will never be used. Only here so we can have a
     /// way to convert from an Unsubscribed to a Subscribed subscription.
     Unknown,
@@ -81,41 +90,100 @@ pub enum Subscriber<T> {
     Unsubscribed(mpsc::Sender<T>, mpsc::Receiver<T>),
 }
 
+#[derive(Clone)]
+pub struct SubscriberMetrics {
+    name: &'static str,
+    capacity: usize,
+}
+
 impl<T> Subscriber<T> {
-    pub fn subscribed() -> (Self, mpsc::Receiver<T>) {
-        let (tx, rx) = mpsc::channel(MAX_MESSAGE_SUB_CHANNEL_SIZE);
-        (Self::Subscribed(tx), rx)
+    pub fn subscribed(name: &'static str) -> (Self, mpsc::Receiver<T>) {
+        Self::subscribed_with_capacity(name, MAX_MESSAGE_SUB_CHANNEL_SIZE)
     }
 
-    pub fn unsubscribed() -> Self {
-        let (tx, rx) = mpsc::channel(MAX_MESSAGE_SUB_CHANNEL_SIZE);
-        Self::Unsubscribed(tx, rx)
+    pub fn subscribed_with_capacity(
+        name: &'static str,
+        capacity: usize,
+    ) -> (Self, mpsc::Receiver<T>) {
+        let metrics = SubscriberMetrics { name, capacity };
+        let (tx, rx) = mpsc::channel(metrics.capacity);
+        (
+            Self {
+                metrics,
+                kind: SubscriberKind::Subscribed(tx),
+            },
+            rx,
+        )
+    }
+
+    pub fn unsubscribed(name: &'static str) -> Self {
+        Self::unsubscribed_with_capacity(name, MAX_MESSAGE_SUB_CHANNEL_SIZE)
+    }
+
+    pub fn unsubscribed_with_capacity(name: &'static str, capacity: usize) -> Self {
+        let metrics = SubscriberMetrics { name, capacity };
+        let (tx, rx) = mpsc::channel(metrics.capacity);
+        Self {
+            metrics,
+            kind: SubscriberKind::Unsubscribed(tx, rx),
+        }
     }
 
     /// Convert this subscriber into a subscribed one, returning the receiver.
     /// If the subscriber is already subscribed, it overrides the existing subscription.
     pub fn subscribe(&mut self) -> mpsc::Receiver<T> {
-        let sub = std::mem::replace(self, Self::Unknown);
-        let (sub, rx) = match sub {
-            Self::Subscribed(_) | Self::Unknown => Self::subscribed(),
-            Self::Unsubscribed(tx, rx) => (Self::Subscribed(tx), rx),
+        let kind = std::mem::replace(&mut self.kind, SubscriberKind::Unknown);
+        let (next_kind, rx) = match kind {
+            SubscriberKind::Subscribed(_) | SubscriberKind::Unknown => {
+                let (tx, rx) = mpsc::channel(self.metrics.capacity);
+                (SubscriberKind::Subscribed(tx), rx)
+            }
+            SubscriberKind::Unsubscribed(tx, rx) => (SubscriberKind::Subscribed(tx), rx),
         };
-        *self = sub;
+        self.kind = next_kind;
         rx
     }
 
     /// Unsubscribe from the subscriber, converting it into an unsubscribed one.
     pub fn unsubscribe(&mut self) {
-        if matches!(self, Self::Subscribed(_) | Self::Unknown) {
-            *self = Self::unsubscribed();
+        if let SubscriberKind::Subscribed(_) = self.kind {
+            let (tx, rx) = mpsc::channel(self.metrics.capacity);
+            self.kind = SubscriberKind::Unsubscribed(tx, rx);
         }
     }
 
+    pub fn remaining_capacity(&self) -> usize {
+        match &self.kind {
+            SubscriberKind::Subscribed(tx) | SubscriberKind::Unsubscribed(tx, _) => tx.capacity(),
+            SubscriberKind::Unknown => 0,
+        }
+    }
+
+    pub fn estimated_len(&self) -> usize {
+        match &self.kind {
+            SubscriberKind::Subscribed(tx) | SubscriberKind::Unsubscribed(tx, _) => channel_len(tx),
+            SubscriberKind::Unknown => 0,
+        }
+    }
+
+    pub fn report_capacity_global(&self) {
+        set_channel_capacity(self.metrics.name, self.remaining_capacity());
+    }
+
+    pub fn clear_capacity_global(&self) {
+        remove_channel_capacity(self.metrics.name);
+    }
+
+    pub fn report_capacity(&self) {
+        observe_queue_capacity(self.metrics.name, self.remaining_capacity());
+    }
+
     pub async fn send(&self, msg: T) -> Result<(), mpsc::error::SendError<T>> {
-        match self {
-            Self::Subscribed(tx) => tx.send(msg).await,
-            Self::Unsubscribed(tx, _) => tx.send(msg).await,
-            Self::Unknown => Ok(()),
+        match &self.kind {
+            SubscriberKind::Subscribed(tx) | SubscriberKind::Unsubscribed(tx, _) => {
+                tx.send(msg).await
+            }
+            SubscriberKind::Unknown => Ok(()),
         }
     }
 
@@ -137,11 +205,10 @@ impl<T> Subscriber<T> {
             }
             SubscriberKind::Unknown => Ok(()),
         };
-        self.report_queue_len();
+        self.report_capacity();
         result
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::Subscriber;
@@ -150,11 +217,11 @@ mod tests {
     fn estimated_queue_len_tracks_buffered_messages() {
         let sub = Subscriber::unsubscribed_with_capacity("test", 4);
 
-        assert_eq!(sub.estimated_queue_len(), 0);
+        assert_eq!(sub.estimated_len(), 0);
 
         sub.try_send_lossy(1u8).unwrap();
         sub.try_send_lossy(2u8).unwrap();
 
-        assert_eq!(sub.estimated_queue_len(), 2);
+        assert_eq!(sub.estimated_len(), 2);
     }
 }
