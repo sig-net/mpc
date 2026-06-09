@@ -33,64 +33,11 @@ pub struct SignBidirectionalEvent {
 }
 
 impl SignBidirectionalEvent {
-    pub fn sender(&self) -> [u8; 32] {
-        self.sender
-    }
-
     pub(crate) fn sender_string(&self) -> anyhow::Result<String> {
         match self.chain {
             Chain::Canton => Ok(hex::encode(self.sender)),
             _ => sender_string(self.sender, self.chain),
         }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn source_chain(&self) -> Chain {
-        self.chain
-    }
-
-    pub(crate) fn chain_ctx(&self) -> Option<Vec<u8>> {
-        self.chain_ctx.clone()
-    }
-
-    pub fn path(&self) -> String {
-        self.path.clone()
-    }
-
-    pub fn dest(&self) -> String {
-        self.dest.clone()
-    }
-
-    pub(crate) fn algo(&self) -> String {
-        self.algo.clone()
-    }
-
-    pub fn params(&self) -> String {
-        self.params.clone()
-    }
-
-    pub fn output_deserialization_schema(&self) -> Vec<u8> {
-        self.output_deserialization_schema.clone()
-    }
-
-    pub fn respond_serialization_schema(&self) -> Vec<u8> {
-        self.respond_serialization_schema.clone()
-    }
-
-    pub fn key_version(&self) -> u32 {
-        self.key_version
-    }
-
-    pub(crate) fn deposit(&self) -> u64 {
-        self.deposit
-    }
-
-    pub fn serialized_transaction(&self) -> Vec<u8> {
-        self.serialized_transaction.clone()
-    }
-
-    pub fn caip2_id(&self) -> String {
-        self.caip2_id.clone()
     }
 
     pub fn epsilon(&self) -> anyhow::Result<Scalar> {
@@ -126,39 +73,11 @@ pub struct RespondBidirectionalEvent {
     pub chain: Chain,
 }
 
-impl RespondBidirectionalEvent {
-    pub fn source_chain(&self) -> Chain {
-        self.chain
-    }
-
-    pub fn request_id(&self) -> [u8; 32] {
-        self.request_id
-    }
-
-    pub fn signature(&self) -> Signature {
-        self.signature
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct SignatureRespondedEvent {
     pub request_id: [u8; 32],
     pub signature: Signature,
     pub chain: Chain,
-}
-
-impl SignatureRespondedEvent {
-    pub fn source_chain(&self) -> Chain {
-        self.chain
-    }
-
-    pub fn request_id(&self) -> [u8; 32] {
-        self.request_id
-    }
-
-    pub fn signature(&self) -> Signature {
-        self.signature
-    }
 }
 
 pub(crate) trait SignatureEvent: std::fmt::Debug {
@@ -320,8 +239,8 @@ pub(crate) async fn process_respond_event(
     backlog: &Backlog,
     caught_up: bool,
 ) -> anyhow::Result<()> {
-    let sign_id = SignId::new(respond_event.request_id());
-    let source_chain = respond_event.source_chain();
+    let sign_id = SignId::new(respond_event.request_id);
+    let source_chain = respond_event.chain;
     let Some(entry) = backlog.get(source_chain, &sign_id).await else {
         tracing::info!(
             ?sign_id,
@@ -331,7 +250,7 @@ pub(crate) async fn process_respond_event(
         return Ok(());
     };
 
-    let responded_signature = respond_event.signature();
+    let responded_signature = respond_event.signature;
 
     verify_entry_signature(root_pk, &entry, &responded_signature, sign_id)?;
 
@@ -375,7 +294,7 @@ pub(crate) async fn process_respond_event(
 
     // Sign and hash the transaction to get the correct tx_id and nonce
     let (signed_tx_hash, nonce) = crate::sign_bidirectional::sign_and_hash_transaction(
-        &event.serialized_transaction(),
+        &event.serialized_transaction,
         mpc_sig,
     )?;
 
@@ -383,20 +302,20 @@ pub(crate) async fn process_respond_event(
 
     let bidirectional_tx = BidirectionalTx {
         id: tx_id,
-        sender: event.sender(),
-        serialized_transaction: event.serialized_transaction(),
+        sender: event.sender,
+        serialized_transaction: event.serialized_transaction.clone(),
         source_chain,
         target_chain,
-        caip2_id: event.caip2_id(),
-        key_version: event.key_version(),
-        deposit: event.deposit(),
-        path: event.path(),
-        algo: event.algo(),
-        dest: event.dest(),
-        params: event.params(),
-        output_deserialization_schema: event.output_deserialization_schema(),
-        respond_serialization_schema: event.respond_serialization_schema(),
-        request_id: respond_event.request_id(),
+        caip2_id: event.caip2_id.clone(),
+        key_version: event.key_version,
+        deposit: event.deposit,
+        path: event.path.clone(),
+        algo: event.algo.clone(),
+        dest: event.dest.clone(),
+        params: event.params.clone(),
+        output_deserialization_schema: event.output_deserialization_schema.clone(),
+        respond_serialization_schema: event.respond_serialization_schema.clone(),
+        request_id: respond_event.request_id,
         from_address,
         nonce,
     };
@@ -518,7 +437,7 @@ pub async fn process_execution_confirmed(
         .get(pending_tx.source_chain, &unwatched_sign_id)
         .await
         .and_then(|entry| match entry.request.kind {
-            SignKind::SignBidirectional(event) => event.chain_ctx(),
+            SignKind::SignBidirectional(event) => event.chain_ctx,
             _ => None,
         });
 
@@ -708,11 +627,11 @@ mod tests {
         };
 
         // check fields
-        let sig = event.signature();
+        let sig = event.signature;
         assert_eq!(sig.recovery_id, recovery_id);
         assert_eq!(sig.s, s_scalar);
         assert_eq!(sig.big_r, big_r);
-        assert_eq!(event.source_chain(), Chain::Ethereum);
+        assert_eq!(event.chain, Chain::Ethereum);
     }
 
     #[tokio::test]
