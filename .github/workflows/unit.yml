@@ -46,16 +46,26 @@ jobs:
             target/
           key: "${{ runner.os }}-cargo-${{ hashFiles('mpc-recovery/Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
+      
+      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      
       - name: Compile Contract
         run: ./build-contract.sh
+      
       - name: Compile eth contract
         run: cd chain-signatures/contract-eth && npm i && npx hardhat compile
+      
       - name: Eth contract unit tests
         run: cd chain-signatures/contract-eth && npx hardhat test
+      
       - name: Test format
         run: cargo fmt -- --check
+      
       - name: Test clippy
         run: cargo clippy --tests -- -Dclippy::all
+      
       - name: Unit tests
         run: cargo test --workspace --exclude integration-tests
 

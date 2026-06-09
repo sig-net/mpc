@@ -63,11 +63,9 @@ jobs:
           key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
 
+      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
-        
-      - name: Force clean rebuild of openssl-sys (for benchmark only)
-        run: cargo clean -p openssl-sys
 
       - name: Install cargo-nextest
         run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
@@ -163,6 +161,10 @@ jobs:
             target/
           key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
+      
+      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
 
       - name: Build Chain-Signatures Contract
         run: ./build-contract.sh

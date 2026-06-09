@@ -51,6 +51,10 @@ jobs:
           key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
 
+      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
       - name: Build governance contract
         run: ./build-contract.sh
 
