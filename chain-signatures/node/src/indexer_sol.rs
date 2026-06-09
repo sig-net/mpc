@@ -518,31 +518,31 @@ impl SolanaSignEvent {
         }
     }
 
-    pub fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest> {
+    pub fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
         match self {
             SolanaSignEvent::SignatureRequested(ev) => {
                 tracing::info!("found solana event: {:?}", ev);
                 if ev.deposit == 0 {
                     tracing::warn!("deposit is 0, skipping sign request");
-                    anyhow::bail!("deposit is 0");
+                    return None;
                 }
 
                 if ev.key_version > LATEST_MPC_KEY_VERSION {
                     tracing::warn!("unsupported key version: {}", ev.key_version);
-                    anyhow::bail!("unsupported key version");
+                    return None;
                 }
 
-                let Some(payload) = Scalar::from_bytes(ev.payload) else {
+                let payload = Scalar::from_bytes(ev.payload).or_else(|| {
                     tracing::warn!(
                         "solana `sign` did not produce payload hash correctly: {:?}",
                         ev.payload,
                     );
-                    anyhow::bail!("failed to convert event payload hash to scalar");
-                };
+                    None
+                })?;
 
                 if payload > *MAX_SECP256K1_SCALAR {
                     tracing::warn!("payload exceeds secp256k1 curve order: {payload:?}");
-                    anyhow::bail!("payload exceeds secp256k1 curve order");
+                    return None;
                 }
 
                 let epsilon = derive_epsilon_sol(ev.key_version, &ev.sender.to_string(), &ev.path);
@@ -550,7 +550,7 @@ impl SolanaSignEvent {
                 let sign_id = SignId::new(self.generate_request_id());
                 tracing::info!(?sign_id, "solana signature requested");
 
-                Ok(IndexedSignRequest::sign(
+                Some(IndexedSignRequest::sign(
                     sign_id,
                     SignArgs {
                         entropy,
@@ -567,12 +567,12 @@ impl SolanaSignEvent {
                 tracing::info!("found solana event: {:?}", ev);
                 if ev.deposit == 0 {
                     tracing::warn!("deposit is 0, skipping sign request");
-                    anyhow::bail!("deposit is 0");
+                    return None;
                 }
 
                 if ev.key_version > LATEST_MPC_KEY_VERSION {
                     tracing::warn!("unsupported key version: {}", ev.key_version);
-                    anyhow::bail!("unsupported key version");
+                    return None;
                 }
 
                 let request_id = self.generate_request_id();
@@ -583,16 +583,16 @@ impl SolanaSignEvent {
                 let sign_id = SignId::new(request_id);
                 tracing::info!(?sign_id, "solana signature requested");
                 let unsigned_tx_hash = hash_rlp_data(rlp_encoded_tx);
-                let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
-                    anyhow::bail!("Failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
-                };
+                let payload = Scalar::from_bytes(unsigned_tx_hash).or_else(|| {
+                    None
+                })?;
 
                 if payload > *MAX_SECP256K1_SCALAR {
                     tracing::warn!("payload exceeds secp256k1 curve order: {payload:?}");
-                    anyhow::bail!("payload exceeds secp256k1 curve order");
+                    return None;
                 }
 
-                Ok(IndexedSignRequest::sign_bidirectional(
+                Some(IndexedSignRequest::sign_bidirectional(
                     sign_id,
                     SignArgs {
                         entropy,
@@ -627,7 +627,7 @@ impl SolanaSignEvent {
 fn build_sign_request(
     sign_event: SolanaSignEvent,
     tx_sig: Vec<u8>,
-) -> anyhow::Result<IndexedSignRequest> {
+) -> Option<IndexedSignRequest> {
     let mut entropy = [0u8; 32];
     entropy.copy_from_slice(&tx_sig[..32]);
     sign_event.generate_sign_request(entropy)
@@ -1023,8 +1023,9 @@ async fn emit_events(
     match SolanaEvents::parse(tx, program_id, logs)? {
         SolanaEvents::Sign(events) => {
             for ev in events {
-                let req = build_sign_request(ev, signature.as_ref().to_vec())?;
-                events_tx.send(ChainEvent::SignRequest(req)).await?;
+                if let Some(req) = build_sign_request(ev, signature.as_ref().to_vec()) {
+                    events_tx.send(ChainEvent::SignRequest(req)).await?;
+                }
             }
         }
         SolanaEvents::Respond {
