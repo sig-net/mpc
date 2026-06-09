@@ -110,7 +110,7 @@ pub struct SignArgs {
 impl std::fmt::Debug for SignArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SignArgs")
-            .field("entropy", &hex::encode(self.entropy))
+            .field("entropy", &hex::encode(&self.entropy[..4])) // not a secret atm, but better truncate for readability and logging safety in the future (if it becomes one)
             .field("epsilon", &self.epsilon)
             .field("payload", &self.payload)
             .field("path", &self.path)
