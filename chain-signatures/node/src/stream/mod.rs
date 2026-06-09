@@ -977,13 +977,20 @@ mod tests {
         .unwrap();
 
         // we should receive a Sign::Request because of the execution being confirmed
-        let msg_req = timeout(Duration::from_secs(1), sign_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        match msg_req {
-            Sign::Request(req) => assert_eq!(req.id, sign_id),
-            _ => panic!("expected sign request for RespondBidirectional"),
+        let check = tokio::time::sleep(Duration::from_secs(1));
+        tokio::pin!(check);
+        loop {
+            tokio::select! {
+                _ = &mut check => panic!("expected sign request for RespondBidirectional"),
+                msg_req = sign_rx.recv() => match msg_req {
+                    Some(Sign::Request(req)) => {
+                        assert_eq!(req.id, sign_id);
+                        break;
+                    }
+                    Some(Sign::Checkpoint(_)) => continue,
+                    _ => panic!("expected sign request for RespondBidirectional"),
+                }
+            }
         }
 
         // Fetch the updated request from the backlog to get the new epsilon and payload
