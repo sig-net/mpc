@@ -7,6 +7,7 @@ pub mod fixture_interface;
 pub mod fixture_tasks;
 pub mod input;
 pub mod message_collector;
+pub mod mock_chain;
 pub mod mock_governance;
 pub mod mock_stream;
 

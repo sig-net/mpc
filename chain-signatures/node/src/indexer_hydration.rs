@@ -412,6 +412,9 @@ pub async fn run(
     .await;
 
     spawn_runtime_updater(hydration_api.clone());
+
+    let root_pk = contract_watcher.wait_public_key().await;
+
     // Subscribe to finalized Hydration blocks.
     let mut blocks = match hydration_api.blocks().subscribe_finalized().await {
         Ok(blocks) => blocks,
@@ -529,7 +532,7 @@ pub async fn run(
                 if let Err(e) = crate::stream::ops::process_respond_event(
                     event,
                     sign_tx.clone(),
-                    &mut contract_watcher,
+                    root_pk,
                     &backlog,
                     true,
                 )
@@ -587,15 +590,24 @@ pub async fn run(
                         continue;
                     }
                 };
+                let signature = match get_named(&fields, "signature").and_then(parse_signature) {
+                    Ok(sig) => sig,
+                    Err(e) => {
+                        tracing::error!(?e, "failed to parse signature");
+                        continue;
+                    }
+                };
                 tracing::info!(
                     "Hydration::Signet::RespondBidirectionalEvent in block #{number} ({hash:?})"
                 );
                 if let Err(e) = crate::stream::ops::process_respond_bidirectional_event(
                     crate::stream::ops::RespondBidirectionalEvent {
                         request_id,
+                        signature,
                         chain: crate::protocol::Chain::Hydration,
                     },
                     sign_tx.clone(),
+                    root_pk,
                     &backlog,
                     true,
                 )

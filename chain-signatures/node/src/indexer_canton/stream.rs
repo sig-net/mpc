@@ -437,14 +437,23 @@ async fn process_canton_event(
             Ok(payload) => {
                 let mut request_id = [0u8; 32];
                 if let Err(e) = hex::decode_to_slice(&payload.request_id, &mut request_id) {
-                    tracing::warn!("invalid request_id hex: {e}");
+                    tracing::warn!(%e, "invalid request_id hex");
                 } else {
-                    let event = RespondBidirectionalEvent {
-                        request_id,
-                        chain: crate::protocol::Chain::Canton,
+                    let signature = match parse_canton_signature(&payload.signature) {
+                        Ok(signature) => signature,
+                        Err(e) => {
+                            tracing::warn!(%e, "invalid signature in canton RespondBidirectionalEvent");
+                            return;
+                        }
                     };
                     if events_tx
-                        .send(ChainEvent::RespondBidirectional(event))
+                        .send(ChainEvent::RespondBidirectional(
+                            RespondBidirectionalEvent {
+                                request_id,
+                                signature,
+                                chain: crate::protocol::Chain::Canton,
+                            },
+                        ))
                         .await
                         .is_err()
                     {

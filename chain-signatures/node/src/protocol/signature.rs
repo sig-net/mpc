@@ -2,6 +2,7 @@ use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
+use crate::metrics::messaging::set_inbox_count;
 use crate::metrics::requests::{
     record_request_latency, record_request_latency_since, SignRequestStep, SIGN_REQUEST_LOOPS,
 };
@@ -1674,6 +1675,7 @@ impl SignatureSpawner {
             .or_insert_with(|| Subscriber::unsubscribed(SIGN_POSIT_INBOX_LABEL));
         let rx = inbox.subscribe();
         inbox.report_capacity();
+        set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
 
         let task = SignTask {
             governance: governance.clone(),
@@ -1708,10 +1710,12 @@ impl SignatureSpawner {
         if from == me {
             return;
         }
-        let inbox = self
-            .inboxes
-            .entry(sign_id)
-            .or_insert_with(|| Subscriber::unsubscribed(SIGN_POSIT_INBOX_LABEL));
+        let inbox = self.inboxes.entry(sign_id).or_insert_with(|| {
+            Subscriber::unsubscribed_with_capacity(
+                SIGN_POSIT_INBOX_LABEL,
+                crate::protocol::message::POSIT_INBOX_CHANNEL_SIZE,
+            )
+        });
         let _ = inbox
             .send(SignTaskMessage::PositMessage {
                 presignature_id,
@@ -1727,6 +1731,7 @@ impl SignatureSpawner {
         if let Some(inbox) = self.inboxes.remove(&sign_id) {
             inbox.clear_capacity_global();
         }
+        set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
         self.abort_delayed_watcher(sign_id, "completion");
         if self.tasks.abort(sign_id) {
             tracing::info!(?sign_id, "aborting signature task due to completion event");
@@ -1744,6 +1749,7 @@ impl SignatureSpawner {
                 if let Some(inbox) = self.inboxes.remove(&sign_id) {
                     inbox.clear_capacity_global();
                 }
+                set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
                 self.abort_delayed_watcher(sign_id, "interruption");
                 return;
             }
@@ -1751,6 +1757,7 @@ impl SignatureSpawner {
         if let Some(inbox) = self.inboxes.remove(&sign_id) {
             inbox.clear_capacity_global();
         }
+        set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
         self.abort_delayed_watcher(sign_id, "task completion");
         match result {
             Ok(()) => {
