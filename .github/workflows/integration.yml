@@ -65,8 +65,10 @@ jobs:
         with:
           shared-key: component-test
           cache-all-crates: false
-          cache-targets: false
+          cache-targets: true
           cache-on-failure: false
+          # Prevent every PR from uploading multi-GB caches
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -97,6 +99,11 @@ jobs:
       - name: Cache diagnostics
         run: |
           find target -type d -name incremental -exec du -sh {} + | sort -hr | head -20
+
+      - name: Target breakdown
+        run: |
+          du -sh target/debug/*
+          du -sh target/release/*
 
   # Integration tests that share the mpc_it_network Docker network and thus must run sequentially.
   # This also requires additional Solana/Anchor setup.
@@ -178,8 +185,10 @@ jobs:
         with:
           shared-key: integration-test
           cache-all-crates: false
-          cache-targets: false
+          cache-targets: true
           cache-on-failure: false
+          # Prevent every PR from uploading multi-GB caches
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       - name: Build Chain-Signatures Contract
         run: ./build-contract.sh
@@ -216,3 +225,8 @@ jobs:
       - name: Cache diagnostics
         run: |
           find target -type d -name incremental -exec du -sh {} + | sort -hr | head -20
+
+      - name: Target breakdown
+        run: |
+          du -sh target/debug/*
+          du -sh target/release/*
