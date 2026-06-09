@@ -28,10 +28,8 @@ jobs:
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
       
       - name: Install Rust (1.81.0)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.81.0
         with:
-          profile: minimal
-          toolchain: 1.81.0
           target: wasm32-unknown-unknown
 
       - uses: WarpBuilds/cache@v1
@@ -86,10 +84,8 @@ jobs:
           docker pull redis:7.4.2
 
       - name: Install Rust (1.81.0)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.81.0
         with:
-          profile: minimal
-          toolchain: 1.81.0
           target: wasm32-unknown-unknown
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
@@ -177,10 +173,8 @@ jobs:
           docker pull redis:7.4.2
 
       - name: Install Rust (1.81.0)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.81.0
         with:
-          profile: minimal
-          toolchain: 1.81.0
           target: wasm32-unknown-unknown
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
