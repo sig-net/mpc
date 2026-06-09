@@ -377,8 +377,11 @@ fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
         &event.path,
     );
 
-    // Use transaction hash as entropy
-    let entropy = log.transaction_hash.unwrap_or_default();
+    // Use Ethereum transaction hash as entropy
+    let Some(entropy) = log.transaction_hash else {
+        tracing::error!("log missing transaction hash, skipping sign request");
+        return None;
+    };
 
     let sign_id = SignId::new(event.generate_request_id());
     tracing::info!(?sign_id, "eth signature requested");

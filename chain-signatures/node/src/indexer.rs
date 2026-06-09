@@ -103,8 +103,8 @@ impl NearIndexer {
         let payload = pending_request.payload;
         let epsilon = pending_request.epsilon;
 
-        // no longer taking entropy from logs, but this is merely for integration tests, so
-        // it doesn't matter as much as long as the IT nodes agree on the entropy.
+        // No longer taking entropy from logs, but this is merely for integration tests, so
+        // it doesn't matter as much as long as the integration tests nodes agree on the entropy.
         let entropy = self.derive_entropy_from_sign_id(&sign_id);
         // NOTE: path is not used at all currently in signature.rs during signing, so hardcoding
         // it here won't matter.
