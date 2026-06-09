@@ -34,7 +34,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
+          key: "${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
       - name: Build all dependencies
         # Build both with and without helios features so the downstream jobs can hit the cache
@@ -91,7 +91,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
+          key: "${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
@@ -191,7 +191,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
+          key: "${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
