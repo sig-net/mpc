@@ -8,6 +8,7 @@ on:
       - integration-tests/**
       - chain-signatures/**
   pull_request:
+  merge_group:
 
 env:
   RUSTFLAGS: -D warnings
