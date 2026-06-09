@@ -25,6 +25,7 @@ use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{
     SignArgs, SignId, Signature as MpcSignature, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -181,7 +182,7 @@ pub struct EthArgs {
         env("MPC_ETH_ACCOUNT_SK"),
         requires_all = ["eth_execution_rpc_http_url", "eth_contract_address"]
     )]
-    pub eth_account_sk: Option<String>,
+    pub eth_account_sk: Option<SecretString>,
     /// The contract address to watch without the `0x` prefix
     #[clap(long, env("MPC_ETH_CONTRACT_ADDRESS"), requires = "eth_account_sk")]
     pub eth_contract_address: Option<String>,
@@ -247,7 +248,10 @@ impl EthArgs {
     pub fn into_str_args(self) -> Vec<String> {
         let mut args = Vec::with_capacity(10);
         if let Some(eth_account_sk) = self.eth_account_sk {
-            args.extend(["--eth-account-sk".to_string(), eth_account_sk]);
+            args.extend([
+                "--eth-account-sk".to_string(),
+                eth_account_sk.expose_secret().to_string(),
+            ]);
         }
         if let Some(eth_consensus_rpc_http_url) = self.eth_consensus_rpc_http_url {
             args.extend([
@@ -294,7 +298,7 @@ impl EthArgs {
         }
 
         Some(EthConfig {
-            account_sk: self.eth_account_sk?,
+            account_sk: self.eth_account_sk?.expose_secret().to_string(), // this is safe because  EthConfig has custom Debug implementation that redacts the account_sk field
             consensus_rpc_http_url: self.eth_consensus_rpc_http_url.unwrap_or_default(),
             execution_rpc_http_url: self.eth_execution_rpc_http_url.unwrap(),
             contract_address: self.eth_contract_address.unwrap(),
@@ -312,7 +316,7 @@ impl EthArgs {
     pub fn from_config(config: Option<EthConfig>) -> Self {
         match config {
             Some(config) if !config.account_sk.is_empty() => Self {
-                eth_account_sk: Some(config.account_sk),
+                eth_account_sk: Some(config.account_sk.into()),
                 eth_consensus_rpc_http_url: Some(config.consensus_rpc_http_url),
                 eth_execution_rpc_http_url: Some(config.execution_rpc_http_url),
                 eth_contract_address: Some(config.contract_address),
