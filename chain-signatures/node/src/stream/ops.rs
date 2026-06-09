@@ -80,8 +80,6 @@ pub struct SignatureRespondedEvent {
     pub chain: Chain,
 }
 
-
-
 pub(crate) async fn process_sign_request(
     sign_request: IndexedSignRequest,
     sign_tx: mpsc::Sender<Sign>,
