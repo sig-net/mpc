@@ -105,15 +105,16 @@ pub struct HydrationSignatureRequestedEvent {
 
 impl HydrationSignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
+        let sender = self.sender_string();
         ethabi_request_id(
-            self.sender_string(),
+            &sender,
             self.payload,
-            self.path.clone(),
+            &self.path,
             self.key_version,
-            self.chain_id.clone(),
-            self.algo.clone(),
-            self.dest.clone(),
-            self.params.clone(),
+            &self.chain_id,
+            &self.algo,
+            &self.dest,
+            &self.params,
         )
     }
 

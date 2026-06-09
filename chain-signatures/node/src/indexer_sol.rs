@@ -37,7 +37,8 @@ use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature:
 use solana_transaction_status::option_serializer::OptionSerializer;
 use solana_transaction_status::{
     EncodedConfirmedTransactionWithStatusMeta, EncodedTransaction,
-    EncodedTransactionWithStatusMeta, TransactionDetails, UiConfirmedBlock, UiTransactionEncoding,
+    EncodedTransactionWithStatusMeta, TransactionDetails, UiConfirmedBlock, UiInstruction,
+    UiParsedInstruction, UiTransactionEncoding,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -143,10 +144,6 @@ pub struct SolSignRequest {
     pub path: String,
     pub key_version: u32,
 }
-
-// SolanaSignatureEvent trait removed
-
-type Result<T> = anyhow::Result<T>;
 
 const MAX_SIGNATURES_FOR_FAST_CATCHUP: usize = 1000;
 
@@ -488,18 +485,16 @@ pub enum SolanaSignEvent {
 impl SolanaSignEvent {
     pub fn generate_request_id(&self) -> [u8; 32] {
         match self {
-            SolanaSignEvent::SignatureRequested(ev) => {
-                ethabi_request_id(
-                    ev.sender.to_string(),
-                    ev.payload,
-                    ev.path.clone(),
-                    ev.key_version,
-                    ev.chain_id.clone(),
-                    ev.algo.clone(),
-                    ev.dest.clone(),
-                    ev.params.clone(),
-                )
-            }
+            SolanaSignEvent::SignatureRequested(ev) => ethabi_request_id(
+                &ev.sender.to_string(),
+                ev.payload,
+                &ev.path,
+                ev.key_version,
+                &ev.chain_id,
+                &ev.algo,
+                &ev.dest,
+                &ev.params,
+            ),
             SolanaSignEvent::SignBidirectional(ev) => {
                 let encoded = (
                     ev.sender.to_string(),
@@ -583,9 +578,7 @@ impl SolanaSignEvent {
                 let sign_id = SignId::new(request_id);
                 tracing::info!(?sign_id, "solana signature requested");
                 let unsigned_tx_hash = hash_rlp_data(rlp_encoded_tx);
-                let payload = Scalar::from_bytes(unsigned_tx_hash).or_else(|| {
-                    None
-                })?;
+                let payload = Scalar::from_bytes(unsigned_tx_hash).or_else(|| None)?;
 
                 if payload > *MAX_SECP256K1_SCALAR {
                     tracing::warn!("payload exceeds secp256k1 curve order: {payload:?}");
@@ -624,10 +617,7 @@ impl SolanaSignEvent {
     }
 }
 
-fn build_sign_request(
-    sign_event: SolanaSignEvent,
-    tx_sig: Vec<u8>,
-) -> Option<IndexedSignRequest> {
+fn build_sign_request(sign_event: SolanaSignEvent, tx_sig: Vec<u8>) -> Option<IndexedSignRequest> {
     let mut entropy = [0u8; 32];
     entropy.copy_from_slice(&tx_sig[..32]);
     sign_event.generate_sign_request(entropy)
@@ -668,9 +658,7 @@ async fn subscribe_and_buffer_live_events(
 fn parse_cpi_events(
     tx: &EncodedTransactionWithStatusMeta,
     target_program_id: &Pubkey,
-) -> Result<Vec<SolanaSignEvent>> {
-    use solana_transaction_status::{UiInstruction, UiParsedInstruction};
-
+) -> anyhow::Result<Vec<SolanaSignEvent>> {
     let Some(meta) = &tx.meta else {
         return Ok(Vec::new());
     };
@@ -679,7 +667,7 @@ fn parse_cpi_events(
     let mut out = Vec::<SolanaSignEvent>::new();
 
     // Small helper closure to try decoding both event types from raw data
-    let try_parse_events = |data: &str| -> Result<Vec<SolanaSignEvent>> {
+    let try_parse_events = |data: &str| -> anyhow::Result<Vec<SolanaSignEvent>> {
         let Ok(ix_data) = solana_sdk::bs58::decode(data).into_vec() else {
             tracing::warn!("Failed to decode instruction data for target program");
             return Ok(Vec::new());
@@ -764,7 +752,7 @@ async fn subscribe_to_program_events(
     ws_url: &str,
     events_tx: mpsc::Sender<ChainEvent>,
     anchor_tx: &mut Option<oneshot::Sender<u64>>,
-) -> Result<()> {
+) -> anyhow::Result<()> {
     let pubsub_client = PubsubClient::new(ws_url).await?;
 
     let filter = RpcTransactionLogsFilter::Mentions(vec![program_id.to_string()]);
@@ -885,7 +873,7 @@ fn has_log_starts_with(logs: &[String], start_with: &str) -> bool {
 fn parse_cpi_respond_events(
     tx: &EncodedTransactionWithStatusMeta,
     target_program_id: &Pubkey,
-) -> Result<(Vec<RespondBidirectionalEvent>, Vec<SignatureRespondedEvent>)> {
+) -> anyhow::Result<(Vec<RespondBidirectionalEvent>, Vec<SignatureRespondedEvent>)> {
     use solana_transaction_status::{UiInstruction, UiParsedInstruction};
 
     let Some(meta) = &tx.meta else {
@@ -897,46 +885,48 @@ fn parse_cpi_respond_events(
     let mut signature_responded_events = Vec::<SignatureRespondedEvent>::new();
 
     // Helper closure to try decoding RespondBidirectionalEvent and SignatureRespondedEvent from raw data
-    let try_parse_respond_event =
-        |data: &str| -> Result<(Vec<RespondBidirectionalEvent>, Vec<SignatureRespondedEvent>)> {
-            let Ok(ix_data) = solana_sdk::bs58::decode(data).into_vec() else {
-                tracing::warn!("Failed to decode instruction data for target program");
-                return Ok((Vec::new(), Vec::new()));
-            };
-
-            // Ensure this is an Anchor event instruction
-            if !ix_data.starts_with(anchor_lang::event::EVENT_IX_TAG_LE) {
-                return Ok((Vec::new(), Vec::new()));
-            }
-
-            let event_discriminator = &ix_data[8..16];
-            let event_data = &ix_data[16..];
-
-            let mut respond_bdx = Vec::new();
-            let mut sig_resp = Vec::new();
-
-            // Handle RespondBidirectionalEvent
-            if event_discriminator == RespondBidirectionalEvent::DISCRIMINATOR {
-                match RespondBidirectionalEvent::deserialize(&mut &event_data[..]) {
-                    Ok(ev) => respond_bdx.push(ev),
-                    Err(e) => {
-                        tracing::warn!("Failed to deserialize RespondBidirectionalEvent: {e}")
-                    }
-                }
-            }
-
-            // Handle SignatureRespondedEvent
-            if event_discriminator == SignatureRespondedEvent::DISCRIMINATOR {
-                match SignatureRespondedEvent::deserialize(&mut &event_data[..]) {
-                    Ok(ev) => sig_resp.push(ev),
-                    Err(e) => {
-                        tracing::warn!("Failed to deserialize SignatureRespondedEvent: {e}")
-                    }
-                }
-            }
-
-            Ok((respond_bdx, sig_resp))
+    let try_parse_respond_event = |data: &str| -> anyhow::Result<(
+        Vec<RespondBidirectionalEvent>,
+        Vec<SignatureRespondedEvent>,
+    )> {
+        let Ok(ix_data) = solana_sdk::bs58::decode(data).into_vec() else {
+            tracing::warn!("Failed to decode instruction data for target program");
+            return Ok((Vec::new(), Vec::new()));
         };
+
+        // Ensure this is an Anchor event instruction
+        if !ix_data.starts_with(anchor_lang::event::EVENT_IX_TAG_LE) {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let event_discriminator = &ix_data[8..16];
+        let event_data = &ix_data[16..];
+
+        let mut respond_bdx = Vec::new();
+        let mut sig_resp = Vec::new();
+
+        // Handle RespondBidirectionalEvent
+        if event_discriminator == RespondBidirectionalEvent::DISCRIMINATOR {
+            match RespondBidirectionalEvent::deserialize(&mut &event_data[..]) {
+                Ok(ev) => respond_bdx.push(ev),
+                Err(e) => {
+                    tracing::warn!("Failed to deserialize RespondBidirectionalEvent: {e}")
+                }
+            }
+        }
+
+        // Handle SignatureRespondedEvent
+        if event_discriminator == SignatureRespondedEvent::DISCRIMINATOR {
+            match SignatureRespondedEvent::deserialize(&mut &event_data[..]) {
+                Ok(ev) => sig_resp.push(ev),
+                Err(e) => {
+                    tracing::warn!("Failed to deserialize SignatureRespondedEvent: {e}")
+                }
+            }
+        }
+
+        Ok((respond_bdx, sig_resp))
+    };
 
     // Look into inner instructions for CPI calls
     let inner_ixs = match &meta.inner_instructions {
@@ -998,7 +988,7 @@ impl SolanaEvents {
         tx: &EncodedTransactionWithStatusMeta,
         target_program_id: &Pubkey,
         logs: &[String],
-    ) -> Result<Self> {
+    ) -> anyhow::Result<Self> {
         if looks_like_cpi_sign_event(logs) {
             Ok(SolanaEvents::Sign(parse_cpi_events(tx, target_program_id)?))
         } else if looks_like_respond_event(logs) {
@@ -1019,7 +1009,7 @@ async fn emit_events(
     signature: Signature,
     tx: &EncodedTransactionWithStatusMeta,
     logs: &[String],
-) -> Result<()> {
+) -> anyhow::Result<()> {
     match SolanaEvents::parse(tx, program_id, logs)? {
         SolanaEvents::Sign(events) => {
             for ev in events {
