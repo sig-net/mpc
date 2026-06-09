@@ -28,7 +28,7 @@ jobs:
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
       
       - name: Install Rust (1.81.0)
-        uses: dtolnay/rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           profile: minimal
           toolchain: 1.81.0
@@ -86,7 +86,7 @@ jobs:
           docker pull redis:7.4.2
 
       - name: Install Rust (1.81.0)
-        uses: dtolnay/rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           profile: minimal
           toolchain: 1.81.0
@@ -177,7 +177,7 @@ jobs:
           docker pull redis:7.4.2
 
       - name: Install Rust (1.81.0)
-        uses: dtolnay/rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           profile: minimal
           toolchain: 1.81.0
