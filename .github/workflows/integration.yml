@@ -13,50 +13,9 @@ on:
 env:
   RUSTFLAGS: -D warnings
 jobs:
-  # This job builds the test binaries and populates the cargo build cache, which the subsequent test jobs can then restore from to save time.
-  build-cache:
-    name: Build Cache
-    runs-on: warp-ubuntu-latest-x64-4x
-    steps:
-      - uses: actions/checkout@v6
-
-      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
-      - name: Install system OpenSSL
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
-
-      - name: Set OpenSSL to system
-        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
-      
-      - name: Install Rust (1.81.0)
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: 1.81.0
-          target: wasm32-unknown-unknown
-
-      - uses: WarpBuilds/cache@v1
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: "${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}"
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Build all dependencies
-        # Build both with and without helios features so the downstream jobs can hit the cache
-        run: |
-          cargo build -p integration-tests --tests --features helios
-          cargo build -p integration-tests --tests
-          cargo build -p mpc-node --release --features test-feature,debug-page,helios
-          cargo build -p mpc-node --release --features test-feature,debug-page
-
   # Light-weight component tests using the MPC fixture, these can run in parallel.
   component-test:
     name: Component Test
-    needs: build-cache
     runs-on: warp-ubuntu-latest-x64-4x
 
     steps:
@@ -100,19 +59,10 @@ jobs:
       - name: Set OpenSSL to system
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
-      - uses: WarpBuilds/cache@v1
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: "${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}"
-          restore-keys: ${{ runner.os }}-cargo-
+      - uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-nextest
-        run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+        uses: taiki-e/install-action@nextest
 
       - name: Presetup binaries
         run: ./setup.sh
@@ -134,7 +84,7 @@ jobs:
   # This also requires additional Solana/Anchor setup.
   sequential-integration-test:
     name: Integration Test
-    needs: build-cache
+
     strategy:
       matrix:
         # FIXME: macos-latest-xl is disabled since colima is erroring out right now
@@ -204,16 +154,7 @@ jobs:
           solana-cli-version: '2.3.9'
           anchor-version: '0.30.1'
 
-      - uses: WarpBuilds/cache@v1
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: "${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}"
-          restore-keys: ${{ runner.os }}-cargo-
+      - uses: Swatinem/rust-cache@v2
 
       - name: Build Chain-Signatures Contract
         run: ./build-contract.sh
@@ -223,7 +164,7 @@ jobs:
         run: npm i && npx hardhat compile
 
       - name: Install cargo-nextest
-        run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+        uses: taiki-e/install-action@nextest
 
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.
