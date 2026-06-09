@@ -516,7 +516,7 @@ impl SolanaSignEvent {
     pub fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
         match self {
             SolanaSignEvent::SignatureRequested(ev) => {
-                tracing::info!("found solana event: {:?}", ev);
+                tracing::info!(?ev, "found solana event");
                 if ev.deposit == 0 {
                     tracing::warn!("deposit is 0, skipping sign request");
                     return None;
@@ -559,7 +559,7 @@ impl SolanaSignEvent {
                 ))
             }
             SolanaSignEvent::SignBidirectional(ev) => {
-                tracing::info!("found solana event: {:?}", ev);
+                tracing::info!(?ev, "found solana event");
                 if ev.deposit == 0 {
                     tracing::warn!("deposit is 0, skipping sign request");
                     return None;
@@ -571,17 +571,14 @@ impl SolanaSignEvent {
                 }
 
                 let request_id = self.generate_request_id();
-                let rlp_encoded_tx = ev.serialized_transaction.clone();
-
                 let epsilon = derive_epsilon_sol(ev.key_version, &ev.sender.to_string(), &ev.path);
-
                 let sign_id = SignId::new(request_id);
-                tracing::info!(?sign_id, "solana signature requested");
-                let unsigned_tx_hash = hash_rlp_data(rlp_encoded_tx);
-                let payload = Scalar::from_bytes(unsigned_tx_hash).or_else(|| None)?;
+                tracing::info!(?sign_id, "solana bidirectional signature requested");
+                let unsigned_tx_hash = hash_rlp_data(&ev.serialized_transaction);
+                let payload = Scalar::from_bytes(unsigned_tx_hash)?;
 
                 if payload > *MAX_SECP256K1_SCALAR {
-                    tracing::warn!("payload exceeds secp256k1 curve order: {payload:?}");
+                    tracing::warn!(?payload, "payload exceeds secp256k1 curve order");
                     return None;
                 }
 
@@ -1023,8 +1020,8 @@ async fn emit_events(
             responded,
         } => {
             for ev in bidirectional {
-                let signature = to_mpc_signature(ev.signature.clone())
-                    .context("failed to parse Solana signature")?;
+                let signature =
+                    to_mpc_signature(&ev.signature).context("failed to parse Solana signature")?;
                 let _ = events_tx
                     .send(ChainEvent::RespondBidirectional(
                         crate::stream::ops::RespondBidirectionalEvent {
@@ -1037,8 +1034,8 @@ async fn emit_events(
             }
 
             for ev in responded {
-                let signature = to_mpc_signature(ev.signature.clone())
-                    .context("failed to parse Solana signature")?;
+                let signature =
+                    to_mpc_signature(&ev.signature).context("failed to parse Solana signature")?;
                 let _ = events_tx
                     .send(ChainEvent::Respond(
                         crate::stream::ops::SignatureRespondedEvent {
@@ -1078,7 +1075,7 @@ fn cleanup_seen_cache(seen: &mut HashMap<Signature, Instant>, ttl: Duration) {
 }
 
 pub fn to_mpc_signature(
-    sig: signet_program::Signature,
+    sig: &signet_program::Signature,
 ) -> anyhow::Result<mpc_primitives::Signature> {
     // Create a 65-byte uncompressed point representation (0x04 || x || y)
     let mut big_r = [0u8; 65];

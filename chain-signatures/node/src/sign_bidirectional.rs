@@ -271,9 +271,9 @@ impl TransactionOutput {
     }
 }
 
-pub fn hash_rlp_data(rlp_data: Vec<u8>) -> [u8; 32] {
+pub fn hash_rlp_data(rlp_data: &[u8]) -> [u8; 32] {
     let mut hasher = Keccak256::new();
-    hasher.update(&rlp_data);
+    hasher.update(rlp_data);
     hasher.finalize().into()
 }
 

@@ -6,6 +6,7 @@ use mpc_node::backlog::Backlog;
 use mpc_node::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
 use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
 use mpc_node::protocol::{Chain, IndexedSignRequest, SignKind};
+use mpc_node::sign_bidirectional::hash_rlp_data;
 use mpc_node::stream::{catchup_then_livestream, ChainEvent, ChainStream};
 use mpc_primitives::{ScalarExt, Signature, LATEST_MPC_KEY_VERSION};
 use serde_json::json;
@@ -72,8 +73,7 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
         panic!("expected SignBidirectional, got {:?}", event.kind);
     };
 
-    let expected_hash =
-        mpc_node::sign_bidirectional::hash_rlp_data(bidir.serialized_transaction.clone());
+    let expected_hash = hash_rlp_data(&bidir.serialized_transaction);
     let expected_payload = <k256::Scalar as ScalarExt>::from_bytes(expected_hash)
         .expect("test tx hash must be a valid scalar");
     assert_eq!(

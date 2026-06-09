@@ -105,9 +105,8 @@ pub struct HydrationSignatureRequestedEvent {
 
 impl HydrationSignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
-        let sender = self.sender_string();
         ethabi_request_id(
-            &sender,
+            &self.sender_string(),
             self.payload,
             &self.path,
             self.key_version,
@@ -118,29 +117,29 @@ impl HydrationSignatureRequestedEvent {
         )
     }
 
-    fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest> {
+    fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
         tracing::info!("found hydration event: {:?}", self);
         if self.deposit == 0 {
             tracing::warn!("deposit is 0, skipping sign request");
-            anyhow::bail!("deposit is 0");
+            return None;
         }
 
         if self.key_version > LATEST_MPC_KEY_VERSION {
             tracing::warn!("unsupported key version: {}", self.key_version);
-            anyhow::bail!("unsupported key version");
+            return None;
         }
 
-        let Some(payload) = Scalar::from_bytes(self.payload) else {
+        let payload = Scalar::from_bytes(self.payload).or_else(|| {
             tracing::warn!(
                 "hydration `sign` did not produce payload hash correctly: {:?}",
                 self.payload,
             );
-            anyhow::bail!("failed to convert event payload hash to scalar");
-        };
+            None
+        })?;
 
         if payload > *MAX_SECP256K1_SCALAR {
             tracing::warn!("payload exceeds secp256k1 curve order: {payload:?}");
-            anyhow::bail!("payload exceeds secp256k1 curve order");
+            return None;
         }
 
         let epsilon = mpc_crypto::kdf::derive_epsilon_hydration(
@@ -152,7 +151,7 @@ impl HydrationSignatureRequestedEvent {
         let sign_id = SignId::new(self.generate_request_id());
         tracing::info!(?sign_id, "hydration signature requested");
 
-        Ok(IndexedSignRequest::sign(
+        Some(IndexedSignRequest::sign(
             sign_id,
             SignArgs {
                 entropy,
@@ -243,20 +242,19 @@ impl HydrationSignBidirectionalRequestedEvent {
         alloy::primitives::keccak256(encoded).into()
     }
 
-    pub fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest> {
+    pub fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
         tracing::info!("found hydration event: {:?}", self);
         if self.deposit == 0 {
             tracing::warn!("deposit is 0, skipping sign request");
-            anyhow::bail!("deposit is 0");
+            return None;
         }
 
         if self.key_version > LATEST_MPC_KEY_VERSION {
             tracing::warn!("unsupported key version: {}", self.key_version);
-            anyhow::bail!("unsupported key version");
+            return None;
         }
 
         let request_id = self.generate_request_id();
-        let rlp_encoded_tx = self.serialized_transaction.clone();
 
         // Call the existing derive_epsilon_sol function with the correct parameters
         // to match the TypeScript implementation
@@ -268,17 +266,18 @@ impl HydrationSignBidirectionalRequestedEvent {
 
         let sign_id = SignId::new(request_id);
         tracing::info!(?sign_id, "hydration signature requested");
-        let unsigned_tx_hash = hash_rlp_data(rlp_encoded_tx);
-        let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
-            anyhow::bail!("Failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
-        };
+        let unsigned_tx_hash = hash_rlp_data(&self.serialized_transaction);
+        let payload = Scalar::from_bytes(unsigned_tx_hash).or_else(|| {
+            tracing::warn!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
+            None
+        })?;
 
         if payload > *MAX_SECP256K1_SCALAR {
             tracing::warn!("payload exceeds secp256k1 curve order: {payload:?}");
-            anyhow::bail!("payload exceeds secp256k1 curve order");
+            return None;
         }
 
-        Ok(IndexedSignRequest::sign_bidirectional(
+        Some(IndexedSignRequest::sign_bidirectional(
             sign_id,
             SignArgs {
                 entropy,
@@ -506,12 +505,8 @@ pub async fn run(
 
                 let entropy = sp_core::hashing::blake2_256(ev.bytes());
 
-                let sign_request = match event.generate_sign_request(entropy) {
-                    Ok(req) => req,
-                    Err(e) => {
-                        tracing::error!("failed to generate sign request: {e}");
-                        continue;
-                    }
+                let Some(sign_request) = event.generate_sign_request(entropy) else {
+                    continue;
                 };
 
                 if let Err(e) = crate::stream::ops::process_sign_request(
@@ -568,12 +563,8 @@ pub async fn run(
 
                 let entropy = sp_core::hashing::blake2_256(ev.bytes());
 
-                let sign_request = match event.generate_sign_request(entropy) {
-                    Ok(req) => req,
-                    Err(e) => {
-                        tracing::error!("failed to generate sign request: {e}");
-                        continue;
-                    }
+                let Some(sign_request) = event.generate_sign_request(entropy) else {
+                    continue;
                 };
 
                 if let Err(e) = crate::stream::ops::process_sign_request(

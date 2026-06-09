@@ -110,7 +110,7 @@ impl CantonSignBidirectionalRequestedEvent {
             &self.path,
         );
 
-        let unsigned_tx_hash = hash_rlp_data(self.serialized_transaction.clone());
+        let unsigned_tx_hash = hash_rlp_data(&self.serialized_transaction);
 
         let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
             anyhow::bail!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
