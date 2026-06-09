@@ -20,6 +20,7 @@ thiserror.workspace = true
 anyhow.workspace = true
 rand.workspace = true
 tokio.workspace = true
+near-sdk = { workspace = true, features = ["unit-testing"] }
 
 # crypto dependencies
 ecdsa = { version = "0.16.9", features = ["digest", "hazmat"] }
@@ -27,8 +28,8 @@ signature = "2.2.0"
 digest = "0.10.7"
 
 # near dependencies
-near-crypto = "0.35.1"
-near-workspaces = "0.22.1"
+near-crypto = "0.36.0"
+near-workspaces = "0.22.2"
 
 [features]
 default = []

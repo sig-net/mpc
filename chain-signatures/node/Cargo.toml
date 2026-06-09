@@ -77,8 +77,8 @@ parity-scale-codec.workspace = true
 tokio-tungstenite.workspace = true
 
 near-account-id.workspace = true
-near-crypto = "0.35.1"
-near-fetch = "0.10.0"
+near-crypto = "0.36.0"
+near-fetch = "0.11.0"
 near-primitives.workspace = true
 near-sdk.workspace = true
 oauth2.workspace = true
