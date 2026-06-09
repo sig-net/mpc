@@ -65,7 +65,7 @@ jobs:
         with:
           shared-key: component-test
           cache-all-crates: false
-          cache-targets: true
+          cache-targets: false
           cache-on-failure: false
 
       - name: Install cargo-nextest
@@ -93,6 +93,10 @@ jobs:
           du -sh target/debug || true
           du -sh target/release || true
           du -sh target/wasm32-unknown-unknown || true
+
+      - name: Cache diagnostics
+        run: |
+          find target -type d -name incremental -exec du -sh {} + | sort -hr | head -20
 
   # Integration tests that share the mpc_it_network Docker network and thus must run sequentially.
   # This also requires additional Solana/Anchor setup.
@@ -174,7 +178,7 @@ jobs:
         with:
           shared-key: integration-test
           cache-all-crates: false
-          cache-targets: true
+          cache-targets: false
           cache-on-failure: false
 
       - name: Build Chain-Signatures Contract
@@ -208,3 +212,7 @@ jobs:
           du -sh target/debug || true
           du -sh target/release || true
           du -sh target/wasm32-unknown-unknown || true
+
+      - name: Cache diagnostics
+        run: |
+          find target -type d -name incremental -exec du -sh {} + | sort -hr | head -20
