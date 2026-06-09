@@ -1,7 +1,7 @@
 use crate::backlog::Backlog;
 use crate::protocol::Chain;
 use crate::rpc::CantonClient;
-use crate::stream::ops::{RespondBidirectionalEvent, SignatureEvent, SignatureRespondedEvent};
+use crate::stream::ops::{RespondBidirectionalEvent, SignatureRespondedEvent};
 use crate::stream::{ChainEvent, ChainIndexer, ChainStream};
 
 use alloy::primitives::keccak256;

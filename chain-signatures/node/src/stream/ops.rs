@@ -80,42 +80,7 @@ pub struct SignatureRespondedEvent {
     pub chain: Chain,
 }
 
-pub(crate) trait SignatureEvent: std::fmt::Debug {
-    fn generate_request_id(&self) -> [u8; 32];
-    fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest>;
-    fn source_chain(&self) -> Chain;
-    fn sender_string(&self) -> String;
-}
 
-pub(crate) type SignatureEventBox = Box<dyn SignatureEvent + Send>;
-
-pub(crate) async fn process_sign_event(
-    sign_event: SignatureEventBox,
-    entropy: [u8; 32],
-    sign_tx: mpsc::Sender<Sign>,
-    backlog: Backlog,
-    caught_up: bool,
-) -> anyhow::Result<()> {
-    let sign_request = sign_event.generate_sign_request(entropy)?;
-    record_indexing_step_reached(sign_event.source_chain());
-
-    if matches!(sign_request.kind, SignKind::RespondBidirectional(_)) {
-        anyhow::bail!(
-            "unexpected sign kind: RespondBidirectional should not be generated from a sign event"
-        );
-    }
-
-    backlog.insert(sign_request.clone()).await;
-
-    if caught_up {
-        if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
-            let chain = sign_event.source_chain();
-            tracing::error!(?err, %chain, "failed to send sign request into queue");
-        }
-    }
-
-    Ok(())
-}
 
 pub(crate) async fn process_sign_request(
     sign_request: IndexedSignRequest,

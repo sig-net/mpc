@@ -12,7 +12,7 @@ pub use stream::{parse_canton_signature, CantonStream};
 
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::stream::ops::{SignBidirectionalEvent, SignatureEvent};
+use crate::stream::ops::SignBidirectionalEvent;
 use alloy::consensus::{SignableTransaction, TxEip1559};
 use borsh::{BorshDeserialize, BorshSerialize};
 use k256::Scalar;
@@ -86,12 +86,12 @@ impl CantonSignBidirectionalRequestedEvent {
     }
 }
 
-impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
-    fn generate_request_id(&self) -> [u8; 32] {
+impl CantonSignBidirectionalRequestedEvent {
+    pub fn generate_request_id(&self) -> [u8; 32] {
         self.request_id
     }
 
-    fn generate_sign_request(
+    pub fn generate_sign_request(
         &self,
         entropy: [u8; 32],
     ) -> anyhow::Result<crate::protocol::IndexedSignRequest> {
@@ -154,11 +154,11 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
         ))
     }
 
-    fn source_chain(&self) -> Chain {
+    pub fn source_chain(&self) -> Chain {
         Chain::Canton
     }
 
-    fn sender_string(&self) -> String {
+    pub fn sender_string(&self) -> String {
         hex::encode(self.sender)
     }
 }

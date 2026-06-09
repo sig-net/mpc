@@ -4,7 +4,7 @@ use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::stream::ops::SignatureEvent;
+
 use crate::util::ethabi_request_id;
 use alloy_sol_types::SolValue;
 use anyhow::{anyhow, Result};
@@ -103,7 +103,7 @@ pub struct HydrationSignatureRequestedEvent {
     pub params: String,
 }
 
-impl SignatureEvent for HydrationSignatureRequestedEvent {
+impl HydrationSignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
         ethabi_request_id(
             self.sender_string(),
@@ -165,11 +165,11 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {
         ))
     }
 
-    fn source_chain(&self) -> Chain {
+    pub fn source_chain(&self) -> Chain {
         Chain::Hydration
     }
 
-    fn sender_string(&self) -> String {
+    pub fn sender_string(&self) -> String {
         ss58_address_from_account32(self.sender)
     }
 }
@@ -224,7 +224,7 @@ pub struct HydrationSignBidirectionalRequestedEvent {
     pub respond_serialization_schema: Vec<u8>,
 }
 
-impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
+impl HydrationSignBidirectionalRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
         // Match TypeScript implementation using ABI encoding
         let encoded = (
@@ -242,7 +242,7 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
         alloy::primitives::keccak256(encoded).into()
     }
 
-    fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest> {
+    pub fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("found hydration event: {:?}", self);
         if self.deposit == 0 {
             tracing::warn!("deposit is 0, skipping sign request");
@@ -306,11 +306,11 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
         ))
     }
 
-    fn source_chain(&self) -> Chain {
+    pub fn source_chain(&self) -> Chain {
         Chain::Hydration
     }
 
-    fn sender_string(&self) -> String {
+    pub fn sender_string(&self) -> String {
         ss58_address_from_account32(self.sender)
     }
 }
@@ -505,9 +505,16 @@ pub async fn run(
 
                 let entropy = sp_core::hashing::blake2_256(ev.bytes());
 
-                if let Err(e) = crate::stream::ops::process_sign_event(
-                    Box::new(event),
-                    entropy,
+                let sign_request = match event.generate_sign_request(entropy) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        tracing::error!("failed to generate sign request: {e}");
+                        continue;
+                    }
+                };
+
+                if let Err(e) = crate::stream::ops::process_sign_request(
+                    sign_request,
                     sign_tx.clone(),
                     backlog.clone(),
                     true,
@@ -560,9 +567,16 @@ pub async fn run(
 
                 let entropy = sp_core::hashing::blake2_256(ev.bytes());
 
-                if let Err(e) = crate::stream::ops::process_sign_event(
-                    Box::new(event),
-                    entropy,
+                let sign_request = match event.generate_sign_request(entropy) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        tracing::error!("failed to generate sign request: {e}");
+                        continue;
+                    }
+                };
+
+                if let Err(e) = crate::stream::ops::process_sign_request(
+                    sign_request,
                     sign_tx.clone(),
                     backlog.clone(),
                     true,

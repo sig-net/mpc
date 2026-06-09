@@ -1,7 +1,7 @@
 use crate::backlog::Backlog;
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::stream::ops::{SignatureEvent, SignatureEventBox};
+
 use crate::stream::{ChainEvent, ChainIndexer, ChainStream};
 use crate::util::ethabi_request_id;
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
@@ -144,7 +144,14 @@ pub struct SolSignRequest {
     pub key_version: u32,
 }
 
-impl SignatureEvent for SignatureRequestedEvent {
+pub trait SolanaSignatureEvent {
+    fn generate_request_id(&self) -> [u8; 32];
+    fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest>;
+    fn source_chain(&self) -> Chain;
+    fn sender_string(&self) -> String;
+}
+
+impl SolanaSignatureEvent for SignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
         ethabi_request_id(
             self.sender_string(),
@@ -213,7 +220,7 @@ impl SignatureEvent for SignatureRequestedEvent {
     }
 }
 
-impl SignatureEvent for SignBidirectionalEvent {
+impl SolanaSignatureEvent for SignBidirectionalEvent {
     fn generate_request_id(&self) -> [u8; 32] {
         // Match TypeScript implementation using ABI encoding
         let encoded = (
@@ -634,13 +641,21 @@ impl SolanaIndexer {
     }
 }
 
+pub enum SolanaSignEvent {
+    SignatureRequested(SignatureRequestedEvent),
+    SignBidirectional(SignBidirectionalEvent),
+}
+
 fn build_sign_request(
-    sign_event: SignatureEventBox,
+    sign_event: SolanaSignEvent,
     tx_sig: Vec<u8>,
 ) -> anyhow::Result<IndexedSignRequest> {
     let mut entropy = [0u8; 32];
     entropy.copy_from_slice(&tx_sig[..32]);
-    sign_event.generate_sign_request(entropy)
+    match sign_event {
+        SolanaSignEvent::SignatureRequested(ev) => ev.generate_sign_request(entropy),
+        SolanaSignEvent::SignBidirectional(ev) => ev.generate_sign_request(entropy),
+    }
 }
 
 /// Subscribe to the live WS feed, preprocess events into `ChainEvent`s, and buffer them
@@ -678,7 +693,7 @@ async fn subscribe_and_buffer_live_events(
 fn parse_cpi_events(
     tx: &EncodedTransactionWithStatusMeta,
     target_program_id: &Pubkey,
-) -> Result<Vec<SignatureEventBox>> {
+) -> Result<Vec<SolanaSignEvent>> {
     use solana_transaction_status::{UiInstruction, UiParsedInstruction};
 
     let Some(meta) = &tx.meta else {
@@ -686,10 +701,10 @@ fn parse_cpi_events(
     };
 
     let target_program_str = target_program_id.to_string();
-    let mut out = Vec::<SignatureEventBox>::new();
+    let mut out = Vec::<SolanaSignEvent>::new();
 
     // Small helper closure to try decoding both event types from raw data
-    let try_parse_events = |data: &str| -> Result<Vec<SignatureEventBox>> {
+    let try_parse_events = |data: &str| -> Result<Vec<SolanaSignEvent>> {
         let Ok(ix_data) = solana_sdk::bs58::decode(data).into_vec() else {
             tracing::warn!("Failed to decode instruction data for target program");
             return Ok(Vec::new());
@@ -708,7 +723,7 @@ fn parse_cpi_events(
         // handle both event types
         if event_discriminator == SignatureRequestedEvent::DISCRIMINATOR {
             match SignatureRequestedEvent::deserialize(&mut &event_data[..]) {
-                Ok(ev) => acc.push(Box::new(ev) as SignatureEventBox),
+                Ok(ev) => acc.push(SolanaSignEvent::SignatureRequested(ev)),
                 Err(e) => tracing::warn!("Failed to deserialize SignatureRequestedEvent: {e}"),
             }
         } else if event_discriminator == SignBidirectionalEvent::DISCRIMINATOR {
@@ -719,7 +734,7 @@ fn parse_cpi_events(
                     if let Err(e) = Chain::from_caip2_chain_id(&ev.caip2_id) {
                         tracing::warn!("invalid caip2 chain id in sign bidirectional event: {e:?}")
                     } else {
-                        acc.push(Box::new(ev) as SignatureEventBox)
+                        acc.push(SolanaSignEvent::SignBidirectional(ev))
                     }
                 }
                 Err(e) => {
@@ -995,7 +1010,7 @@ fn parse_cpi_respond_events(
 }
 
 enum SolanaEvents {
-    Sign(Vec<SignatureEventBox>),
+    Sign(Vec<SolanaSignEvent>),
     Respond {
         bidirectional: Vec<RespondBidirectionalEvent>,
         responded: Vec<SignatureRespondedEvent>,
