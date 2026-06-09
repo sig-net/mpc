@@ -153,9 +153,9 @@ async fn test_channel_contention_1M_requests() {
     check_channel_contention(1000, 1000, 75, None).await;
 }
 
-/// A missed respond event leaves a stale task that clogs other nodes' inboxes.
+/// A missed respond event leaves a stale task but does not clog other nodes' inboxes.
 #[test(tokio::test(flavor = "multi_thread"))]
-async fn test_missed_respond_event_clogs_inbox() {
+async fn test_missed_respond_event_does_not_clog_inbox() {
     run_stale_task_test(true).await;
 }
 
@@ -298,14 +298,11 @@ async fn run_stale_task_test(drop_respond_event: bool) {
     }
 
     if drop_respond_event {
-        // Clog: bad request must have been processed, but not all 20.
-        assert!(
-            completed > bad_request_seed,
-            "expected more than {bad_request_seed} successful requests (including the bad one), got {completed}"
-        );
-        assert!(
-            completed < 20,
-            "expected clog to prevent some requests, but all 20 completed"
+        // Even with a missed respond event causing a stale task on node 2,
+        // all 20 requests must complete successfully because nodes 0 and 1 drop the stale posit messages.
+        assert_eq!(
+            completed, 20,
+            "expected all 20 requests to complete (backpressure dropping prevents clog), got {completed}"
         );
 
         // Bad request: nodes 0+1 generated, node 2 was excluded.
@@ -339,90 +336,16 @@ async fn run_stale_task_test(drop_respond_event: bool) {
             n2_bad.signature
         );
 
-        // Send a fresh request and verify nodes 0+1 are durably silent.
+        // Send a fresh request and verify it is successfully signed.
         let fresh_seed = completed + 100;
-        let new_sign_id = sign_request(fresh_seed).id;
-        let n2_bad_before = tracker_counts
-            .lock()
-            .unwrap()
-            .get(&(node_2, bad_sign_id))
-            .cloned()
-            .unwrap_or_default()
-            .posit;
-
         network
             .process_sign_requests(Chain::Solana, &[sign_request(fresh_seed)])
             .await;
 
-        tokio::time::timeout(Duration::from_secs(120), async {
-            loop {
-                let ready = {
-                    let counts = tracker_counts.lock().unwrap();
-                    let bad_posits = counts
-                        .get(&(node_2, bad_sign_id))
-                        .map_or(0, |c| c.posit.saturating_sub(n2_bad_before));
-                    let new_posits = counts.get(&(node_2, new_sign_id)).map_or(0, |c| c.posit);
-                    bad_posits >= 2 && new_posits >= 2
-                };
-                if ready {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
-        .await
-        .expect("node 2 should be sending posit messages for both bad and new requests");
-
-        // Two snapshots with a quiet period prove durable silence.
-        let n0_snap1 = tracker_counts
-            .lock()
-            .unwrap()
-            .get(&(node_0, new_sign_id))
-            .cloned()
-            .unwrap_or_default();
-        let n1_snap1 = tracker_counts
-            .lock()
-            .unwrap()
-            .get(&(node_1, new_sign_id))
-            .cloned()
-            .unwrap_or_default();
-
-        let quiet_period = 2 * mpc_node::protocol::signature::organize_posit_timeout();
-        tokio::time::sleep(quiet_period).await;
-
-        let n0_snap2 = tracker_counts
-            .lock()
-            .unwrap()
-            .get(&(node_0, new_sign_id))
-            .cloned()
-            .unwrap_or_default();
-        let n1_snap2 = tracker_counts
-            .lock()
-            .unwrap()
-            .get(&(node_1, new_sign_id))
-            .cloned()
-            .unwrap_or_default();
-
-        assert_eq!(
-            n0_snap1.posit + n0_snap1.signature,
-            0,
-            "node 0 sent messages for new request — expected 0 (spawner clogged)"
-        );
-        assert_eq!(
-            n1_snap1.posit + n1_snap1.signature,
-            0,
-            "node 1 sent messages for new request — expected 0 (spawner clogged)"
-        );
-        assert_eq!(
-            n0_snap2.posit + n0_snap2.signature,
-            0,
-            "node 0 sent messages during quiet period — clog is not durable"
-        );
-        assert_eq!(
-            n1_snap2.posit + n1_snap2.signature,
-            0,
-            "node 1 sent messages during quiet period — clog is not durable"
-        );
+        let actions = network
+            .assert_actions(completed as usize + 1, Duration::from_secs(30))
+            .await;
+        assert_eq!(actions.len(), completed as usize + 1);
     } else {
         // Respond event cleans up the stale task — all requests complete.
         assert_eq!(
