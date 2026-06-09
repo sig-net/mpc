@@ -20,4 +20,6 @@ ignore = [
     "RUSTSEC-2026-0099",  # rustls-webpki 0.101.7/0.102.8 wildcard name constraints accepted; same dependency chain as RUSTSEC-2026-0049.
 	"RUSTSEC-2026-0104",  # rustls-webpki CRL parsing panic; we do not use CRLs, so this is not reachable in our current TLS usage.
 	"RUSTSEC-2026-0119",  # CPU exhaustion via O(n²) name compression in hickory-proto; transitively locked through reqwest 0.12/helios, blocked on upstream updates
+	"RUSTSEC-2026-0118",  # hickory-proto NSEC3 closest-encloser proof validation enters unbounded loop on cross-zone responses;
+						  # no fixed upgrade is available, transitively pulled by reqwest 0.12 consumers (helios, near-jsonrpc-client, solana-rpc-client)
 ]

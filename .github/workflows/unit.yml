@@ -12,6 +12,7 @@ on:
       - "chain-signatures/contract-eth/**/*.sol"
       - "chain-signatures/contract-eth/**/*.js"
   pull_request:
+  merge_group:
 
 env:
   RUSTFLAGS: -D warnings
