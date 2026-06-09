@@ -50,6 +50,8 @@ jobs:
         run: |
           cargo build -p integration-tests --tests --features helios
           cargo build -p integration-tests --tests
+          cargo build -p mpc-node --release --features test-feature,debug-page,helios
+          cargo build -p mpc-node --release --features test-feature,debug-page
 
   # Light-weight component tests using the MPC fixture, these can run in parallel.
   component-test:
