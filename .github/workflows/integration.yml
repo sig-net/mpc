@@ -55,7 +55,9 @@ jobs:
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+        run: |
+          sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+          pkg-config --libs openssl  # verify it's found
       - name: Set OpenSSL to system
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
@@ -137,7 +139,9 @@ jobs:
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+        run: |
+          sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+          pkg-config --libs openssl  # verify it's found
       - name: Set OpenSSL to system
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
