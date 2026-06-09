@@ -109,7 +109,8 @@ pub(crate) static TASK_QUEUE_CAPACITY: LazyLock<HistogramVec> = LazyLock::new(||
         "Distribution of queue capacities across message channels",
         &["channel"],
         Some(vec![
-            0.0, 1.0, 10.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 4096.0,
+            0.0, 1.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 1500.0, 2000.0, 2500.0, 3000.0, 3500.0,
+            4000.0, 4096.0,
         ]),
     )
     .unwrap()
@@ -119,4 +120,19 @@ pub(crate) fn observe_queue_capacity(channel: &str, len: usize) {
     TASK_QUEUE_CAPACITY
         .with_label_values(&[channel])
         .observe(len as f64);
+}
+
+pub(crate) static TASK_QUEUE_INBOX_COUNT: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    super::try_create_int_gauge_vec_with_node_account_id(
+        "multichain_task_queue_inbox_count",
+        "Number of active inboxes per channel",
+        &["channel"],
+    )
+    .unwrap()
+});
+
+pub(crate) fn set_inbox_count(channel: &str, count: usize) {
+    TASK_QUEUE_INBOX_COUNT
+        .with_label_values(&[channel])
+        .set(count as i64);
 }

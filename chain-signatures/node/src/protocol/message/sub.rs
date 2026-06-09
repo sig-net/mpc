@@ -18,6 +18,13 @@ use crate::util::channel_len;
 /// This should be enough to hold a few messages in the inbox.
 pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
 
+/// Small under test-feature so dead-letter inboxes fill quickly in clog tests.
+pub const POSIT_INBOX_CHANNEL_SIZE: usize = if cfg!(feature = "test-feature") {
+    4
+} else {
+    MAX_MESSAGE_SUB_CHANNEL_SIZE
+};
+
 pub enum SubscribeId {
     Generating,
     Resharing,

@@ -103,6 +103,12 @@ impl MockStream {
         guard.prepare_block_of_sign_requests(requests)
     }
 
+    /// Add a future block containing arbitrary chain events.
+    pub async fn prepare_block_of_events(&self, events: &[ChainEvent]) {
+        let mut guard = self.inner.lock().await;
+        guard.future_blocks.push(events.to_vec());
+    }
+
     /// Add a future block that contains events corresponding to the provided rpc actions.
     pub async fn prepare_block_of_rpc_actions(&self, actions: &[RpcAction]) {
         let mut guard = self.inner.lock().await;
