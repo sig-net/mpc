@@ -40,7 +40,7 @@ echo "$SCRIPT_START_TEXT"
 
 # Add additional features if we're benchmarking.
 if echo "$CARGO_CMD_ARGS" | grep -q "bench"; then
-    CONTRACT_FEATURES="bench"
+    CONTRACT_FEATURES="--features bench"
     NODE_FEATURES="${NODE_FEATURES},bench"
 fi
 
@@ -48,15 +48,13 @@ NODE_FEATURE_ARGS="--features ${NODE_FEATURES}"
 
 set --
 set -e
+
+# Apple default clang lacks WASM support
 if [ -z "$CC" ] && [ -x "/opt/homebrew/opt/llvm/bin/clang" ]; then
     export CC="/opt/homebrew/opt/llvm/bin/clang"
 fi
 
-if [ -n "$CONTRACT_FEATURES" ]; then
-    cargo near build non-reproducible-wasm --manifest-path $ROOT_DIR/chain-signatures/contract/Cargo.toml --no-abi --env 'RUSTFLAGS=-C link-arg=--allow-undefined' --features "$CONTRACT_FEATURES"
-else
-    cargo near build non-reproducible-wasm --manifest-path $ROOT_DIR/chain-signatures/contract/Cargo.toml --no-abi --env 'RUSTFLAGS=-C link-arg=--allow-undefined'
-fi
+cargo +1.93.0 near build non-reproducible-wasm --manifest-path $ROOT_DIR/chain-signatures/contract/Cargo.toml --no-abi --env 'RUSTFLAGS=-C link-arg=--allow-undefined' $CONTRACT_FEATURES
 
 mkdir -p $ROOT_DIR/target/wasm32-unknown-unknown/release
 cp $ROOT_DIR/target/near/mpc_contract/mpc_contract.wasm $ROOT_DIR/target/wasm32-unknown-unknown/release/mpc_contract.wasm
