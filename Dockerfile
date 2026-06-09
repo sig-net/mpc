@@ -10,6 +10,8 @@ RUN npx hardhat compile
 FROM rust:latest AS node-builder
 RUN rustc --version --verbose
 WORKDIR /usr/src/app
+# Explicitly install OpenSSL development libraries so that the Rust build uses the system OpenSSL instead of building OpenSSL from source
+RUN apt-get update && apt-get install -y libssl-dev pkg-config
 ARG GIT_COMMIT_HASH
 ENV GIT_COMMIT_HASH=$GIT_COMMIT_HASH
 COPY chain-signatures/ ./chain-signatures
