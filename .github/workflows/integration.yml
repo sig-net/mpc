@@ -61,24 +61,14 @@ jobs:
       - name: Set OpenSSL to system
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
-      - uses: WarpBuilds/cache@v1
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: component-test-${{ hashFiles('**/Cargo.lock') }}
-
-      # - uses: Swatinem/rust-cache@v2
-      #   with:
-      #     shared-key: component-test
-      #     cache-all-crates: false
-      #     cache-targets: true
-      #     cache-on-failure: false
-      #     # Prevent every PR from uploading multi-GB caches
-      #     save-if: ${{ github.ref == 'refs/heads/develop' }}
+          shared-key: component-test
+          cache-all-crates: false
+          cache-targets: true
+          cache-on-failure: false
+          # Prevent every PR from uploading multi-GB caches
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -91,10 +81,10 @@ jobs:
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.
       - name: Build Chain-Signatures Integration Tests
-        run: cargo build -p integration-tests --tests --features helios
+        run: cargo build -p integration-tests --tests --features helios --release
 
       - name: Test
-        run: cargo nextest run -p integration-tests --features helios --profile fixture
+        run: cargo nextest run -p integration-tests --features helios --profile fixture --release
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
@@ -191,23 +181,14 @@ jobs:
           solana-cli-version: '2.3.9'
           anchor-version: '0.30.1'
 
-      - uses: WarpBuilds/cache@v1
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: component-test-${{ hashFiles('**/Cargo.lock') }}
-      # - uses: Swatinem/rust-cache@v2
-      #   with:
-      #     shared-key: integration-test
-      #     cache-all-crates: false
-      #     cache-targets: true
-      #     cache-on-failure: false
-      #     # Prevent every PR from uploading multi-GB caches
-      #     save-if: ${{ github.ref == 'refs/heads/develop' }}
+          shared-key: integration-test
+          cache-all-crates: false
+          cache-targets: true
+          cache-on-failure: false
+          # Prevent every PR from uploading multi-GB caches
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       - name: Build Chain-Signatures Contract
         run: ./build-contract.sh
@@ -222,10 +203,10 @@ jobs:
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.
       - name: Build Chain-Signatures Integration Tests
-        run: cargo build -p integration-tests --tests
+        run: cargo build -p integration-tests --tests --release
 
       - name: Test
-        run: cargo nextest run -p integration-tests --profile cluster
+        run: cargo nextest run -p integration-tests --profile cluster --release
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
