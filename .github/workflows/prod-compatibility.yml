@@ -19,7 +19,7 @@ jobs:
     runs-on: warp-ubuntu-latest-x64-4x
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
