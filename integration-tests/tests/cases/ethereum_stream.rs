@@ -18,7 +18,6 @@ use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::ops::SignBidirectionalEvent as NodeSignBidirectionalEvent;
-use mpc_node::stream::ops::SignatureRespondedEvent;
 use mpc_node::stream::{catchup_then_livestream, run_stream, ChainEvent, ChainStream};
 use mpc_node::util::current_unix_timestamp;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
@@ -321,20 +320,21 @@ fn test_bidirectional_event() -> NodeSignBidirectionalEvent {
     rlp_s.append(&0u64);
     rlp_s.append(&0u64);
 
-    NodeSignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
-        sender: solana_sdk::pubkey::Pubkey::new_unique(),
+    NodeSignBidirectionalEvent {
+        sender: solana_sdk::pubkey::Pubkey::new_unique().to_bytes(),
         serialized_transaction: rlp_s.out().to_vec(),
-        dest: Chain::Ethereum.to_string(),
         caip2_id: "eip155:31337".to_string(),
         key_version: LATEST_MPC_KEY_VERSION,
         deposit: 1,
         path: "bidirectional-test-path".to_string(),
         algo: "secp256k1".to_string(),
+        dest: Chain::Ethereum.to_string(),
         params: "{}".to_string(),
-        program_id: solana_sdk::pubkey::Pubkey::new_unique(),
+        chain: Chain::Solana,
+        chain_ctx: Some(solana_sdk::pubkey::Pubkey::new_unique().to_bytes().to_vec()),
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-    })
+    }
 }
 
 struct StartedEthereumStream {
@@ -1122,7 +1122,8 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     let mut saw_respond = false;
     for _ in 0..8 {
         match next_event_within(&mut stream, Duration::from_secs(10)).await? {
-            ChainEvent::Respond(SignatureRespondedEvent::Ethereum(ev)) => {
+            ChainEvent::Respond(ev) => {
+                assert_eq!(ev.chain, mpc_primitives::Chain::Ethereum);
                 assert_eq!(ev.request_id, sign_req.id.request_id);
                 assert_eq!(ev.signature.big_r, expected_big_r);
                 assert_eq!(ev.signature.s, expected_s);

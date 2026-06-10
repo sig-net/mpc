@@ -4,7 +4,7 @@ use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::stream::ops::SignatureEvent;
+
 use crate::util::ethabi_request_id;
 use alloy_sol_types::SolValue;
 use anyhow::{anyhow, Result};
@@ -103,43 +103,43 @@ pub struct HydrationSignatureRequestedEvent {
     pub params: String,
 }
 
-impl SignatureEvent for HydrationSignatureRequestedEvent {
+impl HydrationSignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
         ethabi_request_id(
-            self.sender_string(),
+            &self.sender_string(),
             self.payload,
-            self.path.clone(),
+            &self.path,
             self.key_version,
-            self.chain_id.clone(),
-            self.algo.clone(),
-            self.dest.clone(),
-            self.params.clone(),
+            &self.chain_id,
+            &self.algo,
+            &self.dest,
+            &self.params,
         )
     }
 
-    fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest> {
+    fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
         tracing::info!("found hydration event: {:?}", self);
         if self.deposit == 0 {
             tracing::warn!("deposit is 0, skipping sign request");
-            anyhow::bail!("deposit is 0");
+            return None;
         }
 
         if self.key_version > LATEST_MPC_KEY_VERSION {
             tracing::warn!("unsupported key version: {}", self.key_version);
-            anyhow::bail!("unsupported key version");
+            return None;
         }
 
-        let Some(payload) = Scalar::from_bytes(self.payload) else {
+        let payload = Scalar::from_bytes(self.payload).or_else(|| {
             tracing::warn!(
                 "hydration `sign` did not produce payload hash correctly: {:?}",
                 self.payload,
             );
-            anyhow::bail!("failed to convert event payload hash to scalar");
-        };
+            None
+        })?;
 
         if payload > *MAX_SECP256K1_SCALAR {
             tracing::warn!("payload exceeds secp256k1 curve order: {payload:?}");
-            anyhow::bail!("payload exceeds secp256k1 curve order");
+            return None;
         }
 
         let epsilon = mpc_crypto::kdf::derive_epsilon_hydration(
@@ -151,7 +151,7 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {
         let sign_id = SignId::new(self.generate_request_id());
         tracing::info!(?sign_id, "hydration signature requested");
 
-        Ok(IndexedSignRequest::sign(
+        Some(IndexedSignRequest::sign(
             sign_id,
             SignArgs {
                 entropy,
@@ -165,11 +165,11 @@ impl SignatureEvent for HydrationSignatureRequestedEvent {
         ))
     }
 
-    fn source_chain(&self) -> Chain {
+    pub fn source_chain(&self) -> Chain {
         Chain::Hydration
     }
 
-    fn sender_string(&self) -> String {
+    pub fn sender_string(&self) -> String {
         ss58_address_from_account32(self.sender)
     }
 }
@@ -224,7 +224,7 @@ pub struct HydrationSignBidirectionalRequestedEvent {
     pub respond_serialization_schema: Vec<u8>,
 }
 
-impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
+impl HydrationSignBidirectionalRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
         // Match TypeScript implementation using ABI encoding
         let encoded = (
@@ -242,20 +242,19 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
         alloy::primitives::keccak256(encoded).into()
     }
 
-    fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest> {
+    pub fn generate_sign_request(&self, entropy: [u8; 32]) -> Option<IndexedSignRequest> {
         tracing::info!("found hydration event: {:?}", self);
         if self.deposit == 0 {
             tracing::warn!("deposit is 0, skipping sign request");
-            anyhow::bail!("deposit is 0");
+            return None;
         }
 
         if self.key_version > LATEST_MPC_KEY_VERSION {
             tracing::warn!("unsupported key version: {}", self.key_version);
-            anyhow::bail!("unsupported key version");
+            return None;
         }
 
         let request_id = self.generate_request_id();
-        let rlp_encoded_tx = self.serialized_transaction.clone();
 
         // Call the existing derive_epsilon_sol function with the correct parameters
         // to match the TypeScript implementation
@@ -267,17 +266,18 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
 
         let sign_id = SignId::new(request_id);
         tracing::info!(?sign_id, "hydration signature requested");
-        let unsigned_tx_hash = hash_rlp_data(rlp_encoded_tx);
-        let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
-            anyhow::bail!("Failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
-        };
+        let unsigned_tx_hash = hash_rlp_data(&self.serialized_transaction);
+        let payload = Scalar::from_bytes(unsigned_tx_hash).or_else(|| {
+            tracing::warn!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
+            None
+        })?;
 
         if payload > *MAX_SECP256K1_SCALAR {
             tracing::warn!("payload exceeds secp256k1 curve order: {payload:?}");
-            anyhow::bail!("payload exceeds secp256k1 curve order");
+            return None;
         }
 
-        Ok(IndexedSignRequest::sign_bidirectional(
+        Some(IndexedSignRequest::sign_bidirectional(
             sign_id,
             SignArgs {
                 entropy,
@@ -288,32 +288,31 @@ impl SignatureEvent for HydrationSignBidirectionalRequestedEvent {
             },
             Chain::Hydration,
             crate::util::current_unix_timestamp(),
-            crate::stream::ops::SignBidirectionalEvent::Hydration(self.clone()),
+            crate::stream::ops::SignBidirectionalEvent {
+                sender: self.sender,
+                serialized_transaction: self.serialized_transaction.clone(),
+                caip2_id: self.caip2_id.clone(),
+                key_version: self.key_version,
+                deposit: self.deposit,
+                path: self.path.clone(),
+                algo: self.algo.clone(),
+                dest: self.dest.clone(),
+                params: self.params.clone(),
+                output_deserialization_schema: self.output_deserialization_schema.clone(),
+                respond_serialization_schema: self.respond_serialization_schema.clone(),
+                chain: Chain::Hydration,
+                chain_ctx: None,
+            },
         ))
     }
 
-    fn source_chain(&self) -> Chain {
+    pub fn source_chain(&self) -> Chain {
         Chain::Hydration
     }
 
-    fn sender_string(&self) -> String {
+    pub fn sender_string(&self) -> String {
         ss58_address_from_account32(self.sender)
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HydrationRespondBidirectionalEvent {
-    pub request_id: [u8; 32],
-    pub responder: [u8; 32],
-    pub serialized_output: Vec<u8>,
-    pub signature: Signature,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HydrationSignatureRespondedEvent {
-    pub request_id: [u8; 32],
-    pub responder: [u8; 32],
-    pub signature: Signature,
 }
 
 /// Storage key for `frame_system::Events`.
@@ -506,9 +505,12 @@ pub async fn run(
 
                 let entropy = sp_core::hashing::blake2_256(ev.bytes());
 
-                if let Err(e) = crate::stream::ops::process_sign_event(
-                    Box::new(event),
-                    entropy,
+                let Some(sign_request) = event.generate_sign_request(entropy) else {
+                    continue;
+                };
+
+                if let Err(e) = crate::stream::ops::process_sign_request(
+                    sign_request,
                     sign_tx.clone(),
                     backlog.clone(),
                     true,
@@ -528,11 +530,10 @@ pub async fn run(
                     }
                 };
                 tracing::info!(
-                    "Hydration::Signet::SignatureResponded in block #{number} ({hash:?}): {:?}",
-                    event
+                    "Hydration::Signet::SignatureResponded in block #{number} ({hash:?})"
                 );
                 if let Err(e) = crate::stream::ops::process_respond_event(
-                    crate::stream::ops::SignatureRespondedEvent::Hydration(event),
+                    event,
                     sign_tx.clone(),
                     root_pk,
                     &backlog,
@@ -562,9 +563,12 @@ pub async fn run(
 
                 let entropy = sp_core::hashing::blake2_256(ev.bytes());
 
-                if let Err(e) = crate::stream::ops::process_sign_event(
-                    Box::new(event),
-                    entropy,
+                let Some(sign_request) = event.generate_sign_request(entropy) else {
+                    continue;
+                };
+
+                if let Err(e) = crate::stream::ops::process_sign_request(
+                    sign_request,
                     sign_tx.clone(),
                     backlog.clone(),
                     true,
@@ -578,19 +582,36 @@ pub async fn run(
             // Bidirectional response
             if ev.pallet_name() == PALLET_SIGNET && ev.variant_name() == EVENT_RESPOND_BIDIRECTIONAL
             {
-                let event = match decode_respond_bidirectional(&ev) {
-                    Ok(event) => event,
+                let fields = match ev.field_values() {
+                    Ok(f) => f,
                     Err(e) => {
-                        tracing::error!("failed to decode respond bidirectional event: {e}");
+                        tracing::error!("failed to get fields for respond bidirectional: {e}");
+                        continue;
+                    }
+                };
+                let request_id = match get_named_bytes32(&fields, "request_id") {
+                    Ok(id) => id,
+                    Err(e) => {
+                        tracing::error!("failed to get request_id: {e}");
+                        continue;
+                    }
+                };
+                let signature = match get_named(&fields, "signature").and_then(parse_signature) {
+                    Ok(sig) => sig,
+                    Err(e) => {
+                        tracing::error!(?e, "failed to parse signature");
                         continue;
                     }
                 };
                 tracing::info!(
-                    "Hydration::Signet::RespondBidirectionalEvent in block #{number} ({hash:?}): {:?}",
-                    event
+                    "Hydration::Signet::RespondBidirectionalEvent in block #{number} ({hash:?})"
                 );
                 if let Err(e) = crate::stream::ops::process_respond_bidirectional_event(
-                    crate::stream::ops::RespondBidirectionalEvent::Hydration(event),
+                    crate::stream::ops::RespondBidirectionalEvent {
+                        request_id,
+                        signature,
+                        chain: crate::protocol::Chain::Hydration,
+                    },
                     sign_tx.clone(),
                     root_pk,
                     &backlog,
@@ -656,20 +677,19 @@ fn decode_signature_requested(
 
 fn decode_signature_responded(
     ev: &EventDetails<SubstrateConfig>,
-) -> anyhow::Result<HydrationSignatureRespondedEvent> {
+) -> anyhow::Result<crate::stream::ops::SignatureRespondedEvent> {
     let fields = ev.field_values()?;
 
     let request_id = get_named_bytes32(&fields, "request_id")?;
-    let responder = get_named_bytes32(&fields, "responder")?; // Hydration 一般是 AccountId32
 
     // signature: pallet 的 Signature 结构（嵌套）
     let sig_value = get_named(&fields, "signature")?;
     let mpc_sig = parse_signature(sig_value)?;
 
-    Ok(HydrationSignatureRespondedEvent {
+    Ok(crate::stream::ops::SignatureRespondedEvent {
         request_id,
-        responder,
         signature: mpc_sig,
+        chain: Chain::Hydration,
     })
 }
 
@@ -708,26 +728,6 @@ fn decode_sign_bidirectional_requested(
         params,
         output_deserialization_schema,
         respond_serialization_schema,
-    })
-}
-
-fn decode_respond_bidirectional(
-    ev: &EventDetails<SubstrateConfig>,
-) -> anyhow::Result<HydrationRespondBidirectionalEvent> {
-    let fields = ev.field_values()?;
-
-    let request_id = get_named_bytes32(&fields, "request_id")?;
-    let responder = get_named_bytes32(&fields, "responder")?;
-    let serialized_output = get_named_vec_u8(&fields, "serialized_output")?;
-
-    let sig_val = get_named(&fields, "signature")?;
-    let mpc_sig = parse_signature(sig_val)?;
-
-    Ok(HydrationRespondBidirectionalEvent {
-        request_id,
-        responder,
-        serialized_output,
-        signature: mpc_sig,
     })
 }
 

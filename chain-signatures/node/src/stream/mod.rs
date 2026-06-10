@@ -60,13 +60,13 @@ impl std::fmt::Debug for ChainEvent {
                 .finish(),
             ChainEvent::Respond(ev) => f
                 .debug_tuple("Respond")
-                .field(&ev.request_id())
-                .field(&ev.source_chain().as_str())
+                .field(&ev.request_id)
+                .field(&ev.chain.as_str())
                 .finish(),
             ChainEvent::RespondBidirectional(ev) => f
                 .debug_tuple("RespondBidirectional")
-                .field(&ev.request_id())
-                .field(&ev.source_chain().as_str())
+                .field(&ev.request_id)
+                .field(&ev.chain.as_str())
                 .finish(),
             ChainEvent::CatchupCompleted => write!(f, "CatchupCompleted"),
             ChainEvent::Block(b) => write!(f, "Block({b})"),
@@ -325,10 +325,8 @@ mod tests {
     use crate::protocol::{Chain, IndexedSignRequest};
     use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
     use crate::storage::checkpoint_storage::CheckpointStorage;
-    use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
+    use crate::stream::ops::SignatureRespondedEvent;
     use crate::util::current_unix_timestamp;
-    use alloy::primitives::Address;
-    use k256::elliptic_curve::sec1::ToEncodedPoint;
     use k256::{AffinePoint, Scalar};
     use mockito::Server;
     use mpc_primitives::SignArgs;
@@ -634,16 +632,11 @@ mod tests {
 
         // Prepare a respond event that matches the sign id
         let mpc_sig = valid_signature(&root_sk, &args);
-
-        let sig_responded =
-            SignatureRespondedEvent::Solana(signet_program::SignatureRespondedEvent {
-                request_id: sign_id.request_id,
-                responder: solana_sdk::pubkey::Pubkey::new_unique(),
-                signature: crate::util::mpc_to_sol_signature(
-                    &mpc_sig,
-                    mpc_sig.big_r.to_encoded_point(false),
-                ),
-            });
+        let sig_responded = SignatureRespondedEvent {
+            request_id: sign_id.request_id,
+            signature: mpc_sig,
+            chain: Chain::Solana,
+        };
         let client = SolanaTestStream::new(vec![
             Some(ChainEvent::CatchupCompleted),
             Some(ChainEvent::SignRequest(indexed.clone())),
@@ -699,10 +692,7 @@ mod tests {
     async fn test_stream_handles_sign_bidirectional_block_and_recover() {
         let _ = tracing_subscriber::fmt::try_init();
         use crate::sign_bidirectional::SignStatus;
-        use crate::stream::ops::RespondBidirectionalEvent as RBE;
         use crate::stream::ops::SignBidirectionalEvent as SBE;
-        use crate::stream::ops::SignatureRespondedEvent as SRE;
-        use signet_program::SignBidirectionalEvent;
 
         // shared storage so checkpoint persistence is visible to recovered backlog
         let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
@@ -815,17 +805,18 @@ mod tests {
         rlp_s.append(&0u64);
         let unsigned_rlp = rlp_s.out().to_vec();
 
-        let sign_bidir = SignBidirectionalEvent {
+        let sign_bidir = SBE {
             sender: Default::default(),
             serialized_transaction: unsigned_rlp,
-            dest: Chain::Ethereum.to_string(),
             caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
             key_version: 0,
             deposit: 0,
             path: "".to_string(),
             algo: "".to_string(),
+            dest: Chain::Ethereum.to_string(),
             params: "".to_string(),
-            program_id,
+            chain: Chain::Solana,
+            chain_ctx: Some(program_id.to_bytes().to_vec()),
             output_deserialization_schema: vec![],
             respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         };
@@ -835,7 +826,7 @@ mod tests {
             args.clone(),
             Chain::Solana,
             current_unix_timestamp(),
-            SBE::Solana(sign_bidir.clone()),
+            sign_bidir,
         );
 
         events_tx.send(ChainEvent::CatchupCompleted).await.unwrap();
@@ -873,14 +864,11 @@ mod tests {
             .await;
 
         // Prepare a SignatureRespondedEvent that will advance to bidirectional and register watcher
-        let sig_responded = SRE::Solana(signet_program::SignatureRespondedEvent {
+        let sig_responded = SignatureRespondedEvent {
             request_id: sign_id.request_id,
-            responder: solana_sdk::pubkey::Pubkey::new_unique(),
-            signature: crate::util::mpc_to_sol_signature(
-                &mpc_sig,
-                mpc_sig.big_r.to_encoded_point(false),
-            ),
-        });
+            signature: mpc_sig,
+            chain: Chain::Solana,
+        };
         events_tx
             .send(ChainEvent::Respond(sig_responded))
             .await
@@ -976,15 +964,11 @@ mod tests {
 
         // now send a RespondBidirectional event to complete the request
         // RespondBidirectional should also carry a valid signature
-        let respond_bidirectional = RBE::Solana(signet_program::RespondBidirectionalEvent {
+        let respond_bidirectional = crate::stream::ops::RespondBidirectionalEvent {
             request_id: sign_id.request_id,
-            responder: solana_sdk::pubkey::Pubkey::new_unique(),
-            serialized_output: vec![],
-            signature: crate::util::mpc_to_sol_signature(
-                &new_mpc_sig,
-                new_mpc_sig.big_r.to_encoded_point(false),
-            ),
-        });
+            signature: new_mpc_sig,
+            chain: Chain::Solana,
+        };
         events_tx
             .send(ChainEvent::RespondBidirectional(respond_bidirectional))
             .await
@@ -1038,11 +1022,11 @@ mod tests {
         let root_pk = root_sk.public_key().to_projective().to_affine();
         let mpc_sig = valid_signature(&root_sk, &args);
 
-        let respond = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
+        let respond = SignatureRespondedEvent {
             request_id: sign_id.request_id,
-            responder: Address::ZERO,
             signature: mpc_sig,
-        });
+            chain: Chain::Ethereum,
+        };
 
         let client = EthereumTestStream::new(vec![
             Some(ChainEvent::Respond(respond)),

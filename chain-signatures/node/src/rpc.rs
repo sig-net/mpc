@@ -2062,15 +2062,23 @@ async fn try_publish_canton(
     }))?;
 
     let (choice, command_id, choice_argument) = match &action.indexed.kind {
-        SignKind::SignBidirectional(crate::stream::ops::SignBidirectionalEvent::Canton(event)) => (
-            "Respond",
-            format!("mpc-respond-{request_id_hex}"),
-            serde_json::json!({
-                "signEventCid": &event.sign_event_contract_id,
-                "requestId": request_id_hex,
-                "signature": canton_signature,
-            }),
-        ),
+        SignKind::SignBidirectional(event) if event.chain == Chain::Canton => {
+            let chain_ctx_bytes = event
+                .chain_ctx
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("missing chain_ctx on Canton sign request"))?;
+            let ctx: crate::indexer_canton::CantonChainCtx = borsh::from_slice(chain_ctx_bytes)
+                .map_err(|e| anyhow::anyhow!("failed to deserialize CantonChainCtx: {e}"))?;
+            (
+                "Respond",
+                format!("mpc-respond-{request_id_hex}"),
+                serde_json::json!({
+                    "signEventCid": ctx.sign_event_contract_id,
+                    "requestId": request_id_hex,
+                    "signature": canton_signature,
+                }),
+            )
+        }
         SignKind::RespondBidirectional(respond_tx) => {
             let chain_ctx_bytes = respond_tx
                 .chain_ctx

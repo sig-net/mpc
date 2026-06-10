@@ -1003,7 +1003,7 @@ mod tests {
         let prefix_len = dest.len().min(program_id.len());
         program_id[..prefix_len].copy_from_slice(&dest.as_bytes()[..prefix_len]);
 
-        SignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
+        SignBidirectionalEvent {
             sender: Default::default(),
             serialized_transaction: vec![],
             dest: dest.to_string(),
@@ -1013,10 +1013,11 @@ mod tests {
             path: "".to_string(),
             algo: "".to_string(),
             params: "".to_string(),
-            program_id: Pubkey::new_from_array(program_id),
+            chain: Chain::Solana,
+            chain_ctx: Some(program_id.to_vec()),
             output_deserialization_schema: vec![],
             respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-        })
+        }
     }
 
     fn create_test_args(id: u8) -> SignArgs {
@@ -1590,22 +1591,21 @@ mod tests {
         };
 
         let program_id = Pubkey::new_unique();
-        let sign_kind = SignKind::SignBidirectional(SignBidirectionalEvent::Solana(
-            signet_program::SignBidirectionalEvent {
-                sender: Default::default(),
-                serialized_transaction: vec![1, 2, 3],
-                dest: "ethereum".to_string(),
-                caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
-                key_version: 1,
-                deposit: 10,
-                path: "m/0".to_string(),
-                algo: "ECDSA".to_string(),
-                params: "{}".to_string(),
-                program_id,
-                output_deserialization_schema: vec![9],
-                respond_serialization_schema: vec![8],
-            },
-        ));
+        let sign_kind = SignKind::SignBidirectional(SignBidirectionalEvent {
+            sender: Default::default(),
+            serialized_transaction: vec![1, 2, 3],
+            dest: "ethereum".to_string(),
+            caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
+            key_version: 1,
+            deposit: 10,
+            path: "m/0".to_string(),
+            algo: "ECDSA".to_string(),
+            params: "{}".to_string(),
+            chain: Chain::Solana,
+            chain_ctx: Some(program_id.to_bytes().to_vec()),
+            output_deserialization_schema: vec![9],
+            respond_serialization_schema: vec![8],
+        });
 
         backlog
             .insert(create_indexed_request(

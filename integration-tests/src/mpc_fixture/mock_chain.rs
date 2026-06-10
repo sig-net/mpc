@@ -2,9 +2,10 @@
 //! optional per-node filters for simulating event misses.
 
 use crate::mpc_fixture::mock_stream::MockStream;
-use mpc_node::protocol::IndexedSignRequest;
+use mpc_node::protocol::{IndexedSignRequest, SignKind};
 use mpc_node::rpc::RpcAction;
 use mpc_node::stream::ChainEvent;
+use mpc_primitives::Chain;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -59,11 +60,6 @@ impl MockChain {
     }
 
     fn rpc_action_to_events(action: &RpcAction) -> Vec<ChainEvent> {
-        use elliptic_curve::sec1::ToEncodedPoint;
-        use mpc_node::protocol::SignKind;
-        use mpc_primitives::Chain;
-        use solana_sdk::pubkey::Pubkey;
-
         let RpcAction::Publish(publish_action) = action;
 
         if publish_action.indexed.chain != Chain::Solana {
@@ -77,13 +73,11 @@ impl MockChain {
             return vec![];
         }
 
-        let big_r = publish_action.signature.big_r.to_encoded_point(false);
-        let sol_event = signet_program::SignatureRespondedEvent {
+        let respond_event = mpc_node::stream::ops::SignatureRespondedEvent {
             request_id: publish_action.indexed.id.request_id,
-            responder: Pubkey::new_unique(),
-            signature: mpc_node::util::mpc_to_sol_signature(&publish_action.signature, big_r),
+            signature: publish_action.signature,
+            chain: Chain::Solana,
         };
-        let respond_event = mpc_node::stream::ops::SignatureRespondedEvent::Solana(sol_event);
         vec![ChainEvent::Respond(respond_event)]
     }
 }

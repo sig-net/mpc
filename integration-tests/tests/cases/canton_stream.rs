@@ -6,7 +6,7 @@ use mpc_node::backlog::Backlog;
 use mpc_node::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
 use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
 use mpc_node::protocol::{Chain, IndexedSignRequest, SignKind};
-use mpc_node::stream::ops::SignatureRespondedEvent;
+use mpc_node::sign_bidirectional::hash_rlp_data;
 use mpc_node::stream::{catchup_then_livestream, ChainEvent, ChainStream};
 use mpc_primitives::{ScalarExt, Signature, LATEST_MPC_KEY_VERSION};
 use serde_json::json;
@@ -73,23 +73,23 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
         panic!("expected SignBidirectional, got {:?}", event.kind);
     };
 
-    let expected_hash = mpc_node::sign_bidirectional::hash_rlp_data(bidir.serialized_transaction());
+    let expected_hash = hash_rlp_data(&bidir.serialized_transaction);
     let expected_payload = <k256::Scalar as ScalarExt>::from_bytes(expected_hash)
         .expect("test tx hash must be a valid scalar");
     assert_eq!(
         event.args.payload, expected_payload,
         "payload should match keccak256 of normalized serialized_transaction"
     );
-    assert_eq!(bidir.caip2_id(), expected_event.caip2_id);
-    assert_eq!(bidir.dest(), expected_event.dest);
-    assert_eq!(bidir.key_version(), expected_event.key_version);
-    assert_eq!(bidir.path(), expected_event.path);
+    assert_eq!(bidir.caip2_id, expected_event.caip2_id);
+    assert_eq!(bidir.dest, expected_event.dest);
+    assert_eq!(bidir.key_version, expected_event.key_version);
+    assert_eq!(bidir.path, expected_event.path);
     assert_eq!(
-        bidir.output_deserialization_schema(),
+        bidir.output_deserialization_schema,
         expected_event.output_deserialization_schema.as_bytes()
     );
     assert_eq!(
-        bidir.respond_serialization_schema(),
+        bidir.respond_serialization_schema,
         expected_event.respond_serialization_schema.as_bytes()
     );
     Ok(())
@@ -363,9 +363,15 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     assert_eq!(sign_event.chain, Chain::Canton);
     let request_id = hex::encode(sign_event.id.request_id);
     let sign_event_cid = match &sign_event.kind {
-        SignKind::SignBidirectional(mpc_node::stream::ops::SignBidirectionalEvent::Canton(
-            canton_event,
-        )) => canton_event.sign_event_contract_id.clone(),
+        SignKind::SignBidirectional(event) if event.chain == Chain::Canton => {
+            let chain_ctx_bytes = event
+                .chain_ctx
+                .as_deref()
+                .expect("missing chain_ctx on Canton sign request");
+            let ctx: mpc_node::indexer_canton::CantonChainCtx =
+                borsh::from_slice(chain_ctx_bytes).expect("failed to deserialize CantonChainCtx");
+            ctx.sign_event_contract_id.clone()
+        }
         _ => panic!("expected Canton SignBidirectional event"),
     };
 
@@ -402,7 +408,8 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     let mut saw_respond = false;
     for _ in 0..10 {
         match timeout(Duration::from_secs(5), stream.next_event()).await {
-            Ok(Some(ChainEvent::Respond(SignatureRespondedEvent::Canton(ev)))) => {
+            Ok(Some(ChainEvent::Respond(ev))) => {
+                assert_eq!(ev.chain, mpc_primitives::Chain::Canton);
                 assert_eq!(hex::encode(ev.request_id), request_id);
                 assert_eq!(ev.signature.big_r, expected_big_r);
                 assert_eq!(ev.signature.s, expected_s);
@@ -441,37 +448,31 @@ async fn test_canton_stream_parse_sign_bidirectional_fields() -> Result<()> {
         panic!("expected SignBidirectional, got {:?}", req.kind);
     };
 
-    assert_eq!(bidir.caip2_id(), expected_event.caip2_id);
-    assert_eq!(bidir.dest(), expected_event.dest);
-    assert_eq!(bidir.path(), expected_event.path);
-    assert_eq!(bidir.key_version(), expected_event.key_version);
+    assert_eq!(bidir.caip2_id, expected_event.caip2_id);
+    assert_eq!(bidir.dest, expected_event.dest);
+    assert_eq!(bidir.path, expected_event.path);
+    assert_eq!(bidir.key_version, expected_event.key_version);
     let expected_sender = hex::decode(&expected_event.sender)?;
     assert_eq!(
-        bidir.sender(),
+        bidir.sender,
         <[u8; 32]>::try_from(expected_sender.as_slice())?
     );
-    assert!(
-        matches!(
-            bidir,
-            mpc_node::stream::ops::SignBidirectionalEvent::Canton(_)
-        ),
-        "expected Canton variant"
-    );
+    assert_eq!(bidir.chain, Chain::Canton, "expected Canton chain");
     assert_eq!(
         bidir.target_chain()?,
         Chain::Ethereum,
         "caip2_id should parse to Chain::Ethereum"
     );
     assert_eq!(
-        bidir.output_deserialization_schema(),
+        bidir.output_deserialization_schema,
         expected_event.output_deserialization_schema.as_bytes()
     );
     assert_eq!(
-        bidir.respond_serialization_schema(),
+        bidir.respond_serialization_schema,
         expected_event.respond_serialization_schema.as_bytes()
     );
     assert!(
-        !bidir.serialized_transaction().is_empty(),
+        !bidir.serialized_transaction.is_empty(),
         "RLP-encoded tx should not be empty"
     );
     Ok(())
