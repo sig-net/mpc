@@ -62,7 +62,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: component-test
-          cache-targets: false
+          cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
           save-if: ${{ github.ref == 'refs/heads/develop' }}
@@ -179,7 +179,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: integration-test
-          cache-targets: false
+          cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
           save-if: ${{ github.ref == 'refs/heads/develop' }}

@@ -95,10 +95,12 @@ debug = 0
 debug = 0 
 
 [profile.fixture]
-inherits = "test"
+inherits = "release"
+debug = 0
 
 [profile.cluster]
-inherits = "test"
+inherits = "release"
+debug = 0
 
 [profile.release]
 debug = 0
