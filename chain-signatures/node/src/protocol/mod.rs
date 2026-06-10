@@ -30,7 +30,7 @@ use crate::protocol::signature::SignatureSpawnerTask;
 use crate::respond_bidirectional::RespondBidirectionalTx;
 use crate::rpc::ContractStateWatcher;
 use crate::storage::presignature_storage::PresignatureStorage;
-use crate::storage::secret_storage::SecretNodeStorageBox;
+use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::TripleStorage;
 
 use near_account_id::AccountId;
@@ -42,7 +42,7 @@ use tokio::sync::{mpsc, watch};
 
 pub struct MpcSignProtocol {
     pub(crate) my_account_id: AccountId,
-    pub(crate) secret_storage: SecretNodeStorageBox,
+    pub(crate) secret_storage: SecretNodeStorageVariant,
     pub(crate) triple_storage: TripleStorage,
     pub(crate) presignature_storage: PresignatureStorage,
     pub(crate) sign_task: SignatureSpawnerTask,

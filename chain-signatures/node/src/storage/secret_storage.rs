@@ -11,12 +11,16 @@ use near_account_id::AccountId;
 
 #[async_trait]
 pub trait SecretNodeStorage {
+    /// Stores the given `PersistentNodeData` securely.
     async fn store(&mut self, data: &PersistentNodeData) -> SecretResult<()>;
+    /// Loads the `PersistentNodeData` if it exists.
+    /// Returns `Ok(None)` if the data does not exist.
     async fn load(&self) -> SecretResult<Option<PersistentNodeData>>;
 }
 
+/// In-memory implementation of `SecretNodeStorage`.
 #[derive(Default)]
-struct MemoryNodeStorage {
+pub struct MemoryNodeStorage {
     node_data: Option<PersistentNodeData>,
 }
 
@@ -34,7 +38,8 @@ impl SecretNodeStorage for MemoryNodeStorage {
     }
 }
 
-struct SecretManagerNodeStorage {
+/// GCP Secret Manager implementation of `SecretNodeStorage`.
+pub struct SecretManagerNodeStorage {
     secret_manager: SecretManagerService,
     sk_share_secret_id: String,
 }
@@ -80,7 +85,8 @@ impl SecretNodeStorage for SecretManagerNodeStorage {
     }
 }
 
-struct DiskNodeStorage {
+/// Local disk storage implementation of `SecretNodeStorage`.
+pub struct DiskNodeStorage {
     path: PathBuf,
 }
 
@@ -129,29 +135,58 @@ impl SecretNodeStorage for DiskNodeStorage {
     }
 }
 
-pub type SecretNodeStorageBox = Box<dyn SecretNodeStorage + Send + Sync>;
+/// Enum representing the different variants of secret node storage.
+pub enum SecretNodeStorageVariant {
+    /// In-memory storage variant, primarily for testing or ephemeral use cases.
+    Memory(MemoryNodeStorage),
+    /// Google Cloud Secret Manager storage variant
+    Gcp(SecretManagerNodeStorage),
+    /// Local disk storage variant, storing secrets in a file on the local filesystem.
+    Disk(DiskNodeStorage),
+}
 
+impl SecretNodeStorageVariant {
+    /// Stores the given `PersistentNodeData` using the underlying storage mechanism.
+    pub async fn store(&mut self, data: &PersistentNodeData) -> SecretResult<()> {
+        match self {
+            SecretNodeStorageVariant::Memory(s) => s.store(data).await,
+            SecretNodeStorageVariant::Gcp(s) => s.store(data).await,
+            SecretNodeStorageVariant::Disk(s) => s.store(data).await,
+        }
+    }
+
+    /// Loads the `PersistentNodeData` from the underlying storage mechanism, if it exists.
+    pub async fn load(&self) -> SecretResult<Option<PersistentNodeData>> {
+        match self {
+            SecretNodeStorageVariant::Memory(s) => s.load().await,
+            SecretNodeStorageVariant::Gcp(s) => s.load().await,
+            SecretNodeStorageVariant::Disk(s) => s.load().await,
+        }
+    }
+}
+
+/// Initializes the appropriate `SecretNodeStorageVariant` based on the provided options and GCP service.
 pub fn init(
     gcp_service: Option<&GcpService>,
     opts: &Options,
     account_id: &AccountId,
-) -> SecretNodeStorageBox {
+) -> SecretNodeStorageVariant {
     match gcp_service {
         Some(gcp) if opts.sk_share_secret_id.is_some() => {
             tracing::info!("using SecretManagerNodeStorage");
-            Box::new(SecretManagerNodeStorage::new(
+            SecretNodeStorageVariant::Gcp(SecretManagerNodeStorage::new(
                 &gcp.secret_manager.clone(),
-                opts.clone().sk_share_secret_id.unwrap().clone(),
-            )) as SecretNodeStorageBox
+                opts.sk_share_secret_id.clone().unwrap(),
+            ))
         }
         _ => {
             if let Some(sk_share_local_path) = &opts.sk_share_local_path {
                 let path = format!("{sk_share_local_path}-{account_id}");
                 tracing::info!("using DiskNodeStorage with path: {}", path);
-                Box::new(DiskNodeStorage::new(&path)) as SecretNodeStorageBox
+                SecretNodeStorageVariant::Disk(DiskNodeStorage::new(&path))
             } else {
                 tracing::info!("using MemoryNodeStorage");
-                Box::<MemoryNodeStorage>::default() as SecretNodeStorageBox
+                SecretNodeStorageVariant::Memory(MemoryNodeStorage::default())
             }
         }
     }
@@ -162,7 +197,7 @@ pub fn test_store(
     epoch: u64,
     private_share: crate::types::SecretKeyShare,
     public_key: mpc_crypto::PublicKey,
-) -> SecretNodeStorageBox {
+) -> SecretNodeStorageVariant {
     let store = MemoryNodeStorage {
         node_data: Some(PersistentNodeData {
             epoch,
@@ -170,5 +205,5 @@ pub fn test_store(
             public_key,
         }),
     };
-    Box::new(store) as SecretNodeStorageBox
+    SecretNodeStorageVariant::Memory(store)
 }
