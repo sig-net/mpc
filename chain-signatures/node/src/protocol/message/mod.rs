@@ -1,6 +1,7 @@
 mod filter;
 mod sub;
 mod types;
+pub mod quic;
 
 pub use sub::{Subscriber, POSIT_INBOX_CHANNEL_SIZE};
 
@@ -449,10 +450,22 @@ impl MessageChannel {
         client: NodeClient,
         config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
+        port: u16,
+        use_quic: bool,
     ) -> Self {
         let (inbox, outbox, channel) = Self::new();
         tokio::spawn(inbox.run(config.clone(), contract.clone()));
-        tokio::spawn(outbox.run(client, config, contract));
+
+        let sender = if use_quic {
+            let quic_client = std::sync::Arc::new(quic::QuicConnectionPool::new().unwrap());
+            let inbox_tx = channel.inbox.clone();
+            quic::start_quic_server(port, inbox_tx).unwrap();
+            MessageSender::Quic(quic_client)
+        } else {
+            MessageSender::Http(client)
+        };
+
+        tokio::spawn(outbox.run(sender, config, contract));
 
         channel
     }
@@ -844,6 +857,12 @@ pub struct Partition {
     timestamp: Instant,
 }
 
+#[derive(Clone)]
+pub enum MessageSender {
+    Http(NodeClient),
+    Quic(std::sync::Arc<quic::QuicConnectionPool>),
+}
+
 /// Message outbox is the set of messages that are pending to be sent to other nodes.
 /// These messages will be signed and encrypted before being sent out.
 pub struct MessageOutbox {
@@ -930,7 +949,7 @@ impl MessageOutbox {
     /// Send the encrypted messages to other participants.
     pub async fn send(
         &mut self,
-        client: &NodeClient,
+        sender: &MessageSender,
         participants: &Participants,
         cfg: &ProtocolConfig,
         encrypted: HashMap<MessageRoute, Vec<(Ciphered, Instant, usize)>>,
@@ -946,7 +965,7 @@ impl MessageOutbox {
 
                 metrics::messaging::NUM_SEND_ENCRYPTED_TOTAL.inc_by(message_len as f64);
 
-                let client = client.clone();
+                let sender = sender.clone();
                 tokio::spawn(async move {
                     let instant = Instant::now();
                     metrics::messaging::MSG_CLIENT_SEND_DELAY
@@ -965,7 +984,12 @@ impl MessageOutbox {
                                 );
                                 break;
                             }
-                            result = client.msg(&url, payload) => {
+                            result = async {
+                                match &sender {
+                                    MessageSender::Http(client) => client.msg(&url, payload).await.map_err(anyhow::Error::from),
+                                    MessageSender::Quic(quic_client) => quic_client.send(&url, payload).await,
+                                }
+                            } => {
                                 let Err(err) = result else {
                                     crate::metrics::messaging::SEND_ENCRYPTED_LATENCY.observe(start.elapsed().as_millis() as f64);
                                     break;
@@ -990,7 +1014,7 @@ impl MessageOutbox {
     /// Publish messages to other nodes
     async fn publish(
         &mut self,
-        client: &NodeClient,
+        sender: &MessageSender,
         config: &watch::Receiver<Config>,
         contract: &ContractStateWatcher,
     ) {
@@ -1000,13 +1024,13 @@ impl MessageOutbox {
         let config = config.borrow().clone();
         let compacted = self.compact();
         let encrypted = self.encrypt(&config.local.network.sign_sk, &participants, compacted);
-        self.send(client, &participants, &config.protocol, encrypted)
+        self.send(sender, &participants, &config.protocol, encrypted)
             .await;
     }
 
     pub async fn run(
         mut self,
-        client: NodeClient,
+        sender: MessageSender,
         config: watch::Receiver<Config>,
         contract: ContractStateWatcher,
     ) {
@@ -1020,7 +1044,7 @@ impl MessageOutbox {
                     entry.push((msg, timestamp));
                 }
                 _ = interval.tick() => {
-                    self.publish(&client, &config, &contract).await;
+                    self.publish(&sender, &config, &contract).await;
                 }
             }
         }

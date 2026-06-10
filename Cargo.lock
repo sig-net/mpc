@@ -5479,7 +5479,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2 0.4.10",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -6906,7 +6906,7 @@ dependencies = [
  "futures-rustls",
  "libp2p-core",
  "libp2p-identity",
- "rcgen",
+ "rcgen 0.10.0",
  "ring 0.16.20",
  "rustls 0.20.9",
  "thiserror 1.0.69",
@@ -7310,6 +7310,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fafa6961cabd9c63bcd77a45d7e3b7f3b552b70417831fb0f56db717e72407e"
 
 [[package]]
+name = "mpc-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-extra",
+ "cait-sith",
+ "ciborium",
+ "criterion",
+ "mpc-keys",
+ "mpc-node",
+ "near-crypto 0.26.0",
+ "tokio",
+]
+
+[[package]]
 name = "mpc-contract"
 version = "1.16.2"
 dependencies = [
@@ -7412,10 +7428,13 @@ dependencies = [
  "opentelemetry_sdk",
  "parity-scale-codec",
  "prometheus 0.14.0",
+ "quinn",
  "rand 0.8.5",
+ "rcgen 0.13.2",
  "redis",
  "reqwest 0.11.27",
  "rlp",
+ "rustls 0.23.28",
  "semver 1.0.26",
  "serde",
  "serde-aux",
@@ -9399,6 +9418,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64 0.22.1",
+ "serde_core",
+]
+
+[[package]]
 name = "pem-rfc7468"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10252,8 +10281,21 @@ version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ffbe84efe2f38dea12e9bfc1f65377fdf03e53a18cb3b995faedf7934c7e785b"
 dependencies = [
- "pem",
+ "pem 1.1.1",
  "ring 0.16.20",
+ "time",
+ "yasna",
+]
+
+[[package]]
+name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "pem 3.0.6",
+ "ring 0.17.14",
+ "rustls-pki-types",
  "time",
  "yasna",
 ]
@@ -11106,7 +11148,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs 1.0.6",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -13896,7 +13938,7 @@ dependencies = [
  "libc",
  "log",
  "nix 0.30.1",
- "pem",
+ "pem 1.1.1",
  "percentage",
  "quinn",
  "quinn-proto 0.11.14",

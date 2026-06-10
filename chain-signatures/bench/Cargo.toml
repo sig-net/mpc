@@ -1,0 +1,22 @@
+[package]
+name = "mpc-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bench]]
+name = "messaging"
+path = "benches/messaging.rs"
+harness = false
+
+[dependencies]
+anyhow = { workspace = true }
+axum = "0.7.9"
+axum-extra = "0.9.6"
+cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
+ciborium = { workspace = true }
+criterion = "0.5.1"
+mpc-keys = { path = "../keys" }
+mpc-node = { path = "../node", default-features = false, features = ["test-feature", "bench"] }
+near-crypto = "0.26.0"
+tokio = { version = "1.45.1", features = ["full"] }

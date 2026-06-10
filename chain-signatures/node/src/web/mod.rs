@@ -1,5 +1,5 @@
-mod cbor;
-mod error;
+pub mod cbor;
+pub mod error;
 #[cfg(test)]
 pub mod mock;
 
