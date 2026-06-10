@@ -16,7 +16,7 @@ jobs:
   # Light-weight component tests using the MPC fixture, these can run in parallel.
   component-test:
     name: Component Test
-    runs-on: warp-ubuntu-latest-x64-8x
+    runs-on: warp-ubuntu-latest-x64-4x
 
     steps:
       - name: Comment on PR if this is a re-run
@@ -65,7 +65,7 @@ jobs:
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
-          # save-if: ${{ github.ref == 'refs/heads/develop' }}
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -86,22 +86,6 @@ jobs:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
 
-      - name: Cargo cache stats
-        run: |
-          du -sh target || true
-          du -sh target/debug || true
-          du -sh target/release || true
-          du -sh target/wasm32-unknown-unknown || true
-
-      - name: Cache diagnostics
-        run: |
-          find target -type d -name incremental -exec du -sh {} + | sort -hr | head -20
-
-      - name: Target breakdown
-        run: |
-          du -sh target/debug/*
-          du -sh target/release/*
-
   # Integration tests that share the mpc_it_network Docker network and thus must run sequentially.
   # This also requires additional Solana/Anchor setup.
   sequential-integration-test:
@@ -110,7 +94,7 @@ jobs:
     strategy:
       matrix:
         # FIXME: macos-latest-xl is disabled since colima is erroring out right now
-        os: [warp-ubuntu-latest-x64-8x]
+        os: [warp-ubuntu-latest-x64-4x]
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -182,7 +166,7 @@ jobs:
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
-          # save-if: ${{ github.ref == 'refs/heads/develop' }}
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       - name: Build Chain-Signatures Contract
         run: ./build-contract.sh
@@ -208,19 +192,3 @@ jobs:
           IT_ETH_CONTRACT_ADDR: ${{ secrets.IT_ETH_CONTRACT_ADDR }}
           IT_ETH_CONSENSUS_RPC_URL: ${{ secrets.IT_ETH_CONSENSUS_RPC_URL }}
           IT_ETH_EXECUTION_RPC_URL: ${{ secrets.IT_ETH_EXECUTION_RPC_URL }}
-
-      - name: Cargo cache stats
-        run: |
-          du -sh target || true
-          du -sh target/debug || true
-          du -sh target/release || true
-          du -sh target/wasm32-unknown-unknown || true
-
-      - name: Cache diagnostics
-        run: |
-          find target -type d -name incremental -exec du -sh {} + | sort -hr | head -20
-
-      - name: Target breakdown
-        run: |
-          du -sh target/debug/*
-          du -sh target/release/*
