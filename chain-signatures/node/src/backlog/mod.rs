@@ -870,7 +870,7 @@ mod tests {
         let prefix_len = dest.len().min(program_id.len());
         program_id[..prefix_len].copy_from_slice(&dest.as_bytes()[..prefix_len]);
 
-        SignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
+        SignBidirectionalEvent {
             sender: Default::default(),
             serialized_transaction: vec![],
             dest: dest.to_string(),
@@ -880,10 +880,11 @@ mod tests {
             path: "".to_string(),
             algo: "".to_string(),
             params: "".to_string(),
-            program_id: Pubkey::new_from_array(program_id),
+            chain: Chain::Solana,
+            chain_ctx: Some(program_id.to_vec()),
             output_deserialization_schema: vec![],
             respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-        })
+        }
     }
 
     fn create_test_args(id: u8) -> SignArgs {
@@ -1232,7 +1233,7 @@ mod tests {
         assert_eq!(checkpoint.pending_requests.len(), 2);
         assert_eq!(
             checkpoint.digest(),
-            digest_hex("cda40bc6a6ddf5783311686ae9ecfbd415315358d4c2a48bd204a4efb5430dd2")
+            digest_hex("1375def17d26f1771024dc8a2fd7814b216d4e9d2922517364d7515a77f70ca6")
         );
     }
 
@@ -1327,11 +1328,11 @@ mod tests {
 
         assert_eq!(
             checkpoint1.digest(),
-            digest_hex("2607b4f5c40463fe118b992642f768231b3faa5a6a6f6f510d765e643be187b1")
+            digest_hex("9f63c8dcffa4b078f57c0be1d0031969f45023a56a81309951ed4e48e78cee06")
         );
         assert_eq!(
             checkpoint2.digest(),
-            digest_hex("f9c763c10e79f375f13e1e9b4171e0b9df33e795bd56ce88c9ce79b97e030ba0")
+            digest_hex("216925686b085ef868ae5e3c40d1ce616f71374a3d1b82228dc7abde8adebe24")
         );
     }
 
@@ -1359,7 +1360,7 @@ mod tests {
         assert_eq!(checkpoint, deserialized);
         assert_eq!(
             checkpoint.digest(),
-            digest_hex("671a17aaf9550c47144630e5792c081ae1698c093020ddac2c38728d160fe73f")
+            digest_hex("b41606a6b5be62aa9098f55058195c270e08aeffee149e0b0f299538197cde19")
         );
         assert_eq!(checkpoint.digest(), deserialized.digest());
 
@@ -1451,22 +1452,21 @@ mod tests {
         };
 
         let program_id = Pubkey::new_unique();
-        let sign_kind = SignKind::SignBidirectional(SignBidirectionalEvent::Solana(
-            signet_program::SignBidirectionalEvent {
-                sender: Default::default(),
-                serialized_transaction: vec![1, 2, 3],
-                dest: "ethereum".to_string(),
-                caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
-                key_version: 1,
-                deposit: 10,
-                path: "m/0".to_string(),
-                algo: "ECDSA".to_string(),
-                params: "{}".to_string(),
-                program_id,
-                output_deserialization_schema: vec![9],
-                respond_serialization_schema: vec![8],
-            },
-        ));
+        let sign_kind = SignKind::SignBidirectional(SignBidirectionalEvent {
+            sender: Default::default(),
+            serialized_transaction: vec![1, 2, 3],
+            dest: "ethereum".to_string(),
+            caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
+            key_version: 1,
+            deposit: 10,
+            path: "m/0".to_string(),
+            algo: "ECDSA".to_string(),
+            params: "{}".to_string(),
+            chain: Chain::Solana,
+            chain_ctx: Some(program_id.to_bytes().to_vec()),
+            output_deserialization_schema: vec![9],
+            respond_serialization_schema: vec![8],
+        });
 
         backlog
             .insert(create_indexed_request(

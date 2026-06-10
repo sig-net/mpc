@@ -12,11 +12,11 @@ pub use stream::{parse_canton_signature, CantonStream};
 
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::stream::ops::{SignBidirectionalEvent, SignatureEvent};
+use crate::stream::ops::SignBidirectionalEvent;
 use alloy::consensus::{SignableTransaction, TxEip1559};
 use borsh::{BorshDeserialize, BorshSerialize};
 use k256::Scalar;
-use mpc_primitives::{ScalarExt, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{ScalarExt, SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use std::fmt;
 
 use contracts::TxParams as CantonTxParams;
@@ -86,29 +86,12 @@ impl CantonSignBidirectionalRequestedEvent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CantonRespondBidirectionalEvent {
-    pub request_id: [u8; 32],
-    pub responder: String,
-    pub serialized_output: Vec<u8>,
-    pub signature: Signature,
-}
-// NOTE: No Hash derive — Signature contains k256 types that don't impl Hash
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct CantonSignatureRespondedEvent {
-    pub request_id: [u8; 32],
-    pub responder: String,
-    pub signature: Signature,
-}
-// NOTE: No Hash, PartialEq, Eq derives — matches HydrationSignatureRespondedEvent
-
-impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
-    fn generate_request_id(&self) -> [u8; 32] {
+impl CantonSignBidirectionalRequestedEvent {
+    pub fn generate_request_id(&self) -> [u8; 32] {
         self.request_id
     }
 
-    fn generate_sign_request(
+    pub fn generate_sign_request(
         &self,
         entropy: [u8; 32],
     ) -> anyhow::Result<crate::protocol::IndexedSignRequest> {
@@ -127,7 +110,7 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
             &self.path,
         );
 
-        let unsigned_tx_hash = hash_rlp_data(self.serialized_transaction.clone());
+        let unsigned_tx_hash = hash_rlp_data(&self.serialized_transaction);
 
         let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
             anyhow::bail!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
@@ -135,6 +118,12 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
 
         let sign_id = SignId::new(request_id);
         tracing::info!(?sign_id, "canton signature requested");
+
+        let ctx = CantonChainCtx {
+            sign_event_contract_id: self.sign_event_contract_id.clone(),
+        };
+        let chain_ctx =
+            Some(borsh::to_vec(&ctx).expect("CantonChainCtx Borsh serialization is infallible"));
 
         Ok(crate::protocol::IndexedSignRequest::sign_bidirectional(
             sign_id,
@@ -147,15 +136,29 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
             },
             Chain::Canton,
             crate::util::current_unix_timestamp(),
-            SignBidirectionalEvent::Canton(self.clone()),
+            SignBidirectionalEvent {
+                sender: self.sender,
+                serialized_transaction: self.serialized_transaction.clone(),
+                caip2_id: self.caip2_id.clone(),
+                key_version: self.key_version,
+                deposit: 0,
+                path: self.path.clone(),
+                algo: self.algo.clone(),
+                dest: self.dest.clone(),
+                params: self.params.clone(),
+                output_deserialization_schema: self.output_deserialization_schema.clone(),
+                respond_serialization_schema: self.respond_serialization_schema.clone(),
+                chain: Chain::Canton,
+                chain_ctx,
+            },
         ))
     }
 
-    fn source_chain(&self) -> Chain {
+    pub fn source_chain(&self) -> Chain {
         Chain::Canton
     }
 
-    fn sender_string(&self) -> String {
+    pub fn sender_string(&self) -> String {
         hex::encode(self.sender)
     }
 }

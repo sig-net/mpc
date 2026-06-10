@@ -1,10 +1,8 @@
 use async_trait::async_trait;
-use elliptic_curve::sec1::ToEncodedPoint;
 use mpc_node::protocol::{IndexedSignRequest, SignKind};
 use mpc_node::rpc::RpcAction;
 use mpc_node::stream::{ChainEvent, ChainIndexer, ChainStream};
 use mpc_primitives::Chain;
-use solana_sdk::pubkey::Pubkey;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -165,15 +163,11 @@ impl InnerMockStream {
                 continue;
             }
 
-            // type conversions that would usually happen in RPC publishing -> Solana contract -> CPI event library
-            let big_r = publish_action.signature.big_r.to_encoded_point(false);
-            let sol_event = signet_program::SignatureRespondedEvent {
+            let respond_event = mpc_node::stream::ops::SignatureRespondedEvent {
                 request_id: publish_action.indexed.id.request_id,
-                responder: Pubkey::new_unique(),
-                signature: mpc_node::util::mpc_to_sol_signature(&publish_action.signature, big_r),
+                signature: publish_action.signature,
+                chain: Chain::Solana,
             };
-
-            let respond_event = mpc_node::stream::ops::SignatureRespondedEvent::Solana(sol_event);
 
             block.push(ChainEvent::Respond(respond_event));
         }
