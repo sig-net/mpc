@@ -61,11 +61,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: component-test
+          shared-key: component-test-2
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          # save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
@@ -178,11 +178,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: integration-test
+          shared-key: integration-test-2
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
-          save-if: ${{ github.ref == 'refs/heads/develop' }}
+          # save-if: ${{ github.ref == 'refs/heads/develop' }}
 
       - name: Build Chain-Signatures Contract
         run: ./build-contract.sh
