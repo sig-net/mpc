@@ -195,6 +195,10 @@ impl<T> Subscriber<T> {
     }
 
     pub fn try_send_lossy(&self, msg: T) -> Result<(), mpsc::error::SendError<T>> {
+        // TODO: https://github.com/sig-net/mpc/issues/864
+        // Need to drop messages in a more well defined manner than just dropping
+        // whatever message is latest. We'd likely need the latest vs the oldest
+        // since the oldest message would have a higher chance of being out of date.
         let result = match &self.kind {
             SubscriberKind::Subscribed(tx) | SubscriberKind::Unsubscribed(tx, _) => {
                 match tx.try_send(msg) {
