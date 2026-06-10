@@ -16,7 +16,7 @@ jobs:
   # Light-weight component tests using the MPC fixture, these can run in parallel.
   component-test:
     name: Component Test
-    runs-on: warp-ubuntu-latest-x64-4x
+    runs-on: warp-ubuntu-latest-x64-8x
 
     steps:
       - name: Comment on PR if this is a re-run
@@ -110,7 +110,7 @@ jobs:
     strategy:
       matrix:
         # FIXME: macos-latest-xl is disabled since colima is erroring out right now
-        os: [warp-ubuntu-latest-x64-4x]
+        os: [warp-ubuntu-latest-x64-8x]
     runs-on: ${{ matrix.os }}
 
     steps:
