@@ -102,6 +102,7 @@ secrecy = "0.10.3"
 
 [dev-dependencies]
 mockito.workspace = true
+tempfile = "3.27.0"
 test-log = { version = "0.2.12", features = ["log", "trace"] }
 
 [features]

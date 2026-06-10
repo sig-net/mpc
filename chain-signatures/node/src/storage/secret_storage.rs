@@ -224,3 +224,135 @@ pub fn test_store(
     };
     SecretNodeStorageVariant::Memory(store)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::SecretKeyShare;
+    use k256::elliptic_curve::group::GroupEncoding;
+    use mpc_crypto::PublicKey;
+    use mpc_primitives::ScalarExt;
+
+    /// Helper function to create a test account ID.
+    fn make_test_account_id() -> AccountId {
+        "test.near".parse().unwrap()
+    }
+
+    /// Creates a test secret key share.
+    fn make_test_secret_key_share() -> SecretKeyShare {
+        SecretKeyShare::from_bytes([0u8; 32].into()).unwrap().into()
+    }
+
+    /// Creates a test public key.
+    fn make_test_public_key() -> PublicKey {
+        PublicKey::from_bytes((&[0u8; 33]).into()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn disk_load_nonexistent_file_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.json");
+
+        let storage = DiskNodeStorage { path };
+
+        let result = storage.load().await.unwrap();
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn disk_store_and_load_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node_data.json");
+
+        let mut storage = DiskNodeStorage { path };
+
+        let expected = PersistentNodeData {
+            epoch: 42,
+            private_share: make_test_secret_key_share(),
+            public_key: make_test_public_key(),
+        };
+
+        storage.store(&expected).await.unwrap();
+
+        let loaded = storage.load().await.unwrap();
+
+        assert_eq!(loaded, Some(expected));
+    }
+
+    #[tokio::test]
+    async fn disk_load_invalid_json_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node_data.json");
+
+        tokio::fs::write(&path, b"not a valid json").await.unwrap();
+
+        let storage = DiskNodeStorage { path };
+
+        assert!(storage.load().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn memory_store_and_load_round_trip() {
+        let mut storage = MemoryNodeStorage::default();
+
+        let expected = PersistentNodeData {
+            epoch: 42,
+            private_share: make_test_secret_key_share(),
+            public_key: make_test_public_key(),
+        };
+
+        storage.store(&expected).await.unwrap();
+
+        let loaded = storage.load().await.unwrap();
+
+        assert_eq!(loaded, Some(expected));
+    }
+
+    #[test]
+    fn init_uses_memory_when_no_storage_configured() {
+        let opts = Options {
+            sk_share_secret_id: None,
+            sk_share_local_path: None,
+            env: "test".to_string(),
+            gcp_project_id: "test-project".to_string(),
+            redis_url: "redis://localhost".to_string(),
+        };
+
+        let storage = init(None, &opts, &make_test_account_id());
+
+        assert!(matches!(storage, SecretNodeStorageVariant::Memory(_)));
+    }
+
+    #[test]
+    fn init_uses_disk_when_local_path_provided() {
+        let opts = Options {
+            sk_share_local_path: Some("/tmp/share".into()),
+            sk_share_secret_id: None,
+            env: "test".to_string(),
+            gcp_project_id: "test-project".to_string(),
+            redis_url: "redis://localhost".to_string(),
+        };
+
+        let storage = init(None, &opts, &make_test_account_id());
+
+        assert!(matches!(storage, SecretNodeStorageVariant::Disk(_)));
+    }
+
+    #[tokio::test]
+    async fn init_uses_gcp_when_secret_id_present() {
+        let opts = Options {
+            sk_share_secret_id: Some("secret-id".to_string()),
+            sk_share_local_path: None,
+            env: "test".to_string(),
+            gcp_project_id: "test-project".to_string(),
+            redis_url: "redis://localhost".to_string(),
+        };
+        let account_id = make_test_account_id();
+        let gcp_service = GcpService::init(&account_id, &opts).await.unwrap();
+
+        let storage = init(Some(&gcp_service), &opts, &account_id);
+
+        assert!(matches!(storage, SecretNodeStorageVariant::Gcp(_)));
+    }
+}
