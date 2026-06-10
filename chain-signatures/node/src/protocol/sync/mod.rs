@@ -174,6 +174,9 @@ impl SyncTask {
         };
         tracing::info!(?me, "starting sync loop...");
 
+        self.triples.set_me(me);
+        self.presignatures.set_me(me);
+
         let mut broadcast = Option::<(Instant, JoinHandle<_>)>::None;
         loop {
             tokio::select! {
