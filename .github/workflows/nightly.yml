@@ -74,16 +74,19 @@ jobs:
           cache: 'npm'
           cache-dependency-path: chain-signatures/contract-eth/package-lock.json
 
-      - uses: WarpBuilds/cache@v1
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: nightly-test
+          cache-targets: true
+          cache-on-failure: false
+          # Prevent every PR from uploading multi-GB caches
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+
+      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Set OpenSSL to system
+        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
       - name: Build eth contract
         working-directory: ./chain-signatures/contract-eth
