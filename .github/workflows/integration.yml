@@ -55,16 +55,13 @@ jobs:
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL
-        run: |
-          sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
-          pkg-config --libs openssl  # verify it's found
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
       - name: Set OpenSSL to system
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: component-test
-          cache-all-crates: false
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
@@ -162,9 +159,7 @@ jobs:
 
       # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
       - name: Install system OpenSSL
-        run: |
-          sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
-          pkg-config --libs openssl  # verify it's found
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
       - name: Set OpenSSL to system
         run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
@@ -184,7 +179,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: integration-test
-          cache-all-crates: false
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
@@ -203,10 +197,10 @@ jobs:
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.
       - name: Build Chain-Signatures Integration Tests
-        run: cargo build -p integration-tests --tests --release
+        run: cargo build -p integration-tests --tests
 
       - name: Test
-        run: cargo nextest run -p integration-tests --profile cluster --release
+        run: cargo nextest run -p integration-tests --profile cluster
         env:
           RUST_LOG: info,workspaces=warn
           RUST_BACKTRACE: 1
