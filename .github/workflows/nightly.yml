@@ -71,6 +71,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
 
       - uses: WarpBuilds/cache@v1
         with:

@@ -33,10 +33,14 @@ jobs:
           profile: minimal
           toolchain: 1.81.0
           target: wasm32-unknown-unknown
+          
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "18"
+          cache: 'npm'
+          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
+
       - uses: WarpBuilds/cache@v1
         with:
           path: |
