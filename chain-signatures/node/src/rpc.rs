@@ -361,6 +361,15 @@ impl ContractStateWatcher {
         }
     }
 
+    pub async fn wait_info(&self) -> (usize, Participant) {
+        loop {
+            if let Some((threshold, participant)) = self.info().await {
+                return (threshold, participant);
+            }
+            let _ = self.contract_state.changed().await;
+        }
+    }
+
     pub async fn participant_map(&self) -> ParticipantMap {
         let Some(state) = self.state().clone() else {
             return ParticipantMap::Zero;
