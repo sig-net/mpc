@@ -96,14 +96,9 @@ debug = 0
 
 [profile.fixture]
 inherits = "test"
-debug = 0
 
 [profile.cluster]
 inherits = "test"
-debug = 0
 
-[profile.ci-node]
-inherits = "test"      
-opt-level = 2          
-codegen-units = 16     
-debug = 0              
+[profile.release]
+debug = 0

@@ -54,6 +54,6 @@ else
     . $ROOT_DIR/build-contract.sh
 fi
 
-cargo build -p mpc-node --profile ci-node $NODE_FEATURE_ARGS
+cargo build -p mpc-node --release $NODE_FEATURE_ARGS
 
 exec $CARGO_CMD_ARGS
