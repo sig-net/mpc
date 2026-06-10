@@ -240,7 +240,7 @@ mod tests {
 
     /// Creates a test secret key share.
     fn make_test_secret_key_share() -> SecretKeyShare {
-        SecretKeyShare::from_bytes([0u8; 32]).unwrap().into()
+        SecretKeyShare::from_bytes([0u8; 32]).unwrap()
     }
 
     /// Creates a test public key.
