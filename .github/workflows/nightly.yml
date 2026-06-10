@@ -20,7 +20,7 @@ jobs:
         continue-on-error: true
         name: Check if the latest commit is within a day
         if: ${{ github.event_name == 'schedule' }}
-        run: test -z $(git rev-list  --after="24 hours"  ${{ github.sha }}) && echo "::set-output name=should_run::false"
+        run: test -z $(git rev-list  --after="24 hours"  ${{ github.sha }}) && echo "should_run=false" >> "$GITHUB_OUTPUT"
 
   nightly:
     strategy:
