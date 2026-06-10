@@ -164,7 +164,7 @@ jobs:
 
       - name: Build eth contract
         working-directory: ./chain-signatures/contract-eth
-        run: npm i && npx hardhat compile
+        run: npm ci && npx hardhat compile
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest

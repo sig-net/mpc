@@ -85,7 +85,7 @@ jobs:
 
       - name: Build eth contract
         working-directory: ./chain-signatures/contract-eth
-        run: npm i && npx hardhat compile
+        run: npm ci && npx hardhat compile
 
       - name: Presetup binaries
         run: ./setup.sh

@@ -50,7 +50,7 @@ jobs:
       - name: Compile Contract
         run: ./build-contract.sh
       - name: Compile eth contract
-        run: cd chain-signatures/contract-eth && npm i && npx hardhat compile
+        run: cd chain-signatures/contract-eth && npm ci && npx hardhat compile
       - name: Eth contract unit tests
         run: cd chain-signatures/contract-eth && npx hardhat test
       - name: Test format
