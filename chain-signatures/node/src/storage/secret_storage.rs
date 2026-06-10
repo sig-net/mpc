@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use tokio::fs::File;
+use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::gcp::{GcpService, SecretResult};
@@ -102,11 +102,22 @@ impl DiskNodeStorage {
 impl SecretNodeStorage for DiskNodeStorage {
     async fn store(&mut self, data: &PersistentNodeData) -> SecretResult<()> {
         tracing::info!("storing PersistentNodeData using DiskNodeStorage");
-        let mut file = File::create(self.path.as_os_str()).await?;
+
         // Serialize the person object to JSON and convert directly to bytes
         let json_bytes = serde_json::to_vec(data)?;
-        // Write the serialized JSON bytes to the file
+
+        // Write the JSON bytes to a temporary file first to ensure atomicitys, then rename it to the target path
+        let tmp_path = self.path.with_extension("tmp");
+
+        let mut file = File::create(&tmp_path).await?;
         file.write_all(&json_bytes).await?;
+
+        // Ensure all data is flushed to disk before renaming
+        file.sync_all().await?;
+
+        drop(file);
+
+        fs::rename(&tmp_path, &self.path).await?;
 
         Ok(())
     }
