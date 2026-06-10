@@ -162,8 +162,6 @@ impl SyncTask {
         let mut watcher_interval = tokio::time::interval(Duration::from_millis(500));
         // Trigger sync broadcasts to peers in need_sync state
         let mut sync_interval = tokio::time::interval(Duration::from_millis(200));
-        // Poll whether any ongoing sync task has completed
-        let mut sync_check_interval = tokio::time::interval(Duration::from_millis(100));
 
         // Do NOT start until we have our own participant info
         let (threshold, me) = loop {
@@ -205,18 +203,13 @@ impl SyncTask {
                     ));
                     broadcast = Some((start, task));
                 }
-                // check that our broadcast has completed, and if so process the result.
-                _ = sync_check_interval.tick() => {
-                    let Some((start, handle)) = broadcast.take() else {
-                        continue;
-                    };
-                    if !handle.is_finished() {
-                        // task is not finished yet, put it back:
-                        broadcast = Some((start, handle));
-                        continue;
-                    }
-
-                    match handle.await {
+                // wait for the ongoing broadcast task to finish if active
+                (start, resp) = async {
+                    let (start, handle) = broadcast.as_mut().unwrap();
+                    (*start, handle.await)
+                }, if broadcast.is_some() => {
+                    broadcast = None;
+                    match resp {
                         Ok(responses) => {
                             // Process sync responses: update artifact participants based on not_found data
                             if let Err(err) = self.process_sync_responses(responses, threshold).await {
