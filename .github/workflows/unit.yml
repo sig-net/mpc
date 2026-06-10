@@ -33,7 +33,7 @@ jobs:
           profile: minimal
           toolchain: 1.81.0
           target: wasm32-unknown-unknown
-          
+
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
@@ -74,11 +74,8 @@ jobs:
         with:
           profile: minimal
           toolchain: 1.81.0
-      - name: Install Audit
-        run: cargo install cargo-audit
-      - name: Run Audit
-        # even if previous audit step fails, run this audit step to ensure all crates are audited
-        if: always()
-        # audit exceptions can be found in .cargo/audit.toml
-        run: |
-          cargo audit
+      
+      # Run cargo-audit to check for vulnerable dependencies
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
