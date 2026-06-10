@@ -127,9 +127,15 @@ impl SecretNodeStorage for DiskNodeStorage {
 
                 Ok(Some(data))
             }
-            _ => {
+            // If the file is not found, treat it as if there is no existing data, rather than an error
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::info!("loading PersistentNodeData using DiskNodeStorage: no file");
                 Ok(None)
+            }
+            // Propagate other types of errors
+            Err(e) => {
+                tracing::error!(%e, "failed to load PersistentNodeData");
+                Err(e.into())
             }
         }
     }
