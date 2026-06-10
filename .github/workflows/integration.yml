@@ -65,7 +65,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Install cargo-nextest
-        run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+        uses: taiki-e/install-action@nextest
 
       - name: Presetup binaries
         run: ./setup.sh
@@ -167,7 +167,7 @@ jobs:
         run: npm i && npx hardhat compile
 
       - name: Install cargo-nextest
-        run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+        uses: taiki-e/install-action@nextest
 
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.
