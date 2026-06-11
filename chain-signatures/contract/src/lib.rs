@@ -11,8 +11,8 @@ use errors::{
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::Scalar;
 use mpc_crypto::{
-    derive_epsilon_near, derive_key, kdf::check_ec_signature, near_public_key_to_affine_point,
-    ScalarExt as _,
+    derive_epsilon_checkpoint, derive_epsilon_near, derive_key, kdf::check_ec_signature,
+    near_public_key_to_affine_point, ScalarExt as _,
 };
 use mpc_primitives::{Chain, ConsensusCheckpointDigest, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
@@ -825,7 +825,14 @@ impl VersionedMpcContract {
             return Err(InvalidState::ProtocolStateNotRunning.into());
         }
 
-        let expected_public_key = near_public_key_to_affine_point(self.public_key()?);
+        let root_pk = near_public_key_to_affine_point(self.public_key()?);
+        let epsilon = derive_epsilon_checkpoint(
+            LATEST_MPC_KEY_VERSION,
+            checkpoint.chain,
+            "checkpoint|sender",
+            checkpoint.height,
+        );
+        let expected_public_key = derive_key(root_pk, epsilon);
         if check_ec_signature(
             &expected_public_key,
             &signature.big_r,

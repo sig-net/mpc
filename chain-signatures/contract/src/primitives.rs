@@ -49,7 +49,7 @@ pub enum Read {
     Checkpoints,
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
 #[borsh(crate = "near_sdk::borsh")]
 pub enum View {
     State(ProtocolContractState),
