@@ -469,9 +469,12 @@ impl SolanaIndexer {
         mut start_slot: u64,
         end_slot: u64,
     ) -> BTreeMap<u64, SolanaCatchupBlock> {
-        let mut block_slots = Vec::new();
+        // TODO: https://github.com/sig-net/mpc/issues/869
+        // This can be gigantic. We should move to iterating over chunks instead of fetching
+        // all blocks for multiple chunks at once.
         const MAX_CHUNK_SIZE: u64 = 500_000;
 
+        let mut block_slots = Vec::new();
         while start_slot <= end_slot {
             let chunk_end = std::cmp::min(end_slot, start_slot.saturating_add(MAX_CHUNK_SIZE - 1));
             let chunk_slots = self.fetch_sparse_chunk(start_slot, chunk_end).await;
@@ -1178,7 +1181,10 @@ async fn get_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
+    use serde_json::json;
     use solana_sdk::commitment_config::CommitmentLevel;
+    use solana_sdk::pubkey::Pubkey;
     use solana_transaction_status::UiTransactionStatusMeta;
 
     #[test]
@@ -1315,10 +1321,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_sparse_blocks_chunks_large_range() {
-        use mockito::{Matcher, Server};
-        use serde_json::json;
-        use solana_sdk::pubkey::Pubkey;
-
         let mut server = Server::new_async().await;
         let backlog = Backlog::new();
         let (events_tx, _events_rx) = mpsc::channel(1);
