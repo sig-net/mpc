@@ -1713,12 +1713,14 @@ impl SignatureSpawner {
         if from == me {
             return;
         }
+
         // Drop straggler posits for already-completed tasks. Without this guard, the
         // `entry` API below would silently re-create an Unsubscribed inbox that no
         // task is reading, causing the channel to fill and messages to be dropped.
         if self.completed.contains(&sign_id) {
             return;
         }
+
         let inbox = self.inboxes.entry(sign_id).or_insert_with(|| {
             Subscriber::unsubscribed_with_capacity(
                 SIGN_POSIT_INBOX_LABEL,
@@ -1737,12 +1739,7 @@ impl SignatureSpawner {
     }
 
     fn handle_completion(&mut self, sign_id: SignId) {
-        self.completed.put(sign_id, ());
-        if let Some(inbox) = self.inboxes.remove(&sign_id) {
-            inbox.clear_capacity_global();
-        }
-        set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
-        self.abort_delayed_watcher(sign_id, "completion");
+        self.finalize_request(sign_id, "completion");
         if self.tasks.abort(sign_id) {
             tracing::info!(?sign_id, "aborting signature task due to completion event");
         } else {
@@ -1756,21 +1753,11 @@ impl SignatureSpawner {
             Ok(outcome) => outcome,
             Err(sign_id) => {
                 tracing::warn!(?sign_id, "signature task interrupted");
-                self.completed.put(sign_id, ());
-                if let Some(inbox) = self.inboxes.remove(&sign_id) {
-                    inbox.clear_capacity_global();
-                }
-                set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
-                self.abort_delayed_watcher(sign_id, "interruption");
+                self.finalize_request(sign_id, "interruption");
                 return;
             }
         };
-        self.completed.put(sign_id, ());
-        if let Some(inbox) = self.inboxes.remove(&sign_id) {
-            inbox.clear_capacity_global();
-        }
-        set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
-        self.abort_delayed_watcher(sign_id, "task completion");
+        self.finalize_request(sign_id, "task completion");
         match result {
             Ok(()) => {
                 tracing::info!(?sign_id, "signature task completed successfully");
@@ -1781,12 +1768,19 @@ impl SignatureSpawner {
         }
     }
 
-    fn abort_delayed_watcher(&mut self, sign_id: SignId, reason: &str) {
+    /// Marks `sign_id` as done: records it in `completed`, removes its posit
+    /// inbox, updates the inbox count metric, and aborts the delayed watcher.
+    fn finalize_request(&mut self, sign_id: SignId, reason: &str) {
+        self.completed.put(sign_id, ());
+        if let Some(inbox) = self.inboxes.remove(&sign_id) {
+            inbox.clear_capacity_global();
+        }
+        set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
         if let Some(watcher) = self.delayed_watchers.remove(&sign_id) {
-            tracing::info!(?sign_id, reason = %reason, "aborting delayed watcher");
+            tracing::info!(?sign_id, %reason, "aborting delayed watcher");
             watcher.abort();
         } else {
-            tracing::debug!(?sign_id, reason = %reason, "no delayed watcher to abort");
+            tracing::debug!(?sign_id, %reason, "no delayed watcher to abort");
         }
     }
 
