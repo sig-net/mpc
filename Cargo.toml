@@ -23,6 +23,7 @@ alloy-primitives = "1.4.1"
 anchor-client = { version = "0.31.0", features = ["async"] }
 anchor-lang = "0.31.1"
 anyhow = { version = "1.0.95", features = ["backtrace"] }
+async-trait = "0.1"
 borsh = "1.5.3"
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
 ciborium = "0.2.2"
