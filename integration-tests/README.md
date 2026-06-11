@@ -19,8 +19,6 @@ rustup target add wasm32-unknown-unknown
 rustup target add wasm32-unknown-unknown --toolchain 1.81.0
 ```
 
-Alternatively, you may run all tests sequentially with `cargo test -p integration-tests --jobs 1 -- --test-threads 1`.
-
 ## Basic guide
 
 Running integration tests requires you to have redis and sandbox docker images present on your machine:
@@ -31,22 +29,37 @@ docker pull redis:7.4.2
 
 In case of authorization issues make sure you have logged into docker using your [access token](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic).
 
-### ⚠️ First-Time Setup
+### Building integration test artifacts
 
-`cargo nextest` runs tests in parallel, running it immediately on a fresh clone can cause multiple background processes to try to compile the WASM smart contract (or download toolchains) at the exact same time, resulting in corrupted caches or `can't find crate for core` errors.
+Integration tests require:
 
-To prevent this, **always pre-build the tests sequentially on your first run**:
+- the WASM contract artifact
+- the local mpc-node binary
+
+Build them once before your first test run, or whenever you change contract or node code:
 
 ```bash
-# Run 1 job to safely cache the WASM contract and heavy dependencies
-cargo nextest run -p integration-tests --profile fixture -j 1
+# Setup artifacts
+./setup.sh
+
+# Run tests
+cargo nextest run -p integration-tests
 ```
 
-Once that completes successfully, you can run the tests normally (in parallel):
+If you use Helios:
+```bash
+MPC_ENABLE_HELIOS=1 ./setup.sh
+```
 
+`setup.sh` performs the pre-build steps required by the integration test environment
+(contract WASM compilation and local node binary compilation). 
+
+Once the artifacts are built, run tests normally:
 ```BASH
 cargo nextest run -p integration-tests
 ```
+
+Alternatively, you may run all tests sequentially with `cargo test -p integration-tests --jobs 1 -- --test-threads 1`.
 
 For a faster iteration loop during development, run only the lightweight MPC fixture tests
 (no full cluster or Docker containers needed beyond Redis):
