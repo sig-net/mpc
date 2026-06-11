@@ -4,84 +4,87 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+default = []
+docker-test = []
+helios = ["mpc-node/helios"]
 
 [dependencies]
 alloy = { workspace = true, features = ["provider-anvil-api"] }
+
+# solana dependencies
+anchor-client.workspace = true
 anyhow.workspace = true
 async-process = "1"
 async-trait = "0.1"
 backon = "0.4"
-bollard = "0.17.0"
-borsh.workspace = true
-bs58 = "0.5.1"
-ciborium.workspace = true
-clap.workspace = true
-deadpool-redis.workspace = true
-futures = "0.3"
-generic-array = { version = "0.14.7", default-features = false }
-hex.workspace = true
-hyper.workspace = true
-rand.workspace = true
-reqwest.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-semver.workspace = true
-shell-escape = "0.1.5"
-testcontainers = "0.23.1"
-tokio = { version = "1.45.1", features = ["full", "test-util"] }
-tracing.workspace = true
-tracing-subscriber.workspace = true
-thiserror.workspace = true
-url.workspace = true
-uuid = { version = "1.0", features = ["v4"] }
-sha3.workspace = true
-sha2 = "0.10"
-rlp = "0.5"
-
-# solana dependencies
-anchor-client.workspace = true
-signet-program.workspace = true
-solana-sdk.workspace = true
-solana-client.workspace = true
-solana-transaction-status.workspace = true
 
 # crypto dependencies
 bip32 = "0.5.3"
 bip39 = "2.2.0"
+bollard = "0.17.0"
+borsh.workspace = true
+bs58 = "0.5.1"
+cait-sith = { workspace = true, features = ["k256"] }
+ciborium.workspace = true
+clap.workspace = true
+deadpool-redis.workspace = true
 ecdsa = "0.16.9"
-cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
 elliptic-curve = { version = "0.13.5", default-features = false }
-k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
-
-# near dependencies
-near-account-id.workspace = true
-near-crypto = "0.26.0"
-near-fetch = "0.6.0"
-near-sdk.workspace = true
-near-jsonrpc-client = "0.13.0"
-near-primitives = "0.26.0"
-
-# if necessary, use the following branch for near related indexer hacking:
-# { git = "https://github.com/near/near-workspaces-rs", branch = "phuong/tmp-node-2.3.0" }
-near-workspaces = "0.15.0"
+futures = "0.3"
+generic-array = { version = "0.14.7", default-features = false }
+hex.workspace = true
+hyper.workspace = true
+k256 = { workspace = true, features = ["sha256", "ecdsa", "serde"] }
+mpc-contract.workspace = true
 
 # local chain-signatures dependencies
 mpc-crypto.workspace = true
-mpc-contract.workspace = true
 mpc-keys.workspace = true
 mpc-node = { path = "../chain-signatures/node", default-features = false, features = ["test-feature", "debug-page"] }
 mpc-primitives.workspace = true
 
-[dev-dependencies]
-criterion = "0.5.1"
-serial_test = "3"
-test-log = { version = "0.2.12", features = ["log", "trace"] }
+# near dependencies
+near-account-id.workspace = true
+near-crypto.workspace = true
+near-fetch = "0.6.0"
+near-jsonrpc-client = "0.13.0"
+near-primitives.workspace = true
+near-sdk.workspace = true
+
+# if necessary, use the following branch for near related indexer hacking:
+# { git = "https://github.com/near/near-workspaces-rs", branch = "phuong/tmp-node-2.3.0" }
+near-workspaces = "0.15.0"
+rand.workspace = true
+reqwest.workspace = true
+rlp.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+sha3.workspace = true
+shell-escape = "0.1.5"
+signet-program.workspace = true
+solana-client.workspace = true
+solana-sdk.workspace = true
+solana-transaction-status.workspace = true
+testcontainers = "0.23.1"
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid = { version = "1.0", features = ["v4"] }
 
 [build-dependencies]
 anyhow.workspace = true
 async-process = "1"
 tokio.workspace = true
 
+[dev-dependencies]
+criterion = "0.5.1"
+serial_test = "3"
+test-log = { version = "0.2.12", features = ["log", "trace"] }
 
 [[bench]]
 name = "sign"
@@ -92,8 +95,3 @@ harness = false
 name = "store"
 path = "benches/store.rs"
 harness = false
-
-[features]
-default = []
-docker-test = []
-helios = ["mpc-node/helios"]

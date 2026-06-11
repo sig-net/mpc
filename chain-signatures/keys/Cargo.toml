@@ -10,5 +10,5 @@ crate-type = ["cdylib", "lib"]
 borsh.workspace = true
 hex.workspace = true
 hpke = { version = "0.11", features = ["serde_impls", "std"] }
-serde.workspace = true
 rand.workspace = true
+serde.workspace = true

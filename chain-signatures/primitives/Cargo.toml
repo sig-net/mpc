@@ -3,6 +3,9 @@ name = "mpc-primitives"
 version.workspace = true
 edition = "2021"
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2.12", features = ["custom"] }
+
 [dependencies]
 ciborium.workspace = true
 hex.workspace = true
@@ -13,9 +16,6 @@ serde.workspace = true
 serde_bytes.workspace = true
 sha3.workspace = true
 thiserror.workspace = true
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.2.12", features = ["custom"] }
 
 [dev-dependencies]
 borsh.workspace = true

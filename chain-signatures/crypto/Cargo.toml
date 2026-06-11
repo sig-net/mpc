@@ -3,17 +3,17 @@ name = "mpc-crypto"
 version.workspace = true
 edition = "2021"
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2.12", features = ["custom"] }
+
 [dependencies]
-k256.workspace = true
 anyhow.workspace = true
+k256.workspace = true
+
+mpc-primitives.workspace = true
 near-account-id.workspace = true
 near-sdk.workspace = true
 sha3.workspace = true
-
-mpc-primitives.workspace = true
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.2.12", features = ["custom"] }
 
 [dev-dependencies]
 alloy.workspace = true

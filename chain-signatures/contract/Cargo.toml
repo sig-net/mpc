@@ -6,6 +6,11 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "lib"]
 
+[features]
+default = []
+# utilized for benchmarking the node:
+bench = []
+
 [dependencies]
 borsh.workspace = true
 k256.workspace = true
@@ -18,19 +23,14 @@ thiserror.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
-rand.workspace = true
-tokio.workspace = true
+digest = "0.10.7"
 
 # crypto dependencies
 ecdsa = { version = "0.16.9", features = ["digest", "hazmat"] }
-signature = "2.2.0"
-digest = "0.10.7"
 
 # near dependencies
 near-crypto = "0.27.0"
 near-workspaces = "0.15.0"
-
-[features]
-default = []
-# utilized for benchmarking the node:
-bench = []
+rand.workspace = true
+signature = "2.2.0"
+tokio.workspace = true
