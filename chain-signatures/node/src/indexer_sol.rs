@@ -446,15 +446,10 @@ impl SolanaIndexer {
         Ok(())
     }
 
-    /// Fetches blocks from start_slot to end_slot. The range is inclusive `[start_slot, endslot]`
-    async fn fetch_sparse_blocks(
-        &self,
-        start_slot: u64,
-        end_slot: u64,
-    ) -> BTreeMap<u64, SolanaCatchupBlock> {
-        let block_slots = loop {
+    async fn fetch_sparse_chunk(&self, start_slot: u64, end_slot: u64) -> Vec<u64> {
+        loop {
             match self.rpc_client.get_blocks(start_slot, Some(end_slot)).await {
-                Ok(block_slots) => break block_slots,
+                Ok(block_slots) => return block_slots,
                 Err(err) => {
                     tracing::warn!(
                         ?err,
@@ -465,7 +460,27 @@ impl SolanaIndexer {
                     tokio::time::sleep(Self::RETRY_DELAY).await;
                 }
             }
-        };
+        }
+    }
+
+    /// Fetches blocks from start_slot to end_slot. The range is inclusive `[start_slot, endslot]`
+    async fn fetch_sparse_blocks(
+        &self,
+        mut start_slot: u64,
+        end_slot: u64,
+    ) -> BTreeMap<u64, SolanaCatchupBlock> {
+        // TODO: https://github.com/sig-net/mpc/issues/869
+        // This can be gigantic. We should move to iterating over chunks instead of fetching
+        // all blocks for multiple chunks at once.
+        const MAX_CHUNK_SIZE: u64 = 500_000;
+
+        let mut block_slots = Vec::new();
+        while start_slot <= end_slot {
+            let chunk_end = std::cmp::min(end_slot, start_slot.saturating_add(MAX_CHUNK_SIZE - 1));
+            let chunk_slots = self.fetch_sparse_chunk(start_slot, chunk_end).await;
+            block_slots.extend(chunk_slots);
+            start_slot = chunk_end.saturating_add(1);
+        }
 
         self.fetch_blocks_for_slots(
             block_slots
@@ -1166,7 +1181,10 @@ async fn get_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::{Matcher, Server};
+    use serde_json::json;
     use solana_sdk::commitment_config::CommitmentLevel;
+    use solana_sdk::pubkey::Pubkey;
     use solana_transaction_status::UiTransactionStatusMeta;
 
     #[test]
@@ -1299,5 +1317,120 @@ mod tests {
         );
         let meta = result.unwrap();
         assert!(meta.err.is_some(), "expected err to be set");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_sparse_blocks_chunks_large_range() {
+        let mut server = Server::new_async().await;
+        let backlog = Backlog::new();
+        let (events_tx, _events_rx) = mpsc::channel(1);
+
+        let indexer = SolanaIndexer {
+            program_id: Pubkey::new_unique(),
+            rpc_client: RpcClient::new(server.url()),
+            rpc_http_url: server.url(),
+            rpc_ws_url: String::new(),
+            events_tx,
+            backlog,
+            live_rx: None,
+        };
+
+        let mock_chunk1 = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "getBlocks",
+                "params": [100000, 599999]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "result": [100000],
+                    "id": 1
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mock_chunk2 = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "getBlocks",
+                "params": [600000, 600000]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "result": [600000],
+                    "id": 2
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mock_block100k = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "getBlock",
+                "params": [100000]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "transactions": []
+                    },
+                    "id": 3
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let mock_block600k = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "getBlock",
+                "params": [600000]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "transactions": []
+                    },
+                    "id": 4
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let res_timeout = tokio::time::timeout(
+            Duration::from_secs(2),
+            indexer.fetch_sparse_blocks(100000, 600000),
+        )
+        .await;
+
+        let res = res_timeout
+            .expect("fetch_sparse_blocks timed out (likely infinite retry loop on large range)");
+
+        assert_eq!(res.len(), 2);
+        assert!(res.contains_key(&100000));
+        assert!(res.contains_key(&600000));
+
+        mock_chunk1.assert_async().await;
+        mock_chunk2.assert_async().await;
+        mock_block100k.assert_async().await;
+        mock_block600k.assert_async().await;
     }
 }

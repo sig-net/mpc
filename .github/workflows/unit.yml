@@ -21,42 +21,51 @@ jobs:
     runs-on: warp-ubuntu-latest-x64-4x
     name: Check & Test
     steps:
-      - uses: actions/checkout@v3
-      - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: 1.81.0
+      - uses: actions/checkout@v6
+
       - name: Install Rust (1.81.0)
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: 1.81.0
           target: wasm32-unknown-unknown
+
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "18"
-      - uses: WarpBuilds/cache@v1
+          cache: 'npm'
+          cache-dependency-path: chain-signatures/contract-eth/package-lock.json
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: "${{ runner.os }}-cargo-${{ hashFiles('mpc-recovery/Cargo.lock') }}"
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: unit-test
+          cache-targets: true
+          cache-on-failure: false
+          # Prevent every PR from uploading multi-GB caches
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+      
+      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Set OpenSSL to system
+        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
+      
       - name: Compile Contract
         run: ./build-contract.sh
+      
       - name: Compile eth contract
-        run: cd chain-signatures/contract-eth && npm i && npx hardhat compile
+        run: cd chain-signatures/contract-eth && npm ci && npx hardhat compile
+      
       - name: Eth contract unit tests
         run: cd chain-signatures/contract-eth && npx hardhat test
+      
       - name: Test format
         run: cargo fmt -- --check
+      
       - name: Test clippy
         run: cargo clippy --tests -- -Dclippy::all
+      
       - name: Unit tests
         run: cargo test --workspace --exclude integration-tests
 
@@ -64,17 +73,14 @@ jobs:
     name: Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
       - name: Install Rust toolchain
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
           toolchain: 1.81.0
-      - name: Install Audit
-        run: cargo install cargo-audit
-      - name: Run Audit
-        # even if previous audit step fails, run this audit step to ensure all crates are audited
-        if: always()
-        # audit exceptions can be found in .cargo/audit.toml
-        run: |
-          cargo audit
+
+      # Run cargo-audit to check for vulnerable dependencies
+      - uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
