@@ -52,7 +52,7 @@ near-sdk = { version = "5.6.0", features = ["unstable", "unit-testing"] }
 near-workspaces = "0.15.0"
 parity-scale-codec = { version = "3", features = ["derive"] }
 rand = "0.8.5"
-reqwest = { version = "0.11.16", features = ["blocking", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rlp = "0.5"
 semver = "1.0.23"
 serde = { version = "1", features = ["derive"] }
