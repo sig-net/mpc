@@ -33,11 +33,15 @@ pub struct CantonChainCtx {
 /// transaction params. This type is created at the indexer boundary and carries
 /// the byte fields expected by the shared bidirectional signing flow.
 ///
-/// The current Daml Signer contract does not model signature fees/deposits:
-/// Canton Coin transfers are explicit token-standard/Daml workflows, not an
-/// attached value on this `SignBidirectional` choice. Until the contract composes
-/// that transfer and exposes a deposit amount, the shared bidirectional flow
-/// treats Canton deposit as zero.
+/// `RequestSignature` charges a Canton Coin signature fee (requester →
+/// featured-app receiver) atomically on-ledger and fail-closes if it cannot
+/// settle, so the fee is already paid by the time this event exists — the indexer
+/// only ever observes already-charged requests. That fee is a service fee to the
+/// featured-app party, not a bridgeable value: it never enters the event payload
+/// and does not feed the request id, KDF epsilon, or signed transaction, so the
+/// MPC neither sees nor re-verifies it (it is an on-ledger precondition, outside
+/// the indexer's trust scope) and the shared bidirectional flow still carries no
+/// Canton deposit (deposit = zero).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CantonSignBidirectionalRequestedEvent {
     pub sign_event_contract_id: String,
@@ -164,10 +168,13 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
 ///
 /// # Contract migration
 ///
-/// When the Signer DAR is upgraded and redeployed, both `signer_contract_id`
-/// and `signer_template_id` change (similar to deploying a new Ethereum
-/// contract — the old address/ID is gone). Currently the MPC node requires a
-/// restart with updated CLI args to pick up the new IDs.
+/// Configure `signer_template_id` in the package-name form
+/// (`#daml-signer:Signer:Signer`): it is stable across DAR upgrades (smart
+/// contract upgrades keep the package name), and Canton 3.5+ rejects the
+/// `<packageHash>:Module:Entity` form on read endpoints (ACS/update filters,
+/// `INVALID_FIELD`) while only tolerating it on command submission as
+/// deprecated. `signer_contract_id` still changes whenever the Signer
+/// contract itself is recreated, which requires a restart with the new value.
 #[derive(Clone)]
 pub struct CantonConfig {
     pub json_api_url: String,
@@ -178,8 +185,10 @@ pub struct CantonConfig {
     /// The Signer contract ID on the Canton ledger. Changes on every DAR
     /// redeployment — requires MPC node restart with the new value.
     pub signer_contract_id: String,
-    /// The full template ID of the Signer contract (e.g. "<packageHash>:Signer:Signer").
-    /// The package hash changes on every DAR upgrade, invalidating this value.
+    /// Template ID of the Signer contract, in the package-name form
+    /// ("#daml-signer:Signer:Signer") — stable across DAR upgrades; Canton 3.5+
+    /// rejects the "<packageHash>:Signer:Signer" form on read endpoints and
+    /// deprecates it on command submission.
     pub signer_template_id: String,
 }
 
@@ -264,8 +273,9 @@ pub struct CantonArgs {
         requires = "canton_json_api_url"
     )]
     pub canton_signer_contract_id: Option<String>,
-    /// The full template ID of the Signer contract (e.g. "<packageHash>:Signer:Signer").
-    /// Must be updated if the DAR is upgraded.
+    /// Template ID of the Signer contract, in the package-name form
+    /// ("#daml-signer:Signer:Signer") — stable across DAR upgrades; the
+    /// package-hash form is rejected on Canton 3.5+ read endpoints.
     #[arg(
         long,
         env("MPC_CANTON_SIGNER_TEMPLATE_ID"),

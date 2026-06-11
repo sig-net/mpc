@@ -127,7 +127,7 @@ pub enum TxParams {
 }
 
 /// Payload of a `Signer:SignBidirectionalEvent` created event.
-/// Emitted when `Signer.SignBidirectional` is exercised.
+/// Emitted when `Signer.RequestSignature` is exercised.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignBidirectionalRequestedEvent {

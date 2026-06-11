@@ -458,7 +458,7 @@ async fn process_canton_event(
 /// These checks are defense-in-depth on top of the Daml ledger guarantees:
 /// 1. Operators from the payload must be actual signatories on the CreatedEvent
 /// 2. Requester must be a signatory
-/// 3. An ExercisedEvent with choice "SignBidirectional" on Signer:Signer must
+/// 3. An ExercisedEvent with choice "RequestSignature" on Signer:Signer must
 ///    exist in the same transaction — proves the event was created through the
 ///    correct Daml code path, not fabricated
 fn verify_sign_event(
@@ -486,7 +486,7 @@ fn verify_sign_event(
         );
     }
 
-    // Check 3: ExercisedEvent with choice "SignBidirectional" on the pinned
+    // Check 3: ExercisedEvent with choice "RequestSignature" on the pinned
     // Signer contract must exist in the same transaction. Exact contract ID
     // match since the operator pinned it via CLI.
     // NOTE: after a DAR upgrade/redeployment the contract ID changes — this
@@ -495,13 +495,13 @@ fn verify_sign_event(
         matches!(
             e,
             ledger_api::Event::ExercisedEvent(ex)
-                if ex.choice == "SignBidirectional"
+                if ex.choice == "RequestSignature"
                     && ex.contract_id == signer_contract_id
         )
     });
     if !has_exercise {
         anyhow::bail!(
-            "no ExercisedEvent with choice SignBidirectional on contract {signer_contract_id} found in transaction"
+            "no ExercisedEvent with choice RequestSignature on contract {signer_contract_id} found in transaction"
         );
     }
 
@@ -635,7 +635,7 @@ mod tests {
         ledger_api::Event::ExercisedEvent(ledger_api::ExercisedEvent {
             contract_id: contract_id.to_string(),
             template_id: "pkg:Signer:Signer".to_string(),
-            choice: "SignBidirectional".to_string(),
+            choice: "RequestSignature".to_string(),
             acting_parties: Vec::new(),
             consuming: false,
             node_id: Some(2),
@@ -708,6 +708,18 @@ mod tests {
         let err = verify_sign_event(&event, &created, &tx_events, "signer-contract")
             .expect_err("verification should fail");
         assert!(err.to_string().contains("no ExercisedEvent"));
+    }
+
+    #[test]
+    fn verify_sign_event_accepts_valid_event() {
+        let event = sample_sign_event();
+        // sigNetworkFA ("fa-1") is now an event signatory too; the operators +
+        // requester subset check must still pass against the wider signatory set.
+        let created = sample_created_event(&["operator-1", "requester-1", "fa-1"]);
+        let tx_events = vec![sample_exercised_event("signer-contract")];
+
+        verify_sign_event(&event, &created, &tx_events, "signer-contract")
+            .expect("verification should pass for a well-formed RequestSignature event");
     }
 
     #[test]

@@ -41,6 +41,10 @@ jobs:
           curl -fsSL https://get.digitalasset.com/install/install.sh | sh
           echo "$HOME/.dpm/bin" >> $GITHUB_PATH
           export PATH="$HOME/.dpm/bin:$PATH"
+          # Pin the SDK: the harness spawns `dpm sandbox` with the globally
+          # active SDK, and the installer activates the latest release —
+          # without this pin the Canton version under test drifts on its own.
+          dpm install 3.5.1
           dpm --version
 
       - name: Install Rust (1.81.0)
@@ -110,6 +114,10 @@ jobs:
           curl -fsSL https://get.digitalasset.com/install/install.sh | sh
           echo "$HOME/.dpm/bin" >> $GITHUB_PATH
           export PATH="$HOME/.dpm/bin:$PATH"
+          # Pin the SDK: the harness spawns `dpm sandbox` with the globally
+          # active SDK, and the installer activates the latest release —
+          # without this pin the Canton version under test drifts on its own.
+          dpm install 3.5.1
           dpm --version
 
       - name: Install Rust (1.81.0)

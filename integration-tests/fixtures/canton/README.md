@@ -5,7 +5,8 @@ the Canton sandbox loads before the integration tests run.
 
 - **Source repository:** [`sig-net/canton-poc`](https://github.com/sig-net/canton-poc)
 - **Source package:** `daml-packages/daml-vault`
-- **Built with:** Daml SDK 3.4.11 via `dpm build`
+- **Built with:** Daml SDK 3.4.11 via `dpm build` (Daml-LF 2.2 — loads unchanged
+  on the Canton 3.5 sandbox; rebuild with the pinned SDK on the next Daml change)
 
 ## Regenerate
 

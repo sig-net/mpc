@@ -1,13 +1,16 @@
 //! Typed structs for the Canton JSON Ledger API v2.
 //!
-//! Hand-translated from the OpenAPI spec (version 3.4.11) — no Rust SDK exists.
-//! Only types the MPC node or integration tests actually use are included.
-//! Could be auto-generated with `openapi-generator` in the future.
+//! Hand-translated from the OpenAPI spec (version 3.4.11) and re-verified
+//! field-by-field against the 3.5.1 OpenAPI/AsyncAPI specs (every request
+//! covers the 3.5.1 required fields; new response fields are ignored by
+//! serde) — no Rust SDK exists. Only types the MPC node or integration tests
+//! actually use are included. Could be auto-generated with `openapi-generator`
+//! in the future.
 //!
 //! Upstream spec:
-//! - HTTP (OpenAPI): <https://docs.digitalasset.com/build/3.4/reference/json-api/openapi.html>
-//! - WebSocket (AsyncAPI): <https://docs.digitalasset.com/build/3.4/reference/json-api/asyncapi.html>
-//! - Overview: <https://docs.digitalasset.com/build/3.4/explanations/json-api/index.html>
+//! - HTTP (OpenAPI): <https://docs.digitalasset.com/build/3.5/reference/json-api/openapi.html>
+//! - WebSocket (AsyncAPI): <https://docs.digitalasset.com/build/3.5/reference/json-api/asyncapi.html>
+//! - Overview: <https://docs.digitalasset.com/build/3.5/explanations/json-api/index.html>
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
