@@ -39,7 +39,6 @@ k256 = { version = "0.13.1", features = [
     "arithmetic",
     "expose-field",
 ] }
-mockito = "1.7.0"
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }
 mpc-keys = { path = "./chain-signatures/keys" }

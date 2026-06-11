@@ -107,6 +107,6 @@ tracing-subscriber.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-mockito.workspace = true
+mockito = "1.7.0"
 tempfile = "3.27.0"
 test-log = { version = "0.2.12", features = ["log", "trace"] }
