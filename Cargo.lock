@@ -6005,7 +6005,6 @@ dependencies = [
  "futures",
  "generic-array",
  "hex",
- "hyper 0.14.32",
  "k256",
  "mpc-contract",
  "mpc-crypto",

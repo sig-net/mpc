@@ -46,7 +46,7 @@ hex.workspace = true
 highway = "1.1.0"
 hkdf = "0.12.4"
 http = "1.1.0"
-hyper.workspace = true
+hyper = { version = "0.14", features = ["full"] }
 hyper-rustls = { version = "=0.24", features = ["http2"] }
 k256.workspace = true
 local-ip-address = "0.5.4"

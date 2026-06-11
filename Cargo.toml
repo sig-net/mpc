@@ -31,7 +31,6 @@ clap = { version = "4.5.4", features = ["derive", "env"] }
 deadpool-redis = "0.18.0"
 futures-util = "0.3.31"
 hex = "0.4.3"
-hyper = { version = "0.14", features = ["full"] }
 k256 = { version = "0.13.1", features = [
     "sha256",
     "ecdsa",

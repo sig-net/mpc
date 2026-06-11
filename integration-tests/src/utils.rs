@@ -1,11 +1,11 @@
 use anyhow::Context;
-use hyper::{Body, Client, Method, Request, StatusCode, Uri};
 use near_workspaces::{
     network::Sandbox,
     types::{KeyType, SecretKey},
     Account, AccountId, Worker,
 };
 use rand::Rng;
+use reqwest::StatusCode;
 use std::collections::HashSet;
 use std::sync::{Mutex, Once};
 use tracing_subscriber::EnvFilter;
@@ -123,21 +123,11 @@ pub async fn vote_leave(
     Ok(())
 }
 
-pub async fn get<U>(uri: U) -> anyhow::Result<StatusCode>
-where
-    Uri: TryFrom<U>,
-    <Uri as TryFrom<U>>::Error: Into<hyper::http::Error>,
-{
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri(uri)
+pub async fn get(uri: &str) -> anyhow::Result<StatusCode> {
+    let response = reqwest::Client::new()
+        .get(uri)
         .header("content-type", "application/json")
-        .body(Body::empty())
-        .context("failed to build the request")?;
-
-    let client = Client::new();
-    let response = client
-        .request(req)
+        .send()
         .await
         .context("failed to send the request")?;
     Ok(response.status())

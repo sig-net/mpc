@@ -34,7 +34,6 @@ elliptic-curve = { version = "0.13.5", default-features = false }
 futures = "0.3"
 generic-array = { version = "0.14.7", default-features = false }
 hex.workspace = true
-hyper.workspace = true
 k256 = { workspace = true, features = ["sha256", "ecdsa", "serde"] }
 mpc-contract.workspace = true
 
