@@ -76,7 +76,7 @@ opentelemetry_sdk = { version = "0.29.0", default-features = false, features = [
 parity-scale-codec.workspace = true
 prometheus = "0.14.0"
 rand.workspace = true
-redis = "0.27.2"
+redis = "0.27.6"
 reqwest.workspace = true
 rlp.workspace = true
 secrecy = "0.10.3"
