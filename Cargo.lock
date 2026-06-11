@@ -6034,7 +6034,7 @@ dependencies = [
  "solana-transaction-status",
  "test-log",
  "testcontainers",
- "thiserror 1.0.69",
+ "thiserror 2.0.12",
  "tokio",
  "tracing",
  "tracing-subscriber 0.3.20",
@@ -7313,7 +7313,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signature 2.2.0",
- "thiserror 1.0.69",
+ "thiserror 2.0.12",
  "tokio",
 ]
 
@@ -7421,7 +7421,7 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "test-log",
- "thiserror 1.0.69",
+ "thiserror 2.0.12",
  "tokio",
  "tokio-stream",
  "tokio-tungstenite 0.29.0",
@@ -7447,7 +7447,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha3",
- "thiserror 1.0.69",
+ "thiserror 2.0.12",
 ]
 
 [[package]]
