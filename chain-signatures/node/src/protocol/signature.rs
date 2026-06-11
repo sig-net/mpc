@@ -34,11 +34,12 @@ use mpc_primitives::{SignArgs, SignId};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{mpsc, watch, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
 /// The round interval to search for a proposer in the organizing phase.
@@ -272,8 +273,8 @@ struct SignState {
     /// would not have sent a posit message before the proposer proposes.
     ///
     /// INVARIANT: All messages stored here are for `highest_seen_round`. Must
-    /// be cleared when `highest_seen_round` changes.
-    buffered_messages: VecDeque<SignTaskMessage>,
+    /// be cleared when `highest_seen_round` changes. One slot per sender.
+    buffered_messages: HashMap<Participant, SignTaskMessage>,
     /// When Some, another group is already generating this signature.
     /// The timestamp is when proposing can be resumed.
     pause_proposing: Option<std::time::Instant>,
@@ -288,7 +289,7 @@ impl SignState {
             budget: TimeoutBudget::new(ORGANIZE_POSIT_TIMEOUT),
             permit: None,
             highest_seen_round: 0,
-            buffered_messages: VecDeque::new(),
+            buffered_messages: HashMap::new(),
             pause_proposing: None,
         }
     }
@@ -310,7 +311,9 @@ impl SignState {
     /// that round is reached.
     fn store_future_posit_message(&mut self, msg: SignTaskMessage) {
         let SignTaskMessage::PositMessage {
-            round: peer_round, ..
+            round: peer_round,
+            from,
+            ..
         } = msg;
 
         if peer_round < self.highest_seen_round {
@@ -320,16 +323,93 @@ impl SignState {
             self.highest_seen_round = peer_round;
             self.buffered_messages.clear();
         }
-        self.buffered_messages.push_back(msg);
+        // One slot per sender; newer message for the same round wins.
+        self.buffered_messages.insert(from, msg);
     }
 
     /// Remove a buffered message for processing, if there is one for the
     /// current round.
     fn take_buffered_posit_message(&mut self) -> Option<SignTaskMessage> {
         if self.highest_seen_round == self.round {
-            self.buffered_messages.pop_front()
+            let key = self.buffered_messages.keys().next().copied()?;
+            self.buffered_messages.remove(&key)
         } else {
             None
+        }
+    }
+}
+
+/// Work queue for posit messages, keyed by sending participant.
+///
+/// A message for round N from sender P replaces any earlier message from P.
+///
+/// Only a single message per round and sender buffered. This is enough because:
+///
+/// - When we are proposer for a round, only Reject or Accept will be sent to us.
+/// - When we are deliberator, we can only receive `Propose` or `Start` messages
+///   here. But we can't get a `Start` message for a round that we haven't already
+///   responded to a `Propose` message. Therefore, one message per round is all we
+///   need to buffer.
+struct SignPositWorkQueue {
+    // using std Mutex here, do not hold across .await
+    messages: std::sync::Mutex<HashMap<Participant, SignTaskMessage>>,
+    notify: Notify,
+}
+
+impl SignPositWorkQueue {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            messages: std::sync::Mutex::new(HashMap::new()),
+            notify: Notify::new(),
+        })
+    }
+
+    fn push(&self, msg: SignTaskMessage) {
+        let SignTaskMessage::PositMessage {
+            from,
+            round: new_round,
+            ..
+        } = msg;
+        let mut guard = self.messages.lock().unwrap();
+        let mut inserted = false;
+        match guard.entry(from) {
+            Entry::Occupied(mut occupied_entry) => {
+                let SignTaskMessage::PositMessage {
+                    round: existing, ..
+                } = occupied_entry.get();
+
+                if new_round >= *existing {
+                    occupied_entry.insert(msg);
+                    inserted = true;
+                }
+            }
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert(msg);
+                inserted = true;
+            }
+        }
+        drop(guard);
+        // Wake up potential work consumers. (after releasing the lock)
+        if inserted {
+            self.notify.notify_one();
+        }
+    }
+
+    fn try_recv(&self) -> Option<SignTaskMessage> {
+        let mut guard = self.messages.lock().unwrap();
+        let key = guard.keys().next().copied()?;
+        guard.remove(&key)
+    }
+
+    /// Wait for the next available posit message.
+    async fn recv(&self) -> SignTaskMessage {
+        loop {
+            // Register for wakeup BEFORE checking to avoid races with a push.
+            let notified = self.notify.notified();
+            if let Some(msg) = self.try_recv() {
+                return msg;
+            }
+            notified.await;
         }
     }
 }
@@ -360,12 +440,12 @@ impl SignPhase {
         &mut self,
         ctx: &mut SignTask,
         state: &mut SignState,
-        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
+        posit_queue: &SignPositWorkQueue,
     ) -> SignPhase {
         match self {
             SignPhase::Organizing(phase) => phase.advance(ctx, state).await,
-            SignPhase::Posit(phase) => phase.advance(ctx, state, task_rx).await,
-            SignPhase::Generating(phase) => phase.advance(ctx, state, task_rx).await,
+            SignPhase::Posit(phase) => phase.advance(ctx, state, posit_queue).await,
+            SignPhase::Generating(phase) => phase.advance(ctx, state, posit_queue).await,
             SignPhase::Complete(result) => SignPhase::Complete(*result),
         }
     }
@@ -597,7 +677,7 @@ impl SignPositor {
     async fn wait_propose(
         ctx: &mut SignTask,
         state: &mut SignState,
-        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
+        posit_queue: &SignPositWorkQueue,
         proposer: Participant,
     ) -> Result<PresignatureId, SignPhase> {
         let sign_id = ctx.sign_id;
@@ -608,12 +688,7 @@ impl SignPositor {
                 // Prioritize buffered messages, if any for the current round
                 let task_msg = match state.take_buffered_posit_message() {
                     Some(buffered) => buffered,
-                    None => {
-                        let Some(task_msg) = task_rx.recv().await else {
-                            continue;
-                        };
-                        task_msg
-                    }
+                    None => posit_queue.recv().await,
                 };
 
                 let SignTaskMessage::PositMessage {
@@ -776,7 +851,7 @@ impl SignPositor {
         &mut self,
         ctx: &mut SignTask,
         state: &mut SignState,
-        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
+        posit_queue: &SignPositWorkQueue,
     ) -> SignPhase {
         let proposer = self.proposer;
         let active = self.active.clone();
@@ -804,7 +879,7 @@ impl SignPositor {
                 "deliberator waiting for Propose"
             );
 
-            presignature_id = match Self::wait_propose(ctx, state, task_rx, proposer).await {
+            presignature_id = match Self::wait_propose(ctx, state, posit_queue, proposer).await {
                 Ok(id) => id,
                 Err(phase) => return phase,
             }
@@ -833,7 +908,7 @@ impl SignPositor {
 
         let accepted_participants = loop {
             tokio::select! {
-                Some(task_msg) = task_rx.recv() => {
+                task_msg = posit_queue.recv() => {
                     let SignTaskMessage::PositMessage { round: peer_round , ..} = task_msg;
 
                     // Ignore messages for older rounds
@@ -1008,7 +1083,7 @@ impl SignGenerating {
         &mut self,
         ctx: &SignTask,
         state: &mut SignState,
-        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
+        posit_queue: &SignPositWorkQueue,
     ) -> SignPhase {
         // We successfully committed to generating; future rounds should be unrestricted.
         state.pause_proposing = None;
@@ -1071,7 +1146,7 @@ impl SignGenerating {
         // Track that we've created a generator
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS.inc();
 
-        match generator.run(ctx, task_rx).await {
+        match generator.run(ctx, posit_queue).await {
             Ok(()) => SignPhase::Complete(Ok(())),
             Err(err) => {
                 tracing::warn!(
@@ -1196,7 +1271,7 @@ impl SignGenerator {
     async fn run(
         mut self,
         ctx: &SignTask,
-        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
+        posit_queue: &SignPositWorkQueue,
     ) -> Result<(), SignError> {
         let me = ctx.governance.me;
         let epoch = ctx.governance.epoch;
@@ -1249,7 +1324,7 @@ impl SignGenerator {
                             })?;
                             self.protocol.message(msg.from, msg.data);
                         }
-                        Some(task_msg) = task_rx.recv() => {
+                        task_msg = posit_queue.recv() => {
                             let SignTaskMessage::PositMessage {
                                 presignature_id: posit_presig_id,
                                 round: posit_round,
@@ -1500,7 +1575,7 @@ impl SignTask {
         mut self,
         indexed: IndexedSignRequest,
         mesh_state: watch::Receiver<MeshState>,
-        mut task_rx: mpsc::Receiver<SignTaskMessage>,
+        posit_queue: Arc<SignPositWorkQueue>,
     ) -> Result<(), SignError> {
         let sign_id = self.sign_id;
         tracing::info!(?sign_id, governance = ?self.governance, "signature task starting...");
@@ -1550,7 +1625,7 @@ impl SignTask {
                 // This branch in tokio::select will get cancelled since the future for next contract
                 // state is reached first. This effectively pauses this branch from executing and
                 // further advancing the signature organization/positing/generation flow.
-                new_phase = phase.advance(&mut self, &mut state, &mut task_rx), if is_running => {
+                new_phase = phase.advance(&mut self, &mut state, &posit_queue), if is_running => {
                     if let Some(step) = current_phase_step {
                         durations.add(step, phase_start.elapsed());
                         if matches!(&new_phase, SignPhase::Organizing(_)) {
@@ -1668,14 +1743,27 @@ impl SignatureSpawner {
             self.delayed_watchers.insert(sign_id, watcher);
         }
 
-        // Subscribe to (or create) the posit inbox for this sign request
+        // Subscribe to (or create) the posit inbox for this sign request.
         let inbox = self
             .inboxes
             .entry(sign_id)
             .or_insert_with(|| Subscriber::unsubscribed(SIGN_POSIT_INBOX_LABEL));
-        let rx = inbox.subscribe();
+        let mut rx = inbox.subscribe();
         inbox.report_capacity();
         set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
+
+        // Keep draining the channel as long as the Subscriber is alive and move
+        // the messages to a specialized work item queue.
+        // The spawned task is only woken up by tokio when a new message is sent
+        // or the channel closes.
+        let posit_queue = SignPositWorkQueue::new();
+        let drain_into = Arc::clone(&posit_queue);
+        tokio::spawn(async move {
+            // None was returned => the Subscriber was dropped
+            while let Some(msg) = rx.recv().await {
+                drain_into.push(msg);
+            }
+        });
 
         let task = SignTask {
             governance: governance.clone(),
@@ -1692,8 +1780,10 @@ impl SignatureSpawner {
         };
 
         // Spawn the async task with organizing loop
-        self.tasks
-            .spawn(sign_id, task.run(indexed, self.mesh_state.clone(), rx));
+        self.tasks.spawn(
+            sign_id,
+            task.run(indexed, self.mesh_state.clone(), posit_queue),
+        );
     }
 
     /// Handle a posit message - routes to existing task or buffers if task not yet created
