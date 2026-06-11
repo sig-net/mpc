@@ -361,7 +361,7 @@ impl ContractStateWatcher {
         }
     }
 
-    pub async fn wait_info(&self) -> (usize, Participant) {
+    pub async fn wait_info(&mut self) -> (usize, Participant) {
         loop {
             if let Some((threshold, participant)) = self.info().await {
                 return (threshold, participant);
