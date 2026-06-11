@@ -1607,6 +1607,9 @@ pub struct SignatureSpawner {
     tasks: JoinMap<SignId, Result<(), SignError>>,
     /// Buffered inboxes for posit messages, allowing us to queue before tasks spawn
     inboxes: HashMap<SignId, Subscriber<SignTaskMessage>>,
+    /// Recently-completed sign IDs. Straggler posit messages for these are dropped
+    /// immediately in `handle_posit` to prevent re-creating dead inbox entries.
+    completed: lru::LruCache<SignId, ()>,
     /// Tracks delay watcher tasks that will increment the delayed metric when response time exceeds expected
     delayed_watchers: HashMap<SignId, JoinHandle<()>>,
     mesh_state: watch::Receiver<MeshState>,
@@ -1710,6 +1713,12 @@ impl SignatureSpawner {
         if from == me {
             return;
         }
+        // Drop straggler posits for already-completed tasks. Without this guard, the
+        // `entry` API below would silently re-create an Unsubscribed inbox that no
+        // task is reading, causing the channel to fill and messages to be dropped.
+        if self.completed.contains(&sign_id) {
+            return;
+        }
         let inbox = self.inboxes.entry(sign_id).or_insert_with(|| {
             Subscriber::unsubscribed_with_capacity(
                 SIGN_POSIT_INBOX_LABEL,
@@ -1728,6 +1737,7 @@ impl SignatureSpawner {
     }
 
     fn handle_completion(&mut self, sign_id: SignId) {
+        self.completed.put(sign_id, ());
         if let Some(inbox) = self.inboxes.remove(&sign_id) {
             inbox.clear_capacity_global();
         }
@@ -1746,6 +1756,7 @@ impl SignatureSpawner {
             Ok(outcome) => outcome,
             Err(sign_id) => {
                 tracing::warn!(?sign_id, "signature task interrupted");
+                self.completed.put(sign_id, ());
                 if let Some(inbox) = self.inboxes.remove(&sign_id) {
                     inbox.clear_capacity_global();
                 }
@@ -1754,6 +1765,7 @@ impl SignatureSpawner {
                 return;
             }
         };
+        self.completed.put(sign_id, ());
         if let Some(inbox) = self.inboxes.remove(&sign_id) {
             inbox.clear_capacity_global();
         }
@@ -1875,6 +1887,9 @@ impl SignatureSpawnerTask {
             contract,
             tasks: JoinMap::new(),
             inboxes: HashMap::new(),
+            completed: lru::LruCache::new(
+                crate::protocol::message::filter::MAX_FILTER_SIZE,
+            ),
             delayed_watchers: HashMap::new(),
             presignatures: presignature_storage,
             mesh_state,
@@ -2175,6 +2190,94 @@ mod tests {
         assert_eq!(
             SignOrganizer::proposer_per_round(2, &participants, &entropy),
             Participant::from(0)
+        );
+    }
+
+    fn make_spawner() -> SignatureSpawner {
+        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .unwrap();
+        let presignatures = Presignature::storage(&pool, &account_id);
+        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let rpc_channel = RpcChannel { tx: rpc_tx };
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants,
+        );
+        let (mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        drop(mesh_tx);
+        SignatureSpawner {
+            contract,
+            tasks: JoinMap::new(),
+            inboxes: HashMap::new(),
+            completed: lru::LruCache::new(crate::protocol::message::filter::MAX_FILTER_SIZE),
+            delayed_watchers: HashMap::new(),
+            presignatures,
+            mesh_state: mesh_rx,
+            limiter: SignLimiter::new(MAX_CONCURRENT_PROPOSERS),
+            msg: msg_channel,
+            rpc: rpc_channel,
+            backlog: Backlog::new(),
+            node_account_id: account_id,
+        }
+    }
+
+    /// Straggler posits for a task that exited via `handle_task_exit` must not
+    /// re-create a dead inbox entry in `SignatureSpawner.inboxes`.
+    #[tokio::test]
+    async fn handle_posit_drops_stragglers_after_task_exit() {
+        let mut spawner = make_spawner();
+        let me = Participant::from(0);
+        let peer = Participant::from(1);
+        let sign_id = SignId::new([1u8; 32]);
+        let presig_id = 42u64;
+
+        // First posit — task not yet spawned, inbox created.
+        spawner.handle_posit(me, sign_id, presig_id, 0, peer, PositAction::Propose);
+        assert!(spawner.inboxes.contains_key(&sign_id), "inbox should exist");
+
+        // Simulate successful task exit.
+        spawner.handle_task_exit(Ok((sign_id, Ok(()))));
+        assert!(!spawner.inboxes.contains_key(&sign_id), "inbox should be removed on exit");
+        assert!(spawner.completed.contains(&sign_id), "sign_id should be in completed set");
+
+        // Straggler posit — must NOT recreate inbox.
+        spawner.handle_posit(me, sign_id, presig_id, 1, peer, PositAction::Propose);
+        assert!(
+            !spawner.inboxes.contains_key(&sign_id),
+            "straggler posit must not recreate inbox for completed sign_id"
+        );
+    }
+
+    /// Same guarantee must hold when the task is aborted externally via
+    /// `handle_completion` (e.g. a respond event arrives from another node).
+    #[tokio::test]
+    async fn handle_posit_drops_stragglers_after_completion_event() {
+        let mut spawner = make_spawner();
+        let me = Participant::from(0);
+        let peer = Participant::from(1);
+        let sign_id = SignId::new([2u8; 32]);
+        let presig_id = 77u64;
+
+        spawner.handle_posit(me, sign_id, presig_id, 0, peer, PositAction::Propose);
+        assert!(spawner.inboxes.contains_key(&sign_id));
+
+        spawner.handle_completion(sign_id);
+        assert!(!spawner.inboxes.contains_key(&sign_id));
+        assert!(spawner.completed.contains(&sign_id));
+
+        // Straggler must be silently dropped.
+        spawner.handle_posit(me, sign_id, presig_id, 1, peer, PositAction::Propose);
+        assert!(
+            !spawner.inboxes.contains_key(&sign_id),
+            "straggler posit must not recreate inbox after completion event"
         );
     }
 }

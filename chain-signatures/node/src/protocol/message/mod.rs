@@ -1,4 +1,4 @@
-mod filter;
+pub(crate) mod filter;
 mod sub;
 mod types;
 
