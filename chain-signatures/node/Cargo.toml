@@ -60,7 +60,7 @@ mpc-keys.workspace = true
 mpc-primitives.workspace = true
 near-account-id.workspace = true
 near-crypto.workspace = true
-near-fetch = "0.6.0"
+near-fetch.workspace = true
 near-primitives.workspace = true
 near-sdk.workspace = true
 oauth2 = { version = "4.4.2", default-features = false, features = ["reqwest"] }
