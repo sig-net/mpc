@@ -63,7 +63,7 @@ near-crypto.workspace = true
 near-fetch = "0.6.0"
 near-primitives.workspace = true
 near-sdk.workspace = true
-oauth2.workspace = true
+oauth2 = { version = "4.4.2", default-features = false, features = ["reqwest"] }
 opentelemetry = { version = "0.29.0", default-features = false, features = [
     "trace",
 ] }

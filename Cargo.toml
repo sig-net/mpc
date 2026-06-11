@@ -49,7 +49,6 @@ near-account-id = "1.0.0"
 near-crypto = "0.26.0"
 near-primitives = "0.26.0"
 near-sdk = { version = "5.6.0", features = ["unstable", "unit-testing"] }
-oauth2 = { version = "4.4.2", default-features = false, features = ["reqwest"] }
 parity-scale-codec = { version = "3", features = ["derive"] }
 rand = "0.8.5"
 reqwest = { version = "0.11.16", features = ["blocking", "json"] }
