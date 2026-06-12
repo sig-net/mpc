@@ -41,23 +41,23 @@ In case of authorization issues make sure you have logged into docker using your
 
 ### Running tests
 
-Each `just` test recipe automatically runs setup (WASM contract + node binary compilation) before executing tests. Run `just` with no arguments to list all available recipes.
+Each `just` test recipe automatically runs setup (WASM contract + node binary compilation) before executing tests. Pass an optional `filter` to run matching tests only, and `helios=1` to build with Helios. Run `just` with no arguments to list all available recipes.
 
 | Command | Full recipe | Description |
 |---|---|---|
 | `just s` | `just setup` | Build artifacts |
-| `just t` | `just test` | All integration tests |
-| `just tf` | `just test-fixture` | Fixture tests only (no full cluster) |
-| `just tc` | `just test-cluster` | Full cluster tests only |
-| `just ts` | `just test-seq` | All tests, sequential single-threaded |
+| `just t [filter]` | `just test` | All integration tests |
+| `just tf [filter]` | `just test-fixture` | Fixture tests only (no full cluster) |
+| `just tc [filter]` | `just test-cluster` | Full cluster tests only |
+| `just ts [filter]` | `just test-seq` | All tests, sequential single-threaded |
 | `just to <name>` | `just test-one <name>` | Single test, keeps containers alive |
-| `just tk` | `just test-keep` | All tests, keeps containers alive |
-
-To use Helios, append `helios=1` to any command:
+| `just tk [filter]` | `just test-keep` | All tests, keeps containers alive |
 
 ```bash
-just t helios=1
-just to test_basic_action helios=1
+just t                               # run all tests
+just t my_module                     # run matching tests only
+just t my_module helios=1            # run matching tests with Helios
+just to test_basic_action helios=1.  # run specific test with Helios
 ```
 
 The available profiles and their concurrency settings are defined in [`.config/nextest.toml`](../.config/nextest.toml).
