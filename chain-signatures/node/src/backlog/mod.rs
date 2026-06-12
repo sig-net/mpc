@@ -8,12 +8,11 @@ use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PublishState
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use anyhow::Context;
-use futures_util::future::join_all;
-use futures_util::{stream, StreamExt};
 use mpc_primitives::{PendingTx, SignId};
 use sha3::{Digest, Sha3_256};
 use std::collections::{hash_map, HashMap};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -230,6 +229,8 @@ pub struct Backlog {
     execution_watchers: Arc<HashMap<Chain, RwLock<ExecutionWatchers>>>,
     /// Historical checkpoints kept for 30 minutes, indexed by chain
     historical_checkpoints: Arc<HashMap<Chain, RwLock<Vec<HistoricalCheckpoint>>>>,
+    /// Total number of pending requests across all chains, wrapped in Arc to make clonable
+    total_pending: Arc<AtomicUsize>,
 }
 
 impl Default for Backlog {
@@ -260,10 +261,11 @@ impl Backlog {
             requests: Arc::new(requests),
             execution_watchers: Arc::new(execution_watchers),
             historical_checkpoints: Arc::new(historical_checkpoints),
+            total_pending: Arc::new(AtomicUsize::new(0)),
         }
     }
 
-    /// Get the pending requests for a specific chain. 
+    /// Get the pending requests for a specific chain.
     /// Panics if the chain is not initialized, which should never happen since we pre-allocate for all chains in `persisted`.
     #[inline]
     fn pending(&self, chain: &Chain) -> &RwLock<PendingRequests> {
@@ -309,6 +311,11 @@ impl Backlog {
             (p, pending.len())
         };
 
+        // Only increment total pending if this is a new entry
+        if prev.is_none() {
+            self.total_pending.fetch_add(1, Ordering::Relaxed);
+        }
+
         self.observe_backlog_size(chain, len);
         prev
     }
@@ -320,6 +327,11 @@ impl Backlog {
             (rem, pending.len())
         };
 
+        // Only decrement total pending if an entry was actually removed
+        if removed.is_some() {
+            self.total_pending.fetch_sub(1, Ordering::Relaxed);
+        }
+
         self.observe_backlog_size(chain, len);
         removed
     }
@@ -330,23 +342,12 @@ impl Backlog {
 
     /// Returns the number of pending requests in total
     pub async fn len(&self) -> usize {
-        // TODO: think about making this more efficient
-        join_all(
-            self.requests
-                .values()
-                .map(|lock| async { lock.read().await.len() }),
-        )
-        .await
-        .into_iter()
-        .sum()
+        self.total_pending.load(Ordering::Relaxed)
     }
 
     /// Returns true if there are no pending requests
     pub async fn is_empty(&self) -> bool {
-        // TODO: think about making this more efficient
-        stream::iter(self.requests.values())
-            .all(|lock| async { lock.read().await.requests.is_empty() })
-            .await
+        self.len().await == 0
     }
 
     fn observe_backlog_size(&self, chain: Chain, len: usize) {
