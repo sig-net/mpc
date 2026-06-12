@@ -349,13 +349,13 @@ impl Backlog {
     }
 
     /// Returns the number of pending requests in total
-    pub async fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.total_pending.load(Ordering::Relaxed)
     }
 
     /// Returns true if there are no pending requests
-    pub async fn is_empty(&self) -> bool {
-        self.len().await == 0
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Observe the backlog size for a specific chain and update metrics accordingly
@@ -2046,8 +2046,8 @@ mod tests {
     #[tokio::test]
     async fn test_total_pending_initial_state() {
         let backlog = Backlog::new();
-        assert_eq!(backlog.len().await, 0);
-        assert!(backlog.is_empty().await);
+        assert_eq!(backlog.len(), 0);
+        assert!(backlog.is_empty());
     }
 
     #[tokio::test]
@@ -2063,8 +2063,8 @@ mod tests {
             0,
         )).await;
         
-        assert_eq!(backlog.len().await, 1);
-        assert!(!backlog.is_empty().await);
+        assert_eq!(backlog.len(), 1);
+        assert!(!backlog.is_empty());
     }
 
     #[tokio::test]
@@ -2081,11 +2081,11 @@ mod tests {
         
         // Insert first time
         backlog.insert(request.clone()).await;
-        assert_eq!(backlog.len().await, 1);
+        assert_eq!(backlog.len(), 1);
 
         // Insert exactly the same ID again (overwrites)
         backlog.insert(request).await;
-        assert_eq!(backlog.len().await, 1, "Duplicate insert should not increment total");
+        assert_eq!(backlog.len(), 1, "Duplicate insert should not increment total");
     }
 
     #[tokio::test]
@@ -2108,7 +2108,7 @@ mod tests {
             0,
         )).await;
 
-        assert_eq!(backlog.len().await, 2);
+        assert_eq!(backlog.len(), 2);
     }
 
     #[tokio::test]
@@ -2123,11 +2123,11 @@ mod tests {
             SignKind::Sign,
             0,
         )).await;
-        assert_eq!(backlog.len().await, 1);
+        assert_eq!(backlog.len(), 1);
 
         backlog.remove(Chain::Ethereum, &sign_id).await;
-        assert_eq!(backlog.len().await, 0);
-        assert!(backlog.is_empty().await);
+        assert_eq!(backlog.len(), 0);
+        assert!(backlog.is_empty());
     }
 
     #[tokio::test]
@@ -2145,7 +2145,7 @@ mod tests {
         )).await;
 
         backlog.remove(Chain::Ethereum, &sign_id2).await;
-        assert_eq!(backlog.len().await, 1, "Removing non-existent ID should not decrement total");
+        assert_eq!(backlog.len(), 1, "Removing non-existent ID should not decrement total");
     }
 
     #[tokio::test]
@@ -2167,11 +2167,11 @@ mod tests {
 
         // Clean backlog recovers the checkpoint
         let recovered = Backlog::new();
-        assert_eq!(recovered.len().await, 0);
+        assert_eq!(recovered.len(), 0);
         
         recovered.recover_by_checkpoint(checkpoint).await.expect("failed to recover");
         
-        assert_eq!(recovered.len().await, 3);
+        assert_eq!(recovered.len(), 3);
     }
 
     #[tokio::test]
@@ -2201,13 +2201,13 @@ mod tests {
             0,
         )).await;
         
-        assert_eq!(dirty_backlog.len().await, 1);
+        assert_eq!(dirty_backlog.len(), 1);
         
         // Recover from checkpoint (should overwrite the dirty state)
         dirty_backlog.recover_by_checkpoint(checkpoint).await.expect("failed to recover");
         
         assert_eq!(
-            dirty_backlog.len().await, 
+            dirty_backlog.len(), 
             3, 
             "Total should reflect exactly the restored checkpoint size, ignoring the overwritten dirty state"
         );
