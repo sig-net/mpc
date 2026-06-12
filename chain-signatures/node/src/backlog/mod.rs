@@ -263,13 +263,35 @@ impl Backlog {
         }
     }
 
-    async fn remember_checkpoint(&self, checkpoint: &Checkpoint) {
-        let mut historical = self
-            .historical_checkpoints
-            .get(&checkpoint.chain)
+    /// Get the pending requests for a specific chain. 
+    /// Panics if the chain is not initialized, which should never happen since we pre-allocate for all chains in `persisted`.
+    #[inline]
+    fn pending(&self, chain: &Chain) -> &RwLock<PendingRequests> {
+        self.requests
+            .get(chain)
             .expect("chain should be initialized within `persisted` method")
-            .write()
-            .await;
+    }
+
+    /// Get the execution watchers for a specific chain.
+    /// Panics if the chain is not initialized, which should never happen since we pre-allocate for all chains in `persisted`.
+    #[inline]
+    fn watchers(&self, chain: &Chain) -> &RwLock<ExecutionWatchers> {
+        self.execution_watchers
+            .get(chain)
+            .expect("chain should be initialized within `persisted` method")
+    }
+
+    /// Get the historical checkpoints for a specific chain.
+    /// Panics if the chain is not initialized, which should never happen since we pre-allocate for all chains in `persisted`.
+    #[inline]
+    fn checkpoints(&self, chain: &Chain) -> &RwLock<Vec<HistoricalCheckpoint>> {
+        self.historical_checkpoints
+            .get(chain)
+            .expect("chain should be initialized within `persisted` method")
+    }
+
+    async fn remember_checkpoint(&self, checkpoint: &Checkpoint) {
+        let mut historical = self.checkpoints(&checkpoint.chain).write().await;
         historical.push(HistoricalCheckpoint {
             checkpoint: checkpoint.clone(),
             created_at: Instant::now(),
@@ -282,12 +304,7 @@ impl Backlog {
         let id = request.id;
         let entry = BacklogEntry::new(request);
         let (prev, len) = {
-            let mut pending = self
-                .requests
-                .get(&chain)
-                .expect("chain should be initialized within `persisted` method")
-                .write()
-                .await;
+            let mut pending = self.pending(&chain).write().await;
             let p = pending.insert(id, entry);
             (p, pending.len())
         };
@@ -298,12 +315,7 @@ impl Backlog {
 
     pub async fn remove(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
         let (removed, len) = {
-            let mut pending = self
-                .requests
-                .get(&chain)
-                .expect("chain should be initialized within `persisted` method")
-                .write()
-                .await;
+            let mut pending = self.pending(&chain).write().await;
             let rem = pending.remove(id);
             (rem, pending.len())
         };
@@ -313,13 +325,7 @@ impl Backlog {
     }
 
     pub async fn get(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
-        self.requests
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
-            .read()
-            .await
-            .get(id)
-            .cloned()
+        self.pending(&chain).read().await.get(id).cloned()
     }
 
     /// Returns the number of pending requests in total
@@ -352,12 +358,7 @@ impl Backlog {
     /// Returns backlog requests for a chain that are still eligible to be
     /// enqueued for processing after catchup completes.
     pub async fn take_requeueable_requests(&self, chain: Chain) -> Vec<IndexedSignRequest> {
-        let pending = self
-            .requests
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
-            .write()
-            .await;
+        let pending = self.pending(&chain).write().await;
 
         let mut requeueable: Vec<_> = pending
             .requests
@@ -379,12 +380,7 @@ impl Backlog {
         &self,
         chain: Chain,
     ) -> Vec<(IndexedSignRequest, PublishState)> {
-        let pending = self
-            .requests
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
-            .write()
-            .await;
+        let pending = self.pending(&chain).write().await;
 
         let mut publishable: Vec<_> = pending
             .requests
@@ -409,30 +405,21 @@ impl Backlog {
     }
 
     pub async fn pending_generations(&self, chain: Chain) -> HashMap<SignId, BacklogEntry> {
-        self.requests
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
-            .read()
-            .await
-            .pending_generations()
+        self.pending(&chain).read().await.pending_generations()
     }
 
     pub async fn pending_generation_bidirectionals(
         &self,
         chain: Chain,
     ) -> HashMap<SignId, BacklogEntry> {
-        self.requests
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
+        self.pending(&chain)
             .read()
             .await
             .pending_generation_bidirectionals()
     }
 
     pub async fn pending_execution(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
-        self.requests
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
+        self.pending(&chain)
             .read()
             .await
             .pending_execution(id)
@@ -440,12 +427,7 @@ impl Backlog {
     }
 
     pub async fn len_by_chain(&self, chain: Chain) -> usize {
-        self.requests
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
-            .read()
-            .await
-            .len()
+        self.pending(&chain).read().await.len()
     }
 
     pub async fn mark_publishing(
@@ -478,12 +460,7 @@ impl Backlog {
         id: &SignId,
         request: IndexedSignRequest,
     ) -> Result<(), BacklogError> {
-        let mut pending = self
-            .requests
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
-            .write()
-            .await;
+        let mut pending = self.pending(&chain).write().await;
 
         let Some(entry) = pending.requests.get_mut(id) else {
             return Err(BacklogError::NotFound { chain, id: *id });
@@ -499,12 +476,7 @@ impl Backlog {
         sign_id: SignId,
         tx: BidirectionalTx,
     ) -> Option<(SignId, BidirectionalTx)> {
-        let mut entry = self
-            .execution_watchers
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
-            .write()
-            .await;
+        let mut entry = self.watchers(&chain).write().await;
 
         entry
             .insert(tx.id, ExecutionWatcher { sign_id, tx })
@@ -517,12 +489,7 @@ impl Backlog {
         chain: Chain,
         tx_id: &BidirectionalTxId,
     ) -> Option<(SignId, BidirectionalTx)> {
-        let mut entry = self
-            .execution_watchers
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
-            .write()
-            .await;
+        let mut entry = self.watchers(&chain).write().await;
 
         entry
             .remove(tx_id)
@@ -535,12 +502,7 @@ impl Backlog {
         &self,
         chain: Chain,
     ) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)> {
-        self.execution_watchers
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
-            .read()
-            .await
-            .all()
+        self.watchers(&chain).read().await.all()
     }
 
     /// Update the status of a tracked bidirectional transaction on the source chain.
@@ -550,12 +512,7 @@ impl Backlog {
         id: &SignId,
         status: SignStatus,
     ) -> Option<BacklogEntry> {
-        let mut pending = self
-            .requests
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
-            .write()
-            .await;
+        let mut pending = self.pending(&chain).write().await;
 
         let Some(entry) = pending.requests.get_mut(id) else {
             tracing::warn!(
@@ -580,12 +537,7 @@ impl Backlog {
         bidirectional_tx: BidirectionalTx,
     ) -> Result<(), BacklogError> {
         // Update the transaction in the backlog from Sign to Bidirectional
-        let mut pending = self
-            .requests
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
-            .write()
-            .await;
+        let mut pending = self.pending(&chain).write().await;
 
         let entry = pending
             .requests
@@ -604,12 +556,7 @@ impl Backlog {
 
     /// Get the processed block height for a specific chain
     pub async fn processed_block(&self, chain: Chain) -> Option<u64> {
-        self.requests
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
-            .read()
-            .await
-            .processed_block_height()
+        self.pending(&chain).read().await.processed_block_height()
     }
 
     /// Set the processed block height for a specific chain.
@@ -626,12 +573,7 @@ impl Backlog {
         height: u64,
         interval: u64,
     ) -> Option<Checkpoint> {
-        let mut pending = self
-            .requests
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
-            .write()
-            .await;
+        let mut pending = self.pending(&chain).write().await;
         pending.set_processed_block(height);
 
         tracing::trace!(
@@ -656,13 +598,7 @@ impl Backlog {
 
     /// Create a checkpoint of the current backlog state for a specific chain
     pub async fn checkpoint(&self, chain: Chain) -> Checkpoint {
-        let checkpoint = self
-            .requests
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
-            .read()
-            .await
-            .checkpoint(chain);
+        let checkpoint = self.pending(&chain).read().await.checkpoint(chain);
 
         self.remember_checkpoint(&checkpoint).await;
 
@@ -674,9 +610,7 @@ impl Backlog {
     }
 
     pub async fn latest_checkpoint(&self, chain: Chain) -> Option<Checkpoint> {
-        self.historical_checkpoints
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
+        self.checkpoints(&chain)
             .read()
             .await
             .iter()
@@ -686,13 +620,7 @@ impl Backlog {
 
     /// Find a historical checkpoint by hash
     pub async fn find_checkpoint_by_hash(&self, chain: Chain, hash: u64) -> Option<Checkpoint> {
-        let checkpoints = self
-            .historical_checkpoints
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
-            .read()
-            .await
-            .clone(); // TODO: consider if we can avoid cloning
+        let checkpoints = self.checkpoints(&chain).read().await.clone(); // TODO: consider if we can avoid cloning
 
         for hcp in checkpoints {
             let mut hasher = hash_map::DefaultHasher::new();
@@ -715,12 +643,7 @@ impl Backlog {
             "recovering from checkpoint"
         );
 
-        let mut pending = self
-            .requests
-            .get(&checkpoint.chain)
-            .expect("chain should be initialized within `persisted` method")
-            .write()
-            .await;
+        let mut pending = self.pending(&checkpoint.chain).write().await;
 
         let previous_height = pending.processed_block_height().unwrap_or(0);
         let checkpoint_height = checkpoint.block_height;
@@ -756,13 +679,7 @@ impl Backlog {
         // Need to set the checkpoint as latest in our historical checkpoints
         // when we initially recover for this particular chain.
         if checkpoint_height > previous_height {
-            let checkpoint = self
-                .requests
-                .get(&chain)
-                .expect("chain should be initialized within `persisted` method")
-                .read()
-                .await
-                .checkpoint(chain);
+            let checkpoint = self.pending(&chain).read().await.checkpoint(chain);
 
             self.remember_checkpoint(&checkpoint).await;
         }
@@ -853,8 +770,6 @@ pub enum BacklogError {
     NotFound { chain: Chain, id: SignId },
     #[error("chain not initialized: {chain:?}")]
     ChainNotInitialized { chain: Chain },
-    #[error("chain not found")]
-    ChainNotFound,
     #[error("transaction not found")]
     TransactionNotFound,
     #[error("cannot mark publishing for current backlog state")]
