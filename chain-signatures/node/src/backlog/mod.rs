@@ -453,12 +453,7 @@ impl Backlog {
         id: &SignId,
         publish: PublishState,
     ) -> Result<(), BacklogError> {
-        let mut pending = self
-            .requests
-            .get(&chain)
-            .expect("chain should be initialized within `persisted` method")
-            .write()
-            .await;
+        let mut pending = self.pending(&chain).write().await;
 
         let Some(entry) = pending.requests.get_mut(id) else {
             return Err(BacklogError::NotFound { chain, id: *id });
