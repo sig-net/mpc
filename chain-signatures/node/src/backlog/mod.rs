@@ -652,7 +652,15 @@ impl Backlog {
         // Execution watchers are ephemeral, we need to get all the execution watchers here
         let execution_to_watch = if checkpoint_height > previous_height {
             let cleared = pending.len();
-            *pending = PendingRequests::from_checkpoint(checkpoint)?;
+            let new_pending = PendingRequests::from_checkpoint(checkpoint)?;
+            let restored = new_pending.len();
+
+            *pending = new_pending;
+
+            // Update total pending count based on the difference between cleared and restored requests
+            self.total_pending.fetch_sub(cleared, Ordering::Relaxed);
+            self.total_pending.fetch_add(restored, Ordering::Relaxed);
+
             let execution_to_watch = pending.pending_executions();
 
             tracing::info!(
