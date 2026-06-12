@@ -224,8 +224,11 @@ struct HistoricalCheckpoint {
 /// publish queues.
 #[derive(Debug, Clone)]
 pub struct Backlog {
+    /// Storage for checkpoints, which can be in-memory or persisted to disk
     storage: CheckpointStorage,
+    /// Pending requests indexed by chain
     requests: Arc<HashMap<Chain, RwLock<PendingRequests>>>,
+    /// Execution watchers indexed by chain
     execution_watchers: Arc<HashMap<Chain, RwLock<ExecutionWatchers>>>,
     /// Historical checkpoints kept for 30 minutes, indexed by chain
     historical_checkpoints: Arc<HashMap<Chain, RwLock<Vec<HistoricalCheckpoint>>>>,
@@ -244,6 +247,7 @@ impl Backlog {
         Self::persisted(CheckpointStorage::in_memory())
     }
 
+    /// Initialize the backlog with storage and pre-allocate maps for all chains
     pub fn persisted(storage: CheckpointStorage) -> Self {
         let mut requests = HashMap::new();
         let mut execution_watchers = HashMap::new();
@@ -292,6 +296,7 @@ impl Backlog {
             .expect("chain should be initialized within `persisted` method")
     }
 
+    /// Remember a checkpoint in the historical checkpoints list and clean up old checkpoints
     async fn remember_checkpoint(&self, checkpoint: &Checkpoint) {
         let mut historical = self.checkpoints(&checkpoint.chain).write().await;
         historical.push(HistoricalCheckpoint {
@@ -301,6 +306,7 @@ impl Backlog {
         historical.retain(|hcp| hcp.created_at.elapsed() < RETENTION_DURATION);
     }
 
+    /// Insert a new Sign request into the backlog for the specified chain.
     pub async fn insert(&self, request: IndexedSignRequest) -> Option<BacklogEntry> {
         let chain = request.chain;
         let id = request.id;
@@ -320,6 +326,7 @@ impl Backlog {
         prev
     }
 
+    /// Remove a Sign request from the backlog for the specified chain.
     pub async fn remove(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
         let (removed, len) = {
             let mut pending = self.pending(&chain).write().await;
@@ -336,6 +343,7 @@ impl Backlog {
         removed
     }
 
+    /// Get a Sign request from the backlog for the specified chain.
     pub async fn get(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
         self.pending(&chain).read().await.get(id).cloned()
     }
@@ -350,6 +358,7 @@ impl Backlog {
         self.len().await == 0
     }
 
+    /// Observe the backlog size for a specific chain and update metrics accordingly
     fn observe_backlog_size(&self, chain: Chain, len: usize) {
         crate::metrics::requests::BACKLOG_SIZE
             .with_label_values(&[chain.as_str()])
@@ -377,6 +386,8 @@ impl Backlog {
         requeueable
     }
 
+    /// Returns backlog requests for a chain that are ready to be published.
+    /// Sorted by indexed timestamp and request id.
     pub async fn publishable_requests(
         &self,
         chain: Chain,
@@ -405,10 +416,12 @@ impl Backlog {
         publishable
     }
 
+    /// Returns backlog requests for a chain that are still pending generation
     pub async fn pending_generations(&self, chain: Chain) -> HashMap<SignId, BacklogEntry> {
         self.pending(&chain).read().await.pending_generations()
     }
 
+    /// Returns backlog requests for a chain that are still pending generation for bidirectional transactions
     pub async fn pending_generation_bidirectionals(
         &self,
         chain: Chain,
@@ -419,6 +432,7 @@ impl Backlog {
             .pending_generation_bidirectionals()
     }
 
+    /// Returns backlog entries that are pending execution for a given chain and request id
     pub async fn pending_execution(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
         self.pending(&chain)
             .read()
@@ -427,10 +441,12 @@ impl Backlog {
             .cloned()
     }
 
+    /// Returns the number of pending requests for a specific chain
     pub async fn len_by_chain(&self, chain: Chain) -> usize {
         self.pending(&chain).read().await.len()
     }
 
+    /// Marks a request as publishing for a specific chain and request id, with the given publish state.
     pub async fn mark_publishing(
         &self,
         chain: Chain,
@@ -568,6 +584,7 @@ impl Backlog {
             .await
     }
 
+    /// Set the processed block height for a specific chain and checkpoint on interval.
     pub async fn set_processed_block_interval(
         &self,
         chain: Chain,
@@ -584,7 +601,7 @@ impl Backlog {
             "backlog updated processed block height"
         );
 
-        // create a checkpoint on interval
+        // Create a checkpoint on interval
         if height.is_multiple_of(interval) {
             let tx_count = pending.len();
             drop(pending);
@@ -610,6 +627,7 @@ impl Backlog {
         checkpoint
     }
 
+    /// Get the latest checkpoint for a specific chain.
     pub async fn latest_checkpoint(&self, chain: Chain) -> Option<Checkpoint> {
         self.checkpoints(&chain)
             .read()
@@ -704,6 +722,7 @@ impl Backlog {
         Ok(())
     }
 
+    /// Recover backlog state by selecting checkpoints from active participants in the mesh network.
     pub async fn recover(
         &self,
         mesh_state: &MeshState,
