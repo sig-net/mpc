@@ -621,9 +621,9 @@ impl Backlog {
 
     /// Find a historical checkpoint by hash
     pub async fn find_checkpoint_by_hash(&self, chain: Chain, hash: u64) -> Option<Checkpoint> {
-        let checkpoints = self.checkpoints(&chain).read().await.clone(); // TODO: consider if we can avoid cloning
+        let checkpoints = self.checkpoints(&chain).read().await;
 
-        for hcp in checkpoints {
+        for hcp in checkpoints.iter() {
             let mut hasher = hash_map::DefaultHasher::new();
             hcp.checkpoint.hash(&mut hasher);
             if hasher.finish() == hash {
