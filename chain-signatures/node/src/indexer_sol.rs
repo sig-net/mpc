@@ -472,7 +472,7 @@ impl SolanaIndexer {
         // TODO: https://github.com/sig-net/mpc/issues/869
         // This can be gigantic. We should move to iterating over chunks instead of fetching
         // all blocks for multiple chunks at once.
-        const MAX_CHUNK_SIZE: u64 = 500_000;
+        const MAX_CHUNK_SIZE: u64 = 10_000;
 
         let mut block_slots = Vec::new();
         while start_slot <= end_slot {
@@ -1339,7 +1339,7 @@ mod tests {
             .mock("POST", "/")
             .match_body(Matcher::PartialJson(json!({
                 "method": "getBlocks",
-                "params": [100000, 599999]
+                "params": [100000, 109999]
             })))
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -1358,14 +1358,14 @@ mod tests {
             .mock("POST", "/")
             .match_body(Matcher::PartialJson(json!({
                 "method": "getBlocks",
-                "params": [600000, 600000]
+                "params": [110000, 112000]
             })))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
                 json!({
                     "jsonrpc": "2.0",
-                    "result": [600000],
+                    "result": [112000],
                     "id": 2
                 })
                 .to_string(),
@@ -1394,11 +1394,11 @@ mod tests {
             .create_async()
             .await;
 
-        let mock_block600k = server
+        let mock_block112k = server
             .mock("POST", "/")
             .match_body(Matcher::PartialJson(json!({
                 "method": "getBlock",
-                "params": [600000]
+                "params": [112000]
             })))
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -1417,7 +1417,7 @@ mod tests {
 
         let res_timeout = tokio::time::timeout(
             Duration::from_secs(2),
-            indexer.fetch_sparse_blocks(100000, 600000),
+            indexer.fetch_sparse_blocks(100000, 112000),
         )
         .await;
 
@@ -1426,11 +1426,11 @@ mod tests {
 
         assert_eq!(res.len(), 2);
         assert!(res.contains_key(&100000));
-        assert!(res.contains_key(&600000));
+        assert!(res.contains_key(&112000));
 
         mock_chunk1.assert_async().await;
         mock_chunk2.assert_async().await;
         mock_block100k.assert_async().await;
-        mock_block600k.assert_async().await;
+        mock_block112k.assert_async().await;
     }
 }
