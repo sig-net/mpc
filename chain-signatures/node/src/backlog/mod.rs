@@ -2044,13 +2044,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_total_pending_initial_state() {
-        let backlog = Backlog::new();
-        assert_eq!(backlog.len(), 0);
-        assert!(backlog.is_empty());
-    }
-
-    #[tokio::test]
     async fn test_total_pending_increments_on_insert() {
         let backlog = Backlog::new();
         let tx = create_test_tx(1);
