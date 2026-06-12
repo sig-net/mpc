@@ -519,7 +519,7 @@ impl Backlog {
     ) -> Option<(SignId, BidirectionalTx)> {
         let mut entry = self
             .execution_watchers
-            .get_mut(&chain)
+            .get(&chain)
             .expect("chain should be initialized within `persisted` method")
             .write()
             .await;
