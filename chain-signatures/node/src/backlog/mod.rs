@@ -668,7 +668,7 @@ impl Backlog {
                 old_block = previous_height,
                 new_block = checkpoint_height,
                 cleared_requests = cleared,
-                restored_requests = pending.len(),
+                restored_requests = restored,
                 "successfully recovered from checkpoint"
             );
 
@@ -2021,6 +2021,176 @@ mod tests {
         assert_eq!(
             entry.execution_tx().map(|execution| execution.id),
             Some(tx.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_total_pending_initial_state() {
+        let backlog = Backlog::new();
+        assert_eq!(backlog.len().await, 0);
+        assert!(backlog.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn test_total_pending_increments_on_insert() {
+        let backlog = Backlog::new();
+        let tx = create_test_tx(1);
+        
+        backlog.insert(create_indexed_request(
+            SignId::new(tx.request_id),
+            Chain::Ethereum,
+            create_test_args(1),
+            SignKind::Sign,
+            0,
+        )).await;
+        
+        assert_eq!(backlog.len().await, 1);
+        assert!(!backlog.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn test_total_pending_ignores_duplicate_inserts() {
+        let backlog = Backlog::new();
+        let tx = create_test_tx(1);
+        let request = create_indexed_request(
+            SignId::new(tx.request_id),
+            Chain::Ethereum,
+            create_test_args(1),
+            SignKind::Sign,
+            0,
+        );
+        
+        // Insert first time
+        backlog.insert(request.clone()).await;
+        assert_eq!(backlog.len().await, 1);
+
+        // Insert exactly the same ID again (overwrites)
+        backlog.insert(request).await;
+        assert_eq!(backlog.len().await, 1, "Duplicate insert should not increment total");
+    }
+
+    #[tokio::test]
+    async fn test_total_pending_counts_across_chains() {
+        let backlog = Backlog::new();
+        
+        backlog.insert(create_indexed_request(
+            SignId::new(create_test_tx(1).request_id),
+            Chain::Ethereum,
+            create_test_args(1),
+            SignKind::Sign,
+            0,
+        )).await;
+
+        backlog.insert(create_indexed_request(
+            SignId::new(create_test_tx(2).request_id),
+            Chain::Solana,
+            create_test_args(2),
+            SignKind::Sign,
+            0,
+        )).await;
+
+        assert_eq!(backlog.len().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_total_pending_decrements_on_remove() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new(create_test_tx(1).request_id);
+        
+        backlog.insert(create_indexed_request(
+            sign_id,
+            Chain::Ethereum,
+            create_test_args(1),
+            SignKind::Sign,
+            0,
+        )).await;
+        assert_eq!(backlog.len().await, 1);
+
+        backlog.remove(Chain::Ethereum, &sign_id).await;
+        assert_eq!(backlog.len().await, 0);
+        assert!(backlog.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn test_total_pending_ignores_invalid_removes() {
+        let backlog = Backlog::new();
+        let sign_id1 = SignId::new(create_test_tx(1).request_id);
+        let sign_id2 = SignId::new(create_test_tx(2).request_id); // Not inserted
+        
+        backlog.insert(create_indexed_request(
+            sign_id1,
+            Chain::Ethereum,
+            create_test_args(1),
+            SignKind::Sign,
+            0,
+        )).await;
+
+        backlog.remove(Chain::Ethereum, &sign_id2).await;
+        assert_eq!(backlog.len().await, 1, "Removing non-existent ID should not decrement total");
+    }
+
+    #[tokio::test]
+    async fn test_total_pending_updates_on_clean_recovery() {
+        let backlog = Backlog::new();
+        
+        // Populate 3 requests and create a checkpoint
+        for i in 1..=3 {
+            backlog.insert(create_indexed_request(
+                SignId::new(create_test_tx(i).request_id),
+                Chain::Ethereum,
+                create_test_args(i),
+                SignKind::Sign,
+                0,
+            )).await;
+        }
+        backlog.set_processed_block(Chain::Ethereum, 10).await;
+        let checkpoint = backlog.checkpoint(Chain::Ethereum).await;
+
+        // Clean backlog recovers the checkpoint
+        let recovered = Backlog::new();
+        assert_eq!(recovered.len().await, 0);
+        
+        recovered.recover_by_checkpoint(checkpoint).await.expect("failed to recover");
+        
+        assert_eq!(recovered.len().await, 3);
+    }
+
+    #[tokio::test]
+    async fn test_total_pending_updates_on_dirty_recovery() {
+        let backlog = Backlog::new();
+        
+        // Populate 3 requests and create a checkpoint
+        for i in 1..=3 {
+            backlog.insert(create_indexed_request(
+                SignId::new(create_test_tx(i).request_id),
+                Chain::Ethereum,
+                create_test_args(i),
+                SignKind::Sign,
+                0,
+            )).await;
+        }
+        backlog.set_processed_block(Chain::Ethereum, 10).await;
+        let checkpoint = backlog.checkpoint(Chain::Ethereum).await;
+
+        // Dirty backlog has 1 entirely different request before recovery
+        let dirty_backlog = Backlog::new();
+        dirty_backlog.insert(create_indexed_request(
+            SignId::new([99u8; 32]),
+            Chain::Ethereum,
+            create_test_args(99),
+            SignKind::Sign,
+            0,
+        )).await;
+        
+        assert_eq!(dirty_backlog.len().await, 1);
+        
+        // Recover from checkpoint (should overwrite the dirty state)
+        dirty_backlog.recover_by_checkpoint(checkpoint).await.expect("failed to recover");
+        
+        assert_eq!(
+            dirty_backlog.len().await, 
+            3, 
+            "Total should reflect exactly the restored checkpoint size, ignoring the overwritten dirty state"
         );
     }
 }
