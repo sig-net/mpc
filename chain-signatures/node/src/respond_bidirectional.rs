@@ -127,7 +127,11 @@ impl CompletedTx {
     ) -> anyhow::Result<RespondBidirectionalSerializedOutput> {
         let tx = &self.tx;
         let tx_id = self.tx.id.0;
-        let Some(tx_info) = client.as_ref().get_transaction_by_hash(tx_id.into()).await? else {
+        let Some(tx_info) = client
+            .as_ref()
+            .get_transaction_by_hash(tx_id.into())
+            .await?
+        else {
             anyhow::bail!("Failed to fetch transaction {tx_id:?}");
         };
 
