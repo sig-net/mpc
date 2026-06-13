@@ -61,7 +61,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: component-test-2
+          shared-key: component-test
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
@@ -70,7 +70,7 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Presetup binaries
+      - name: Build integration test artifacts
         run: ./setup.sh
         env:
           MPC_ENABLE_HELIOS: 1
@@ -161,21 +161,21 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: integration-test-2
+          shared-key: integration-test
           cache-targets: true
           cache-on-failure: false
           # Prevent every PR from uploading multi-GB caches
           save-if: ${{ github.ref == 'refs/heads/develop' }}
 
-      - name: Build Chain-Signatures Contract
-        run: ./build-contract.sh
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Build integration test artifacts
+        run: ./setup.sh
 
       - name: Build eth contract
         working-directory: ./chain-signatures/contract-eth
         run: npm ci && npx hardhat compile
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
 
       # Build the tests before actually running them to see how long the tests take to run by itself
       # instead of including the build time in the test time report on Github.

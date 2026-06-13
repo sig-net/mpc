@@ -19,7 +19,15 @@ rustup target add wasm32-unknown-unknown
 rustup target add wasm32-unknown-unknown --toolchain 1.81.0
 ```
 
-Alternatively, you may run all tests sequentially with `cargo test -p integration-tests --jobs 1 -- --test-threads 1`.
+3. Install [just](https://just.systems/man/en/packages.html):
+
+```bash
+# Linux/macOS
+curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to ~/.cargo/bin
+
+# Cargo
+cargo install just
+```
 
 ## Basic guide
 
@@ -31,34 +39,25 @@ docker pull redis:7.4.2
 
 In case of authorization issues make sure you have logged into docker using your [access token](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-with-a-personal-access-token-classic).
 
-### ⚠️ First-Time Setup
+### Running tests
 
-`cargo nextest` runs tests in parallel, running it immediately on a fresh clone can cause multiple background processes to try to compile the WASM smart contract (or download toolchains) at the exact same time, resulting in corrupted caches or `can't find crate for core` errors.
+Each `just` test recipe automatically runs setup (WASM contract + node binary compilation) before executing tests. Pass an optional `filter` to run matching tests only, and `helios=1` to build with Helios. Run `just` with no arguments to list all available recipes.
 
-To prevent this, **always pre-build the tests sequentially on your first run**:
+| Command | Full recipe | Description |
+|---|---|---|
+| `just s` | `just setup` | Build artifacts |
+| `just t [filter]` | `just test` | All integration tests |
+| `just tf [filter]` | `just test-fixture` | Fixture tests only (no full cluster) |
+| `just tc [filter]` | `just test-cluster` | Full cluster tests only |
+| `just ts [filter]` | `just test-seq` | All tests, sequential single-threaded |
+| `just to <name>` | `just test-one <name>` | Single test, keeps containers alive |
+| `just tk [filter]` | `just test-keep` | All tests, keeps containers alive |
 
 ```bash
-# Run 1 job to safely cache the WASM contract and heavy dependencies
-cargo nextest run -p integration-tests --profile fixture -j 1
-```
-
-Once that completes successfully, you can run the tests normally (in parallel):
-
-```BASH
-cargo nextest run -p integration-tests
-```
-
-For a faster iteration loop during development, run only the lightweight MPC fixture tests
-(no full cluster or Docker containers needed beyond Redis):
-
-```BASH
-cargo nextest run -p integration-tests --profile fixture
-```
-
-To run only the full cluster tests:
-
-```BASH
-cargo nextest run -p integration-tests --profile cluster
+just t                               # run all tests
+just t my_module                     # run matching tests only
+just t my_module helios=1            # run matching tests with Helios
+just to test_basic_action helios=1.  # run specific test with Helios
 ```
 
 The available profiles and their concurrency settings are defined in [`.config/nextest.toml`](../.config/nextest.toml).
@@ -125,10 +124,11 @@ artifacts into git.
 
 ### I want to run a test, but keep the docker containers from being destroyed
 
-You can pass environment variable `TESTCONTAINERS=keep` to keep all of the docker containers. For example:
+Use `just tk` to keep all containers after a full test run, or `just to <name>` for a single test:
 
 ```bash
-$ TESTCONTAINERS=keep cargo nextest run -p integration-tests
+just tk
+just to test_basic_action
 ```
 
 ### There are no logs anymore, how do I debug?
@@ -136,7 +136,7 @@ $ TESTCONTAINERS=keep cargo nextest run -p integration-tests
 The easiest way is to run one isolated test of your choosing while keeping the containers (see above):
 
 ```bash
-$ TESTCONTAINERS=keep cargo nextest run -p integration-tests -E 'test(test_basic_action)'
+just to test_basic_action
 ```
 
 Now, you can do `docker ps` and it should list all of containers related to your test (the most recent ones are always at the top, so lookout for those). For example:
