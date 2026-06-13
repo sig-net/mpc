@@ -4,7 +4,6 @@ version.workspace = true
 edition = "2021"
 
 [dependencies]
-alloy.workspace = true
 ciborium.workspace = true
 hex.workspace = true
 k256.workspace = true

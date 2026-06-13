@@ -1,15 +1,9 @@
-use alloy::primitives::{Address, B256};
-
 use crate::{Chain, Signature};
 
+// Should wrap B256 from Alloy, currently adding Alloy as a dependency pulls `alloy-sol-macro-input`, which requires Rust 1.85+
+// TODO: Use B256 from Alloy once we can bump the minimum Rust version to 1.85+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Copy)]
-pub struct BidirectionalTxId(pub B256);
-
-impl From<B256> for BidirectionalTxId {
-    fn from(b256: B256) -> Self {
-        BidirectionalTxId(b256)
-    }
-}
+pub struct BidirectionalTxId(pub [u8; 32]);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BidirectionalTx {
@@ -30,7 +24,8 @@ pub struct BidirectionalTx {
     pub output_deserialization_schema: Vec<u8>,
     pub respond_serialization_schema: Vec<u8>,
     pub request_id: [u8; 32],
-    pub from_address: Address,
+    // TODO: Same as comment above for BidirectionalTxId: Use Address from Alloy once we can bump the minimum Rust version to 1.85+
+    pub from_address: [u8; 20],
     pub nonce: u64,
 }
 

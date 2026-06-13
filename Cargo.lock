@@ -7450,7 +7450,6 @@ dependencies = [
 name = "mpc-primitives"
 version = "1.16.3"
 dependencies = [
- "alloy",
  "borsh 1.5.7",
  "ciborium",
  "getrandom 0.2.16",
