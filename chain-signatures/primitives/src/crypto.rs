@@ -1,13 +1,12 @@
-
 use k256::elliptic_curve::{
     bigint::ArrayEncoding, sec1::ToEncodedPoint, CurveArithmetic, PrimeField,
 };
 use k256::{AffinePoint, Scalar, Secp256k1, U256};
 use near_account_id::AccountId;
-use sha3::Digest;
-use std::sync::LazyLock;
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
+use sha3::Digest;
+use std::sync::LazyLock;
 
 pub type PublicKey = <Secp256k1 as CurveArithmetic>::AffinePoint;
 
@@ -226,7 +225,7 @@ pub mod borsh_affine_point {
 mod tests {
     use super::*;
     use borsh::{BorshDeserialize, BorshSerialize};
-    use k256::{AffinePoint, Scalar, elliptic_curve::PrimeField};
+    use k256::{elliptic_curve::PrimeField, AffinePoint, Scalar};
     use serde::{Deserialize, Serialize};
 
     #[test]
@@ -289,4 +288,3 @@ mod tests {
         assert!(Scalar::from_bytes(not_too_high).is_some());
     }
 }
-

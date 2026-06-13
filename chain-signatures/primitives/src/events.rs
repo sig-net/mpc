@@ -1,5 +1,7 @@
-use crate::{BidirectionalTxId, Chain, IndexedSignRequest, SignId, Signature, bidirectional::RespondBidirectionalEvent};
-
+use crate::{
+    bidirectional::RespondBidirectionalEvent, BidirectionalTxId, Chain, IndexedSignRequest, SignId,
+    Signature,
+};
 
 /// Unified event produced by a chain stream
 #[allow(clippy::large_enum_variant)]
@@ -70,7 +72,6 @@ pub enum ExecutionOutcome {
     Success { output: Vec<u8> },
     Failed,
 }
-
 
 #[derive(Clone, Debug)]
 pub struct SignatureRespondedEvent {

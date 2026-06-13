@@ -1,6 +1,5 @@
 use crate::{Chain, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignId};
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[allow(clippy::large_enum_variant)]
 pub enum SignKind {
@@ -74,4 +73,3 @@ impl IndexedSignRequest {
         )
     }
 }
-

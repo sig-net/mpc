@@ -48,14 +48,12 @@ pub struct RespondBidirectionalTx {
 
 pub type RespondBidirectionalSerializedOutput = Vec<u8>;
 
-
 #[derive(Clone, Debug)]
 pub struct RespondBidirectionalEvent {
     pub request_id: [u8; 32],
     pub signature: Signature,
     pub chain: Chain,
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SignBidirectionalEvent {
