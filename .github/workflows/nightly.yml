@@ -60,12 +60,8 @@ jobs:
           solana-cli-version: '2.3.9'
           anchor-version: '0.30.1'
 
-      - name: Install Rust (1.81.0)
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: 1.81.0
-          target: wasm32-unknown-unknown
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install Node.js
         uses: actions/setup-node@v4

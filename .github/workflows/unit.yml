@@ -23,12 +23,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust (1.81.0)
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: 1.81.0
-          target: wasm32-unknown-unknown
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -74,11 +70,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: 1.81.0
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
       # Run cargo-audit to check for vulnerable dependencies
       - uses: rustsec/audit-check@v2.0.0
