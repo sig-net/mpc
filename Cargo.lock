@@ -7455,7 +7455,6 @@ dependencies = [
  "getrandom 0.2.16",
  "hex",
  "k256",
- "near-account-id",
  "serde",
  "serde_bytes",
  "serde_json",

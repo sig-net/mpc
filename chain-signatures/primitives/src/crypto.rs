@@ -3,7 +3,6 @@ use k256::elliptic_curve::{
     bigint::ArrayEncoding, sec1::ToEncodedPoint, CurveArithmetic, PrimeField,
 };
 use k256::{AffinePoint, Scalar, Secp256k1, U256};
-use near_account_id::AccountId;
 use serde::{Deserialize, Serialize};
 use sha3::Digest;
 use std::sync::LazyLock;
@@ -75,7 +74,7 @@ impl SignId {
         Self { request_id }
     }
 
-    pub fn from_parts(id: &AccountId, payload: &[u8; 32], path: &str, key_version: u32) -> Self {
+    pub fn from_parts(id: &str, payload: &[u8; 32], path: &str, key_version: u32) -> Self {
         let mut hasher = sha3::Sha3_256::new();
         hasher.update(id.as_bytes());
         hasher.update(payload);

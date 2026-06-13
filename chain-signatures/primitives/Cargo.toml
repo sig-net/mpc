@@ -8,7 +8,6 @@ borsh.workspace = true
 ciborium.workspace = true
 hex.workspace = true
 k256.workspace = true
-near-account-id.workspace = true
 serde.workspace = true
 serde_bytes.workspace = true
 serde_json.workspace = true
