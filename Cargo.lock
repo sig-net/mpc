@@ -7456,7 +7456,6 @@ dependencies = [
  "hex",
  "k256",
  "near-account-id",
- "near-sdk",
  "serde",
  "serde_bytes",
  "serde_json",

@@ -1,5 +1,5 @@
-use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
-use near_sdk::serde::{Deserialize, Serialize};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -24,7 +24,6 @@ pub enum SerDeserFormat {
     Ord,
     Hash,
 )]
-#[borsh(crate = "near_sdk::borsh")]
 pub enum Chain {
     NEAR,
     Ethereum,

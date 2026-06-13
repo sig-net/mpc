@@ -1,5 +1,5 @@
-use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
-use near_sdk::serde::{Deserialize, Serialize};
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::{Chain, SignId};
@@ -17,7 +17,6 @@ use crate::{Chain, SignId};
     Ord,
     Hash,
 )]
-#[borsh(crate = "near_sdk::borsh")]
 pub struct PendingTx {
     pub sign_id: SignId,
     #[serde(with = "serde_bytes")]
@@ -46,7 +45,6 @@ impl fmt::Debug for PendingTx {
     Ord,
     Hash,
 )]
-#[borsh(crate = "near_sdk::borsh")]
 pub struct Checkpoint {
     pub chain: Chain,
     pub block_height: u64,

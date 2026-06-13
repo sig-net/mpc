@@ -1,10 +1,10 @@
+use borsh::{BorshDeserialize, BorshSerialize};
 use k256::elliptic_curve::{
     bigint::ArrayEncoding, sec1::ToEncodedPoint, CurveArithmetic, PrimeField,
 };
 use k256::{AffinePoint, Scalar, Secp256k1, U256};
 use near_account_id::AccountId;
-use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
-use near_sdk::serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use sha3::Digest;
 use std::sync::LazyLock;
 
@@ -57,7 +57,6 @@ pub static MAX_SECP256K1_SCALAR: LazyLock<Scalar> = LazyLock::new(|| {
     BorshSerialize,
     BorshDeserialize,
 )]
-#[borsh(crate = "near_sdk::borsh")]
 pub struct SignId {
     #[serde(with = "serde_bytes")]
     pub request_id: [u8; 32],
@@ -114,7 +113,6 @@ impl std::fmt::Debug for SignArgs {
 #[derive(
     Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
 )]
-#[borsh(crate = "near_sdk::borsh")]
 pub struct Signature {
     #[borsh(
         serialize_with = "borsh_affine_point::serialize",
@@ -184,8 +182,8 @@ pub mod cbor_scalar {
 
 pub mod borsh_scalar {
     use crate::crypto::ScalarExt as _;
+    use borsh::{BorshDeserialize, BorshSerialize};
     use k256::Scalar;
-    use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
     use std::io;
 
     pub fn serialize<W: io::prelude::Write>(scalar: &Scalar, writer: &mut W) -> io::Result<()> {
@@ -204,9 +202,8 @@ pub mod borsh_scalar {
 }
 
 pub mod borsh_affine_point {
+    use borsh::{BorshDeserialize, BorshSerialize};
     use k256::AffinePoint;
-    use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
-    use near_sdk::serde_json;
     use std::io;
     use std::io::prelude::{Read, Write};
 
