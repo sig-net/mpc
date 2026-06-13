@@ -105,7 +105,7 @@ impl CompletedTx {
         Ok(IndexedSignRequest::respond_bidirectional(
             SignId::new(request_id_bytes),
             SignArgs {
-                entropy: entropy.into(),
+                entropy,
                 epsilon,
                 payload,
                 path,
