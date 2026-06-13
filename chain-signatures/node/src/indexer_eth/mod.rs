@@ -1102,7 +1102,7 @@ impl EthereumIndexer {
         pending_tx: &BidirectionalTx,
         current_block_number: u64,
     ) -> anyhow::Result<BackfillOutcome> {
-        let Some(tx) = self.client.get_transaction_by_hash(tx_id.0).await? else {
+        let Some(tx) = self.client.get_transaction_by_hash(tx_id.0.into()).await? else {
             return Ok(BackfillOutcome::NotObserved);
         };
 
@@ -1233,7 +1233,7 @@ impl EthereumIndexer {
                 .client
                 .as_ref()
                 .get_nonce(
-                    tx.from_address,
+                    tx.from_address.into(),
                     BlockId::Number(BlockNumberOrTag::Number(block_number)),
                 )
                 .await
@@ -1999,7 +1999,7 @@ mod tests {
         let backlog = Backlog::new();
         let sign_id = SignId::new([0x55; 32]);
         let tx = BidirectionalTx {
-            id: BidirectionalTxId(tx_hash),
+            id: BidirectionalTxId(tx_hash.0),
             sender: [0u8; 32],
             serialized_transaction: vec![],
             source_chain: Chain::Solana,
@@ -2014,7 +2014,7 @@ mod tests {
             output_deserialization_schema: vec![],
             respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             request_id: sign_id.request_id,
-            from_address,
+            from_address: **from_address,
             nonce: 0,
         };
         backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;
@@ -2056,7 +2056,7 @@ mod tests {
                 block_height,
                 result,
             } => {
-                assert_eq!(*event_tx_id, BidirectionalTxId(tx_hash));
+                assert_eq!(*event_tx_id, BidirectionalTxId(tx_hash.0));
                 assert_eq!(*event_sign_id, sign_id);
                 assert_eq!(*source_chain, Chain::Solana);
                 assert_eq!(*block_height, 2);

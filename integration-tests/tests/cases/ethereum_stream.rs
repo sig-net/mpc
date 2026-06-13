@@ -533,7 +533,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         .await;
 
     let execution_tx = mpc_primitives::BidirectionalTx {
-        id: mpc_primitives::BidirectionalTxId(B256::from([0x44; 32])),
+        id: mpc_primitives::BidirectionalTxId(B256::from([0x44; 32]).0),
         sender: [0u8; 32],
         serialized_transaction: vec![],
         source_chain: Chain::Solana,
@@ -548,7 +548,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         request_id: execution_sign_id.request_id,
-        from_address: ctx.wallet,
+        from_address: **ctx.wallet,
         nonce: checkpoint_nonce,
     };
     backlog
@@ -720,7 +720,7 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
 
     // Register an execution watcher with an intentionally stale nonce to trigger the staleness path.
     let tx = mpc_primitives::BidirectionalTx {
-        id: mpc_primitives::BidirectionalTxId(B256::from([9u8; 32])),
+        id: mpc_primitives::BidirectionalTxId(B256::from([9u8; 32]).0),
         sender: [0u8; 32],
         serialized_transaction: vec![],
         source_chain: Chain::Solana,
@@ -735,7 +735,7 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         request_id: [7u8; 32],
-        from_address: ctx.wallet,
+        from_address: **ctx.wallet,
         nonce: 0,
     };
     let sign_id = SignId::new([7u8; 32]);
@@ -834,7 +834,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     // Register the execution watcher only after catchup has completed and the
     // transaction is already in the past relative to the stream.
     let sign_id = SignId::new([0x88; 32]);
-    let tx_id = mpc_primitives::BidirectionalTxId(tx_hash);
+    let tx_id = mpc_primitives::BidirectionalTxId(tx_hash.0);
     let tx = mpc_primitives::BidirectionalTx {
         id: tx_id,
         sender: [0u8; 32],
@@ -851,7 +851,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         request_id: sign_id.request_id,
-        from_address: ctx.wallet,
+        from_address: **ctx.wallet,
         nonce: 0,
     };
     backlog

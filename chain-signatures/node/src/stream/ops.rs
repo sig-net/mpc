@@ -195,7 +195,7 @@ pub(crate) async fn process_respond_event(
         mpc_sig,
     )?;
 
-    let tx_id = BidirectionalTxId(signed_tx_hash.into());
+    let tx_id = BidirectionalTxId(signed_tx_hash);
 
     let bidirectional_tx = BidirectionalTx {
         id: tx_id,
@@ -213,7 +213,7 @@ pub(crate) async fn process_respond_event(
         output_deserialization_schema: event.output_deserialization_schema.clone(),
         respond_serialization_schema: event.respond_serialization_schema.clone(),
         request_id: respond_event.request_id,
-        from_address,
+        from_address: **from_address,
         nonce,
     };
 
@@ -446,7 +446,7 @@ mod tests {
 
     fn test_bidirectional_tx(id: u8, source_chain: Chain, target_chain: Chain) -> BidirectionalTx {
         BidirectionalTx {
-            id: BidirectionalTxId(B256::from([id; 32])),
+            id: BidirectionalTxId(B256::from([id; 32]).0),
             sender: [0u8; 32],
             serialized_transaction: vec![1, 2, 3],
             source_chain,
@@ -461,7 +461,7 @@ mod tests {
             output_deserialization_schema: vec![],
             respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             request_id: [id; 32],
-            from_address: Address::ZERO,
+            from_address: **Address::ZERO,
             nonce: 0,
         }
     }
@@ -997,7 +997,7 @@ mod tests {
             Chain::Solana,
             current_unix_timestamp(),
             RespondBidirectionalTx {
-                tx_id: BidirectionalTxId(B256::from([12u8; 32])),
+                tx_id: BidirectionalTxId(B256::from([12u8; 32]).0),
                 output: vec![],
                 chain_ctx: None,
             },
@@ -1063,7 +1063,7 @@ mod tests {
                 Chain::Solana,
                 current_unix_timestamp(),
                 RespondBidirectionalTx {
-                    tx_id: BidirectionalTxId(B256::from([13u8; 32])),
+                    tx_id: BidirectionalTxId(B256::from([13u8; 32]).0),
                     output: vec![1, 2, 3],
                     chain_ctx: None,
                 },
@@ -1123,7 +1123,7 @@ mod tests {
                 Chain::Solana,
                 current_unix_timestamp(),
                 RespondBidirectionalTx {
-                    tx_id: BidirectionalTxId(B256::from([16u8; 32])),
+                    tx_id: BidirectionalTxId(B256::from([16u8; 32]).0),
                     output: vec![1, 2, 3],
                     chain_ctx: None,
                 },
@@ -1313,7 +1313,7 @@ mod tests {
 
         use alloy::primitives::{Address, B256};
         let tx = BidirectionalTx {
-            id: BidirectionalTxId(B256::from([2u8; 32])),
+            id: BidirectionalTxId(B256::from([2u8; 32]).0),
             sender: [0u8; 32],
             serialized_transaction: vec![1, 2, 3],
             source_chain: Chain::Solana,
@@ -1328,7 +1328,7 @@ mod tests {
             output_deserialization_schema: vec![],
             respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             request_id: [2u8; 32],
-            from_address: Address::ZERO,
+            from_address: **Address::ZERO,
             nonce: 0,
         };
         let sign_id = SignId::new(tx.request_id);
@@ -1413,7 +1413,7 @@ mod tests {
 
         use alloy::primitives::{Address, B256};
         let tx = BidirectionalTx {
-            id: BidirectionalTxId(B256::from([4u8; 32])),
+            id: BidirectionalTxId(B256::from([4u8; 32]).0),
             sender: [0u8; 32],
             serialized_transaction: vec![1, 2, 3],
             source_chain: Chain::Solana,
@@ -1428,7 +1428,7 @@ mod tests {
             output_deserialization_schema: vec![],
             respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             request_id: [4u8; 32],
-            from_address: Address::ZERO,
+            from_address: **Address::ZERO,
             nonce: 0,
         };
         let sign_id = SignId::new(tx.request_id);

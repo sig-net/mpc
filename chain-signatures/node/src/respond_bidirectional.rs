@@ -127,7 +127,7 @@ impl CompletedTx {
     ) -> anyhow::Result<RespondBidirectionalSerializedOutput> {
         let tx = &self.tx;
         let tx_id = self.tx.id.0;
-        let Some(tx_info) = client.as_ref().get_transaction_by_hash(tx_id).await? else {
+        let Some(tx_info) = client.as_ref().get_transaction_by_hash(tx_id.into()).await? else {
             anyhow::bail!("Failed to fetch transaction {tx_id:?}");
         };
 
@@ -147,7 +147,7 @@ impl CompletedTx {
                 ?tx_id,
                 "Extracting transaction output via debug_traceTransaction"
             );
-            Some(client.trace_transaction_output(tx_id).await?)
+            Some(client.trace_transaction_output(tx_id.into()).await?)
         } else {
             None
         };
@@ -216,7 +216,7 @@ mod tests {
     /// Sample tx with a Solana source chain, required by `epsilon`/path derivation.
     fn sample_bidirectional_tx() -> BidirectionalTx {
         BidirectionalTx {
-            id: BidirectionalTxId(B256::repeat_byte(0xab)),
+            id: BidirectionalTxId(B256::repeat_byte(0xab).0),
             sender: [0x11; 32],
             serialized_transaction: Vec::new(),
             source_chain: Chain::Solana,
@@ -231,7 +231,7 @@ mod tests {
             output_deserialization_schema: UINT256_SCHEMA.to_vec(),
             respond_serialization_schema: UINT256_SCHEMA.to_vec(),
             request_id: [0x22; 32],
-            from_address: Address::ZERO,
+            from_address: **Address::ZERO,
             nonce: 0,
         }
     }

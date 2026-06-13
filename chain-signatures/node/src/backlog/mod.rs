@@ -977,7 +977,7 @@ mod tests {
 
     fn create_test_tx(id: u8) -> BidirectionalTx {
         BidirectionalTx {
-            id: BidirectionalTxId(B256::from([id; 32])),
+            id: BidirectionalTxId(B256::from([id; 32]).0),
             sender: [0u8; 32],
             serialized_transaction: vec![1, 2, 3],
             source_chain: Chain::Solana,
@@ -992,7 +992,7 @@ mod tests {
             output_deserialization_schema: vec![],
             respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             request_id: [id; 32],
-            from_address: Address::ZERO,
+            from_address: **Address::ZERO,
             nonce: 0,
         }
     }
