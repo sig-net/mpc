@@ -3,7 +3,7 @@ use crate::backlog::Backlog;
 use crate::protocol::{Chain, Sign};
 
 use mpc_contract::primitives::PendingRequest;
-use mpc_primitives::{SignArgs, SignId, IndexedSignRequest};
+use mpc_primitives::{IndexedSignRequest, SignArgs, SignId};
 use near_account_id::AccountId;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};

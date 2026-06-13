@@ -260,13 +260,13 @@ mod tests {
     use mpc_primitives::SignArgs;
     use mpc_primitives::SignId;
     use mpc_primitives::Signature;
+    use mpc_primitives::SignatureRespondedEvent;
     use near_primitives::types::AccountId;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
-    use mpc_primitives::{SignatureRespondedEvent};
 
     fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<RpcAction>) {
         let (tx, rx) = mpsc::channel(buffer);

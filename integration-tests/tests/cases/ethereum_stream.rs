@@ -19,7 +19,10 @@ use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{catchup_then_livestream, run_stream, ChainStream};
 use mpc_node::util::current_unix_timestamp;
-use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION, SignKind, ChainEvent, SignBidirectionalEvent as NodeSignBidirectionalEvent};
+use mpc_primitives::{
+    ChainEvent, SignArgs, SignBidirectionalEvent as NodeSignBidirectionalEvent, SignId, SignKind,
+    LATEST_MPC_KEY_VERSION,
+};
 use near_primitives::types::AccountId;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};

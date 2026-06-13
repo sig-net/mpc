@@ -18,7 +18,7 @@ pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
 pub use mpc_primitives::{Chain, IndexedSignRequest, RespondBidirectionalTx};
-pub use signature::{Sign};
+pub use signature::Sign;
 pub use state::{Node, NodeState};
 
 use crate::config::Config;

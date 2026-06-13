@@ -22,9 +22,9 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{
-    BidirectionalTxId, BidirectionalTx,
-    ChainEvent, ExecutionOutcome, IndexedSignRequest, SignArgs, SignId, Signature as MpcSignature,
-    SignatureRespondedEvent, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+    BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, IndexedSignRequest, SignArgs,
+    SignId, Signature as MpcSignature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
+    MAX_SECP256K1_SCALAR,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -1541,7 +1541,10 @@ mod tests {
     use alloy::primitives::{address, b256, Address};
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
-    use mpc_primitives::{BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, LATEST_MPC_KEY_VERSION, SignId};
+    use mpc_primitives::{
+        BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, SignId,
+        LATEST_MPC_KEY_VERSION,
+    };
     use serde_json::json;
     use std::sync::Arc;
     use tokio::sync::{mpsc, Notify};

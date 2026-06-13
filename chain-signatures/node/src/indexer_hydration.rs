@@ -12,7 +12,8 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
-    IndexedSignRequest, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR, RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent
+    IndexedSignRequest, RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignId,
+    Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{twox_128, H256};
