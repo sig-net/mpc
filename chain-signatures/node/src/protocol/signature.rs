@@ -14,12 +14,11 @@ use crate::protocol::posit::{PositAction, PositRejectReason, SinglePositCounter}
 use crate::protocol::presignature::PresignatureId;
 use crate::protocol::{Chain, ProtocolState};
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
-use crate::sign_bidirectional::PublishState;
-use crate::storage::PresignatureStorage;
+use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt};
 use crate::storage::presignature_storage::{
     PresignatureReservation, PresignatureTaken, PresignatureTakenDropper,
 };
-use crate::stream::ops::SignBidirectionalEventExt;
+use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap, TimeoutBudget};
 
@@ -29,7 +28,7 @@ use chrono::Utc;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::derive_key;
-use mpc_primitives::{SignKind, SignId, IndexedSignRequest};
+use mpc_primitives::{IndexedSignRequest, SignId, SignKind};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;

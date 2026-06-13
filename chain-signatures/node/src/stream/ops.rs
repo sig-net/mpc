@@ -6,57 +6,13 @@ use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
-use crate::sign_bidirectional::SignStatus;
+use crate::sign_bidirectional::{SignBidirectionalEventExt, SignStatus};
 use anchor_lang::prelude::Pubkey;
-use k256::Scalar;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, ChainFromError, ExecutionOutcome,
-    RespondBidirectionalEvent, SignBidirectionalEvent, SignId, SignKind, Signature,
-    SignatureRespondedEvent,
+    BidirectionalTx, BidirectionalTxId, ExecutionOutcome, RespondBidirectionalEvent, SignId,
+    SignKind, Signature, SignatureRespondedEvent,
 };
 use tokio::sync::{mpsc, watch};
-
-// TODO: consider moving elsewhere
-/// Extension trait for `SignBidirectionalEvent` to provide additional helper methods.
-pub trait SignBidirectionalEventExt {
-    fn sender_string(&self) -> anyhow::Result<String>;
-    fn epsilon(&self) -> anyhow::Result<Scalar>;
-    fn target_chain(&self) -> Result<Chain, ChainFromError>;
-}
-
-impl SignBidirectionalEventExt for SignBidirectionalEvent {
-    fn sender_string(&self) -> anyhow::Result<String> {
-        match self.chain {
-            Chain::Canton => Ok(hex::encode(self.sender)),
-            _ => crate::stream::ops::sender_string(self.sender, self.chain),
-        }
-    }
-
-    fn epsilon(&self) -> anyhow::Result<Scalar> {
-        match self.chain {
-            Chain::Solana => Ok(mpc_crypto::kdf::derive_epsilon_sol(
-                self.key_version,
-                &self.sender_string()?,
-                &self.path,
-            )),
-            Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
-                self.key_version,
-                &self.sender_string()?,
-                &self.path,
-            )),
-            Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
-                self.key_version,
-                &self.sender_string()?,
-                &self.path,
-            )),
-            _ => anyhow::bail!("Unsupported chain for epsilon derivation: {:?}", self.chain),
-        }
-    }
-
-    fn target_chain(&self) -> Result<Chain, mpc_primitives::ChainFromError> {
-        Chain::from_caip2_chain_id(&self.caip2_id)
-    }
-}
 
 pub(crate) async fn process_sign_request(
     sign_request: IndexedSignRequest,
@@ -471,7 +427,7 @@ mod tests {
     use alloy::primitives::{Address, B256};
     use cait_sith::protocol::Participant;
     use k256::{ProjectivePoint, Scalar};
-    use mpc_primitives::{RespondBidirectionalTx, SignArgs, SignKind};
+    use mpc_primitives::{RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind};
     use near_primitives::types::AccountId;
     use solana_sdk::pubkey::Pubkey;
     use std::time::Duration;

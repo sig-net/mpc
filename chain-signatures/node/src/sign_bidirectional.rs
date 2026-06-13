@@ -7,7 +7,9 @@ use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
-use mpc_primitives::{SerDeserFormat, Signature, BidirectionalTx};
+use mpc_primitives::{
+    BidirectionalTx, ChainFromError, SerDeserFormat, SignBidirectionalEvent, Signature,
+};
 use rlp::{Rlp, RlpStream};
 use serde_json::Value;
 use sha3::{Digest, Keccak256};
@@ -88,7 +90,47 @@ impl SignStatus {
     }
 }
 
-// TODO: consider moving elsewhere
+/// Extension trait for `SignBidirectionalEvent` to provide additional helper methods.
+pub trait SignBidirectionalEventExt {
+    fn sender_string(&self) -> anyhow::Result<String>;
+    fn epsilon(&self) -> anyhow::Result<Scalar>;
+    fn target_chain(&self) -> Result<Chain, ChainFromError>;
+}
+
+impl SignBidirectionalEventExt for SignBidirectionalEvent {
+    fn sender_string(&self) -> anyhow::Result<String> {
+        match self.chain {
+            Chain::Canton => Ok(hex::encode(self.sender)),
+            _ => crate::stream::ops::sender_string(self.sender, self.chain),
+        }
+    }
+
+    fn epsilon(&self) -> anyhow::Result<Scalar> {
+        match self.chain {
+            Chain::Solana => Ok(mpc_crypto::kdf::derive_epsilon_sol(
+                self.key_version,
+                &self.sender_string()?,
+                &self.path,
+            )),
+            Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
+                self.key_version,
+                &self.sender_string()?,
+                &self.path,
+            )),
+            Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
+                self.key_version,
+                &self.sender_string()?,
+                &self.path,
+            )),
+            _ => anyhow::bail!("Unsupported chain for epsilon derivation: {:?}", self.chain),
+        }
+    }
+
+    fn target_chain(&self) -> Result<Chain, mpc_primitives::ChainFromError> {
+        Chain::from_caip2_chain_id(&self.caip2_id)
+    }
+}
+
 /// Extension trait for `BidirectionalTx` to provide additional helper methods.
 pub trait BidirectionalTxExt {
     fn sender_string(&self) -> anyhow::Result<String>;
