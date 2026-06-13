@@ -3,44 +3,36 @@ use crate::backlog::Backlog;
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::metrics::requests::record_indexing_step_reached;
 use crate::node_client::NodeClient;
-use crate::protocol::{Chain, IndexedSignRequest, Sign, SignKind};
+use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
-use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, SignStatus};
-use crate::stream::ExecutionOutcome;
-
+use crate::sign_bidirectional::SignStatus;
 use anchor_lang::prelude::Pubkey;
 use k256::Scalar;
-use mpc_primitives::{SignId, Signature};
+use mpc_primitives::{
+    BidirectionalTx, BidirectionalTxId, ChainFromError, ExecutionOutcome,
+    RespondBidirectionalEvent, SignBidirectionalEvent, SignId, SignKind, Signature,
+    SignatureRespondedEvent,
+};
 use tokio::sync::{mpsc, watch};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct SignBidirectionalEvent {
-    pub sender: [u8; 32],
-    pub serialized_transaction: Vec<u8>,
-    pub caip2_id: String,
-    pub key_version: u32,
-    pub deposit: u64,
-    pub path: String,
-    pub algo: String,
-    pub dest: String,
-    pub params: String,
-    pub output_deserialization_schema: Vec<u8>,
-    pub respond_serialization_schema: Vec<u8>,
-    pub chain: Chain,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chain_ctx: Option<Vec<u8>>,
+// TODO: consider moving elsewhere
+/// Extension trait for `SignBidirectionalEvent` to provide additional helper methods.
+pub trait SignBidirectionalEventExt {
+    fn sender_string(&self) -> anyhow::Result<String>;
+    fn epsilon(&self) -> anyhow::Result<Scalar>;
+    fn target_chain(&self) -> Result<Chain, ChainFromError>;
 }
 
-impl SignBidirectionalEvent {
-    pub(crate) fn sender_string(&self) -> anyhow::Result<String> {
+impl SignBidirectionalEventExt for SignBidirectionalEvent {
+    fn sender_string(&self) -> anyhow::Result<String> {
         match self.chain {
             Chain::Canton => Ok(hex::encode(self.sender)),
-            _ => sender_string(self.sender, self.chain),
+            _ => crate::stream::ops::sender_string(self.sender, self.chain),
         }
     }
 
-    pub fn epsilon(&self) -> anyhow::Result<Scalar> {
+    fn epsilon(&self) -> anyhow::Result<Scalar> {
         match self.chain {
             Chain::Solana => Ok(mpc_crypto::kdf::derive_epsilon_sol(
                 self.key_version,
@@ -61,23 +53,9 @@ impl SignBidirectionalEvent {
         }
     }
 
-    pub fn target_chain(&self) -> Result<Chain, mpc_primitives::ChainFromError> {
+    fn target_chain(&self) -> Result<Chain, mpc_primitives::ChainFromError> {
         Chain::from_caip2_chain_id(&self.caip2_id)
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct RespondBidirectionalEvent {
-    pub request_id: [u8; 32],
-    pub signature: Signature,
-    pub chain: Chain,
-}
-
-#[derive(Clone, Debug)]
-pub struct SignatureRespondedEvent {
-    pub request_id: [u8; 32],
-    pub signature: Signature,
-    pub chain: Chain,
 }
 
 pub(crate) async fn process_sign_request(
@@ -363,7 +341,7 @@ pub(crate) async fn process_respond_bidirectional_event(
 /// The target chain is the chain where the execution was observed.
 #[allow(clippy::too_many_arguments)]
 pub async fn process_execution_confirmed(
-    tx_id: crate::sign_bidirectional::BidirectionalTxId,
+    tx_id: mpc_primitives::BidirectionalTxId,
     sign_id: SignId,
     source_chain: Chain,
     block_height: u64,
@@ -486,15 +464,14 @@ mod tests {
     use crate::mesh::wait_threshold_active;
     use crate::node_client::NodeClient;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
-    use crate::protocol::SignKind;
-    use crate::respond_bidirectional::RespondBidirectionalTx;
+    use crate::sign_bidirectional::SignStatus;
     use crate::storage::checkpoint_storage::CheckpointStorage;
     use crate::stream::ops::process_execution_confirmed;
     use crate::util::current_unix_timestamp;
     use alloy::primitives::{Address, B256};
     use cait_sith::protocol::Participant;
     use k256::{ProjectivePoint, Scalar};
-    use mpc_primitives::SignArgs;
+    use mpc_primitives::{RespondBidirectionalTx, SignArgs, SignKind};
     use near_primitives::types::AccountId;
     use solana_sdk::pubkey::Pubkey;
     use std::time::Duration;
@@ -748,7 +725,7 @@ mod tests {
             .unwrap();
         match msg {
             Sign::Request(req) => {
-                if let crate::protocol::SignKind::RespondBidirectional(res) = req.kind {
+                if let mpc_primitives::SignKind::RespondBidirectional(res) = req.kind {
                     assert_eq!(res.tx_id, tx.id);
                 } else {
                     panic!("Expected RespondBidirectional request");
@@ -1462,7 +1439,7 @@ mod tests {
             .unwrap();
         match msg {
             Sign::Request(req) => {
-                if let crate::protocol::SignKind::RespondBidirectional(res) = req.kind {
+                if let mpc_primitives::SignKind::RespondBidirectional(res) = req.kind {
                     assert_eq!(res.tx_id, tx.id);
                     // Expect the serialized output to begin with MAGIC_ERROR_PREFIX
                     assert!(res.output.starts_with(&[0xde, 0xad, 0xbe, 0xef]));
@@ -1546,7 +1523,7 @@ mod tests {
                 assert_eq!(req.chain, Chain::Solana);
                 assert!(matches!(
                     req.kind,
-                    crate::protocol::SignKind::RespondBidirectional(_)
+                    mpc_primitives::SignKind::RespondBidirectional(_)
                 ));
             }
             other => panic!("expected cross-chain follow-up request, got {other:?}"),

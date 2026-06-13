@@ -12,11 +12,10 @@ pub use stream::{parse_canton_signature, CantonStream};
 
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::stream::ops::SignBidirectionalEvent;
 use alloy::consensus::{SignableTransaction, TxEip1559};
 use borsh::{BorshDeserialize, BorshSerialize};
 use k256::Scalar;
-use mpc_primitives::{ScalarExt, SignArgs, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{ScalarExt, SignArgs, SignBidirectionalEvent, SignId, LATEST_MPC_KEY_VERSION};
 use std::fmt;
 
 use contracts::TxParams as CantonTxParams;

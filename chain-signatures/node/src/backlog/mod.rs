@@ -3,14 +3,16 @@ pub mod selection;
 use self::selection::select_checkpoints;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::{Chain, IndexedSignRequest, SignKind};
-use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PublishState, SignStatus};
+use crate::sign_bidirectional::{PublishState, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+use crate::stream::ops::SignBidirectionalEventExt;
 
 use anyhow::Context;
-use mpc_primitives::{PendingTx, SignId};
+use mpc_primitives::{
+    BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PendingTx, SignId, SignKind,
+};
 use sha3::{Digest, Sha3_256};
-use std::collections::{hash_map, HashMap};
+use std::collections::{HashMap, hash_map};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -940,17 +942,15 @@ fn select_recovery_checkpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        protocol::SignKind,
-        respond_bidirectional::RespondBidirectionalTx,
-        sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PublishState, SignStatus},
-        stream::ops::SignBidirectionalEvent,
-    };
+    use crate::sign_bidirectional::{PublishState, SignStatus};
     use alloy::primitives::{Address, B256};
     use anchor_lang::prelude::Pubkey;
     use cait_sith::protocol::Participant;
     use k256::{AffinePoint, Scalar};
-    use mpc_primitives::{SignArgs, SignId};
+    use mpc_primitives::{
+        BidirectionalTx, BidirectionalTxId, RespondBidirectionalTx, SignArgs,
+        SignBidirectionalEvent, SignId, SignKind,
+    };
     use std::convert::TryInto;
 
     fn digest_hex(hex_str: &str) -> [u8; 32] {

@@ -1,8 +1,8 @@
 use crate::backlog::Backlog;
-use crate::protocol::{Chain, IndexedSignRequest};
+use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
 
-use crate::stream::{ChainEvent, ChainIndexer, ChainStream};
+use crate::stream::{ChainIndexer, ChainStream};
 use crate::util::ethabi_request_id;
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 use anyhow::Context;
@@ -22,7 +22,9 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
-use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR};
+use mpc_primitives::{
+    ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+};
 use serde::{Deserialize, Serialize};
 use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
@@ -606,7 +608,7 @@ impl SolanaSignEvent {
                     },
                     Chain::Solana,
                     crate::util::current_unix_timestamp(),
-                    crate::stream::ops::SignBidirectionalEvent {
+                    mpc_primitives::SignBidirectionalEvent {
                         sender: ev.sender.to_bytes(),
                         serialized_transaction: ev.serialized_transaction.clone(),
                         caip2_id: ev.caip2_id.clone(),
@@ -1038,7 +1040,7 @@ async fn emit_events(
                     to_mpc_signature(&ev.signature).context("failed to parse Solana signature")?;
                 let _ = events_tx
                     .send(ChainEvent::RespondBidirectional(
-                        crate::stream::ops::RespondBidirectionalEvent {
+                        mpc_primitives::RespondBidirectionalEvent {
                             request_id: ev.request_id,
                             signature,
                             chain: crate::protocol::Chain::Solana,
@@ -1052,7 +1054,7 @@ async fn emit_events(
                     to_mpc_signature(&ev.signature).context("failed to parse Solana signature")?;
                 let _ = events_tx
                     .send(ChainEvent::Respond(
-                        crate::stream::ops::SignatureRespondedEvent {
+                        mpc_primitives::SignatureRespondedEvent {
                             request_id: ev.request_id,
                             signature,
                             chain: Chain::Solana,

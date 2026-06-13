@@ -1,14 +1,15 @@
 use crate::backlog::Backlog;
 use crate::protocol::Chain;
 use crate::rpc::CantonClient;
-use crate::stream::ops::{RespondBidirectionalEvent, SignatureRespondedEvent};
-use crate::stream::{ChainEvent, ChainIndexer, ChainStream};
+use crate::stream::{ChainIndexer, ChainStream};
 
 use alloy::primitives::keccak256;
 use async_trait::async_trait;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use mpc_primitives::{ScalarExt, Signature};
+use mpc_primitives::{
+    ChainEvent, RespondBidirectionalEvent, ScalarExt, Signature, SignatureRespondedEvent,
+};
 use std::collections::HashSet;
 use std::ops::Range;
 use std::time::Duration;

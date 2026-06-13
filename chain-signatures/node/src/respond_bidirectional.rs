@@ -1,12 +1,14 @@
 use crate::indexer_eth::EthereumClient;
 use crate::protocol::{Chain, IndexedSignRequest};
-use crate::sign_bidirectional::TransactionOutput;
-use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId};
+use crate::sign_bidirectional::{BidirectionalTxExt, TransactionOutput};
 use alloy::consensus::Transaction;
 use alloy::primitives::Bytes;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
-use mpc_primitives::{SerDeserFormat, SignArgs, SignId};
+use mpc_primitives::{
+    BidirectionalTx, RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat,
+    SignArgs, SignId,
+};
 use std::sync::Arc;
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
@@ -19,20 +21,6 @@ pub(crate) const OUTPUT_DESERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat:
 pub struct CompletedTx {
     tx: BidirectionalTx,
 }
-
-#[derive(Hash, PartialEq, Eq, Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct RespondBidirectionalTx {
-    pub tx_id: BidirectionalTxId,
-    pub output: RespondBidirectionalSerializedOutput,
-    /// Opaque per-chain context blob. The producing indexer serializes its own
-    /// struct (see e.g. `indexer_canton::CantonChainCtx`) into bytes; the
-    /// consuming publisher deserializes it back. Backlog and protocol layers
-    /// treat this as opaque bytes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chain_ctx: Option<Vec<u8>>,
-}
-
-pub type RespondBidirectionalSerializedOutput = Vec<u8>;
 
 impl CompletedTx {
     pub fn new(tx: BidirectionalTx) -> Self {
@@ -220,8 +208,8 @@ pub fn calculate_respond_bidirectional_hash_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::SignKind;
     use alloy::primitives::{Address, B256};
+    use mpc_primitives::{BidirectionalTxId, SignKind};
 
     const UINT256_SCHEMA: &[u8] = br#"[{"name":"amount","type":"uint256"}]"#;
 

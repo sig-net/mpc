@@ -4,7 +4,7 @@ use crate::indexer_sol::SolConfig;
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
-use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, SignKind};
+use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState};
 use crate::util::AffinePointExt as _;
 use std::collections::BTreeSet;
 
@@ -20,8 +20,7 @@ use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
 use mpc_keys::hpke;
-use mpc_primitives::SignId;
-use mpc_primitives::Signature;
+use mpc_primitives::{SignId, Signature, SignKind};
 
 use crate::util::retry::{retry_async, Backoff, RetryConfig, RetryError, RetryReason};
 use alloy::contract::{ContractInstance, Interface};
