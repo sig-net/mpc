@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const CANTON_JSON_API_PORT: u16 = 7575;
-const DEFAULT_DAR_RELATIVE_PATH: &str = "fixtures/canton/daml-vault-0.0.1.dar";
+const DEFAULT_DAR_RELATIVE_PATH: &str = "fixtures/canton/signet-vault-v1-0.0.1.dar";
 const DEFAULT_FEE_DAR_RELATIVE_PATH: &str = "fixtures/canton/signet-fee-amulet-0.0.1.dar";
 
 /// Charge-context key read by the `signet-fee-amulet` implementation

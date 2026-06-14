@@ -4,8 +4,8 @@ These fixtures are Daml Archives (`.dar`): the compiled Daml package bundles
 that the Canton sandbox loads before the integration tests run.
 
 - **Source repository:** [`sig-net/canton`](https://github.com/sig-net/canton)
-- **Source packages:** `daml-packages/daml-vault` (checked in as
-  `daml-vault-0.0.1.dar`; the package itself is named `daml-vault-poc`) and
+- **Source packages:** `daml-packages/signet-vault-v1` (checked in as
+  `signet-vault-v1-0.0.1.dar`; the package itself is named `signet-vault-v1`) and
   `daml-packages/signet-fee-amulet` (`signet-fee-amulet-0.0.1.dar`)
 - **Built with:** Daml SDK 3.5.1 via `dpm build --all`
 
@@ -15,8 +15,8 @@ that the Canton sandbox loads before the integration tests run.
 # in the canton repo
 dpm build --all
 # in this repo
-cp <canton-repo>/daml-packages/daml-vault/.daml/dist/daml-vault-poc-0.0.1.dar \
-   <this-directory>/daml-vault-0.0.1.dar
+cp <canton-repo>/daml-packages/signet-vault-v1/.daml/dist/signet-vault-v1-0.0.1.dar \
+   <this-directory>/signet-vault-v1-0.0.1.dar
 cp <canton-repo>/daml-packages/signet-fee-amulet/.daml/dist/signet-fee-amulet-0.0.1.dar \
    <this-directory>/signet-fee-amulet-0.0.1.dar
 ```
