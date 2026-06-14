@@ -30,8 +30,8 @@ const PRICE_CONFIG_CONTEXT_KEY: &str = "signet.network/fee/price-config";
 
 // Package-name template refs (the form Canton 3.5+ requires on read endpoints
 // and prefers on submissions), shared by the create and disclosure call sites.
-const SIGNER_TEMPLATE_ID: &str = "#daml-signer:Signer:Signer";
-const SIGNER_PROPOSAL_TEMPLATE_ID: &str = "#daml-signer:Signer:SignerProposal";
+const SIGNER_TEMPLATE_ID: &str = "#signet-signer-v1:Signer:Signer";
+const SIGNER_PROPOSAL_TEMPLATE_ID: &str = "#signet-signer-v1:Signer:SignerProposal";
 const FEE_REGISTRATION_TEMPLATE_ID: &str =
     "#signet-api-fee-v1:Signet.Api.Fee.V1:FeeCollectorRegistration";
 const CC_FEE_COLLECTOR_TEMPLATE_ID: &str = "#signet-fee-amulet:Signet.Fee.Amulet:CcFeeCollector";

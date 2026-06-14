@@ -22,7 +22,7 @@ cp <canton-repo>/daml-packages/signet-fee-amulet/.daml/dist/signet-fee-amulet-0.
 ```
 
 The vault DAR bundles the package itself plus its data dependencies from the
-same repository: `daml-signer`, `daml-eip712`, `daml-abi`, the frozen
+same repository: `signet-signer-v1`, `signet-eip712`, `signet-abi`, the frozen
 `signet-api-fee-v1` fee API, and the vendored Splice token-standard API
 packages. The `signet-fee-amulet` DAR carries the `CcFeeCollector` /
 `FeePriceConfig` fee implementation that `Signer.RequestSignature` charges

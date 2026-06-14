@@ -118,7 +118,7 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
     let sig_payload: SignatureRespondedEventPayload = client
         .poll_for_contract(
             &[&canton.party_id],
-            "#daml-signer:Signer:SignatureRespondedEvent",
+            "#signet-signer-v1:Signer:SignatureRespondedEvent",
             |p: &SignatureRespondedEventPayload| p.request_id == expected_request_id,
             Duration::from_secs(120),
         )
@@ -173,7 +173,7 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
     let respond_payload = client
         .poll_for_contract(
             &[&canton.party_id],
-            "#daml-signer:Signer:RespondBidirectionalEvent",
+            "#signet-signer-v1:Signer:RespondBidirectionalEvent",
             |p: &RespondBidirectionalEventPayload| p.request_id == expected_request_id,
             Duration::from_secs(300),
         )

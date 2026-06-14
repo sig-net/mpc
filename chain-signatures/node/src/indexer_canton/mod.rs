@@ -169,7 +169,7 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
 /// # Contract migration
 ///
 /// Configure `signer_template_id` in the package-name form
-/// (`#daml-signer:Signer:Signer`): it is stable across DAR upgrades (smart
+/// (`#signet-signer-v1:Signer:Signer`): it is stable across DAR upgrades (smart
 /// contract upgrades keep the package name), and Canton 3.5+ rejects the
 /// `<packageHash>:Module:Entity` form on read endpoints (ACS/update filters,
 /// `INVALID_FIELD`) while only tolerating it on command submission as
@@ -186,7 +186,7 @@ pub struct CantonConfig {
     /// redeployment — requires MPC node restart with the new value.
     pub signer_contract_id: String,
     /// Template ID of the Signer contract, in the package-name form
-    /// ("#daml-signer:Signer:Signer") — stable across DAR upgrades; Canton 3.5+
+    /// ("#signet-signer-v1:Signer:Signer") — stable across DAR upgrades; Canton 3.5+
     /// rejects the "<packageHash>:Signer:Signer" form on read endpoints and
     /// deprecates it on command submission.
     pub signer_template_id: String,
@@ -274,7 +274,7 @@ pub struct CantonArgs {
     )]
     pub canton_signer_contract_id: Option<String>,
     /// Template ID of the Signer contract, in the package-name form
-    /// ("#daml-signer:Signer:Signer") — stable across DAR upgrades; the
+    /// ("#signet-signer-v1:Signer:Signer") — stable across DAR upgrades; the
     /// package-hash form is rejected on Canton 3.5+ read endpoints.
     #[arg(
         long,

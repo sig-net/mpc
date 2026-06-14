@@ -1,8 +1,8 @@
 //! Typed structs for Daml contract payloads.
 //!
 //! These represent the JSON payloads inside `CreatedEvent.payload` for specific
-//! Daml templates from `daml-signer`. Derived from the `.daml` source files in
-//! the `sig-net/canton` repository (`daml-packages/daml-signer/daml/`).
+//! Daml templates from `signet-signer-v1`. Derived from the `.daml` source files in
+//! the `sig-net/canton` repository (`daml-packages/signet-signer-v1/daml/`).
 
 use alloy::consensus::TxEip1559;
 use alloy::eips::eip2930::{AccessList, AccessListItem};
