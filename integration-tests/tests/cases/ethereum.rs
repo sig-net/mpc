@@ -395,6 +395,13 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
     cluster.restart_node(offline_config).await?;
     cluster.wait().signable().await?;
 
+    // Pump some empty blocks to cross a checkpoint boundary.
+    // This forces both the active and restarted nodes to process the same new blocks
+    // and deterministically emit identical checkpoint structs,
+    // resolving any transient state mismatch from the catch-up phase.
+    let checkpoint_interval = Chain::Ethereum.checkpoint_interval().unwrap_or(10);
+    produce_empty_eth_blocks(&eth_client, requester, checkpoint_interval + 2).await?;
+
     // Verify the restarted node recovers to the same checkpoint via node consensus
     let node_recovered_checkpoint = wait_node_checkpoint(
         &cluster,
