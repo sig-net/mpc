@@ -88,6 +88,7 @@ impl CantonConnection {
         ws_url: &str,
         jwt_token: &str,
         party_id: &str,
+        signer_template_id: &str,
         begin_exclusive: u64,
     ) -> anyhow::Result<Self> {
         let mut request = ws_url.into_client_request()?;
@@ -103,8 +104,15 @@ impl CantonConnection {
         let (mut ws_write, ws_read) = ws_stream.split();
         tracing::info!(begin_exclusive, "canton WebSocket connected");
 
+        // Subscribe only to the Signer module's templates (package-name form, stable
+        // across DAR upgrades), rather than every contract visible to the party. This
+        // enforces the package at the ledger; the client-side suffix match in
+        // process_canton_event stays as a second layer.
+        let party_filter = ledger_api::template_party_filter(
+            &ledger_api::signer_subscription_template_ids(signer_template_id),
+        );
         let mut filters_by_party = serde_json::Map::new();
-        filters_by_party.insert(party_id.to_string(), serde_json::json!({}));
+        filters_by_party.insert(party_id.to_string(), serde_json::to_value(party_filter)?);
 
         let subscribe_msg = ledger_api::GetUpdatesRequest {
             begin_exclusive,
@@ -203,8 +211,14 @@ impl CantonIndexer {
         let jwt_token = self.client.bearer_token().await?;
         let ws_url = format!("{}/v2/updates", self.client.config.json_api_ws_url);
         let party_id = &self.client.config.party_id;
-        self.ws_conn =
-            CantonConnection::connect(&ws_url, &jwt_token, party_id, begin_exclusive).await?;
+        self.ws_conn = CantonConnection::connect(
+            &ws_url,
+            &jwt_token,
+            party_id,
+            &self.client.config.signer_template_id,
+            begin_exclusive,
+        )
+        .await?;
         Ok(())
     }
 

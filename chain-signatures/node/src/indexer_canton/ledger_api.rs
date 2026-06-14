@@ -379,6 +379,49 @@ pub fn template_suffix_matches(template_id: &str, suffix: &str) -> bool {
     template_id == suffix || template_id.ends_with(&format!(":{suffix}"))
 }
 
+/// Template IDs the indexer subscribes to, in package-name form, derived from the
+/// configured `signer_template_id` (e.g. `#signet-signer-v1:Signer:Signer`). The
+/// `Signer` event templates live in the same package and module as `Signer:Signer`,
+/// so they reuse its package prefix — keeping the filter stable across DAR upgrades.
+///
+/// `Signer:Signer` itself is included so the `RequestSignature` ExercisedEvent stays
+/// in the (now template-filtered) stream: `verify_sign_event` requires it in the
+/// same transaction.
+pub fn signer_subscription_template_ids(signer_template_id: &str) -> Vec<String> {
+    let package = signer_template_id
+        .split(':')
+        .next()
+        .unwrap_or(signer_template_id);
+    [
+        templates::SIGNER,
+        templates::SIGN_BIDIRECTIONAL_EVENT,
+        templates::SIGNATURE_RESPONDED_EVENT,
+        templates::RESPOND_BIDIRECTIONAL_EVENT,
+    ]
+    .iter()
+    .map(|suffix| format!("{package}:{suffix}"))
+    .collect()
+}
+
+/// Build a `PartyFilter` of cumulative `TemplateFilter`s for `template_ids`, so the
+/// ledger only streams those templates instead of every contract visible to the
+/// party (which the indexer would then filter client-side).
+pub fn template_party_filter(template_ids: &[String]) -> PartyFilter {
+    PartyFilter {
+        cumulative: template_ids
+            .iter()
+            .map(|template_id| CumulativeFilter {
+                identifier_filter: IdentifierFilter::TemplateFilter {
+                    value: TemplateFilterValue {
+                        template_id: template_id.clone(),
+                        include_created_event_blob: false,
+                    },
+                },
+            })
+            .collect(),
+    }
+}
+
 /// Build a UserRight for CanActAs.
 pub fn can_act_as(party: &str) -> UserRight {
     UserRight {
@@ -398,5 +441,45 @@ pub fn can_read_as(party: &str) -> UserRight {
                 party: party.to_string(),
             },
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signer_subscription_template_ids_reuse_signer_package() {
+        let ids = signer_subscription_template_ids("#signet-signer-v1:Signer:Signer");
+        assert_eq!(
+            ids,
+            vec![
+                "#signet-signer-v1:Signer:Signer".to_string(),
+                "#signet-signer-v1:Signer:SignBidirectionalEvent".to_string(),
+                "#signet-signer-v1:Signer:SignatureRespondedEvent".to_string(),
+                "#signet-signer-v1:Signer:RespondBidirectionalEvent".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn template_party_filter_matches_canton_json_shape() {
+        let filter = template_party_filter(&["#signet-signer-v1:Signer:Signer".to_string()]);
+        let json = serde_json::to_value(&filter).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "cumulative": [{
+                    "identifierFilter": {
+                        "TemplateFilter": {
+                            "value": {
+                                "templateId": "#signet-signer-v1:Signer:Signer",
+                                "includeCreatedEventBlob": false
+                            }
+                        }
+                    }
+                }]
+            })
+        );
     }
 }
