@@ -43,7 +43,8 @@ fn thread_network_name(docker: &DockerClient) -> String {
         }
 
         let slot = NEXT_NETWORK_SLOT.fetch_add(1, Ordering::Relaxed);
-        let network = format!("mpc_it_{}", slot);
+        let pid = std::process::id();
+        let network = format!("mpc_it_{}_{}", pid, slot);
         THREAD_NETWORK_CLEANUP.with(|cleanup_cell| {
             *cleanup_cell.borrow_mut() = Some(ThreadNetworkCleanup {
                 docker: docker.clone(),
@@ -172,8 +173,12 @@ pub struct ClusterSpawner {
 
 impl Default for ClusterSpawner {
     fn default() -> Self {
+        let docker = DockerClient::default();
+        let network = thread_network_name(&docker);
+
         let mut tmp_dir = execute::target_dir().expect("unable to locate target dir");
-        tmp_dir.push("tmp");
+        // Create a unique temporary directory for this test run to avoid conflicts
+        tmp_dir.push(format!("tmp_{}", network));
 
         let nodes = 3;
         let threshold = 2;
@@ -182,8 +187,7 @@ impl Default for ClusterSpawner {
             threshold,
             ..Default::default()
         };
-        let docker = DockerClient::default();
-        let network = thread_network_name(&docker);
+
         Self {
             docker,
             release: true,
