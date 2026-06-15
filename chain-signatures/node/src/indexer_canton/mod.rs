@@ -160,15 +160,6 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
 }
 
 /// Canton JSON Ledger API configuration.
-///
-/// # Contract migration
-///
-/// Configure `signer_template_id` in package-name form
-/// (`#signet-signer-v1:Signer:Signer`): the name is stable across DAR/SCU upgrades
-/// (the package hash changes), so it survives a Signer redeploy. The package-hash form
-/// is deprecated on the JSON Ledger API — Splice deployments (DevNet) reject it, stock
-/// Canton warns and auto-converts. `signer_contract_id` still changes on every Signer
-/// recreate and needs a restart.
 #[derive(Clone)]
 pub struct CantonConfig {
     pub json_api_url: String,
@@ -179,9 +170,8 @@ pub struct CantonConfig {
     /// The Signer contract ID on the Canton ledger. Changes on every DAR
     /// redeployment — requires MPC node restart with the new value.
     pub signer_contract_id: String,
-    /// Template ID of the Signer contract, in the package-name form
-    /// (`#signet-signer-v1:Signer:Signer`) — see the `# Contract migration` note
-    /// on `CantonConfig`.
+    /// Template ID of the Signer contract, in package-name form
+    /// (`#signet-signer-v1:Signer:Signer`) — stable across DAR upgrades.
     pub signer_template_id: String,
 }
 
@@ -266,9 +256,8 @@ pub struct CantonArgs {
         requires = "canton_json_api_url"
     )]
     pub canton_signer_contract_id: Option<String>,
-    /// Template ID of the Signer contract, in the package-name form
-    /// (`#signet-signer-v1:Signer:Signer`). See `CantonConfig`'s `# Contract
-    /// migration` note.
+    /// Template ID of the Signer contract, in package-name form
+    /// (`#signet-signer-v1:Signer:Signer`).
     #[arg(
         long,
         env("MPC_CANTON_SIGNER_TEMPLATE_ID"),

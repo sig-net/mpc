@@ -145,9 +145,6 @@ pub struct ExercisedEvent {
 }
 
 /// Subscription message sent to `ws://.../v2/updates`.
-///
-/// Uses `updateFormat` (Canton 3.4+) instead of the deprecated
-/// `filter`/`verbose` top-level fields
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetUpdatesRequest {
