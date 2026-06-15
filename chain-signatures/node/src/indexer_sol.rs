@@ -7,9 +7,11 @@ use crate::util::ethabi_request_id;
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 use anyhow::Context;
 
-use std::collections::{btree_map, BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
+use std::pin::Pin;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alloy_sol_types::SolValue;
@@ -17,7 +19,8 @@ use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
 use async_trait::async_trait;
-use futures_util::stream::{self, StreamExt};
+use futures_util::stream::StreamExt;
+use futures_util::Stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
@@ -158,7 +161,7 @@ pub struct SolanaStream {
 
 pub struct SolanaIndexer {
     program_id: Pubkey,
-    rpc_client: RpcClient,
+    rpc_client: Arc<RpcClient>,
     rpc_http_url: String,
     rpc_ws_url: String,
     events_tx: mpsc::Sender<ChainEvent>,
@@ -227,7 +230,7 @@ impl ChainStream for SolanaStream {
 
         let indexer = SolanaIndexer {
             program_id: start_state.program_id,
-            rpc_client: RpcClient::new(start_state.rpc_http_url.clone()),
+            rpc_client: Arc::new(RpcClient::new(start_state.rpc_http_url.clone())),
             rpc_http_url: start_state.rpc_http_url.clone(),
             rpc_ws_url: start_state.rpc_ws_url.clone(),
             events_tx: start_state.tx.clone(),
@@ -250,7 +253,7 @@ impl ChainStream for SolanaStream {
 impl ChainIndexer for SolanaIndexer {
     const CHAIN: Chain = Chain::Solana;
     type Block = (u64, SolanaCatchupBlock);
-    type Iter = stream::Iter<btree_map::IntoIter<u64, SolanaCatchupBlock>>;
+    type Iter = Pin<Box<dyn Stream<Item = Self::Block> + Send + 'static>>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         let (live_tx, live_rx) = crate::stream::channel();
@@ -286,7 +289,7 @@ impl ChainIndexer for SolanaIndexer {
             .unwrap_or(anchor_height);
         let end_slot = anchor_height.saturating_sub(1); // We want to catch up to just before the anchor
         if start_slot > end_slot {
-            return stream::iter(BTreeMap::new().into_iter());
+            return Box::pin(futures_util::stream::empty());
         }
 
         // This fetches a sparse list of transactions based on whether our program received
@@ -311,8 +314,9 @@ impl ChainIndexer for SolanaIndexer {
                     "failed to query solana signature history; falling back to sparse catchup"
                 );
 
-                let blocks = self.fetch_sparse_blocks(start_slot, end_slot).await;
-                return stream::iter(blocks.into_iter());
+                // Stream blocks in chunks
+                let slots = self.get_all_sparse_slots(start_slot, end_slot).await;
+                return self.build_concurrent_catchup_stream(slots);
             }
         };
 
@@ -327,7 +331,6 @@ impl ChainIndexer for SolanaIndexer {
             slots.insert(sig.slot);
         }
         let mid_slot = mid_slot.map(|n| n.saturating_sub(1)).unwrap_or(start_slot);
-        let mut items = self.fetch_blocks_for_slots(slots).await;
 
         // NOTE: since we can only do fast catchup for up to 1000 signatures,
         // if we hit that limit and the earliest signature is significantly
@@ -339,10 +342,16 @@ impl ChainIndexer for SolanaIndexer {
                 mid_slot,
                 "solana signature history hit the 1000-signature limit; combining sparse blocks with signatures"
             );
-            items.extend(self.fetch_sparse_blocks(start_slot, mid_slot).await);
+
+            // Fetch the sparse blocks between start_slot and mid_slot and add them to the set of slots to catch up
+            let missing_slots = self.get_all_sparse_slots(start_slot, mid_slot).await;
+            for slot in missing_slots {
+                slots.insert(slot);
+            }
         }
 
-        stream::iter(items.into_iter())
+        // Fetch all blocks for the identified slots concurrently
+        self.build_concurrent_catchup_stream(slots.into_iter().collect())
     }
 
     async fn process_catchup(&mut self, (slot, block): &Self::Block) -> anyhow::Result<()> {
@@ -395,32 +404,6 @@ impl SolanaIndexer {
             .with_context(|| format!("failed to fetch Solana block for slot {slot}"))
     }
 
-    async fn fetch_blocks_for_slots(
-        &self,
-        slots: BTreeSet<u64>,
-    ) -> BTreeMap<u64, SolanaCatchupBlock> {
-        let mut blocks_by_height = BTreeMap::new();
-
-        for &slot in &slots {
-            match self.get_block(slot).await {
-                Ok(block) => {
-                    blocks_by_height.insert(slot, SolanaCatchupBlock::Block(block));
-                }
-                Err(err) => {
-                    tracing::warn!(?err, slot, "failed to fetch Solana block for catchup slot");
-                }
-            }
-        }
-
-        slots
-            .into_iter()
-            .map(|slot| match blocks_by_height.remove(&slot) {
-                Some(block) => (slot, block),
-                None => (slot, SolanaCatchupBlock::Missing),
-            })
-            .collect()
-    }
-
     async fn process_block(&mut self, height: u64, block: &UiConfirmedBlock) -> anyhow::Result<()> {
         let Some(transactions) = &block.transactions else {
             self.events_tx.send(ChainEvent::Block(height)).await?;
@@ -464,32 +447,45 @@ impl SolanaIndexer {
         }
     }
 
-    /// Fetches blocks from start_slot to end_slot. The range is inclusive `[start_slot, endslot]`
-    async fn fetch_sparse_blocks(
-        &self,
-        mut start_slot: u64,
-        end_slot: u64,
-    ) -> BTreeMap<u64, SolanaCatchupBlock> {
-        // TODO: https://github.com/sig-net/mpc/issues/869
-        // This can be gigantic. We should move to iterating over chunks instead of fetching
-        // all blocks for multiple chunks at once.
-        const MAX_CHUNK_SIZE: u64 = 10_000;
+    /// Fetches blocks for the given slots concurrently, returning a stream of results as they arrive.
+    fn build_concurrent_catchup_stream(&self, slots: Vec<u64>) -> <Self as ChainIndexer>::Iter {
+        let rpc_client = Arc::new(self.rpc_client.clone());
 
-        let mut block_slots = Vec::new();
+        let stream = futures_util::stream::iter(slots)
+            .map(move |slot| {
+                let rpc = rpc_client.clone();
+                async move {
+                    match rpc
+                        .get_block_with_config(slot, Self::block_fetch_config())
+                        .await
+                    {
+                        Ok(block) => (slot, SolanaCatchupBlock::Block(block)),
+                        Err(err) => {
+                            tracing::warn!(?err, slot, "failed to fetch Solana block for catchup");
+                            (slot, SolanaCatchupBlock::Missing)
+                        }
+                    }
+                }
+            })
+            // TODO: remove hardcoded value
+            .buffer_unordered(20);
+
+        Box::pin(stream)
+    }
+
+    /// Fetches all missing slots across a large range by chunking requests
+    async fn get_all_sparse_slots(&self, mut start_slot: u64, end_slot: u64) -> Vec<u64> {
+        const MAX_CHUNK_SIZE: u64 = 10_000;
+        let mut all_slots = Vec::new();
+
         while start_slot <= end_slot {
             let chunk_end = std::cmp::min(end_slot, start_slot.saturating_add(MAX_CHUNK_SIZE - 1));
             let chunk_slots = self.fetch_sparse_chunk(start_slot, chunk_end).await;
-            block_slots.extend(chunk_slots);
+            all_slots.extend(chunk_slots);
             start_slot = chunk_end.saturating_add(1);
         }
 
-        self.fetch_blocks_for_slots(
-            block_slots
-                .into_iter()
-                .filter(|slot| *slot <= end_slot)
-                .collect(),
-        )
-        .await
+        all_slots
     }
 }
 
@@ -1181,6 +1177,8 @@ async fn get_tx(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use mockito::{Matcher, Server};
     use serde_json::json;
@@ -1328,7 +1326,7 @@ mod tests {
 
         let indexer = SolanaIndexer {
             program_id: Pubkey::new_unique(),
-            rpc_client: RpcClient::new(server.url()),
+            rpc_client: Arc::new(RpcClient::new(server.url())),
             rpc_http_url: server.url(),
             rpc_ws_url: String::new(),
             events_tx,
@@ -1416,10 +1414,19 @@ mod tests {
             .create_async()
             .await;
 
-        let res_timeout = tokio::time::timeout(
-            Duration::from_secs(2),
-            indexer.fetch_sparse_blocks(100000, 112000),
-        )
+        let res_timeout = tokio::time::timeout(Duration::from_secs(2), async {
+            // Get the chunked slots
+            let slots = indexer.get_all_sparse_slots(100000, 112000).await;
+            // Feed them into the concurrent stream
+            let mut stream = indexer.build_concurrent_catchup_stream(slots);
+
+            // Collect the results
+            let mut results = HashMap::new();
+            while let Some((slot, block)) = stream.next().await {
+                results.insert(slot, block);
+            }
+            results
+        })
         .await;
 
         let res = res_timeout

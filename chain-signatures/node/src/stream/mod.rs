@@ -28,7 +28,7 @@ pub fn channel() -> (mpsc::Sender<ChainEvent>, mpsc::Receiver<ChainEvent>) {
 pub trait ChainIndexer: Send + 'static {
     const CHAIN: Chain;
     type Block: Send;
-    type Iter: Stream<Item = Self::Block> + Send + 'static;
+    type Iter: Stream<Item = Self::Block> + Send + Unpin + 'static;
 
     const RETRY_DELAY: Duration = Duration::from_millis(500);
 
