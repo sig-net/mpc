@@ -379,14 +379,10 @@ pub fn template_suffix_matches(template_id: &str, suffix: &str) -> bool {
     template_id == suffix || template_id.ends_with(&format!(":{suffix}"))
 }
 
-/// Template IDs the indexer subscribes to, in package-name form, derived from the
-/// configured `signer_template_id` (e.g. `#signet-signer-v1:Signer:Signer`). The
-/// `Signer` event templates live in the same package and module as `Signer:Signer`,
-/// so they reuse its package prefix — keeping the filter stable across DAR upgrades.
-///
+/// Template IDs the indexer subscribes to (package-name form), derived from
+/// `signer_template_id`'s package prefix — the event templates share its package.
 /// `Signer:Signer` itself is included so the `RequestSignature` ExercisedEvent stays
-/// in the (now template-filtered) stream: `verify_sign_event` requires it in the
-/// same transaction.
+/// in the filtered stream (`verify_sign_event` needs it in the same transaction).
 pub fn signer_subscription_template_ids(signer_template_id: &str) -> Vec<String> {
     let package = signer_template_id
         .split_once(':')

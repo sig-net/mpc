@@ -33,12 +33,10 @@ pub struct CantonChainCtx {
 /// transaction params. This type is created at the indexer boundary and carries
 /// the byte fields expected by the shared bidirectional signing flow.
 ///
-/// `RequestSignature` charges the Canton Coin fee atomically on-ledger
-/// (fail-closed), so the indexer only ever observes already-charged requests. The
-/// fee never enters the event payload, request id, KDF epsilon, or signed
-/// transaction — outside the indexer's trust scope, the MPC neither sees nor
-/// verifies it — so the shared bidirectional flow carries no Canton deposit
-/// (deposit = zero).
+/// `RequestSignature` charges the Canton Coin fee atomically on-ledger (fail-closed),
+/// so the indexer only sees already-charged requests. The fee never enters the event
+/// payload, request id, KDF epsilon, or signed tx — the MPC neither sees nor verifies
+/// it — so the bidirectional flow carries no Canton deposit (deposit = zero).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CantonSignBidirectionalRequestedEvent {
     pub sign_event_contract_id: String,
@@ -165,13 +163,12 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
 ///
 /// # Contract migration
 ///
-/// Configure `signer_template_id` in the package-name form
-/// (`#signet-signer-v1:Signer:Signer`): it is stable across DAR upgrades (smart
-/// contract upgrades keep the package name), and Canton 3.5+ rejects the
-/// `<packageHash>:Module:Entity` form on read endpoints (ACS/update filters,
-/// `INVALID_FIELD`) while only tolerating it on command submission as
-/// deprecated. `signer_contract_id` still changes whenever the Signer
-/// contract itself is recreated, which requires a restart with the new value.
+/// Configure `signer_template_id` in package-name form
+/// (`#signet-signer-v1:Signer:Signer`): the name is stable across DAR/SCU upgrades
+/// (the package hash changes), so it survives a Signer redeploy. The package-hash form
+/// is deprecated on the JSON Ledger API — Splice deployments (DevNet) reject it, stock
+/// Canton warns and auto-converts. `signer_contract_id` still changes on every Signer
+/// recreate and needs a restart.
 #[derive(Clone)]
 pub struct CantonConfig {
     pub json_api_url: String,
@@ -183,9 +180,8 @@ pub struct CantonConfig {
     /// redeployment — requires MPC node restart with the new value.
     pub signer_contract_id: String,
     /// Template ID of the Signer contract, in the package-name form
-    /// ("#signet-signer-v1:Signer:Signer") — stable across DAR upgrades; Canton 3.5+
-    /// rejects the "<packageHash>:Signer:Signer" form on read endpoints and
-    /// deprecates it on command submission.
+    /// (`#signet-signer-v1:Signer:Signer`) — see the `# Contract migration` note
+    /// on `CantonConfig`.
     pub signer_template_id: String,
 }
 
@@ -271,8 +267,8 @@ pub struct CantonArgs {
     )]
     pub canton_signer_contract_id: Option<String>,
     /// Template ID of the Signer contract, in the package-name form
-    /// ("#signet-signer-v1:Signer:Signer") — stable across DAR upgrades; the
-    /// package-hash form is rejected on Canton 3.5+ read endpoints.
+    /// (`#signet-signer-v1:Signer:Signer`). See `CantonConfig`'s `# Contract
+    /// migration` note.
     #[arg(
         long,
         env("MPC_CANTON_SIGNER_TEMPLATE_ID"),

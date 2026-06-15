@@ -104,9 +104,8 @@ impl CantonConnection {
         let (mut ws_write, ws_read) = ws_stream.split();
         tracing::info!(begin_exclusive, "canton WebSocket connected");
 
-        // Subscribe only to the Signer module's templates (package-name form, stable
-        // across DAR upgrades), rather than every contract visible to the party. This
-        // enforces the package at the ledger; the client-side suffix match in
+        // Subscribe to only the Signer package's templates (not every contract visible to
+        // the party) — enforces the package at the ledger; the client-side suffix match in
         // process_canton_event stays as a second layer.
         let party_filter = ledger_api::template_party_filter(
             &ledger_api::signer_subscription_template_ids(signer_template_id),

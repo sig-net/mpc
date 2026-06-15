@@ -23,11 +23,12 @@ cp <canton-repo>/daml-packages/signet-fee-amulet/.daml/dist/signet-fee-amulet-0.
 
 The vault DAR bundles the package itself plus its data dependencies from the
 same repository: `signet-signer-v1`, `signet-eip712`, `signet-abi`, the frozen
-`signet-api-fee-v1` fee API, and the vendored Splice token-standard API
-packages. The `signet-fee-amulet` DAR carries the `CcFeeCollector` /
-`FeePriceConfig` fee implementation that `Signer.RequestSignature` charges
-through — the sandbox registers it with a zero-fee price config so tests stay
-off the Splice Amulet machinery.
+`signet-api-fee-v1` fee API, and the two vendored Splice token-standard API DARs
+it uses (`splice-api-token-metadata-v1`, `splice-api-token-holding-v1`). The
+`signet-fee-amulet` DAR carries the `CcFeeCollector` / `FeePriceConfig` fee
+implementation that `Signer.RequestSignature` charges through — the sandbox
+registers it with a zero-fee price config so tests stay off the Splice Amulet
+machinery.
 
 Integration tests use them to bootstrap a Canton sandbox with the Signer and
 fee contracts (`CANTON_DAR_PATH` / `CANTON_FEE_DAR_PATH` override the paths).

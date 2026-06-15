@@ -24,12 +24,10 @@ const CANTON_JSON_API_PORT: u16 = 7575;
 const DEFAULT_DAR_RELATIVE_PATH: &str = "fixtures/canton/signet-vault-v1-0.0.1.dar";
 const DEFAULT_FEE_DAR_RELATIVE_PATH: &str = "fixtures/canton/signet-fee-amulet-0.0.1.dar";
 
-/// Charge-context key read by the `signet-fee-amulet` implementation
-/// (mirrors `Signet.Fee.Amulet.priceConfigContextKey`).
+/// Charge-context key; mirrors Daml `Signet.Fee.Amulet.priceConfigContextKey`.
 const PRICE_CONFIG_CONTEXT_KEY: &str = "signet.network/fee/price-config";
 
-// Package-name template refs (the form Canton 3.5+ requires on read endpoints
-// and prefers on submissions), shared by the create and disclosure call sites.
+// Package-name template refs (stable across DAR upgrades), used at create + disclosure sites.
 const SIGNER_TEMPLATE_ID: &str = "#signet-signer-v1:Signer:Signer";
 const SIGNER_PROPOSAL_TEMPLATE_ID: &str = "#signet-signer-v1:Signer:SignerProposal";
 const FEE_REGISTRATION_TEMPLATE_ID: &str =
@@ -224,9 +222,7 @@ impl CantonSandbox {
             );
         }
 
-        // Resolve DAR paths (env vars with fallbacks). The vault DAR carries the
-        // Signer (+ the frozen fee API it depends on); the fee DAR carries the
-        // CcFeeCollector/FeePriceConfig implementation RequestSignature charges through.
+        // Two DARs: vault (Signer + frozen fee API) and fee impl (CcFeeCollector/FeePriceConfig).
         let dar_path = match std::env::var("CANTON_DAR_PATH") {
             Ok(p) => PathBuf::from(p),
             Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_DAR_RELATIVE_PATH),
@@ -367,8 +363,7 @@ canton.participants.sandbox.ledger-api {{
             .create_user(&sig_network_runtime_user_id, &sig_network, runtime_rights)
             .await?;
 
-        // FA admin user is the featured-app/fee-admin identity: it co-signs the
-        // Signer (AcceptSigner) and owns the fee contracts.
+        // FA admin = featured-app/fee identity: co-signs the Signer and owns the fee contracts.
         let fa_rights = vec![
             ledger_api::can_act_as(&sig_network_fa),
             ledger_api::can_read_as(&sig_network_fa),
@@ -417,10 +412,8 @@ canton.participants.sandbox.ledger-api {{
         ))
         .await?;
 
-        // The Signer is co-signed by SigNetwork + SigNetworkFA via the two-party
-        // SignerProposal → AcceptSigner ceremony. The proposal goes through the
-        // sig_network_runtime_client so later runtime choices use the same
-        // party/user pair.
+        // Two-party Signer ceremony (SignerProposal → AcceptSigner). The proposal uses the
+        // runtime client so later runtime choices share its party/user pair.
         let proposal_result = sig_network_runtime_client
             .create_contract(
                 &[&sig_network],
@@ -440,19 +433,14 @@ canton.participants.sandbox.ledger-api {{
             )
             .await?;
         let (signer_cid, _) = find_created_contract(&accept_result, "Signer")?;
-        // Canton 3.5+ rejects package-id template refs on read endpoints, so the
-        // node config (and every read filter) must use the package-name form.
         let signer_template_id = SIGNER_TEMPLATE_ID.to_string();
 
         let signer_disclosure = sig_network_runtime_client
             .get_disclosed_contract(&[&sig_network], &signer_template_id, &signer_cid)
             .await?;
 
-        // Fee infrastructure (all sigNetworkFA-signed): RequestSignature charges
-        // a CC fee through the registered collector, so the sandbox registers a
-        // real CcFeeCollector with a zero-fee FeePriceConfig — "free mode" is a
-        // production-supported config flip that skips the CC transfer, keeping
-        // the tests off the Splice Amulet machinery.
+        // Fee infrastructure (sigNetworkFA-signed). A zero-fee FeePriceConfig is the
+        // production "free mode" that skips the CC transfer, keeping tests off Splice Amulet.
         let collector_result = fa_admin_client
             .create_contract(
                 &[&sig_network_fa],
@@ -480,8 +468,7 @@ canton.participants.sandbox.ledger-api {{
         let (fee_registration_cid, _) =
             find_created_contract(&registration_result, "FeeCollectorRegistration")?;
 
-        // Fixed wide validity window: the sandbox runs on wall-clock time and
-        // window-edge behavior is covered by the canton repo's Daml tests.
+        // Wide validity window (wall-clock sandbox); window-edge cases live in the canton Daml tests.
         let price_config_result = fa_admin_client
             .create_contract(
                 &[&sig_network_fa],
@@ -494,7 +481,7 @@ canton.participants.sandbox.ledger-api {{
                     "feeAmount": "0.0",
                     "validFrom": "2020-01-01T00:00:00Z",
                     "validUntil": "2099-01-01T00:00:00Z",
-                    // Daml Int64 travels as a JSON string on the 3.5 JSON API.
+                    // Send Int64 as a string (JSON API canonical form).
                     "version": "0",
                     "meta": { "values": {} },
                 }),
@@ -503,9 +490,7 @@ canton.participants.sandbox.ledger-api {{
         let (fee_price_config_cid, _) =
             find_created_contract(&price_config_result, "FeePriceConfig")?;
 
-        // Disclosures the requester attaches to fee-bearing submissions (the FA
-        // fee endpoint serves these in production): registration, collector,
-        // price config.
+        // Fee disclosures attached per submission (the FA fee endpoint serves these in prod).
         let mut fee_disclosures = Vec::new();
         for (template_id, cid) in [
             (FEE_REGISTRATION_TEMPLATE_ID, &fee_registration_cid),
@@ -577,13 +562,9 @@ canton.participants.sandbox.ledger-api {{
         self.submit_sign_request_case(&case).await
     }
 
-    /// Exercise `Signer.RequestSignature` for the given EVM case: validates the
-    /// tx params, charges the (zero) CC fee through the registered collector,
-    /// and emits the `SignBidirectionalEvent` the MPC node watches — all in one
-    /// atomic transaction. Operators + requester are the choice controllers, so
-    /// the submission acts as both. The requester is not a stakeholder on the
-    /// Signer or the fee contracts, so the Signer disclosure and the FA fee
-    /// disclosures ride along with the command.
+    /// Exercise `Signer.RequestSignature` for an EVM case — one atomic tx that charges
+    /// the (zero) CC fee and emits the `SignBidirectionalEvent` the MPC watches. Acts as
+    /// operators + requester (the controllers); the Signer + fee disclosures ride along.
     pub async fn submit_sign_request_case(&self, case: &EvmType2AnvilCase) -> Result<()> {
         let event = test_sign_request_event(self, case);
         let args = self.request_signature_args(&event);
@@ -602,18 +583,16 @@ canton.participants.sandbox.ledger-api {{
         Ok(())
     }
 
-    /// `Signer.RequestSignature` choice arguments for a test event: request fields
-    /// mirror the event (minus `sender`/`sigNetwork`/`sigNetworkFA`, which the
-    /// ledger derives), plus fee args pointing at the zero-fee registration/price
-    /// config with no holdings. Zero-fee only — a real fee also needs the
-    /// transfer-factory context key, factory disclosures, and input holdings.
+    /// `Signer.RequestSignature` args for a test event: request fields mirror the event
+    /// (minus the ledger-derived `sender`/`sigNetwork`/`sigNetworkFA`) plus zero-fee args
+    /// (registration + price config, no holdings). A non-zero fee needs more (see `Signet.Fee.Amulet`).
     fn request_signature_args(&self, event: &SignBidirectionalRequestedEvent) -> Value {
         json!({
             "operators": event.operators,
             "requester": event.requester,
             "txParams": event.tx_params,
             "caip2Id": event.caip2_id,
-            // Daml Int64 travels as a JSON string on the 3.5 JSON API.
+            // Send Int64 as a string (JSON API canonical form).
             "keyVersion": event.key_version.to_string(),
             "path": event.path,
             "algo": event.algo,

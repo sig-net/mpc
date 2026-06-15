@@ -101,16 +101,8 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
     let expected_event = test_sign_request_event(canton, &case);
     let expected_request_id = hex::encode(compute_request_id(&expected_event)?);
 
-    // One atomic command: Signer.RequestSignature validates the tx params,
-    // charges the (zero) CC fee through the registered FeeCollector, and emits
-    // the SignBidirectionalEvent watched by the MPC Canton indexer.
-    //
-    // EVM contracts are globally visible, so a caller can reference any
-    // contract address. Canton contracts are private to stakeholders. The
-    // requester is not a stakeholder on the Signer or the FA-signed fee
-    // contracts, so their stakeholders hand the requester explicit disclosure
-    // blobs. Attaching them lets the command read those contracts while Daml
-    // still enforces authorization checks:
+    // The requester isn't a stakeholder on the Signer/fee contracts, so disclosure
+    // blobs ride along (Daml still enforces authorization):
     // https://docs.digitalasset.com/build/3.5/sdlc-howtos/applications/develop/explicit-contract-disclosure.html
     canton.submit_sign_request_case(&case).await?;
     tracing::info!(case_name, "canton sign request submitted via Signer");
