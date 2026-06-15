@@ -8,7 +8,7 @@ use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::Chain;
 use crate::respond_bidirectional::CompletedTx;
-use crate::stream::{AsyncCatchupIter, ChainIndexer, ChainStream};
+use crate::stream::{ChainIndexer, ChainStream};
 use crate::util::retry;
 
 use alloy::eips::BlockNumberOrTag;
@@ -18,6 +18,7 @@ use alloy::rpc::types::{Block, BlockId, Log};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
+use futures_util::stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
@@ -77,15 +78,10 @@ impl CatchupIter {
         self.buffered_blocks = self.client.get_blocks(&batch_block_ids).await.into_iter();
         self.next_block = batch_end;
     }
-}
 
-#[async_trait]
-impl AsyncCatchupIter for CatchupIter {
-    type Item = MaybeBlock;
-
-    async fn next(&mut self) -> Option<Self::Item> {
+    pub async fn next(&mut self) -> Option<MaybeBlock> {
         loop {
-            if let Some(block) = Iterator::next(&mut self.buffered_blocks) {
+            if let Some(block) = self.buffered_blocks.next() {
                 return Some(block);
             }
 
@@ -1385,7 +1381,7 @@ impl EthereumIndexer {
 impl ChainIndexer for EthereumIndexer {
     const CHAIN: Chain = Chain::Ethereum;
     type Block = MaybeBlock;
-    type Iter = CatchupIter;
+    type Iter = std::pin::Pin<Box<dyn stream::Stream<Item = Self::Block> + Send + 'static>>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         let start_block_number = loop {
@@ -1427,7 +1423,15 @@ impl ChainIndexer for EthereumIndexer {
             .client
             .clamp_oldest_supported(current_block, anchor_height);
 
-        CatchupIter::new(self.client.clone(), catchup_start, anchor_height)
+        let catchup_iter = CatchupIter::new(self.client.clone(), catchup_start, anchor_height);
+
+        // Convert the async state machine into a Stream
+        let stream = stream::unfold(catchup_iter, |mut state| async move {
+            let item = state.next().await;
+            item.map(|block| (block, state))
+        });
+
+        Box::pin(stream)
     }
 
     async fn process_catchup(&mut self, block: &Self::Block) -> anyhow::Result<()> {
@@ -1536,7 +1540,7 @@ mod tests {
     #[cfg(feature = "helios")]
     use crate::indexer_eth::indexer_eth_helios;
     use crate::protocol::Chain;
-    use crate::stream::{AsyncCatchupIter, ChainIndexer};
+    use crate::stream::ChainIndexer;
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{address, b256, Address};
     use alloy::rpc::types::BlockId;
