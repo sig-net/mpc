@@ -320,7 +320,7 @@ impl ChainIndexer for SolanaIndexer {
 
                 // Stream blocks in chunks
                 let slots = self.get_all_sparse_slots(start_slot, end_slot).await;
-                return self.build_concurrent_catchup_stream(slots);
+                return self.build_ordered_catchup_stream(slots);
             }
         };
 
@@ -355,7 +355,7 @@ impl ChainIndexer for SolanaIndexer {
         }
 
         // Fetch all blocks for the identified slots concurrently
-        self.build_concurrent_catchup_stream(slots.into_iter().collect())
+        self.build_ordered_catchup_stream(slots.into_iter().collect())
     }
 
     async fn process_catchup(&mut self, (slot, block): &Self::Block) -> anyhow::Result<()> {
@@ -452,8 +452,11 @@ impl SolanaIndexer {
     }
 
     /// Fetches blocks for the given slots concurrently, returning a stream of results as they arrive.
-    fn build_concurrent_catchup_stream(&self, slots: Vec<u64>) -> <Self as ChainIndexer>::Iter {
+    fn build_ordered_catchup_stream(&self, mut slots: Vec<u64>) -> <Self as ChainIndexer>::Iter {
         let rpc_client = Arc::new(self.rpc_client.clone());
+
+        // Sort the slots to ensure we yield blocks in order, even if some requests are slower than others.
+        slots.sort_unstable();
 
         let stream = futures_util::stream::iter(slots)
             .map(move |slot| {
@@ -1322,7 +1325,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fetch_sparse_blocks_chunks_large_range() {
+    async fn test_get_all_sparse_slots_chunks_large_range() {
         let mut server = Server::new_async().await;
         let backlog = Backlog::new();
         let (events_tx, _events_rx) = mpsc::channel(1);
@@ -1421,7 +1424,7 @@ mod tests {
             // Get the chunked slots
             let slots = indexer.get_all_sparse_slots(100000, 112000).await;
             // Feed them into the concurrent stream
-            let mut stream = indexer.build_concurrent_catchup_stream(slots);
+            let mut stream = indexer.build_ordered_catchup_stream(slots);
 
             // Collect the results
             let mut results = HashMap::new();
