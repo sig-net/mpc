@@ -57,6 +57,10 @@ const CPI_RESPOND_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: RespondBidirectional",
 ];
 
+// TODO: investigate what is the optimal number. 
+// For now use reasonable default of 20
+const CONCURRENT_REQUESTS: usize = 20;
+
 #[derive(Clone)]
 pub struct SolConfig {
     /// The solana account secret key used to sign solana respond txn.
@@ -467,8 +471,7 @@ impl SolanaIndexer {
                     }
                 }
             })
-            // TODO: remove hardcoded value
-            .buffer_unordered(20);
+            .buffered(CONCURRENT_REQUESTS); // yields results back in strict order (unlike `buffer_unordered`)
 
         Box::pin(stream)
     }
