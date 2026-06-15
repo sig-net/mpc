@@ -86,6 +86,7 @@ impl CantonConnection {
         ws_url: &str,
         jwt_token: &str,
         party_id: &str,
+        signer_template_id: &str,
         begin_exclusive: u64,
     ) -> anyhow::Result<Self> {
         let mut request = ws_url.into_client_request()?;
@@ -101,8 +102,14 @@ impl CantonConnection {
         let (mut ws_write, ws_read) = ws_stream.split();
         tracing::info!(begin_exclusive, "canton WebSocket connected");
 
+        // Subscribe to only the Signer package's templates (not every contract visible to
+        // the party) — enforces the package at the ledger; the client-side suffix match in
+        // process_canton_event stays as a second layer.
+        let party_filter = ledger_api::template_party_filter(
+            &ledger_api::signer_subscription_template_ids(signer_template_id),
+        );
         let mut filters_by_party = serde_json::Map::new();
-        filters_by_party.insert(party_id.to_string(), serde_json::json!({}));
+        filters_by_party.insert(party_id.to_string(), serde_json::to_value(party_filter)?);
 
         let subscribe_msg = ledger_api::GetUpdatesRequest {
             begin_exclusive,
@@ -201,8 +208,14 @@ impl CantonIndexer {
         let jwt_token = self.client.bearer_token().await?;
         let ws_url = format!("{}/v2/updates", self.client.config.json_api_ws_url);
         let party_id = &self.client.config.party_id;
-        self.ws_conn =
-            CantonConnection::connect(&ws_url, &jwt_token, party_id, begin_exclusive).await?;
+        self.ws_conn = CantonConnection::connect(
+            &ws_url,
+            &jwt_token,
+            party_id,
+            &self.client.config.signer_template_id,
+            begin_exclusive,
+        )
+        .await?;
         Ok(())
     }
 
@@ -474,7 +487,7 @@ async fn process_canton_event(
 /// These checks are defense-in-depth on top of the Daml ledger guarantees:
 /// 1. Operators from the payload must be actual signatories on the CreatedEvent
 /// 2. Requester must be a signatory
-/// 3. An ExercisedEvent with choice "SignBidirectional" on Signer:Signer must
+/// 3. An ExercisedEvent with choice "RequestSignature" on Signer:Signer must
 ///    exist in the same transaction — proves the event was created through the
 ///    correct Daml code path, not fabricated
 fn verify_sign_event(
@@ -502,7 +515,7 @@ fn verify_sign_event(
         );
     }
 
-    // Check 3: ExercisedEvent with choice "SignBidirectional" on the pinned
+    // Check 3: ExercisedEvent with choice "RequestSignature" on the pinned
     // Signer contract must exist in the same transaction. Exact contract ID
     // match since the operator pinned it via CLI.
     // NOTE: after a DAR upgrade/redeployment the contract ID changes — this
@@ -511,13 +524,13 @@ fn verify_sign_event(
         matches!(
             e,
             ledger_api::Event::ExercisedEvent(ex)
-                if ex.choice == "SignBidirectional"
+                if ex.choice == "RequestSignature"
                     && ex.contract_id == signer_contract_id
         )
     });
     if !has_exercise {
         anyhow::bail!(
-            "no ExercisedEvent with choice SignBidirectional on contract {signer_contract_id} found in transaction"
+            "no ExercisedEvent with choice RequestSignature on contract {signer_contract_id} found in transaction"
         );
     }
 
@@ -631,7 +644,7 @@ mod tests {
         ledger_api::Event::ExercisedEvent(ledger_api::ExercisedEvent {
             contract_id: contract_id.to_string(),
             template_id: "pkg:Signer:Signer".to_string(),
-            choice: "SignBidirectional".to_string(),
+            choice: "RequestSignature".to_string(),
             acting_parties: Vec::new(),
             consuming: false,
             node_id: Some(2),
