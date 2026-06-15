@@ -57,7 +57,7 @@ const CPI_RESPOND_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: RespondBidirectional",
 ];
 
-// TODO: investigate what is the optimal number. 
+// TODO: investigate what is the optimal number.
 // For now use reasonable default of 20
 const CONCURRENT_REQUESTS: usize = 20;
 
