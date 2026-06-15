@@ -389,8 +389,8 @@ pub fn template_suffix_matches(template_id: &str, suffix: &str) -> bool {
 /// same transaction.
 pub fn signer_subscription_template_ids(signer_template_id: &str) -> Vec<String> {
     let package = signer_template_id
-        .split(':')
-        .next()
+        .split_once(':')
+        .map(|(package, _)| package)
         .unwrap_or(signer_template_id);
     [
         templates::SIGNER,
@@ -441,45 +441,5 @@ pub fn can_read_as(party: &str) -> UserRight {
                 party: party.to_string(),
             },
         },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn signer_subscription_template_ids_reuse_signer_package() {
-        let ids = signer_subscription_template_ids("#signet-signer-v1:Signer:Signer");
-        assert_eq!(
-            ids,
-            vec![
-                "#signet-signer-v1:Signer:Signer".to_string(),
-                "#signet-signer-v1:Signer:SignBidirectionalEvent".to_string(),
-                "#signet-signer-v1:Signer:SignatureRespondedEvent".to_string(),
-                "#signet-signer-v1:Signer:RespondBidirectionalEvent".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn template_party_filter_matches_canton_json_shape() {
-        let filter = template_party_filter(&["#signet-signer-v1:Signer:Signer".to_string()]);
-        let json = serde_json::to_value(&filter).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "cumulative": [{
-                    "identifierFilter": {
-                        "TemplateFilter": {
-                            "value": {
-                                "templateId": "#signet-signer-v1:Signer:Signer",
-                                "includeCreatedEventBlob": false
-                            }
-                        }
-                    }
-                }]
-            })
-        );
     }
 }

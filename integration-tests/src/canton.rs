@@ -602,13 +602,11 @@ canton.participants.sandbox.ledger-api {{
         Ok(())
     }
 
-    /// `Signer.RequestSignature` choice arguments for a test event. The request
-    /// fields mirror the event (minus `sender`/`sigNetwork`/`sigNetworkFA`,
-    /// which the ledger derives); the fee args reference the sandbox's
-    /// registration and zero-fee price config, with no holdings consumed.
-    /// Valid only while the price config is zero-fee: a non-zero fee would
-    /// additionally need the transfer-factory context key, the factory
-    /// disclosures, and input holdings (see `Signet.Fee.Amulet`).
+    /// `Signer.RequestSignature` choice arguments for a test event: request fields
+    /// mirror the event (minus `sender`/`sigNetwork`/`sigNetworkFA`, which the
+    /// ledger derives), plus fee args pointing at the zero-fee registration/price
+    /// config with no holdings. Zero-fee only — a real fee also needs the
+    /// transfer-factory context key, factory disclosures, and input holdings.
     fn request_signature_args(&self, event: &SignBidirectionalRequestedEvent) -> Value {
         json!({
             "operators": event.operators,

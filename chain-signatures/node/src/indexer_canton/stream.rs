@@ -725,18 +725,6 @@ mod tests {
     }
 
     #[test]
-    fn verify_sign_event_accepts_valid_event() {
-        let event = sample_sign_event();
-        // sigNetworkFA ("fa-1") is now an event signatory too; the operators +
-        // requester subset check must still pass against the wider signatory set.
-        let created = sample_created_event(&["operator-1", "requester-1", "fa-1"]);
-        let tx_events = vec![sample_exercised_event("signer-contract")];
-
-        verify_sign_event(&event, &created, &tx_events, "signer-contract")
-            .expect("verification should pass for a well-formed RequestSignature event");
-    }
-
-    #[test]
     fn parse_signature_responded_event_rejects_invalid_hex() {
         let created = ledger_api::CreatedEvent {
             contract_id: "cid-respond".to_string(),

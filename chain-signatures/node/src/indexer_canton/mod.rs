@@ -33,15 +33,12 @@ pub struct CantonChainCtx {
 /// transaction params. This type is created at the indexer boundary and carries
 /// the byte fields expected by the shared bidirectional signing flow.
 ///
-/// `RequestSignature` charges a Canton Coin signature fee (requester →
-/// featured-app receiver) atomically on-ledger and fail-closes if it cannot
-/// settle, so the fee is already paid by the time this event exists — the indexer
-/// only ever observes already-charged requests. That fee is a service fee to the
-/// featured-app party, not a bridgeable value: it never enters the event payload
-/// and does not feed the request id, KDF epsilon, or signed transaction, so the
-/// MPC neither sees nor re-verifies it (it is an on-ledger precondition, outside
-/// the indexer's trust scope) and the shared bidirectional flow still carries no
-/// Canton deposit (deposit = zero).
+/// `RequestSignature` charges the Canton Coin fee atomically on-ledger
+/// (fail-closed), so the indexer only ever observes already-charged requests. The
+/// fee never enters the event payload, request id, KDF epsilon, or signed
+/// transaction — outside the indexer's trust scope, the MPC neither sees nor
+/// verifies it — so the shared bidirectional flow carries no Canton deposit
+/// (deposit = zero).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CantonSignBidirectionalRequestedEvent {
     pub sign_event_contract_id: String,
