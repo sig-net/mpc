@@ -67,8 +67,10 @@ futures-util = "0.3.31"
 parity-scale-codec = { version = "3", features = ["derive"] }
 
 near-account-id = "1.0.0"
-near-primitives = "0.26.0"
-near-sdk = { version = "5.6.0", features = ["unstable", "unit-testing"] }
+near-crypto = "0.28.0"
+near-fetch = "0.7.0"
+near-primitives = "0.28.0"
+near-sdk = { version = "=5.7.0", features = ["unstable", "unit-testing"] }
 
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }

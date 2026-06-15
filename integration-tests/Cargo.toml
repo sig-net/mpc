@@ -55,15 +55,12 @@ k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
 
 # near dependencies
 near-account-id.workspace = true
-near-crypto = "0.26.0"
-near-fetch = "0.6.0"
+near-crypto.workspace = true
+near-fetch.workspace = true
 near-sdk.workspace = true
-near-jsonrpc-client = "0.13.0"
-near-primitives = "0.26.0"
-
-# if necessary, use the following branch for near related indexer hacking:
-# { git = "https://github.com/near/near-workspaces-rs", branch = "phuong/tmp-node-2.3.0" }
-near-workspaces = "0.15.0"
+near-jsonrpc-client = "0.15.0"
+near-primitives.workspace = true
+near-workspaces = "0.16.0"
 
 # local chain-signatures dependencies
 mpc-crypto.workspace = true
