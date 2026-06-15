@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const CANTON_JSON_API_PORT: u16 = 7575;
-const DEFAULT_DAR_RELATIVE_PATH: &str = "fixtures/canton/signet-vault-v1-0.0.1.dar";
+const DEFAULT_DAR_RELATIVE_PATH: &str = "fixtures/canton/signet-signer-v1-0.0.1.dar";
 const DEFAULT_FEE_DAR_RELATIVE_PATH: &str = "fixtures/canton/signet-fee-amulet-0.0.1.dar";
 
 /// Charge-context key; mirrors Daml `Signet.Fee.Amulet.priceConfigContextKey`.
@@ -222,7 +222,7 @@ impl CantonSandbox {
             );
         }
 
-        // Two DARs: vault (Signer + frozen fee API) and fee impl (CcFeeCollector/FeePriceConfig).
+        // Two DARs: signer (Signer + frozen fee API) and fee impl (CcFeeCollector/FeePriceConfig).
         let dar_path = match std::env::var("CANTON_DAR_PATH") {
             Ok(p) => PathBuf::from(p),
             Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_DAR_RELATIVE_PATH),
