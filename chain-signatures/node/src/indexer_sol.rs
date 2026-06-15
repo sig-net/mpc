@@ -17,7 +17,7 @@ use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
 use async_trait::async_trait;
-use futures_util::StreamExt;
+use futures_util::stream::{self, StreamExt};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
@@ -250,7 +250,7 @@ impl ChainStream for SolanaStream {
 impl ChainIndexer for SolanaIndexer {
     const CHAIN: Chain = Chain::Solana;
     type Block = (u64, SolanaCatchupBlock);
-    type Iter = btree_map::IntoIter<u64, SolanaCatchupBlock>;
+    type Iter = stream::Iter<btree_map::IntoIter<u64, SolanaCatchupBlock>>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         let (live_tx, live_rx) = crate::stream::channel();
@@ -286,7 +286,7 @@ impl ChainIndexer for SolanaIndexer {
             .unwrap_or(anchor_height);
         let end_slot = anchor_height.saturating_sub(1); // We want to catch up to just before the anchor
         if start_slot > end_slot {
-            return BTreeMap::new().into_iter();
+            return stream::iter(BTreeMap::new().into_iter());
         }
 
         // This fetches a sparse list of transactions based on whether our program received
@@ -310,10 +310,9 @@ impl ChainIndexer for SolanaIndexer {
                     ?err,
                     "failed to query solana signature history; falling back to sparse catchup"
                 );
-                return self
-                    .fetch_sparse_blocks(start_slot, end_slot)
-                    .await
-                    .into_iter();
+
+                let blocks = self.fetch_sparse_blocks(start_slot, end_slot).await;
+                return stream::iter(blocks.into_iter());
             }
         };
 
@@ -343,7 +342,7 @@ impl ChainIndexer for SolanaIndexer {
             items.extend(self.fetch_sparse_blocks(start_slot, mid_slot).await);
         }
 
-        items.into_iter()
+        stream::iter(items.into_iter())
     }
 
     async fn process_catchup(&mut self, (slot, block): &Self::Block) -> anyhow::Result<()> {
