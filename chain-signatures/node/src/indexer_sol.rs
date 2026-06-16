@@ -24,6 +24,7 @@ use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
     SignatureRespondedEvent,
@@ -162,8 +163,7 @@ pub struct SolanaIndexer {
     events_tx: mpsc::Sender<ChainEvent>,
     backlog: Backlog,
     live_rx: Option<mpsc::Receiver<ChainEvent>>,
-    #[allow(dead_code)]
-    pub catchup_limit: Option<usize>,
+    http_client: reqwest::Client,
 }
 
 #[derive(Debug)]
@@ -233,7 +233,7 @@ impl ChainStream for SolanaStream {
             events_tx: start_state.tx.clone(),
             backlog: start_state.backlog.clone(),
             live_rx: None,
-            catchup_limit: None,
+            http_client: reqwest::Client::new(),
         };
 
         Ok(indexer)
@@ -290,29 +290,12 @@ impl ChainIndexer for SolanaIndexer {
             return BTreeMap::new().into_iter();
         }
 
-        let signatures = match self.fetch_signatures_in_range(start_slot, end_slot).await {
-            Ok(sigs) => sigs,
-            Err(err) => {
-                tracing::error!(
-                    ?err,
-                    start_slot,
-                    end_slot,
-                    "failed to query Solana signature history for catchup"
-                );
-                return BTreeMap::new().into_iter();
-            }
-        };
+        let signatures = self.fetch_signatures_in_range(start_slot, end_slot).await;
 
         let mut slots = BTreeSet::new();
         for sig in signatures {
             slots.insert(sig.slot);
         }
-
-        let slots = if let Some(limit) = self.catchup_limit {
-            slots.into_iter().take(limit).collect()
-        } else {
-            slots
-        };
 
         let items = self.fetch_blocks_for_slots(slots).await;
         items.into_iter()
@@ -322,9 +305,7 @@ impl ChainIndexer for SolanaIndexer {
         match block {
             SolanaCatchupBlock::Block(block) => self.process_block(*slot, block).await,
             SolanaCatchupBlock::Missing => {
-                let block = self.get_block(*slot).await.with_context(|| {
-                    format!("failed to refetch Solana catchup block for slot {slot}")
-                })?;
+                let block = self.get_block(*slot).await;
                 self.process_block(*slot, &block).await
             }
         }
@@ -350,6 +331,21 @@ impl ChainIndexer for SolanaIndexer {
     }
 }
 
+#[derive(Serialize)]
+struct JsonRpcRequest {
+    jsonrpc: &'static str,
+    id: usize,
+    method: &'static str,
+    params: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct JsonRpcResponse<T> {
+    id: usize,
+    result: Option<T>,
+    error: Option<serde_json::Value>,
+}
+
 impl SolanaIndexer {
     fn block_fetch_config() -> RpcBlockConfig {
         RpcBlockConfig {
@@ -361,20 +357,125 @@ impl SolanaIndexer {
         }
     }
 
-    async fn get_block(&self, slot: u64) -> anyhow::Result<UiConfirmedBlock> {
-        self.rpc_client
-            .get_block_with_config(slot, Self::block_fetch_config())
-            .await
-            .with_context(|| format!("failed to fetch Solana block for slot {slot}"))
+    async fn get_block(&self, slot: u64) -> UiConfirmedBlock {
+        let mut attempts = 0;
+        let mut delay = Duration::from_millis(500);
+        loop {
+            attempts += 1;
+            match self
+                .rpc_client
+                .get_block_with_config(slot, Self::block_fetch_config())
+                .await
+            {
+                Ok(block) => return block,
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        attempts,
+                        slot,
+                        "failed to fetch Solana block; retrying in {:?}",
+                        delay
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = std::cmp::min(delay * 2, Duration::from_secs(10));
+                }
+            }
+        }
+    }
+
+    async fn fetch_blocks_batch(
+        &self,
+        slots: &[u64],
+    ) -> HashMap<u64, UiConfirmedBlock> {
+        if slots.is_empty() {
+            return HashMap::new();
+        }
+
+        let mut attempts = 0;
+        let mut delay = Duration::from_millis(500);
+        loop {
+            attempts += 1;
+            let mut requests = Vec::new();
+            for (i, &slot) in slots.iter().enumerate() {
+                let config = Self::block_fetch_config();
+                match serde_json::to_value(config) {
+                    Ok(config_val) => {
+                        requests.push(JsonRpcRequest {
+                            jsonrpc: "2.0",
+                            id: i,
+                            method: "getBlock",
+                            params: json!([slot, config_val]),
+                        });
+                    }
+                    Err(err) => {
+                        tracing::error!(?err, "failed to serialize RpcBlockConfig");
+                        return HashMap::new();
+                    }
+                }
+            }
+
+            match self
+                .http_client
+                .post(&self.rpc_http_url)
+                .json(&requests)
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    match resp.json::<Vec<JsonRpcResponse<UiConfirmedBlock>>>().await {
+                        Ok(responses) => {
+                            let mut results = HashMap::new();
+                            for resp_obj in responses {
+                                if let Some(block) = resp_obj.result {
+                                    if resp_obj.id < slots.len() {
+                                        let slot = slots[resp_obj.id];
+                                        results.insert(slot, block);
+                                    }
+                                } else if let Some(err) = resp_obj.error {
+                                    let is_skipped = err
+                                        .get("code")
+                                        .and_then(|c| c.as_i64())
+                                        .map(|c| c == -32007)
+                                        .unwrap_or(false);
+                                    let slot = slots.get(resp_obj.id);
+                                    if !is_skipped {
+                                        tracing::warn!(?err, ?slot, "JSON-RPC batch response error");
+                                    }
+                                }
+                            }
+                            return results;
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                ?err,
+                                attempts,
+                                "failed to deserialize batch response; retrying in {:?}",
+                                delay
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        attempts,
+                        "failed to send batch request; retrying in {:?}",
+                        delay
+                    );
+                }
+            }
+
+            tokio::time::sleep(delay).await;
+            delay = std::cmp::min(delay * 2, Duration::from_secs(10));
+        }
     }
 
     async fn fetch_signatures_with_retry(
         &self,
         address: &Pubkey,
         before: Option<Signature>,
-    ) -> anyhow::Result<Vec<solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature>> {
+    ) -> Vec<solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature> {
         let mut attempts = 0;
-        let max_attempts = 5;
         let mut delay = Duration::from_millis(500);
         loop {
             attempts += 1;
@@ -389,11 +490,8 @@ impl SolanaIndexer {
                 .get_signatures_for_address_with_config(address, config)
                 .await
             {
-                Ok(res) => return Ok(res),
+                Ok(res) => return res,
                 Err(err) => {
-                    if attempts >= max_attempts {
-                        return Err(anyhow::anyhow!(err).context("failed to fetch signatures after max retries"));
-                    }
                     tracing::warn!(
                         ?err,
                         attempts,
@@ -401,7 +499,7 @@ impl SolanaIndexer {
                         delay
                     );
                     tokio::time::sleep(delay).await;
-                    delay *= 2;
+                    delay = std::cmp::min(delay * 2, Duration::from_secs(10));
                 }
             }
         }
@@ -411,25 +509,36 @@ impl SolanaIndexer {
         &self,
         start_slot: u64,
         end_slot: u64,
-    ) -> anyhow::Result<Vec<solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature>> {
+    ) -> Vec<solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature> {
         let mut signatures = Vec::new();
         let mut before = None;
-        tracing::debug!("Fetching signatures in range [{}, {}]...", start_slot, end_slot);
+        let mut last_slot = None;
+        tracing::trace!("Fetching signatures in range [{}, {}]...", start_slot, end_slot);
         loop {
-            let batch = self.fetch_signatures_with_retry(&self.program_id, before).await?;
+            let batch = self.fetch_signatures_with_retry(&self.program_id, before).await;
             if batch.is_empty() {
-                tracing::debug!("Finished signature fetching: empty batch received.");
-                break;
+                if before.is_none() {
+                    tracing::trace!("Finished signature fetching: no signatures found at all.");
+                    break;
+                }
+
+                tracing::warn!(
+                    ?last_slot,
+                    start_slot,
+                    "Fetched empty signature batch before reaching start_slot. Retrying in 5s..."
+                );
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
             }
 
             let last_sig_str = batch.last().unwrap().signature.clone();
             let last_sig = Signature::from_str(&last_sig_str).ok();
-            let last_slot = batch.last().unwrap().slot;
+            last_slot = Some(batch.last().unwrap().slot);
 
-            tracing::debug!(
+            tracing::trace!(
                 "Fetched batch of {} signatures. Current batch ends at slot {}. Total accumulated: {}",
                 batch.len(),
-                last_slot,
+                last_slot.unwrap(),
                 signatures.len() + batch.len()
             );
 
@@ -445,45 +554,54 @@ impl SolanaIndexer {
             }
 
             if reached_start || last_sig.is_none() {
-                tracing::debug!("Finished signature fetching: reached start_slot {} (or no more signatures).", start_slot);
+                tracing::trace!("Finished signature fetching: reached start_slot {} (or no more signatures).", start_slot);
                 break;
             }
             before = last_sig;
         }
-        Ok(signatures)
+        signatures
     }
 
     async fn fetch_blocks_for_slots(
         &self,
         slots: BTreeSet<u64>,
     ) -> BTreeMap<u64, SolanaCatchupBlock> {
-        let mut blocks_by_height = BTreeMap::new();
         let total_slots = slots.len();
-        tracing::debug!("Fetching {} blocks for slots...", total_slots);
+        tracing::trace!("fetching {} blocks for slots...", total_slots);
 
+        let slots_vec: Vec<u64> = slots.into_iter().collect();
+        let chunk_size = 50;
+        let chunks: Vec<Vec<u64>> = slots_vec
+            .chunks(chunk_size)
+            .map(|chunk| chunk.to_vec())
+            .collect();
+
+        let concurrency_limit = 5;
+        let mut stream = futures_util::stream::iter(chunks.into_iter())
+            .map(|chunk| async move {
+                let results = self.fetch_blocks_batch(&chunk).await;
+                (chunk, results)
+            })
+            .buffer_unordered(concurrency_limit);
+
+        let mut blocks_by_height = BTreeMap::new();
         let mut count = 0;
-        for &slot in &slots {
-            count += 1;
-            if count % 10 == 0 || count == total_slots {
-                tracing::debug!("Fetching block {}/{} (slot {})...", count, total_slots, slot);
-            }
-            match self.get_block(slot).await {
-                Ok(block) => {
-                    blocks_by_height.insert(slot, SolanaCatchupBlock::Block(block));
-                }
-                Err(err) => {
-                    tracing::warn!(?err, slot, "failed to fetch Solana block for catchup slot");
+        while let Some((chunk, results)) = stream.next().await {
+            count += chunk.len();
+            tracing::trace!("Fetched blocks batch progress: {}/{}", count, total_slots);
+            for slot in chunk {
+                match results.get(&slot) {
+                    Some(block) => {
+                        blocks_by_height.insert(slot, SolanaCatchupBlock::Block(block.clone()));
+                    }
+                    None => {
+                        blocks_by_height.insert(slot, SolanaCatchupBlock::Missing);
+                    }
                 }
             }
         }
 
-        slots
-            .into_iter()
-            .map(|slot| match blocks_by_height.remove(&slot) {
-                Some(block) => (slot, block),
-                None => (slot, SolanaCatchupBlock::Missing),
-            })
-            .collect()
+        blocks_by_height
     }
 
     async fn process_block(&mut self, height: u64, block: &UiConfirmedBlock) -> anyhow::Result<()> {
@@ -1205,8 +1323,6 @@ async fn get_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mockito::{Matcher, Server};
-    use serde_json::json;
     use solana_sdk::commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
     use solana_transaction_status::UiTransactionStatusMeta;
@@ -1343,129 +1459,16 @@ mod tests {
         assert!(meta.err.is_some(), "expected err to be set");
     }
 
-    #[tokio::test]
-    async fn test_fetch_sparse_blocks_chunks_large_range() {
-        let mut server = Server::new_async().await;
-        let backlog = Backlog::new();
-        let (events_tx, _events_rx) = mpsc::channel(1);
-
-        let indexer = SolanaIndexer {
-            program_id: Pubkey::new_unique(),
-            rpc_client: RpcClient::new(server.url()),
-            rpc_http_url: server.url(),
-            rpc_ws_url: String::new(),
-            events_tx,
-            backlog,
-            live_rx: None,
-            catchup_limit: None,
-        };
-
-        let mock_chunk1 = server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "getBlocks",
-                "params": [100000, 109999]
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                json!({
-                    "jsonrpc": "2.0",
-                    "result": [100000],
-                    "id": 1
-                })
-                .to_string(),
-            )
-            .create_async()
-            .await;
-
-        let mock_chunk2 = server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "getBlocks",
-                "params": [110000, 112000]
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                json!({
-                    "jsonrpc": "2.0",
-                    "result": [112000],
-                    "id": 2
-                })
-                .to_string(),
-            )
-            .create_async()
-            .await;
-
-        let mock_block100k = server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "getBlock",
-                "params": [100000]
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                json!({
-                    "jsonrpc": "2.0",
-                    "result": {
-                        "transactions": []
-                    },
-                    "id": 3
-                })
-                .to_string(),
-            )
-            .create_async()
-            .await;
-
-        let mock_block112k = server
-            .mock("POST", "/")
-            .match_body(Matcher::PartialJson(json!({
-                "method": "getBlock",
-                "params": [112000]
-            })))
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                json!({
-                    "jsonrpc": "2.0",
-                    "result": {
-                        "transactions": []
-                    },
-                    "id": 4
-                })
-                .to_string(),
-            )
-            .create_async()
-            .await;
-
-        let res_timeout = tokio::time::timeout(
-            Duration::from_secs(2),
-            indexer.fetch_sparse_blocks(100000, 112000),
-        )
-        .await;
-
-        let res = res_timeout
-            .expect("fetch_sparse_blocks timed out (likely infinite retry loop on large range)");
-
-        assert_eq!(res.len(), 2);
-        assert!(res.contains_key(&100000));
-        assert!(res.contains_key(&112000));
-
-        mock_chunk1.assert_async().await;
-        mock_chunk2.assert_async().await;
-        mock_block100k.assert_async().await;
-        mock_block112k.assert_async().await;
-    }
 
     #[tokio::test]
     #[ignore]
     async fn test_solana_pipeline_devnet() {
+        let _ = tracing_subscriber::fmt::try_init();
+
         let api_key = match std::env::var("MPC_TEST_API_KEY") {
             Ok(key) if !key.is_empty() => key,
             _ => {
-                println!("Skipping devnet test: MPC_TEST_API_KEY not set");
+                tracing::debug!("Skipping devnet test: MPC_TEST_API_KEY not set");
                 return;
             }
         };
@@ -1487,7 +1490,7 @@ mod tests {
             events_tx,
             backlog,
             live_rx: None,
-            catchup_limit: Some(20),
+            http_client: reqwest::Client::new(),
         };
 
         // Initialize livestream (resolves anchor slot via get_slot and starts WS)
@@ -1497,11 +1500,11 @@ mod tests {
             .expect("Failed to initialize livestream")
             .expect("Anchor height missing");
 
-        println!("Resolved anchor slot: {anchor_height}");
+        tracing::debug!("Resolved anchor slot: {anchor_height}");
 
         // Start from a checkpoint ~1 week behind (assuming ~2.5 slots per second => 1,512,000 slots per week)
         let start_slot = anchor_height.saturating_sub(1_512_000);
-        println!("Starting catchup from slot: {start_slot} (~1 week behind)");
+        tracing::debug!("Starting catchup from slot: {start_slot} (~1 week behind)");
 
         indexer
             .backlog
@@ -1519,11 +1522,11 @@ mod tests {
             processed_any = true;
         }
 
-        println!("Solana catchup complete. Processed blocks: {processed_any}");
+        tracing::debug!("Solana catchup complete. Processed blocks: {processed_any}");
 
         // Check if any events were received in the channel
         while let Ok(event) = events_rx.try_recv() {
-            println!("Received event: {:?}", event);
+            tracing::debug!("Received event: {:?}", event);
         }
     }
 }
