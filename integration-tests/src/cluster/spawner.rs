@@ -432,7 +432,9 @@ impl ClusterSpawner {
     pub async fn take_worker(&mut self) -> Worker<Sandbox> {
         match self.worker.take() {
             Some(worker) => worker,
-            None => spawn_sandbox_with_retry().await.expect("failed to spawn sandbox"),
+            None => spawn_sandbox_with_retry()
+                .await
+                .expect("failed to spawn sandbox"),
         }
     }
 
@@ -522,12 +524,18 @@ async fn spawn_sandbox_with_retry() -> anyhow::Result<Worker<Sandbox>> {
         match near_workspaces::sandbox().await {
             Ok(worker) => return Ok(worker),
             Err(e) => {
-                tracing::warn!(attempt, "failed to spawn near sandbox within timeout, retrying: {e}");
+                tracing::warn!(
+                    attempt,
+                    "failed to spawn near sandbox within timeout, retrying: {e}"
+                );
                 last_err = Some(e);
                 // Give the OS a moment to breathe before trying again
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         }
     }
-    anyhow::bail!("failed to spawn near sandbox after 5 attempts: {:?}", last_err)
+    anyhow::bail!(
+        "failed to spawn near sandbox after 5 attempts: {:?}",
+        last_err
+    )
 }
