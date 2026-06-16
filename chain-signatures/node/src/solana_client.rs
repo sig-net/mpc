@@ -1,18 +1,18 @@
-use std::collections::{HashMap, BTreeMap, BTreeSet};
-use std::fmt;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Duration;
-use solana_sdk::{pubkey::Pubkey, signature::Signature, commitment_config::CommitmentConfig};
-use solana_sdk::signer::keypair::Keypair;
+use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
 use solana_client::rpc_config::RpcBlockConfig;
 use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
+use solana_sdk::signer::keypair::Keypair;
+use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
 use solana_transaction_status::{TransactionDetails, UiConfirmedBlock, UiTransactionEncoding};
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-use futures_util::StreamExt;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
 
 const MAX_SIGNATURES_FOR_FAST_CATCHUP: usize = 1000;
 
@@ -75,7 +75,8 @@ impl SolanaClient {
     pub fn new(sol: &SolConfig) -> Self {
         let keypair = Keypair::from_base58_string(&sol.account_sk);
         let payer = Arc::new(keypair);
-        let cluster = anchor_client::Cluster::Custom(sol.rpc_http_url.clone(), sol.rpc_ws_url.clone());
+        let cluster =
+            anchor_client::Cluster::Custom(sol.rpc_http_url.clone(), sol.rpc_ws_url.clone());
         let client = anchor_client::Client::new_with_options(
             cluster,
             payer.clone(),
@@ -95,11 +96,7 @@ impl SolanaClient {
         }
     }
 
-    pub fn new_indexer(
-        rpc_http_url: String,
-        rpc_ws_url: String,
-        program_address: Pubkey,
-    ) -> Self {
+    pub fn new_indexer(rpc_http_url: String, rpc_ws_url: String, program_address: Pubkey) -> Self {
         let keypair = Keypair::new(); // Dummy keypair for indexer mode
         let payer = Arc::new(keypair);
         let cluster = anchor_client::Cluster::Custom(rpc_http_url.clone(), rpc_ws_url.clone());
@@ -156,10 +153,7 @@ impl SolanaClient {
         }
     }
 
-    pub async fn fetch_blocks(
-        &self,
-        slots: &[u64],
-    ) -> HashMap<u64, UiConfirmedBlock> {
+    pub async fn fetch_blocks(&self, slots: &[u64]) -> HashMap<u64, UiConfirmedBlock> {
         if slots.is_empty() {
             return HashMap::new();
         }
@@ -194,40 +188,38 @@ impl SolanaClient {
                 .send()
                 .await
             {
-                Ok(resp) => {
-                    match resp.json::<Vec<JsonRpcResponse<UiConfirmedBlock>>>().await {
-                        Ok(responses) => {
-                            let mut results = HashMap::new();
-                            for resp_obj in responses {
-                                if let Some(block) = resp_obj.result {
-                                    if resp_obj.id < slots.len() {
-                                        let slot = slots[resp_obj.id];
-                                        results.insert(slot, block);
-                                    }
-                                } else if let Some(err) = resp_obj.error {
-                                    let is_skipped = err
-                                        .get("code")
-                                        .and_then(|c| c.as_i64())
-                                        .map(|c| c == -32007)
-                                        .unwrap_or(false);
-                                    let slot = slots.get(resp_obj.id);
-                                    if !is_skipped {
-                                        tracing::warn!(?err, ?slot, "JSON-RPC batch response error");
-                                    }
+                Ok(resp) => match resp.json::<Vec<JsonRpcResponse<UiConfirmedBlock>>>().await {
+                    Ok(responses) => {
+                        let mut results = HashMap::new();
+                        for resp_obj in responses {
+                            if let Some(block) = resp_obj.result {
+                                if resp_obj.id < slots.len() {
+                                    let slot = slots[resp_obj.id];
+                                    results.insert(slot, block);
+                                }
+                            } else if let Some(err) = resp_obj.error {
+                                let is_skipped = err
+                                    .get("code")
+                                    .and_then(|c| c.as_i64())
+                                    .map(|c| c == -32007)
+                                    .unwrap_or(false);
+                                let slot = slots.get(resp_obj.id);
+                                if !is_skipped {
+                                    tracing::warn!(?err, ?slot, "JSON-RPC batch response error");
                                 }
                             }
-                            return results;
                         }
-                        Err(err) => {
-                            tracing::warn!(
-                                ?err,
-                                attempts,
-                                "failed to deserialize batch response; retrying in {:?}",
-                                delay
-                            );
-                        }
+                        return results;
                     }
-                }
+                    Err(err) => {
+                        tracing::warn!(
+                            ?err,
+                            attempts,
+                            "failed to deserialize batch response; retrying in {:?}",
+                            delay
+                        );
+                    }
+                },
                 Err(err) => {
                     tracing::warn!(
                         ?err,
@@ -287,7 +279,9 @@ impl SolanaClient {
         let mut last_slot = None;
         tracing::trace!(start_slot, end_slot, "fetching signatures in range");
         loop {
-            let batch = self.fetch_signatures_with_retry(&self.program_id, before).await;
+            let batch = self
+                .fetch_signatures_with_retry(&self.program_id, before)
+                .await;
             if batch.is_empty() {
                 if before.is_none() {
                     tracing::trace!("finished signature fetching: no signatures found at all.");
@@ -326,7 +320,10 @@ impl SolanaClient {
             }
 
             if reached_start || last_sig.is_none() {
-                tracing::trace!(start_slot, "finished signature fetching: reached start_slot (or no more signatures)");
+                tracing::trace!(
+                    start_slot,
+                    "finished signature fetching: reached start_slot (or no more signatures)"
+                );
                 break;
             }
             before = last_sig;

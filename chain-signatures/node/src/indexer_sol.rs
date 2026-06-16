@@ -1,7 +1,7 @@
 use crate::backlog::Backlog;
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::solana_client::{SolConfig, SolanaClient, SolanaCatchupBlock};
+use crate::solana_client::{SolConfig, SolanaCatchupBlock, SolanaClient};
 
 use crate::stream::{ChainEvent, ChainIndexer, ChainStream};
 use crate::util::ethabi_request_id;
@@ -36,8 +36,8 @@ use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature:
 use solana_transaction_status::option_serializer::OptionSerializer;
 use solana_transaction_status::{
     EncodedConfirmedTransactionWithStatusMeta, EncodedTransaction,
-    EncodedTransactionWithStatusMeta, UiConfirmedBlock, UiInstruction,
-    UiParsedInstruction, UiTransactionEncoding,
+    EncodedTransactionWithStatusMeta, UiConfirmedBlock, UiInstruction, UiParsedInstruction,
+    UiTransactionEncoding,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -50,8 +50,6 @@ const CPI_RESPOND_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: Respond",
     "Program log: Instruction: RespondBidirectional",
 ];
-
-
 
 /// Configures Solana indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -259,7 +257,10 @@ impl ChainIndexer for SolanaIndexer {
             return BTreeMap::new().into_iter();
         }
 
-        let signatures = self.client.fetch_signatures_in_range(start_slot, end_slot).await;
+        let signatures = self
+            .client
+            .fetch_signatures_in_range(start_slot, end_slot)
+            .await;
 
         let mut slots = BTreeSet::new();
         for sig in signatures {
@@ -1022,7 +1023,7 @@ mod tests {
     use super::*;
     use solana_sdk::commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
-    use solana_transaction_status::{UiTransactionStatusMeta, TransactionDetails};
+    use solana_transaction_status::{TransactionDetails, UiTransactionStatusMeta};
 
     #[test]
     fn request_id_matches_ethabi() {

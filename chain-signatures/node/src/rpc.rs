@@ -1,10 +1,10 @@
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
-use crate::solana_client::{SolConfig, SolanaClient};
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, SignKind};
+use crate::solana_client::{SolConfig, SolanaClient};
 use crate::util::AffinePointExt as _;
 use std::collections::BTreeSet;
 
