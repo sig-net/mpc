@@ -301,7 +301,6 @@ impl ChainIndexer for SolanaIndexer {
 }
 
 impl SolanaIndexer {
-
     async fn process_block(&mut self, height: u64, block: &UiConfirmedBlock) -> anyhow::Result<()> {
         let Some(transactions) = &block.transactions else {
             self.events_tx.send(ChainEvent::Block(height)).await?;
@@ -1178,7 +1177,7 @@ mod tests {
         let ws_url = format!("wss://solana-devnet.g.alchemy.com/v2/{api_key}");
 
         let backlog = Backlog::new();
-        let (events_tx, mut events_rx) = mpsc::channel(100);
+        let (events_tx, mut events_rx) = mpsc::channel(1_000_000);
 
         let client = SolanaClient::new_indexer(
             http_url.clone(),

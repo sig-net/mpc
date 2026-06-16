@@ -8,6 +8,7 @@ use solana_sdk::signer::keypair::Keypair;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
 use solana_client::rpc_config::RpcBlockConfig;
+use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
 use solana_transaction_status::{TransactionDetails, UiConfirmedBlock, UiTransactionEncoding};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -155,7 +156,7 @@ impl SolanaClient {
         }
     }
 
-    pub async fn fetch_blocks_batch(
+    pub async fn fetch_blocks(
         &self,
         slots: &[u64],
     ) -> HashMap<u64, UiConfirmedBlock> {
@@ -246,7 +247,7 @@ impl SolanaClient {
         &self,
         address: &Pubkey,
         before: Option<Signature>,
-    ) -> Vec<solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature> {
+    ) -> Vec<RpcConfirmedTransactionStatusWithSignature> {
         let mut attempts = 0;
         let mut delay = Duration::from_millis(500);
         loop {
@@ -267,8 +268,7 @@ impl SolanaClient {
                     tracing::warn!(
                         ?err,
                         attempts,
-                        "failed to fetch signatures for address; retrying in {:?}",
-                        delay
+                        "failed to fetch signatures for address; retrying in {delay:?}",
                     );
                     tokio::time::sleep(delay).await;
                     delay = std::cmp::min(delay * 2, Duration::from_secs(10));
@@ -281,37 +281,37 @@ impl SolanaClient {
         &self,
         start_slot: u64,
         end_slot: u64,
-    ) -> Vec<solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature> {
+    ) -> Vec<RpcConfirmedTransactionStatusWithSignature> {
         let mut signatures = Vec::new();
         let mut before = None;
         let mut last_slot = None;
-        tracing::trace!("Fetching signatures in range [{}, {}]...", start_slot, end_slot);
+        tracing::trace!(start_slot, end_slot, "fetching signatures in range");
         loop {
             let batch = self.fetch_signatures_with_retry(&self.program_id, before).await;
             if batch.is_empty() {
                 if before.is_none() {
-                    tracing::trace!("Finished signature fetching: no signatures found at all.");
+                    tracing::trace!("finished signature fetching: no signatures found at all.");
                     break;
                 }
 
                 tracing::warn!(
-                    ?last_slot,
+                    last_slot,
                     start_slot,
-                    "Fetched empty signature batch before reaching start_slot. Retrying in 5s..."
+                    "fetched empty signature batch before reaching start_slot. retrying in 5s..."
                 );
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
 
-            let last_sig_str = batch.last().unwrap().signature.clone();
-            let last_sig = Signature::from_str(&last_sig_str).ok();
-            last_slot = Some(batch.last().unwrap().slot);
+            let last = batch.last().unwrap();
+            let last_sig = Signature::from_str(&last.signature).ok();
+            last_slot = Some(last.slot);
 
             tracing::trace!(
-                "Fetched batch of {} signatures. Current batch ends at slot {}. Total accumulated: {}",
-                batch.len(),
-                last_slot.unwrap(),
-                signatures.len() + batch.len()
+                batch_len = batch.len(),
+                last_slot = last_slot.unwrap(),
+                total_acc = signatures.len() + batch.len(),
+                "fetched batch of signatures"
             );
 
             let mut reached_start = false;
@@ -326,7 +326,7 @@ impl SolanaClient {
             }
 
             if reached_start || last_sig.is_none() {
-                tracing::trace!("Finished signature fetching: reached start_slot {} (or no more signatures).", start_slot);
+                tracing::trace!(start_slot, "finished signature fetching: reached start_slot (or no more signatures)");
                 break;
             }
             before = last_sig;
@@ -338,6 +338,8 @@ impl SolanaClient {
         &self,
         slots: BTreeSet<u64>,
     ) -> BTreeMap<u64, SolanaCatchupBlock> {
+        const MAX_CONCURRENT_FETCH: usize = 5;
+
         let total_slots = slots.len();
         tracing::trace!("Fetching {} blocks for slots...", total_slots);
 
@@ -348,28 +350,24 @@ impl SolanaClient {
             .map(|chunk| chunk.to_vec())
             .collect();
 
-        let concurrency_limit = 5;
         let mut stream = futures_util::stream::iter(chunks.into_iter())
             .map(|chunk| async move {
-                let results = self.fetch_blocks_batch(&chunk).await;
+                let results = self.fetch_blocks(&chunk).await;
                 (chunk, results)
             })
-            .buffer_unordered(concurrency_limit);
+            .buffer_unordered(MAX_CONCURRENT_FETCH);
 
         let mut blocks_by_height = BTreeMap::new();
         let mut count = 0;
-        while let Some((chunk, results)) = stream.next().await {
+        while let Some((chunk, mut results)) = stream.next().await {
             count += chunk.len();
-            tracing::trace!("Fetched blocks batch progress: {}/{}", count, total_slots);
+            tracing::trace!(count, total_slots, "fetched blocks batch progress");
             for slot in chunk {
-                match results.get(&slot) {
-                    Some(block) => {
-                        blocks_by_height.insert(slot, SolanaCatchupBlock::Block(block.clone()));
-                    }
-                    None => {
-                        blocks_by_height.insert(slot, SolanaCatchupBlock::Missing);
-                    }
-                }
+                let catchup_item = match results.remove(&slot) {
+                    Some(block) => SolanaCatchupBlock::Block(block),
+                    None => SolanaCatchupBlock::Missing,
+                };
+                blocks_by_height.insert(slot, catchup_item);
             }
         }
 
