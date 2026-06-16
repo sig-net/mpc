@@ -1,13 +1,16 @@
 //! Typed structs for the Canton JSON Ledger API v2.
 //!
-//! Hand-translated from the OpenAPI spec (version 3.4.11) — no Rust SDK exists.
-//! Only types the MPC node or integration tests actually use are included.
-//! Could be auto-generated with `openapi-generator` in the future.
+//! Hand-translated from the OpenAPI spec (version 3.4.11) and re-verified
+//! field-by-field against the 3.5.1 OpenAPI/AsyncAPI specs (every request
+//! covers the 3.5.1 required fields; new response fields are ignored by
+//! serde) — no Rust SDK exists. Only types the MPC node or integration tests
+//! actually use are included. Could be auto-generated with `openapi-generator`
+//! in the future.
 //!
 //! Upstream spec:
-//! - HTTP (OpenAPI): <https://docs.digitalasset.com/build/3.4/reference/json-api/openapi.html>
-//! - WebSocket (AsyncAPI): <https://docs.digitalasset.com/build/3.4/reference/json-api/asyncapi.html>
-//! - Overview: <https://docs.digitalasset.com/build/3.4/explanations/json-api/index.html>
+//! - HTTP (OpenAPI): <https://docs.digitalasset.com/build/3.5/reference/json-api/openapi.html>
+//! - WebSocket (AsyncAPI): <https://docs.digitalasset.com/build/3.5/reference/json-api/asyncapi.html>
+//! - Overview: <https://docs.digitalasset.com/build/3.5/explanations/json-api/index.html>
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -142,9 +145,6 @@ pub struct ExercisedEvent {
 }
 
 /// Subscription message sent to `ws://.../v2/updates`.
-///
-/// Uses `updateFormat` (Canton 3.4+) instead of the deprecated
-/// `filter`/`verbose` top-level fields
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetUpdatesRequest {
@@ -374,6 +374,45 @@ pub mod templates {
 /// Requires the suffix to be preceded by `:` (package separator) or match exactly.
 pub fn template_suffix_matches(template_id: &str, suffix: &str) -> bool {
     template_id == suffix || template_id.ends_with(&format!(":{suffix}"))
+}
+
+/// Template IDs the indexer subscribes to (package-name form), derived from
+/// `signer_template_id`'s package prefix — the event templates share its package.
+/// `Signer:Signer` itself is included so the `RequestSignature` ExercisedEvent stays
+/// in the filtered stream (`verify_sign_event` needs it in the same transaction).
+pub fn signer_subscription_template_ids(signer_template_id: &str) -> Vec<String> {
+    let package = signer_template_id
+        .split_once(':')
+        .map(|(package, _)| package)
+        .unwrap_or(signer_template_id);
+    [
+        templates::SIGNER,
+        templates::SIGN_BIDIRECTIONAL_EVENT,
+        templates::SIGNATURE_RESPONDED_EVENT,
+        templates::RESPOND_BIDIRECTIONAL_EVENT,
+    ]
+    .iter()
+    .map(|suffix| format!("{package}:{suffix}"))
+    .collect()
+}
+
+/// Build a `PartyFilter` of cumulative `TemplateFilter`s for `template_ids`, so the
+/// ledger only streams those templates instead of every contract visible to the
+/// party (which the indexer would then filter client-side).
+pub fn template_party_filter(template_ids: &[String]) -> PartyFilter {
+    PartyFilter {
+        cumulative: template_ids
+            .iter()
+            .map(|template_id| CumulativeFilter {
+                identifier_filter: IdentifierFilter::TemplateFilter {
+                    value: TemplateFilterValue {
+                        template_id: template_id.clone(),
+                        include_created_event_blob: false,
+                    },
+                },
+            })
+            .collect(),
+    }
 }
 
 /// Build a UserRight for CanActAs.

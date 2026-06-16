@@ -9,6 +9,7 @@ publish = false
 alloy = { workspace = true, features = ["provider-anvil-api"] }
 anyhow.workspace = true
 async-process = "1"
+async-trait = "0.1"
 backon = "0.4"
 bollard = "0.17.0"
 borsh.workspace = true
@@ -45,13 +46,12 @@ solana-client.workspace = true
 solana-transaction-status.workspace = true
 
 # crypto dependencies
+bip32 = "0.5.3"
+bip39 = "2.2.0"
 ecdsa = "0.16.9"
-ethers-core.workspace = true
-ethers = { version = "2.0.13", features = ["abigen"] }
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
 elliptic-curve = { version = "0.13.5", default-features = false }
 k256 = { version = "0.13.1", features = ["sha256", "ecdsa", "serde"] }
-secp256k1.workspace = true
 
 # near dependencies
 near-account-id.workspace = true
@@ -69,7 +69,7 @@ near-workspaces = "0.15.0"
 mpc-crypto.workspace = true
 mpc-contract.workspace = true
 mpc-keys.workspace = true
-mpc-node = { path = "../chain-signatures/node", features = ["test-feature", "debug-page"] }
+mpc-node = { path = "../chain-signatures/node", default-features = false, features = ["test-feature", "debug-page"] }
 mpc-primitives.workspace = true
 
 [dev-dependencies]
@@ -96,3 +96,4 @@ harness = false
 [features]
 default = []
 docker-test = []
+helios = ["mpc-node/helios"]

@@ -1,8 +1,7 @@
-use crate::backlog::Backlog;
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
-use crate::metrics::requests::{record_request_latency, SignRequestStep};
+use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, SignKind};
@@ -37,6 +36,11 @@ use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 use near_fetch::result::ExecutionFinalResult;
 use serde_json::json;
+use sp_core::{sr25519, Pair as _};
+use sp_runtime::{
+    traits::{IdentifyAccount, Verify},
+    MultiSignature as SpMultiSignature,
+};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -53,12 +57,12 @@ use crate::indexer_canton::{CantonAuthProvider, CantonConfig};
 use crate::indexer_hydration::HydrationConfig;
 use parity_scale_codec::{Decode, Encode};
 use subxt::config::substrate::{
-    BlakeTwo256, SubstrateConfig, SubstrateExtrinsicParams, SubstrateHeader,
+    AccountId32, BlakeTwo256, MultiSignature, SubstrateConfig, SubstrateExtrinsicParams,
+    SubstrateHeader,
 };
 use subxt::tx::Payload;
 use subxt::Config as SubxtConfig;
 use subxt::OnlineClient;
-use subxt_signer::{sr25519, SecretUri};
 
 /// The maximum amount of times to retry publishing a signature.
 const MAX_PUBLISH_RETRY: usize = 6;
@@ -166,6 +170,31 @@ impl RpcChannel {
         let rpc = self.clone();
         tokio::spawn(async move {
             if let Err(err) = rpc.tx.send(RpcAction::Publish(action)).await {
+                tracing::error!(%err, "failed to send publish action");
+            }
+        });
+    }
+
+    pub fn publish_signature(
+        &self,
+        public_key: mpc_crypto::PublicKey,
+        indexed: IndexedSignRequest,
+        signature: Signature,
+        participants: Vec<Participant>,
+    ) {
+        let rpc = self.clone();
+        tokio::spawn(async move {
+            if let Err(err) = rpc
+                .tx
+                .send(RpcAction::Publish(PublishAction {
+                    public_key,
+                    indexed,
+                    signature,
+                    participants,
+                    timestamp: Instant::now(),
+                }))
+                .await
+            {
                 tracing::error!(%err, "failed to send publish action");
             }
         });
@@ -384,7 +413,6 @@ pub struct RpcExecutor {
     hydration: Option<HydrationClient>,
     canton: Option<CantonClient>,
     action_rx: mpsc::Receiver<RpcAction>,
-    backlog: Backlog,
 }
 
 impl RpcExecutor {
@@ -394,7 +422,6 @@ impl RpcExecutor {
         solana: &Option<SolConfig>,
         hydration: &Option<HydrationConfig>,
         canton: &Option<CantonConfig>,
-        backlog: Backlog,
     ) -> (RpcChannel, Self) {
         let eth = eth.as_ref().map(EthClient::new);
         let solana = solana.as_ref().map(SolanaClient::new);
@@ -428,7 +455,6 @@ impl RpcExecutor {
                 hydration,
                 canton,
                 action_rx: rx,
-                backlog,
             },
         )
     }
@@ -471,12 +497,11 @@ impl RpcExecutor {
             let chain = action.indexed.chain;
             let client = self.client(&chain);
             let eth_rpc_tx = eth_rpc_tx.clone(); // clone for task use
-            let backlog = self.backlog.clone();
 
             tokio::spawn(async move {
                 match chain {
                     Chain::NEAR | Chain::Solana | Chain::Hydration | Chain::Canton => {
-                        execute_publish(client, action, backlog).await;
+                        execute_publish(client, action).await;
                     }
                     Chain::Ethereum => {
                         if let Err(err) = eth_rpc_tx.send(action).await {
@@ -759,9 +784,37 @@ impl SubxtConfig for HydradxConfig {
 }
 
 #[derive(Clone)]
+struct HydrationSigner {
+    account_id: AccountId32,
+    signer: sr25519::Pair,
+}
+
+impl HydrationSigner {
+    fn from_uri(uri: &str) -> anyhow::Result<Self> {
+        let signer = sr25519::Pair::from_string(uri, None)?;
+        let account_id = <SpMultiSignature as Verify>::Signer::from(signer.public()).into_account();
+
+        Ok(Self {
+            account_id: AccountId32(account_id.into()),
+            signer,
+        })
+    }
+}
+
+impl subxt::tx::Signer<HydradxConfig> for HydrationSigner {
+    fn account_id(&self) -> <HydradxConfig as SubxtConfig>::AccountId {
+        self.account_id.clone()
+    }
+
+    fn sign(&self, signer_payload: &[u8]) -> <HydradxConfig as SubxtConfig>::Signature {
+        MultiSignature::Sr25519(self.signer.sign(signer_payload).0)
+    }
+}
+
+#[derive(Clone)]
 pub struct HydrationClient {
     api: OnlineClient<HydradxConfig>,
-    signer: sr25519::Keypair,
+    signer: HydrationSigner,
 }
 
 const PALLET_SIGNET: &str = "Signet";
@@ -872,8 +925,7 @@ impl Payload for HydrationRespondBidirectionalTx {
 impl HydrationClient {
     pub async fn new(config: &HydrationConfig) -> anyhow::Result<Self> {
         let api = OnlineClient::<HydradxConfig>::from_url(&config.rpc_ws_url).await?;
-        let uri = SecretUri::from_str(&config.signer_uri)?;
-        let signer = sr25519::Keypair::from_uri(&uri)?;
+        let signer = HydrationSigner::from_uri(&config.signer_uri)?;
         Ok(Self { api, signer })
     }
 
@@ -964,8 +1016,7 @@ impl CantonClient {
             .timeout(std::time::Duration::from_secs(30))
             .build()?;
 
-        let auth_provider =
-            CantonAuthProvider::new(config.auth.clone(), config.ledger_api_user.clone()).await?;
+        let auth_provider = CantonAuthProvider::new(config.auth.clone())?;
 
         if !config.signer_contract_id.is_empty() || !config.signer_template_id.is_empty() {
             tracing::info!(
@@ -983,7 +1034,7 @@ impl CantonClient {
     }
 
     pub fn ledger_api_user(&self) -> &str {
-        self.auth_provider.ledger_api_user()
+        &self.config.ledger_api_user
     }
 
     pub async fn bearer_token(&self) -> anyhow::Result<String> {
@@ -1002,14 +1053,16 @@ impl CantonClient {
             .bearer_auth(token))
     }
 
-    pub async fn fetch_ledger_end(&self) -> anyhow::Result<u64> {
+    pub async fn auth_get(&self, path: &str) -> anyhow::Result<reqwest::RequestBuilder> {
         let token = self.bearer_token().await?;
-        let resp = self
+        Ok(self
             .http_client
-            .get(self.json_api_endpoint("/v2/state/ledger-end"))
-            .bearer_auth(token)
-            .send()
-            .await?;
+            .get(self.json_api_endpoint(path))
+            .bearer_auth(token))
+    }
+
+    pub async fn fetch_ledger_end(&self) -> anyhow::Result<u64> {
+        let resp = self.auth_get("/v2/state/ledger-end").await?.send().await?;
         let resp = check_response(resp, "ledger-end").await?;
         let body: LedgerEndResponse = resp.json().await?;
         Ok(body.offset)
@@ -1022,7 +1075,6 @@ impl CantonClient {
         include_blob: bool,
     ) -> anyhow::Result<Vec<ActiveContractEntry>> {
         let offset = self.fetch_ledger_end().await?;
-        let token = self.bearer_token().await?;
 
         let mut filters = serde_json::Map::new();
         for party in parties {
@@ -1051,9 +1103,8 @@ impl CantonClient {
         };
 
         let resp = self
-            .http_client
-            .post(self.json_api_endpoint("/v2/state/active-contracts"))
-            .bearer_auth(token)
+            .auth_post("/v2/state/active-contracts")
+            .await?
             .json(&req)
             .send()
             .await?;
@@ -1067,11 +1118,9 @@ impl CantonClient {
         commands: JsCommands,
         context: &str,
     ) -> anyhow::Result<SubmitAndWaitForTransactionResponse> {
-        let token = self.bearer_token().await?;
         let resp = self
-            .http_client
-            .post(self.json_api_endpoint("/v2/commands/submit-and-wait-for-transaction"))
-            .bearer_auth(token)
+            .auth_post("/v2/commands/submit-and-wait-for-transaction")
+            .await?
             .json(&SubmitAndWaitForTransactionRequest { commands })
             .send()
             .await?;
@@ -1157,7 +1206,7 @@ async fn update_config(near: NearClient, config: watch::Sender<Config>) {
 }
 
 /// Publish the signature and retry if it fails
-async fn execute_publish(client: ChainClient, action: PublishAction, backlog: Backlog) {
+async fn execute_publish(client: ChainClient, action: PublishAction) {
     let chain = action.indexed.chain;
     let sign_id = action.indexed.id;
 
@@ -1237,33 +1286,27 @@ async fn execute_publish(client: ChainClient, action: PublishAction, backlog: Ba
         let elapsed_secs =
             crate::util::unix_elapsed(action.indexed.unix_timestamp_indexed).as_secs();
         if elapsed_secs <= chain.expected_response_time_secs() {
-            record_request_latency(
+            record_request_latency_since(
                 chain,
                 SignRequestStep::Total,
                 "in_time",
                 action.indexed.unix_timestamp_indexed,
             );
         } else {
-            record_request_latency(
+            record_request_latency_since(
                 chain,
                 SignRequestStep::Total,
                 "expired",
                 action.indexed.unix_timestamp_indexed,
             );
         }
-        record_request_latency(chain, SignRequestStep::Responding, "ok", action.timestamp);
+        record_request_latency_since(chain, SignRequestStep::Responding, "ok", action.timestamp);
     } else {
         tracing::info!(
             ?sign_id,
             elapsed = ?action.timestamp.elapsed(),
             "exceeded max retries, trashing publish request"
         );
-    }
-
-    if matches!(action.indexed.kind, SignKind::SignBidirectional(_)) {
-        if let Err(err) = backlog.mark_published(chain, &sign_id, publish_ok).await {
-            tracing::warn!(?sign_id, ?err, "failed to mark publish status in backlog");
-        }
     }
 }
 
@@ -1806,21 +1849,26 @@ async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAc
             let chain = action.indexed.chain;
             let elapsed = crate::util::unix_elapsed(action.indexed.unix_timestamp_indexed);
             if elapsed.as_secs() <= chain.expected_response_time_secs() {
-                record_request_latency(
+                record_request_latency_since(
                     chain,
                     SignRequestStep::Total,
                     "in_time",
                     action.indexed.unix_timestamp_indexed,
                 );
             } else {
-                record_request_latency(
+                record_request_latency_since(
                     chain,
                     SignRequestStep::Total,
                     "expired",
                     action.indexed.unix_timestamp_indexed,
                 );
             }
-            record_request_latency(chain, SignRequestStep::Responding, "ok", action.timestamp);
+            record_request_latency_since(
+                chain,
+                SignRequestStep::Responding,
+                "ok",
+                action.timestamp,
+            );
         }
         actions.clear();
         return;
@@ -1834,8 +1882,6 @@ use signet_program::accounts::Respond as SolanaRespondAccount;
 use signet_program::accounts::RespondBidirectional as SolanaRespondBidirectionalAccount;
 use signet_program::instruction::Respond as SolanaRespond;
 use signet_program::instruction::RespondBidirectional as SolanaRespondBidirectional;
-use signet_program::AffinePoint as SolanaContractAffinePoint;
-use signet_program::Signature as SolanaContractSignature;
 use solana_sdk::signature::Signer as SolanaSigner;
 async fn try_publish_sol(
     sol: &SolanaClient,
@@ -1848,14 +1894,7 @@ async fn try_publish_sol(
     let sign_id = action.indexed.id;
     let request_ids = vec![action.indexed.id.request_id];
     let big_r = signature.big_r.to_encoded_point(false);
-    let signature = SolanaContractSignature {
-        big_r: SolanaContractAffinePoint {
-            x: big_r.as_bytes()[1..33].try_into().unwrap(),
-            y: big_r.as_bytes()[33..65].try_into().unwrap(),
-        },
-        s: signature.s.to_bytes().into(),
-        recovery_id: signature.recovery_id,
-    };
+    let signature = crate::util::mpc_to_sol_signature(signature, big_r);
 
     tracing::debug!(
         ?sign_id,

@@ -41,6 +41,8 @@ jobs:
           curl -fsSL https://get.digitalasset.com/install/install.sh | sh
           echo "$HOME/.dpm/bin" >> $GITHUB_PATH
           export PATH="$HOME/.dpm/bin:$PATH"
+          # Pin the SDK (the harness uses the globally active one; the installer defaults to latest).
+          dpm install 3.5.1
           dpm --version
 
       - name: Install Rust (1.81.0)
@@ -66,15 +68,12 @@ jobs:
           key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Build Chain-Signatures Contract
-        run: ./build-contract.sh
-
       - name: Build eth contract
         working-directory: ./chain-signatures/contract-eth
         run: npm i && npx hardhat compile
 
-      - name: Build Chain-Signatures Node
-        run: cargo build -p mpc-node --release
+      - name: Presetup binaries
+        run: ./setup.sh
 
       - name: Build integration tests
         run: cargo build -p integration-tests --tests
@@ -113,6 +112,8 @@ jobs:
           curl -fsSL https://get.digitalasset.com/install/install.sh | sh
           echo "$HOME/.dpm/bin" >> $GITHUB_PATH
           export PATH="$HOME/.dpm/bin:$PATH"
+          # Pin the SDK (the harness uses the globally active one; the installer defaults to latest).
+          dpm install 3.5.1
           dpm --version
 
       - name: Install Rust (1.81.0)
@@ -138,15 +139,12 @@ jobs:
           key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Build Chain-Signatures Contract
-        run: ./build-contract.sh
-
       - name: Build eth contract
         working-directory: ./chain-signatures/contract-eth
         run: npm i && npx hardhat compile
 
-      - name: Build Chain-Signatures Node
-        run: cargo build -p mpc-node --release
+      - name: Presetup binaries
+        run: ./setup.sh
 
       - name: Build integration tests
         run: cargo build -p integration-tests --tests

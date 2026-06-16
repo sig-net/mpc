@@ -12,7 +12,7 @@ use crate::metrics::requests::record_indexing_step_reached;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign, SignKind};
 use crate::respond_bidirectional::CompletedTx;
-use crate::rpc::ContractStateWatcher;
+use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, SignStatus};
 use crate::stream::ExecutionOutcome;
 
@@ -171,6 +171,7 @@ impl SignBidirectionalEvent {
     }
 }
 
+#[derive(Clone)]
 pub enum RespondBidirectionalEvent {
     Solana(signet_program::RespondBidirectionalEvent),
     Hydration(HydrationRespondBidirectionalEvent),
@@ -375,6 +376,37 @@ pub(crate) async fn requeue_pending_sign_requests(
     }
 }
 
+pub(crate) async fn resume_pending_publish_requests(
+    backlog: &Backlog,
+    source_chain: Chain,
+    contract_watcher: &ContractStateWatcher,
+    rpc: &RpcChannel,
+) {
+    let publishable = backlog.publishable_requests(source_chain).await;
+    if publishable.is_empty() {
+        return;
+    }
+
+    let Some(public_key) = contract_watcher.public_key().await else {
+        tracing::warn!(%source_chain, count = publishable.len(), "cannot resume pending publish requests without a public key");
+        return;
+    };
+    for (sign_request, publish) in publishable {
+        if !publish.is_proposer {
+            continue;
+        }
+
+        let sign_id = sign_request.id;
+        rpc.publish_signature(
+            public_key,
+            sign_request,
+            publish.signature,
+            publish.participants,
+        );
+        tracing::info!(?sign_id, %source_chain, "resumed pending publish request after catchup");
+    }
+}
+
 pub(crate) async fn process_respond_event(
     respond_event: SignatureRespondedEvent,
     sign_tx: mpsc::Sender<Sign>,
@@ -568,7 +600,7 @@ pub async fn process_execution_confirmed(
             _ => None,
         });
 
-    let completed_tx = CompletedTx::new(pending_tx.clone(), block_height);
+    let completed_tx = CompletedTx::new(pending_tx.clone());
 
     let sign_request = match result {
         ExecutionOutcome::Success { output } => completed_tx
@@ -602,7 +634,7 @@ pub async fn process_execution_confirmed(
         .set_status(
             pending_tx.source_chain,
             &unwatched_sign_id,
-            SignStatus::AwaitingResponseBidirectional,
+            SignStatus::PendingGenerationBidirectional,
         )
         .await;
     let updated_tx = match set_res {
@@ -690,7 +722,7 @@ mod tests {
             dest: "0x1234567890123456789012345678901234567890".to_string(),
             params: "{}".to_string(),
             output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             request_id: [id; 32],
             from_address: Address::ZERO,
             nonce: 0,
@@ -728,7 +760,7 @@ mod tests {
                 dest: "0x1234567890123456789012345678901234567890".to_string(),
                 params: "{}".to_string(),
                 output_deserialization_schema: vec![],
-                respond_serialization_schema: vec![],
+                respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             }),
         )
     }
@@ -859,7 +891,7 @@ mod tests {
         // Call the handler with a Success and empty output
         let tx_id = tx.id;
         // ensure watcher exists before processing
-        let before_watchers = backlog.pending_execution(tx.target_chain).await;
+        let before_watchers = backlog.execution_watchers(tx.target_chain).await;
         assert!(before_watchers.contains_key(&tx.id));
         process_execution_confirmed(
             tx_id,
@@ -876,7 +908,7 @@ mod tests {
         .unwrap();
 
         // Watcher should be removed
-        let watchers = backlog.pending_execution(tx.target_chain).await;
+        let watchers = backlog.execution_watchers(tx.target_chain).await;
         tracing::info!(?watchers, "watchers after execution confirmed");
         assert!(watchers.is_empty());
 
@@ -887,8 +919,8 @@ mod tests {
         let tx_after = maybe_tx.unwrap();
         assert_eq!(
             tx_after.status(),
-            SignStatus::AwaitingResponseBidirectional,
-            "expected AwaitingResponseBidirectional but found status: {:?}",
+            SignStatus::PendingGenerationBidirectional,
+            "expected PendingGenerationBidirectional but found status: {:?}",
             tx_after.status()
         );
         assert!(matches!(
@@ -980,7 +1012,7 @@ mod tests {
         let no_second = timeout(Duration::from_millis(100), sign_rx.recv()).await;
         assert!(matches!(no_second, Err(_) | Ok(None)));
 
-        assert!(backlog.pending_execution(tx.target_chain).await.is_empty());
+        assert!(backlog.execution_watchers(tx.target_chain).await.is_empty());
     }
 
     #[tokio::test]
@@ -1026,12 +1058,15 @@ mod tests {
         .unwrap();
 
         let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
-        assert_eq!(tx_after.status(), SignStatus::AwaitingResponseBidirectional);
+        assert_eq!(
+            tx_after.status(),
+            SignStatus::PendingGenerationBidirectional
+        );
         assert!(matches!(
             tx_after.request.kind,
             SignKind::RespondBidirectional(_)
         ));
-        assert!(backlog.pending_execution(tx.target_chain).await.is_empty());
+        assert!(backlog.execution_watchers(tx.target_chain).await.is_empty());
 
         let msg = timeout(Duration::from_secs(1), sign_rx.recv())
             .await
@@ -1172,7 +1207,7 @@ mod tests {
                     params: "{}".to_string(),
                     program_id: Pubkey::new_unique(),
                     output_deserialization_schema: vec![],
-                    respond_serialization_schema: vec![],
+                    respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
                 }),
             ))
             .await;
@@ -1357,6 +1392,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_respond_event_advances_bidirectional_from_pending_publish() {
+        let backlog = Backlog::new();
+        let tx = test_bidirectional_tx(14, Chain::Ethereum, Chain::Solana);
+        let sign_id = SignId::new(tx.request_id);
+
+        let mut rlp_s = rlp::RlpStream::new_list(9);
+        rlp_s.append(&0u64);
+        rlp_s.append(&0u64);
+        rlp_s.append(&0u64);
+        rlp_s.append(&Vec::<u8>::new());
+        rlp_s.append(&0u64);
+        rlp_s.append(&Vec::<u8>::new());
+        rlp_s.append(&1u64);
+        rlp_s.append(&0u64);
+        rlp_s.append(&0u64);
+        let unsigned_rlp = rlp_s.out().to_vec();
+
+        backlog
+            .insert(IndexedSignRequest::sign_bidirectional(
+                sign_id,
+                test_sign_args(14),
+                Chain::Ethereum,
+                current_unix_timestamp(),
+                SignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
+                    sender: Default::default(),
+                    serialized_transaction: unsigned_rlp,
+                    dest: tx.dest.clone(),
+                    caip2_id: tx.caip2_id.clone(),
+                    key_version: tx.key_version,
+                    deposit: tx.deposit,
+                    path: tx.path.clone(),
+                    algo: tx.algo.clone(),
+                    params: tx.params.clone(),
+                    program_id: Pubkey::new_unique(),
+                    output_deserialization_schema: tx.output_deserialization_schema.clone(),
+                    respond_serialization_schema: tx.respond_serialization_schema.clone(),
+                }),
+            ))
+            .await;
+
+        backlog
+            .set_status(
+                Chain::Ethereum,
+                &sign_id,
+                crate::sign_bidirectional::SignStatus::PendingPublish {
+                    publish: crate::sign_bidirectional::PublishState {
+                        signature: Signature::new(
+                            ProjectivePoint::GENERATOR.to_affine(),
+                            Scalar::ONE,
+                            0,
+                        ),
+                        participants: vec![],
+                        is_proposer: true,
+                    },
+                },
+            )
+            .await;
+
+        let event = SignatureRespondedEvent::Ethereum(EthereumSignatureRespondedEvent {
+            request_id: sign_id.request_id,
+            responder: alloy::primitives::Address::from_slice(&[0u8; 20]),
+            signature: Signature::new(ProjectivePoint::GENERATOR.to_affine(), Scalar::ONE, 0),
+        });
+
+        let account_id: AccountId = "test.near".parse().unwrap();
+        let public_key = ProjectivePoint::GENERATOR.to_affine();
+        let (mut contract_watcher, _tx) =
+            ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
+
+        let (sign_tx, _sign_rx) = mpsc::channel(4);
+
+        process_respond_event(event, sign_tx, &mut contract_watcher, &backlog, false)
+            .await
+            .expect("respond event should advance pending publish bidirectional entries");
+
+        let entry = backlog
+            .get(Chain::Ethereum, &sign_id)
+            .await
+            .expect("entry should remain in backlog");
+        assert!(matches!(
+            entry.status(),
+            SignStatus::PendingExecution { .. }
+        ));
+        let execution_tx_id = entry
+            .execution_tx()
+            .expect("pending execution entries should store the execution transaction")
+            .id;
+
+        let watchers = backlog.execution_watchers(Chain::Solana).await;
+        assert_eq!(watchers.len(), 1);
+        assert!(watchers.contains_key(&execution_tx_id));
+    }
+
+    #[tokio::test]
     async fn process_execution_confirmed_failed_creates_error_respond_request() {
         let backlog = Backlog::new();
 
@@ -1375,7 +1504,7 @@ mod tests {
             dest: "0x1234567890123456789012345678901234567890".to_string(),
             params: "{}".to_string(),
             output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             request_id: [2u8; 32],
             from_address: Address::ZERO,
             nonce: 0,
@@ -1422,12 +1551,12 @@ mod tests {
         .unwrap();
 
         // Watcher removed
-        let watchers = backlog.pending_execution(tx.target_chain).await;
+        let watchers = backlog.execution_watchers(tx.target_chain).await;
         assert!(watchers.is_empty());
 
         // Source chain should now wait for final bidirectional response.
         let waiting = backlog
-            .get_by_status(tx.source_chain, SignStatus::AwaitingResponseBidirectional)
+            .pending_generation_bidirectionals(tx.source_chain)
             .await;
         assert!(waiting.contains_key(&sign_id));
 
@@ -1475,7 +1604,7 @@ mod tests {
             dest: "0x1234567890123456789012345678901234567890".to_string(),
             params: "{}".to_string(),
             output_deserialization_schema: vec![],
-            respond_serialization_schema: vec![],
+            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             request_id: [4u8; 32],
             from_address: Address::ZERO,
             nonce: 0,
@@ -1577,9 +1706,12 @@ mod tests {
             assert_eq!(decoded.sign_event_contract_id, sign_event_contract_id);
         };
 
-        assert!(backlog.pending_execution(tx.target_chain).await.is_empty());
+        assert!(backlog.execution_watchers(tx.target_chain).await.is_empty());
         let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
-        assert_eq!(tx_after.status(), SignStatus::AwaitingResponseBidirectional);
+        assert_eq!(
+            tx_after.status(),
+            SignStatus::PendingGenerationBidirectional
+        );
         match &tx_after.request.kind {
             SignKind::RespondBidirectional(res) => {
                 assert_eq!(res.tx_id, tx.id);

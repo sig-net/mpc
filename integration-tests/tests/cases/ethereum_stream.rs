@@ -1,23 +1,21 @@
-use alloy::primitives::{Address as AlloyAddress, B256};
+use alloy::network::{Ethereum, TransactionBuilder};
+use alloy::primitives::{Address, B256, U256};
+use alloy::providers::Provider;
+use alloy::rpc::types::request::TransactionRequest;
 use anyhow::{Context, Result};
 use cait_sith::protocol::Participant;
-use ethers::middleware::{Middleware, SignerMiddleware};
-use ethers::providers::{Http, Provider};
-use ethers::signers::{LocalWallet, Signer};
-use ethers::types::TransactionRequest;
-use ethers::types::{Address, H256, U256};
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers::EthereumSandbox;
-use integration_tests::eth::{
-    self, chain_signatures_contract, ChainSignaturesContract, SignRequest,
-};
+use integration_tests::eth::{self, ChainSignatures, SignRequest};
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
+use k256::{AffinePoint, Scalar};
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign, SignKind};
-use mpc_node::rpc::ContractStateWatcher;
+use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
+use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::ops::SignBidirectionalEvent as NodeSignBidirectionalEvent;
 use mpc_node::stream::ops::SignatureRespondedEvent;
@@ -25,14 +23,17 @@ use mpc_node::stream::{catchup_then_livestream, run_stream, ChainEvent, ChainStr
 use mpc_node::util::current_unix_timestamp;
 use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
 use near_primitives::types::AccountId;
-use rand::thread_rng;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
 
 fn signature_deposit() -> U256 {
     U256::from(1u64)
+}
+
+fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<mpc_node::rpc::RpcAction>) {
+    let (tx, rx) = mpsc::channel(buffer);
+    (RpcChannel { tx }, rx)
 }
 
 // Integration tests for EthereumStream
@@ -43,10 +44,29 @@ fn signature_deposit() -> U256 {
 struct EthereumTestEnvironment {
     _spawner: ClusterSpawner,
     sandbox: EthereumSandbox,
-    signer: Arc<eth::SandboxMiddleware>,
+    signer: eth::SandboxMiddleware,
     wallet: Address,
     contract_address: Address,
     _block_pumper: tokio::task::JoinHandle<()>,
+}
+
+fn random_secret_key() -> String {
+    loop {
+        let secret_key = format!("0x{}", hex::encode(rand::random::<[u8; 32]>()));
+        if eth::client("http://127.0.0.1:8545", &secret_key, 31337).is_ok() {
+            return secret_key;
+        }
+    }
+}
+
+fn transfer_tx(to: Address, value: U256) -> TransactionRequest {
+    <TransactionRequest as TransactionBuilder<Ethereum>>::with_value(
+        <TransactionRequest as TransactionBuilder<Ethereum>>::with_to(
+            TransactionRequest::default(),
+            to,
+        ),
+        value,
+    )
 }
 
 impl EthereumTestEnvironment {
@@ -72,22 +92,21 @@ impl EthereumTestEnvironment {
         // 1) Generate a fresh, independent funded account.
         // 2) Fund it once from the sandbox deployer wallet.
         // 3) Use it to send a simple empty ETH transfer once per second.
-        let pumper_wallet = LocalWallet::new(&mut thread_rng()).with_chain_id(sandbox.chain_id);
-        let pumper_address = pumper_wallet.address();
-        let pumper_provider = Provider::<Http>::try_from(sandbox.external_http_endpoint.as_str())?;
-        let pumper_client: Arc<SignerMiddleware<Provider<Http>, LocalWallet>> =
-            Arc::new(SignerMiddleware::new(pumper_provider, pumper_wallet));
+        let pumper_secret_key = random_secret_key();
+        let (pumper_client, pumper_address) = eth::client(
+            &sandbox.external_http_endpoint,
+            &pumper_secret_key,
+            sandbox.chain_id,
+        )?;
 
         // Fund the pumper account with a small amount of ETH for gas.
         // (0.001 ETH is plenty for these tests.)
-        let fund_tx = TransactionRequest::new()
-            .to(pumper_address)
-            .value(U256::from(1_000_000_000_000_000u64));
-        let pending_fund = signer.send_transaction(fund_tx, None).await?;
+        let fund_tx = transfer_tx(pumper_address, U256::from(1_000_000_000_000_000u64));
+        let pending_fund = signer.send_transaction(fund_tx).await?;
         let _ = pending_fund
+            .get_receipt()
             .await
-            .context("failed to mine block pumper funding transaction")?
-            .context("block pumper funding transaction dropped from mempool")?;
+            .context("failed to mine block pumper funding transaction")?;
 
         let block_pumper = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -95,13 +114,14 @@ impl EthereumTestEnvironment {
 
             loop {
                 interval.tick().await;
-                let tx = TransactionRequest::new().to(wallet).value(U256::zero());
+                let tx = transfer_tx(wallet, U256::ZERO);
 
-                match pumper_client.send_transaction(tx, None).await {
+                match pumper_client.send_transaction(tx).await {
                     Ok(pending) => {
                         // Await mining so each tick reliably corresponds to a mined block.
                         // If it takes too long, just continue; the next iteration will try again.
-                        let _ = tokio::time::timeout(Duration::from_secs(5), pending).await;
+                        let _ = tokio::time::timeout(Duration::from_secs(5), pending.get_receipt())
+                            .await;
                     }
                     Err(err) => {
                         tracing::debug!(?err, "block pumper failed to send tx");
@@ -113,7 +133,8 @@ impl EthereumTestEnvironment {
         });
 
         let contract_address =
-            eth::deploy_chain_signatures(signer.clone(), wallet, signature_deposit()).await?;
+            eth::deploy_chain_signatures(signer.clone(), wallet, wallet, signature_deposit())
+                .await?;
 
         Ok(Self {
             _spawner: spawner,
@@ -143,8 +164,8 @@ impl EthereumTestEnvironment {
         Backlog::new()
     }
 
-    fn contract(&self) -> ChainSignaturesContract<Arc<eth::SandboxMiddleware>> {
-        ChainSignaturesContract::new(self.contract_address, self.signer.clone().into())
+    fn contract(&self) -> ChainSignatures::ChainSignaturesInstance<eth::SandboxMiddleware> {
+        ChainSignatures::new(self.contract_address, self.signer.clone())
     }
 }
 
@@ -152,12 +173,12 @@ async fn submit_sign_request(
     ctx: &EthereumTestEnvironment,
     payload: [u8; 32],
     path: &str,
-) -> Result<H256> {
+) -> Result<B256> {
     let contract = ctx.contract();
     let sign_request = SignRequest {
-        payload,
+        payload: payload.into(),
         path: path.to_string(),
-        key_version: LATEST_MPC_KEY_VERSION,
+        keyVersion: LATEST_MPC_KEY_VERSION,
         algo: "secp256k1".to_string(),
         dest: "".to_string(),
         params: "".to_string(),
@@ -166,9 +187,9 @@ async fn submit_sign_request(
     let call = contract.sign(sign_request).value(signature_deposit());
     let pending_tx = call.send().await?;
     let receipt = pending_tx
+        .get_receipt()
         .await
-        .context("failed to mine sign transaction")?
-        .context("sign transaction dropped from mempool")?;
+        .context("failed to mine sign transaction")?;
     Ok(receipt.transaction_hash)
 }
 
@@ -176,12 +197,12 @@ async fn submit_sign_request_with_block(
     ctx: &EthereumTestEnvironment,
     payload: [u8; 32],
     path: &str,
-) -> Result<(H256, u64)> {
+) -> Result<(B256, u64)> {
     let contract = ctx.contract();
     let sign_request = SignRequest {
-        payload,
+        payload: payload.into(),
         path: path.to_string(),
-        key_version: LATEST_MPC_KEY_VERSION,
+        keyVersion: LATEST_MPC_KEY_VERSION,
         algo: "secp256k1".to_string(),
         dest: "".to_string(),
         params: "".to_string(),
@@ -190,86 +211,78 @@ async fn submit_sign_request_with_block(
     let call = contract.sign(sign_request).value(signature_deposit());
     let pending_tx = call.send().await?;
     let receipt = pending_tx
+        .get_receipt()
         .await
-        .context("failed to mine sign transaction")?
-        .context("sign transaction dropped from mempool")?;
+        .context("failed to mine sign transaction")?;
 
     Ok((
         receipt.transaction_hash,
         receipt
             .block_number
-            .context("sign transaction missing block number")?
-            .as_u64(),
+            .context("sign transaction missing block number")?,
     ))
 }
 
-async fn submit_eth_transfer(ctx: &EthereumTestEnvironment) -> Result<H256> {
+async fn submit_eth_transfer(ctx: &EthereumTestEnvironment) -> Result<B256> {
     let pending_tx = ctx
         .signer
-        .send_transaction(
-            TransactionRequest::new().to(ctx.wallet).value(U256::zero()),
-            None,
-        )
+        .send_transaction(transfer_tx(ctx.wallet, U256::ZERO))
         .await?;
     let receipt = pending_tx
+        .get_receipt()
         .await
-        .context("failed to mine eth transfer transaction")?
-        .context("eth transfer transaction dropped from mempool")?;
+        .context("failed to mine eth transfer transaction")?;
     Ok(receipt.transaction_hash)
 }
 
-async fn submit_eth_transfer_with_block(ctx: &EthereumTestEnvironment) -> Result<(H256, u64)> {
+async fn submit_eth_transfer_with_block(ctx: &EthereumTestEnvironment) -> Result<(B256, u64)> {
     let pending_tx = ctx
         .signer
-        .send_transaction(
-            TransactionRequest::new().to(ctx.wallet).value(U256::zero()),
-            None,
-        )
+        .send_transaction(transfer_tx(ctx.wallet, U256::ZERO))
         .await?;
     let receipt = pending_tx
+        .get_receipt()
         .await
-        .context("failed to mine eth transfer transaction")?
-        .context("eth transfer transaction dropped from mempool")?;
+        .context("failed to mine eth transfer transaction")?;
 
     Ok((
         receipt.transaction_hash,
         receipt
             .block_number
-            .context("eth transfer transaction missing block number")?
-            .as_u64(),
+            .context("eth transfer transaction missing block number")?,
     ))
 }
 
-async fn submit_respond_for_request_id<M>(
-    contract: ChainSignaturesContract<Arc<M>>,
+async fn submit_respond_for_request_id<P>(
+    contract: ChainSignatures::ChainSignaturesInstance<P>,
     request_id: [u8; 32],
-) -> Result<H256>
+) -> Result<B256>
 where
-    M: Middleware + 'static,
+    P: Provider + Clone + Send + Sync + 'static,
 {
     let enc = k256::ProjectivePoint::GENERATOR.to_encoded_point(false);
     let x = enc.x().expect("generator must have x coordinate");
     let y = enc.y().expect("generator must have y coordinate");
-    let s = U256::from_big_endian(k256::Scalar::from(11u64).to_bytes().as_slice());
+    let s = U256::from_be_bytes(k256::Scalar::from(11u64).to_bytes().into());
 
-    let response = chain_signatures_contract::Response {
-        request_id,
-        signature: chain_signatures_contract::Signature {
-            big_r: chain_signatures_contract::AffinePoint {
-                x: U256::from_big_endian(x),
-                y: U256::from_big_endian(y),
+    let response = ChainSignatures::Response {
+        requestId: request_id.into(),
+        signature: ChainSignatures::Signature {
+            bigR: ChainSignatures::AffinePoint {
+                x: U256::from_be_slice(x),
+                y: U256::from_be_slice(y),
             },
             s,
-            recovery_id: 1,
+            recoveryId: 1,
         },
     };
 
     let respond_call = contract.respond(vec![response]);
     let pending_tx = respond_call.send().await?;
     let receipt = pending_tx
+        .get_receipt()
         .await
-        .context("respond transaction execution failed")?
-        .context("respond transaction dropped from mempool")?;
+        .context("respond transaction execution failed")?;
     Ok(receipt.transaction_hash)
 }
 
@@ -317,7 +330,7 @@ fn test_bidirectional_event() -> NodeSignBidirectionalEvent {
         params: "{}".to_string(),
         program_id: solana_sdk::pubkey::Pubkey::new_unique(),
         output_deserialization_schema: vec![],
-        respond_serialization_schema: vec![],
+        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
     })
 }
 
@@ -412,10 +425,12 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     info.url = "http://127.0.0.1:1".to_string();
     mesh_state.update(Participant::from(0u32), NodeStatus::Active, info);
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
+    let (rpc, _rpc_rx) = test_rpc_channel(16);
 
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
+        rpc,
         backlog,
         contract_watcher,
         mesh_rx,
@@ -457,27 +472,21 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
 async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let ctx = EthereumTestEnvironment::new().await?;
 
-    let responder_wallet = LocalWallet::new(&mut thread_rng()).with_chain_id(ctx.sandbox.chain_id);
-    let responder_address = responder_wallet.address();
-    let responder_provider =
-        Provider::<Http>::try_from(ctx.sandbox.external_http_endpoint.as_str())?;
-    let responder_signer: Arc<SignerMiddleware<Provider<Http>, LocalWallet>> =
-        Arc::new(SignerMiddleware::new(responder_provider, responder_wallet));
-    let fund_tx = TransactionRequest::new()
-        .to(responder_address)
-        .value(U256::from(1_000_000_000_000_000u64));
-    let pending_fund = ctx.signer.send_transaction(fund_tx, None).await?;
+    let responder_secret_key = random_secret_key();
+    let (responder_signer, responder_address) = eth::client(
+        &ctx.sandbox.external_http_endpoint,
+        &responder_secret_key,
+        ctx.sandbox.chain_id,
+    )?;
+    let fund_tx = transfer_tx(responder_address, U256::from(1_000_000_000_000_000u64));
+    let pending_fund = ctx.signer.send_transaction(fund_tx).await?;
     let _ = pending_fund
+        .get_receipt()
         .await
-        .context("failed to mine responder funding transaction")?
-        .context("responder funding transaction dropped from mempool")?;
+        .context("failed to mine responder funding transaction")?;
 
-    let checkpoint_height = ctx.signer.get_block_number().await?.as_u64();
-    let checkpoint_nonce = ctx
-        .signer
-        .get_transaction_count(ctx.wallet, None)
-        .await?
-        .as_u64();
+    let checkpoint_height = ctx.signer.get_block_number().await?;
+    let checkpoint_nonce = ctx.signer.get_transaction_count(ctx.wallet).await?;
 
     let storage = CheckpointStorage::in_memory();
     let seeded_backlog = Backlog::persisted(storage.clone());
@@ -532,18 +541,34 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         dest: Chain::Ethereum.to_string(),
         params: "{}".to_string(),
         output_deserialization_schema: vec![],
-        respond_serialization_schema: vec![],
+        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         request_id: execution_sign_id.request_id,
-        from_address: AlloyAddress::from_slice(ctx.wallet.as_bytes()),
+        from_address: ctx.wallet,
         nonce: checkpoint_nonce,
     };
+    backlog
+        .set_status(
+            execution_tx.source_chain,
+            &execution_sign_id,
+            SignStatus::PendingPublish {
+                publish: PublishState {
+                    signature: mpc_primitives::Signature::new(
+                        AffinePoint::GENERATOR,
+                        Scalar::ONE,
+                        0,
+                    ),
+                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                    is_proposer: true,
+                },
+            },
+        )
+        .await;
     backlog
         .advance(Chain::Solana, execution_sign_id, execution_tx)
         .await
         .context("failed to seed execution watcher")?;
 
-    let responder_contract =
-        ChainSignaturesContract::new(ctx.contract_address, responder_signer.clone().into());
+    let responder_contract = ChainSignatures::new(ctx.contract_address, responder_signer.clone());
 
     submit_respond_for_request_id(responder_contract, resolved_sign_id.request_id).await?;
     submit_eth_transfer(&ctx).await?;
@@ -564,10 +589,12 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     info.url = "http://127.0.0.1:1".to_string();
     mesh_state.update(Participant::from(0u32), NodeStatus::Active, info);
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
+    let (rpc, _rpc_rx) = test_rpc_channel(16);
 
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
+        rpc,
         backlog.clone(),
         contract_watcher,
         mesh_rx,
@@ -690,9 +717,9 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
         dest: "".to_string(),
         params: "".to_string(),
         output_deserialization_schema: vec![],
-        respond_serialization_schema: vec![],
+        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         request_id: [7u8; 32],
-        from_address: AlloyAddress::from_slice(ctx.wallet.as_bytes()),
+        from_address: ctx.wallet,
         nonce: 0,
     };
     let sign_id = SignId::new([7u8; 32]);
@@ -747,10 +774,12 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     info.url = "http://127.0.0.1:1".to_string();
     mesh_state.update(Participant::from(0u32), NodeStatus::Active, info);
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
+    let (rpc, _rpc_rx) = test_rpc_channel(16);
 
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
+        rpc,
         backlog.clone(),
         contract_watcher,
         mesh_rx,
@@ -789,8 +818,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     // Register the execution watcher only after catchup has completed and the
     // transaction is already in the past relative to the stream.
     let sign_id = SignId::new([0x88; 32]);
-    let tx_id =
-        mpc_node::sign_bidirectional::BidirectionalTxId(B256::from_slice(tx_hash.as_bytes()));
+    let tx_id = mpc_node::sign_bidirectional::BidirectionalTxId(tx_hash);
     let tx = mpc_node::sign_bidirectional::BidirectionalTx {
         id: tx_id,
         sender: [0u8; 32],
@@ -805,9 +833,9 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         dest: Chain::Ethereum.to_string(),
         params: "{}".to_string(),
         output_deserialization_schema: vec![],
-        respond_serialization_schema: vec![],
+        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         request_id: sign_id.request_id,
-        from_address: AlloyAddress::from_slice(ctx.wallet.as_bytes()),
+        from_address: ctx.wallet,
         nonce: 0,
     };
     backlog
@@ -818,6 +846,23 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
             current_unix_timestamp(),
             test_bidirectional_event(),
         ))
+        .await;
+    backlog
+        .set_status(
+            tx.source_chain,
+            &sign_id,
+            SignStatus::PendingPublish {
+                publish: PublishState {
+                    signature: mpc_primitives::Signature::new(
+                        AffinePoint::GENERATOR,
+                        Scalar::ONE,
+                        0,
+                    ),
+                    participants: vec![Participant::from(0u32), Participant::from(1u32)],
+                    is_proposer: true,
+                },
+            },
+        )
         .await;
     backlog
         .advance(Chain::Solana, sign_id, tx)
@@ -843,7 +888,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         other => panic!("expected Sign::Request from late watcher backfill, got {other:?}"),
     }
 
-    let watchers = backlog.pending_execution(Chain::Ethereum).await;
+    let watchers = backlog.execution_watchers(Chain::Ethereum).await;
     assert!(
         watchers.is_empty(),
         "late watcher should be cleared after backfill"
@@ -1022,20 +1067,20 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     let x = enc.x().expect("generator must have x coordinate");
     let y = enc.y().expect("generator must have y coordinate");
 
-    let big_r = chain_signatures_contract::AffinePoint {
-        x: U256::from_big_endian(x),
-        y: U256::from_big_endian(y),
+    let big_r = ChainSignatures::AffinePoint {
+        x: U256::from_be_slice(x),
+        y: U256::from_be_slice(y),
     };
     let expected_s_bytes = expected_s.to_bytes();
-    let s = U256::from_big_endian(expected_s_bytes.as_slice());
-    let signature = chain_signatures_contract::Signature {
-        big_r,
+    let s = U256::from_be_bytes(expected_s_bytes.into());
+    let signature = ChainSignatures::Signature {
+        bigR: big_r,
         s,
-        recovery_id: expected_recovery_id,
+        recoveryId: expected_recovery_id,
     };
 
-    let response = chain_signatures_contract::Response {
-        request_id: sign_req.id.request_id,
+    let response = ChainSignatures::Response {
+        requestId: sign_req.id.request_id.into(),
         signature,
     };
 
@@ -1043,17 +1088,21 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     let respond_call = contract.respond(vec![response]);
     let pending_tx = respond_call.send().await?;
     let receipt = pending_tx
+        .get_receipt()
         .await
-        .context("respond transaction execution failed")?
-        .ok_or_else(|| anyhow::anyhow!("respond transaction dropped from mempool"))?;
+        .context("respond transaction execution failed")?;
 
     // Sanity-check that the contract emitted the SignatureResponded log we're expecting.
-    let logs = receipt.logs.clone();
+    let logs = receipt.logs().to_vec();
     assert!(!logs.is_empty(), "respond transaction produced no logs");
-    let sig_topic = H256::from(ethers::utils::keccak256(
+    let sig_topic = alloy::primitives::keccak256(
         "SignatureResponded(bytes32,address,((uint256,uint256),uint256,uint8))",
-    ));
-    assert_eq!(logs[0].topics[0], sig_topic, "unexpected event emitted");
+    );
+    assert_eq!(
+        logs[0].topic0(),
+        Some(&sig_topic),
+        "unexpected event emitted"
+    );
 
     // Verify the indexer emits the Respond event with matching data.
     let mut saw_respond = false;

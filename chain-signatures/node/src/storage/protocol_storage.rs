@@ -123,9 +123,50 @@ impl<A: ProtocolArtifact> ArtifactTaken<A> {
     }
 }
 
+/// A peeked artifact ID that is reserved in memory but still physically present in Redis.
+pub struct ArtifactReservation<A: ProtocolArtifact> {
+    pub id: A::Id,
+    holders: Vec<Participant>,
+    /// `None` after `commit()` has consumed the storage handle to suppress Drop cleanup.
+    storage: Option<ProtocolStorage<A>>,
+}
+
+impl<A: ProtocolArtifact> ArtifactReservation<A> {
+    pub fn holders(&self) -> &[Participant] {
+        &self.holders
+    }
+
+    /// Transitions from `pending` to `using` and remove the artifact from Redis.
+    /// Returns `None` on a Redis failure.
+    pub async fn commit(mut self) -> Option<ArtifactTaken<A>> {
+        let storage = self.storage.take()?;
+        let id = self.id;
+        // Because storage is `None`, dropping does nothing.
+        drop(self);
+
+        let me = storage.me().ok()?;
+        let mut guard = storage.reserved.write().await;
+        guard.pending.remove(&id);
+        guard.using.insert(id, true);
+        storage.take_reserved_inner(id, me).await
+    }
+}
+
+impl<A: ProtocolArtifact> Drop for ArtifactReservation<A> {
+    fn drop(&mut self) {
+        if let Some(storage) = self.storage.take() {
+            storage.remove_reserved(self.id, ReservedKind::Pending);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ReservedKind {
+    /// Artifact is being generated
     Generating,
+    /// Artifact is about to be used but not removed from Redis, yet
+    Pending,
+    /// Artifact is in use, no longer stored in Redis
     Using,
 }
 
@@ -138,6 +179,10 @@ struct ReservedState<Id> {
     /// IDs taken from Redis and actively consumed by a protocol.
     /// Value is `true` if this node is the owner of the artifact.
     using: HashMap<Id, bool>,
+    /// IDs peeked by this node for the posit round. The artifact is still in
+    /// Redis but reserved in memory to prevent conflicts due ti concurrent
+    /// tasks. This node is always the owner for pending IDs.
+    pending: HashSet<Id>,
 }
 
 impl<Id: Eq + std::hash::Hash> ReservedState<Id> {
@@ -145,6 +190,7 @@ impl<Id: Eq + std::hash::Hash> ReservedState<Id> {
         Self {
             generating: HashMap::new(),
             using: HashMap::new(),
+            pending: HashSet::new(),
         }
     }
 
@@ -154,6 +200,10 @@ impl<Id: Eq + std::hash::Hash> ReservedState<Id> {
 
     fn contains_reserved(&self, id: &Id) -> bool {
         self.generating.contains_key(id) || self.using.contains_key(id)
+    }
+
+    fn contains_pending_or_using(&self, id: &Id) -> bool {
+        self.pending.contains(id) || self.using.contains_key(id)
     }
 }
 
@@ -222,6 +272,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             match kind {
                 ReservedKind::Generating => state.generating.remove(&id),
                 ReservedKind::Using => state.using.remove(&id),
+                ReservedKind::Pending => {
+                    state.pending.remove(&id);
+                    None
+                }
             };
             return;
         }
@@ -231,6 +285,10 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
                 match kind {
                     ReservedKind::Generating => state.generating.remove(&id),
                     ReservedKind::Using => state.using.remove(&id),
+                    ReservedKind::Pending => {
+                        state.pending.remove(&id);
+                        None
+                    }
                 };
             });
         } else {
@@ -753,6 +811,153 @@ impl<A: ProtocolArtifact> ProtocolStorage<A> {
             Ok(None) => None,
             Err(err) => {
                 tracing::warn!(?err, ?elapsed, "failed to take mine artifact from storage");
+                None
+            }
+        }
+    }
+
+    /// Peek at an available mine artifact without removing it from Redis.
+    /// Marks the chosen ID as `pending` in memory so concurrent proposer tasks on this
+    /// node cannot select the same artifact. Call `ArtifactReservation::commit()` to
+    /// actually consume it when generation starts, or just drop it to release the
+    /// reservation without touching Redis.
+    ///
+    /// `local_excluded` lets the caller skip IDs that were already tried (and found
+    /// unsuitable) within the current organizing round.
+    ///
+    /// For Redis, this is a read-only operation.
+    pub async fn peek_mine(&self, local_excluded: &[A::Id]) -> Option<ArtifactReservation<A>> {
+        const SCRIPT: &str = r#"
+            local artifact_key = KEYS[1]
+            local mine_key = KEYS[2]
+
+            if redis.call("SCARD", mine_key) < 1 then
+                return nil
+            end
+
+            -- Build exclusion lookup from caller-supplied IDs
+            local excluded = {}
+            for i = 1, #ARGV do
+                excluded[ARGV[i]] = true
+            end
+
+            -- Find the first available member not excluded and having non-empty holders
+            local members = redis.call("SMEMBERS", mine_key)
+            for _, id in ipairs(members) do
+                if not excluded[id] then
+                    local holders_key = artifact_key .. ':holders:' .. id
+                    if redis.call("SCARD", holders_key) > 0 then
+                        return {id, redis.call("SMEMBERS", holders_key)}
+                    end
+                end
+            end
+            return nil
+        "#;
+
+        let me = self.me().ok()?;
+
+        // Build exclusion list: in-memory pending + using + caller-supplied local_excluded
+        let excluded: Vec<A::Id> = {
+            let state = self.reserved.read().await;
+            state
+                .pending
+                .iter()
+                .chain(state.using.keys())
+                .copied()
+                .chain(local_excluded.iter().copied())
+                .collect()
+        };
+
+        let mut conn = self.connect().await?;
+        let result: Result<Option<(A::Id, Vec<u32>)>, _> = redis::Script::new(SCRIPT)
+            .key(&self.artifact_key)
+            .key(owner_key(&self.owner_keys, me))
+            .arg(excluded.as_slice())
+            .invoke_async(&mut conn)
+            .await;
+
+        let (id, holders_raw) = match result {
+            Ok(Some(val)) => val,
+            Ok(None) => return None,
+            Err(err) => {
+                tracing::warn!(?err, "failed to peek mine artifact from storage");
+                return None;
+            }
+        };
+        let holders: Vec<Participant> = holders_raw.into_iter().map(Participant::from).collect();
+
+        // Atomically mark as pending in memory.
+        // Retry once if another task raced us to this ID.
+        // Give up on further retries and treat it the same way as "artifact unavailable".
+        for _ in 0..2 {
+            let mut state = self.reserved.write().await;
+            if !state.contains_pending_or_using(&id) {
+                state.pending.insert(id);
+                return Some(ArtifactReservation {
+                    id,
+                    holders,
+                    storage: Some(self.clone()),
+                });
+            }
+        }
+
+        tracing::debug!(id, "peek_mine: lost reservation race, caller should retry");
+        None
+    }
+
+    /// Take a specifically reserved artifact from Redis. The in-memory
+    /// transition from `pending` to `using` must have happened before.
+    async fn take_reserved_inner(&self, id: A::Id, owner: Participant) -> Option<ArtifactTaken<A>> {
+        const SCRIPT: &str = r#"
+            local artifact_key = KEYS[1]
+            local owner_key = KEYS[2]
+            local artifact_id = ARGV[1]
+
+            if redis.call("SREM", owner_key, artifact_id) == 0 then
+                return {err = "WARN artifact " .. artifact_id .. " is not owned by this owner"}
+            end
+
+            local artifact = redis.call("HGET", artifact_key, artifact_id)
+            if not artifact then
+                return {err = "WARN artifact " .. artifact_id .. " not found"}
+            end
+            redis.call("HDEL", artifact_key, artifact_id)
+
+            local holders_key = artifact_key .. ':holders:' .. artifact_id
+            local holders = redis.call("SMEMBERS", holders_key)
+            redis.call("DEL", holders_key)
+
+            return {artifact, holders}
+        "#;
+
+        let start = Instant::now();
+        let Some(mut conn) = self.connect().await else {
+            tracing::warn!(id, "failed to commit reservation: connection failed");
+            self.reserved.write().await.using.remove(&id);
+            return None;
+        };
+        let result: Result<(A, Vec<u32>), _> = redis::Script::new(SCRIPT)
+            .key(&self.artifact_key)
+            .key(owner_key(&self.owner_keys, owner))
+            .arg(id)
+            .invoke_async(&mut conn)
+            .await;
+
+        let elapsed = start.elapsed();
+        crate::metrics::storage::REDIS_LATENCY
+            .with_label_values(&[A::METRIC_LABEL, "take_reserved"])
+            .observe(elapsed.as_millis() as f64);
+
+        match result {
+            Ok((mut artifact, holders)) => {
+                let holders = holders.into_iter().map(Participant::from).collect();
+                artifact.set_holders(holders);
+                tracing::info!(id, ?elapsed, "committed reservation, took artifact");
+                Some(ArtifactTaken::new(artifact, self.clone()))
+            }
+            Err(err) => {
+                self.reserved.write().await.using.remove(&id);
+                tracing::warn!(id, ?err, ?elapsed, "failed to commit reservation");
                 None
             }
         }

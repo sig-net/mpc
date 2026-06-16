@@ -1,6 +1,7 @@
 use std::sync::LazyLock;
+use tokio::sync::mpsc;
 
-use prometheus::{exponential_buckets, Counter, Histogram, HistogramVec};
+use prometheus::{exponential_buckets, Counter, Histogram, HistogramVec, IntGaugeVec};
 
 use super::{
     try_create_counter_vec_with_node_account_id, try_create_histogram_vec_with_node_account_id,
@@ -78,3 +79,44 @@ pub(crate) static WEB_ENDPOINT_LATENCY: LazyLock<HistogramVec> = LazyLock::new(|
     )
     .unwrap()
 });
+
+pub(crate) static CHANNEL_CAPACITY_SIZE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    super::try_create_int_gauge_vec_with_node_account_id(
+        "multichain_channel_capacity_size",
+        "Estimated remaining capacity per message channel",
+        &["channel"],
+    )
+    .unwrap()
+});
+
+pub(crate) fn set_channel_capacity(channel: &str, capacity: usize) {
+    CHANNEL_CAPACITY_SIZE
+        .with_label_values(&[channel])
+        .set(capacity as i64);
+}
+
+pub(crate) fn set_channel_capacity_tx<T>(name: &'static str, tx: &mpsc::Sender<T>) {
+    set_channel_capacity(name, tx.capacity());
+}
+
+pub(crate) fn remove_channel_capacity(channel: &str) {
+    let _ = CHANNEL_CAPACITY_SIZE.remove_label_values(&[channel]);
+}
+
+pub(crate) static TASK_QUEUE_CAPACITY: LazyLock<HistogramVec> = LazyLock::new(|| {
+    try_create_histogram_vec_with_node_account_id(
+        "multichain_task_queue_capacity",
+        "Distribution of queue capacities across message channels",
+        &["channel"],
+        Some(vec![
+            1.0, 10.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0,
+        ]),
+    )
+    .unwrap()
+});
+
+pub(crate) fn observe_queue_capacity(channel: &str, len: usize) {
+    TASK_QUEUE_CAPACITY
+        .with_label_values(&[channel])
+        .observe(len as f64);
+}

@@ -142,9 +142,7 @@ async fn msg(
     for encrypted in encrypted.into_iter() {
         let msg_channel = state.msg_channel.clone();
         tokio::spawn(async move {
-            if let Err(err) = msg_channel.inbox.send(encrypted).await {
-                tracing::error!(?err, "failed to forward an encrypted protocol message");
-            }
+            msg_channel.send_inbox(encrypted).await;
         });
     }
     WEB_ENDPOINT_LATENCY

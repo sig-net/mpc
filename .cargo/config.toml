@@ -20,7 +20,7 @@ rustflags = [
 runner = "./setup.sh"
 
 [alias]
-build-node = "build -p mpc-node --release"
+build-node = "build -p mpc-node --release --features helios"
 build-test = "build -p integration-tests --tests"
 test-i = "test -p integration-tests -- --test-threads 4 --show-output"
 test-unit = "test --workspace --exclude integration-tests -- --show-output"

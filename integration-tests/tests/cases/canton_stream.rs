@@ -3,10 +3,11 @@ use integration_tests::canton::{
     test_evm_type2_anvil_cases, test_sign_request_event, CantonSandbox,
 };
 use mpc_node::backlog::Backlog;
+use mpc_node::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
 use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
 use mpc_node::protocol::{Chain, IndexedSignRequest, SignKind};
 use mpc_node::stream::ops::SignatureRespondedEvent;
-use mpc_node::stream::{ChainEvent, ChainStream};
+use mpc_node::stream::{catchup_then_livestream, ChainEvent, ChainStream};
 use mpc_primitives::{ScalarExt, Signature, LATEST_MPC_KEY_VERSION};
 use serde_json::json;
 use serial_test::serial;
@@ -21,7 +22,8 @@ async fn stream_canton(sandbox: &CantonSandbox, backlog: Backlog) -> Result<Cant
     let config = sandbox.get_config();
     let mut stream =
         CantonStream::new(Some(config), backlog).context("failed to create CantonStream")?;
-    ChainStream::start(&mut stream).await?;
+    let indexer = ChainStream::start(&mut stream).await?;
+    tokio::spawn(catchup_then_livestream(indexer));
     Ok(stream)
 }
 
@@ -376,9 +378,13 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     let mpc_sig = Signature::new(expected_big_r, expected_s, expected_recovery_id);
     let der_bytes = der_encode_signature(&mpc_sig)?;
     let der_hex = hex::encode(&der_bytes);
+    let canton_signature = serde_json::to_value(CantonSignature::EcdsaSig(EcdsaSigData {
+        der: der_hex,
+        recovery_id: expected_recovery_id,
+    }))?;
 
     sandbox
-        .runtime_client
+        .sig_network_runtime_client
         .exercise_choice(
             &[&sandbox.party_id],
             &sandbox.signer_template_id,
@@ -387,13 +393,7 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
             json!({
                 "signEventCid": &sign_event_cid,
                 "requestId": &request_id,
-                "signature": {
-                    "tag": "EcdsaSig",
-                    "value": {
-                        "der": &der_hex,
-                        "recoveryId": expected_recovery_id,
-                    },
-                },
+                "signature": canton_signature,
             }),
             &[],
         )

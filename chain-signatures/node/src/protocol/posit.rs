@@ -52,8 +52,24 @@ pub enum PositAction {
     Propose,
     Start(Vec<Participant>),
     Accept,
-    // TODO: Reject can also have a reason
+    /// Kept for wire compatibility with older nodes
+    #[deprecated = "use `RejectWithReason` instead"]
     Reject,
+    RejectWithReason(PositRejectReason),
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy, Hash)]
+pub enum PositRejectReason {
+    Unknown = 0,
+    /// The node is already participating in a generation, or has already
+    /// finished generation.
+    AlreadyGenerating = 1,
+    /// The node cannot participate because it doesn't have the required
+    /// artifact.
+    MissingArtifact = 2,
+    /// The posit message is invalid, usually because of bad timing leading to
+    /// round / proposer mismatches.
+    InvalidRequest = 3,
 }
 
 impl PositAction {
@@ -112,12 +128,15 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
         }
     }
 
-    pub fn propose(&mut self, id: Id, store: S, participants: &[Participant]) -> PositAction {
+    /// Returns false if there was already an ongoing proposal.
+    ///
+    /// The return value is only for tests.
+    pub fn propose(&mut self, id: Id, store: S, participants: &[Participant]) -> bool {
         let entry = match self.posits.entry(id) {
             Entry::Vacant(entry) => entry,
             Entry::Occupied(_) => {
                 tracing::warn!(?id, "PROPOSE protocol already in progress");
-                return PositAction::Reject;
+                return false;
             }
         };
 
@@ -134,8 +153,7 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
         );
         let timestamp = Instant::now();
         entry.insert((positor, timestamp));
-
-        PositAction::Propose
+        true
     }
 
     /// Act on the posit action. This will map the action received to a corresponding
@@ -168,7 +186,9 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                 let proposer = positor.id();
                 if positor.is_proposer() {
                     tracing::warn!(?id, ?from, "received INIT on protocol we already proposed");
-                    PositInternalAction::Reply(PositAction::Reject)
+                    PositInternalAction::Reply(PositAction::RejectWithReason(
+                        PositRejectReason::InvalidRequest,
+                    ))
                 } else if proposer != from {
                     tracing::warn!(
                         ?id,
@@ -176,7 +196,9 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                         ?proposer,
                         "received INIT on conflicting proposer"
                     );
-                    PositInternalAction::Reply(PositAction::Reject)
+                    PositInternalAction::Reply(PositAction::RejectWithReason(
+                        PositRejectReason::InvalidRequest,
+                    ))
                 } else {
                     PositInternalAction::Reply(PositAction::Accept)
                 }
@@ -193,7 +215,9 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                         ?from,
                         "received START on protocol we are not a part of"
                     );
-                    return PositInternalAction::Reply(PositAction::Reject);
+                    return PositInternalAction::Reply(PositAction::RejectWithReason(
+                        PositRejectReason::InvalidRequest,
+                    ));
                 }
 
                 if let Some((positor, timestamp)) = self.posits.remove(&id) {
@@ -205,7 +229,9 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                             "received START on protocol we already proposed"
                         );
                         self.posits.insert(id, (positor, timestamp));
-                        return PositInternalAction::Reply(PositAction::Reject);
+                        return PositInternalAction::Reply(PositAction::RejectWithReason(
+                            PositRejectReason::InvalidRequest,
+                        ));
                     } else if proposer != from {
                         tracing::warn!(
                             ?id,
@@ -214,11 +240,15 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                             "received START on conflicting proposer"
                         );
                         self.posits.insert(id, (positor, timestamp));
-                        return PositInternalAction::Reply(PositAction::Reject);
+                        return PositInternalAction::Reply(PositAction::RejectWithReason(
+                            PositRejectReason::InvalidRequest,
+                        ));
                     }
                 } else {
                     tracing::warn!(?id, ?from, "received START on protocol we have no info for");
-                    return PositInternalAction::Reply(PositAction::Reject);
+                    return PositInternalAction::Reply(PositAction::RejectWithReason(
+                        PositRejectReason::InvalidRequest,
+                    ));
                 }
 
                 PositInternalAction::StartProtocol(
@@ -226,7 +256,8 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
                     Positor::Deliberator(from),
                 )
             }
-            PositAction::Accept | PositAction::Reject => {
+            #[allow(deprecated)]
+            PositAction::Accept | PositAction::Reject | PositAction::RejectWithReason(_) => {
                 let mut entry = match self.posits.entry(id) {
                     Entry::Occupied(entry) => entry,
                     Entry::Vacant(_) => {
@@ -411,7 +442,7 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
 /// This is used by individual signature tasks instead of the global Posits mapping.
 pub struct SinglePositCounter {
     participants: HashSet<Participant>,
-    rejects: HashSet<Participant>,
+    rejects: HashMap<Participant, PositRejectReason>,
     pub accepts: HashSet<Participant>,
 }
 
@@ -421,7 +452,7 @@ impl SinglePositCounter {
         accepts.insert(me);
         Self {
             participants: participants.iter().copied().collect(),
-            rejects: HashSet::new(),
+            rejects: HashMap::new(),
             accepts,
         }
     }
@@ -438,6 +469,13 @@ impl SinglePositCounter {
         self.accepts.len() + self.rejects.len() == self.participants.len()
     }
 
+    pub fn num_peers_with_ongoing_generation(&self) -> usize {
+        self.rejects
+            .values()
+            .filter(|reason| matches!(reason, PositRejectReason::AlreadyGenerating))
+            .count()
+    }
+
     pub fn process_action(&mut self, from: Participant, action: &PositAction) -> bool {
         if !self.participants.contains(&from) {
             return false;
@@ -446,8 +484,12 @@ impl SinglePositCounter {
             PositAction::Accept => {
                 self.accepts.insert(from);
             }
+            #[allow(deprecated)]
             PositAction::Reject => {
-                self.rejects.insert(from);
+                self.rejects.insert(from, PositRejectReason::Unknown);
+            }
+            PositAction::RejectWithReason(reason) => {
+                self.rejects.insert(from, *reason);
             }
             _ => return false,
         }
@@ -478,8 +520,8 @@ mod tests {
         let id = 101;
         let correct_proposer = Participant::from(0);
         let incorrect_proposer = Participant::from(1);
-        let action = posits0.propose(id, (), &participants);
-        assert!(matches!(action, PositAction::Propose));
+        let ok = posits0.propose(id, (), &participants);
+        assert!(ok);
 
         // propose: act on posit with correct proposer should be accepted
         let action = posits1.act(id, correct_proposer, threshold, &PositAction::Propose);
@@ -491,7 +533,9 @@ mod tests {
         let action = posits1.act(id, incorrect_proposer, threshold, &PositAction::Propose);
         assert!(matches!(
             action,
-            PositInternalAction::Reply(PositAction::Reject)
+            PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::InvalidRequest,
+            ))
         ));
         // propose: act on posit again should be idempotent
         let action = posits1.act(id, correct_proposer, threshold, &PositAction::Propose);
@@ -501,15 +545,17 @@ mod tests {
         ));
 
         // propose(conflict): proposing a posit that is already in progress should be rejected
-        let action = posits1.propose(id, (), &participants);
-        assert!(matches!(action, PositAction::Reject));
+        let ok = posits1.propose(id, (), &participants);
+        assert!(!ok);
 
         // start: incorrect proposer should reject
         let start = PositAction::Start(participants);
         let action = posits1.act(id, incorrect_proposer, threshold, &start);
         assert!(matches!(
             action,
-            PositInternalAction::Reply(PositAction::Reject)
+            PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::InvalidRequest,
+            ))
         ));
         // start: correct proposer should start the protocol
         let action = posits1.act(id, correct_proposer, threshold, &start);
@@ -523,7 +569,9 @@ mod tests {
         let action = posits3.act(id, proposer, threshold, &start);
         assert!(matches!(
             action,
-            PositInternalAction::Reply(PositAction::Reject)
+            PositInternalAction::Reply(PositAction::RejectWithReason(
+                PositRejectReason::InvalidRequest,
+            ))
         ));
     }
 
@@ -557,14 +605,29 @@ mod tests {
         posits0.propose(id, (), &participants);
         let action = posits0.act(id, Participant::from(1), threshold, &PositAction::Accept);
         assert!(matches!(action, PositInternalAction::None));
-        let action = posits0.act(id, Participant::from(2), threshold, &PositAction::Reject);
+        let action = posits0.act(
+            id,
+            Participant::from(2),
+            threshold,
+            &PositAction::RejectWithReason(PositRejectReason::InvalidRequest),
+        );
         assert!(matches!(action, PositInternalAction::StartProtocol(_, _)));
 
         // start: on threshold amount reject, abort the protocol
         posits0.propose(id, (), &participants);
-        let action = posits0.act(id, Participant::from(1), threshold, &PositAction::Reject);
+        let action = posits0.act(
+            id,
+            Participant::from(1),
+            threshold,
+            &PositAction::RejectWithReason(PositRejectReason::InvalidRequest),
+        );
         assert!(matches!(action, PositInternalAction::None));
-        let action = posits0.act(id, Participant::from(2), threshold, &PositAction::Reject);
+        let action = posits0.act(
+            id,
+            Participant::from(2),
+            threshold,
+            &PositAction::RejectWithReason(PositRejectReason::InvalidRequest),
+        );
         assert!(matches!(action, PositInternalAction::Abort));
     }
 
@@ -622,5 +685,48 @@ mod tests {
         let actions = posits1.expire_and_start(threshold, base_delay, deliberator_extra_delay);
         assert_eq!(actions.len(), 0);
         assert_eq!(posits1.len(), 0);
+    }
+
+    #[test]
+    fn test_single_posit_counter_reason_counting() {
+        let me = Participant::from(0);
+        let participants = vec![
+            me,
+            Participant::from(1),
+            Participant::from(2),
+            Participant::from(3),
+        ];
+        let mut counter = SinglePositCounter::new(me, &participants);
+
+        assert_eq!(counter.num_peers_with_ongoing_generation(), 0);
+
+        counter.process_action(
+            Participant::from(1),
+            &PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
+        );
+        assert_eq!(counter.num_peers_with_ongoing_generation(), 1);
+
+        counter.process_action(
+            Participant::from(3),
+            &PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
+        );
+        assert_eq!(counter.num_peers_with_ongoing_generation(), 2);
+
+        // Other reject reasons are not counted.
+        counter.process_action(
+            Participant::from(2),
+            &PositAction::RejectWithReason(PositRejectReason::InvalidRequest),
+        );
+        assert_eq!(counter.num_peers_with_ongoing_generation(), 2);
+
+        counter.process_action(Participant::from(3), &PositAction::Accept);
+        assert_eq!(counter.num_peers_with_ongoing_generation(), 2);
+
+        // Reject from the same peer is not counted again.
+        counter.process_action(
+            Participant::from(1),
+            &PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
+        );
+        assert_eq!(counter.num_peers_with_ongoing_generation(), 2);
     }
 }

@@ -12,12 +12,11 @@ exclude = ["infra/scripts/generate_keys"]
 resolver = "2"
 
 [workspace.package]
-version = "1.15.0"
+version = "1.16.0"
 
 [workspace.dependencies]
 alloy = { version = "=1.0.38", features = ["contract", "json"] }
 anyhow = { version = "1.0.95", features = ["backtrace"] }
-base64 = "0.22"
 borsh = "1.5.3"
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
 ciborium = "0.2.2"
@@ -25,7 +24,6 @@ clap = { version = "4.5.4", features = ["derive", "env"] }
 deadpool-redis = "0.18.0"
 hex = "0.4.3"
 hyper = { version = "0.14", features = ["full"] }
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 k256 = { version = "0.13.1", features = [
     "sha256",
     "ecdsa",
@@ -41,7 +39,6 @@ semver = "1.0.23"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11.15"
 serde_json = "1"
-serde_urlencoded = "0.7"
 sha3 = "0.10.8"
 thiserror = "1"
 tokio = { version = "1.45.1", features = ["full"] }
@@ -54,13 +51,11 @@ tracing-subscriber = { version = "0.3.20", default-features = false, features = 
     "fmt",
 ] }
 url = { version = "2.4.0", features = ["serde"] }
-ethabi = "18.0.0"
 anchor-client = { version = "0.31.0", features = ["async"] }
 anchor-lang = "0.31.0"
 solana-sdk = "2.2.2"
 solana-transaction-status = "2.2.6"
 alloy-dyn-abi = "1.4.1"
-ethers-core = "2.0.13"
 secp256k1 = "0.28.2"
 rlp = "0.5"
 alloy-consensus = { version = "1.0.38", features = ["serde"] }
@@ -69,12 +64,11 @@ alloy-json-abi = "1.4.1"
 alloy-rlp = "0.3.12"
 solana-client = "2.2.7"
 futures-util = "0.3.31"
-p256 = { version = "0.13.2", features = ["ecdsa", "pkcs8"] }
 parity-scale-codec = { version = "3", features = ["derive"] }
 
 near-account-id = "1.0.0"
 near-primitives = "0.26.0"
-near-sdk = { version = "5.6.0", features = ["unit-testing", "unstable"] }
+near-sdk = { version = "5.6.0", features = ["unstable", "unit-testing"] }
 
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }

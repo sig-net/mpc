@@ -149,6 +149,33 @@ impl RpcEthereumClient {
         self.transaction_by_hash(tx_hash).await
     }
 
+    /// Re-execute `tx_hash` via `debug_traceTransaction` (`callTracer`,
+    /// `onlyTopCall: true`) and return the top call's return data. The RPC
+    /// response is the call frame directly — see `trace_output_to_bytes` for
+    /// the field reference and worked examples.
+    pub async fn trace_transaction_output(
+        &self,
+        tx_hash: alloy::primitives::B256,
+    ) -> anyhow::Result<Bytes> {
+        let call_frame: serde_json::Value = self
+            .rpc_call(
+                "debug_traceTransaction",
+                vec![
+                    json!(format!("{:#x}", tx_hash)),
+                    json!({
+                        "tracer": "callTracer",
+                        "tracerConfig": {
+                            "onlyTopCall": true
+                        },
+                        "timeout": "5s"
+                    }),
+                ],
+            )
+            .await?;
+
+        trace_output_to_bytes(tx_hash, &call_frame)
+    }
+
     pub async fn call(
         &self,
         from: Address,
@@ -240,6 +267,90 @@ impl RpcEthereumClient {
     }
 }
 
+/// Parse a `callTracer` (`onlyTopCall: true`) call-frame JSON into the
+/// top call's return data. Bails on revert or error, surfacing the decoded
+/// Solidity revert reason when present.
+///
+/// The RPC `result` is the top call frame directly — no wrapper. Fields we
+/// care about:
+///
+/// - `output` (hex): the bytes we extract. For CALL-family this is the
+///   function's return data; for CREATE/CREATE2 it's the deployed runtime
+///   bytecode.
+/// - `error` (string, optional): set when the top call failed (revert, OOG,
+///   invalid opcode, etc.).
+/// - `revertReason` (string, optional): the decoded `Error(string)` payload,
+///   only present for Solidity `revert("...")` aborts.
+///
+/// Other fields (`type`, `from`, `to`, `value`, `gas`, `gasUsed`, `input`)
+/// are part of the response but unused here. `calls` is omitted by
+/// `onlyTopCall: true`.
+///
+/// # Examples
+///
+/// Successful call returning `bool true`:
+/// ```json
+/// { "type": "CALL", "output": "0x0000...0001" }
+/// ```
+///
+/// Solidity revert with a decoded reason:
+/// ```json
+/// {
+///   "type": "CALL",
+///   "error": "execution reverted",
+///   "revertReason": "InsufficientBalance"
+/// }
+/// ```
+fn trace_output_to_bytes(
+    tx_hash: alloy::primitives::B256,
+    frame: &serde_json::Value,
+) -> anyhow::Result<Bytes> {
+    // `callTracer` populates `error` when the top-level call failed (revert,
+    // OOG, invalid opcode, etc.). `revertReason` is the decoded `Error(string)`,
+    // only present for Solidity `revert("...")` aborts.
+    if let Some(error) = frame
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .filter(|e| !e.is_empty())
+    {
+        let revert_reason = frame
+            .get("revertReason")
+            .and_then(serde_json::Value::as_str)
+            .filter(|r| !r.is_empty());
+        match revert_reason {
+            Some(reason) => anyhow::bail!(
+                "debug_traceTransaction reports transaction {:#x} reverted: {} ({})",
+                tx_hash,
+                error,
+                reason
+            ),
+            None => anyhow::bail!(
+                "debug_traceTransaction reports transaction {:#x} errored: {}",
+                tx_hash,
+                error
+            ),
+        }
+    }
+
+    let output = frame
+        .get("output")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "debug_traceTransaction response for {:#x} is missing `output`: {:?}",
+                tx_hash,
+                frame
+            )
+        })?;
+
+    let stripped = output.strip_prefix("0x").unwrap_or(output);
+    if stripped.is_empty() {
+        return Ok(Bytes::default());
+    }
+
+    Ok(Bytes::from(hex::decode(stripped)?))
+}
+
 fn format_address(address: Address) -> String {
     format!("0x{}", address.encode_hex())
 }
@@ -279,9 +390,10 @@ fn to_hex_block_id(block_id: BlockId) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::RpcEthereumClient;
+    use super::*;
     use crate::indexer_eth::MaybeBlock;
     use alloy::eips::BlockNumberOrTag;
+    use alloy::primitives::B256;
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
     use serde_json::json;
@@ -350,5 +462,36 @@ mod tests {
             &blocks[1],
             MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(8)))
         ));
+    }
+
+    #[test]
+    fn parses_successful_call_output() {
+        let frame = json!({
+            "type": "CALL",
+            "output": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        });
+        let bytes = trace_output_to_bytes(B256::ZERO, &frame).expect("should parse");
+        assert_eq!(bytes.len(), 32);
+        assert_eq!(bytes[31], 1);
+    }
+
+    #[test]
+    fn bails_on_revert_with_reason() {
+        let frame = json!({
+            "type": "CALL",
+            "error": "execution reverted",
+            "revertReason": "InsufficientBalance",
+        });
+        let err = trace_output_to_bytes(B256::ZERO, &frame).expect_err("should bail");
+        let msg = format!("{err}");
+        assert!(msg.contains("execution reverted"));
+        assert!(msg.contains("InsufficientBalance"));
+    }
+
+    #[test]
+    fn bails_when_output_missing_and_no_error() {
+        let frame = json!({ "type": "CALL" });
+        let err = trace_output_to_bytes(B256::ZERO, &frame).expect_err("should bail");
+        assert!(format!("{err}").contains("missing `output`"));
     }
 }

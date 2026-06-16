@@ -96,6 +96,20 @@ impl HeliosEthereumClient {
         })
     }
 
+    pub async fn trace_transaction_output(
+        &self,
+        tx_hash: alloy::primitives::B256,
+    ) -> anyhow::Result<Bytes> {
+        tracing::warn!(
+            ?tx_hash,
+            "debug_traceTransaction is not supported by Helios; refusing to fall back to eth_call"
+        );
+
+        anyhow::bail!(
+            "debug_traceTransaction is not supported by Helios; use direct RPC, e.g. Alchemy, for bidirectional transaction output extraction"
+        )
+    }
+
     pub async fn call(
         &self,
         from: Address,
