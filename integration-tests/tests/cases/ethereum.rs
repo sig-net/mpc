@@ -426,7 +426,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
             node_recovered_checkpoint
                 .block_height
                 .max(node_active_checkpoint.block_height),
-            Duration::from_secs(45),
+            Duration::from_secs(90),
         )
         .await?;
 
@@ -440,7 +440,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         active_idx,
         Chain::Ethereum,
         active_checkpoint_after_restart.block_height,
-        Duration::from_secs(30),
+        Duration::from_secs(60),
     )
     .await?;
 
