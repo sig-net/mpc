@@ -13,6 +13,7 @@ use mpc_primitives::{
 use sha3::{Digest, Sha3_256};
 use std::collections::{hash_map, HashMap};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -224,11 +225,16 @@ struct HistoricalCheckpoint {
 /// publish queues.
 #[derive(Debug, Clone)]
 pub struct Backlog {
+    /// Storage for checkpoints, which can be in-memory or persisted to disk
     storage: CheckpointStorage,
-    requests: Arc<RwLock<HashMap<Chain, PendingRequests>>>,
-    execution_watchers: Arc<RwLock<HashMap<Chain, ExecutionWatchers>>>,
+    /// Pending requests indexed by chain
+    requests: Arc<HashMap<Chain, RwLock<PendingRequests>>>,
+    /// Execution watchers indexed by chain
+    execution_watchers: Arc<HashMap<Chain, RwLock<ExecutionWatchers>>>,
     /// Historical checkpoints kept for 30 minutes, indexed by chain
-    historical_checkpoints: Arc<RwLock<HashMap<Chain, Vec<HistoricalCheckpoint>>>>,
+    historical_checkpoints: Arc<HashMap<Chain, RwLock<Vec<HistoricalCheckpoint>>>>,
+    /// Total number of pending requests across all chains, wrapped in Arc to make clonable
+    total_pending: Arc<AtomicUsize>,
 }
 
 impl Default for Backlog {
@@ -242,18 +248,58 @@ impl Backlog {
         Self::persisted(CheckpointStorage::in_memory())
     }
 
+    /// Initialize the backlog with storage and pre-allocate maps for all chains
     pub fn persisted(storage: CheckpointStorage) -> Self {
+        let mut requests = HashMap::new();
+        let mut execution_watchers = HashMap::new();
+        let mut historical_checkpoints = HashMap::new();
+
+        // Pre-allocate the maps for all chains
+        for chain in Chain::iter() {
+            requests.insert(chain, RwLock::new(PendingRequests::new()));
+            execution_watchers.insert(chain, RwLock::new(ExecutionWatchers::default()));
+            historical_checkpoints.insert(chain, RwLock::new(Vec::new()));
+        }
+
         Self {
             storage,
-            requests: Arc::new(RwLock::new(HashMap::new())),
-            execution_watchers: Arc::new(RwLock::new(HashMap::new())),
-            historical_checkpoints: Arc::new(RwLock::new(HashMap::new())),
+            requests: Arc::new(requests),
+            execution_watchers: Arc::new(execution_watchers),
+            historical_checkpoints: Arc::new(historical_checkpoints),
+            total_pending: Arc::new(AtomicUsize::new(0)),
         }
     }
 
+    /// Get the pending requests for a specific chain.
+    /// Panics if the chain is not initialized, which should never happen since we pre-allocate for all chains in `persisted`.
+    #[inline]
+    fn pending(&self, chain: &Chain) -> &RwLock<PendingRequests> {
+        self.requests
+            .get(chain)
+            .expect("chain should be initialized within `persisted` method")
+    }
+
+    /// Get the execution watchers for a specific chain.
+    /// Panics if the chain is not initialized, which should never happen since we pre-allocate for all chains in `persisted`.
+    #[inline]
+    fn watchers(&self, chain: &Chain) -> &RwLock<ExecutionWatchers> {
+        self.execution_watchers
+            .get(chain)
+            .expect("chain should be initialized within `persisted` method")
+    }
+
+    /// Get the historical checkpoints for a specific chain.
+    /// Panics if the chain is not initialized, which should never happen since we pre-allocate for all chains in `persisted`.
+    #[inline]
+    fn checkpoints(&self, chain: &Chain) -> &RwLock<Vec<HistoricalCheckpoint>> {
+        self.historical_checkpoints
+            .get(chain)
+            .expect("chain should be initialized within `persisted` method")
+    }
+
+    /// Remember a checkpoint in the historical checkpoints list and clean up old checkpoints
     async fn remember_checkpoint(&self, checkpoint: &Checkpoint) {
-        let mut historical = self.historical_checkpoints.write().await;
-        let historical = historical.entry(checkpoint.chain).or_insert_with(Vec::new);
+        let mut historical = self.checkpoints(&checkpoint.chain).write().await;
         historical.push(HistoricalCheckpoint {
             checkpoint: checkpoint.clone(),
             created_at: Instant::now(),
@@ -261,56 +307,59 @@ impl Backlog {
         historical.retain(|hcp| hcp.created_at.elapsed() < RETENTION_DURATION);
     }
 
+    /// Insert a new Sign request into the backlog for the specified chain.
     pub async fn insert(&self, request: IndexedSignRequest) -> Option<BacklogEntry> {
         let chain = request.chain;
         let id = request.id;
         let entry = BacklogEntry::new(request);
         let (prev, len) = {
-            let mut requests = self.requests.write().await;
-            let pending = requests.entry(chain).or_insert_with(PendingRequests::new);
+            let mut pending = self.pending(&chain).write().await;
             let p = pending.insert(id, entry);
             (p, pending.len())
         };
+
+        // Only increment total pending if this is a new entry
+        if prev.is_none() {
+            self.total_pending.fetch_add(1, Ordering::Relaxed);
+        }
 
         self.observe_backlog_size(chain, len);
         prev
     }
 
+    /// Remove a Sign request from the backlog for the specified chain.
     pub async fn remove(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
         let (removed, len) = {
-            let mut requests = self.requests.write().await;
-            let pending = requests.entry(chain).or_insert_with(PendingRequests::new);
+            let mut pending = self.pending(&chain).write().await;
             let rem = pending.remove(id);
             (rem, pending.len())
         };
+
+        // Only decrement total pending if an entry was actually removed
+        if removed.is_some() {
+            self.total_pending.fetch_sub(1, Ordering::Relaxed);
+        }
 
         self.observe_backlog_size(chain, len);
         removed
     }
 
+    /// Get a Sign request from the backlog for the specified chain.
     pub async fn get(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
-        self.requests
-            .read()
-            .await
-            .get(&chain)
-            .and_then(|pending_requests| pending_requests.get(id).cloned())
+        self.pending(&chain).read().await.get(id).cloned()
     }
 
     /// Returns the number of pending requests in total
-    pub async fn len(&self) -> usize {
-        self.requests
-            .read()
-            .await
-            .values()
-            .map(|requests| requests.len())
-            .sum()
+    pub fn len(&self) -> usize {
+        self.total_pending.load(Ordering::Relaxed)
     }
 
     /// Returns true if there are no pending requests
-    pub async fn is_empty(&self) -> bool {
-        self.requests.read().await.is_empty()
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
+    /// Observe the backlog size for a specific chain and update metrics accordingly
     fn observe_backlog_size(&self, chain: Chain, len: usize) {
         crate::metrics::requests::BACKLOG_SIZE
             .with_label_values(&[chain.as_str()])
@@ -320,10 +369,7 @@ impl Backlog {
     /// Returns backlog requests for a chain that are still eligible to be
     /// enqueued for processing after catchup completes.
     pub async fn take_requeueable_requests(&self, chain: Chain) -> Vec<IndexedSignRequest> {
-        let requests = self.requests.read().await;
-        let Some(pending) = requests.get(&chain) else {
-            return Vec::new();
-        };
+        let pending = self.pending(&chain).write().await;
 
         let mut requeueable: Vec<_> = pending
             .requests
@@ -341,14 +387,13 @@ impl Backlog {
         requeueable
     }
 
+    /// Returns backlog requests for a chain that are ready to be published.
+    /// Sorted by indexed timestamp and request id.
     pub async fn publishable_requests(
         &self,
         chain: Chain,
     ) -> Vec<(IndexedSignRequest, PublishState)> {
-        let requests = self.requests.read().await;
-        let Some(pending) = requests.get(&chain) else {
-            return Vec::new();
-        };
+        let pending = self.pending(&chain).write().await;
 
         let mut publishable: Vec<_> = pending
             .requests
@@ -372,54 +417,45 @@ impl Backlog {
         publishable
     }
 
+    /// Returns backlog requests for a chain that are still pending generation
     pub async fn pending_generations(&self, chain: Chain) -> HashMap<SignId, BacklogEntry> {
-        self.requests
-            .read()
-            .await
-            .get(&chain)
-            .map(PendingRequests::pending_generations)
-            .unwrap_or_default()
+        self.pending(&chain).read().await.pending_generations()
     }
 
+    /// Returns backlog requests for a chain that are still pending generation for bidirectional transactions
     pub async fn pending_generation_bidirectionals(
         &self,
         chain: Chain,
     ) -> HashMap<SignId, BacklogEntry> {
-        self.requests
+        self.pending(&chain)
             .read()
             .await
-            .get(&chain)
-            .map(PendingRequests::pending_generation_bidirectionals)
-            .unwrap_or_default()
+            .pending_generation_bidirectionals()
     }
 
+    /// Returns backlog entries that are pending execution for a given chain and request id
     pub async fn pending_execution(&self, chain: Chain, id: &SignId) -> Option<BacklogEntry> {
-        self.requests
+        self.pending(&chain)
             .read()
             .await
-            .get(&chain)
-            .and_then(|requests| requests.pending_execution(id).cloned())
+            .pending_execution(id)
+            .cloned()
     }
 
+    /// Returns the number of pending requests for a specific chain
     pub async fn len_by_chain(&self, chain: Chain) -> usize {
-        self.requests
-            .read()
-            .await
-            .get(&chain)
-            .map(|requests| requests.len())
-            .unwrap_or(0)
+        self.pending(&chain).read().await.len()
     }
 
+    /// Marks a request as publishing for a specific chain and request id, with the given publish state.
     pub async fn mark_publishing(
         &self,
         chain: Chain,
         id: &SignId,
         publish: PublishState,
     ) -> Result<(), BacklogError> {
-        let mut requests = self.requests.write().await;
-        let Some(pending) = requests.get_mut(&chain) else {
-            return Err(BacklogError::ChainNotFound);
-        };
+        let mut pending = self.pending(&chain).write().await;
+
         let Some(entry) = pending.requests.get_mut(id) else {
             return Err(BacklogError::NotFound { chain, id: *id });
         };
@@ -437,10 +473,8 @@ impl Backlog {
         id: &SignId,
         request: IndexedSignRequest,
     ) -> Result<(), BacklogError> {
-        let mut requests = self.requests.write().await;
-        let Some(pending) = requests.get_mut(&chain) else {
-            return Err(BacklogError::ChainNotFound);
-        };
+        let mut pending = self.pending(&chain).write().await;
+
         let Some(entry) = pending.requests.get_mut(id) else {
             return Err(BacklogError::NotFound { chain, id: *id });
         };
@@ -455,8 +489,8 @@ impl Backlog {
         sign_id: SignId,
         tx: BidirectionalTx,
     ) -> Option<(SignId, BidirectionalTx)> {
-        let mut watchers = self.execution_watchers.write().await;
-        let entry = watchers.entry(chain).or_default();
+        let mut entry = self.watchers(&chain).write().await;
+
         entry
             .insert(tx.id, ExecutionWatcher { sign_id, tx })
             .map(|previous| (previous.sign_id, previous.tx))
@@ -468,10 +502,10 @@ impl Backlog {
         chain: Chain,
         tx_id: &BidirectionalTxId,
     ) -> Option<(SignId, BidirectionalTx)> {
-        let mut watchers = self.execution_watchers.write().await;
-        watchers
-            .get_mut(&chain)
-            .and_then(|entry| entry.remove(tx_id))
+        let mut entry = self.watchers(&chain).write().await;
+
+        entry
+            .remove(tx_id)
             .map(|watcher| (watcher.sign_id, watcher.tx))
     }
 
@@ -481,12 +515,7 @@ impl Backlog {
         &self,
         chain: Chain,
     ) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)> {
-        self.execution_watchers
-            .read()
-            .await
-            .get(&chain)
-            .map(ExecutionWatchers::all)
-            .unwrap_or_default()
+        self.watchers(&chain).read().await.all()
     }
 
     /// Update the status of a tracked bidirectional transaction on the source chain.
@@ -496,11 +525,8 @@ impl Backlog {
         id: &SignId,
         status: SignStatus,
     ) -> Option<BacklogEntry> {
-        let mut requests = self.requests.write().await;
-        let Some(pending) = requests.get_mut(&chain) else {
-            tracing::warn!(?chain, ?id, ?status, "set_status: chain not found");
-            return None;
-        };
+        let mut pending = self.pending(&chain).write().await;
+
         let Some(entry) = pending.requests.get_mut(id) else {
             tracing::warn!(
                 ?chain,
@@ -524,10 +550,7 @@ impl Backlog {
         bidirectional_tx: BidirectionalTx,
     ) -> Result<(), BacklogError> {
         // Update the transaction in the backlog from Sign to Bidirectional
-        let mut requests = self.requests.write().await;
-        let pending = requests
-            .get_mut(&chain)
-            .ok_or(BacklogError::ChainNotFound)?;
+        let mut pending = self.pending(&chain).write().await;
 
         let entry = pending
             .requests
@@ -538,7 +561,7 @@ impl Backlog {
 
         // Registration successful, now register the execution watcher on the target chain
         let target_chain = bidirectional_tx.target_chain;
-        drop(requests);
+        drop(pending);
         self.watch_execution(target_chain, sign_id, bidirectional_tx)
             .await;
         Ok(())
@@ -546,11 +569,7 @@ impl Backlog {
 
     /// Get the processed block height for a specific chain
     pub async fn processed_block(&self, chain: Chain) -> Option<u64> {
-        self.requests
-            .read()
-            .await
-            .get(&chain)
-            .and_then(|pr| pr.processed_block_height())
+        self.pending(&chain).read().await.processed_block_height()
     }
 
     /// Set the processed block height for a specific chain.
@@ -561,14 +580,14 @@ impl Backlog {
             .await
     }
 
+    /// Set the processed block height for a specific chain and checkpoint on interval.
     pub async fn set_processed_block_interval(
         &self,
         chain: Chain,
         height: u64,
         interval: u64,
     ) -> Option<Checkpoint> {
-        let mut requests = self.requests.write().await;
-        let pending = requests.entry(chain).or_default();
+        let mut pending = self.pending(&chain).write().await;
         pending.set_processed_block(height);
 
         tracing::trace!(
@@ -578,10 +597,10 @@ impl Backlog {
             "backlog updated processed block height"
         );
 
-        // create a checkpoint on interval
+        // Create a checkpoint on interval
         if height.is_multiple_of(interval) {
             let tx_count = pending.len();
-            drop(requests);
+            drop(pending);
             let checkpoint = self.checkpoint(chain).await;
             tracing::info!(?chain, height, tx_count, ?checkpoint, "creating checkpoint");
 
@@ -593,13 +612,7 @@ impl Backlog {
 
     /// Create a checkpoint of the current backlog state for a specific chain
     pub async fn checkpoint(&self, chain: Chain) -> Checkpoint {
-        let checkpoint = self
-            .requests
-            .read()
-            .await
-            .get(&chain)
-            .map(|pr| pr.checkpoint(chain))
-            .unwrap_or_else(|| Checkpoint::empty(chain));
+        let checkpoint = self.pending(&chain).read().await.checkpoint(chain);
 
         self.remember_checkpoint(&checkpoint).await;
 
@@ -610,26 +623,25 @@ impl Backlog {
         checkpoint
     }
 
+    /// Get the latest checkpoint for a specific chain.
     pub async fn latest_checkpoint(&self, chain: Chain) -> Option<Checkpoint> {
-        let historical = self.historical_checkpoints.read().await;
-        historical.get(&chain).and_then(|checkpoints| {
-            checkpoints
-                .iter()
-                .max_by_key(|hcp| hcp.checkpoint.block_height)
-                .map(|hcp| hcp.checkpoint.clone())
-        })
+        self.checkpoints(&chain)
+            .read()
+            .await
+            .iter()
+            .max_by_key(|hcp| hcp.checkpoint.block_height)
+            .map(|hcp| hcp.checkpoint.clone())
     }
 
     /// Find a historical checkpoint by hash
     pub async fn find_checkpoint_by_hash(&self, chain: Chain, hash: u64) -> Option<Checkpoint> {
-        let historical = self.historical_checkpoints.read().await;
-        if let Some(checkpoints) = historical.get(&chain) {
-            for hcp in checkpoints {
-                let mut hasher = hash_map::DefaultHasher::new();
-                hcp.checkpoint.hash(&mut hasher);
-                if hasher.finish() == hash {
-                    return Some(hcp.checkpoint.clone());
-                }
+        let checkpoints = self.checkpoints(&chain).read().await;
+
+        for hcp in checkpoints.iter() {
+            let mut hasher = hash_map::DefaultHasher::new();
+            hcp.checkpoint.hash(&mut hasher);
+            if hasher.finish() == hash {
+                return Some(hcp.checkpoint.clone());
             }
         }
         None
@@ -646,10 +658,7 @@ impl Backlog {
             "recovering from checkpoint"
         );
 
-        let mut requests = self.requests.write().await;
-        let pending = requests
-            .entry(checkpoint.chain)
-            .or_insert_with(PendingRequests::new);
+        let mut pending = self.pending(&checkpoint.chain).write().await;
 
         let previous_height = pending.processed_block_height().unwrap_or(0);
         let checkpoint_height = checkpoint.block_height;
@@ -657,7 +666,15 @@ impl Backlog {
         // Execution watchers are ephemeral, we need to get all the execution watchers here
         let execution_to_watch = if checkpoint_height > previous_height {
             let cleared = pending.len();
-            *pending = PendingRequests::from_checkpoint(checkpoint)?;
+            let new_pending = PendingRequests::from_checkpoint(checkpoint)?;
+            let restored = new_pending.len();
+
+            *pending = new_pending;
+
+            // Update total pending count based on the difference between cleared and restored requests
+            self.total_pending.fetch_sub(cleared, Ordering::Relaxed);
+            self.total_pending.fetch_add(restored, Ordering::Relaxed);
+
             let execution_to_watch = pending.pending_executions();
 
             tracing::info!(
@@ -665,7 +682,7 @@ impl Backlog {
                 old_block = previous_height,
                 new_block = checkpoint_height,
                 cleared_requests = cleared,
-                restored_requests = pending.len(),
+                restored_requests = restored,
                 "successfully recovered from checkpoint"
             );
 
@@ -680,20 +697,14 @@ impl Backlog {
 
             Vec::new()
         };
-        drop(requests);
+        drop(pending);
 
         // Need to set the checkpoint as latest in our historical checkpoints
         // when we initially recover for this particular chain.
         if checkpoint_height > previous_height {
-            let checkpoint = self
-                .requests
-                .read()
-                .await
-                .get(&chain)
-                .map(|pending| pending.checkpoint(chain));
-            if let Some(checkpoint) = checkpoint {
-                self.remember_checkpoint(&checkpoint).await;
-            }
+            let checkpoint = self.pending(&chain).read().await.checkpoint(chain);
+
+            self.remember_checkpoint(&checkpoint).await;
         }
 
         // now repopulate our execution watchers
@@ -707,6 +718,7 @@ impl Backlog {
         Ok(())
     }
 
+    /// Recover backlog state by selecting checkpoints from active participants in the mesh network.
     pub async fn recover(
         &self,
         mesh_state: &MeshState,
@@ -782,8 +794,6 @@ pub enum BacklogError {
     NotFound { chain: Chain, id: SignId },
     #[error("chain not initialized: {chain:?}")]
     ChainNotInitialized { chain: Chain },
-    #[error("chain not found")]
-    ChainNotFound,
     #[error("transaction not found")]
     TransactionNotFound,
     #[error("cannot mark publishing for current backlog state")]
@@ -2024,6 +2034,199 @@ mod tests {
         assert_eq!(
             entry.execution_tx().map(|execution| execution.id),
             Some(tx.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_total_pending_increments_on_insert() {
+        let backlog = Backlog::new();
+        let tx = create_test_tx(1);
+
+        backlog
+            .insert(create_indexed_request(
+                SignId::new(tx.request_id),
+                Chain::Ethereum,
+                create_test_args(1),
+                SignKind::Sign,
+                0,
+            ))
+            .await;
+
+        assert_eq!(backlog.len(), 1);
+        assert!(!backlog.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_total_pending_ignores_duplicate_inserts() {
+        let backlog = Backlog::new();
+        let tx = create_test_tx(1);
+        let request = create_indexed_request(
+            SignId::new(tx.request_id),
+            Chain::Ethereum,
+            create_test_args(1),
+            SignKind::Sign,
+            0,
+        );
+
+        // Insert first time
+        backlog.insert(request.clone()).await;
+        assert_eq!(backlog.len(), 1);
+
+        // Insert exactly the same ID again (overwrites)
+        backlog.insert(request).await;
+        assert_eq!(
+            backlog.len(),
+            1,
+            "Duplicate insert should not increment total"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_total_pending_counts_across_chains() {
+        let backlog = Backlog::new();
+
+        backlog
+            .insert(create_indexed_request(
+                SignId::new(create_test_tx(1).request_id),
+                Chain::Ethereum,
+                create_test_args(1),
+                SignKind::Sign,
+                0,
+            ))
+            .await;
+
+        backlog
+            .insert(create_indexed_request(
+                SignId::new(create_test_tx(2).request_id),
+                Chain::Solana,
+                create_test_args(2),
+                SignKind::Sign,
+                0,
+            ))
+            .await;
+
+        assert_eq!(backlog.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_total_pending_decrements_on_remove() {
+        let backlog = Backlog::new();
+        let sign_id = SignId::new(create_test_tx(1).request_id);
+
+        backlog
+            .insert(create_indexed_request(
+                sign_id,
+                Chain::Ethereum,
+                create_test_args(1),
+                SignKind::Sign,
+                0,
+            ))
+            .await;
+        assert_eq!(backlog.len(), 1);
+
+        backlog.remove(Chain::Ethereum, &sign_id).await;
+        assert_eq!(backlog.len(), 0);
+        assert!(backlog.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_total_pending_ignores_invalid_removes() {
+        let backlog = Backlog::new();
+        let sign_id1 = SignId::new(create_test_tx(1).request_id);
+        let sign_id2 = SignId::new(create_test_tx(2).request_id); // Not inserted
+
+        backlog
+            .insert(create_indexed_request(
+                sign_id1,
+                Chain::Ethereum,
+                create_test_args(1),
+                SignKind::Sign,
+                0,
+            ))
+            .await;
+
+        backlog.remove(Chain::Ethereum, &sign_id2).await;
+        assert_eq!(
+            backlog.len(),
+            1,
+            "Removing non-existent ID should not decrement total"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_total_pending_updates_on_clean_recovery() {
+        let backlog = Backlog::new();
+
+        // Populate 3 requests and create a checkpoint
+        for i in 1..=3 {
+            backlog
+                .insert(create_indexed_request(
+                    SignId::new(create_test_tx(i).request_id),
+                    Chain::Ethereum,
+                    create_test_args(i),
+                    SignKind::Sign,
+                    0,
+                ))
+                .await;
+        }
+        backlog.set_processed_block(Chain::Ethereum, 10).await;
+        let checkpoint = backlog.checkpoint(Chain::Ethereum).await;
+
+        // Clean backlog recovers the checkpoint
+        let recovered = Backlog::new();
+        assert_eq!(recovered.len(), 0);
+
+        recovered
+            .recover_by_checkpoint(checkpoint)
+            .await
+            .expect("failed to recover");
+
+        assert_eq!(recovered.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_total_pending_updates_on_dirty_recovery() {
+        let backlog = Backlog::new();
+
+        // Populate 3 requests and create a checkpoint
+        for i in 1..=3 {
+            backlog
+                .insert(create_indexed_request(
+                    SignId::new(create_test_tx(i).request_id),
+                    Chain::Ethereum,
+                    create_test_args(i),
+                    SignKind::Sign,
+                    0,
+                ))
+                .await;
+        }
+        backlog.set_processed_block(Chain::Ethereum, 10).await;
+        let checkpoint = backlog.checkpoint(Chain::Ethereum).await;
+
+        // Dirty backlog has 1 entirely different request before recovery
+        let dirty_backlog = Backlog::new();
+        dirty_backlog
+            .insert(create_indexed_request(
+                SignId::new([99u8; 32]),
+                Chain::Ethereum,
+                create_test_args(99),
+                SignKind::Sign,
+                0,
+            ))
+            .await;
+
+        assert_eq!(dirty_backlog.len(), 1);
+
+        // Recover from checkpoint (should overwrite the dirty state)
+        dirty_backlog
+            .recover_by_checkpoint(checkpoint)
+            .await
+            .expect("failed to recover");
+
+        assert_eq!(
+            dirty_backlog.len(),
+            3,
+            "Total should reflect exactly the restored checkpoint size, ignoring the overwritten dirty state"
         );
     }
 }

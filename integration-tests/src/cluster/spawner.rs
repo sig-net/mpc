@@ -424,7 +424,7 @@ impl ClusterSpawner {
 
     pub async fn prespawn_sandbox(&mut self) -> anyhow::Result<&Worker<Sandbox>> {
         if self.worker.is_none() {
-            self.worker = Some(near_workspaces::sandbox().await?);
+            self.worker = Some(spawn_sandbox_with_retry().await?);
         }
         Ok(self.worker.as_ref().unwrap())
     }
@@ -432,7 +432,9 @@ impl ClusterSpawner {
     pub async fn take_worker(&mut self) -> Worker<Sandbox> {
         match self.worker.take() {
             Some(worker) => worker,
-            None => near_workspaces::sandbox().await.unwrap(),
+            None => spawn_sandbox_with_retry()
+                .await
+                .expect("failed to spawn sandbox"),
         }
     }
 
@@ -513,4 +515,27 @@ impl IntoFuture for ClusterSpawner {
             Ok(cluster)
         })
     }
+}
+
+/// Spawn a near sandbox with retry logic to handle potential transient failures (i.e., due to CPU contention)
+async fn spawn_sandbox_with_retry() -> anyhow::Result<Worker<Sandbox>> {
+    let mut last_err = None;
+    for attempt in 1..=5 {
+        match near_workspaces::sandbox().await {
+            Ok(worker) => return Ok(worker),
+            Err(e) => {
+                tracing::warn!(
+                    attempt,
+                    "failed to spawn near sandbox within timeout, retrying: {e}"
+                );
+                last_err = Some(e);
+                // Give the OS a moment to breathe before trying again
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    }
+    anyhow::bail!(
+        "failed to spawn near sandbox after 5 attempts: {:?}",
+        last_err
+    )
 }
