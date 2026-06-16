@@ -118,6 +118,12 @@ async fn run_live_canton_vault_deposit_flow(live: LiveCanton) -> Result<()> {
     let operators = vec![live.party_id.clone()];
     let sender = compute_operators_hash(&operators);
 
+    // Free-mode CC fee: reuse the deployed FeeCollectorRegistration + FeePriceConfig
+    // (feeAmount = 0). The signet-fee-amulet charge validates the price config and returns
+    // before reading inputs/factory, so empty inputs + the price-config context suffice.
+    let fee_registration_cid = required_env("MPC_CANTON_FEE_REGISTRATION_CID")?;
+    let fee_price_config_cid = required_env("MPC_CANTON_FEE_PRICE_CONFIG_CID")?;
+
     let nodes = cluster::spawn()
         .disable_prestockpile()
         .live_canton(live.config.clone())
@@ -163,12 +169,12 @@ async fn run_live_canton_vault_deposit_flow(live: LiveCanton) -> Result<()> {
         .client
         .create_contract(
             &[&live.party_id],
-            "#daml-vault:Erc20Vault:Vault",
+            "#signet-vault-v1:Erc20Vault:Vault",
             json!({
                 "operators": &operators,
                 "sigNetwork": &live.party_id,
                 "evmVaultAddress": &vault_address_slot,
-                "evmMpcPublicKey": &response_spki,
+                "mpcResponseVerifyKey": &response_spki,
                 "vaultId": &vault_id,
             }),
         )
@@ -211,6 +217,19 @@ async fn run_live_canton_vault_deposit_flow(live: LiveCanton) -> Result<()> {
                 "params": "",
                 "outputDeserializationSchema": EVM_TYPE2_BOOL_OUTPUT_SCHEMA,
                 "respondSerializationSchema": EVM_TYPE2_BOOL_OUTPUT_SCHEMA,
+                "feeRegistrationCid": fee_registration_cid,
+                "feeInputs": [],
+                "feeExtraArgs": {
+                    "context": {
+                        "values": {
+                            "signet.network/fee/price-config": {
+                                "tag": "AV_ContractId",
+                                "value": fee_price_config_cid
+                            }
+                        }
+                    },
+                    "meta": { "values": {} }
+                },
             }),
             &[],
         )
@@ -234,7 +253,7 @@ async fn run_live_canton_vault_deposit_flow(live: LiveCanton) -> Result<()> {
         .client
         .poll_for_contract(
             &[&live.party_id],
-            "#daml-signer:Signer:SignatureRespondedEvent",
+            "#signet-signer-v1:Signer:SignatureRespondedEvent",
             |p: &SignatureRespondedEventPayload| p.request_id == request_id,
             Duration::from_secs(180),
         )
@@ -269,7 +288,7 @@ async fn run_live_canton_vault_deposit_flow(live: LiveCanton) -> Result<()> {
         .client
         .poll_for_contract(
             &[&live.party_id],
-            "#daml-signer:Signer:RespondBidirectionalEvent",
+            "#signet-signer-v1:Signer:RespondBidirectionalEvent",
             |p: &RespondBidirectionalEventPayload| p.request_id == request_id,
             Duration::from_secs(300),
         )
@@ -312,14 +331,14 @@ async fn run_live_canton_vault_deposit_flow(live: LiveCanton) -> Result<()> {
     let signature_event_cid = find_active_contract_cid(
         &ledger_client,
         &[&live.party_id],
-        "#daml-signer:Signer:SignatureRespondedEvent",
+        "#signet-signer-v1:Signer:SignatureRespondedEvent",
         |payload| payload.get("requestId").and_then(|v| v.as_str()) == Some(request_id.as_str()),
     )
     .await?;
     let respond_event_cid = find_active_contract_cid(
         &ledger_client,
         &[&live.party_id],
-        "#daml-signer:Signer:RespondBidirectionalEvent",
+        "#signet-signer-v1:Signer:RespondBidirectionalEvent",
         |payload| payload.get("requestId").and_then(|v| v.as_str()) == Some(request_id.as_str()),
     )
     .await?;
@@ -538,7 +557,7 @@ async fn create_live_signer(client: &CantonTestClient, party_id: &str) -> Result
     let signer_result = client
         .create_contract(
             &[party_id],
-            "#daml-signer:Signer:Signer",
+            "#signet-signer-v1:Signer:Signer",
             json!({ "sigNetwork": party_id }),
         )
         .await?;
@@ -552,12 +571,13 @@ async fn validate_live_signer(
     signer_template_id: &str,
 ) -> Result<()> {
     let signer = client
-        .get_disclosed_contract(&[party_id], "#daml-signer:Signer:Signer", signer_cid)
+        .get_disclosed_contract(&[party_id], "#signet-signer-v1:Signer:Signer", signer_cid)
         .await
         .with_context(|| format!("live Signer contract is not active or visible: {signer_cid}"))?;
     anyhow::ensure!(
-        signer.template_id == signer_template_id,
-        "configured live Signer template mismatch: env has {signer_template_id}, ledger has {}",
+        signer.template_id.ends_with(":Signer:Signer")
+            && signer_template_id.ends_with(":Signer:Signer"),
+        "configured live Signer is not a Signer template: env={signer_template_id}, ledger={}",
         signer.template_id
     );
     Ok(())
