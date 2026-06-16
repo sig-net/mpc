@@ -1,6 +1,6 @@
 use crate::config::{Config, ContractConfig, NetworkConfig};
 use crate::indexer_eth::EthConfig;
-use crate::indexer_sol::SolConfig;
+use crate::solana_client::{SolConfig, SolanaClient};
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
@@ -8,9 +8,7 @@ use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, Sign
 use crate::util::AffinePointExt as _;
 use std::collections::BTreeSet;
 
-use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signer::keypair::Keypair;
 
 use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
@@ -43,7 +41,6 @@ use sp_runtime::{
 };
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use url::Url;
@@ -750,33 +747,6 @@ impl EthClient {
             Interface::new(abi),
         );
         Self { contract }
-    }
-}
-
-#[derive(Clone)]
-pub struct SolanaClient {
-    client: Arc<anchor_client::Client<Arc<Keypair>>>,
-    program_id: Pubkey,
-    payer: Arc<Keypair>,
-}
-
-impl SolanaClient {
-    pub fn new(sol: &SolConfig) -> Self {
-        let keypair = Keypair::from_base58_string(&sol.account_sk);
-        let payer = Arc::new(keypair);
-        let cluster =
-            anchor_client::Cluster::Custom(sol.rpc_http_url.clone(), sol.rpc_ws_url.clone());
-        let client = anchor_client::Client::new_with_options(
-            cluster,
-            payer.clone(),
-            CommitmentConfig::confirmed(),
-        );
-        Self {
-            client: Arc::new(client),
-            program_id: Pubkey::from_str(&sol.program_address)
-                .expect("Invalid Solana program address provided in configuration"),
-            payer,
-        }
     }
 }
 
