@@ -1,3 +1,4 @@
+use backon::{ExponentialBuilder, Retryable};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -128,29 +129,31 @@ impl SolanaClient {
     }
 
     pub async fn get_block(&self, slot: u64) -> UiConfirmedBlock {
-        let mut attempts = 0;
-        let mut delay = Duration::from_millis(500);
-        loop {
-            attempts += 1;
-            match self
-                .rpc_client
+        let mut attempts = 1;
+        let fetch = || async {
+            self.rpc_client
                 .get_block_with_config(slot, Self::block_fetch_config())
                 .await
-            {
-                Ok(block) => return block,
-                Err(err) => {
-                    tracing::warn!(
-                        ?err,
-                        attempts,
-                        slot,
-                        "failed to fetch Solana block; retrying in {:?}",
-                        delay
-                    );
-                    tokio::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_secs(10));
-                }
-            }
-        }
+        };
+        fetch
+            .retry(
+                &ExponentialBuilder::default()
+                    .with_min_delay(Duration::from_millis(500))
+                    .with_max_delay(Duration::from_secs(10))
+                    .with_max_times(usize::MAX),
+            )
+            .notify(|err, delay| {
+                tracing::warn!(
+                    ?err,
+                    attempts,
+                    slot,
+                    "failed to fetch Solana block; retrying in {:?}",
+                    delay
+                );
+                attempts += 1;
+            })
+            .await
+            .expect("Solana get_block eventually succeeded")
     }
 
     pub async fn fetch_blocks(&self, slots: &[u64]) -> HashMap<u64, UiConfirmedBlock> {
@@ -158,81 +161,71 @@ impl SolanaClient {
             return HashMap::new();
         }
 
-        let mut attempts = 0;
-        let mut delay = Duration::from_millis(500);
-        loop {
-            attempts += 1;
+        let mut attempts = 1;
+        let fetch = || async {
             let mut requests = Vec::new();
             for (i, &slot) in slots.iter().enumerate() {
                 let config = Self::block_fetch_config();
-                match serde_json::to_value(config) {
-                    Ok(config_val) => {
-                        requests.push(JsonRpcRequest {
-                            jsonrpc: "2.0",
-                            id: i,
-                            method: "getBlock",
-                            params: json!([slot, config_val]),
-                        });
-                    }
-                    Err(err) => {
-                        tracing::error!(?err, "failed to serialize RpcBlockConfig");
-                        return HashMap::new();
-                    }
-                }
+                let config_val = serde_json::to_value(config)
+                    .map_err(|e| anyhow::anyhow!("serialization error: {e}"))?;
+                requests.push(JsonRpcRequest {
+                    jsonrpc: "2.0",
+                    id: i,
+                    method: "getBlock",
+                    params: json!([slot, config_val]),
+                });
             }
 
-            match self
+            let resp = self
                 .http_client
                 .post(&self.rpc_http_url)
                 .json(&requests)
                 .send()
-                .await
-            {
-                Ok(resp) => match resp.json::<Vec<JsonRpcResponse<UiConfirmedBlock>>>().await {
-                    Ok(responses) => {
-                        let mut results = HashMap::new();
-                        for resp_obj in responses {
-                            if let Some(block) = resp_obj.result {
-                                if resp_obj.id < slots.len() {
-                                    let slot = slots[resp_obj.id];
-                                    results.insert(slot, block);
-                                }
-                            } else if let Some(err) = resp_obj.error {
-                                let is_skipped = err
-                                    .get("code")
-                                    .and_then(|c| c.as_i64())
-                                    .map(|c| c == -32007)
-                                    .unwrap_or(false);
-                                let slot = slots.get(resp_obj.id);
-                                if !is_skipped {
-                                    tracing::warn!(?err, ?slot, "JSON-RPC batch response error");
-                                }
-                            }
-                        }
-                        return results;
+                .await?;
+            let responses = resp
+                .json::<Vec<JsonRpcResponse<UiConfirmedBlock>>>()
+                .await?;
+
+            let mut results = HashMap::new();
+            for resp_obj in responses {
+                if let Some(block) = resp_obj.result {
+                    if resp_obj.id < slots.len() {
+                        let slot = slots[resp_obj.id];
+                        results.insert(slot, block);
                     }
-                    Err(err) => {
-                        tracing::warn!(
-                            ?err,
-                            attempts,
-                            "failed to deserialize batch response; retrying in {:?}",
-                            delay
-                        );
+                } else if let Some(err) = resp_obj.error {
+                    let is_skipped = err
+                        .get("code")
+                        .and_then(|c| c.as_i64())
+                        .map(|c| c == -32007)
+                        .unwrap_or(false);
+                    let slot = slots.get(resp_obj.id);
+                    if !is_skipped {
+                        tracing::warn!(?err, ?slot, "JSON-RPC batch response error");
                     }
-                },
-                Err(err) => {
-                    tracing::warn!(
-                        ?err,
-                        attempts,
-                        "failed to send batch request; retrying in {:?}",
-                        delay
-                    );
                 }
             }
+            Ok(results)
+        };
 
-            tokio::time::sleep(delay).await;
-            delay = std::cmp::min(delay * 2, Duration::from_secs(10));
-        }
+        fetch
+            .retry(
+                &ExponentialBuilder::default()
+                    .with_min_delay(Duration::from_millis(500))
+                    .with_max_delay(Duration::from_secs(10))
+                    .with_max_times(usize::MAX),
+            )
+            .notify(|err: &anyhow::Error, delay| {
+                tracing::warn!(
+                    ?err,
+                    attempts,
+                    "failed to send batch request or deserialize response; retrying in {:?}",
+                    delay
+                );
+                attempts += 1;
+            })
+            .await
+            .unwrap_or_default()
     }
 
     pub async fn fetch_signatures_from_latest(
@@ -240,33 +233,36 @@ impl SolanaClient {
         address: &Pubkey,
         before: Option<Signature>,
     ) -> Vec<RpcConfirmedTransactionStatusWithSignature> {
-        let mut attempts = 0;
-        let mut delay = Duration::from_millis(500);
-        loop {
-            attempts += 1;
+        let mut attempts = 1;
+        let fetch = || async {
             let config = GetConfirmedSignaturesForAddress2Config {
                 before,
                 until: None,
                 limit: Some(MAX_SIGNATURES_FOR_FAST_CATCHUP),
                 commitment: Some(CommitmentConfig::confirmed()),
             };
-            match self
-                .rpc_client
+            self.rpc_client
                 .get_signatures_for_address_with_config(address, config)
                 .await
-            {
-                Ok(res) => return res,
-                Err(err) => {
-                    tracing::warn!(
-                        ?err,
-                        attempts,
-                        "failed to fetch signatures for address; retrying in {delay:?}",
-                    );
-                    tokio::time::sleep(delay).await;
-                    delay = std::cmp::min(delay * 2, Duration::from_secs(10));
-                }
-            }
-        }
+        };
+        fetch
+            .retry(
+                &ExponentialBuilder::default()
+                    .with_min_delay(Duration::from_millis(500))
+                    .with_max_delay(Duration::from_secs(10))
+                    .with_max_times(usize::MAX),
+            )
+            .notify(|err, delay| {
+                tracing::warn!(
+                    ?err,
+                    attempts,
+                    "failed to fetch signatures for address; retrying in {:?}",
+                    delay
+                );
+                attempts += 1;
+            })
+            .await
+            .expect("Solana fetch_signatures_from_latest eventually succeeded")
     }
 
     /// Fetch signatures within the range provided [start_slot, end_slot]
@@ -279,6 +275,12 @@ impl SolanaClient {
         let mut before = None;
         let mut last_slot = None;
         tracing::trace!(start_slot, end_slot, "fetching signatures in range");
+
+        // We walk back from latest block to start_slot. This way we only need
+        // to query the set of blocks that have specific transactions relating
+        // to our program. If we queried blocks in ascending order, we would
+        // need to query all blocks in the range. This is not efficient if
+        // there are large gaps between blocks with transactions.
         loop {
             let batch = self
                 .fetch_signatures_from_latest(&self.program_id, before)

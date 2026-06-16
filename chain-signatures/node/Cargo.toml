@@ -48,6 +48,7 @@ sp-state-machine = { version = "0.48", default-features = false, features = ["st
 # workspace dependencies
 alloy.workspace = true
 anyhow.workspace = true
+backon.workspace = true
 borsh.workspace = true
 borsh_sol = { package = "borsh", version = "0.10.4" } # solana anchor requires borsh 0.10
 cait-sith.workspace = true
