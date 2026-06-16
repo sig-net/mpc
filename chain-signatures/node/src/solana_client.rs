@@ -275,7 +275,6 @@ impl SolanaClient {
     ) -> Vec<RpcConfirmedTransactionStatusWithSignature> {
         let mut signatures = Vec::new();
         let mut before = None;
-        let mut last_slot = None;
         tracing::trace!(start_slot, end_slot, "fetching signatures in range");
 
         // We walk back from latest block to start_slot. This way we only need
@@ -288,27 +287,19 @@ impl SolanaClient {
                 .fetch_signatures_from_latest(&self.program_id, before)
                 .await;
             if batch.is_empty() {
-                if before.is_none() {
-                    tracing::trace!("finished signature fetching: no signatures found at all.");
-                    break;
-                }
-
-                tracing::warn!(
-                    last_slot,
-                    start_slot,
-                    "fetched empty signature batch before reaching start_slot. retrying in 5s..."
+                tracing::trace!(
+                    ?before,
+                    "finished signature fetching: no more signatures found."
                 );
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
+                break;
             }
 
             let last = batch.last().unwrap();
             let last_sig = Signature::from_str(&last.signature).ok();
-            last_slot = Some(last.slot);
 
             tracing::trace!(
                 batch_len = batch.len(),
-                last_slot = last_slot.unwrap(),
+                last_slot = last.slot,
                 total_acc = signatures.len() + batch.len(),
                 "fetched batch of signatures"
             );
