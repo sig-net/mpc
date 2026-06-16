@@ -19,7 +19,7 @@ use tokio::time::Duration;
 
 #[test(tokio::test)]
 async fn test_signature_ethereum() -> Result<()> {
-    let cluster = cluster::spawn().disable_prestockpile().ethereum().await?;
+    let cluster = cluster::spawn().ethereum().await?;
     cluster.wait().signable().await?;
 
     let ctx = cluster.nodes.ctx();
@@ -165,7 +165,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
         std::env::set_var(name, value);
     }
 
-    let cluster = cluster::spawn().disable_prestockpile().ethereum().await?;
+    let cluster = cluster::spawn().ethereum().await?;
     cluster.wait().signable().await?;
 
     let ctx = cluster.nodes.ctx();
