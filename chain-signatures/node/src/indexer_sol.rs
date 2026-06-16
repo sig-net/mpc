@@ -9,7 +9,7 @@ use crate::util::ethabi_request_id;
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 use anyhow::Context;
 
-use std::collections::{btree_map, BTreeMap, BTreeSet, HashMap};
+use std::collections::{btree_map, BTreeMap, HashMap};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -258,16 +258,7 @@ impl ChainIndexer for SolanaIndexer {
             return BTreeMap::new().into_iter();
         }
 
-        let signatures = self
-            .client
-            .fetch_signatures_in_range(start_slot, end_slot)
-            .await;
-
-        let mut slots = BTreeSet::new();
-        for sig in signatures {
-            slots.insert(sig.slot);
-        }
-
+        let slots = self.client.fetch_slots(start_slot, end_slot).await;
         let items = self.client.fetch_blocks_for_slots(slots).await;
         items.into_iter()
     }

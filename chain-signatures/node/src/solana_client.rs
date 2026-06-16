@@ -269,7 +269,8 @@ impl SolanaClient {
         }
     }
 
-    pub async fn fetch_signatures_in_range(
+    /// Fetch signatures within the range provided [start_slot, end_slot]
+    pub async fn fetch_signatures(
         &self,
         start_slot: u64,
         end_slot: u64,
@@ -329,6 +330,15 @@ impl SolanaClient {
             before = last_sig;
         }
         signatures
+    }
+
+    /// Fetch slots covered by signatures in the range provided [start_slot, end_slot]
+    pub async fn fetch_slots(&self, start_slot: u64, end_slot: u64) -> BTreeSet<u64> {
+        self.fetch_signatures(start_slot, end_slot)
+            .await
+            .into_iter()
+            .map(|sig| sig.slot)
+            .collect()
     }
 
     pub async fn fetch_blocks_for_slots(
