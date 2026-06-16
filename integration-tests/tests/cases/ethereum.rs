@@ -393,7 +393,8 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
 
     tracing::info!("bringing offline node back online");
     cluster.restart_node(offline_config).await?;
-    cluster.wait().signable().await?;
+    // Does not have to be signable, just need Indexer to sync
+    cluster.wait().nodes_running().await?;
 
     // Verify the restarted node recovers to the same checkpoint via node consensus
     let node_recovered_checkpoint = wait_node_checkpoint(
