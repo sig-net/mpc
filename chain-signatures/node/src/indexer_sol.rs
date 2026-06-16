@@ -1,7 +1,8 @@
 use crate::backlog::Backlog;
 use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::solana_client::{SolConfig, SolanaCatchupBlock, SolanaClient};
+pub use crate::solana_client::SolConfig;
+use crate::solana_client::{SolanaCatchupBlock, SolanaClient};
 
 use crate::stream::{ChainEvent, ChainIndexer, ChainStream};
 use crate::util::ethabi_request_id;
@@ -1213,9 +1214,9 @@ mod tests {
             .await;
 
         // Run catchup range
-        let mut catchup_iter = indexer.catchup_range(anchor_height).await;
+        let catchup_iter = indexer.catchup_range(anchor_height).await;
         let mut processed_any = false;
-        while let Some(item) = catchup_iter.next() {
+        for item in catchup_iter {
             indexer
                 .process_catchup(&item)
                 .await

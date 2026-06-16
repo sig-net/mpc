@@ -336,18 +336,16 @@ impl SolanaClient {
         slots: BTreeSet<u64>,
     ) -> BTreeMap<u64, SolanaCatchupBlock> {
         const MAX_CONCURRENT_FETCH: usize = 5;
+        const MAX_CHUNK_SIZE: usize = 50;
 
-        let total_slots = slots.len();
-        tracing::trace!("Fetching {} blocks for slots...", total_slots);
-
+        tracing::trace!(total_slots = slots.len(), "fetching blocks for slots...");
         let slots_vec: Vec<u64> = slots.into_iter().collect();
-        let chunk_size = 50;
         let chunks: Vec<Vec<u64>> = slots_vec
-            .chunks(chunk_size)
+            .chunks(MAX_CHUNK_SIZE)
             .map(|chunk| chunk.to_vec())
             .collect();
 
-        let mut stream = futures_util::stream::iter(chunks.into_iter())
+        let mut stream = futures_util::stream::iter(chunks)
             .map(|chunk| async move {
                 let results = self.fetch_blocks(&chunk).await;
                 (chunk, results)
@@ -358,7 +356,7 @@ impl SolanaClient {
         let mut count = 0;
         while let Some((chunk, mut results)) = stream.next().await {
             count += chunk.len();
-            tracing::trace!(count, total_slots, "fetched blocks batch progress");
+            tracing::trace!(count, "fetched blocks batch progress");
             for slot in chunk {
                 let catchup_item = match results.remove(&slot) {
                     Some(block) => SolanaCatchupBlock::Block(block),
