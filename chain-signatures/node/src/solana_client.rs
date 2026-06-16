@@ -73,7 +73,7 @@ pub struct SolanaClient {
 }
 
 impl SolanaClient {
-    pub fn new(sol: &SolConfig) -> Self {
+    pub fn from_config(sol: &SolConfig) -> Self {
         let keypair = Keypair::from_base58_string(&sol.account_sk);
         let payer = Arc::new(keypair);
         let cluster =
@@ -97,7 +97,9 @@ impl SolanaClient {
         }
     }
 
-    pub fn new_indexer(rpc_http_url: String, rpc_ws_url: String, program_address: Pubkey) -> Self {
+    pub fn for_indexer(rpc_http_url: String, rpc_ws_url: String, program_address: Pubkey) -> Self {
+        // TODO: we need to move solana client further up the creation stack into cli eventually
+        // so we can reuse the same SolanaClient for both indexer and RPC.
         let keypair = Keypair::new(); // Dummy keypair for indexer mode
         let payer = Arc::new(keypair);
         let cluster = anchor_client::Cluster::Custom(rpc_http_url.clone(), rpc_ws_url.clone());

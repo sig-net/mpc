@@ -425,7 +425,7 @@ impl RpcExecutor {
         canton: &Option<CantonConfig>,
     ) -> (RpcChannel, Self) {
         let eth = eth.as_ref().map(EthClient::new);
-        let solana = solana.as_ref().map(SolanaClient::new);
+        let solana = solana.as_ref().map(SolanaClient::from_config);
         let hydration = match hydration {
             Some(h) => match HydrationClient::new(h).await {
                 Ok(client) => Some(client),

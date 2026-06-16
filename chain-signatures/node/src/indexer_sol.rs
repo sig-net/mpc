@@ -192,7 +192,7 @@ impl ChainStream for SolanaStream {
             anyhow::bail!("solana stream already started");
         };
 
-        let client = SolanaClient::new_indexer(
+        let client = SolanaClient::for_indexer(
             start_state.rpc_http_url.clone(),
             start_state.rpc_ws_url.clone(),
             start_state.program_id,
@@ -1174,7 +1174,7 @@ mod tests {
         let backlog = Backlog::new();
         let (events_tx, mut events_rx) = mpsc::channel(1_000_000);
 
-        let client = SolanaClient::new_indexer(
+        let client = SolanaClient::for_indexer(
             http_url.clone(),
             ws_url.clone(),
             Pubkey::from_str(&sol_addr).unwrap(),
