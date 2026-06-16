@@ -12,15 +12,13 @@ use crate::protocol::message::{
 };
 use crate::protocol::posit::{PositAction, PositRejectReason, SinglePositCounter};
 use crate::protocol::presignature::PresignatureId;
-use crate::protocol::SignKind;
 use crate::protocol::{Chain, ProtocolState};
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
-use crate::sign_bidirectional::PublishState;
+use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt};
 use crate::storage::presignature_storage::{
     PresignatureReservation, PresignatureTaken, PresignatureTakenDropper,
 };
 use crate::storage::PresignatureStorage;
-use crate::stream::ops::SignBidirectionalEvent;
 use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap, TimeoutBudget};
 
@@ -30,7 +28,7 @@ use chrono::Utc;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::derive_key;
-use mpc_primitives::{SignArgs, SignId};
+use mpc_primitives::{IndexedSignRequest, SignId, SignKind};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
@@ -63,72 +61,6 @@ const ACCEPT_POSIT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Metric channel label shared by every entry in `SignatureSpawner.inboxes`.
 const SIGN_POSIT_INBOX_LABEL: &str = "sign_posit_inbox";
-
-/// All relevant info pertaining to an indexed sign request.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct IndexedSignRequest {
-    pub id: SignId,
-    pub args: SignArgs,
-    pub chain: Chain,
-    /// Unix timestamp when the request was indexed by MPC node.
-    /// Preserved across recoveries to maintain original request creation time.
-    pub unix_timestamp_indexed: u64,
-    pub kind: SignKind,
-}
-
-impl IndexedSignRequest {
-    pub fn new(
-        id: SignId,
-        args: SignArgs,
-        chain: Chain,
-        unix_timestamp_indexed: u64,
-        kind: SignKind,
-    ) -> Self {
-        Self {
-            id,
-            args,
-            chain,
-            unix_timestamp_indexed,
-            kind,
-        }
-    }
-
-    pub fn sign(id: SignId, args: SignArgs, chain: Chain, unix_timestamp_indexed: u64) -> Self {
-        Self::new(id, args, chain, unix_timestamp_indexed, SignKind::Sign)
-    }
-
-    pub fn sign_bidirectional(
-        id: SignId,
-        args: SignArgs,
-        chain: Chain,
-        unix_timestamp_indexed: u64,
-        event: SignBidirectionalEvent,
-    ) -> Self {
-        Self::new(
-            id,
-            args,
-            chain,
-            unix_timestamp_indexed,
-            SignKind::SignBidirectional(event),
-        )
-    }
-
-    pub fn respond_bidirectional(
-        id: SignId,
-        args: SignArgs,
-        chain: Chain,
-        unix_timestamp_indexed: u64,
-        tx: crate::protocol::RespondBidirectionalTx,
-    ) -> Self {
-        Self::new(
-            id,
-            args,
-            chain,
-            unix_timestamp_indexed,
-            SignKind::RespondBidirectional(tx),
-        )
-    }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]

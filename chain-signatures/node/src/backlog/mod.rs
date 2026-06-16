@@ -3,12 +3,13 @@ pub mod selection;
 use self::selection::select_checkpoints;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::{Chain, IndexedSignRequest, SignKind};
-use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PublishState, SignStatus};
+use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use anyhow::Context;
-use mpc_primitives::{PendingTx, SignId};
+use mpc_primitives::{
+    BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PendingTx, SignId, SignKind,
+};
 use sha3::{Digest, Sha3_256};
 use std::collections::{hash_map, HashMap};
 use std::hash::{Hash, Hasher};
@@ -940,17 +941,15 @@ fn select_recovery_checkpoint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        protocol::SignKind,
-        respond_bidirectional::RespondBidirectionalTx,
-        sign_bidirectional::{BidirectionalTx, BidirectionalTxId, PublishState, SignStatus},
-        stream::ops::SignBidirectionalEvent,
-    };
+    use crate::sign_bidirectional::{PublishState, SignStatus};
     use alloy::primitives::{Address, B256};
     use anchor_lang::prelude::Pubkey;
     use cait_sith::protocol::Participant;
     use k256::{AffinePoint, Scalar};
-    use mpc_primitives::{SignArgs, SignId};
+    use mpc_primitives::{
+        BidirectionalTx, BidirectionalTxId, RespondBidirectionalTx, SignArgs,
+        SignBidirectionalEvent, SignId, SignKind,
+    };
     use std::convert::TryInto;
 
     fn digest_hex(hex_str: &str) -> [u8; 32] {
@@ -978,7 +977,7 @@ mod tests {
 
     fn create_test_tx(id: u8) -> BidirectionalTx {
         BidirectionalTx {
-            id: BidirectionalTxId(B256::from([id; 32])),
+            id: BidirectionalTxId(B256::from([id; 32]).0),
             sender: [0u8; 32],
             serialized_transaction: vec![1, 2, 3],
             source_chain: Chain::Solana,
@@ -993,7 +992,7 @@ mod tests {
             output_deserialization_schema: vec![],
             respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             request_id: [id; 32],
-            from_address: Address::ZERO,
+            from_address: **Address::ZERO,
             nonce: 0,
         }
     }

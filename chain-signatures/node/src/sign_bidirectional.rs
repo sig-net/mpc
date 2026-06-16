@@ -1,5 +1,5 @@
 use crate::protocol::{Chain, IndexedSignRequest};
-use alloy::primitives::{keccak256, Address, Bytes, B256, I256, U256};
+use alloy::primitives::{keccak256, Address, Bytes, I256, U256};
 use alloy_dyn_abi::{DynSolType, DynSolValue};
 use borsh::BorshSerialize;
 use cait_sith::protocol::Participant;
@@ -7,7 +7,9 @@ use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
-use mpc_primitives::{SerDeserFormat, Signature};
+use mpc_primitives::{
+    BidirectionalTx, ChainFromError, SerDeserFormat, SignBidirectionalEvent, Signature,
+};
 use rlp::{Rlp, RlpStream};
 use serde_json::Value;
 use sha3::{Digest, Keccak256};
@@ -15,16 +17,7 @@ use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use std::io::Write;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Copy)]
-pub struct BidirectionalTxId(pub B256);
-
 pub type RequestId = [u8; 32];
-
-impl From<B256> for BidirectionalTxId {
-    fn from(b256: B256) -> Self {
-        BidirectionalTxId(b256)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 struct AbiField {
@@ -97,38 +90,62 @@ impl SignStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct BidirectionalTx {
-    pub id: BidirectionalTxId,
-    pub sender: [u8; 32],
-    pub serialized_transaction: Vec<u8>,
-    pub source_chain: Chain,
-    pub target_chain: Chain,
-    // mainnet caip2_id of the target chain where the signed transaction will be sent
-    // This must be a supported chain in the Chain enum in primitives.
-    pub caip2_id: String,
-    pub key_version: u32,
-    pub deposit: u64,
-    pub path: String,
-    pub algo: String,
-    pub dest: String,
-    pub params: String,
-    pub output_deserialization_schema: Vec<u8>,
-    pub respond_serialization_schema: Vec<u8>,
-    pub request_id: [u8; 32],
-    pub from_address: Address,
-    pub nonce: u64,
+/// Extension trait for `SignBidirectionalEvent` to provide additional helper methods.
+pub trait SignBidirectionalEventExt {
+    fn sender_string(&self) -> anyhow::Result<String>;
+    fn epsilon(&self) -> anyhow::Result<Scalar>;
+    fn target_chain(&self) -> Result<Chain, ChainFromError>;
 }
 
-impl BidirectionalTx {
-    pub(crate) fn sender_string(&self) -> anyhow::Result<String> {
+impl SignBidirectionalEventExt for SignBidirectionalEvent {
+    fn sender_string(&self) -> anyhow::Result<String> {
+        match self.chain {
+            Chain::Canton => Ok(hex::encode(self.sender)),
+            _ => crate::stream::ops::sender_string(self.sender, self.chain),
+        }
+    }
+
+    fn epsilon(&self) -> anyhow::Result<Scalar> {
+        match self.chain {
+            Chain::Solana => Ok(mpc_crypto::kdf::derive_epsilon_sol(
+                self.key_version,
+                &self.sender_string()?,
+                &self.path,
+            )),
+            Chain::Hydration => Ok(mpc_crypto::kdf::derive_epsilon_hydration(
+                self.key_version,
+                &self.sender_string()?,
+                &self.path,
+            )),
+            Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
+                self.key_version,
+                &self.sender_string()?,
+                &self.path,
+            )),
+            _ => anyhow::bail!("Unsupported chain for epsilon derivation: {:?}", self.chain),
+        }
+    }
+
+    fn target_chain(&self) -> Result<Chain, mpc_primitives::ChainFromError> {
+        Chain::from_caip2_chain_id(&self.caip2_id)
+    }
+}
+
+/// Extension trait for `BidirectionalTx` to provide additional helper methods.
+pub trait BidirectionalTxExt {
+    fn sender_string(&self) -> anyhow::Result<String>;
+    fn epsilon(&self, path: &str) -> anyhow::Result<Scalar>;
+}
+
+impl BidirectionalTxExt for BidirectionalTx {
+    fn sender_string(&self) -> anyhow::Result<String> {
         if self.source_chain == Chain::Canton {
             return Ok(hex::encode(self.sender));
         }
         crate::stream::ops::sender_string(self.sender, self.source_chain)
     }
 
-    pub(crate) fn epsilon(&self, path: &str) -> anyhow::Result<Scalar> {
+    fn epsilon(&self, path: &str) -> anyhow::Result<Scalar> {
         match self.source_chain {
             Chain::Solana => Ok(mpc_crypto::kdf::derive_epsilon_sol(
                 self.key_version,

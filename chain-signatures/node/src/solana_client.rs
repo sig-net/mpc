@@ -235,7 +235,7 @@ impl SolanaClient {
         }
     }
 
-    pub async fn fetch_signatures_with_retry(
+    pub async fn fetch_signatures_from_latest(
         &self,
         address: &Pubkey,
         before: Option<Signature>,
@@ -281,7 +281,7 @@ impl SolanaClient {
         tracing::trace!(start_slot, end_slot, "fetching signatures in range");
         loop {
             let batch = self
-                .fetch_signatures_with_retry(&self.program_id, before)
+                .fetch_signatures_from_latest(&self.program_id, before)
                 .await;
             if batch.is_empty() {
                 if before.is_none() {

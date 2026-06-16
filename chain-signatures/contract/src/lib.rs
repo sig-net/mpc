@@ -163,7 +163,7 @@ impl VersionedMpcContract {
             return Err(SignError::RequestLimitExceeded.into());
         }
         let predecessor = env::predecessor_account_id();
-        let sign_id = SignId::from_parts(&predecessor, &payload_bytes, &path, key_version);
+        let sign_id = SignId::from_parts(predecessor.as_str(), &payload_bytes, &path, key_version);
         if self.contains_request(&sign_id) {
             return Err(SignError::RequestCollision.into());
         }

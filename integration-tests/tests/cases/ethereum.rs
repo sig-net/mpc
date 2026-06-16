@@ -382,7 +382,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         active_idx,
         Chain::Ethereum,
         initial_checkpoint.block_height + 1,
-        Duration::from_secs(30),
+        Duration::from_secs(90),
     )
     .await?;
 

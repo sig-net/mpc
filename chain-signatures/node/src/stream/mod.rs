@@ -1,15 +1,14 @@
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::IndexedSignRequest;
 use crate::protocol::{Chain, Sign};
 use crate::rpc::{ContractStateWatcher, RpcChannel};
-use crate::sign_bidirectional::BidirectionalTxId;
 use crate::stream::ops::{
     process_execution_confirmed, process_respond_bidirectional_event, process_respond_event,
     process_sign_request, recover_backlog, requeue_pending_sign_requests,
-    resume_pending_publish_requests, RespondBidirectionalEvent, SignatureRespondedEvent,
+    resume_pending_publish_requests,
 };
+use mpc_primitives::ChainEvent;
 
 pub mod ops;
 
@@ -22,76 +21,6 @@ pub const CHAIN_EVENT_STREAM_SIZE: usize = 16384;
 
 pub fn channel() -> (mpsc::Sender<ChainEvent>, mpsc::Receiver<ChainEvent>) {
     mpsc::channel(CHAIN_EVENT_STREAM_SIZE)
-}
-
-/// Unified event produced by a chain stream
-#[allow(clippy::large_enum_variant)]
-#[derive(Clone)]
-pub enum ChainEvent {
-    SignRequest(IndexedSignRequest),
-    Respond(SignatureRespondedEvent),
-    RespondBidirectional(RespondBidirectionalEvent),
-
-    /// Catchup has completed and live events may be forwarded to the signer.
-    CatchupCompleted,
-
-    /// Block height indicating the client has observed/processed up to `u64` (slot/block)
-    Block(u64),
-
-    /// A watched bidirectional execution has been observed on the target chain.
-    /// The client detected the execution, performed chain-specific extraction, and
-    /// carries either the serialized output (Success) or a failure indicator.
-    ExecutionConfirmed {
-        tx_id: BidirectionalTxId,
-        sign_id: mpc_primitives::SignId,
-        source_chain: Chain,
-        block_height: u64,
-        result: ExecutionOutcome,
-    },
-}
-
-impl std::fmt::Debug for ChainEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ChainEvent::SignRequest(r) => f
-                .debug_tuple("SignRequest")
-                .field(&r.id)
-                .field(&r.chain.as_str())
-                .finish(),
-            ChainEvent::Respond(ev) => f
-                .debug_tuple("Respond")
-                .field(&ev.request_id)
-                .field(&ev.chain.as_str())
-                .finish(),
-            ChainEvent::RespondBidirectional(ev) => f
-                .debug_tuple("RespondBidirectional")
-                .field(&ev.request_id)
-                .field(&ev.chain.as_str())
-                .finish(),
-            ChainEvent::CatchupCompleted => write!(f, "CatchupCompleted"),
-            ChainEvent::Block(b) => write!(f, "Block({b})"),
-            ChainEvent::ExecutionConfirmed {
-                tx_id,
-                sign_id,
-                source_chain,
-                block_height,
-                result,
-            } => f
-                .debug_struct("ExecutionConfirmed")
-                .field("tx_id", tx_id)
-                .field("sign_id", sign_id)
-                .field("source_chain", source_chain)
-                .field("block_height", block_height)
-                .field("result", result)
-                .finish(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum ExecutionOutcome {
-    Success { output: Vec<u8> },
-    Failed,
 }
 
 #[async_trait]
@@ -325,13 +254,13 @@ mod tests {
     use crate::protocol::{Chain, IndexedSignRequest};
     use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
     use crate::storage::checkpoint_storage::CheckpointStorage;
-    use crate::stream::ops::SignatureRespondedEvent;
     use crate::util::current_unix_timestamp;
     use k256::{AffinePoint, Scalar};
     use mockito::Server;
     use mpc_primitives::SignArgs;
     use mpc_primitives::SignId;
     use mpc_primitives::Signature;
+    use mpc_primitives::SignatureRespondedEvent;
     use near_primitives::types::AccountId;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -692,7 +621,7 @@ mod tests {
     async fn test_stream_handles_sign_bidirectional_block_and_recover() {
         let _ = tracing_subscriber::fmt::try_init();
         use crate::sign_bidirectional::SignStatus;
-        use crate::stream::ops::SignBidirectionalEvent as SBE;
+        use mpc_primitives::SignBidirectionalEvent as SBE;
 
         // shared storage so checkpoint persistence is visible to recovered backlog
         let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
@@ -938,7 +867,7 @@ mod tests {
             sign_id,
             Chain::Solana,
             block,
-            crate::stream::ExecutionOutcome::Success { output: vec![] },
+            mpc_primitives::ExecutionOutcome::Success { output: vec![] },
             &backlog,
             sign_tx.clone(),
             Chain::Ethereum,
@@ -964,7 +893,7 @@ mod tests {
 
         // now send a RespondBidirectional event to complete the request
         // RespondBidirectional should also carry a valid signature
-        let respond_bidirectional = crate::stream::ops::RespondBidirectionalEvent {
+        let respond_bidirectional = mpc_primitives::RespondBidirectionalEvent {
             request_id: sign_id.request_id,
             signature: new_mpc_sig,
             chain: Chain::Solana,

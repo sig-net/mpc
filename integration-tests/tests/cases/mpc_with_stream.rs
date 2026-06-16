@@ -172,7 +172,7 @@ async fn run_stale_task_test(drop_respond_event: bool) {
     use integration_tests::mpc_fixture::mock_chain::EventDelivery;
     use mpc_node::protocol::message::{PositProtocolId, SendMessage};
     use mpc_node::protocol::Message;
-    use mpc_node::stream::ChainEvent;
+    use mpc_primitives::ChainEvent;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::Mutex;

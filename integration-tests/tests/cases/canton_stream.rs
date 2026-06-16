@@ -5,10 +5,10 @@ use integration_tests::canton::{
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
 use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
-use mpc_node::protocol::{Chain, IndexedSignRequest, SignKind};
-use mpc_node::sign_bidirectional::hash_rlp_data;
-use mpc_node::stream::{catchup_then_livestream, ChainEvent, ChainStream};
-use mpc_primitives::{ScalarExt, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_node::protocol::{Chain, IndexedSignRequest};
+use mpc_node::sign_bidirectional::{hash_rlp_data, SignBidirectionalEventExt};
+use mpc_node::stream::{catchup_then_livestream, ChainStream};
+use mpc_primitives::{ChainEvent, ScalarExt, SignKind, Signature, LATEST_MPC_KEY_VERSION};
 use serde_json::json;
 use serial_test::serial;
 use std::collections::HashSet;

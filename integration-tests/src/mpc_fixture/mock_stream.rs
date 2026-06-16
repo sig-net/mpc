@@ -1,8 +1,8 @@
 use async_trait::async_trait;
-use mpc_node::protocol::{IndexedSignRequest, SignKind};
+use mpc_node::protocol::IndexedSignRequest;
 use mpc_node::rpc::RpcAction;
-use mpc_node::stream::{ChainEvent, ChainIndexer, ChainStream};
-use mpc_primitives::Chain;
+use mpc_node::stream::{ChainIndexer, ChainStream};
+use mpc_primitives::{Chain, ChainEvent, SignKind};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -163,7 +163,7 @@ impl InnerMockStream {
                 continue;
             }
 
-            let respond_event = mpc_node::stream::ops::SignatureRespondedEvent {
+            let respond_event = mpc_primitives::SignatureRespondedEvent {
                 request_id: publish_action.indexed.id.request_id,
                 signature: publish_action.signature,
                 chain: Chain::Solana,

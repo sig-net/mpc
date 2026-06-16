@@ -13,14 +13,16 @@ use mpc_node::backlog::Backlog;
 use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
-use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign, SignKind};
+use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign};
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::ops::SignBidirectionalEvent as NodeSignBidirectionalEvent;
-use mpc_node::stream::{catchup_then_livestream, run_stream, ChainEvent, ChainStream};
+use mpc_node::stream::{catchup_then_livestream, run_stream, ChainStream};
 use mpc_node::util::current_unix_timestamp;
-use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{
+    ChainEvent, SignArgs, SignBidirectionalEvent as NodeSignBidirectionalEvent, SignId, SignKind,
+    LATEST_MPC_KEY_VERSION,
+};
 use near_primitives::types::AccountId;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
@@ -530,8 +532,8 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         ))
         .await;
 
-    let execution_tx = mpc_node::sign_bidirectional::BidirectionalTx {
-        id: mpc_node::sign_bidirectional::BidirectionalTxId(B256::from([0x44; 32])),
+    let execution_tx = mpc_primitives::BidirectionalTx {
+        id: mpc_primitives::BidirectionalTxId(B256::from([0x44; 32]).0),
         sender: [0u8; 32],
         serialized_transaction: vec![],
         source_chain: Chain::Solana,
@@ -546,7 +548,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         request_id: execution_sign_id.request_id,
-        from_address: ctx.wallet,
+        from_address: **ctx.wallet,
         nonce: checkpoint_nonce,
     };
     backlog
@@ -717,8 +719,8 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
     let backlog = ctx.backlog();
 
     // Register an execution watcher with an intentionally stale nonce to trigger the staleness path.
-    let tx = mpc_node::sign_bidirectional::BidirectionalTx {
-        id: mpc_node::sign_bidirectional::BidirectionalTxId(B256::from([9u8; 32])),
+    let tx = mpc_primitives::BidirectionalTx {
+        id: mpc_primitives::BidirectionalTxId(B256::from([9u8; 32]).0),
         sender: [0u8; 32],
         serialized_transaction: vec![],
         source_chain: Chain::Solana,
@@ -733,7 +735,7 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         request_id: [7u8; 32],
-        from_address: ctx.wallet,
+        from_address: **ctx.wallet,
         nonce: 0,
     };
     let sign_id = SignId::new([7u8; 32]);
@@ -832,8 +834,8 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     // Register the execution watcher only after catchup has completed and the
     // transaction is already in the past relative to the stream.
     let sign_id = SignId::new([0x88; 32]);
-    let tx_id = mpc_node::sign_bidirectional::BidirectionalTxId(tx_hash);
-    let tx = mpc_node::sign_bidirectional::BidirectionalTx {
+    let tx_id = mpc_primitives::BidirectionalTxId(tx_hash.0);
+    let tx = mpc_primitives::BidirectionalTx {
         id: tx_id,
         sender: [0u8; 32],
         serialized_transaction: vec![],
@@ -849,7 +851,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         request_id: sign_id.request_id,
-        from_address: ctx.wallet,
+        from_address: **ctx.wallet,
         nonce: 0,
     };
     backlog

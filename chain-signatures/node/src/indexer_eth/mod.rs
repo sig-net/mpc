@@ -6,10 +6,9 @@ pub mod indexer_eth_helios;
 use crate::backlog::Backlog;
 use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
-use crate::protocol::{Chain, IndexedSignRequest};
+use crate::protocol::Chain;
 use crate::respond_bidirectional::CompletedTx;
-use crate::stream::ops::SignatureRespondedEvent;
-use crate::stream::{AsyncCatchupIter, ChainEvent, ChainIndexer, ChainStream, ExecutionOutcome};
+use crate::stream::{AsyncCatchupIter, ChainIndexer, ChainStream};
 use crate::util::retry;
 
 use alloy::eips::BlockNumberOrTag;
@@ -23,7 +22,9 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{
-    SignArgs, SignId, Signature as MpcSignature, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+    BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, IndexedSignRequest, SignArgs,
+    SignId, Signature as MpcSignature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
+    MAX_SECP256K1_SCALAR,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -1036,9 +1037,9 @@ impl EthereumIndexer {
 
     async fn execution_confirmed_event(
         &self,
-        tx_id: crate::sign_bidirectional::BidirectionalTxId,
+        tx_id: BidirectionalTxId,
         sign_id: SignId,
-        pending_tx: &crate::sign_bidirectional::BidirectionalTx,
+        pending_tx: &BidirectionalTx,
         block_number: u64,
         receipt: &alloy::rpc::types::TransactionReceipt,
     ) -> Option<ChainEvent> {
@@ -1096,12 +1097,12 @@ impl EthereumIndexer {
 
     async fn backfill_execution_confirmation(
         &self,
-        tx_id: crate::sign_bidirectional::BidirectionalTxId,
+        tx_id: BidirectionalTxId,
         sign_id: SignId,
-        pending_tx: &crate::sign_bidirectional::BidirectionalTx,
+        pending_tx: &BidirectionalTx,
         current_block_number: u64,
     ) -> anyhow::Result<BackfillOutcome> {
-        let Some(tx) = self.client.get_transaction_by_hash(tx_id.0).await? else {
+        let Some(tx) = self.client.get_transaction_by_hash(tx_id.0.into()).await? else {
             return Ok(BackfillOutcome::NotObserved);
         };
 
@@ -1232,7 +1233,7 @@ impl EthereumIndexer {
                 .client
                 .as_ref()
                 .get_nonce(
-                    tx.from_address,
+                    tx.from_address.into(),
                     BlockId::Number(BlockNumberOrTag::Number(block_number)),
                 )
                 .await
@@ -1535,13 +1536,15 @@ mod tests {
     #[cfg(feature = "helios")]
     use crate::indexer_eth::indexer_eth_helios;
     use crate::protocol::Chain;
-    use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId};
-    use crate::stream::{AsyncCatchupIter, ChainEvent, ChainIndexer, ExecutionOutcome};
+    use crate::stream::{AsyncCatchupIter, ChainIndexer};
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{address, b256, Address};
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
-    use mpc_primitives::{SignId, LATEST_MPC_KEY_VERSION};
+    use mpc_primitives::{
+        BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, SignId,
+        LATEST_MPC_KEY_VERSION,
+    };
     use serde_json::json;
     use std::sync::Arc;
     use tokio::sync::{mpsc, Notify};
@@ -1996,7 +1999,7 @@ mod tests {
         let backlog = Backlog::new();
         let sign_id = SignId::new([0x55; 32]);
         let tx = BidirectionalTx {
-            id: BidirectionalTxId(tx_hash),
+            id: BidirectionalTxId(tx_hash.0),
             sender: [0u8; 32],
             serialized_transaction: vec![],
             source_chain: Chain::Solana,
@@ -2011,7 +2014,7 @@ mod tests {
             output_deserialization_schema: vec![],
             respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             request_id: sign_id.request_id,
-            from_address,
+            from_address: **from_address,
             nonce: 0,
         };
         backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;
@@ -2053,7 +2056,7 @@ mod tests {
                 block_height,
                 result,
             } => {
-                assert_eq!(*event_tx_id, BidirectionalTxId(tx_hash));
+                assert_eq!(*event_tx_id, BidirectionalTxId(tx_hash.0));
                 assert_eq!(*event_sign_id, sign_id);
                 assert_eq!(*source_chain, Chain::Solana);
                 assert_eq!(*block_height, 2);

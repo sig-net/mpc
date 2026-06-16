@@ -1,7 +1,7 @@
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::{Chain, IndexedSignRequest, Sign};
+use crate::protocol::{Chain, Sign};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
 
@@ -11,8 +11,10 @@ use anyhow::{anyhow, Result};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
-use mpc_primitives::Signature;
-use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR};
+use mpc_primitives::{
+    IndexedSignRequest, RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignId,
+    Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+};
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{twox_128, H256};
 use sp_runtime::traits::BlakeTwo256;
@@ -288,7 +290,7 @@ impl HydrationSignBidirectionalRequestedEvent {
             },
             Chain::Hydration,
             crate::util::current_unix_timestamp(),
-            crate::stream::ops::SignBidirectionalEvent {
+            SignBidirectionalEvent {
                 sender: self.sender,
                 serialized_transaction: self.serialized_transaction.clone(),
                 caip2_id: self.caip2_id.clone(),
@@ -607,7 +609,7 @@ pub async fn run(
                     "Hydration::Signet::RespondBidirectionalEvent in block #{number} ({hash:?})"
                 );
                 if let Err(e) = crate::stream::ops::process_respond_bidirectional_event(
-                    crate::stream::ops::RespondBidirectionalEvent {
+                    RespondBidirectionalEvent {
                         request_id,
                         signature,
                         chain: crate::protocol::Chain::Hydration,
@@ -677,7 +679,7 @@ fn decode_signature_requested(
 
 fn decode_signature_responded(
     ev: &EventDetails<SubstrateConfig>,
-) -> anyhow::Result<crate::stream::ops::SignatureRespondedEvent> {
+) -> anyhow::Result<SignatureRespondedEvent> {
     let fields = ev.field_values()?;
 
     let request_id = get_named_bytes32(&fields, "request_id")?;
@@ -686,7 +688,7 @@ fn decode_signature_responded(
     let sig_value = get_named(&fields, "signature")?;
     let mpc_sig = parse_signature(sig_value)?;
 
-    Ok(crate::stream::ops::SignatureRespondedEvent {
+    Ok(SignatureRespondedEvent {
         request_id,
         signature: mpc_sig,
         chain: Chain::Hydration,
