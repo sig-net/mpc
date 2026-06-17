@@ -838,7 +838,7 @@ impl EthereumClient {
 }
 
 pub struct EthereumIndexer {
-    eth: EthConfig,
+    config: EthConfig,
     // TODO: Ethereum still needs backlog to get active watchers, remove once this logic is moved to the Node core
     backlog: Backlog,
     client: Arc<EthereumClient>,
@@ -846,6 +846,7 @@ pub struct EthereumIndexer {
     contract_address: Address,
     catchup_complete: Arc<Notify>,
     live_blocks_rx: Option<mpsc::Receiver<MaybeBlock>>,
+    start_height: Option<u64>,
 }
 
 /// Result of a `backfill_execution_confirmation`. `Observed` carries an
@@ -860,24 +861,26 @@ enum BackfillOutcome {
 
 impl EthereumIndexer {
     pub async fn new(
-        eth: EthConfig,
+        config: EthConfig,
         backlog: Backlog,
         events_tx: mpsc::Sender<ChainEvent>,
+        start_height: Option<u64>,
     ) -> anyhow::Result<Self> {
-        let client = Arc::new(EthereumClient::new(eth.clone()).await?);
-        let contract_address = format!("0x{}", eth.contract_address);
+        let client = Arc::new(EthereumClient::new(config.clone()).await?);
+        let contract_address = format!("0x{}", config.contract_address);
         let contract_address = Address::from_str(&contract_address).with_context(|| {
             format!("failed to parse ethereum contract address: {contract_address}")
         })?;
 
         Ok(Self {
-            eth,
+            config,
             backlog,
             client,
             events_tx,
             contract_address,
             catchup_complete: Arc::new(Notify::new()),
             live_blocks_rx: None,
+            start_height,
         })
     }
 
@@ -1279,7 +1282,7 @@ impl EthereumIndexer {
             execution_events,
         }: BlockAndRequests,
     ) -> anyhow::Result<()> {
-        if !self.eth.optimistic_requests {
+        if !self.config.optimistic_requests {
             self.wait_for_finalized_block(block_number).await?;
         }
 
@@ -1327,7 +1330,7 @@ impl EthereumIndexer {
     }
 
     async fn wait_for_finalized_block(&self, block_number: BlockNumber) -> anyhow::Result<()> {
-        let retry_interval = Duration::from_millis(self.eth.refresh_finalized_interval);
+        let retry_interval = Duration::from_millis(self.config.refresh_finalized_interval);
         let mut last_final_block_number: Option<BlockNumber> = None;
 
         loop {
@@ -1409,10 +1412,15 @@ impl ChainIndexer for EthereumIndexer {
         rx.recv().await
     }
 
-    async fn catchup_range(&self, start_height: u64, anchor_height: u64) -> Self::Iter {
+    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
+        let current_block = self
+            .start_height
+            .map(|n| n.saturating_add(1))
+            .unwrap_or(anchor_height);
+
         let catchup_start = self
             .client
-            .clamp_oldest_supported(start_height, anchor_height);
+            .clamp_oldest_supported(current_block, anchor_height);
 
         let catchup_iter = CatchupIter::new(self.client.clone(), catchup_start, anchor_height);
 
@@ -1480,12 +1488,15 @@ impl ChainIndexer for EthereumIndexer {
 /// `start()` after recovery has completed.
 pub struct EthereumStream {
     events_rx: Option<mpsc::Receiver<ChainEvent>>,
-    start_state: Option<EthereumIndexer>,
+    events_tx: Option<mpsc::Sender<ChainEvent>>,
+    // start_state: Option<EthereumIndexer>,
+    config: Option<EthConfig>,
+    backlog: Backlog,
 }
 
 impl EthereumStream {
     pub async fn new(eth: Option<EthConfig>, backlog: Backlog) -> anyhow::Result<Self> {
-        let Some(eth) = eth else {
+        let Some(config) = eth else {
             tracing::warn!(
                 "ethereum indexer is disabled: no EthConfig provided \
                  (check that all --eth-* CLI flags were supplied)"
@@ -1493,16 +1504,17 @@ impl EthereumStream {
             anyhow::bail!("ethereum indexer is disabled: no EthConfig provided");
         };
         tracing::info!(
-            eth_config = ?eth,
+            config = ?config,
             "creating ethereum indexer stream"
         );
 
         let (events_tx, events_rx) = crate::stream::channel();
-        let indexer = EthereumIndexer::new(eth, backlog, events_tx).await?;
 
         Ok(Self {
             events_rx: Some(events_rx),
-            start_state: Some(indexer),
+            config: Some(config),
+            events_tx: Some(events_tx),
+            backlog,
         })
     }
 }
@@ -1511,17 +1523,14 @@ impl EthereumStream {
 impl ChainStream for EthereumStream {
     type Indexer = EthereumIndexer;
 
-    async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-        self.start_state
-            .take()
-            .context("ethereum stream already started")
+    async fn start(&mut self, start_height: Option<u64>) -> anyhow::Result<Self::Indexer> {
+        let config = self.config.take().context("stream already started")?;
+        let events_tx = self.events_tx.take().unwrap();
+        EthereumIndexer::new(config, self.backlog.clone(), events_tx, start_height).await
     }
 
     async fn next_event(&mut self) -> Option<ChainEvent> {
-        match self.events_rx.as_mut() {
-            Some(rx) => rx.recv().await,
-            None => None,
-        }
+        self.events_rx.as_mut()?.recv().await
     }
 }
 #[cfg(test)]
@@ -1626,7 +1635,7 @@ mod tests {
             .await;
 
         let mut indexer = EthereumIndexer {
-            eth: EthConfig {
+            config: EthConfig {
                 account_sk: String::new(),
                 consensus_rpc_http_url: server.url(),
                 execution_rpc_http_url: server.url(),
@@ -1645,6 +1654,7 @@ mod tests {
             contract_address: Address::ZERO,
             catchup_complete: Arc::new(Notify::new()),
             live_blocks_rx: None,
+            start_height: None,
         };
 
         indexer
@@ -1665,7 +1675,7 @@ mod tests {
         let backlog = Backlog::new();
         let (events_tx, mut events_rx) = mpsc::channel(1);
         let mut indexer = EthereumIndexer {
-            eth: EthConfig {
+            config: EthConfig {
                 account_sk: String::new(),
                 consensus_rpc_http_url: String::new(),
                 execution_rpc_http_url: String::new(),
@@ -1684,6 +1694,7 @@ mod tests {
             contract_address: Address::ZERO,
             catchup_complete: Arc::new(Notify::new()),
             live_blocks_rx: None,
+            start_height: None,
         };
 
         let err = indexer
@@ -2016,7 +2027,7 @@ mod tests {
 
         let (events_tx, _events_rx) = mpsc::channel(1);
         let indexer = EthereumIndexer {
-            eth: EthConfig {
+            config: EthConfig {
                 account_sk: String::new(),
                 consensus_rpc_http_url: server.url(),
                 execution_rpc_http_url: server.url(),
@@ -2035,6 +2046,7 @@ mod tests {
             contract_address: Address::ZERO,
             catchup_complete: Arc::new(Notify::new()),
             live_blocks_rx: None,
+            start_height: None,
         };
 
         let events = indexer
