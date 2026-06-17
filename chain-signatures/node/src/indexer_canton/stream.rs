@@ -325,9 +325,9 @@ impl ChainIndexer for CantonIndexer {
         Ok(Some(anchor_height))
     }
 
-    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
+    async fn catchup_range(&self, start_height: u64, anchor_height: u64) -> Self::Iter {
         // After a reconnect, we resume from last_seen_offset, so catchup should start there.
-        stream::iter(catchup_offset_range(self.last_seen_offset, anchor_height))
+        stream::iter(catchup_offset_range(start_height, anchor_height))
     }
 
     async fn process_catchup(&mut self, &item: &Self::Block) -> anyhow::Result<()> {
