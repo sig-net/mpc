@@ -11,7 +11,7 @@ use mpc_node::indexer_canton::contracts::{
     EvmType2TransactionParams, RespondBidirectionalEventPayload, SignatureRespondedEventPayload,
 };
 use mpc_node::indexer_canton::ledger_api::{
-    ContractEntry, Event, SubmitAndWaitForTransactionResponse,
+    ContractEntry, CreatedEvent, DisclosedContract, Event, SubmitAndWaitForTransactionResponse,
 };
 use mpc_node::indexer_canton::{CantonAuthConfig, CantonConfig, parse_canton_signature};
 use mpc_node::respond_bidirectional::CANTON_RESPOND_BIDIRECTIONAL_PATH;
@@ -35,11 +35,26 @@ const ERC20_BALANCE_OF_SELECTOR: &str = "70a08231";
 const LIVE_EVM_CHAIN_ID: u64 = 1;
 const MOCK_DEPOSIT_AMOUNT: u64 = 100_000_000;
 
+// CC signature-fee plumbing (mirrors canton-sig fee.ts / Signet.Fee.Amulet).
+const FEE_PRICE_CONFIG_TID: &str = "#signet-fee-amulet:Signet.Fee.Amulet:FeePriceConfig";
+const AMULET_TID: &str = "#splice-amulet:Splice.Amulet:Amulet";
+const PRICE_CONFIG_CONTEXT_KEY: &str = "signet.network/fee/price-config";
+const TRANSFER_FACTORY_CONTEXT_KEY: &str = "signet.network/fee/transfer-factory";
+const TRANSFER_FACTORY_REGISTRY_PATH: &str = "/registry/transfer-instruction/v1/transfer-factory";
+// Signer package-NAME ref: the MPC indexer subscribes to the Signer package by name (a
+// package-id hash is rejected); the disclosure envelope carries the hash form separately.
+const SIGNER_TID: &str = "#signet-signer-v1:Signer:Signer";
+
 struct LiveCanton {
     config: CantonConfig,
     client: CantonTestClient,
     party_id: String,
     signer_cid: String,
+    // Disclosures sourced from the public endpoint (requester view), passed on RequestDeposit.
+    signer_disclosure: DisclosedContract,
+    fee_registration_cid: String,
+    fee_price_config_cid: String,
+    fee_disclosures: Vec<DisclosedContract>,
 }
 
 impl LiveCanton {
@@ -58,7 +73,22 @@ impl LiveCanton {
         let ledger_api_user = required_env("MPC_CANTON_LEDGER_API_USER")?;
         let party_id = required_env("MPC_CANTON_PARTY_ID")?;
 
-        let mut config = CantonConfig {
+        let disclosure_api_url = required_env("MPC_CANTON_DISCLOSURE_API_URL")?;
+        // Source the deployed disclosures the way an external requester does — the
+        // sigNetwork-only Signer and the FA-signed fee infra it cannot read from its own ACS.
+        let endpoint = fetch_endpoint_disclosures(&disclosure_api_url)
+            .await
+            .context("fetch deployed disclosures from MPC_CANTON_DISCLOSURE_API_URL")?;
+        anyhow::ensure!(
+            endpoint.signer.template_id.ends_with(":Signer:Signer"),
+            "disclosure API signer is not a Signer template: {}",
+            endpoint.signer.template_id
+        );
+        let signer_cid = endpoint.signer.contract_id.clone();
+        let fee_registration_cid = find_fee_cid(&endpoint.fee, ":FeeCollectorRegistration")?;
+        let fee_price_config_cid = find_fee_cid(&endpoint.fee, ":FeePriceConfig")?;
+
+        let config = CantonConfig {
             json_api_url,
             json_api_ws_url,
             auth: CantonAuthConfig {
@@ -70,30 +100,73 @@ impl LiveCanton {
             },
             ledger_api_user,
             party_id: party_id.clone(),
-            signer_contract_id: String::new(),
-            signer_template_id: String::new(),
+            signer_contract_id: signer_cid.clone(),
+            // Name ref for the indexer subscription; the disclosure's hash templateId is used
+            // only for the disclosed contract on RequestDeposit.
+            signer_template_id: SIGNER_TID.to_string(),
         };
 
         let client = CantonTestClient::new(config.clone())
             .await
             .context("create live Canton test client")?;
-        let (signer_cid, signer_template_id) = match configured_signer()? {
-            Some(signer) => signer,
-            None => create_live_signer(&client, &party_id)
-                .await
-                .context("create live Canton Signer contract")?,
-        };
-        config.signer_contract_id = signer_cid.clone();
-        config.signer_template_id = signer_template_id.clone();
-        validate_live_signer(&client, &party_id, &signer_cid, &signer_template_id).await?;
 
         Ok(Self {
             config,
             client,
             party_id,
             signer_cid,
+            signer_disclosure: endpoint.signer,
+            fee_registration_cid,
+            fee_price_config_cid,
+            fee_disclosures: endpoint.fee,
         })
     }
+}
+
+/// The subset of the disclosure-API response (`{ network, signer, vault, fee }`) the test
+/// needs: the Signer envelope and the FA-signed fee infra disclosures.
+struct EndpointDisclosures {
+    signer: DisclosedContract,
+    fee: Vec<DisclosedContract>,
+}
+
+/// GET the deployed apps/disclosure-api endpoint the way a requester does — it serves the
+/// ledger-public disclosure envelopes (no auth).
+async fn fetch_endpoint_disclosures(url: &str) -> Result<EndpointDisclosures> {
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?
+        .error_for_status()
+        .with_context(|| format!("disclosure API {url}"))?
+        .json()
+        .await
+        .context("parse disclosure API response")?;
+    let signer: DisclosedContract = body
+        .get("signer")
+        .cloned()
+        .context("disclosure API response missing signer")
+        .and_then(|v| serde_json::from_value(v).context("parse signer disclosure"))?;
+    anyhow::ensure!(
+        !signer.created_event_blob.is_empty(),
+        "disclosure API signer has no createdEventBlob"
+    );
+    let fee: Vec<DisclosedContract> = body
+        .get("fee")
+        .map(|f| serde_json::from_value(f.clone()))
+        .transpose()
+        .context("parse fee disclosures")?
+        .unwrap_or_default();
+    Ok(EndpointDisclosures { signer, fee })
+}
+
+/// The contract id of the fee disclosure whose template id ends with `suffix`.
+fn find_fee_cid(fee: &[DisclosedContract], suffix: &str) -> Result<String> {
+    fee.iter()
+        .find(|d| d.template_id.ends_with(suffix))
+        .map(|d| d.contract_id.clone())
+        .with_context(|| format!("disclosure API fee[] missing a {suffix} entry"))
 }
 
 // TODO: Remove this live-ledger test once the local mock-oauth2-server Canton
@@ -118,11 +191,12 @@ async fn run_live_canton_vault_deposit_flow(live: LiveCanton) -> Result<()> {
     let operators = vec![live.party_id.clone()];
     let sender = compute_operators_hash(&operators);
 
-    // Free-mode CC fee: reuse the deployed FeeCollectorRegistration + FeePriceConfig
-    // (feeAmount = 0). The signet-fee-amulet charge validates the price config and returns
-    // before reading inputs/factory, so empty inputs + the price-config context suffice.
-    let fee_registration_cid = required_env("MPC_CANTON_FEE_REGISTRATION_CID")?;
-    let fee_price_config_cid = required_env("MPC_CANTON_FEE_PRICE_CONFIG_CID")?;
+    // CC signature fee. The fee infra (registration + price config) is sourced from the
+    // disclosure endpoint (live.fee_*); prepare_fee_inputs reads the FeePriceConfig and picks
+    // the mode: free (feeAmount = 0) → empty inputs + price-config-only context; paid
+    // (feeAmount > 0) → cover the fee from Amulet holdings and resolve the CC TransferFactory
+    // + disclosures from the token-standard registry (MPC_CANTON_CC_REGISTRY_URL).
+    let fee_registry_url = optional_env("MPC_CANTON_CC_REGISTRY_URL");
 
     let nodes = cluster::spawn()
         .disable_prestockpile()
@@ -199,6 +273,30 @@ async fn run_live_canton_vault_deposit_flow(live: LiveCanton) -> Result<()> {
     anyhow::ensure!(seeded, "failed to seed mock ERC20 user balance");
 
     let deposit_params = vault_deposit_evm_params(token_address, vault_address, deposit_amount);
+
+    // Resolve the CC fee just before RequestDeposit so the registry's open mining round
+    // (a per-submission disclosure that rotates) is fresh at charge time.
+    let ledger_client = CantonClient::new(&live.config).await?;
+    let fee = prepare_fee_inputs(
+        &ledger_client,
+        &live.party_id,
+        &live.fee_price_config_cid,
+        fee_registry_url.as_deref(),
+    )
+    .await
+    .context("prepare CC fee inputs")?;
+
+    // Requester-view disclosures: the endpoint-sourced Signer + FA-signed fee infra (which a
+    // requester can't read from its own ACS), plus the registry's CC contracts resolved above.
+    let mut request_disclosures = vec![live.signer_disclosure.clone()];
+    request_disclosures.extend(live.fee_disclosures.iter().cloned());
+    request_disclosures.extend(fee.disclosures.iter().cloned());
+    tracing::info!(
+        fee_inputs = fee.inputs.len(),
+        disclosures = request_disclosures.len(),
+        "prepared requester-view CC fee inputs for live Vault.RequestDeposit"
+    );
+
     let deposit_result = live
         .client
         .exercise_choice(
@@ -217,21 +315,11 @@ async fn run_live_canton_vault_deposit_flow(live: LiveCanton) -> Result<()> {
                 "params": "",
                 "outputDeserializationSchema": EVM_TYPE2_BOOL_OUTPUT_SCHEMA,
                 "respondSerializationSchema": EVM_TYPE2_BOOL_OUTPUT_SCHEMA,
-                "feeRegistrationCid": fee_registration_cid,
-                "feeInputs": [],
-                "feeExtraArgs": {
-                    "context": {
-                        "values": {
-                            "signet.network/fee/price-config": {
-                                "tag": "AV_ContractId",
-                                "value": fee_price_config_cid
-                            }
-                        }
-                    },
-                    "meta": { "values": {} }
-                },
+                "feeRegistrationCid": live.fee_registration_cid.clone(),
+                "feeInputs": fee.inputs.clone(),
+                "feeExtraArgs": fee.extra_args.clone(),
             }),
-            &[],
+            &request_disclosures,
         )
         .await
         .context("exercise Vault.RequestDeposit")?;
@@ -327,7 +415,6 @@ async fn run_live_canton_vault_deposit_flow(live: LiveCanton) -> Result<()> {
     verify_response_signature(root_pk, &sender, &respond_payload)
         .context("verify live Vault deposit response signature")?;
 
-    let ledger_client = CantonClient::new(&live.config).await?;
     let signature_event_cid = find_active_contract_cid(
         &ledger_client,
         &[&live.party_id],
@@ -385,6 +472,213 @@ async fn run_live_canton_vault_deposit_flow(live: LiveCanton) -> Result<()> {
     );
 
     Ok(())
+}
+
+/// The CC fee inputs threaded into `Vault.RequestDeposit`.
+struct FeeInputs {
+    inputs: Vec<String>,
+    extra_args: serde_json::Value,
+    disclosures: Vec<DisclosedContract>,
+}
+
+/// Assemble the CC signature-fee inputs for the configured `FeePriceConfig`.
+///
+/// Mirrors `canton-sig`'s `prepareFeeInputs`: free mode (feeAmount = 0) returns empty
+/// inputs and a price-config-only context (the `signet-fee-amulet` charge returns before
+/// reading inputs/factory); paid mode (feeAmount > 0) covers the fee from the party's
+/// Amulet holdings and resolves the CC `TransferFactory` + disclosures from the
+/// token-standard registry, then folds them into the opaque `feeExtraArgs` context.
+async fn prepare_fee_inputs(
+    ledger: &CantonClient,
+    party: &str,
+    fee_price_config_cid: &str,
+    registry_url: Option<&str>,
+) -> Result<FeeInputs> {
+    let cfg = fetch_price_config(ledger, party, fee_price_config_cid).await?;
+
+    let mut context = serde_json::Map::new();
+    context.insert(
+        PRICE_CONFIG_CONTEXT_KEY.to_string(),
+        json!({ "tag": "AV_ContractId", "value": fee_price_config_cid }),
+    );
+
+    let fee_amount: f64 = cfg.fee_amount.parse().context("parse FeePriceConfig.feeAmount")?;
+    if fee_amount <= 0.0 {
+        return Ok(FeeInputs {
+            inputs: vec![],
+            extra_args: json!({ "context": { "values": context }, "meta": { "values": {} } }),
+            disclosures: vec![],
+        });
+    }
+
+    // Paid mode.
+    let registry_url =
+        registry_url.context("paid fee (feeAmount > 0) requires MPC_CANTON_CC_REGISTRY_URL")?;
+    let inputs = fetch_amulet_holdings(ledger, party).await?;
+    anyhow::ensure!(
+        !inputs.is_empty(),
+        "no Amulet holdings to cover the {} CC fee for {party}",
+        cfg.fee_amount
+    );
+    let token = ledger.bearer_token().await?;
+    let factory = resolve_transfer_factory(registry_url, &token, party, &cfg, &inputs).await?;
+
+    // Merge the price-config key, the registry's context keys (AmuletRules / OpenMiningRound),
+    // and the transfer-factory key — exactly what `feeCollector_chargeImpl` reads.
+    if let Some(obj) = factory.context_values.as_object() {
+        for (k, v) in obj {
+            context.insert(k.clone(), v.clone());
+        }
+    }
+    context.insert(
+        TRANSFER_FACTORY_CONTEXT_KEY.to_string(),
+        json!({ "tag": "AV_ContractId", "value": factory.factory_id }),
+    );
+
+    Ok(FeeInputs {
+        inputs,
+        extra_args: json!({ "context": { "values": context }, "meta": { "values": {} } }),
+        disclosures: factory.disclosures,
+    })
+}
+
+/// The active `CreatedEvent`s for a template visible to `parties` — the shape every live
+/// query here reduces to.
+async fn active_events(
+    ledger: &CantonClient,
+    parties: &[&str],
+    template_id: &str,
+) -> Result<Vec<CreatedEvent>> {
+    Ok(ledger
+        .fetch_active_contracts(parties, Some(template_id), false)
+        .await?
+        .into_iter()
+        .filter_map(|entry| match entry.contract_entry {
+            Some(ContractEntry::JsActiveContract(ac)) => Some(ac.created_event),
+            _ => None,
+        })
+        .collect())
+}
+
+struct PriceConfig {
+    fee_amount: String,
+    instrument_admin: String,
+    instrument_id: String,
+    fee_receiver: String,
+}
+
+async fn fetch_price_config(ledger: &CantonClient, party: &str, cid: &str) -> Result<PriceConfig> {
+    let event = active_events(ledger, &[party], FEE_PRICE_CONFIG_TID)
+        .await?
+        .into_iter()
+        .find(|ce| ce.contract_id == cid)
+        .with_context(|| format!("FeePriceConfig {cid} not active or visible to {party}"))?;
+    let field = |k: &str| -> Result<String> {
+        event
+            .payload
+            .get(k)
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .with_context(|| format!("FeePriceConfig.{k}"))
+    };
+    Ok(PriceConfig {
+        fee_amount: field("feeAmount")?,
+        instrument_admin: field("instrumentAdmin")?,
+        instrument_id: field("instrumentId")?,
+        fee_receiver: field("feeReceiver")?,
+    })
+}
+
+/// All the party's Amulet holding cids — the inputs for the CC fee transfer. The Amulet
+/// template excludes locked holdings (those are `LockedAmulet`), so all are spendable; the
+/// transfer consumes only what the fee needs and returns the rest as change.
+async fn fetch_amulet_holdings(ledger: &CantonClient, party: &str) -> Result<Vec<String>> {
+    Ok(active_events(ledger, &[party], AMULET_TID)
+        .await?
+        .into_iter()
+        .map(|ce| ce.contract_id)
+        .collect())
+}
+
+struct ResolvedFactory {
+    factory_id: String,
+    context_values: serde_json::Value,
+    disclosures: Vec<DisclosedContract>,
+}
+
+/// Resolve the CC `TransferFactory` for the fee transfer via the token-standard registry
+/// (the validator scan-proxy, authed with the ledger bearer). Mirrors canton-sig's
+/// `getTransferFactoryForFee` request/response shape.
+async fn resolve_transfer_factory(
+    registry_url: &str,
+    token: &str,
+    party: &str,
+    cfg: &PriceConfig,
+    inputs: &[String],
+) -> Result<ResolvedFactory> {
+    let now = chrono::Utc::now();
+    let requested_at = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let execute_before =
+        (now + chrono::Duration::hours(24)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+    let body = json!({
+        "choiceArguments": {
+            "expectedAdmin": cfg.instrument_admin,
+            "transfer": {
+                "sender": party,
+                "receiver": cfg.fee_receiver,
+                "amount": cfg.fee_amount,
+                "instrumentId": { "admin": cfg.instrument_admin, "id": cfg.instrument_id },
+                "lock": null,
+                "requestedAt": requested_at,
+                "executeBefore": execute_before,
+                "inputHoldingCids": inputs,
+                "meta": { "values": { "splice.lfdecentralizedtrust.org/reason": "sigNetwork CC signature fee" } }
+            },
+            "extraArgs": { "context": { "values": {} }, "meta": { "values": {} } }
+        },
+        "excludeDebugFields": true
+    });
+
+    let url = format!("{registry_url}{TRANSFER_FACTORY_REGISTRY_PATH}");
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    anyhow::ensure!(status.is_success(), "registry {url} returned {status}: {text}");
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).with_context(|| format!("parse registry response: {text}"))?;
+    let factory_id = parsed
+        .get("factoryId")
+        .and_then(|v| v.as_str())
+        .context("registry response missing factoryId")?
+        .to_string();
+    let choice_context = parsed
+        .get("choiceContext")
+        .context("registry response missing choiceContext")?;
+    let context_values = choice_context
+        .get("choiceContextData")
+        .and_then(|d| d.get("values"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let disclosures: Vec<DisclosedContract> = choice_context
+        .get("disclosedContracts")
+        .map(|d| serde_json::from_value(d.clone()))
+        .transpose()
+        .context("parse registry disclosedContracts")?
+        .unwrap_or_default();
+
+    Ok(ResolvedFactory {
+        factory_id,
+        context_values,
+        disclosures,
+    })
 }
 
 fn vault_deposit_evm_params(
@@ -496,17 +790,12 @@ async fn find_active_contract_cid<F>(
 where
     F: Fn(&serde_json::Value) -> bool,
 {
-    let entries = client
-        .fetch_active_contracts(parties, Some(template_id), false)
-        .await?;
-    for entry in &entries {
-        if let Some(ContractEntry::JsActiveContract(ac)) = &entry.contract_entry {
-            if predicate(&ac.created_event.payload) {
-                return Ok(ac.created_event.contract_id.clone());
-            }
-        }
-    }
-    anyhow::bail!("no active contract for {template_id} matching predicate")
+    active_events(client, parties, template_id)
+        .await?
+        .into_iter()
+        .find(|ce| predicate(&ce.payload))
+        .map(|ce| ce.contract_id)
+        .with_context(|| format!("no active contract for {template_id} matching predicate"))
 }
 
 fn verify_response_signature(
@@ -551,48 +840,6 @@ fn encode_signed_eip1559(
     Ok(TxEip1559::try_from(params)?
         .into_signed(signature)
         .encoded_2718())
-}
-
-async fn create_live_signer(client: &CantonTestClient, party_id: &str) -> Result<(String, String)> {
-    let signer_result = client
-        .create_contract(
-            &[party_id],
-            "#signet-signer-v1:Signer:Signer",
-            json!({ "sigNetwork": party_id }),
-        )
-        .await?;
-    find_created_contract(&signer_result, "Signer")
-}
-
-async fn validate_live_signer(
-    client: &CantonTestClient,
-    party_id: &str,
-    signer_cid: &str,
-    signer_template_id: &str,
-) -> Result<()> {
-    let signer = client
-        .get_disclosed_contract(&[party_id], "#signet-signer-v1:Signer:Signer", signer_cid)
-        .await
-        .with_context(|| format!("live Signer contract is not active or visible: {signer_cid}"))?;
-    anyhow::ensure!(
-        signer.template_id.ends_with(":Signer:Signer")
-            && signer_template_id.ends_with(":Signer:Signer"),
-        "configured live Signer is not a Signer template: env={signer_template_id}, ledger={}",
-        signer.template_id
-    );
-    Ok(())
-}
-
-fn configured_signer() -> Result<Option<(String, String)>> {
-    let signer_cid = optional_env("MPC_CANTON_SIGNER_CONTRACT_ID");
-    let signer_template_id = optional_env("MPC_CANTON_SIGNER_TEMPLATE_ID");
-    match (signer_cid, signer_template_id) {
-        (Some(cid), Some(template_id)) => Ok(Some((cid, template_id))),
-        (None, None) => Ok(None),
-        _ => anyhow::bail!(
-            "set both MPC_CANTON_SIGNER_CONTRACT_ID and MPC_CANTON_SIGNER_TEMPLATE_ID, or neither"
-        ),
-    }
 }
 
 fn live_test_id() -> Result<String> {

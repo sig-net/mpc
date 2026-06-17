@@ -73,6 +73,7 @@ mpc-node = { path = "../chain-signatures/node", default-features = false, featur
 mpc-primitives.workspace = true
 
 [dev-dependencies]
+chrono = "0.4"
 criterion = "0.5.1"
 serial_test = "3"
 test-log = { version = "0.2.12", features = ["log", "trace"] }
