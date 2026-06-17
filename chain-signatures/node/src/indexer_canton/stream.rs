@@ -5,7 +5,7 @@ use crate::stream::{ChainIndexer, ChainStream};
 
 use alloy::primitives::keccak256;
 use async_trait::async_trait;
-use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::stream::{self, SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use mpc_primitives::{
     ChainEvent, RespondBidirectionalEvent, ScalarExt, Signature, SignatureRespondedEvent,
@@ -311,7 +311,7 @@ fn catchup_offset_range(checkpoint: u64, anchor_height: u64) -> Range<u64> {
 impl ChainIndexer for CantonIndexer {
     const CHAIN: Chain = Chain::Canton;
     type Block = u64;
-    type Iter = Range<u64>;
+    type Iter = stream::Iter<Range<u64>>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         let checkpoint = self
@@ -327,7 +327,7 @@ impl ChainIndexer for CantonIndexer {
 
     async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
         // After a reconnect, we resume from last_seen_offset, so catchup should start there.
-        catchup_offset_range(self.last_seen_offset, anchor_height)
+        stream::iter(catchup_offset_range(self.last_seen_offset, anchor_height))
     }
 
     async fn process_catchup(&mut self, &item: &Self::Block) -> anyhow::Result<()> {

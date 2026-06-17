@@ -8,6 +8,7 @@ use crate::stream::ops::{
     process_sign_request, recover_backlog, requeue_pending_sign_requests,
     resume_pending_publish_requests,
 };
+use futures_util::{Stream, StreamExt};
 use mpc_primitives::ChainEvent;
 
 pub mod ops;
@@ -24,30 +25,10 @@ pub fn channel() -> (mpsc::Sender<ChainEvent>, mpsc::Receiver<ChainEvent>) {
 }
 
 #[async_trait]
-pub trait AsyncCatchupIter: Send + 'static {
-    type Item: Send;
-
-    async fn next(&mut self) -> Option<Self::Item>;
-}
-
-#[async_trait]
-impl<I> AsyncCatchupIter for I
-where
-    I: Iterator + Send + 'static,
-    I::Item: Send,
-{
-    type Item = I::Item;
-
-    async fn next(&mut self) -> Option<Self::Item> {
-        Iterator::next(self)
-    }
-}
-
-#[async_trait]
 pub trait ChainIndexer: Send + 'static {
     const CHAIN: Chain;
     type Block: Send;
-    type Iter: AsyncCatchupIter<Item = Self::Block> + Send + 'static;
+    type Iter: Stream<Item = Self::Block> + Send + Unpin + 'static;
 
     const RETRY_DELAY: Duration = Duration::from_millis(500);
 
@@ -116,8 +97,10 @@ pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I) {
     };
 
     tracing::info!(%chain, anchor_height, "livestream initialized => starting catchup");
-    let mut catchup_iter = indexer.catchup_range(anchor_height).await;
-    while let Some(catchup_item) = catchup_iter.next().await {
+    let catchup_stream = indexer.catchup_range(anchor_height).await;
+    // Pin the stream
+    tokio::pin!(catchup_stream);
+    while let Some(catchup_item) = catchup_stream.next().await {
         while let Err(err) = indexer.process_catchup(&catchup_item).await {
             tracing::warn!(?err, %chain, "catchup item processing failed; retrying");
             tokio::time::sleep(I::RETRY_DELAY).await;
@@ -314,14 +297,14 @@ mod tests {
                 const CHAIN: Chain = $chain;
 
                 type Block = ();
-                type Iter = std::iter::Empty<Self::Block>;
+                type Iter = futures_util::stream::Empty<Self::Block>;
 
                 async fn next(&mut self) -> Option<Self::Block> {
                     None
                 }
 
                 async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-                    std::iter::empty()
+                    futures_util::stream::empty()
                 }
 
                 async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
@@ -421,7 +404,7 @@ mod tests {
     impl ChainIndexer for TestLinearIndexer {
         const CHAIN: Chain = Chain::Ethereum;
         type Block = u64;
-        type Iter = std::vec::IntoIter<Self::Block>;
+        type Iter = futures_util::stream::Iter<std::vec::IntoIter<Self::Block>>;
 
         const RETRY_DELAY: Duration = Duration::from_millis(1);
 
@@ -447,7 +430,7 @@ mod tests {
                 .map(|height| height + 1)
                 .unwrap_or(anchor_height);
             let items: Vec<Self::Block> = (start..anchor_height).collect();
-            items.into_iter()
+            futures_util::stream::iter(items.into_iter())
         }
 
         async fn process_catchup(&mut self, &height: &Self::Block) -> anyhow::Result<()> {
@@ -659,14 +642,14 @@ mod tests {
         impl ChainIndexer for DisabledChainIndexer {
             const CHAIN: Chain = Chain::Solana;
             type Block = ();
-            type Iter = std::iter::Empty<Self::Block>;
+            type Iter = futures_util::stream::Empty<Self::Block>;
 
             async fn next(&mut self) -> Option<Self::Block> {
                 None
             }
 
             async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-                std::iter::empty()
+                futures_util::stream::empty()
             }
 
             async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {

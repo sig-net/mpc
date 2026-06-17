@@ -1,15 +1,15 @@
 use crate::backlog::Backlog;
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
-pub use crate::solana_client::SolConfig;
 use crate::solana_client::{SolanaCatchupBlock, SolanaClient};
-
 use crate::stream::{ChainIndexer, ChainStream};
 use crate::util::ethabi_request_id;
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
-use anyhow::Context;
 
-use std::collections::{btree_map, BTreeMap, HashMap};
+pub use crate::solana_client::SolConfig;
+
+use std::collections::HashMap;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -17,8 +17,10 @@ use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
+use anyhow::Context;
 use async_trait::async_trait;
-use futures_util::StreamExt;
+use futures_util::stream::StreamExt;
+use futures_util::Stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
@@ -221,7 +223,7 @@ impl ChainStream for SolanaStream {
 impl ChainIndexer for SolanaIndexer {
     const CHAIN: Chain = Chain::Solana;
     type Block = (u64, SolanaCatchupBlock);
-    type Iter = btree_map::IntoIter<u64, SolanaCatchupBlock>;
+    type Iter = Pin<Box<dyn Stream<Item = Self::Block> + Send + 'static>>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         let (live_tx, live_rx) = crate::stream::channel();
@@ -257,12 +259,12 @@ impl ChainIndexer for SolanaIndexer {
             .unwrap_or(anchor_height);
         let end_slot = anchor_height.saturating_sub(1); // We want to catch up to just before the anchor
         if start_slot > end_slot {
-            return BTreeMap::new().into_iter();
+            return Box::pin(futures_util::stream::empty());
         }
 
         let slots = self.client.fetch_slots(start_slot, end_slot).await;
         let items = self.client.fetch_blocks_for_slots(slots).await;
-        items.into_iter()
+        Box::pin(futures_util::stream::iter(items.into_iter()))
     }
 
     async fn process_catchup(&mut self, (slot, block): &Self::Block) -> anyhow::Result<()> {
@@ -1014,6 +1016,8 @@ async fn get_tx(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use solana_sdk::commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
@@ -1207,9 +1211,10 @@ mod tests {
             .await;
 
         // Run catchup range
-        let catchup_iter = indexer.catchup_range(anchor_height).await;
+        let catchup_stream = indexer.catchup_range(anchor_height).await;
+        tokio::pin!(catchup_stream);
         let mut processed_any = false;
-        for item in catchup_iter {
+        while let Some(item) = catchup_stream.next().await {
             indexer
                 .process_catchup(&item)
                 .await
