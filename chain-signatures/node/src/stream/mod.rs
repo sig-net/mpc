@@ -438,6 +438,7 @@ mod tests {
             Some(block)
         }
 
+        // TODO: double check this
         async fn catchup_range(&self, start_height: u64, anchor_height: u64) -> Self::Iter {
             let start = self
                 .control
