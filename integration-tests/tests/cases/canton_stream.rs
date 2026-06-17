@@ -21,8 +21,9 @@ use tokio::time::timeout;
 async fn stream_canton(sandbox: &CantonSandbox, backlog: Backlog) -> Result<CantonStream> {
     let config = sandbox.get_config();
     let mut stream =
-        CantonStream::new(Some(config), backlog).context("failed to create CantonStream")?;
-    let indexer = ChainStream::start(&mut stream).await?;
+        CantonStream::new(Some(config)).context("failed to create CantonStream")?;
+    let start_height = backlog.processed_block(Chain::Canton).await;
+    let indexer = ChainStream::start(&mut stream, start_height).await?;
     tokio::spawn(catchup_then_livestream(indexer));
     Ok(stream)
 }

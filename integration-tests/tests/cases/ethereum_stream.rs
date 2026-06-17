@@ -379,8 +379,9 @@ async fn stream_ethereum(
     ctx: &EthereumTestEnvironment,
     backlog: Backlog,
 ) -> Result<StartedEthereumStream> {
-    let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog).await?;
-    let indexer = stream.start().await?;
+    let start_height = backlog.processed_block(Chain::Ethereum).await;
+    let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
+    let indexer = stream.start(start_height).await?;
     let indexer_task = tokio::spawn(catchup_then_livestream(indexer));
 
     Ok(StartedEthereumStream {

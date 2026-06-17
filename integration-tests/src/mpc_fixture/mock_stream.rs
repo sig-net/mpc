@@ -55,7 +55,7 @@ impl ChainIndexer for MockIndexer {
 impl ChainStream for MockStream {
     type Indexer = MockIndexer;
 
-    async fn start(&mut self) -> anyhow::Result<MockIndexer> {
+    async fn start(&mut self, _start_height: Option<u64>) -> anyhow::Result<MockIndexer> {
         Ok(MockIndexer {
             inner: self.inner.clone(),
         })
