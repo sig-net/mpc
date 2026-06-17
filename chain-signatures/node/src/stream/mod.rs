@@ -74,8 +74,10 @@ pub trait ChainIndexer: Send + 'static {
 pub trait ChainStream: Send + 'static {
     type Indexer: ChainIndexer + Send;
 
-    async fn start(&mut self, start_height: Option<u64>) -> anyhow::Result<Self::Indexer>;
-    async fn next_event(&mut self) -> Option<ChainEvent>;
+    async fn start(
+        self,
+        start_height: Option<u64>,
+    ) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)>;
 }
 
 pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I) {
@@ -121,7 +123,7 @@ pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I) {
 
 /// Shared indexer loop: recovers backlog then processes events from the stream
 pub async fn run_stream<S: ChainStream>(
-    mut stream: S,
+    stream: S,
     sign_tx: mpsc::Sender<Sign>,
     rpc: RpcChannel,
     backlog: Backlog,
@@ -144,8 +146,8 @@ pub async fn run_stream<S: ChainStream>(
     // Query backlog for the last processed block to determine where to start catchup
     let start_height = backlog.processed_block(chain).await;
 
-    let indexer = match stream.start(start_height).await {
-        Ok(indexer) => indexer,
+    let (indexer, mut events_rx) = match stream.start(start_height).await {
+        Ok(res) => res,
         Err(err) => {
             tracing::error!(?err, %chain, "failed to start stream");
             return;
@@ -157,7 +159,7 @@ pub async fn run_stream<S: ChainStream>(
     let root_pk = contract_watcher.wait_public_key().await;
 
     let mut caught_up = false;
-    while let Some(event) = stream.next_event().await {
+    while let Some(event) = events_rx.recv().await {
         match event {
             ChainEvent::CatchupCompleted => {
                 if caught_up {
@@ -281,11 +283,13 @@ mod tests {
 
     macro_rules! impl_vec_event_stream {
         ($stream:ident, $indexer:ident, $chain:expr) => {
-            struct $stream(VecEventStreamState);
+            struct $stream {
+                events: Vec<Option<ChainEvent>>,
+            }
 
             impl $stream {
                 pub fn new(events: Vec<Option<ChainEvent>>) -> Self {
-                    Self(VecEventStreamState::new(events))
+                    Self { events }
                 }
             }
 
@@ -294,8 +298,10 @@ mod tests {
             }
 
             impl $indexer {
-                pub fn silent() -> Self {
-                    Self { events_tx: None }
+                pub fn silent(events_tx: mpsc::Sender<ChainEvent>) -> Self {
+                    Self {
+                        events_tx: Some(events_tx),
+                    }
                 }
             }
 
@@ -310,10 +316,7 @@ mod tests {
                     None
                 }
 
-                async fn catchup_range(
-                    &self,
-                    _anchor_height: u64,
-                ) -> Self::Iter {
+                async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
                     futures_util::stream::empty()
                 }
 
@@ -321,7 +324,6 @@ mod tests {
                     if let Some(events_tx) = &self.events_tx {
                         events_tx.send(ChainEvent::CatchupCompleted).await?;
                     }
-
                     Ok(())
                 }
             }
@@ -330,17 +332,23 @@ mod tests {
             impl ChainStream for $stream {
                 type Indexer = $indexer;
 
-                async fn start(&mut self, _start_height: Option<u64>) -> anyhow::Result<Self::Indexer> {
-                    self.0.started = true;
-                    Ok($indexer::silent())
-                }
+                async fn start(
+                    self,
+                    _start_height: Option<u64>,
+                ) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
+                    let (tx, rx) = crate::stream::channel();
 
-                async fn next_event(&mut self) -> Option<ChainEvent> {
-                    if self.0.events.is_empty() {
-                        return None;
-                    }
+                    // Send the pre-defined events in a background task
+                    let events = self.events;
+                    let bg_tx = tx.clone();
+                    tokio::spawn(async move {
+                        for ev in events.into_iter().flatten() {
+                            let _ = bg_tx.send(ev).await;
+                        }
+                    });
 
-                    self.0.events.remove(0)
+                    // Pass the tx to the indexer so notify_catchup_completed can use it
+                    Ok(($indexer::silent(tx), rx))
                 }
             }
         };
@@ -469,28 +477,29 @@ mod tests {
     impl ChainStream for TestLinearStream {
         type Indexer = TestLinearIndexer;
 
-        async fn start(&mut self, _start_height: Option<u64>) -> anyhow::Result<Self::Indexer> {
-            Ok(TestLinearIndexer {
+        async fn start(
+            self,
+            _start_height: Option<u64>,
+        ) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
+            let (events_tx, events_rx) = crate::stream::channel();
+            let indexer = TestLinearIndexer {
                 control: self.control.clone(),
-                tx: self.tx.clone(),
+                tx: events_tx.clone(),
                 live_items: Vec::new(),
                 pending_live_block: None,
-            })
-        }
-
-        async fn next_event(&mut self) -> Option<ChainEvent> {
-            self.rx.recv().await
+            };
+            Ok((indexer, events_rx))
         }
     }
 
     #[tokio::test]
     async fn test_run_linearized_source_orders_catchup_before_live() {
-        let mut stream = TestLinearStream::new(TestLinearControl::new(Some(1), vec![4, 5]));
-        let indexer = stream.start(None).await.unwrap();
+        let stream = TestLinearStream::new(TestLinearControl::new(Some(1), vec![4, 5]));
+        let (indexer, mut events_rx) = stream.start(None).await.unwrap();
         catchup_then_livestream(indexer).await;
 
         let mut observed = Vec::new();
-        while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
+        while let Some(event) = timeout(Duration::from_millis(20), events_rx.recv())
             .await
             .ok()
             .flatten()
@@ -506,16 +515,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_linearized_source_retries_without_reordering() {
-        let mut stream = TestLinearStream::new(
+        let stream = TestLinearStream::new(
             TestLinearControl::new(Some(1), vec![4, 5])
                 .fail_catchup_once(3)
                 .fail_live_once(4),
         );
-        let indexer = stream.start(None).await.unwrap();
+        let (indexer, mut events_rx) = stream.start(None).await.unwrap();
         catchup_then_livestream(indexer).await;
 
         let mut observed = Vec::new();
-        while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
+        while let Some(event) = timeout(Duration::from_millis(20), events_rx.recv())
             .await
             .ok()
             .flatten()
@@ -622,20 +631,18 @@ mod tests {
         let backlog = Backlog::persisted(storage.clone());
 
         // client implemented with a channel so the test can control pacing
-        struct LocalStream {
-            rx: mpsc::Receiver<ChainEvent>,
-        }
+        struct LocalStream {}
 
         #[async_trait]
         impl ChainStream for LocalStream {
             type Indexer = DisabledChainIndexer;
 
-            async fn start(&mut self, _start_height: Option<u64>) -> anyhow::Result<Self::Indexer> {
-                Ok(DisabledChainIndexer::silent())
-            }
-
-            async fn next_event(&mut self) -> Option<ChainEvent> {
-                self.rx.recv().await
+            async fn start(
+                self,
+                _start_height: Option<u64>,
+            ) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
+                let (_events_tx, events_rx) = crate::stream::channel();
+                Ok((DisabledChainIndexer::silent(), events_rx))
             }
         }
 
@@ -672,7 +679,7 @@ mod tests {
         }
 
         let (events_tx, rx) = mpsc::channel(8);
-        let client = LocalStream { rx };
+        let client = LocalStream {};
 
         let (sign_tx, mut sign_rx) = mpsc::channel(8);
 

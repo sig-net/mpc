@@ -127,9 +127,8 @@ pub struct SolSignRequest {
 
 /// Solana stream that implements the new ChainStream abstraction
 pub struct SolanaStream {
-    rx: Option<mpsc::Receiver<ChainEvent>>,
-    start_state: Option<SolanaStreamStartState>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
+    config: SolConfig,
 }
 
 pub struct SolanaIndexer {
@@ -138,13 +137,6 @@ pub struct SolanaIndexer {
     pub events_tx: mpsc::Sender<ChainEvent>,
     pub live_rx: Option<mpsc::Receiver<ChainEvent>>,
     pub start_height: Option<u64>,
-}
-
-struct SolanaStreamStartState {
-    program_id: Pubkey,
-    rpc_http_url: String,
-    rpc_ws_url: String,
-    tx: mpsc::Sender<ChainEvent>,
 }
 
 impl Drop for SolanaStream {
@@ -156,27 +148,14 @@ impl Drop for SolanaStream {
 }
 
 impl SolanaStream {
-    pub fn new(sol: Option<SolConfig>) -> Option<Self> {
-        let Some(sol) = sol else {
+    pub fn new(config: Option<SolConfig>) -> Option<Self> {
+        let Some(config) = config else {
             tracing::warn!("solana indexer is disabled");
             return None;
         };
 
-        let Ok(program_id) = Pubkey::from_str(&sol.program_address) else {
-            tracing::error!("Failed to parse program address: {}", sol.program_address);
-            return None;
-        };
-
-        let (tx, rx) = crate::stream::channel();
-
         Some(SolanaStream {
-            rx: Some(rx),
-            start_state: Some(SolanaStreamStartState {
-                program_id,
-                rpc_http_url: sol.rpc_http_url.clone(),
-                rpc_ws_url: sol.rpc_ws_url.clone(),
-                tx,
-            }),
+            config,
             tasks: Vec::new(),
         })
     }
@@ -186,33 +165,34 @@ impl SolanaStream {
 impl ChainStream for SolanaStream {
     type Indexer = SolanaIndexer;
 
-    async fn start(&mut self, start_height: Option<u64>) -> anyhow::Result<Self::Indexer> {
-        let Some(start_state) = self.start_state.take() else {
-            anyhow::bail!("solana stream already started");
+    async fn start(
+        self,
+        start_height: Option<u64>,
+    ) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
+        let Ok(program_id) = Pubkey::from_str(&self.config.program_address) else {
+            anyhow::bail!(
+                "Failed to parse solana program address: {}",
+                self.config.program_address
+            );
         };
 
+        let (events_tx, events_rx) = crate::stream::channel();
+
         let client = SolanaClient::for_indexer(
-            start_state.rpc_http_url.clone(),
-            start_state.rpc_ws_url.clone(),
-            start_state.program_id,
+            self.config.rpc_http_url.clone(),
+            self.config.rpc_ws_url.clone(),
+            program_id,
         );
 
         let indexer = SolanaIndexer {
-            program_id: start_state.program_id,
+            program_id,
             client,
-            events_tx: start_state.tx.clone(),
+            events_tx,
             live_rx: None,
             start_height,
         };
 
-        Ok(indexer)
-    }
-
-    async fn next_event(&mut self) -> Option<ChainEvent> {
-        match self.rx.as_mut() {
-            Some(rx) => rx.recv().await,
-            None => None,
-        }
+        Ok((indexer, events_rx))
     }
 }
 
@@ -246,7 +226,10 @@ impl ChainIndexer for SolanaIndexer {
     }
 
     async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
-        let start_slot = self.start_height.map(|n| n.saturating_add(1)).unwrap_or(anchor_height);
+        let start_slot = self
+            .start_height
+            .map(|n| n.saturating_add(1))
+            .unwrap_or(anchor_height);
         let end_slot = anchor_height.saturating_sub(1); // We want to catch up to just before the anchor
         if start_slot > end_slot {
             return Box::pin(futures_util::stream::empty());

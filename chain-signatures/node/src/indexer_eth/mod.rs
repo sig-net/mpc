@@ -1487,16 +1487,13 @@ impl ChainIndexer for EthereumIndexer {
 /// Construction is side-effect free; the shared `run_stream()` loop calls
 /// `start()` after recovery has completed.
 pub struct EthereumStream {
-    events_rx: Option<mpsc::Receiver<ChainEvent>>,
-    events_tx: Option<mpsc::Sender<ChainEvent>>,
-    // start_state: Option<EthereumIndexer>,
-    config: Option<EthConfig>,
+    config: EthConfig,
     backlog: Backlog,
 }
 
 impl EthereumStream {
-    pub async fn new(eth: Option<EthConfig>, backlog: Backlog) -> anyhow::Result<Self> {
-        let Some(config) = eth else {
+    pub async fn new(config: Option<EthConfig>, backlog: Backlog) -> anyhow::Result<Self> {
+        let Some(config) = config else {
             tracing::warn!(
                 "ethereum indexer is disabled: no EthConfig provided \
                  (check that all --eth-* CLI flags were supplied)"
@@ -1508,14 +1505,7 @@ impl EthereumStream {
             "creating ethereum indexer stream"
         );
 
-        let (events_tx, events_rx) = crate::stream::channel();
-
-        Ok(Self {
-            events_rx: Some(events_rx),
-            config: Some(config),
-            events_tx: Some(events_tx),
-            backlog,
-        })
+        Ok(Self { config, backlog })
     }
 }
 
@@ -1523,14 +1513,15 @@ impl EthereumStream {
 impl ChainStream for EthereumStream {
     type Indexer = EthereumIndexer;
 
-    async fn start(&mut self, start_height: Option<u64>) -> anyhow::Result<Self::Indexer> {
-        let config = self.config.take().context("stream already started")?;
-        let events_tx = self.events_tx.take().unwrap();
-        EthereumIndexer::new(config, self.backlog.clone(), events_tx, start_height).await
-    }
-
-    async fn next_event(&mut self) -> Option<ChainEvent> {
-        self.events_rx.as_mut()?.recv().await
+    async fn start(
+        self,
+        start_height: Option<u64>,
+    ) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
+        let (events_tx, events_rx) = crate::stream::channel();
+        let indexer =
+            EthereumIndexer::new(self.config, self.backlog.clone(), events_tx, start_height)
+                .await?;
+        Ok((indexer, events_rx))
     }
 }
 #[cfg(test)]

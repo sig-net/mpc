@@ -27,8 +27,6 @@ type CantonWsWrite = SplitSink<CantonWs, Message>;
 
 pub struct CantonStream {
     config: CantonConfig,
-    events_rx: mpsc::Receiver<ChainEvent>,
-    events_tx: Option<mpsc::Sender<ChainEvent>>,
 }
 
 impl CantonStream {
@@ -41,13 +39,7 @@ impl CantonStream {
             }
         };
 
-        let (events_tx, events_rx) = crate::stream::channel();
-
-        Some(CantonStream {
-            config,
-            events_rx,
-            events_tx: Some(events_tx),
-        })
+        Some(CantonStream { config })
     }
 }
 
@@ -55,17 +47,14 @@ impl CantonStream {
 impl ChainStream for CantonStream {
     type Indexer = CantonIndexer;
 
-    async fn start(&mut self, start_height: Option<u64>) -> anyhow::Result<Self::Indexer> {
-        let Some(events_tx) = self.events_tx.take() else {
-            anyhow::bail!("canton stream already started");
-        };
-
+    async fn start(
+        self,
+        start_height: Option<u64>,
+    ) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
+        let (events_tx, events_rx) = crate::stream::channel();
         let client = CantonClient::new(&self.config).await?;
-        Ok(Self::Indexer::new(client, events_tx, start_height))
-    }
-
-    async fn next_event(&mut self) -> Option<ChainEvent> {
-        self.events_rx.recv().await
+        let indexer = CantonIndexer::new(client.clone(), events_tx.clone(), start_height);
+        Ok((indexer, events_rx))
     }
 }
 
@@ -319,7 +308,10 @@ impl ChainIndexer for CantonIndexer {
     }
 
     async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
-        let start_height = self.start_height.map(|n| n.saturating_add(1)).unwrap_or(anchor_height);
+        let start_height = self
+            .start_height
+            .map(|n| n.saturating_add(1))
+            .unwrap_or(anchor_height);
         // After a reconnect, we resume from last_seen_offset, so catchup should start there.
         stream::iter(catchup_offset_range(start_height, anchor_height))
     }

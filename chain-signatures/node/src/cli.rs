@@ -448,8 +448,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 mesh_state.clone(),
                 client.clone(),
             ));
-            if let Some(canton_stream) = indexer_canton::CantonStream::new(canton)
-            {
+            if let Some(canton_stream) = indexer_canton::CantonStream::new(canton) {
                 tokio::spawn(run_stream(
                     canton_stream,
                     sign_tx.clone(),
