@@ -40,7 +40,7 @@ pub trait ChainIndexer: Send + 'static {
         Ok(())
     }
 
-    async fn catchup_range(&self, start_height: u64, anchor_height: u64) -> Self::Iter;
+    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter;
 
     async fn process_catchup(&mut self, item: &Self::Block) -> anyhow::Result<()> {
         let _ = item;
@@ -74,11 +74,11 @@ pub trait ChainIndexer: Send + 'static {
 pub trait ChainStream: Send + 'static {
     type Indexer: ChainIndexer + Send;
 
-    async fn start(&mut self) -> anyhow::Result<Self::Indexer>;
+    async fn start(&mut self, start_height: Option<u64>) -> anyhow::Result<Self::Indexer>;
     async fn next_event(&mut self) -> Option<ChainEvent>;
 }
 
-pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I, backlog: Backlog) {
+pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I) {
     let chain = I::CHAIN;
     tracing::info!(%chain, "starting ChainStream catchup then livestream");
 
@@ -96,17 +96,10 @@ pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I, backlog: B
         return;
     };
 
-    // Determine the starting height for catchup by checking the last processed block in the backlog.
-    let start_height = backlog
-        .processed_block(chain)
-        .await
-        .map(|height| height.saturating_add(1))
-        .unwrap_or(anchor_height);
-
     tracing::info!(
-        %chain, start_height, anchor_height, "livestream initialized => starting catchup");
+        %chain, anchor_height, "livestream initialized => starting catchup");
 
-    let catchup_stream = indexer.catchup_range(start_height, anchor_height).await;
+    let catchup_stream = indexer.catchup_range(anchor_height).await;
 
     // Pin the stream
     tokio::pin!(catchup_stream);
@@ -148,7 +141,10 @@ pub async fn run_stream<S: ChainStream>(
     )
     .await;
 
-    let indexer = match stream.start().await {
+    // Query backlog for the last processed block to determine where to start catchup
+    let start_height = backlog.processed_block(chain).await;
+
+    let indexer = match stream.start(start_height).await {
         Ok(indexer) => indexer,
         Err(err) => {
             tracing::error!(?err, %chain, "failed to start stream");
@@ -156,7 +152,7 @@ pub async fn run_stream<S: ChainStream>(
         }
     };
 
-    let indexer_task = tokio::spawn(catchup_then_livestream(indexer, backlog.clone()));
+    let indexer_task = tokio::spawn(catchup_then_livestream(indexer));
 
     let root_pk = contract_watcher.wait_public_key().await;
 
@@ -316,7 +312,6 @@ mod tests {
 
                 async fn catchup_range(
                     &self,
-                    _start_height: u64,
                     _anchor_height: u64,
                 ) -> Self::Iter {
                     futures_util::stream::empty()
@@ -335,7 +330,7 @@ mod tests {
             impl ChainStream for $stream {
                 type Indexer = $indexer;
 
-                async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
+                async fn start(&mut self, _start_height: Option<u64>) -> anyhow::Result<Self::Indexer> {
                     self.0.started = true;
                     Ok($indexer::silent())
                 }
@@ -439,12 +434,12 @@ mod tests {
         }
 
         // TODO: double check this
-        async fn catchup_range(&self, start_height: u64, anchor_height: u64) -> Self::Iter {
+        async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
             let start = self
                 .control
                 .persisted_height
                 .map(|height| height + 1)
-                .unwrap_or(start_height);
+                .unwrap_or(anchor_height);
             let items: Vec<Self::Block> = (start..anchor_height).collect();
             futures_util::stream::iter(items.into_iter())
         }
@@ -474,7 +469,7 @@ mod tests {
     impl ChainStream for TestLinearStream {
         type Indexer = TestLinearIndexer;
 
-        async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
+        async fn start(&mut self, _start_height: Option<u64>) -> anyhow::Result<Self::Indexer> {
             Ok(TestLinearIndexer {
                 control: self.control.clone(),
                 tx: self.tx.clone(),
@@ -491,9 +486,8 @@ mod tests {
     #[tokio::test]
     async fn test_run_linearized_source_orders_catchup_before_live() {
         let mut stream = TestLinearStream::new(TestLinearControl::new(Some(1), vec![4, 5]));
-        let indexer = stream.start().await.unwrap();
-        let backlog = Backlog::new();
-        catchup_then_livestream(indexer, backlog).await;
+        let indexer = stream.start(None).await.unwrap();
+        catchup_then_livestream(indexer).await;
 
         let mut observed = Vec::new();
         while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
@@ -517,9 +511,8 @@ mod tests {
                 .fail_catchup_once(3)
                 .fail_live_once(4),
         );
-        let indexer = stream.start().await.unwrap();
-        let backlog = Backlog::new();
-        catchup_then_livestream(indexer, backlog).await;
+        let indexer = stream.start(None).await.unwrap();
+        catchup_then_livestream(indexer).await;
 
         let mut observed = Vec::new();
         while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
@@ -637,7 +630,7 @@ mod tests {
         impl ChainStream for LocalStream {
             type Indexer = DisabledChainIndexer;
 
-            async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
+            async fn start(&mut self, _start_height: Option<u64>) -> anyhow::Result<Self::Indexer> {
                 Ok(DisabledChainIndexer::silent())
             }
 
@@ -666,7 +659,7 @@ mod tests {
                 None
             }
 
-            async fn catchup_range(&self, _start_height: u64, _anchor_height: u64) -> Self::Iter {
+            async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
                 futures_util::stream::empty()
             }
 
