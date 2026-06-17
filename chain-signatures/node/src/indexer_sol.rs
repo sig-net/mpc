@@ -137,6 +137,7 @@ pub struct SolanaIndexer {
     pub client: SolanaClient,
     pub events_tx: mpsc::Sender<ChainEvent>,
     pub live_rx: Option<mpsc::Receiver<ChainEvent>>,
+    pub start_height: Option<u64>,
 }
 
 struct SolanaStreamStartState {
@@ -185,7 +186,7 @@ impl SolanaStream {
 impl ChainStream for SolanaStream {
     type Indexer = SolanaIndexer;
 
-    async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
+    async fn start(&mut self, start_height: Option<u64>) -> anyhow::Result<Self::Indexer> {
         let Some(start_state) = self.start_state.take() else {
             anyhow::bail!("solana stream already started");
         };
@@ -201,6 +202,7 @@ impl ChainStream for SolanaStream {
             client,
             events_tx: start_state.tx.clone(),
             live_rx: None,
+            start_height,
         };
 
         Ok(indexer)
@@ -243,7 +245,8 @@ impl ChainIndexer for SolanaIndexer {
         Ok(Some(anchor_rx.await?))
     }
 
-    async fn catchup_range(&self, start_slot: u64, anchor_height: u64) -> Self::Iter {
+    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
+        let start_slot = self.start_height.map(|n| n.saturating_add(1)).unwrap_or(anchor_height);
         let end_slot = anchor_height.saturating_sub(1); // We want to catch up to just before the anchor
         if start_slot > end_slot {
             return Box::pin(futures_util::stream::empty());
@@ -1175,6 +1178,7 @@ mod tests {
             client,
             events_tx,
             live_rx: None,
+            start_height: None,
         };
 
         // Initialize livestream (resolves anchor slot via get_slot and starts WS)
@@ -1190,14 +1194,8 @@ mod tests {
         let start_slot = anchor_height.saturating_sub(1_512_000);
         tracing::debug!("Starting catchup from slot: {start_slot} (~1 week behind)");
 
-        // TODO: find a way to set the processed block interval
-        // indexer
-        //     .backlog
-        //     .set_processed_block_interval(Chain::Solana, start_slot.saturating_sub(1), 1)
-        //     .await;
-
         // Run catchup range
-        let catchup_stream = indexer.catchup_range(start_slot, anchor_height).await;
+        let catchup_stream = indexer.catchup_range(anchor_height).await;
         tokio::pin!(catchup_stream);
         let mut processed_any = false;
         while let Some(item) = catchup_stream.next().await {
