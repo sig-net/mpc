@@ -40,7 +40,7 @@ pub trait ChainIndexer: Send + 'static {
         Ok(())
     }
 
-    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter;
+    async fn catchup_range(&self, start_height: u64, anchor_height: u64) -> Self::Iter;
 
     async fn process_catchup(&mut self, item: &Self::Block) -> anyhow::Result<()> {
         let _ = item;
@@ -78,7 +78,7 @@ pub trait ChainStream: Send + 'static {
     async fn next_event(&mut self) -> Option<ChainEvent>;
 }
 
-pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I) {
+pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I, backlog: Backlog) {
     let chain = I::CHAIN;
     tracing::info!(%chain, "starting ChainStream catchup then livestream");
 
@@ -96,8 +96,18 @@ pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I) {
         return;
     };
 
-    tracing::info!(%chain, anchor_height, "livestream initialized => starting catchup");
-    let catchup_stream = indexer.catchup_range(anchor_height).await;
+    // Determine the starting height for catchup by checking the last processed block in the backlog.
+    let start_height = backlog
+        .processed_block(chain)
+        .await
+        .map(|height| height.saturating_add(1))
+        .unwrap_or(anchor_height);
+
+    tracing::info!(
+        %chain, start_height, anchor_height, "livestream initialized => starting catchup");
+
+    let catchup_stream = indexer.catchup_range(start_height, anchor_height).await;
+
     // Pin the stream
     tokio::pin!(catchup_stream);
     while let Some(catchup_item) = catchup_stream.next().await {
@@ -145,7 +155,8 @@ pub async fn run_stream<S: ChainStream>(
             return;
         }
     };
-    let indexer_task = tokio::spawn(catchup_then_livestream(indexer));
+
+    let indexer_task = tokio::spawn(catchup_then_livestream(indexer, backlog.clone()));
 
     let root_pk = contract_watcher.wait_public_key().await;
 
@@ -303,7 +314,11 @@ mod tests {
                     None
                 }
 
-                async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
+                async fn catchup_range(
+                    &self,
+                    _start_height: u64,
+                    _anchor_height: u64,
+                ) -> Self::Iter {
                     futures_util::stream::empty()
                 }
 
@@ -423,12 +438,12 @@ mod tests {
             Some(block)
         }
 
-        async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
+        async fn catchup_range(&self, start_height: u64, anchor_height: u64) -> Self::Iter {
             let start = self
                 .control
                 .persisted_height
                 .map(|height| height + 1)
-                .unwrap_or(anchor_height);
+                .unwrap_or(start_height);
             let items: Vec<Self::Block> = (start..anchor_height).collect();
             futures_util::stream::iter(items.into_iter())
         }
@@ -476,7 +491,8 @@ mod tests {
     async fn test_run_linearized_source_orders_catchup_before_live() {
         let mut stream = TestLinearStream::new(TestLinearControl::new(Some(1), vec![4, 5]));
         let indexer = stream.start().await.unwrap();
-        catchup_then_livestream(indexer).await;
+        let backlog = Backlog::new();
+        catchup_then_livestream(indexer, backlog).await;
 
         let mut observed = Vec::new();
         while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
@@ -501,7 +517,8 @@ mod tests {
                 .fail_live_once(4),
         );
         let indexer = stream.start().await.unwrap();
-        catchup_then_livestream(indexer).await;
+        let backlog = Backlog::new();
+        catchup_then_livestream(indexer, backlog).await;
 
         let mut observed = Vec::new();
         while let Some(event) = timeout(Duration::from_millis(20), stream.next_event())
@@ -648,7 +665,7 @@ mod tests {
                 None
             }
 
-            async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
+            async fn catchup_range(&self, _start_height: u64, _anchor_height: u64) -> Self::Iter {
                 futures_util::stream::empty()
             }
 
