@@ -826,12 +826,7 @@ impl VersionedMpcContract {
         }
 
         let root_pk = near_public_key_to_affine_point(self.public_key()?);
-        let epsilon = derive_epsilon_checkpoint(
-            LATEST_MPC_KEY_VERSION,
-            checkpoint.chain,
-            "checkpoint|sender",
-            checkpoint.height,
-        );
+        let epsilon = derive_epsilon_checkpoint(checkpoint.chain, checkpoint.height);
         let expected_public_key = derive_key(root_pk, epsilon);
         if check_ec_signature(
             &expected_public_key,

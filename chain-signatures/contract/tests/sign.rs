@@ -362,12 +362,7 @@ async fn test_contract_checkpoint_verification() -> anyhow::Result<()> {
     let checkpoint = ConsensusCheckpointDigest::new(Chain::Ethereum, 100, [42u8; 32]);
 
     // 1. Sign using the correct derived key (with height)
-    let epsilon = kdf::derive_epsilon_checkpoint(
-        LATEST_MPC_KEY_VERSION,
-        checkpoint.chain,
-        "checkpoint|sender",
-        checkpoint.height,
-    );
+    let epsilon = kdf::derive_epsilon_checkpoint(checkpoint.chain, checkpoint.height);
     let derived_sk = kdf::derive_secret_key(&sk, epsilon);
     let derived_pk = kdf::derive_key(sk.public_key().into(), epsilon);
 

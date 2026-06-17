@@ -88,9 +88,6 @@ pub(crate) async fn recover_backlog(
     // Recover backlog before doing anything.
     // Wait for threshold to be available
     let threshold = contract_watcher.wait_threshold().await;
-    if threshold == 0 {
-        return;
-    }
     wait_threshold_active(mesh_state, threshold).await;
 
     // Load local checkpoint from storage first

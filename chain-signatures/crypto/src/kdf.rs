@@ -5,7 +5,7 @@ use k256::{
     elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint, CurveArithmetic},
     Scalar, Secp256k1, SecretKey,
 };
-use mpc_primitives::Chain;
+use mpc_primitives::{Chain, LATEST_MPC_KEY_VERSION};
 use near_account_id::AccountId;
 use sha3::{Digest, Keccak256, Sha3_256};
 
@@ -13,6 +13,9 @@ use sha3::{Digest, Keccak256, Sha3_256};
 // Sig.Network with key derivation protocol vX.Y.Z.
 const EPSILON_DERIVATION_PREFIX_V1: &str = "sig.network v1.0.0 epsilon derivation";
 const EPSILON_DERIVATION_PREFIX_V2: &str = "sig.network v2.0.0 epsilon derivation";
+
+const CHECKPOINT_SENDER: &str = "checkpoint|sender";
+const CHECKPOINT_VERSION: u32 = LATEST_MPC_KEY_VERSION;
 
 /// Creates a derivation path string using the legacy format
 fn deprecated_derivation_path(chain: Chain, sender: &str, path: &str) -> String {
@@ -48,13 +51,13 @@ fn keccak(derivation_path: impl AsRef<[u8]>) -> Scalar {
     Scalar::from_non_biased(hash)
 }
 
-pub fn derive_epsilon_checkpoint(
-    key_version: u32,
-    chain: Chain,
-    sender: &str,
-    height: u64,
-) -> Scalar {
-    let derivation_path = derivation_path(key_version, chain, sender, &height.to_string());
+pub fn derive_epsilon_checkpoint(chain: Chain, height: u64) -> Scalar {
+    let derivation_path = derivation_path(
+        CHECKPOINT_VERSION,
+        chain,
+        CHECKPOINT_SENDER,
+        &height.to_string(),
+    );
     sha3(derivation_path)
 }
 

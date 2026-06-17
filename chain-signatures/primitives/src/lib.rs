@@ -95,7 +95,7 @@ impl SignId {
         Self { request_id }
     }
 
-    pub fn checkpoint(chain: Chain, height: u64, payload: &[u8; 32]) -> Self {
+    pub fn from_checkpoint(chain: Chain, height: u64, payload: &[u8; 32]) -> Self {
         let mut hasher = sha3::Sha3_256::new();
         hasher.update(b"checkpoint");
         hasher.update(chain.caip2_chain_id().as_bytes());
@@ -476,7 +476,11 @@ impl ConsensusCheckpointDigest {
     }
 
     pub fn sign_path(&self) -> String {
-        format!("checkpoint/{}/{}", self.chain.as_str(), self.height)
+        self.height.to_string()
+    }
+
+    pub fn sign_id(&self) -> SignId {
+        SignId::from_checkpoint(self.chain, self.height, &self.sign_payload_hash())
     }
 }
 
