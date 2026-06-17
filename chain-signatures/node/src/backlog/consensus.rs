@@ -41,15 +41,13 @@ pub(crate) async fn align_backlog_with_consensus(
             .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
             .await
         {
-            if historical.height == checkpoint_digest.height {
-                tracing::info!(
-                    ?chain,
-                    local_height = current_checkpoint.height,
-                    consensus_height = checkpoint_digest.height,
-                    "local backlog is ahead of consensus and matches past consensus checkpoint; no regression needed"
-                );
-                return None;
-            }
+            tracing::info!(
+                ?chain,
+                local_height = current_checkpoint.height,
+                consensus_height = checkpoint_digest.height,
+                "local backlog is ahead of consensus and matches past consensus checkpoint; no regression needed"
+            );
+            return None;
         }
     }
 

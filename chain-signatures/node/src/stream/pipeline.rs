@@ -267,9 +267,13 @@ async fn detect_regression(
             .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
             .await
         {
-            if historical.height == checkpoint_digest.height {
-                return None;
-            }
+            tracing::info!(
+                ?chain,
+                local_height = current_checkpoint.height,
+                consensus_height = checkpoint_digest.height,
+                "local backlog is ahead of consensus and matches past consensus checkpoint; no regression needed"
+            );
+            return None;
         }
     }
 
