@@ -761,12 +761,19 @@ impl Solana {
 
         let mut last_error = None;
         for attempt in 1..=3 {
-            // Reserve rpc/ws as one contiguous block so parallel Solana validators do not overlap.
-            let rpc_port = pick_preferred_or_unused_port_block(8899, 2).await;
+            // Generate a random base port for THIS specific test process
+            let block_index = rand::random::<u16>() % 400;
+            let base_port = 10000 + (block_index * 100);
+
+            // Because the preferred port is randomized per-process, Test A and Test B
+            // will query completely different areas of the OS port space, avoiding the race condition.
+            let rpc_port = pick_preferred_or_unused_port_block(base_port, 2).await;
             let ws_port = rpc_port + 1;
-            let faucet_port = pick_preferred_or_unused_port(9900).await;
-            let gossip_port = pick_preferred_or_unused_port(8000).await;
-            let dynamic_port_start = pick_preferred_or_unused_port_block(gossip_port + 1, 33).await;
+
+            let faucet_port = pick_preferred_or_unused_port(base_port + 2).await;
+            let gossip_port = pick_preferred_or_unused_port(base_port + 3).await;
+
+            let dynamic_port_start = pick_preferred_or_unused_port_block(base_port + 4, 33).await;
             let dynamic_port_end = dynamic_port_start + 32;
 
             let rpc_address = format!("http://127.0.0.1:{}", rpc_port);

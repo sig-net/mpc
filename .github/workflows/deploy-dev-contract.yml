@@ -14,7 +14,7 @@ jobs:
       - name: add JSON contract
         run: mkdir -p ~/.near-credentials/testnet && echo '${{ secrets.DEV_CONTRACT_JSON }}' > ~/.near-credentials/testnet/dev.sig-net.testnet.json
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Use Node.js
         uses: actions/setup-node@v4
         with:
@@ -35,6 +35,12 @@ jobs:
           if ! command -v cargo-near >/dev/null; then
             curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
           fi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: deploy-dev-contract
+          cache-targets: true
+          cache-on-failure: false
 
       - name: Build & Deploy Dev Contract
         run: |

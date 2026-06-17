@@ -19,12 +19,12 @@ jobs:
     runs-on: warp-ubuntu-latest-x64-4x
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v1
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -45,22 +45,23 @@ jobs:
         with:
           node-version: '20'
 
-      - uses: WarpBuilds/cache@v1
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: "${{ runner.os }}-cargo-${{ hashFiles('chain-signatures/Cargo.lock') }}"
-          restore-keys: ${{ runner.os }}-cargo-
-
       - name: Install cargo-near
         run: |
           if ! command -v cargo-near >/dev/null; then
             curl --proto '=https' --tlsv1.2 -LsSf https://github.com/near/cargo-near/releases/latest/download/cargo-near-installer.sh | sh
           fi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: compat-test
+          cache-targets: true
+          cache-on-failure: false
+
+      # Install system OpenSSL explicitly here so the build uses system OpenSSL instead of building OpenSSL from source
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Set OpenSSL to system
+        run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
 
       - name: Build governance contract
         run: |

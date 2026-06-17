@@ -15,11 +15,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
         name: "Checkout mpc"
 
       - name: Login to GCP Artifact Registry
-        uses: docker/login-action@v3.7.0
+        uses: docker/login-action@v4
         with:
           registry: europe-west1-docker.pkg.dev
           username: _json_key

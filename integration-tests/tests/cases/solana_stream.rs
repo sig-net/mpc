@@ -13,9 +13,8 @@ use mpc_node::protocol::{Chain, IndexedSignRequest, Sign};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{catchup_then_livestream, run_stream, ChainEvent, ChainStream};
-use mpc_primitives::LATEST_MPC_KEY_VERSION;
-use mpc_primitives::{SignArgs, SignId, Signature};
+use mpc_node::stream::{catchup_then_livestream, run_stream, ChainStream};
+use mpc_primitives::{ChainEvent, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;
 use tokio::sync::mpsc;
@@ -245,7 +244,7 @@ async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {
     assert_eq!(req.chain, Chain::Solana);
     assert!(matches!(
         req.kind,
-        mpc_node::protocol::SignKind::SignBidirectional(_)
+        mpc_primitives::SignKind::SignBidirectional(_)
     ));
 
     Ok(())

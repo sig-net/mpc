@@ -110,14 +110,14 @@ pub fn current_unix_timestamp() -> u64 {
 /// exactly like the legacy `ethabi` path so request IDs stay stable.
 #[allow(clippy::too_many_arguments)]
 pub fn ethabi_request_id(
-    sender: String,
+    sender: &str,
     payload: [u8; 32],
-    path: String,
+    path: &str,
     key_version: u32,
-    chain_id: String,
-    algo: String,
-    dest: String,
-    params: String,
+    chain_id: &str,
+    algo: &str,
+    dest: &str,
+    params: &str,
 ) -> [u8; 32] {
     const HEAD_WORDS: usize = 8;
     const WORD_SIZE: usize = 32;

@@ -2,6 +2,7 @@
 //! passing between nodes and updates to the governance smart contract.
 
 use crate::mpc_fixture::fixture_interface::SharedOutput;
+use crate::mpc_fixture::mock_chain::MockChain;
 use crate::mpc_fixture::mock_stream::MockStream;
 use cait_sith::protocol::Participant;
 use mpc_keys::hpke::Ciphered;
@@ -30,7 +31,7 @@ pub(super) fn test_mock_network(
     mesh: watch::Sender<MeshState>,
     config: watch::Sender<Config>,
     mut filter: MessageFilter,
-    mock_streams: Vec<MockStream>,
+    mock_chain: Option<MockChain>,
 ) -> JoinHandle<()> {
     let msg_log = Arc::clone(&shared_output.msg_log);
     let rpc_actions = Arc::clone(&shared_output.rpc_actions);
@@ -85,9 +86,10 @@ pub(super) fn test_mock_network(
                     tracing::info!(target: "mock_network", ?action_str, "Received RPC action");
                     let mut actions_log = rpc_actions.lock().await;
                     actions_log.insert(action_str);
-                    let block = [rpc];
-                    for stream in &mock_streams {
-                        stream.prepare_block_of_rpc_actions(&block).await;
+                    drop(actions_log);
+
+                    if let Some(chain) = &mock_chain {
+                        chain.on_rpc_publish(&rpc).await;
                     }
                 }
 
