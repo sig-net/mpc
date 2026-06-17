@@ -1,4 +1,3 @@
-use crate::backlog::Backlog;
 use crate::protocol::Chain;
 use crate::rpc::CantonClient;
 use crate::stream::{ChainIndexer, ChainStream};
@@ -28,13 +27,12 @@ type CantonWsWrite = SplitSink<CantonWs, Message>;
 
 pub struct CantonStream {
     config: CantonConfig,
-    backlog: Backlog,
     events_rx: mpsc::Receiver<ChainEvent>,
     events_tx: Option<mpsc::Sender<ChainEvent>>,
 }
 
 impl CantonStream {
-    pub fn new(config: Option<CantonConfig>, backlog: Backlog) -> Option<Self> {
+    pub fn new(config: Option<CantonConfig>) -> Option<Self> {
         let config = match config {
             Some(c) => c,
             None => {
@@ -47,7 +45,6 @@ impl CantonStream {
 
         Some(CantonStream {
             config,
-            backlog,
             events_rx,
             events_tx: Some(events_tx),
         })
@@ -58,13 +55,13 @@ impl CantonStream {
 impl ChainStream for CantonStream {
     type Indexer = CantonIndexer;
 
-    async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
+    async fn start(&mut self, start_height: Option<u64>) -> anyhow::Result<Self::Indexer> {
         let Some(events_tx) = self.events_tx.take() else {
             anyhow::bail!("canton stream already started");
         };
 
         let client = CantonClient::new(&self.config).await?;
-        Ok(Self::Indexer::new(client, self.backlog.clone(), events_tx))
+        Ok(Self::Indexer::new(client, events_tx, start_height))
     }
 
     async fn next_event(&mut self) -> Option<ChainEvent> {
@@ -176,24 +173,24 @@ impl CantonConnection {
 
 pub struct CantonIndexer {
     client: CantonClient,
-    backlog: Backlog,
     events_tx: mpsc::Sender<ChainEvent>,
     ws_conn: CantonConnection,
     last_seen_offset: u64,
+    start_height: Option<u64>,
 }
 
 impl CantonIndexer {
     pub fn new(
         client: CantonClient,
-        backlog: Backlog,
         events_tx: mpsc::Sender<ChainEvent>,
+        start_height: Option<u64>,
     ) -> Self {
         Self {
             client,
-            backlog,
             events_tx,
             ws_conn: CantonConnection::Disconnected,
             last_seen_offset: 0,
+            start_height,
         }
     }
 
@@ -314,18 +311,15 @@ impl ChainIndexer for CantonIndexer {
     type Iter = stream::Iter<Range<u64>>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
-        let checkpoint = self
-            .backlog
-            .processed_block(Chain::Canton)
-            .await
-            .unwrap_or(0);
+        let checkpoint = self.start_height.unwrap_or(0);
         self.last_seen_offset = checkpoint;
         let anchor_height = self.client.fetch_ledger_end().await?;
         self.reconnect(self.last_seen_offset).await;
         Ok(Some(anchor_height))
     }
 
-    async fn catchup_range(&self, start_height: u64, anchor_height: u64) -> Self::Iter {
+    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
+        let start_height = self.start_height.map(|n| n.saturating_add(1)).unwrap_or(anchor_height);
         // After a reconnect, we resume from last_seen_offset, so catchup should start there.
         stream::iter(catchup_offset_range(start_height, anchor_height))
     }
