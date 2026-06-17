@@ -340,37 +340,18 @@ fn test_bidirectional_event() -> NodeSignBidirectionalEvent {
 }
 
 struct StartedEthereumStream {
-    stream: EthereumStream,
+    events_rx: mpsc::Receiver<ChainEvent>,
     _indexer_task: tokio::task::JoinHandle<()>,
-}
-
-impl std::ops::Deref for StartedEthereumStream {
-    type Target = EthereumStream;
-
-    fn deref(&self) -> &Self::Target {
-        &self.stream
-    }
-}
-
-impl std::ops::DerefMut for StartedEthereumStream {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.stream
-    }
 }
 
 async fn next_event_within(
     client: &mut StartedEthereumStream,
     duration: Duration,
 ) -> Result<ChainEvent> {
-    timeout(duration, async {
-        loop {
-            if let Some(event) = client.next_event().await {
-                return event;
-            }
-        }
-    })
-    .await
-    .context("timed out waiting for chain event")
+    timeout(duration, client.events_rx.recv())
+        .await
+        .context("timed out waiting for chain event")?
+        .context("stream channel closed unexpectedly")
 }
 
 /// Helper for starting the ethereum stream, especially in cases where we do not want
@@ -380,12 +361,12 @@ async fn stream_ethereum(
     backlog: Backlog,
 ) -> Result<StartedEthereumStream> {
     let start_height = backlog.processed_block(Chain::Ethereum).await;
-    let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
-    let indexer = stream.start(start_height).await?;
+    let stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
+    let (indexer, events_rx) = stream.start(start_height).await?;
     let indexer_task = tokio::spawn(catchup_then_livestream(indexer));
 
     Ok(StartedEthereumStream {
-        stream,
+        events_rx,
         _indexer_task: indexer_task,
     })
 }
@@ -968,7 +949,7 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
     let checkpoint = tokio::time::timeout(Duration::from_secs(20), async move {
         let mut saw_sign_request = false;
         loop {
-            let Some(event) = stream.next_event().await else {
+            let Some(event) = stream.events_rx.recv().await else {
                 break None;
             };
             match event {

@@ -37,24 +37,28 @@ fn test_dependencies() -> (Backlog, watch::Receiver<MeshState>, NodeClient) {
     (backlog, mesh_rx, node_client)
 }
 
-async fn stream_solana(config: SolConfig) -> Result<SolanaStream> {
+async fn stream_solana(config: SolConfig) -> Result<mpsc::Receiver<ChainEvent>> {
     let (backlog, _, _) = test_dependencies();
     stream_solana_with_backlog(config, backlog).await
 }
 
-async fn stream_solana_with_backlog(config: SolConfig, backlog: Backlog) -> Result<SolanaStream> {
+async fn stream_solana_with_backlog(
+    config: SolConfig,
+    backlog: Backlog,
+) -> Result<mpsc::Receiver<ChainEvent>> {
     let start_height = backlog.processed_block(Chain::Solana).await;
-    let mut stream =
-        SolanaStream::new(Some(config)).context("failed to create SolanaStream")?;
-    let indexer = ChainStream::start(&mut stream, start_height).await?;
+    let stream = SolanaStream::new(Some(config)).context("failed to create SolanaStream")?;
+    let (indexer, events_rx) = stream.start(start_height).await?;
     tokio::spawn(catchup_then_livestream(indexer));
-    Ok(stream)
+    Ok(events_rx)
 }
 
 /// Helper to wait for a specific event type, skipping block events
-async fn wait_for_sign_request(stream: &mut SolanaStream) -> Result<IndexedSignRequest> {
+async fn wait_for_sign_request(
+    events_rx: &mut mpsc::Receiver<ChainEvent>,
+) -> Result<IndexedSignRequest> {
     loop {
-        match timeout(Duration::from_secs(6), stream.next_event()).await {
+        match timeout(Duration::from_secs(6), events_rx.recv()).await {
             Ok(Some(ChainEvent::SignRequest(req))) => return Ok(req),
             Ok(Some(ChainEvent::Block(_))) => continue,
             Ok(Some(ChainEvent::CatchupCompleted)) => {
@@ -109,7 +113,7 @@ async fn test_solana_stream_emits_blocks() -> Result<()> {
     let program_address = solana.program_keypair.pubkey().to_string();
 
     let config = solana.get_config(program_address);
-    let mut stream = stream_solana(config).await?;
+    let mut events_rx = stream_solana(config).await?;
 
     // Submit a transaction to generate activity
     let payload = [2u8; 32];
@@ -120,7 +124,7 @@ async fn test_solana_stream_emits_blocks() -> Result<()> {
     // Collect events and verify we get block markers
     let mut found_block = false;
     for _ in 0..5 {
-        if let Ok(Some(event)) = timeout(Duration::from_secs(3), stream.next_event()).await {
+        if let Ok(Some(event)) = timeout(Duration::from_secs(3), events_rx.recv()).await {
             if matches!(event, ChainEvent::Block(_)) {
                 found_block = true;
                 break;
@@ -140,7 +144,7 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
 
     // Create first client and process some events
     let config = solana.get_config(program_address.clone());
-    let mut stream1 = stream_solana(config.clone()).await?;
+    let mut events_rx1 = stream_solana(config.clone()).await?;
 
     // Submit requests while client is running
     for i in 0..3 {
@@ -154,7 +158,7 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     let mut seen_by_client1 = 0;
     let mut last_block_client1 = 0;
     for _ in 0..10 {
-        if let Ok(Some(event)) = timeout(Duration::from_millis(500), stream1.next_event()).await {
+        if let Ok(Some(event)) = timeout(Duration::from_millis(500), events_rx1.recv()).await {
             match event {
                 ChainEvent::SignRequest(_) => seen_by_client1 += 1,
                 ChainEvent::Block(block) => last_block_client1 = last_block_client1.max(block),
@@ -166,10 +170,10 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     assert!(last_block_client1 > 0, "first client saw no block events");
 
     // Drop first client
-    drop(stream1);
+    drop(events_rx1);
 
     // Create new client immediately (before more events) - should start processing from now
-    let mut stream2 = stream_solana(config).await?;
+    let mut events_rx2 = stream_solana(config).await?;
 
     // Submit new requests while second client is running
     for i in 3..6 {
@@ -183,7 +187,7 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     let mut sign_events = Vec::new();
     let mut caught_up = false;
     for _ in 0..20 {
-        if let Ok(Some(event)) = timeout(Duration::from_secs(1), stream2.next_event()).await {
+        if let Ok(Some(event)) = timeout(Duration::from_secs(1), events_rx2.recv()).await {
             match event {
                 ChainEvent::SignRequest(req) => {
                     sign_events.push(req);
@@ -257,7 +261,7 @@ async fn test_solana_stream_concurrent_events() -> Result<()> {
     let solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
     let config = solana.get_config(program_address);
-    let mut stream = stream_solana(config).await?;
+    let mut events_rx = stream_solana(config).await?;
 
     // Submit multiple concurrent sign requests
     let num_requests = 5;
@@ -278,9 +282,7 @@ async fn test_solana_stream_concurrent_events() -> Result<()> {
             break;
         }
 
-        if let Ok(Some(ChainEvent::SignRequest(req))) =
-            timeout(remaining, stream.next_event()).await
-        {
+        if let Ok(Some(ChainEvent::SignRequest(req))) = timeout(remaining, events_rx.recv()).await {
             sign_events.push(req);
         }
     }
@@ -311,7 +313,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
     let program_address = solana.program_keypair.pubkey().to_string();
     let (backlog, _, _) = test_dependencies();
     let config = solana.get_config(program_address.clone());
-    let mut stream1 = stream_solana_with_backlog(config.clone(), backlog.clone()).await?;
+    let mut events_rx1 = stream_solana_with_backlog(config.clone(), backlog.clone()).await?;
 
     // Submit request and wait for a block marker
     solana
@@ -328,7 +330,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut checkpoint_block = None;
     while Instant::now() < deadline {
-        match timeout(Duration::from_secs(1), stream1.next_event()).await {
+        match timeout(Duration::from_secs(1), events_rx1.recv()).await {
             Ok(Some(ChainEvent::Block(block))) => {
                 tracing::info!(block, "received block event");
                 checkpoint_block = Some(block);
@@ -348,10 +350,10 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
         checkpoint_block.is_some(),
         "did not receive block event within time"
     );
-    drop(stream1);
+    drop(events_rx1);
 
     // Create new client with same backlog - should resume from checkpoint
-    let mut stream2 = stream_solana_with_backlog(config, backlog.clone()).await?;
+    let mut events_rx2 = stream_solana_with_backlog(config, backlog.clone()).await?;
 
     // Verify the backlog was persisted
     let persisted_block = backlog.processed_block(Chain::Solana).await;
@@ -375,7 +377,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
     // New client should pick up new events
     timeout(Duration::from_secs(5), async {
         loop {
-            match stream2.next_event().await {
+            match events_rx2.recv().await {
                 Some(ChainEvent::SignRequest(req)) => break Ok(req),
                 Some(other) => {
                     tracing::info!(?other, "received non-sign/block event");
@@ -437,8 +439,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     seeded_backlog.checkpoint(Chain::Solana).await;
 
     let recovered_backlog = Backlog::persisted(storage);
-    let stream = SolanaStream::new(Some(config))
-        .context("failed to create SolanaStream")?;
+    let stream = SolanaStream::new(Some(config)).context("failed to create SolanaStream")?;
 
     let (sign_tx, mut sign_rx) = mpsc::channel::<Sign>(4);
     let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcAction>(4);

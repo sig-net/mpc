@@ -4,8 +4,7 @@ use mpc_node::rpc::RpcAction;
 use mpc_node::stream::{ChainIndexer, ChainStream};
 use mpc_primitives::{Chain, ChainEvent, SignKind};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 
 #[derive(Default, Clone)]
 pub struct MockStream {
@@ -55,23 +54,17 @@ impl ChainIndexer for MockIndexer {
 impl ChainStream for MockStream {
     type Indexer = MockIndexer;
 
-    async fn start(&mut self, _start_height: Option<u64>) -> anyhow::Result<MockIndexer> {
-        Ok(MockIndexer {
-            inner: self.inner.clone(),
-        })
-    }
-
-    async fn next_event(&mut self) -> Option<ChainEvent> {
-        loop {
-            let mut guard = self.inner.lock().await;
-            let out = guard.pending_events.pop();
-            if out.is_some() {
-                return out;
-            }
-            drop(guard);
-            // TODO: would be better to avoid sleep by awaiting new data
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    async fn start(
+        self,
+        _start_height: Option<u64>,
+    ) -> anyhow::Result<(MockIndexer, mpsc::Receiver<ChainEvent>)> {
+        let (_events_tx, events_rx) = mpsc::channel(100);
+        Ok((
+            MockIndexer {
+                inner: self.inner.clone(),
+            },
+            events_rx,
+        ))
     }
 }
 
