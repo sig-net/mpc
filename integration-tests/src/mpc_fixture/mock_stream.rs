@@ -58,7 +58,34 @@ impl ChainStream for MockStream {
         self,
         _start_height: Option<u64>,
     ) -> anyhow::Result<(MockIndexer, mpsc::Receiver<ChainEvent>)> {
-        let (_events_tx, events_rx) = mpsc::channel(100);
+        let (events_tx, events_rx) = mpsc::channel(100);
+        let inner_clone = self.inner.clone();
+
+        // Background task to pump events from inner state to the channel
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(10));
+            loop {
+                interval.tick().await;
+
+                // Extract any pending events from the lock
+                let mut events_to_send = Vec::new();
+                {
+                    let mut guard = inner_clone.lock().await;
+                    if !guard.pending_events.is_empty() {
+                        events_to_send = std::mem::take(&mut guard.pending_events);
+                    }
+                }
+
+                // Send events to the orchestrator
+                for event in events_to_send {
+                    if events_tx.send(event).await.is_err() {
+                        // The receiver (run_stream) dropped, meaning the test is over.
+                        return;
+                    }
+                }
+            }
+        });
+
         Ok((
             MockIndexer {
                 inner: self.inner.clone(),
