@@ -40,7 +40,12 @@ pub fn respond_command(contract_id: &AccountId, caller_id: &AccountId) -> anyhow
     let payload_hashed = alloy::primitives::keccak256(PAYLOAD);
     let path = "test";
 
-    let sign_id = SignId::from_parts(caller_id, &payload_hashed, path, LATEST_MPC_KEY_VERSION);
+    let sign_id = SignId::from_parts(
+        caller_id.as_str(),
+        &payload_hashed,
+        path,
+        LATEST_MPC_KEY_VERSION,
+    );
     let big_r = serde_json::from_value(
         "02EC7FA686BB430A4B700BDA07F2E07D6333D9E33AEEF270334EB2D00D0A6FEC6C".into(),
     )?; // Fake BigR

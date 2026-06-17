@@ -14,7 +14,7 @@ jobs:
       - name: add JSON contract
         run: mkdir -p ~/.near-credentials/testnet && echo '${{ secrets.DEV_CONTRACT_JSON }}' > ~/.near-credentials/testnet/dev.sig-net.testnet.json
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Use Node.js
         uses: actions/setup-node@v4
         with:
@@ -29,6 +29,12 @@ jobs:
           profile: minimal
           toolchain: 1.81.0
           target: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: deploy-dev-contract
+          cache-targets: true
+          cache-on-failure: false
 
       - name: Build & Deploy Dev Contract
         run: ./build-contract.sh \

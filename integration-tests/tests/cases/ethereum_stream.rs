@@ -13,15 +13,16 @@ use mpc_node::backlog::Backlog;
 use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
-use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign, SignKind};
+use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign};
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::ops::SignBidirectionalEvent as NodeSignBidirectionalEvent;
-use mpc_node::stream::ops::SignatureRespondedEvent;
-use mpc_node::stream::{catchup_then_livestream, run_stream, ChainEvent, ChainStream};
+use mpc_node::stream::{catchup_then_livestream, run_stream, ChainStream};
 use mpc_node::util::current_unix_timestamp;
-use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{
+    ChainEvent, SignArgs, SignBidirectionalEvent as NodeSignBidirectionalEvent, SignId, SignKind,
+    LATEST_MPC_KEY_VERSION,
+};
 use near_primitives::types::AccountId;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
@@ -256,14 +257,15 @@ async fn submit_eth_transfer_with_block(ctx: &EthereumTestEnvironment) -> Result
 async fn submit_respond_for_request_id<P>(
     contract: ChainSignatures::ChainSignaturesInstance<P>,
     request_id: [u8; 32],
+    signature: mpc_primitives::Signature,
 ) -> Result<B256>
 where
     P: Provider + Clone + Send + Sync + 'static,
 {
-    let enc = k256::ProjectivePoint::GENERATOR.to_encoded_point(false);
-    let x = enc.x().expect("generator must have x coordinate");
-    let y = enc.y().expect("generator must have y coordinate");
-    let s = U256::from_be_bytes(k256::Scalar::from(11u64).to_bytes().into());
+    let enc = signature.big_r.to_encoded_point(false);
+    let x = enc.x().expect("big_r must have x coordinate");
+    let y = enc.y().expect("big_r must have y coordinate");
+    let s = U256::from_be_bytes(signature.s.to_bytes().into());
 
     let response = ChainSignatures::Response {
         requestId: request_id.into(),
@@ -273,7 +275,7 @@ where
                 y: U256::from_be_slice(y),
             },
             s,
-            recoveryId: 1,
+            recoveryId: signature.recovery_id,
         },
     };
 
@@ -306,6 +308,8 @@ fn test_sign_args(seed: u8) -> SignArgs {
     }
 }
 
+use mpc_node::kdf::valid_signature;
+
 fn test_bidirectional_event() -> NodeSignBidirectionalEvent {
     let mut rlp_s = rlp::RlpStream::new_list(9);
     rlp_s.append(&0u64);
@@ -318,20 +322,21 @@ fn test_bidirectional_event() -> NodeSignBidirectionalEvent {
     rlp_s.append(&0u64);
     rlp_s.append(&0u64);
 
-    NodeSignBidirectionalEvent::Solana(signet_program::SignBidirectionalEvent {
-        sender: solana_sdk::pubkey::Pubkey::new_unique(),
+    NodeSignBidirectionalEvent {
+        sender: solana_sdk::pubkey::Pubkey::new_unique().to_bytes(),
         serialized_transaction: rlp_s.out().to_vec(),
-        dest: Chain::Ethereum.to_string(),
         caip2_id: "eip155:31337".to_string(),
         key_version: LATEST_MPC_KEY_VERSION,
         deposit: 1,
         path: "bidirectional-test-path".to_string(),
         algo: "secp256k1".to_string(),
+        dest: Chain::Ethereum.to_string(),
         params: "{}".to_string(),
-        program_id: solana_sdk::pubkey::Pubkey::new_unique(),
+        chain: Chain::Solana,
+        chain_ctx: Some(solana_sdk::pubkey::Pubkey::new_unique().to_bytes().to_vec()),
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-    })
+    }
 }
 
 struct StartedEthereumStream {
@@ -527,8 +532,8 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         ))
         .await;
 
-    let execution_tx = mpc_node::sign_bidirectional::BidirectionalTx {
-        id: mpc_node::sign_bidirectional::BidirectionalTxId(B256::from([0x44; 32])),
+    let execution_tx = mpc_primitives::BidirectionalTx {
+        id: mpc_primitives::BidirectionalTxId(B256::from([0x44; 32]).0),
         sender: [0u8; 32],
         serialized_transaction: vec![],
         source_chain: Chain::Solana,
@@ -543,7 +548,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         request_id: execution_sign_id.request_id,
-        from_address: ctx.wallet,
+        from_address: **ctx.wallet,
         nonce: checkpoint_nonce,
     };
     backlog
@@ -570,7 +575,18 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
 
     let responder_contract = ChainSignatures::new(ctx.contract_address, responder_signer.clone());
 
-    submit_respond_for_request_id(responder_contract, resolved_sign_id.request_id).await?;
+    let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
+    let root_pk = root_sk.public_key().to_projective().to_affine();
+
+    let resolved_args = test_sign_args(0x11);
+    let resolved_sig = valid_signature(&root_sk, &resolved_args);
+
+    submit_respond_for_request_id(
+        responder_contract,
+        resolved_sign_id.request_id,
+        resolved_sig,
+    )
+    .await?;
     submit_eth_transfer(&ctx).await?;
     let catchup_payload = [0x55; 32];
     submit_sign_request(&ctx, catchup_payload, "catchup-linear-path").await?;
@@ -579,7 +595,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
-        k256::ProjectivePoint::GENERATOR.to_affine(),
+        root_pk,
         1,
         Default::default(),
     );
@@ -703,8 +719,8 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
     let backlog = ctx.backlog();
 
     // Register an execution watcher with an intentionally stale nonce to trigger the staleness path.
-    let tx = mpc_node::sign_bidirectional::BidirectionalTx {
-        id: mpc_node::sign_bidirectional::BidirectionalTxId(B256::from([9u8; 32])),
+    let tx = mpc_primitives::BidirectionalTx {
+        id: mpc_primitives::BidirectionalTxId(B256::from([9u8; 32]).0),
         sender: [0u8; 32],
         serialized_transaction: vec![],
         source_chain: Chain::Solana,
@@ -719,7 +735,7 @@ async fn test_ethereum_stream_execution_confirmation() -> Result<()> {
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         request_id: [7u8; 32],
-        from_address: ctx.wallet,
+        from_address: **ctx.wallet,
         nonce: 0,
     };
     let sign_id = SignId::new([7u8; 32]);
@@ -818,8 +834,8 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     // Register the execution watcher only after catchup has completed and the
     // transaction is already in the past relative to the stream.
     let sign_id = SignId::new([0x88; 32]);
-    let tx_id = mpc_node::sign_bidirectional::BidirectionalTxId(tx_hash);
-    let tx = mpc_node::sign_bidirectional::BidirectionalTx {
+    let tx_id = mpc_primitives::BidirectionalTxId(tx_hash.0);
+    let tx = mpc_primitives::BidirectionalTx {
         id: tx_id,
         sender: [0u8; 32],
         serialized_transaction: vec![],
@@ -835,7 +851,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         output_deserialization_schema: vec![],
         respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         request_id: sign_id.request_id,
-        from_address: ctx.wallet,
+        from_address: **ctx.wallet,
         nonce: 0,
     };
     backlog
@@ -1108,7 +1124,8 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     let mut saw_respond = false;
     for _ in 0..8 {
         match next_event_within(&mut stream, Duration::from_secs(10)).await? {
-            ChainEvent::Respond(SignatureRespondedEvent::Ethereum(ev)) => {
+            ChainEvent::Respond(ev) => {
+                assert_eq!(ev.chain, mpc_primitives::Chain::Ethereum);
                 assert_eq!(ev.request_id, sign_req.id.request_id);
                 assert_eq!(ev.signature.big_r, expected_big_r);
                 assert_eq!(ev.signature.s, expected_s);

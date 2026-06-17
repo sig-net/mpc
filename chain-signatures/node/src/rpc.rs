@@ -1,61 +1,51 @@
 use crate::config::{Config, ContractConfig, NetworkConfig};
-use crate::indexer_eth::EthConfig;
-use crate::indexer_sol::SolConfig;
-use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
-use crate::protocol::contract::primitives::{ParticipantMap, Participants};
-use crate::protocol::contract::RunningContractState;
-use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, SignKind};
-use crate::util::AffinePointExt as _;
-use std::collections::BTreeSet;
-
-use solana_sdk::commitment_config::CommitmentConfig;
-use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signer::keypair::Keypair;
-
-use alloy::primitives::Address;
-use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
-use alloy::providers::{Provider, RootProvider, WalletProvider};
-use alloy::rpc::types::{Transaction, TransactionReceipt};
-use cait_sith::protocol::Participant;
-use cait_sith::FullSignature;
-use k256::{AffinePoint, Secp256k1};
-use mpc_keys::hpke;
-use mpc_primitives::SignId;
-use mpc_primitives::Signature;
-
-use crate::util::retry::{retry_async, Backoff, RetryConfig, RetryError, RetryReason};
-use alloy::contract::{ContractInstance, Interface};
-use alloy::dyn_abi::DynSolValue;
-use alloy::network::EthereumWallet;
-use alloy::primitives::U256;
-use alloy::providers::ProviderBuilder;
-use alloy_signer_local::PrivateKeySigner;
-use k256::elliptic_curve::point::AffineCoordinates;
-use k256::elliptic_curve::sec1::ToEncodedPoint;
-use near_account_id::AccountId;
-use near_crypto::InMemorySigner;
-use near_fetch::result::ExecutionFinalResult;
-use serde_json::json;
-use sp_core::{sr25519, Pair as _};
-use sp_runtime::{
-    traits::{IdentifyAccount, Verify},
-    MultiSignature as SpMultiSignature,
-};
-use std::collections::HashMap;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, watch};
-use url::Url;
-
 use crate::indexer_canton::ledger_api::{
     ActiveContractEntry, CumulativeFilter, EventFormat, GetActiveContractsRequest,
     IdentifierFilter, JsCommands, LedgerEndResponse, PartyFilter,
     SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse, TemplateFilterValue,
 };
 use crate::indexer_canton::{CantonAuthProvider, CantonConfig};
+use crate::indexer_eth::EthConfig;
 use crate::indexer_hydration::HydrationConfig;
+use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
+use crate::protocol::contract::primitives::{ParticipantMap, Participants};
+use crate::protocol::contract::RunningContractState;
+use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState};
+use crate::solana_client::{SolConfig, SolanaClient};
+use crate::util::retry::{retry_async, Backoff, RetryConfig, RetryError, RetryReason};
+use crate::util::AffinePointExt as _;
+
+use alloy::contract::{ContractInstance, Interface};
+use alloy::dyn_abi::DynSolValue;
+use alloy::network::EthereumWallet;
+use alloy::primitives::Address;
+use alloy::primitives::U256;
+use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
+use alloy::providers::ProviderBuilder;
+use alloy::providers::{Provider, RootProvider, WalletProvider};
+use alloy::rpc::types::{Transaction, TransactionReceipt};
+use alloy_signer_local::PrivateKeySigner;
+use cait_sith::protocol::Participant;
+use cait_sith::FullSignature;
+use k256::elliptic_curve::point::AffineCoordinates;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
+use k256::{AffinePoint, Secp256k1};
+use mpc_keys::hpke;
+use mpc_primitives::{SignId, SignKind, Signature};
+use near_account_id::AccountId;
+use near_crypto::InMemorySigner;
+use near_fetch::result::ExecutionFinalResult;
 use parity_scale_codec::{Decode, Encode};
+use serde_json::json;
+use solana_sdk::pubkey::Pubkey;
+use sp_core::{sr25519, Pair as _};
+use sp_runtime::{
+    traits::{IdentifyAccount, Verify},
+    MultiSignature as SpMultiSignature,
+};
+use std::collections::{BTreeSet, HashMap};
+use std::str::FromStr;
+use std::time::{Duration, Instant};
 use subxt::config::substrate::{
     AccountId32, BlakeTwo256, MultiSignature, SubstrateConfig, SubstrateExtrinsicParams,
     SubstrateHeader,
@@ -63,6 +53,8 @@ use subxt::config::substrate::{
 use subxt::tx::Payload;
 use subxt::Config as SubxtConfig;
 use subxt::OnlineClient;
+use tokio::sync::{mpsc, watch};
+use url::Url;
 
 /// The maximum amount of times to retry publishing a signature.
 const MAX_PUBLISH_RETRY: usize = 6;
@@ -361,6 +353,15 @@ impl ContractStateWatcher {
         }
     }
 
+    pub async fn wait_info(&mut self) -> (usize, Participant) {
+        loop {
+            if let Some((threshold, participant)) = self.info().await {
+                return (threshold, participant);
+            }
+            let _ = self.contract_state.changed().await;
+        }
+    }
+
     pub async fn participant_map(&self) -> ParticipantMap {
         let Some(state) = self.state().clone() else {
             return ParticipantMap::Zero;
@@ -424,7 +425,7 @@ impl RpcExecutor {
         canton: &Option<CantonConfig>,
     ) -> (RpcChannel, Self) {
         let eth = eth.as_ref().map(EthClient::new);
-        let solana = solana.as_ref().map(SolanaClient::new);
+        let solana = solana.as_ref().map(SolanaClient::from_config);
         let hydration = match hydration {
             Some(h) => match HydrationClient::new(h).await {
                 Ok(client) => Some(client),
@@ -741,33 +742,6 @@ impl EthClient {
             Interface::new(abi),
         );
         Self { contract }
-    }
-}
-
-#[derive(Clone)]
-pub struct SolanaClient {
-    client: Arc<anchor_client::Client<Arc<Keypair>>>,
-    program_id: Pubkey,
-    payer: Arc<Keypair>,
-}
-
-impl SolanaClient {
-    pub fn new(sol: &SolConfig) -> Self {
-        let keypair = Keypair::from_base58_string(&sol.account_sk);
-        let payer = Arc::new(keypair);
-        let cluster =
-            anchor_client::Cluster::Custom(sol.rpc_http_url.clone(), sol.rpc_ws_url.clone());
-        let client = anchor_client::Client::new_with_options(
-            cluster,
-            payer.clone(),
-            CommitmentConfig::confirmed(),
-        );
-        Self {
-            client: Arc::new(client),
-            program_id: Pubkey::from_str(&sol.program_address)
-                .expect("Invalid Solana program address provided in configuration"),
-            payer,
-        }
     }
 }
 
@@ -2062,15 +2036,23 @@ async fn try_publish_canton(
     }))?;
 
     let (choice, command_id, choice_argument) = match &action.indexed.kind {
-        SignKind::SignBidirectional(crate::stream::ops::SignBidirectionalEvent::Canton(event)) => (
-            "Respond",
-            format!("mpc-respond-{request_id_hex}"),
-            serde_json::json!({
-                "signEventCid": &event.sign_event_contract_id,
-                "requestId": request_id_hex,
-                "signature": canton_signature,
-            }),
-        ),
+        SignKind::SignBidirectional(event) if event.chain == Chain::Canton => {
+            let chain_ctx_bytes = event
+                .chain_ctx
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("missing chain_ctx on Canton sign request"))?;
+            let ctx: crate::indexer_canton::CantonChainCtx = borsh::from_slice(chain_ctx_bytes)
+                .map_err(|e| anyhow::anyhow!("failed to deserialize CantonChainCtx: {e}"))?;
+            (
+                "Respond",
+                format!("mpc-respond-{request_id_hex}"),
+                serde_json::json!({
+                    "signEventCid": ctx.sign_event_contract_id,
+                    "requestId": request_id_hex,
+                    "signature": canton_signature,
+                }),
+            )
+        }
         SignKind::RespondBidirectional(respond_tx) => {
             let chain_ctx_bytes = respond_tx
                 .chain_ctx

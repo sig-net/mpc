@@ -1,5 +1,5 @@
 [test-groups]
-cluster = { max-threads = 1 }
+cluster = { max-threads = "num-cpus" }
 fixture = { max-threads = "num-cpus" }
 
 [[profile.default.overrides]]

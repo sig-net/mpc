@@ -3,6 +3,7 @@
 
 use crate::containers::Redis;
 use crate::mpc_fixture::message_collector::{CollectMessages, MessagePrinter};
+use crate::mpc_fixture::mock_chain::MockChain;
 use crate::mpc_fixture::mock_stream::MockStream;
 use cait_sith::protocol::Participant;
 use mpc_node::backlog::Backlog;
@@ -26,6 +27,7 @@ pub struct MpcFixture {
     pub redis_container: Redis,
     pub shared_contract_state: watch::Sender<Option<ProtocolState>>,
     pub output: SharedOutput,
+    pub mock_chain: Option<MockChain>,
 }
 
 pub struct MpcFixtureNode {
@@ -190,13 +192,17 @@ impl MpcFixture {
     /// Add a block that contains signature requesting events, visible to all
     /// nodes, then progress the chain to execute it immediately.
     pub async fn process_sign_requests(&self, chain: Chain, requests: &[IndexedSignRequest]) {
-        for node in &self.nodes {
-            let stream = node
-                .mock_streams
-                .get(&chain)
-                .expect("must have mock stream configured");
-            stream.prepare_block_of_sign_requests(requests).await;
-            stream.progress_block_height(1).await;
+        if let Some(mock_chain) = &self.mock_chain {
+            mock_chain.add_sign_requests(requests).await;
+        } else {
+            for node in &self.nodes {
+                let stream = node
+                    .mock_streams
+                    .get(&chain)
+                    .expect("must have mock stream configured");
+                stream.prepare_block_of_sign_requests(requests).await;
+                stream.progress_block_height(1).await;
+            }
         }
     }
 }

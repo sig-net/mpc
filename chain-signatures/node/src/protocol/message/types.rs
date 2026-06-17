@@ -46,8 +46,6 @@ impl PositMessage {
                 participants.len() * std::mem::size_of::<Participant>()
             }
             PositAction::Accept => 0,
-            #[allow(deprecated)]
-            PositAction::Reject => 0,
             PositAction::RejectWithReason(_reason) => std::mem::size_of::<PositRejectReason>(),
         }
     }

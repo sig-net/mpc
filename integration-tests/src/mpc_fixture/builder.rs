@@ -6,6 +6,7 @@ use crate::mpc_fixture::fixture_interface::SharedOutput;
 use crate::mpc_fixture::fixture_tasks::MessageFilter;
 use crate::mpc_fixture::input::FixtureInput;
 use crate::mpc_fixture::message_collector::CollectMessages;
+use crate::mpc_fixture::mock_chain::{ChainEventFilter, MockChain};
 use crate::mpc_fixture::mock_governance::MockGovernance;
 use crate::mpc_fixture::mock_stream::MockStream;
 use crate::mpc_fixture::{fixture_tasks, MpcFixture, MpcFixtureNode};
@@ -50,6 +51,7 @@ pub struct MpcFixtureBuilder {
     candidates: Candidates,
     fixture_config: FixtureConfig,
     output: SharedOutput,
+    chain_event_filters: HashMap<usize, ChainEventFilter>,
 }
 
 struct MpcFixtureNodeBuilder {
@@ -173,6 +175,7 @@ impl MpcFixtureBuilder {
             candidates,
             fixture_config: FixtureConfig::new(num_nodes, threshold),
             output: SharedOutput::default(),
+            chain_event_filters: HashMap::new(),
         }
     }
 
@@ -229,6 +232,25 @@ impl MpcFixtureBuilder {
         let output = self.output;
         let mut nodes = vec![];
 
+        let has_mock_streams = self
+            .prepared_nodes
+            .iter()
+            .any(|n| !n.mock_streams.is_empty());
+        let mock_chain = if has_mock_streams {
+            let all_streams: Vec<MockStream> = self
+                .prepared_nodes
+                .iter()
+                .flat_map(|n| n.mock_streams.values().cloned())
+                .collect();
+            let chain = MockChain::new(all_streams);
+            for (node_idx, filter) in self.chain_event_filters.drain() {
+                chain.set_filter(node_idx, filter).await;
+            }
+            Some(chain)
+        } else {
+            None
+        };
+
         let account_ids: Vec<_> = self
             .prepared_nodes
             .iter()
@@ -254,6 +276,7 @@ impl MpcFixtureBuilder {
                     shared_contract_state_tx.clone(),
                     &mut fixture_input,
                     &output,
+                    mock_chain.clone(),
                 )
                 .await;
 
@@ -265,6 +288,7 @@ impl MpcFixtureBuilder {
             nodes,
             output,
             shared_contract_state: shared_contract_state_tx,
+            mock_chain,
         }
     }
 
@@ -389,6 +413,12 @@ impl MpcFixtureBuilder {
         self
     }
 
+    /// Filter chain events for a specific node. Dropped events are not delivered.
+    pub fn with_chain_event_filter(mut self, node_idx: usize, filter: ChainEventFilter) -> Self {
+        self.chain_event_filters.insert(node_idx, filter);
+        self
+    }
+
     /// Specify a method that acts as message filter for all sent messages the given node.
     pub fn with_message_collector(
         mut self,
@@ -497,6 +527,7 @@ impl MpcFixtureNodeBuilder {
         protocol_state_tx: watch::Sender<Option<ProtocolState>>,
         fixture_input: &mut Option<FixtureInput>,
         shared_output: &SharedOutput,
+        mock_chain: Option<MockChain>,
     ) -> MpcFixtureNode {
         // overwrite the default protocol config with the built config
         self.config.protocol = context.protocol_config.clone();
@@ -575,7 +606,7 @@ impl MpcFixtureNodeBuilder {
             mesh_tx.clone(),
             config_tx.clone(),
             self.messaging.filter,
-            flat_mock_streams.clone(),
+            mock_chain,
         );
 
         // --- SyncChannel and SyncTask setup ---
