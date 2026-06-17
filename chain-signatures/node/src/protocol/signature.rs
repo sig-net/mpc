@@ -132,8 +132,8 @@ impl IndexedSignRequest {
     pub fn checkpoint(checkpoint: ConsensusCheckpointDigest) -> Self {
         let payload = checkpoint.sign_payload_scalar();
         let epsilon = derive_epsilon_checkpoint(checkpoint.chain, checkpoint.height);
-        let entropy = [0u8; 32];
         let id = checkpoint.sign_id();
+        let entropy = id.request_id;
         let args = SignArgs {
             entropy,
             epsilon,
