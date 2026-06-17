@@ -267,20 +267,6 @@ mod tests {
 
     use crate::kdf::valid_signature;
 
-    struct VecEventStreamState {
-        started: bool,
-        events: Vec<Option<ChainEvent>>,
-    }
-
-    impl VecEventStreamState {
-        fn new(events: Vec<Option<ChainEvent>>) -> Self {
-            Self {
-                started: false,
-                events,
-            }
-        }
-    }
-
     macro_rules! impl_vec_event_stream {
         ($stream:ident, $indexer:ident, $chain:expr) => {
             struct $stream {
@@ -400,14 +386,18 @@ mod tests {
 
     struct TestLinearStream {
         control: TestLinearControl,
-        rx: mpsc::Receiver<ChainEvent>,
+        rx: Option<mpsc::Receiver<ChainEvent>>,
         tx: mpsc::Sender<ChainEvent>,
     }
 
     impl TestLinearStream {
         fn new(control: TestLinearControl) -> Self {
             let (tx, rx) = mpsc::channel(16);
-            Self { control, rx, tx }
+            Self {
+                control,
+                rx: Some(rx),
+                tx,
+            }
         }
     }
 
@@ -478,17 +468,18 @@ mod tests {
         type Indexer = TestLinearIndexer;
 
         async fn start(
-            self,
+            mut self,
             _start_height: Option<u64>,
         ) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
-            let (events_tx, events_rx) = crate::stream::channel();
             let indexer = TestLinearIndexer {
-                control: self.control.clone(),
-                tx: events_tx.clone(),
+                control: self.control,
+                tx: self.tx,
                 live_items: Vec::new(),
                 pending_live_block: None,
             };
-            Ok((indexer, events_rx))
+
+            let rx = self.rx.take().expect("Stream already started");
+            Ok((indexer, rx))
         }
     }
 
@@ -678,7 +669,7 @@ mod tests {
             }
         }
 
-        let (events_tx, rx) = mpsc::channel(8);
+        let (events_tx, _rx) = mpsc::channel(8);
         let client = LocalStream {};
 
         let (sign_tx, mut sign_rx) = mpsc::channel(8);
