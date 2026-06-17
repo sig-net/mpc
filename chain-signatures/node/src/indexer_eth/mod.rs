@@ -3,7 +3,6 @@ pub mod indexer_eth_direct_rpc;
 #[cfg(feature = "helios")]
 pub mod indexer_eth_helios;
 
-use crate::backlog::Backlog;
 use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::Chain;
@@ -839,7 +838,6 @@ impl EthereumClient {
 
 pub struct EthereumIndexer {
     eth: EthConfig,
-    backlog: Backlog,
     client: Arc<EthereumClient>,
     events_tx: mpsc::Sender<ChainEvent>,
     contract_address: Address,
@@ -860,7 +858,6 @@ enum BackfillOutcome {
 impl EthereumIndexer {
     pub async fn new(
         eth: EthConfig,
-        backlog: Backlog,
         events_tx: mpsc::Sender<ChainEvent>,
     ) -> anyhow::Result<Self> {
         let client = Arc::new(EthereumClient::new(eth.clone()).await?);
@@ -871,7 +868,6 @@ impl EthereumIndexer {
 
         Ok(Self {
             eth,
-            backlog,
             client,
             events_tx,
             contract_address,
@@ -1408,20 +1404,10 @@ impl ChainIndexer for EthereumIndexer {
         rx.recv().await
     }
 
-    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
-        // TODO: start from genesis block of contract deployment instead of
-        // anchor_height so that we can start from the very beginning of
-        // the history of the network in case where we do not have a checkpoint.
-        // https://github.com/sig-net/mpc/issues/777
-        let current_block = self
-            .backlog
-            .processed_block(Chain::Ethereum)
-            .await
-            .map(|n| n.saturating_add(1))
-            .unwrap_or(anchor_height);
+    async fn catchup_range(&self, start_height: u64, anchor_height: u64) -> Self::Iter {
         let catchup_start = self
             .client
-            .clamp_oldest_supported(current_block, anchor_height);
+            .clamp_oldest_supported(start_height, anchor_height);
 
         let catchup_iter = CatchupIter::new(self.client.clone(), catchup_start, anchor_height);
 
@@ -1493,7 +1479,7 @@ pub struct EthereumStream {
 }
 
 impl EthereumStream {
-    pub async fn new(eth: Option<EthConfig>, backlog: Backlog) -> anyhow::Result<Self> {
+    pub async fn new(eth: Option<EthConfig>) -> anyhow::Result<Self> {
         let Some(eth) = eth else {
             tracing::warn!(
                 "ethereum indexer is disabled: no EthConfig provided \
@@ -1507,7 +1493,7 @@ impl EthereumStream {
         );
 
         let (events_tx, events_rx) = crate::stream::channel();
-        let indexer = EthereumIndexer::new(eth, backlog, events_tx).await?;
+        let indexer = EthereumIndexer::new(eth, events_tx).await?;
 
         Ok(Self {
             events_rx: Some(events_rx),
@@ -1607,7 +1593,6 @@ mod tests {
     #[tokio::test]
     async fn missing_catchup_block_is_refetched() {
         let mut server = Server::new_async().await;
-        let backlog = Backlog::new();
         let (events_tx, mut events_rx) = mpsc::channel(1);
 
         server
@@ -1646,7 +1631,6 @@ mod tests {
                 optimistic_requests: true,
                 light_client: false,
             },
-            backlog,
             client: Arc::new(EthereumClient::DirectRpc(
                 super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
             )),
@@ -1671,7 +1655,6 @@ mod tests {
 
     #[tokio::test]
     async fn missing_catchup_block_returns_error_when_refetch_fails() {
-        let backlog = Backlog::new();
         let (events_tx, mut events_rx) = mpsc::channel(1);
         let mut indexer = EthereumIndexer {
             eth: EthConfig {
@@ -1685,7 +1668,6 @@ mod tests {
                 optimistic_requests: true,
                 light_client: false,
             },
-            backlog,
             client: Arc::new(EthereumClient::DirectRpc(
                 super::indexer_eth_direct_rpc::RpcEthereumClient::new("http://127.0.0.1:1"),
             )),
@@ -2036,7 +2018,6 @@ mod tests {
                 optimistic_requests: true,
                 light_client: false,
             },
-            backlog,
             client: Arc::new(EthereumClient::DirectRpc(
                 super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
             )),
