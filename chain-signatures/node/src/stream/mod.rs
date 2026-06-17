@@ -622,17 +622,19 @@ mod tests {
         let backlog = Backlog::persisted(storage.clone());
 
         // client implemented with a channel so the test can control pacing
-        struct LocalStream {}
+        struct LocalStream {
+            events_rx: Option<mpsc::Receiver<ChainEvent>>,
+        }
 
         #[async_trait]
         impl ChainStream for LocalStream {
             type Indexer = DisabledChainIndexer;
 
             async fn start(
-                self,
+                mut self,
                 _start_height: Option<u64>,
             ) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
-                let (_events_tx, events_rx) = crate::stream::channel();
+                let events_rx = self.events_rx.take().expect("Stream already started");
                 Ok((DisabledChainIndexer::silent(), events_rx))
             }
         }
@@ -669,8 +671,10 @@ mod tests {
             }
         }
 
-        let (events_tx, _rx) = mpsc::channel(8);
-        let client = LocalStream {};
+        let (events_tx, events_rx) = mpsc::channel(8);
+        let client = LocalStream {
+            events_rx: Some(events_rx),
+        };
 
         let (sign_tx, mut sign_rx) = mpsc::channel(8);
 
