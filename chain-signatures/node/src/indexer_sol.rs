@@ -1,4 +1,3 @@
-use crate::backlog::Backlog;
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::solana_client::{SolanaCatchupBlock, SolanaClient};
@@ -137,7 +136,6 @@ pub struct SolanaIndexer {
     pub program_id: Pubkey,
     pub client: SolanaClient,
     pub events_tx: mpsc::Sender<ChainEvent>,
-    pub backlog: Backlog,
     pub live_rx: Option<mpsc::Receiver<ChainEvent>>,
 }
 
@@ -145,7 +143,6 @@ struct SolanaStreamStartState {
     program_id: Pubkey,
     rpc_http_url: String,
     rpc_ws_url: String,
-    backlog: Backlog,
     tx: mpsc::Sender<ChainEvent>,
 }
 
@@ -158,7 +155,7 @@ impl Drop for SolanaStream {
 }
 
 impl SolanaStream {
-    pub fn new(sol: Option<SolConfig>, backlog: Backlog) -> Option<Self> {
+    pub fn new(sol: Option<SolConfig>) -> Option<Self> {
         let Some(sol) = sol else {
             tracing::warn!("solana indexer is disabled");
             return None;
@@ -177,7 +174,6 @@ impl SolanaStream {
                 program_id,
                 rpc_http_url: sol.rpc_http_url.clone(),
                 rpc_ws_url: sol.rpc_ws_url.clone(),
-                backlog,
                 tx,
             }),
             tasks: Vec::new(),
@@ -204,7 +200,6 @@ impl ChainStream for SolanaStream {
             program_id: start_state.program_id,
             client,
             events_tx: start_state.tx.clone(),
-            backlog: start_state.backlog.clone(),
             live_rx: None,
         };
 
@@ -248,15 +243,7 @@ impl ChainIndexer for SolanaIndexer {
         Ok(Some(anchor_rx.await?))
     }
 
-    async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
-        // Get the last persisted processed block height from backlog
-        // TODO: https://github.com/sig-net/mpc/issues/777
-        let start_slot = self
-            .backlog
-            .processed_block(Chain::Solana)
-            .await
-            .map(|n| n.saturating_add(1))
-            .unwrap_or(anchor_height);
+    async fn catchup_range(&self, start_slot: u64, anchor_height: u64) -> Self::Iter {
         let end_slot = anchor_height.saturating_sub(1); // We want to catch up to just before the anchor
         if start_slot > end_slot {
             return Box::pin(futures_util::stream::empty());
@@ -1175,7 +1162,6 @@ mod tests {
         let http_url = format!("https://solana-devnet.g.alchemy.com/v2/{api_key}");
         let ws_url = format!("wss://solana-devnet.g.alchemy.com/v2/{api_key}");
 
-        let backlog = Backlog::new();
         let (events_tx, mut events_rx) = mpsc::channel(1_000_000);
 
         let client = SolanaClient::for_indexer(
@@ -1188,7 +1174,6 @@ mod tests {
             program_id: Pubkey::from_str(&sol_addr).unwrap(),
             client,
             events_tx,
-            backlog,
             live_rx: None,
         };
 
@@ -1205,13 +1190,14 @@ mod tests {
         let start_slot = anchor_height.saturating_sub(1_512_000);
         tracing::debug!("Starting catchup from slot: {start_slot} (~1 week behind)");
 
-        indexer
-            .backlog
-            .set_processed_block_interval(Chain::Solana, start_slot.saturating_sub(1), 1)
-            .await;
+        // TODO: find a way to set the processed block interval
+        // indexer
+        //     .backlog
+        //     .set_processed_block_interval(Chain::Solana, start_slot.saturating_sub(1), 1)
+        //     .await;
 
         // Run catchup range
-        let catchup_stream = indexer.catchup_range(anchor_height).await;
+        let catchup_stream = indexer.catchup_range(start_slot, anchor_height).await;
         tokio::pin!(catchup_stream);
         let mut processed_any = false;
         while let Some(item) = catchup_stream.next().await {
