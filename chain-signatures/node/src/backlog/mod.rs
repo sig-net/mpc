@@ -9,6 +9,7 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 use anyhow::Context;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PendingTx, SignId, SignKind,
+    StateManager,
 };
 use sha3::{Digest, Sha3_256};
 use std::collections::{hash_map, HashMap};
@@ -784,6 +785,20 @@ impl Backlog {
                 continue;
             }
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl StateManager for Backlog {
+    async fn get_processed_block(&self, chain: Chain) -> Option<u64> {
+        self.processed_block(chain).await
+    }
+
+    async fn get_execution_watchers(
+        &self,
+        chain: Chain,
+    ) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)> {
+        self.execution_watchers(chain).await
     }
 }
 

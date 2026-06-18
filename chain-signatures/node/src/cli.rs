@@ -429,7 +429,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 }
             };
 
-            if let Some(sol_stream) = SolanaStream::new(sol.clone()) {
+            if let Some(sol_stream) = SolanaStream::new(sol.clone(), backlog.clone()) {
                 tokio::spawn(run_stream(
                     sol_stream,
                     sign_tx.clone(),
@@ -448,7 +448,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 mesh_state.clone(),
                 client.clone(),
             ));
-            if let Some(canton_stream) = indexer_canton::CantonStream::new(canton) {
+            if let Some(canton_stream) = indexer_canton::CantonStream::new(canton, backlog.clone())
+            {
                 tokio::spawn(run_stream(
                     canton_stream,
                     sign_tx.clone(),

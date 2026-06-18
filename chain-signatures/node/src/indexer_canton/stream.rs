@@ -8,6 +8,7 @@ use futures_util::stream::{self, SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use mpc_primitives::{
     ChainEvent, RespondBidirectionalEvent, ScalarExt, Signature, SignatureRespondedEvent,
+    StateManager,
 };
 use std::collections::HashSet;
 use std::ops::Range;
@@ -25,12 +26,13 @@ type CantonWs = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type CantonWsRead = SplitStream<CantonWs>;
 type CantonWsWrite = SplitSink<CantonWs, Message>;
 
-pub struct CantonStream {
+pub struct CantonStream<S: StateManager> {
     config: CantonConfig,
+    state_manager: S,
 }
 
-impl CantonStream {
-    pub fn new(config: Option<CantonConfig>) -> Option<Self> {
+impl<S: StateManager> CantonStream<S> {
+    pub fn new(config: Option<CantonConfig>, state_manager: S) -> Option<Self> {
         let config = match config {
             Some(c) => c,
             None => {
@@ -39,21 +41,21 @@ impl CantonStream {
             }
         };
 
-        Some(CantonStream { config })
+        Some(CantonStream {
+            config,
+            state_manager,
+        })
     }
 }
 
 #[async_trait]
-impl ChainStream for CantonStream {
-    type Indexer = CantonIndexer;
+impl<S: StateManager> ChainStream for CantonStream<S> {
+    type Indexer = CantonIndexer<S>;
 
-    async fn start(
-        self,
-        start_height: Option<u64>,
-    ) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
+    async fn start(self) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
         let (events_tx, events_rx) = crate::stream::channel();
         let client = CantonClient::new(&self.config).await?;
-        let indexer = CantonIndexer::new(client.clone(), events_tx.clone(), start_height);
+        let indexer = CantonIndexer::new(client.clone(), self.state_manager, events_tx.clone());
         Ok((indexer, events_rx))
     }
 }
@@ -160,26 +162,26 @@ impl CantonConnection {
     }
 }
 
-pub struct CantonIndexer {
+pub struct CantonIndexer<S: StateManager> {
     client: CantonClient,
+    state_manager: S,
     events_tx: mpsc::Sender<ChainEvent>,
     ws_conn: CantonConnection,
     last_seen_offset: u64,
-    start_height: Option<u64>,
 }
 
-impl CantonIndexer {
+impl<S: StateManager> CantonIndexer<S> {
     pub fn new(
         client: CantonClient,
+        state_manager: S,
         events_tx: mpsc::Sender<ChainEvent>,
-        start_height: Option<u64>,
     ) -> Self {
         Self {
             client,
+            state_manager,
             events_tx,
             ws_conn: CantonConnection::Disconnected,
             last_seen_offset: 0,
-            start_height,
         }
     }
 
@@ -294,13 +296,17 @@ fn catchup_offset_range(checkpoint: u64, anchor_height: u64) -> Range<u64> {
 }
 
 #[async_trait]
-impl ChainIndexer for CantonIndexer {
+impl<S: StateManager> ChainIndexer for CantonIndexer<S> {
     const CHAIN: Chain = Chain::Canton;
     type Block = u64;
     type Iter = stream::Iter<Range<u64>>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
-        let checkpoint = self.start_height.unwrap_or(0);
+        let checkpoint = self
+            .state_manager
+            .get_processed_block(Self::CHAIN)
+            .await
+            .unwrap_or(0);
         self.last_seen_offset = checkpoint;
         let anchor_height = self.client.fetch_ledger_end().await?;
         self.reconnect(self.last_seen_offset).await;
@@ -308,12 +314,8 @@ impl ChainIndexer for CantonIndexer {
     }
 
     async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
-        let start_height = self
-            .start_height
-            .map(|n| n.saturating_add(1))
-            .unwrap_or(anchor_height);
         // After a reconnect, we resume from last_seen_offset, so catchup should start there.
-        stream::iter(catchup_offset_range(start_height, anchor_height))
+        stream::iter(catchup_offset_range(self.last_seen_offset, anchor_height))
     }
 
     async fn process_catchup(&mut self, &item: &Self::Block) -> anyhow::Result<()> {

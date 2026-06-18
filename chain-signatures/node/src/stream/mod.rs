@@ -70,16 +70,13 @@ pub trait ChainIndexer: Send + 'static {
     }
 }
 
+// TODO: consider replacing this trait and use builder
 #[async_trait]
 pub trait ChainStream: Send + 'static {
     type Indexer: ChainIndexer + Send;
 
     /// Start the stream and return the indexer and a receiver for chain events.
-    /// The `start_height` parameter is the last processed block height from the backlog
-    async fn start(
-        self,
-        start_height: Option<u64>,
-    ) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)>;
+    async fn start(self) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)>;
 }
 
 pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I) {
@@ -145,10 +142,7 @@ pub async fn run_stream<S: ChainStream>(
     )
     .await;
 
-    // Query backlog for the last processed block to determine where to start catchup
-    let start_height = backlog.processed_block(chain).await;
-
-    let (indexer, mut events_rx) = match stream.start(start_height).await {
+    let (indexer, mut events_rx) = match stream.start().await {
         Ok(res) => res,
         Err(err) => {
             tracing::error!(?err, %chain, "failed to start stream");
@@ -322,7 +316,6 @@ mod tests {
 
                 async fn start(
                     self,
-                    _start_height: Option<u64>,
                 ) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
                     let (tx, rx) = crate::stream::channel();
 
@@ -469,10 +462,7 @@ mod tests {
     impl ChainStream for TestLinearStream {
         type Indexer = TestLinearIndexer;
 
-        async fn start(
-            mut self,
-            _start_height: Option<u64>,
-        ) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
+        async fn start(mut self) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
             let indexer = TestLinearIndexer {
                 control: self.control,
                 tx: self.tx,
@@ -488,7 +478,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_linearized_source_orders_catchup_before_live() {
         let stream = TestLinearStream::new(TestLinearControl::new(Some(1), vec![4, 5]));
-        let (indexer, mut events_rx) = stream.start(None).await.unwrap();
+        let (indexer, mut events_rx) = stream.start().await.unwrap();
         catchup_then_livestream(indexer).await;
 
         let mut observed = Vec::new();
@@ -513,7 +503,7 @@ mod tests {
                 .fail_catchup_once(3)
                 .fail_live_once(4),
         );
-        let (indexer, mut events_rx) = stream.start(None).await.unwrap();
+        let (indexer, mut events_rx) = stream.start().await.unwrap();
         catchup_then_livestream(indexer).await;
 
         let mut observed = Vec::new();
@@ -634,7 +624,6 @@ mod tests {
 
             async fn start(
                 mut self,
-                _start_height: Option<u64>,
             ) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
                 let events_rx = self.events_rx.take().expect("Stream already started");
                 Ok((DisabledChainIndexer::silent(), events_rx))

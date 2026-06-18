@@ -25,7 +25,8 @@ use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
-    ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+    ChainEvent, IndexedSignRequest, SignArgs, SignId, StateManager, LATEST_MPC_KEY_VERSION,
+    MAX_SECP256K1_SCALAR,
 };
 use serde::{Deserialize, Serialize};
 use signet_program::{
@@ -126,20 +127,22 @@ pub struct SolSignRequest {
 }
 
 /// Solana stream that implements the new ChainStream abstraction
-pub struct SolanaStream {
+pub struct SolanaStream<S: StateManager> {
     tasks: Vec<tokio::task::JoinHandle<()>>,
     config: SolConfig,
+    state_manager: S,
 }
 
-pub struct SolanaIndexer {
+pub struct SolanaIndexer<S: StateManager> {
     pub program_id: Pubkey,
     pub client: SolanaClient,
+    // TODO: static dispatch
+    pub state_manager: S,
     pub events_tx: mpsc::Sender<ChainEvent>,
     pub live_rx: Option<mpsc::Receiver<ChainEvent>>,
-    pub start_height: Option<u64>,
 }
 
-impl Drop for SolanaStream {
+impl<S: StateManager> Drop for SolanaStream<S> {
     fn drop(&mut self) {
         for task in &self.tasks {
             task.abort();
@@ -147,8 +150,8 @@ impl Drop for SolanaStream {
     }
 }
 
-impl SolanaStream {
-    pub fn new(config: Option<SolConfig>) -> Option<Self> {
+impl<S: StateManager> SolanaStream<S> {
+    pub fn new(config: Option<SolConfig>, state_manager: S) -> Option<Self> {
         let Some(config) = config else {
             tracing::warn!("solana indexer is disabled");
             return None;
@@ -157,18 +160,16 @@ impl SolanaStream {
         Some(SolanaStream {
             config,
             tasks: Vec::new(),
+            state_manager,
         })
     }
 }
 
 #[async_trait]
-impl ChainStream for SolanaStream {
-    type Indexer = SolanaIndexer;
+impl<S: StateManager> ChainStream for SolanaStream<S> {
+    type Indexer = SolanaIndexer<S>;
 
-    async fn start(
-        self,
-        start_height: Option<u64>,
-    ) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
+    async fn start(self) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
         let Ok(program_id) = Pubkey::from_str(&self.config.program_address) else {
             anyhow::bail!(
                 "Failed to parse solana program address: {}",
@@ -184,12 +185,13 @@ impl ChainStream for SolanaStream {
             program_id,
         );
 
+        // TODO: make it better
         let indexer = SolanaIndexer {
             program_id,
             client,
+            state_manager: self.state_manager.clone(),
             events_tx,
             live_rx: None,
-            start_height,
         };
 
         Ok((indexer, events_rx))
@@ -197,7 +199,7 @@ impl ChainStream for SolanaStream {
 }
 
 #[async_trait]
-impl ChainIndexer for SolanaIndexer {
+impl<S: StateManager> ChainIndexer for SolanaIndexer<S> {
     const CHAIN: Chain = Chain::Solana;
     type Block = (u64, SolanaCatchupBlock);
     type Iter = Pin<Box<dyn Stream<Item = Self::Block> + Send + 'static>>;
@@ -226,8 +228,12 @@ impl ChainIndexer for SolanaIndexer {
     }
 
     async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
+        // Get the last persisted processed block height from state manager (backlog)
+        // TODO: https://github.com/sig-net/mpc/issues/777
         let start_slot = self
-            .start_height
+            .state_manager
+            .get_processed_block(Chain::Solana)
+            .await
             .map(|n| n.saturating_add(1))
             .unwrap_or(anchor_height);
         let end_slot = anchor_height.saturating_sub(1); // We want to catch up to just before the anchor
@@ -270,7 +276,7 @@ impl ChainIndexer for SolanaIndexer {
     }
 }
 
-impl SolanaIndexer {
+impl<S: StateManager> SolanaIndexer<S> {
     async fn process_block(&mut self, height: u64, block: &UiConfirmedBlock) -> anyhow::Result<()> {
         let Some(transactions) = &block.transactions else {
             self.events_tx.send(ChainEvent::Block(height)).await?;
@@ -992,6 +998,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use mpc_primitives::{BidirectionalTx, BidirectionalTxId};
     use solana_sdk::commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
     use solana_transaction_status::{TransactionDetails, UiTransactionStatusMeta};
@@ -1156,12 +1163,32 @@ mod tests {
             Pubkey::from_str(&sol_addr).unwrap(),
         );
 
+        // TODO: move elsewhere
+        #[derive(Clone)]
+        struct MockStateManager;
+
+        #[async_trait::async_trait]
+        impl StateManager for MockStateManager {
+            async fn get_processed_block(&self, _chain: Chain) -> Option<u64> {
+                None
+            }
+
+            async fn get_execution_watchers(
+                &self,
+                _chain: Chain,
+            ) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)> {
+                HashMap::new()
+            }
+        }
+
+        let state_manager = MockStateManager;
+
         let mut indexer = SolanaIndexer {
             program_id: Pubkey::from_str(&sol_addr).unwrap(),
             client,
+            state_manager,
             events_tx,
             live_rx: None,
-            start_height: None,
         };
 
         // Initialize livestream (resolves anchor slot via get_slot and starts WS)
