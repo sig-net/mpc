@@ -136,7 +136,6 @@ pub struct SolanaStream<S: StateManager> {
 pub struct SolanaIndexer<S: StateManager> {
     pub program_id: Pubkey,
     pub client: SolanaClient,
-    // TODO: static dispatch
     pub state_manager: S,
     pub events_tx: mpsc::Sender<ChainEvent>,
     pub live_rx: Option<mpsc::Receiver<ChainEvent>>,
@@ -997,8 +996,9 @@ async fn get_tx(
 mod tests {
     use std::collections::BTreeMap;
 
+    use crate::backlog::Backlog;
+
     use super::*;
-    use mpc_primitives::{BidirectionalTx, BidirectionalTxId};
     use solana_sdk::commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
     use solana_transaction_status::{TransactionDetails, UiTransactionStatusMeta};
@@ -1155,6 +1155,7 @@ mod tests {
         let http_url = format!("https://solana-devnet.g.alchemy.com/v2/{api_key}");
         let ws_url = format!("wss://solana-devnet.g.alchemy.com/v2/{api_key}");
 
+        let backlog = Backlog::new();
         let (events_tx, mut events_rx) = mpsc::channel(1_000_000);
 
         let client = SolanaClient::for_indexer(
@@ -1163,30 +1164,10 @@ mod tests {
             Pubkey::from_str(&sol_addr).unwrap(),
         );
 
-        // TODO: move elsewhere
-        #[derive(Clone)]
-        struct MockStateManager;
-
-        #[async_trait::async_trait]
-        impl StateManager for MockStateManager {
-            async fn get_processed_block(&self, _chain: Chain) -> Option<u64> {
-                None
-            }
-
-            async fn get_execution_watchers(
-                &self,
-                _chain: Chain,
-            ) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)> {
-                HashMap::new()
-            }
-        }
-
-        let state_manager = MockStateManager;
-
         let mut indexer = SolanaIndexer {
             program_id: Pubkey::from_str(&sol_addr).unwrap(),
             client,
-            state_manager,
+            state_manager: backlog,
             events_tx,
             live_rx: None,
         };
