@@ -434,10 +434,8 @@ mod tests {
     use super::*;
     use crate::backlog::Backlog;
     use crate::mesh::connection::NodeStatus;
-    use crate::mesh::wait_threshold_active;
-    use crate::mesh::MeshState;
-    use crate::node_client::NodeClient;
-    use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
+    use crate::mesh::{wait_threshold_active, MeshState};
+    use crate::protocol::contract::primitives::ParticipantInfo;
     use crate::sign_bidirectional::SignStatus;
     use crate::storage::checkpoint_storage::CheckpointStorage;
     use crate::stream::ops::process_execution_confirmed;
@@ -446,9 +444,7 @@ mod tests {
     use alloy::primitives::{Address, B256};
     use cait_sith::protocol::Participant;
     use k256::{ProjectivePoint, Scalar};
-    use mpc_primitives::{
-        RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind,
-    };
+    use mpc_primitives::{RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind};
     use near_primitives::types::AccountId;
     use solana_sdk::pubkey::Pubkey;
     use std::time::Duration;
@@ -584,12 +580,13 @@ mod tests {
         mesh_state.update(participant, NodeStatus::Active, ParticipantInfo::new(0));
         let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
         wait_threshold_active(&mut mesh_rx, threshold).await;
-
-        let account_id: AccountId = "test.near".parse().unwrap();
-        let public_key = ProjectivePoint::GENERATOR.to_affine();
-        let participants = Participants::default();
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
-        let checkpoint = backlog.storage.load_latest(Chain::Solana).await.unwrap().unwrap();
+        let checkpoint = backlog
+            .storage
+            .load_latest(Chain::Solana)
+            .await
+            .unwrap()
+            .unwrap();
         backlog.recover_by_checkpoint(checkpoint).await.unwrap();
 
         requeue_pending_sign_requests(&backlog, Chain::Solana, sign_tx).await;
@@ -886,14 +883,15 @@ mod tests {
         mesh_state.update(participant, NodeStatus::Active, ParticipantInfo::new(0));
         let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
         wait_threshold_active(&mut mesh_rx, threshold).await;
-
-        let account_id: AccountId = "test.near".parse().unwrap();
-        let public_key = ProjectivePoint::GENERATOR.to_affine();
-        let participants = Participants::default();
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let recovered = Backlog::persisted(storage.clone());
 
-        let checkpoint = recovered.storage.load_latest(tx.source_chain).await.unwrap().unwrap();
+        let checkpoint = recovered
+            .storage
+            .load_latest(tx.source_chain)
+            .await
+            .unwrap()
+            .unwrap();
         recovered.recover_by_checkpoint(checkpoint).await.unwrap();
 
         requeue_pending_sign_requests(&recovered, tx.source_chain, sign_tx).await;
