@@ -112,6 +112,7 @@ pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I) {
 }
 
 /// Shared indexer loop: recovers backlog then processes events from the stream
+#[allow(clippy::too_many_arguments)] // TODO: refactor to reduce arguments
 pub async fn run_stream<I: ChainIndexer>(
     indexer: I,
     mut events_rx: mpsc::Receiver<ChainEvent>,
