@@ -11,13 +11,12 @@ use std::collections::{hash_map, BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 pub use mpc_primitives::Checkpoint;
 
-// Clean up old checkpoints (older than 30 minutes)
-const RETENTION_DURATION: Duration = Duration::from_secs(30 * 60);
+/// Maximum number of historical checkpoints retained per chain.
+const MAX_RECENT_CHECKPOINTS: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct PendingRequests {
@@ -183,11 +182,10 @@ impl ExecutionWatchers {
     }
 }
 
-/// Historical checkpoint with timestamp for retention management
+/// Historical checkpoint entry.
 #[derive(Debug, Clone)]
 struct HistoricalCheckpoint {
     checkpoint: Checkpoint,
-    created_at: Instant,
 }
 
 /// Backlog manages pending sign-respond requests across multiple chains.
@@ -267,17 +265,13 @@ impl Backlog {
             .expect("chain should be initialized within `persisted` method")
     }
 
-    /// Remember a checkpoint in the historical checkpoints list and clean up old checkpoints
+    /// Remember a checkpoint and keep only the most recent `MAX_RECENT_CHECKPOINTS`.
     pub(crate) async fn remember_checkpoint(&self, checkpoint: Checkpoint) {
         let mut historical = self.checkpoints(&checkpoint.chain).write().await;
-        historical.insert(
-            checkpoint.block_height,
-            HistoricalCheckpoint {
-                checkpoint,
-                created_at: Instant::now(),
-            },
-        );
-        historical.retain(|_, hcp| hcp.created_at.elapsed() < RETENTION_DURATION);
+        historical.insert(checkpoint.block_height, HistoricalCheckpoint { checkpoint });
+        while historical.len() > MAX_RECENT_CHECKPOINTS {
+            historical.pop_first();
+        }
     }
 
     /// Insert a new Sign request into the backlog for the specified chain.
