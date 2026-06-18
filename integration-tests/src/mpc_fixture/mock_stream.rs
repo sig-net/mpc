@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use mpc_node::protocol::IndexedSignRequest;
 use mpc_node::rpc::RpcAction;
-use mpc_node::stream::{ChainIndexer, ChainStream};
+use mpc_node::stream::ChainIndexer;
 use mpc_primitives::{Chain, ChainEvent, SignKind};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -50,11 +50,8 @@ impl ChainIndexer for MockIndexer {
     }
 }
 
-#[async_trait]
-impl ChainStream for MockStream {
-    type Indexer = MockIndexer;
-
-    async fn start(self) -> anyhow::Result<(MockIndexer, mpsc::Receiver<ChainEvent>)> {
+impl MockStream {
+    pub async fn start(self) -> anyhow::Result<(MockIndexer, mpsc::Receiver<ChainEvent>)> {
         let (events_tx, events_rx) = mpsc::channel(100);
         let inner_clone = self.inner.clone();
 
@@ -90,9 +87,7 @@ impl ChainStream for MockStream {
             events_rx,
         ))
     }
-}
 
-impl MockStream {
     /// Clones internal data to create different copies of the stream that can
     /// be drained independently. The standard clone only does an Arc::clone.
     pub async fn deep_clone(&self) -> Self {

@@ -4,7 +4,7 @@ use integration_tests::containers::Solana;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::ScalarExt;
 use mpc_node::backlog::Backlog;
-use mpc_node::indexer_sol::{SolConfig, SolanaIndexer, SolanaStream};
+use mpc_node::indexer_sol::{SolConfig, SolanaIndexer};
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
@@ -13,7 +13,7 @@ use mpc_node::protocol::{Chain, IndexedSignRequest, Sign};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{catchup_then_livestream, run_stream, ChainStream};
+use mpc_node::stream::{catchup_then_livestream, run_stream};
 use mpc_primitives::{
     ChainEvent, SignArgs, SignId, Signature, StateManager, LATEST_MPC_KEY_VERSION,
 };
@@ -48,9 +48,7 @@ async fn stream_solana_with_backlog(
     config: SolConfig,
     backlog: Backlog,
 ) -> Result<mpsc::Receiver<ChainEvent>> {
-    let stream =
-        SolanaStream::new(Some(config), backlog).context("failed to create SolanaStream")?;
-    let (indexer, events_rx) = stream.start().await?;
+    let (indexer, events_rx) = SolanaIndexer::new(config, backlog).await?;
     tokio::spawn(catchup_then_livestream(indexer));
     Ok(events_rx)
 }
@@ -441,8 +439,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     seeded_backlog.checkpoint(Chain::Solana).await;
 
     let recovered_backlog = Backlog::persisted(storage);
-    let (indexer, events_rx) = SolanaIndexer::new(config, recovered_backlog.clone())
-        .context("failed to create SolanaStream")?;
+    let (indexer, events_rx) = SolanaIndexer::new(config, recovered_backlog.clone()).await?;
 
     let (sign_tx, mut sign_rx) = mpsc::channel::<Sign>(4);
     let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcAction>(4);

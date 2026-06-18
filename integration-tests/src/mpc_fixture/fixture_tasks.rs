@@ -112,15 +112,28 @@ pub(super) fn start_mock_stream_tasks(
     mesh_state: &watch::Receiver<MeshState>,
 ) {
     for stream in mock_streams {
-        tokio::spawn(run_stream(
-            stream.clone(),
-            sign_tx.clone(),
-            rpc.clone(),
-            backlog.clone(),
-            contract_watcher.clone(),
-            mesh_state.clone(),
-            // Only used for backlog recovery - not implemented in component tests yet
-            NodeClient::new(&Default::default()),
-        ));
+        let stream = stream.clone();
+        let sign_tx = sign_tx.clone();
+        let rpc = rpc.clone();
+        let backlog = backlog.clone();
+        let contract_watcher = contract_watcher.clone();
+        let mesh_state = mesh_state.clone();
+
+        tokio::spawn(async move {
+            let (indexer, events_rx) = stream.start().await.expect("failed to start mock stream");
+
+            run_stream(
+                indexer,
+                events_rx,
+                sign_tx,
+                rpc,
+                backlog,
+                contract_watcher,
+                mesh_state,
+                // Only used for backlog recovery - not implemented in component tests yet
+                NodeClient::new(&Default::default()),
+            )
+            .await;
+        });
     }
 }

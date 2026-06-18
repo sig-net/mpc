@@ -4,10 +4,10 @@ use integration_tests::canton::{
 };
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
-use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
+use mpc_node::indexer_canton::{der_encode_signature, CantonIndexer};
 use mpc_node::protocol::{Chain, IndexedSignRequest};
 use mpc_node::sign_bidirectional::{hash_rlp_data, SignBidirectionalEventExt};
-use mpc_node::stream::{catchup_then_livestream, ChainStream};
+use mpc_node::stream::catchup_then_livestream;
 use mpc_primitives::{
     ChainEvent, ScalarExt, SignKind, Signature, StateManager, LATEST_MPC_KEY_VERSION,
 };
@@ -26,9 +26,7 @@ async fn stream_canton(
     backlog: Backlog,
 ) -> Result<mpsc::Receiver<ChainEvent>> {
     let config = sandbox.get_config();
-    let stream =
-        CantonStream::new(Some(config), backlog).context("failed to create CantonStream")?;
-    let (indexer, events_rx) = stream.start().await?;
+    let (indexer, events_rx) = CantonIndexer::new(config, backlog).await?;
     tokio::spawn(catchup_then_livestream(indexer));
     Ok(events_rx)
 }

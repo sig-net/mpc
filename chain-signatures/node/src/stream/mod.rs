@@ -583,11 +583,6 @@ mod tests {
         let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
         let backlog = Backlog::persisted(storage.clone());
 
-        // client implemented with a channel so the test can control pacing
-        struct LocalStream {
-            events_rx: Option<mpsc::Receiver<ChainEvent>>,
-        }
-
         struct DisabledChainIndexer {
             events_tx: Option<mpsc::Sender<ChainEvent>>,
         }

@@ -10,14 +10,14 @@ use integration_tests::eth::{self, ChainSignatures, SignRequest};
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_node::backlog::Backlog;
-use mpc_node::indexer_eth::{EthConfig, EthereumIndexer, EthereumStream};
+use mpc_node::indexer_eth::{EthConfig, EthereumIndexer};
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign};
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{catchup_then_livestream, run_stream, ChainStream};
+use mpc_node::stream::{catchup_then_livestream, run_stream};
 use mpc_node::util::current_unix_timestamp;
 use mpc_primitives::{
     ChainEvent, SignArgs, SignBidirectionalEvent as NodeSignBidirectionalEvent, SignId, SignKind,
@@ -360,8 +360,7 @@ async fn stream_ethereum(
     ctx: &EthereumTestEnvironment,
     backlog: Backlog,
 ) -> Result<StartedEthereumStream> {
-    let stream = EthereumStream::new(Some(ctx.config(true)), backlog).await?;
-    let (indexer, events_rx) = stream.start().await?;
+    let (indexer, events_rx) = EthereumIndexer::new(ctx.config(true), backlog).await?;
     let indexer_task = tokio::spawn(catchup_then_livestream(indexer));
 
     Ok(StartedEthereumStream {
