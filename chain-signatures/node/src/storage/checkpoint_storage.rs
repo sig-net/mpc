@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 pub const CHECKPOINT_VERSION: &str = "v9";
+pub const MAX_RECENT_CHECKPOINTS: usize = 32;
 
 #[derive(Clone, Debug)]
 pub enum CheckpointStorage {
@@ -60,24 +61,33 @@ impl CheckpointStorage {
                 let value = serde_json::to_string(checkpoint)
                     .context("failed to serialize checkpoint persistence")?;
 
-                let timestamp = crate::util::current_unix_timestamp();
+                // Score by block_height so ZRANGE returns oldest→newest.
+                // Trim to the most recent MAX_RECENT_CHECKPOINTS entries
+                // via score=block_height
                 const PERSIST_SCRIPT: &str = r#"
                     local latest_key = KEYS[1]
                     local history_key = KEYS[2]
                     local value = ARGV[1]
                     local score = tonumber(ARGV[2])
+                    local max_count = tonumber(ARGV[3])
 
                     redis.call("SET", latest_key, value)
                     redis.call("ZADD", history_key, score, value)
-                    redis.call("ZREMRANGEBYSCORE", history_key, 0, score - 1800)
-                    redis.call("EXPIRE", history_key, 1800)
+                    local count = redis.call("ZCARD", history_key)
+                    if count > max_count then
+                        -- remove the oldest checkpoints starting from
+                        -- index 0 to count - max_count - 1
+                        redis.call("ZREMRANGEBYRANK", history_key, 0, count - max_count - 1)
+                    end
                 "#;
 
+                let score = checkpoint.block_height;
                 let _: () = redis::Script::new(PERSIST_SCRIPT)
                     .key(self.checkpoint_key(checkpoint.chain))
                     .key(self.checkpoint_history_key(checkpoint.chain))
                     .arg(&value)
-                    .arg(timestamp)
+                    .arg(score)
+                    .arg(MAX_RECENT_CHECKPOINTS as u64)
                     .invoke_async(&mut conn)
                     .await
                     .context("failed to persist checkpoint")?;
@@ -87,12 +97,12 @@ impl CheckpointStorage {
                     .write()
                     .await
                     .insert(checkpoint.chain, checkpoint.clone());
-                history
-                    .write()
-                    .await
-                    .entry(checkpoint.chain)
-                    .or_default()
-                    .insert(checkpoint.block_height, checkpoint.clone());
+                let mut hist = history.write().await;
+                let map = hist.entry(checkpoint.chain).or_default();
+                map.insert(checkpoint.block_height, checkpoint.clone());
+                while map.len() > MAX_RECENT_CHECKPOINTS {
+                    map.pop_first();
+                }
             }
         }
         Ok(())
@@ -125,30 +135,19 @@ impl CheckpointStorage {
         match self {
             CheckpointStorage::Redis(pool, _) => {
                 let mut conn = pool.get().await.context("failed to get redis connection")?;
-                let timestamp = crate::util::current_unix_timestamp();
 
-                const LOAD_HISTORY_SCRIPT: &str = r#"
-                    local history_key = KEYS[1]
-                    local current_time = tonumber(ARGV[1])
-
-                    redis.call("ZREMRANGEBYSCORE", history_key, 0, current_time - 1800)
-                    return redis.call("ZRANGE", history_key, 0, -1)
-                "#;
-
-                let values: Vec<String> = redis::Script::new(LOAD_HISTORY_SCRIPT)
-                    .key(self.checkpoint_history_key(chain))
-                    .arg(timestamp)
-                    .invoke_async(&mut conn)
+                let values: Vec<String> = conn
+                    .zrange(self.checkpoint_history_key(chain), 0isize, -1isize)
                     .await
                     .context("failed to load historical checkpoints")?;
 
-                let mut checkpoints = Vec::new();
-                for v in values {
-                    let checkpoint: Checkpoint = serde_json::from_str(&v)
-                        .context("failed to deserialize historical checkpoint")?;
-                    checkpoints.push(checkpoint);
-                }
-                Ok(checkpoints)
+                values
+                    .into_iter()
+                    .map(|v| {
+                        serde_json::from_str(&v)
+                            .context("failed to deserialize historical checkpoint")
+                    })
+                    .collect()
             }
             CheckpointStorage::InMemory { history, .. } => {
                 let guard = history.read().await;

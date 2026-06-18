@@ -1,7 +1,7 @@
 pub mod consensus;
 
 use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt, SignStatus};
-use crate::storage::checkpoint_storage::CheckpointStorage;
+use crate::storage::checkpoint_storage::{CheckpointStorage, MAX_RECENT_CHECKPOINTS};
 
 use anyhow::Context;
 use mpc_primitives::{
@@ -14,9 +14,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub use mpc_primitives::Checkpoint;
-
-/// Maximum number of historical checkpoints retained per chain.
-const MAX_RECENT_CHECKPOINTS: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct PendingRequests {
