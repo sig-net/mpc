@@ -74,6 +74,8 @@ pub trait ChainIndexer: Send + 'static {
 pub trait ChainStream: Send + 'static {
     type Indexer: ChainIndexer + Send;
 
+    /// Start the stream and return the indexer and a receiver for chain events.
+    /// The `start_height` parameter is the last processed block height from the backlog
     async fn start(
         self,
         start_height: Option<u64>,

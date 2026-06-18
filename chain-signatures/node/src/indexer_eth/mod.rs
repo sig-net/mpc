@@ -1413,6 +1413,10 @@ impl ChainIndexer for EthereumIndexer {
     }
 
     async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
+        // TODO: start from genesis block of contract deployment instead of
+        // anchor_height so that we can start from the very beginning of
+        // the history of the network in case where we do not have a checkpoint.
+        // https://github.com/sig-net/mpc/issues/777
         let current_block = self
             .start_height
             .map(|n| n.saturating_add(1))
