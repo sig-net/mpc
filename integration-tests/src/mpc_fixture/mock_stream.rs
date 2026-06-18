@@ -1,8 +1,8 @@
 use async_trait::async_trait;
-use mpc_node::protocol::{IndexedSignRequest, SignKind};
+use mpc_node::protocol::IndexedSignRequest;
 use mpc_node::rpc::RpcAction;
-use mpc_node::stream::{ChainEvent, ChainIndexer, ChainStream};
-use mpc_primitives::Chain;
+use mpc_node::stream::{ChainIndexer, ChainStream};
+use mpc_primitives::{Chain, ChainEvent, SignKind};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -35,10 +35,10 @@ pub struct MockIndexer {
 impl ChainIndexer for MockIndexer {
     const CHAIN: Chain = Chain::Solana;
     type Block = ();
-    type Iter = std::iter::Empty<()>;
+    type Iter = futures_util::stream::Empty<()>;
 
     async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-        std::iter::empty()
+        futures_util::stream::empty()
     }
 
     async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
@@ -163,7 +163,7 @@ impl InnerMockStream {
                 continue;
             }
 
-            let respond_event = mpc_node::stream::ops::SignatureRespondedEvent {
+            let respond_event = mpc_primitives::SignatureRespondedEvent {
                 request_id: publish_action.indexed.id.request_id,
                 signature: publish_action.signature,
                 chain: Chain::Solana,

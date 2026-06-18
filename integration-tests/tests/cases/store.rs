@@ -328,19 +328,19 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     };
     let cp1 = Checkpoint {
         chain: Chain::Solana,
-        height: 10,
+        block_height: 10,
         pending_requests: vec![tx1],
     };
     storage.persist(&cp1).await?;
 
     // 3. Verify latest and history
     let latest = storage.load_latest(Chain::Solana).await?.unwrap();
-    assert_eq!(latest.height, 10);
+    assert_eq!(latest.block_height, 10);
     assert_eq!(latest.pending_requests.len(), 1);
     assert_eq!(latest.pending_requests[0].transaction, vec![1, 2, 3]);
     let history = storage.load_history(Chain::Solana).await?;
     assert_eq!(history.len(), 1);
-    assert_eq!(history[0].height, 10);
+    assert_eq!(history[0].block_height, 10);
     assert_eq!(history[0].pending_requests.len(), 1);
 
     // 4. Persist second checkpoint at higher height
@@ -350,19 +350,19 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     };
     let cp2 = Checkpoint {
         chain: Chain::Solana,
-        height: 20,
+        block_height: 20,
         pending_requests: vec![tx2],
     };
     storage.persist(&cp2).await?;
 
     // 5. Verify latest is updated and history has both
     let latest = storage.load_latest(Chain::Solana).await?.unwrap();
-    assert_eq!(latest.height, 20);
+    assert_eq!(latest.block_height, 20);
     assert_eq!(latest.pending_requests.len(), 1);
     assert_eq!(latest.pending_requests[0].transaction, vec![4, 5, 6]);
     let history = storage.load_history(Chain::Solana).await?;
     assert_eq!(history.len(), 2);
-    let mut heights: Vec<u64> = history.iter().map(|cp| cp.height).collect();
+    let mut heights: Vec<u64> = history.iter().map(|cp| cp.block_height).collect();
     heights.sort();
     assert_eq!(heights, vec![10, 20]);
 
@@ -380,7 +380,7 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     // 7. Load history again - this triggers pruning in the Lua script!
     let history = storage.load_history(Chain::Solana).await?;
     assert_eq!(history.len(), 1);
-    assert_eq!(history[0].height, 20); // cp1 is pruned, only cp2 remains
+    assert_eq!(history[0].block_height, 20); // cp1 is pruned, only cp2 remains
 
     Ok(())
 }

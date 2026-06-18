@@ -9,6 +9,6 @@ edition = "2021"
 ethers = "2.0"
 hex = "0.4.3"
 hpke = { version = "0.11", features = ["std"] }
-near-crypto = "0.27"
+near-crypto.workspace = true
 rand = "0.8"
 sp-core = { version = "38.1", default-features = false, features = ["std"] }

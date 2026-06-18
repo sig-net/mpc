@@ -4,18 +4,18 @@ pub mod pipeline;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::{IndexedSignRequest, Sign};
+use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use crate::rpc::{ContractStateWatcher, RpcChannel};
-use crate::sign_bidirectional::BidirectionalTxId;
 use crate::stream::ops::{
     process_block_event, process_execution_confirmed, process_respond_bidirectional_event,
     process_respond_event, process_sign_request, requeue_pending_sign_requests,
-    resume_pending_publish_requests, RespondBidirectionalEvent, SignatureRespondedEvent,
+    resume_pending_publish_requests,
 };
 pub use crate::stream::pipeline::ChainPipeline;
-use mpc_primitives::{Chain, CheckpointDigest};
 
 use async_trait::async_trait;
+use futures_util::{Stream, StreamExt};
+use mpc_primitives::{ChainEvent, CheckpointDigest};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
@@ -32,101 +32,11 @@ pub fn channel() -> (mpsc::Sender<ChainEvent>, mpsc::Receiver<ChainEvent>) {
     mpsc::channel(CHAIN_EVENT_STREAM_SIZE)
 }
 
-/// Unified event produced by a chain stream
-#[allow(clippy::large_enum_variant)]
-#[derive(Clone)]
-pub enum ChainEvent {
-    SignRequest(IndexedSignRequest),
-    Respond(SignatureRespondedEvent),
-    RespondBidirectional(RespondBidirectionalEvent),
-
-    /// Catchup has completed and live events may be forwarded to the signer.
-    CatchupCompleted,
-
-    /// Block height indicating the client has observed/processed up to `u64` (slot/block)
-    Block(u64),
-
-    /// A watched bidirectional execution has been observed on the target chain.
-    /// The client detected the execution, performed chain-specific extraction, and
-    /// carries either the serialized output (Success) or a failure indicator.
-    ExecutionConfirmed {
-        tx_id: BidirectionalTxId,
-        sign_id: mpc_primitives::SignId,
-        source_chain: Chain,
-        block_height: u64,
-        result: ExecutionOutcome,
-    },
-}
-
-impl std::fmt::Debug for ChainEvent {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ChainEvent::SignRequest(r) => f
-                .debug_tuple("SignRequest")
-                .field(&r.id)
-                .field(&r.chain.as_str())
-                .finish(),
-            ChainEvent::Respond(ev) => f
-                .debug_tuple("Respond")
-                .field(&ev.request_id)
-                .field(&ev.chain.as_str())
-                .finish(),
-            ChainEvent::RespondBidirectional(ev) => f
-                .debug_tuple("RespondBidirectional")
-                .field(&ev.request_id)
-                .field(&ev.chain.as_str())
-                .finish(),
-            ChainEvent::CatchupCompleted => write!(f, "CatchupCompleted"),
-            ChainEvent::Block(b) => write!(f, "Block({b})"),
-            ChainEvent::ExecutionConfirmed {
-                tx_id,
-                sign_id,
-                source_chain,
-                block_height,
-                result,
-            } => f
-                .debug_struct("ExecutionConfirmed")
-                .field("tx_id", tx_id)
-                .field("sign_id", sign_id)
-                .field("source_chain", source_chain)
-                .field("block_height", block_height)
-                .field("result", result)
-                .finish(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum ExecutionOutcome {
-    Success { output: Vec<u8> },
-    Failed,
-}
-
-#[async_trait]
-pub trait AsyncCatchupIter: Send + 'static {
-    type Item: Send;
-
-    async fn next(&mut self) -> Option<Self::Item>;
-}
-
-#[async_trait]
-impl<I> AsyncCatchupIter for I
-where
-    I: Iterator + Send + 'static,
-    I::Item: Send,
-{
-    type Item = I::Item;
-
-    async fn next(&mut self) -> Option<Self::Item> {
-        Iterator::next(self)
-    }
-}
-
 #[async_trait]
 pub trait ChainIndexer: Send + 'static {
     const CHAIN: Chain;
     type Block: Send;
-    type Iter: AsyncCatchupIter<Item = Self::Block> + Send + 'static;
+    type Iter: Stream<Item = Self::Block> + Send + Unpin + 'static;
 
     const RETRY_DELAY: Duration = Duration::from_millis(500);
 
@@ -176,6 +86,43 @@ pub trait ChainStream: Send + 'static {
     async fn next_event(&mut self) -> Option<ChainEvent>;
 }
 
+pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I) {
+    let chain = I::CHAIN;
+    tracing::info!(%chain, "starting ChainStream catchup then livestream");
+
+    let anchor_height = match indexer.livestream().await {
+        Ok(anchor_height) => anchor_height,
+        Err(err) => {
+            tracing::error!(?err, %chain, "failed to initialize livestream");
+            return;
+        }
+    };
+    let Some(anchor_height) = anchor_height else {
+        if let Err(err) = indexer.notify_catchup_completed().await {
+            tracing::warn!(?err, %chain, "failed to signal catchup completion");
+        }
+        return;
+    };
+
+    tracing::info!(%chain, anchor_height, "livestream initialized => starting catchup");
+    let catchup_stream = indexer.catchup_range(anchor_height).await;
+    // Pin the stream
+    tokio::pin!(catchup_stream);
+    while let Some(catchup_item) = catchup_stream.next().await {
+        while let Err(err) = indexer.process_catchup(&catchup_item).await {
+            tracing::warn!(?err, %chain, "catchup item processing failed; retrying");
+            tokio::time::sleep(I::RETRY_DELAY).await;
+        }
+    }
+
+    tracing::info!(%chain, "catchup completed => processing livestream");
+    if let Err(err) = indexer.notify_catchup_completed().await {
+        tracing::warn!(?err, %chain, "failed to signal catchup completion");
+        return;
+    }
+
+    while indexer.process_next_block().await {}
+}
 /// Shared indexer loop: recovers backlog then processes events from the stream
 #[allow(clippy::too_many_arguments)]
 pub async fn run_stream<S: ChainStream>(
@@ -310,7 +257,6 @@ mod tests {
     use crate::protocol::Sign;
     use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
     use crate::storage::checkpoint_storage::CheckpointStorage;
-    use crate::stream::ops::SignatureRespondedEvent;
     use crate::util::current_unix_timestamp;
     use k256::{AffinePoint, Scalar};
     use mockito::Server;
@@ -318,6 +264,7 @@ mod tests {
     use mpc_primitives::SignArgs;
     use mpc_primitives::SignId;
     use mpc_primitives::Signature;
+    use mpc_primitives::SignatureRespondedEvent;
     use near_primitives::types::AccountId;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -371,14 +318,14 @@ mod tests {
                 const CHAIN: Chain = $chain;
 
                 type Block = ();
-                type Iter = std::iter::Empty<Self::Block>;
+                type Iter = futures_util::stream::Empty<Self::Block>;
 
                 async fn next(&mut self) -> Option<Self::Block> {
                     None
                 }
 
                 async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-                    std::iter::empty()
+                    futures_util::stream::empty()
                 }
 
                 async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
@@ -478,7 +425,7 @@ mod tests {
     impl ChainIndexer for TestLinearIndexer {
         const CHAIN: Chain = Chain::Ethereum;
         type Block = u64;
-        type Iter = std::vec::IntoIter<Self::Block>;
+        type Iter = futures_util::stream::Iter<std::vec::IntoIter<Self::Block>>;
 
         const RETRY_DELAY: Duration = Duration::from_millis(1);
 
@@ -504,7 +451,7 @@ mod tests {
                 .map(|height| height + 1)
                 .unwrap_or(anchor_height);
             let items: Vec<Self::Block> = (start..anchor_height).collect();
-            items.into_iter()
+            futures_util::stream::iter(items.into_iter())
         }
 
         async fn process_catchup(&mut self, &height: &Self::Block) -> anyhow::Result<()> {
@@ -707,7 +654,7 @@ mod tests {
     async fn test_stream_handles_sign_bidirectional_block_and_recover() {
         let _ = tracing_subscriber::fmt::try_init();
         use crate::sign_bidirectional::SignStatus;
-        use crate::stream::ops::SignBidirectionalEvent as SBE;
+        use mpc_primitives::SignBidirectionalEvent as SBE;
 
         // shared storage so checkpoint persistence is visible to recovered backlog
         let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
@@ -745,14 +692,14 @@ mod tests {
         impl ChainIndexer for DisabledChainIndexer {
             const CHAIN: Chain = Chain::Solana;
             type Block = ();
-            type Iter = std::iter::Empty<Self::Block>;
+            type Iter = futures_util::stream::Empty<Self::Block>;
 
             async fn next(&mut self) -> Option<Self::Block> {
                 None
             }
 
             async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-                std::iter::empty()
+                futures_util::stream::empty()
             }
 
             async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
@@ -955,7 +902,7 @@ mod tests {
             sign_id,
             Chain::Solana,
             block,
-            crate::stream::ExecutionOutcome::Success { output: vec![] },
+            mpc_primitives::ExecutionOutcome::Success { output: vec![] },
             &backlog,
             sign_tx.clone(),
             Chain::Ethereum,
@@ -988,7 +935,7 @@ mod tests {
 
         // now send a RespondBidirectional event to complete the request
         // RespondBidirectional should also carry a valid signature
-        let respond_bidirectional = crate::stream::ops::RespondBidirectionalEvent {
+        let respond_bidirectional = mpc_primitives::RespondBidirectionalEvent {
             request_id: sign_id.request_id,
             signature: new_mpc_sig,
             chain: Chain::Solana,
@@ -1398,7 +1345,7 @@ mod tests {
         impl ChainIndexer for MockCatchupIndexer {
             const CHAIN: Chain = Chain::Solana;
             type Block = u64;
-            type Iter = std::vec::IntoIter<Self::Block>;
+            type Iter = futures_util::stream::Iter<std::vec::IntoIter<Self::Block>>;
             const RETRY_DELAY: Duration = Duration::from_millis(1);
 
             async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
@@ -1410,7 +1357,7 @@ mod tests {
             }
 
             async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-                vec![1].into_iter()
+                futures_util::stream::iter(vec![1].into_iter())
             }
 
             async fn process_catchup(&mut self, _block: &Self::Block) -> anyhow::Result<()> {
@@ -1486,7 +1433,7 @@ mod tests {
         impl ChainIndexer for MockLiveIndexer {
             const CHAIN: Chain = Chain::Solana;
             type Block = u64;
-            type Iter = std::vec::IntoIter<Self::Block>;
+            type Iter = futures_util::stream::Iter<std::vec::IntoIter<Self::Block>>;
             const RETRY_DELAY: Duration = Duration::from_millis(1);
 
             async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
@@ -1501,7 +1448,7 @@ mod tests {
             }
 
             async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-                vec![].into_iter()
+                futures_util::stream::iter(vec![].into_iter())
             }
         }
 

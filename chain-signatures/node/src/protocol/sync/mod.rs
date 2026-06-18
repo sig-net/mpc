@@ -158,21 +158,19 @@ impl SyncTask {
 
     pub async fn run(mut self) {
         tracing::info!("sync task has been started");
-        // Polling loop for participant info from contract state
-        let mut watcher_interval = tokio::time::interval(Duration::from_millis(500));
         // Trigger sync broadcasts to peers in need_sync state
         let mut sync_interval = tokio::time::interval(Duration::from_millis(200));
         // Poll whether any ongoing sync task has completed
         let mut sync_check_interval = tokio::time::interval(Duration::from_millis(100));
 
         // Do NOT start until we have our own participant info
-        let (threshold, me) = loop {
-            watcher_interval.tick().await;
-            if let Some(info) = self.contract.info().await {
-                break info;
-            }
-        };
-        tracing::info!(?me, "starting sync loop...");
+        tracing::info!("sync waiting for participant info");
+        let start = Instant::now();
+        let (threshold, me) = self.contract.wait_info().await;
+        tracing::info!(?me, elapsed = ?start.elapsed(), "starting sync loop...");
+
+        self.triples.set_me(me);
+        self.presignatures.set_me(me);
 
         let mut broadcast = Option::<(Instant, JoinHandle<_>)>::None;
         loop {

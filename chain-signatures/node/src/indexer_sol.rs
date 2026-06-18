@@ -1,14 +1,15 @@
 use crate::backlog::Backlog;
-use crate::protocol::{Chain, IndexedSignRequest};
+use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
-
-use crate::stream::{ChainEvent, ChainIndexer, ChainStream};
+use crate::solana_client::{SolanaCatchupBlock, SolanaClient};
+use crate::stream::{ChainIndexer, ChainStream};
 use crate::util::ethabi_request_id;
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
-use anyhow::Context;
 
-use std::collections::{btree_map, BTreeMap, BTreeSet, HashMap};
-use std::fmt;
+pub use crate::solana_client::SolConfig;
+
+use std::collections::HashMap;
+use std::pin::Pin;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -16,13 +17,17 @@ use alloy_sol_types::SolValue;
 use anchor_client::anchor_lang::AnchorDeserialize;
 use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
+use anyhow::Context;
 use async_trait::async_trait;
-use futures_util::StreamExt;
+use futures_util::stream::StreamExt;
+use futures_util::Stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
-use mpc_primitives::{SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR};
+use mpc_primitives::{
+    ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+};
 use serde::{Deserialize, Serialize};
 use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
@@ -30,15 +35,14 @@ use signet_program::{
 };
 use solana_client::{
     nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient},
-    rpc_client::GetConfirmedSignaturesForAddress2Config,
-    rpc_config::{RpcBlockConfig, RpcTransactionLogsConfig, RpcTransactionLogsFilter},
+    rpc_config::{RpcTransactionLogsConfig, RpcTransactionLogsFilter},
 };
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
 use solana_transaction_status::option_serializer::OptionSerializer;
 use solana_transaction_status::{
     EncodedConfirmedTransactionWithStatusMeta, EncodedTransaction,
-    EncodedTransactionWithStatusMeta, TransactionDetails, UiConfirmedBlock, UiInstruction,
-    UiParsedInstruction, UiTransactionEncoding,
+    EncodedTransactionWithStatusMeta, UiConfirmedBlock, UiInstruction, UiParsedInstruction,
+    UiTransactionEncoding,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -51,29 +55,6 @@ const CPI_RESPOND_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: Respond",
     "Program log: Instruction: RespondBidirectional",
 ];
-
-#[derive(Clone)]
-pub struct SolConfig {
-    /// The solana account secret key used to sign solana respond txn.
-    pub account_sk: String,
-    /// Solana RPC http URL
-    pub rpc_http_url: String,
-    /// Solana RPC websocket URL
-    pub rpc_ws_url: String,
-    /// The program address to watch
-    pub program_address: String,
-}
-
-impl fmt::Debug for SolConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SolConfig")
-            .field("account_sk", &"<hidden>")
-            .field("rpc_http_url", &self.rpc_http_url)
-            .field("rpc_ws_url", &self.rpc_ws_url)
-            .field("program_address", &self.program_address)
-            .finish()
-    }
-}
 
 /// Configures Solana indexer.
 #[derive(Debug, Clone, clap::Parser)]
@@ -145,8 +126,6 @@ pub struct SolSignRequest {
     pub key_version: u32,
 }
 
-const MAX_SIGNATURES_FOR_FAST_CATCHUP: usize = 1000;
-
 /// Solana stream that implements the new ChainStream abstraction
 pub struct SolanaStream {
     rx: Option<mpsc::Receiver<ChainEvent>>,
@@ -155,19 +134,11 @@ pub struct SolanaStream {
 }
 
 pub struct SolanaIndexer {
-    program_id: Pubkey,
-    rpc_client: RpcClient,
-    rpc_http_url: String,
-    rpc_ws_url: String,
-    events_tx: mpsc::Sender<ChainEvent>,
-    backlog: Backlog,
-    live_rx: Option<mpsc::Receiver<ChainEvent>>,
-}
-
-#[derive(Debug)]
-pub enum SolanaCatchupBlock {
-    Block(UiConfirmedBlock),
-    Missing,
+    pub program_id: Pubkey,
+    pub client: SolanaClient,
+    pub events_tx: mpsc::Sender<ChainEvent>,
+    pub backlog: Backlog,
+    pub live_rx: Option<mpsc::Receiver<ChainEvent>>,
 }
 
 struct SolanaStreamStartState {
@@ -223,11 +194,15 @@ impl ChainStream for SolanaStream {
             anyhow::bail!("solana stream already started");
         };
 
+        let client = SolanaClient::for_indexer(
+            start_state.rpc_http_url.clone(),
+            start_state.rpc_ws_url.clone(),
+            start_state.program_id,
+        );
+
         let indexer = SolanaIndexer {
             program_id: start_state.program_id,
-            rpc_client: RpcClient::new(start_state.rpc_http_url.clone()),
-            rpc_http_url: start_state.rpc_http_url.clone(),
-            rpc_ws_url: start_state.rpc_ws_url.clone(),
+            client,
             events_tx: start_state.tx.clone(),
             backlog: start_state.backlog.clone(),
             live_rx: None,
@@ -248,15 +223,15 @@ impl ChainStream for SolanaStream {
 impl ChainIndexer for SolanaIndexer {
     const CHAIN: Chain = Chain::Solana;
     type Block = (u64, SolanaCatchupBlock);
-    type Iter = btree_map::IntoIter<u64, SolanaCatchupBlock>;
+    type Iter = Pin<Box<dyn Stream<Item = Self::Block> + Send + 'static>>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         let (live_tx, live_rx) = crate::stream::channel();
         self.live_rx = Some(live_rx);
 
         let program_id = self.program_id;
-        let rpc_http_url = self.rpc_http_url.clone();
-        let rpc_ws_url = self.rpc_ws_url.clone();
+        let rpc_http_url = self.client.rpc_http_url.clone();
+        let rpc_ws_url = self.client.rpc_ws_url.clone();
 
         // Oneshot to receive the first observed slot from the live subscription.
         let (anchor_tx, anchor_rx) = oneshot::channel::<u64>();
@@ -284,73 +259,19 @@ impl ChainIndexer for SolanaIndexer {
             .unwrap_or(anchor_height);
         let end_slot = anchor_height.saturating_sub(1); // We want to catch up to just before the anchor
         if start_slot > end_slot {
-            return BTreeMap::new().into_iter();
+            return Box::pin(futures_util::stream::empty());
         }
 
-        // This fetches a sparse list of transactions based on whether our program received
-        // a transaction in that specific slot. This is the most optimized and cheapest path.
-        let signatures = match self
-            .rpc_client
-            .get_signatures_for_address_with_config(
-                &self.program_id,
-                GetConfirmedSignaturesForAddress2Config {
-                    before: None,
-                    until: None,
-                    limit: Some(MAX_SIGNATURES_FOR_FAST_CATCHUP),
-                    commitment: Some(CommitmentConfig::confirmed()),
-                },
-            )
-            .await
-        {
-            Ok(signatures) => signatures,
-            Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    "failed to query solana signature history; falling back to sparse catchup"
-                );
-                return self
-                    .fetch_sparse_blocks(start_slot, end_slot)
-                    .await
-                    .into_iter();
-            }
-        };
-
-        let signatures_len = signatures.len();
-        let mut mid_slot = None;
-        let mut slots = BTreeSet::new();
-        for sig in signatures {
-            if sig.slot < start_slot || sig.slot > end_slot {
-                continue;
-            }
-            mid_slot = Some(mid_slot.unwrap_or(sig.slot).min(sig.slot));
-            slots.insert(sig.slot);
-        }
-        let mid_slot = mid_slot.map(|n| n.saturating_sub(1)).unwrap_or(start_slot);
-        let mut items = self.fetch_blocks_for_slots(slots).await;
-
-        // NOTE: since we can only do fast catchup for up to 1000 signatures,
-        // if we hit that limit and the earliest signature is significantly
-        // ahead of our start slot, we do one additional fetch for the
-        // sparse blocks between start_slot and the earliest signature (mid_slot).
-        if signatures_len == MAX_SIGNATURES_FOR_FAST_CATCHUP && mid_slot > start_slot {
-            tracing::info!(
-                start_slot,
-                mid_slot,
-                "solana signature history hit the 1000-signature limit; combining sparse blocks with signatures"
-            );
-            items.extend(self.fetch_sparse_blocks(start_slot, mid_slot).await);
-        }
-
-        items.into_iter()
+        let slots = self.client.fetch_slots(start_slot, end_slot).await;
+        let items = self.client.fetch_blocks_for_slots(slots).await;
+        Box::pin(futures_util::stream::iter(items.into_iter()))
     }
 
     async fn process_catchup(&mut self, (slot, block): &Self::Block) -> anyhow::Result<()> {
         match block {
             SolanaCatchupBlock::Block(block) => self.process_block(*slot, block).await,
             SolanaCatchupBlock::Missing => {
-                let block = self.get_block(*slot).await.with_context(|| {
-                    format!("failed to refetch Solana catchup block for slot {slot}")
-                })?;
+                let block = self.client.get_block(*slot).await;
                 self.process_block(*slot, &block).await
             }
         }
@@ -377,49 +298,6 @@ impl ChainIndexer for SolanaIndexer {
 }
 
 impl SolanaIndexer {
-    fn block_fetch_config() -> RpcBlockConfig {
-        RpcBlockConfig {
-            encoding: Some(UiTransactionEncoding::Json),
-            transaction_details: Some(TransactionDetails::Full),
-            rewards: Some(false),
-            commitment: Some(CommitmentConfig::confirmed()),
-            max_supported_transaction_version: Some(0),
-        }
-    }
-
-    async fn get_block(&self, slot: u64) -> anyhow::Result<UiConfirmedBlock> {
-        self.rpc_client
-            .get_block_with_config(slot, Self::block_fetch_config())
-            .await
-            .with_context(|| format!("failed to fetch Solana block for slot {slot}"))
-    }
-
-    async fn fetch_blocks_for_slots(
-        &self,
-        slots: BTreeSet<u64>,
-    ) -> BTreeMap<u64, SolanaCatchupBlock> {
-        let mut blocks_by_height = BTreeMap::new();
-
-        for &slot in &slots {
-            match self.get_block(slot).await {
-                Ok(block) => {
-                    blocks_by_height.insert(slot, SolanaCatchupBlock::Block(block));
-                }
-                Err(err) => {
-                    tracing::warn!(?err, slot, "failed to fetch Solana block for catchup slot");
-                }
-            }
-        }
-
-        slots
-            .into_iter()
-            .map(|slot| match blocks_by_height.remove(&slot) {
-                Some(block) => (slot, block),
-                None => (slot, SolanaCatchupBlock::Missing),
-            })
-            .collect()
-    }
-
     async fn process_block(&mut self, height: u64, block: &UiConfirmedBlock) -> anyhow::Result<()> {
         let Some(transactions) = &block.transactions else {
             self.events_tx.send(ChainEvent::Block(height)).await?;
@@ -444,36 +322,6 @@ impl SolanaIndexer {
 
         self.events_tx.send(ChainEvent::Block(height)).await?;
         Ok(())
-    }
-
-    /// Fetches blocks from start_slot to end_slot. The range is inclusive `[start_slot, endslot]`
-    async fn fetch_sparse_blocks(
-        &self,
-        start_slot: u64,
-        end_slot: u64,
-    ) -> BTreeMap<u64, SolanaCatchupBlock> {
-        let block_slots = loop {
-            match self.rpc_client.get_blocks(start_slot, Some(end_slot)).await {
-                Ok(block_slots) => break block_slots,
-                Err(err) => {
-                    tracing::warn!(
-                        ?err,
-                        start_slot,
-                        end_slot,
-                        "failed to fetch Solana block range for catchup; retrying"
-                    );
-                    tokio::time::sleep(Self::RETRY_DELAY).await;
-                }
-            }
-        };
-
-        self.fetch_blocks_for_slots(
-            block_slots
-                .into_iter()
-                .filter(|slot| *slot <= end_slot)
-                .collect(),
-        )
-        .await
     }
 }
 
@@ -591,7 +439,7 @@ impl SolanaSignEvent {
                     },
                     Chain::Solana,
                     crate::util::current_unix_timestamp(),
-                    crate::stream::ops::SignBidirectionalEvent {
+                    mpc_primitives::SignBidirectionalEvent {
                         sender: ev.sender.to_bytes(),
                         serialized_transaction: ev.serialized_transaction.clone(),
                         caip2_id: ev.caip2_id.clone(),
@@ -801,7 +649,6 @@ async fn subscribe_to_program_events(
                         last_ws_msg = Instant::now();
 
                         let slot = response.context.slot;
-
                         let logs = &response.value.logs;
                         if response.value.err.is_some() || !has_log_starts_with(logs, &program_invoke_log) {
                             // block is not relevant to our program, skip but still
@@ -1042,7 +889,7 @@ async fn emit_events(
                     to_mpc_signature(&ev.signature).context("failed to parse Solana signature")?;
                 let _ = events_tx
                     .send(ChainEvent::RespondBidirectional(
-                        crate::stream::ops::RespondBidirectionalEvent {
+                        mpc_primitives::RespondBidirectionalEvent {
                             request_id: ev.request_id,
                             signature,
                             chain: crate::protocol::Chain::Solana,
@@ -1056,7 +903,7 @@ async fn emit_events(
                     to_mpc_signature(&ev.signature).context("failed to parse Solana signature")?;
                 let _ = events_tx
                     .send(ChainEvent::Respond(
-                        crate::stream::ops::SignatureRespondedEvent {
+                        mpc_primitives::SignatureRespondedEvent {
                             request_id: ev.request_id,
                             signature,
                             chain: Chain::Solana,
@@ -1184,9 +1031,12 @@ async fn get_tx(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use solana_sdk::commitment_config::CommitmentLevel;
-    use solana_transaction_status::UiTransactionStatusMeta;
+    use solana_sdk::pubkey::Pubkey;
+    use solana_transaction_status::{TransactionDetails, UiTransactionStatusMeta};
 
     #[test]
     fn request_id_matches_ethabi() {
@@ -1211,7 +1061,7 @@ mod tests {
 
     #[test]
     fn block_fetch_config_sets_max_supported_transaction_version() {
-        let config = SolanaIndexer::block_fetch_config();
+        let config = SolanaClient::block_fetch_config();
 
         assert_eq!(config.max_supported_transaction_version, Some(0));
         assert_eq!(config.transaction_details, Some(TransactionDetails::Full));
@@ -1318,5 +1168,80 @@ mod tests {
         );
         let meta = result.unwrap();
         assert!(meta.err.is_some(), "expected err to be set");
+    }
+
+    // Very expensive test in terms of RPC usage.
+    #[tokio::test]
+    #[ignore]
+    async fn test_solana_pipeline_devnet() {
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let api_key = match std::env::var("MPC_TEST_API_KEY") {
+            Ok(key) if !key.is_empty() => key,
+            _ => {
+                tracing::debug!("Skipping devnet test: MPC_TEST_API_KEY not set");
+                return;
+            }
+        };
+
+        let sol_addr = std::env::var("MPC_TEST_SOL_ADDR")
+            .unwrap_or_else(|_| "SigDuEPNeDjh3oJv7MUraPN7zaTFomS6ZWfpXwjUg4B".to_string());
+
+        let http_url = format!("https://solana-devnet.g.alchemy.com/v2/{api_key}");
+        let ws_url = format!("wss://solana-devnet.g.alchemy.com/v2/{api_key}");
+
+        let backlog = Backlog::new();
+        let (events_tx, mut events_rx) = mpsc::channel(1_000_000);
+
+        let client = SolanaClient::for_indexer(
+            http_url.clone(),
+            ws_url.clone(),
+            Pubkey::from_str(&sol_addr).unwrap(),
+        );
+
+        let mut indexer = SolanaIndexer {
+            program_id: Pubkey::from_str(&sol_addr).unwrap(),
+            client,
+            events_tx,
+            backlog,
+            live_rx: None,
+        };
+
+        // Initialize livestream (resolves anchor slot via get_slot and starts WS)
+        let anchor_height = indexer
+            .livestream()
+            .await
+            .expect("Failed to initialize livestream")
+            .expect("Anchor height missing");
+
+        tracing::debug!("Resolved anchor slot: {anchor_height}");
+
+        // Start from a checkpoint ~1 week behind (assuming ~2.5 slots per second => 1,512,000 slots per week)
+        let start_slot = anchor_height.saturating_sub(1_512_000);
+        tracing::debug!("Starting catchup from slot: {start_slot} (~1 week behind)");
+
+        indexer
+            .backlog
+            .set_processed_block_interval(Chain::Solana, start_slot.saturating_sub(1), 1)
+            .await;
+
+        // Run catchup range
+        let catchup_stream = indexer.catchup_range(anchor_height).await;
+        tokio::pin!(catchup_stream);
+        let mut processed_any = false;
+        while let Some(item) = catchup_stream.next().await {
+            indexer
+                .process_catchup(&item)
+                .await
+                .expect("Failed to process catchup block");
+            processed_any = true;
+        }
+
+        tracing::debug!("Solana catchup complete. Processed blocks: {processed_any}");
+
+        // Check if any events were received in the channel
+        while let Ok(event) = events_rx.try_recv() {
+            tracing::debug!("Received event: {:?}", event);
+        }
     }
 }

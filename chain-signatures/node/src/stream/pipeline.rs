@@ -2,7 +2,8 @@ use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::Chain;
-use crate::stream::{AsyncCatchupIter, ChainIndexer, ChainStreaming};
+use crate::stream::{ChainIndexer, ChainStreaming};
+use futures_util::StreamExt;
 use mpc_primitives::CheckpointDigest;
 use near_account_id::AccountId;
 use tokio::sync::watch;
@@ -110,7 +111,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                 Ok(Some(checkpoint)) => {
                     tracing::info!(
                         ?chain,
-                        height = checkpoint.height,
+                        height = checkpoint.block_height,
                         "loaded local checkpoint"
                     );
                     if let Err(err) = self.backlog.recover_by_checkpoint(checkpoint).await {
@@ -262,14 +263,14 @@ async fn detect_regression(
     }
 
     // Check if we are ahead of consensus and aligned
-    if current_checkpoint.height > checkpoint_digest.height {
+    if current_checkpoint.block_height > checkpoint_digest.height {
         if let Some(historical) = backlog
             .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
             .await
         {
             tracing::info!(
                 ?chain,
-                local_height = current_checkpoint.height,
+                local_height = current_checkpoint.block_height,
                 consensus_height = checkpoint_digest.height,
                 "local backlog is ahead of consensus and matches past consensus checkpoint; no regression needed"
             );

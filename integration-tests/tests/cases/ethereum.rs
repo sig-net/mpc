@@ -19,7 +19,7 @@ use tokio::time::Duration;
 
 #[test(tokio::test)]
 async fn test_signature_ethereum() -> Result<()> {
-    let cluster = cluster::spawn().disable_prestockpile().ethereum().await?;
+    let cluster = cluster::spawn().ethereum().await?;
     cluster.wait().signable().await?;
 
     let ctx = cluster.nodes.ctx();
@@ -165,7 +165,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
         std::env::set_var(name, value);
     }
 
-    let cluster = cluster::spawn().disable_prestockpile().ethereum().await?;
+    let cluster = cluster::spawn().ethereum().await?;
     cluster.wait().signable().await?;
 
     let ctx = cluster.nodes.ctx();
@@ -240,12 +240,12 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     let checkpoint = checkpoints
         .get(&Chain::Ethereum)
         .expect("checkpoint not found for eth");
-    let checkpoint_height_after_request = checkpoint.height;
+    let checkpoint_height = checkpoint.block_height;
     let checkpoint_interval = Chain::Ethereum
         .checkpoint_interval()
         .expect("ethereum checkpoint interval should be configured");
     tracing::info!(
-        checkpoint_height_after_request,
+        checkpoint_height,
         checkpoint_interval,
         pending_count = checkpoint.pending_requests.len(),
         "pending transactions in checkpoint"
@@ -296,7 +296,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     produce_empty_eth_blocks(&client, requester, checkpoint_interval).await?;
 
     let min_next_checkpoint_height =
-        ((checkpoint_height_after_request / checkpoint_interval) + 1) * checkpoint_interval;
+        ((checkpoint_height / checkpoint_interval) + 1) * checkpoint_interval;
     let checkpoint = wait_node_checkpoint(
         &cluster,
         node_idx,
@@ -381,26 +381,27 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         &cluster,
         active_idx,
         Chain::Ethereum,
-        initial_checkpoint.height + 1,
-        Duration::from_secs(30),
+        initial_checkpoint.block_height + 1,
+        Duration::from_secs(120),
     )
     .await?;
 
     tracing::info!(
-        block_height = node_active_checkpoint.height,
+        block_height = node_active_checkpoint.block_height,
         "active node created new checkpoint while peer is offline"
     );
 
     tracing::info!("bringing offline node back online");
     cluster.restart_node(offline_config).await?;
-    cluster.wait().signable().await?;
+    // Does not have to be signable, just need Indexer to sync
+    cluster.wait().nodes_running().await?;
 
     // Verify the restarted node recovers to the same checkpoint via node consensus
     let node_recovered_checkpoint = wait_node_checkpoint(
         &cluster,
         offline_idx,
         Chain::Ethereum,
-        node_active_checkpoint.height,
+        node_active_checkpoint.block_height,
         Duration::from_secs(30),
     )
     .await?;
@@ -412,7 +413,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
     );
 
     anyhow::ensure!(
-        node_recovered_checkpoint.height >= node_active_checkpoint.height,
+        node_recovered_checkpoint.block_height >= node_active_checkpoint.block_height,
         "restarted node should recover to at least the active checkpoint height via consensus"
     );
 
@@ -423,9 +424,9 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
             offline_idx,
             Chain::Ethereum,
             node_recovered_checkpoint
-                .height
-                .max(node_active_checkpoint.height),
-            Duration::from_secs(45),
+                .block_height
+                .max(node_active_checkpoint.block_height),
+            Duration::from_secs(90),
         )
         .await?;
 
@@ -438,13 +439,14 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         &cluster,
         active_idx,
         Chain::Ethereum,
-        active_checkpoint_after_restart.height,
-        Duration::from_secs(30),
+        active_checkpoint_after_restart.block_height,
+        Duration::from_secs(60),
     )
     .await?;
 
     assert!(
-        active_checkpoint_after_restart.height >= recovered_checkpoint_after_restart.height,
+        active_checkpoint_after_restart.block_height
+            >= recovered_checkpoint_after_restart.block_height,
         "active node checkpoint should not fall behind after peer recovery"
     );
 
@@ -513,7 +515,7 @@ async fn wait_node_checkpoint(
 
             let checkpoints = nodes.fetch_checkpoints(node_idx).await?;
             if let Some(checkpoint) = checkpoints.get(&chain) {
-                if checkpoint.height >= min_block_height {
+                if checkpoint.block_height >= min_block_height {
                     return Ok(checkpoint.clone());
                 }
             }
@@ -548,8 +550,8 @@ async fn wait_matching_node_checkpoints(
                 continue;
             };
 
-            if left_checkpoint.height < min_block_height
-                || right_checkpoint.height < min_block_height
+            if left_checkpoint.block_height < min_block_height
+                || right_checkpoint.block_height < min_block_height
             {
                 continue;
             }

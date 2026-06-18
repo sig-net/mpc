@@ -29,6 +29,7 @@ use mpc_keys::hpke;
 use mpc_primitives::CheckpointDigest;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
+use secrecy::ExposeSecret;
 use sha3::Digest;
 use tokio::sync::{mpsc, watch};
 use url::Url;
@@ -283,8 +284,10 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(&account_id);
 
             let eth_account_address = eth.eth_account_sk.as_ref().map(|sk| {
-                let signer: alloy_signer_local::PrivateKeySigner =
-                    sk.parse().expect("cannot parse Eth account sk");
+                let signer: alloy_signer_local::PrivateKeySigner = sk
+                    .expose_secret()
+                    .parse()
+                    .expect("cannot parse Eth account sk");
                 format!("{}", signer.address())
             });
             let sol_payer_address = sol.sol_account_sk.as_ref().map(|sk| {

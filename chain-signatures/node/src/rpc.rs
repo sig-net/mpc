@@ -4,7 +4,7 @@ use crate::indexer_sol::SolConfig;
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
-use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState, SignKind};
+use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState};
 use crate::util::AffinePointExt as _;
 use std::collections::BTreeSet;
 
@@ -23,8 +23,16 @@ use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
 use mpc_keys::hpke;
-use mpc_primitives::{CheckpointDigest, ConsensusCheckpointDigest, SignId, Signature};
+use mpc_primitives::{CheckpointDigest, ConsensusCheckpointDigest, SignId, SignKind, Signature};
 
+use crate::indexer_canton::ledger_api::{
+    ActiveContractEntry, CumulativeFilter, EventFormat, GetActiveContractsRequest,
+    IdentifierFilter, JsCommands, LedgerEndResponse, PartyFilter,
+    SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse, TemplateFilterValue,
+};
+use crate::indexer_canton::{CantonAuthProvider, CantonConfig};
+use crate::indexer_hydration::HydrationConfig;
+use crate::solana_client::SolanaClient;
 use crate::util::retry::{retry_async, Backoff, RetryConfig, RetryError, RetryReason};
 use alloy::contract::{ContractInstance, Interface};
 use alloy::dyn_abi::DynSolValue;
@@ -37,6 +45,7 @@ use k256::elliptic_curve::sec1::ToEncodedPoint;
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 use near_fetch::result::ExecutionFinalResult;
+use parity_scale_codec::{Decode, Encode};
 use serde_json::json;
 use sp_core::{sr25519, Pair as _};
 use sp_runtime::{
@@ -47,17 +56,6 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, watch};
-use url::Url;
-
-use crate::indexer_canton::ledger_api::{
-    ActiveContractEntry, CumulativeFilter, EventFormat, GetActiveContractsRequest,
-    IdentifierFilter, JsCommands, LedgerEndResponse, PartyFilter,
-    SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse, TemplateFilterValue,
-};
-use crate::indexer_canton::{CantonAuthProvider, CantonConfig};
-use crate::indexer_hydration::HydrationConfig;
-use parity_scale_codec::{Decode, Encode};
 use subxt::config::substrate::{
     AccountId32, BlakeTwo256, MultiSignature, SubstrateConfig, SubstrateExtrinsicParams,
     SubstrateHeader,
@@ -65,6 +63,8 @@ use subxt::config::substrate::{
 use subxt::tx::Payload;
 use subxt::Config as SubxtConfig;
 use subxt::OnlineClient;
+use tokio::sync::{mpsc, watch};
+use url::Url;
 
 /// The maximum amount of times to retry publishing a signature.
 const MAX_PUBLISH_RETRY: usize = 6;
@@ -363,6 +363,15 @@ impl ContractStateWatcher {
         }
     }
 
+    pub async fn wait_info(&mut self) -> (usize, Participant) {
+        loop {
+            if let Some((threshold, participant)) = self.info().await {
+                return (threshold, participant);
+            }
+            let _ = self.contract_state.changed().await;
+        }
+    }
+
     pub async fn participant_map(&self) -> ParticipantMap {
         let Some(state) = self.state().clone() else {
             return ParticipantMap::Zero;
@@ -426,7 +435,7 @@ impl RpcExecutor {
         canton: &Option<CantonConfig>,
     ) -> (RpcChannel, Self) {
         let eth = eth.as_ref().map(EthClient::new);
-        let solana = solana.as_ref().map(SolanaClient::new);
+        let solana = solana.as_ref().map(SolanaClient::from_config);
         let hydration = match hydration {
             Some(h) => match HydrationClient::new(h).await {
                 Ok(client) => Some(client),
@@ -774,33 +783,6 @@ impl EthClient {
             Interface::new(abi),
         );
         Self { contract }
-    }
-}
-
-#[derive(Clone)]
-pub struct SolanaClient {
-    client: Arc<anchor_client::Client<Arc<Keypair>>>,
-    program_id: Pubkey,
-    payer: Arc<Keypair>,
-}
-
-impl SolanaClient {
-    pub fn new(sol: &SolConfig) -> Self {
-        let keypair = Keypair::from_base58_string(&sol.account_sk);
-        let payer = Arc::new(keypair);
-        let cluster =
-            anchor_client::Cluster::Custom(sol.rpc_http_url.clone(), sol.rpc_ws_url.clone());
-        let client = anchor_client::Client::new_with_options(
-            cluster,
-            payer.clone(),
-            CommitmentConfig::confirmed(),
-        );
-        Self {
-            client: Arc::new(client),
-            program_id: Pubkey::from_str(&sol.program_address)
-                .expect("Invalid Solana program address provided in configuration"),
-            payer,
-        }
     }
 }
 

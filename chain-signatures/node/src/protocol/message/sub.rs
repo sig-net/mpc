@@ -17,6 +17,9 @@ use crate::util::channel_len;
 
 /// This should be enough to hold a few messages in the inbox.
 pub const MAX_MESSAGE_SUB_CHANNEL_SIZE: usize = 4 * 1024;
+/// Posit channels can accumulate many small control-plane messages; use a large
+/// capacity to avoid backpressure or deadlock under high concurrency.
+pub const MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE: usize = 1 << 24;
 
 /// Small under test-feature so dead-letter inboxes fill quickly in clog tests.
 pub const POSIT_INBOX_CHANNEL_SIZE: usize = if cfg!(feature = "test-feature") {
@@ -190,20 +193,45 @@ impl<T> Subscriber<T> {
             SubscriberKind::Unknown => Ok(()),
         }
     }
-}
 
+    pub fn try_send_lossy(&self, msg: T) -> Result<(), mpsc::error::SendError<T>> {
+        // TODO: https://github.com/sig-net/mpc/issues/864
+        // Need to drop messages in a more well defined manner than just dropping
+        // whatever message is latest. We'd likely need the latest vs the oldest
+        // since the oldest message would have a higher chance of being out of date.
+        let result = match &self.kind {
+            SubscriberKind::Subscribed(tx) | SubscriberKind::Unsubscribed(tx, _) => {
+                match tx.try_send(msg) {
+                    Ok(()) => Ok(()),
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        tracing::warn!(
+                            subscriber = self.metrics.name,
+                            capacity = self.metrics.capacity,
+                            "dropping message: subscriber channel full"
+                        );
+                        Ok(())
+                    }
+                    Err(mpsc::error::TrySendError::Closed(msg)) => Err(mpsc::error::SendError(msg)),
+                }
+            }
+            SubscriberKind::Unknown => Ok(()),
+        };
+        self.report_capacity();
+        result
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::Subscriber;
 
-    #[tokio::test]
-    async fn estimated_queue_len_tracks_buffered_messages() {
+    #[test]
+    fn estimated_queue_len_tracks_buffered_messages() {
         let sub = Subscriber::unsubscribed_with_capacity("test", 4);
 
         assert_eq!(sub.estimated_len(), 0);
 
-        sub.send(1u8).await.unwrap();
-        sub.send(2u8).await.unwrap();
+        sub.try_send_lossy(1u8).unwrap();
+        sub.try_send_lossy(2u8).unwrap();
 
         assert_eq!(sub.estimated_len(), 2);
     }

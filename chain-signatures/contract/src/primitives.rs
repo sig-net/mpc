@@ -3,7 +3,7 @@ pub use mpc_primitives::{Chain, Checkpoint, ConsensusCheckpointDigest, PendingTx
 use crate::config::Config;
 use crate::state::ProtocolContractState;
 
-use mpc_primitives::{bytes::borsh_scalar, SignId, Signature};
+use mpc_primitives::{borsh_scalar, SignId, Signature};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};

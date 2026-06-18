@@ -7,11 +7,12 @@ use mpc_node::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
 use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
-use mpc_node::protocol::{Chain, IndexedSignRequest, SignKind};
-use mpc_node::sign_bidirectional::hash_rlp_data;
-use mpc_node::stream::{ChainEvent, ChainPipeline, ChainStream, ChainStreaming};
-use mpc_primitives::CheckpointDigest;
-use mpc_primitives::{ScalarExt, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_node::protocol::{Chain, IndexedSignRequest};
+use mpc_node::sign_bidirectional::{hash_rlp_data, SignBidirectionalEventExt};
+use mpc_node::stream::{ChainPipeline, ChainStream, ChainStreaming};
+use mpc_primitives::{
+    ChainEvent, CheckpointDigest, ScalarExt, SignKind, Signature, LATEST_MPC_KEY_VERSION,
+};
 use serde_json::json;
 use serial_test::serial;
 use std::collections::HashSet;
@@ -301,7 +302,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
         1,
         "expected one pending request in checkpoint"
     );
-    let checkpoint_height = checkpoint.height;
+    let checkpoint_height = checkpoint.block_height;
     let phase1_request_id = checkpoint.pending_requests[0].sign_id.request_id;
     drop(stream);
 

@@ -92,7 +92,7 @@ impl CheckpointStorage {
                     .await
                     .entry(checkpoint.chain)
                     .or_default()
-                    .insert(checkpoint.height, checkpoint.clone());
+                    .insert(checkpoint.block_height, checkpoint.clone());
             }
         }
         Ok(())
@@ -178,32 +178,32 @@ mod tests {
         // 2. Persist first checkpoint
         let cp1 = Checkpoint {
             chain: Chain::Solana,
-            height: 10,
+            block_height: 10,
             pending_requests: vec![],
         };
         storage.persist(&cp1).await?;
 
         // 3. Verify latest and history
         let latest = storage.load_latest(Chain::Solana).await?.unwrap();
-        assert_eq!(latest.height, 10);
+        assert_eq!(latest.block_height, 10);
         let history = storage.load_history(Chain::Solana).await?;
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].height, 10);
+        assert_eq!(history[0].block_height, 10);
 
         // 4. Persist second checkpoint at higher height
         let cp2 = Checkpoint {
             chain: Chain::Solana,
-            height: 20,
+            block_height: 20,
             pending_requests: vec![],
         };
         storage.persist(&cp2).await?;
 
         // 5. Verify latest is updated and history has both
         let latest = storage.load_latest(Chain::Solana).await?.unwrap();
-        assert_eq!(latest.height, 20);
+        assert_eq!(latest.block_height, 20);
         let history = storage.load_history(Chain::Solana).await?;
         assert_eq!(history.len(), 2);
-        let mut heights: Vec<u64> = history.iter().map(|cp| cp.height).collect();
+        let mut heights: Vec<u64> = history.iter().map(|cp| cp.block_height).collect();
         heights.sort();
         assert_eq!(heights, vec![10, 20]);
 

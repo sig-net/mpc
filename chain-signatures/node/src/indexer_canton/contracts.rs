@@ -1,8 +1,8 @@
 //! Typed structs for Daml contract payloads.
 //!
 //! These represent the JSON payloads inside `CreatedEvent.payload` for specific
-//! Daml templates from `daml-signer` and `daml-vault`. Derived from the
-//! `.daml` source files in `canton-mpc-poc/daml-packages/`.
+//! Daml templates from `signet-signer-v1`. Derived from the `.daml` source files in
+//! the `sig-net/canton` repository (`daml-packages/signet-signer-v1/daml/`).
 
 use alloy::consensus::TxEip1559;
 use alloy::eips::eip2930::{AccessList, AccessListItem};
@@ -127,7 +127,7 @@ pub enum TxParams {
 }
 
 /// Payload of a `Signer:SignBidirectionalEvent` created event.
-/// Emitted when `Signer.SignBidirectional` is exercised.
+/// Emitted when `Signer.RequestSignature` is exercised.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignBidirectionalRequestedEvent {
@@ -138,27 +138,6 @@ pub struct SignBidirectionalRequestedEvent {
     pub tx_params: TxParams,
     pub caip2_id: String,
     /// Canton sends this as either a number or a string.
-    #[serde(
-        deserialize_with = "deserialize_number_from_string",
-        serialize_with = "serialize_number_to_string"
-    )]
-    pub key_version: u32,
-    pub path: String,
-    pub algo: String,
-    pub dest: String,
-    pub params: String,
-    pub output_deserialization_schema: String,
-    pub respond_serialization_schema: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SignRequestPayload {
-    pub operators: Vec<String>,
-    pub requester: String,
-    pub sig_network: String,
-    pub tx_params: TxParams,
-    pub caip2_id: String,
     #[serde(
         deserialize_with = "deserialize_number_from_string",
         serialize_with = "serialize_number_to_string"

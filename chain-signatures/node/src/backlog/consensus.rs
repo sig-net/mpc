@@ -36,14 +36,14 @@ pub(crate) async fn align_backlog_with_consensus(
 
     // If our current height is greater than consensus height,
     // check if we have a historical checkpoint that matches the consensus digest.
-    if current_checkpoint.height > checkpoint_digest.height {
+    if current_checkpoint.block_height > checkpoint_digest.height {
         if let Some(historical) = backlog
             .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
             .await
         {
             tracing::info!(
                 ?chain,
-                local_height = current_checkpoint.height,
+                local_height = current_checkpoint.block_height,
                 consensus_height = checkpoint_digest.height,
                 "local backlog is ahead of consensus and matches past consensus checkpoint; no regression needed"
             );
@@ -66,7 +66,7 @@ pub(crate) async fn align_backlog_with_consensus(
     )
     .await?;
 
-    let height = fetched_checkpoint.height;
+    let height = fetched_checkpoint.block_height;
     if let Err(err) = backlog.recover_by_checkpoint(fetched_checkpoint).await {
         tracing::error!(?err, %chain, "failed to recover backlog to checkpoint");
         return None;
@@ -93,7 +93,7 @@ pub(crate) async fn recover_backlog(
         Ok(Some(checkpoint)) => {
             tracing::info!(
                 ?source_chain,
-                height = checkpoint.height,
+                height = checkpoint.block_height,
                 "loaded local checkpoint"
             );
             if let Err(err) = backlog.recover_by_checkpoint(checkpoint).await {

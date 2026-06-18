@@ -6,10 +6,9 @@ pub mod indexer_eth_helios;
 use crate::backlog::Backlog;
 use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
-use crate::protocol::{Chain, IndexedSignRequest};
+use crate::protocol::Chain;
 use crate::respond_bidirectional::CompletedTx;
-use crate::stream::ops::SignatureRespondedEvent;
-use crate::stream::{AsyncCatchupIter, ChainEvent, ChainIndexer, ChainStream, ExecutionOutcome};
+use crate::stream::{ChainIndexer, ChainStream};
 use crate::util::retry;
 
 use alloy::eips::BlockNumberOrTag;
@@ -19,12 +18,16 @@ use alloy::rpc::types::{Block, BlockId, Log};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
+use futures_util::stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{
-    SignArgs, SignId, Signature as MpcSignature, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+    BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, IndexedSignRequest, SignArgs,
+    SignId, Signature as MpcSignature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
+    MAX_SECP256K1_SCALAR,
 };
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -75,15 +78,10 @@ impl CatchupIter {
         self.buffered_blocks = self.client.get_blocks(&batch_block_ids).await.into_iter();
         self.next_block = batch_end;
     }
-}
 
-#[async_trait]
-impl AsyncCatchupIter for CatchupIter {
-    type Item = MaybeBlock;
-
-    async fn next(&mut self) -> Option<Self::Item> {
+    pub async fn next(&mut self) -> Option<MaybeBlock> {
         loop {
-            if let Some(block) = Iterator::next(&mut self.buffered_blocks) {
+            if let Some(block) = self.buffered_blocks.next() {
                 return Some(block);
             }
 
@@ -181,7 +179,7 @@ pub struct EthArgs {
         env("MPC_ETH_ACCOUNT_SK"),
         requires_all = ["eth_execution_rpc_http_url", "eth_contract_address"]
     )]
-    pub eth_account_sk: Option<String>,
+    pub eth_account_sk: Option<SecretString>,
     /// The contract address to watch without the `0x` prefix
     #[clap(long, env("MPC_ETH_CONTRACT_ADDRESS"), requires = "eth_account_sk")]
     pub eth_contract_address: Option<String>,
@@ -247,7 +245,10 @@ impl EthArgs {
     pub fn into_str_args(self) -> Vec<String> {
         let mut args = Vec::with_capacity(10);
         if let Some(eth_account_sk) = self.eth_account_sk {
-            args.extend(["--eth-account-sk".to_string(), eth_account_sk]);
+            args.extend([
+                "--eth-account-sk".to_string(),
+                eth_account_sk.expose_secret().to_string(),
+            ]);
         }
         if let Some(eth_consensus_rpc_http_url) = self.eth_consensus_rpc_http_url {
             args.extend([
@@ -294,7 +295,7 @@ impl EthArgs {
         }
 
         Some(EthConfig {
-            account_sk: self.eth_account_sk?,
+            account_sk: self.eth_account_sk?.expose_secret().to_string(), // this is safe because  EthConfig has custom Debug implementation that redacts the account_sk field
             consensus_rpc_http_url: self.eth_consensus_rpc_http_url.unwrap_or_default(),
             execution_rpc_http_url: self.eth_execution_rpc_http_url.unwrap(),
             contract_address: self.eth_contract_address.unwrap(),
@@ -312,7 +313,7 @@ impl EthArgs {
     pub fn from_config(config: Option<EthConfig>) -> Self {
         match config {
             Some(config) if !config.account_sk.is_empty() => Self {
-                eth_account_sk: Some(config.account_sk),
+                eth_account_sk: Some(config.account_sk.into()),
                 eth_consensus_rpc_http_url: Some(config.consensus_rpc_http_url),
                 eth_execution_rpc_http_url: Some(config.execution_rpc_http_url),
                 eth_contract_address: Some(config.contract_address),
@@ -1032,9 +1033,9 @@ impl EthereumIndexer {
 
     async fn execution_confirmed_event(
         &self,
-        tx_id: crate::sign_bidirectional::BidirectionalTxId,
+        tx_id: BidirectionalTxId,
         sign_id: SignId,
-        pending_tx: &crate::sign_bidirectional::BidirectionalTx,
+        pending_tx: &BidirectionalTx,
         block_number: u64,
         receipt: &alloy::rpc::types::TransactionReceipt,
     ) -> Option<ChainEvent> {
@@ -1092,12 +1093,12 @@ impl EthereumIndexer {
 
     async fn backfill_execution_confirmation(
         &self,
-        tx_id: crate::sign_bidirectional::BidirectionalTxId,
+        tx_id: BidirectionalTxId,
         sign_id: SignId,
-        pending_tx: &crate::sign_bidirectional::BidirectionalTx,
+        pending_tx: &BidirectionalTx,
         current_block_number: u64,
     ) -> anyhow::Result<BackfillOutcome> {
-        let Some(tx) = self.client.get_transaction_by_hash(tx_id.0).await? else {
+        let Some(tx) = self.client.get_transaction_by_hash(tx_id.0.into()).await? else {
             return Ok(BackfillOutcome::NotObserved);
         };
 
@@ -1228,7 +1229,7 @@ impl EthereumIndexer {
                 .client
                 .as_ref()
                 .get_nonce(
-                    tx.from_address,
+                    tx.from_address.into(),
                     BlockId::Number(BlockNumberOrTag::Number(block_number)),
                 )
                 .await
@@ -1380,7 +1381,7 @@ impl EthereumIndexer {
 impl ChainIndexer for EthereumIndexer {
     const CHAIN: Chain = Chain::Ethereum;
     type Block = MaybeBlock;
-    type Iter = CatchupIter;
+    type Iter = std::pin::Pin<Box<dyn stream::Stream<Item = Self::Block> + Send + 'static>>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         let start_block_number = loop {
@@ -1422,7 +1423,15 @@ impl ChainIndexer for EthereumIndexer {
             .client
             .clamp_oldest_supported(current_block, anchor_height);
 
-        CatchupIter::new(self.client.clone(), catchup_start, anchor_height)
+        let catchup_iter = CatchupIter::new(self.client.clone(), catchup_start, anchor_height);
+
+        // Convert the async state machine into a Stream
+        let stream = stream::unfold(catchup_iter, |mut state| async move {
+            let item = state.next().await;
+            item.map(|block| (block, state))
+        });
+
+        Box::pin(stream)
     }
 
     async fn process_catchup(&mut self, block: &Self::Block) -> anyhow::Result<()> {
@@ -1531,13 +1540,15 @@ mod tests {
     #[cfg(feature = "helios")]
     use crate::indexer_eth::indexer_eth_helios;
     use crate::protocol::Chain;
-    use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId};
-    use crate::stream::{AsyncCatchupIter, ChainEvent, ChainIndexer, ExecutionOutcome};
+    use crate::stream::ChainIndexer;
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{address, b256, Address};
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
-    use mpc_primitives::{SignId, LATEST_MPC_KEY_VERSION};
+    use mpc_primitives::{
+        BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, SignId,
+        LATEST_MPC_KEY_VERSION,
+    };
     use serde_json::json;
     use std::sync::Arc;
     use tokio::sync::{mpsc, Notify};
@@ -1992,7 +2003,7 @@ mod tests {
         let backlog = Backlog::new();
         let sign_id = SignId::new([0x55; 32]);
         let tx = BidirectionalTx {
-            id: BidirectionalTxId(tx_hash),
+            id: BidirectionalTxId(tx_hash.0),
             sender: [0u8; 32],
             serialized_transaction: vec![],
             source_chain: Chain::Solana,
@@ -2007,7 +2018,7 @@ mod tests {
             output_deserialization_schema: vec![],
             respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             request_id: sign_id.request_id,
-            from_address,
+            from_address: **from_address,
             nonce: 0,
         };
         backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;
@@ -2049,7 +2060,7 @@ mod tests {
                 block_height,
                 result,
             } => {
-                assert_eq!(*event_tx_id, BidirectionalTxId(tx_hash));
+                assert_eq!(*event_tx_id, BidirectionalTxId(tx_hash.0));
                 assert_eq!(*event_sign_id, sign_id);
                 assert_eq!(*source_chain, Chain::Solana);
                 assert_eq!(*block_height, 2);

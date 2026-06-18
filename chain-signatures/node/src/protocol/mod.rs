@@ -17,8 +17,10 @@ pub use contract::primitives::ParticipantInfo;
 pub use contract::ProtocolState;
 pub use cryptography::CryptographicError;
 pub use message::{Message, MessageChannel};
-pub use mpc_primitives::{Chain, ConsensusCheckpointDigest};
-pub use signature::{IndexedSignRequest, Sign};
+pub use mpc_primitives::{
+    Chain, ConsensusCheckpointDigest, IndexedSignRequest, RespondBidirectionalTx,
+};
+pub use signature::Sign;
 pub use state::{Node, NodeState};
 
 use crate::config::Config;
@@ -27,10 +29,9 @@ use crate::protocol::consensus::ConsensusProtocol;
 use crate::protocol::cryptography::CryptographicProtocol;
 use crate::protocol::message::{GeneratingMessage, ReadyMessage, ResharingMessage};
 use crate::protocol::signature::SignatureSpawnerTask;
-use crate::respond_bidirectional::RespondBidirectionalTx;
 use crate::rpc::ContractStateWatcher;
 use crate::storage::presignature_storage::PresignatureStorage;
-use crate::storage::secret_storage::SecretNodeStorageBox;
+use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::TripleStorage;
 
 use near_account_id::AccountId;
@@ -42,7 +43,7 @@ use tokio::sync::{mpsc, watch};
 
 pub struct MpcSignProtocol {
     pub(crate) my_account_id: AccountId,
-    pub(crate) secret_storage: SecretNodeStorageBox,
+    pub(crate) secret_storage: SecretNodeStorageVariant,
     pub(crate) triple_storage: TripleStorage,
     pub(crate) presignature_storage: PresignatureStorage,
     pub(crate) sign_task: SignatureSpawnerTask,
@@ -218,15 +219,6 @@ pub async fn spawn_system_metrics() -> tokio::task::JoinHandle<()> {
             std::thread::sleep(Duration::from_secs(5));
         }
     })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[allow(clippy::large_enum_variant)]
-pub enum SignKind {
-    Sign,
-    SignBidirectional(crate::stream::ops::SignBidirectionalEvent),
-    RespondBidirectional(RespondBidirectionalTx),
-    Checkpoint(ConsensusCheckpointDigest),
 }
 
 #[cfg(test)]
