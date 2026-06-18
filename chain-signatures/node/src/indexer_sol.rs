@@ -1,7 +1,7 @@
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::solana_client::{SolanaCatchupBlock, SolanaClient};
-use crate::stream::{ChainIndexer, ChainStream};
+use crate::stream::ChainIndexer;
 use crate::util::ethabi_request_id;
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 
@@ -126,75 +126,12 @@ pub struct SolSignRequest {
     pub key_version: u32,
 }
 
-/// Solana stream that implements the new ChainStream abstraction
-pub struct SolanaStream<S: StateManager> {
-    tasks: Vec<tokio::task::JoinHandle<()>>,
-    config: SolConfig,
-    state_manager: S,
-}
-
 pub struct SolanaIndexer<S: StateManager> {
     pub program_id: Pubkey,
     pub client: SolanaClient,
     pub state_manager: S,
     pub events_tx: mpsc::Sender<ChainEvent>,
     pub live_rx: Option<mpsc::Receiver<ChainEvent>>,
-}
-
-impl<S: StateManager> Drop for SolanaStream<S> {
-    fn drop(&mut self) {
-        for task in &self.tasks {
-            task.abort();
-        }
-    }
-}
-
-impl<S: StateManager> SolanaStream<S> {
-    pub fn new(config: Option<SolConfig>, state_manager: S) -> Option<Self> {
-        let Some(config) = config else {
-            tracing::warn!("solana indexer is disabled");
-            return None;
-        };
-
-        Some(SolanaStream {
-            config,
-            tasks: Vec::new(),
-            state_manager,
-        })
-    }
-}
-
-#[async_trait]
-impl<S: StateManager> ChainStream for SolanaStream<S> {
-    type Indexer = SolanaIndexer<S>;
-
-    async fn start(self) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
-        let Ok(program_id) = Pubkey::from_str(&self.config.program_address) else {
-            anyhow::bail!(
-                "Failed to parse solana program address: {}",
-                self.config.program_address
-            );
-        };
-
-        let (events_tx, events_rx) = crate::stream::channel();
-
-        let client = SolanaClient::for_indexer(
-            self.config.rpc_http_url.clone(),
-            self.config.rpc_ws_url.clone(),
-            program_id,
-        );
-
-        // TODO: make it better
-        let indexer = SolanaIndexer {
-            program_id,
-            client,
-            state_manager: self.state_manager.clone(),
-            events_tx,
-            live_rx: None,
-        };
-
-        Ok((indexer, events_rx))
-    }
 }
 
 #[async_trait]
@@ -276,6 +213,37 @@ impl<S: StateManager> ChainIndexer for SolanaIndexer<S> {
 }
 
 impl<S: StateManager> SolanaIndexer<S> {
+    pub async fn new(
+        config: SolConfig,
+        state_manager: S,
+    ) -> anyhow::Result<(Self, mpsc::Receiver<ChainEvent>)> {
+        let program_id = Pubkey::from_str(&config.program_address).map_err(|_| {
+            anyhow::anyhow!(
+                "failed to parse solana program address: {}",
+                config.program_address
+            )
+        })?;
+
+        let (events_tx, events_rx) = crate::stream::channel();
+
+        let client = SolanaClient::for_indexer(
+            config.rpc_http_url.clone(),
+            config.rpc_ws_url.clone(),
+            program_id,
+        );
+
+        Ok((
+            Self {
+                program_id,
+                client,
+                state_manager,
+                events_tx,
+                live_rx: None,
+            },
+            events_rx,
+        ))
+    }
+
     async fn process_block(&mut self, height: u64, block: &UiConfirmedBlock) -> anyhow::Result<()> {
         let Some(transactions) = &block.transactions else {
             self.events_tx.send(ChainEvent::Block(height)).await?;

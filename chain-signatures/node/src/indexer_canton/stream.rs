@@ -1,6 +1,6 @@
 use crate::protocol::Chain;
 use crate::rpc::CantonClient;
-use crate::stream::{ChainIndexer, ChainStream};
+use crate::stream::ChainIndexer;
 
 use alloy::primitives::keccak256;
 use async_trait::async_trait;
@@ -25,40 +25,6 @@ use super::{contracts, ledger_api, CantonConfig, CantonSignBidirectionalRequeste
 type CantonWs = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type CantonWsRead = SplitStream<CantonWs>;
 type CantonWsWrite = SplitSink<CantonWs, Message>;
-
-pub struct CantonStream<S: StateManager> {
-    config: CantonConfig,
-    state_manager: S,
-}
-
-impl<S: StateManager> CantonStream<S> {
-    pub fn new(config: Option<CantonConfig>, state_manager: S) -> Option<Self> {
-        let config = match config {
-            Some(c) => c,
-            None => {
-                tracing::warn!("canton indexer is disabled");
-                return None;
-            }
-        };
-
-        Some(CantonStream {
-            config,
-            state_manager,
-        })
-    }
-}
-
-#[async_trait]
-impl<S: StateManager> ChainStream for CantonStream<S> {
-    type Indexer = CantonIndexer<S>;
-
-    async fn start(self) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
-        let (events_tx, events_rx) = crate::stream::channel();
-        let client = CantonClient::new(&self.config).await?;
-        let indexer = CantonIndexer::new(client.clone(), self.state_manager, events_tx.clone());
-        Ok((indexer, events_rx))
-    }
-}
 
 enum CantonConnection {
     Connected(CantonWsRead, CantonWsWrite),
@@ -171,18 +137,23 @@ pub struct CantonIndexer<S: StateManager> {
 }
 
 impl<S: StateManager> CantonIndexer<S> {
-    pub fn new(
-        client: CantonClient,
+    pub async fn new(
+        config: CantonConfig,
         state_manager: S,
-        events_tx: mpsc::Sender<ChainEvent>,
-    ) -> Self {
-        Self {
-            client,
-            state_manager,
-            events_tx,
-            ws_conn: CantonConnection::Disconnected,
-            last_seen_offset: 0,
-        }
+    ) -> anyhow::Result<(Self, mpsc::Receiver<ChainEvent>)> {
+        let (events_tx, events_rx) = crate::stream::channel();
+        let client = CantonClient::new(&config).await?;
+
+        Ok((
+            Self {
+                client,
+                state_manager,
+                events_tx,
+                ws_conn: CantonConnection::Disconnected,
+                last_seen_offset: 0,
+            },
+            events_rx,
+        ))
     }
 
     async fn connect_and_subscribe(&mut self, begin_exclusive: u64) -> anyhow::Result<()> {

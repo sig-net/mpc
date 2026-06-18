@@ -7,7 +7,7 @@ use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::Chain;
 use crate::respond_bidirectional::CompletedTx;
-use crate::stream::{ChainIndexer, ChainStream};
+use crate::stream::ChainIndexer;
 use crate::util::retry;
 
 use alloy::eips::BlockNumberOrTag;
@@ -860,23 +860,27 @@ impl<S: StateManager> EthereumIndexer<S> {
     pub async fn new(
         config: EthConfig,
         state_manager: S,
-        events_tx: mpsc::Sender<ChainEvent>,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<(Self, mpsc::Receiver<ChainEvent>)> {
+        let (events_tx, events_rx) = crate::stream::channel();
+
         let client = Arc::new(EthereumClient::new(config.clone()).await?);
         let contract_address = format!("0x{}", config.contract_address);
         let contract_address = Address::from_str(&contract_address).with_context(|| {
             format!("failed to parse ethereum contract address: {contract_address}")
         })?;
 
-        Ok(Self {
-            config,
-            state_manager,
-            client,
-            events_tx,
-            contract_address,
-            catchup_complete: Arc::new(Notify::new()),
-            live_blocks_rx: None,
-        })
+        Ok((
+            Self {
+                config,
+                state_manager,
+                client,
+                events_tx,
+                contract_address,
+                catchup_complete: Arc::new(Notify::new()),
+                live_blocks_rx: None,
+            },
+            events_rx,
+        ))
     }
 
     async fn index_live_blocks(
@@ -1490,45 +1494,6 @@ impl<S: StateManager> ChainIndexer for EthereumIndexer<S> {
     }
 }
 
-/// Ethereum indexer stream implementing the `ChainStream` trait.
-/// Construction is side-effect free; the shared `run_stream()` loop calls
-/// `start()` after recovery has completed.
-pub struct EthereumStream<S: StateManager> {
-    config: EthConfig,
-    state_manager: S,
-}
-
-impl<S: StateManager> EthereumStream<S> {
-    pub async fn new(config: Option<EthConfig>, state_manager: S) -> anyhow::Result<Self> {
-        let Some(config) = config else {
-            tracing::warn!(
-                "ethereum indexer is disabled: no EthConfig provided \
-                 (check that all --eth-* CLI flags were supplied)"
-            );
-            anyhow::bail!("ethereum indexer is disabled: no EthConfig provided");
-        };
-        tracing::info!(
-            config = ?config,
-            "creating ethereum indexer stream"
-        );
-
-        Ok(Self {
-            config,
-            state_manager,
-        })
-    }
-}
-
-#[async_trait]
-impl<S: StateManager> ChainStream for EthereumStream<S> {
-    type Indexer = EthereumIndexer<S>;
-
-    async fn start(self) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
-        let (events_tx, events_rx) = crate::stream::channel();
-        let indexer = EthereumIndexer::new(self.config, self.state_manager, events_tx).await?;
-        Ok((indexer, events_rx))
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::{CatchupIter, EthConfig, EthereumClient, EthereumIndexer, MaybeBlock};

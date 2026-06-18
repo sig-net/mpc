@@ -8,7 +8,7 @@ mod stream;
 pub use auth::{CantonAuthConfig, CantonAuthProvider};
 pub use request_id::compute_request_id;
 pub use signature::der_encode_signature;
-pub use stream::{parse_canton_signature, CantonStream};
+pub use stream::{parse_canton_signature, CantonIndexer};
 
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;

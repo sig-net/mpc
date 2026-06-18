@@ -70,15 +70,6 @@ pub trait ChainIndexer: Send + 'static {
     }
 }
 
-// TODO: consider replacing this trait and use builder
-#[async_trait]
-pub trait ChainStream: Send + 'static {
-    type Indexer: ChainIndexer + Send;
-
-    /// Start the stream and return the indexer and a receiver for chain events.
-    async fn start(self) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)>;
-}
-
 pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I) {
     let chain = I::CHAIN;
     tracing::info!(%chain, "starting ChainStream catchup then livestream");
@@ -121,8 +112,9 @@ pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I) {
 }
 
 /// Shared indexer loop: recovers backlog then processes events from the stream
-pub async fn run_stream<S: ChainStream>(
-    stream: S,
+pub async fn run_stream<I: ChainIndexer>(
+    indexer: I,
+    mut events_rx: mpsc::Receiver<ChainEvent>,
     sign_tx: mpsc::Sender<Sign>,
     rpc: RpcChannel,
     backlog: Backlog,
@@ -130,7 +122,7 @@ pub async fn run_stream<S: ChainStream>(
     mut mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
 ) {
-    let chain = S::Indexer::CHAIN;
+    let chain = I::CHAIN;
     tracing::info!(%chain, "starting stream");
 
     recover_backlog(
@@ -141,14 +133,6 @@ pub async fn run_stream<S: ChainStream>(
         chain,
     )
     .await;
-
-    let (indexer, mut events_rx) = match stream.start().await {
-        Ok(res) => res,
-        Err(err) => {
-            tracing::error!(?err, %chain, "failed to start stream");
-            return;
-        }
-    };
 
     let indexer_task = tokio::spawn(catchup_then_livestream(indexer));
 
@@ -273,6 +257,21 @@ mod tests {
                 pub fn new(events: Vec<Option<ChainEvent>>) -> Self {
                     Self { events }
                 }
+
+                // Replaces ChainStream::start() — returns (indexer, rx) directly
+                pub fn build(self) -> ($indexer, mpsc::Receiver<ChainEvent>) {
+                    let (tx, rx) = crate::stream::channel();
+
+                    let events = self.events;
+                    let bg_tx = tx.clone();
+                    tokio::spawn(async move {
+                        for ev in events.into_iter().flatten() {
+                            let _ = bg_tx.send(ev).await;
+                        }
+                    });
+
+                    ($indexer::silent(tx), rx)
+                }
             }
 
             struct $indexer {
@@ -290,7 +289,6 @@ mod tests {
             #[async_trait]
             impl ChainIndexer for $indexer {
                 const CHAIN: Chain = $chain;
-
                 type Block = ();
                 type Iter = futures_util::stream::Empty<Self::Block>;
 
@@ -307,29 +305,6 @@ mod tests {
                         events_tx.send(ChainEvent::CatchupCompleted).await?;
                     }
                     Ok(())
-                }
-            }
-
-            #[async_trait]
-            impl ChainStream for $stream {
-                type Indexer = $indexer;
-
-                async fn start(
-                    self,
-                ) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
-                    let (tx, rx) = crate::stream::channel();
-
-                    // Send the pre-defined events in a background task
-                    let events = self.events;
-                    let bg_tx = tx.clone();
-                    tokio::spawn(async move {
-                        for ev in events.into_iter().flatten() {
-                            let _ = bg_tx.send(ev).await;
-                        }
-                    });
-
-                    // Pass the tx to the indexer so notify_catchup_completed can use it
-                    Ok(($indexer::silent(tx), rx))
                 }
             }
         };
@@ -394,6 +369,17 @@ mod tests {
                 tx,
             }
         }
+
+        fn build(mut self) -> (TestLinearIndexer, mpsc::Receiver<ChainEvent>) {
+            let indexer = TestLinearIndexer {
+                control: self.control,
+                tx: self.tx,
+                live_items: Vec::new(),
+                pending_live_block: None,
+            };
+            let rx = self.rx.take().expect("stream already built");
+            (indexer, rx)
+        }
     }
 
     struct TestLinearIndexer {
@@ -426,7 +412,6 @@ mod tests {
             Some(block)
         }
 
-        // TODO: double check this
         async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
             let start = self
                 .control
@@ -458,27 +443,10 @@ mod tests {
         }
     }
 
-    #[async_trait]
-    impl ChainStream for TestLinearStream {
-        type Indexer = TestLinearIndexer;
-
-        async fn start(mut self) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
-            let indexer = TestLinearIndexer {
-                control: self.control,
-                tx: self.tx,
-                live_items: Vec::new(),
-                pending_live_block: None,
-            };
-
-            let rx = self.rx.take().expect("Stream already started");
-            Ok((indexer, rx))
-        }
-    }
-
     #[tokio::test]
     async fn test_run_linearized_source_orders_catchup_before_live() {
         let stream = TestLinearStream::new(TestLinearControl::new(Some(1), vec![4, 5]));
-        let (indexer, mut events_rx) = stream.start().await.unwrap();
+        let (indexer, mut events_rx) = stream.build();
         catchup_then_livestream(indexer).await;
 
         let mut observed = Vec::new();
@@ -503,7 +471,7 @@ mod tests {
                 .fail_catchup_once(3)
                 .fail_live_once(4),
         );
-        let (indexer, mut events_rx) = stream.start().await.unwrap();
+        let (indexer, mut events_rx) = stream.build();
         catchup_then_livestream(indexer).await;
 
         let mut observed = Vec::new();
@@ -552,12 +520,13 @@ mod tests {
             signature: mpc_sig,
             chain: Chain::Solana,
         };
-        let client = SolanaTestStream::new(vec![
+        let (indexer, rx) = SolanaTestStream::new(vec![
             Some(ChainEvent::CatchupCompleted),
             Some(ChainEvent::SignRequest(indexed.clone())),
             Some(ChainEvent::Respond(sig_responded)),
             None,
-        ]);
+        ])
+        .build();
 
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
 
@@ -573,7 +542,8 @@ mod tests {
 
         // Run the indexer
         run_stream(
-            client,
+            indexer,
+            rx,
             sign_tx.clone(),
             rpc,
             backlog.clone(),
@@ -618,24 +588,12 @@ mod tests {
             events_rx: Option<mpsc::Receiver<ChainEvent>>,
         }
 
-        #[async_trait]
-        impl ChainStream for LocalStream {
-            type Indexer = DisabledChainIndexer;
-
-            async fn start(
-                mut self,
-            ) -> anyhow::Result<(Self::Indexer, mpsc::Receiver<ChainEvent>)> {
-                let events_rx = self.events_rx.take().expect("Stream already started");
-                Ok((DisabledChainIndexer::silent(), events_rx))
-            }
-        }
-
-        pub struct DisabledChainIndexer {
+        struct DisabledChainIndexer {
             events_tx: Option<mpsc::Sender<ChainEvent>>,
         }
 
         impl DisabledChainIndexer {
-            pub fn silent() -> Self {
+            fn silent() -> Self {
                 Self { events_tx: None }
             }
         }
@@ -650,22 +608,19 @@ mod tests {
                 None
             }
 
-            async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
+            async fn catchup_range(&self, _: u64) -> Self::Iter {
                 futures_util::stream::empty()
             }
 
             async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
-                if let Some(events_tx) = &self.events_tx {
-                    events_tx.send(ChainEvent::CatchupCompleted).await?;
+                if let Some(tx) = &self.events_tx {
+                    tx.send(ChainEvent::CatchupCompleted).await?;
                 }
                 Ok(())
             }
         }
 
         let (events_tx, events_rx) = mpsc::channel(8);
-        let client = LocalStream {
-            events_rx: Some(events_rx),
-        };
 
         let (sign_tx, mut sign_rx) = mpsc::channel(8);
 
@@ -687,7 +642,8 @@ mod tests {
         let sign_tx_for_run = sign_tx.clone();
         let run_handle = tokio::spawn(async move {
             run_stream(
-                client,
+                DisabledChainIndexer::silent(),
+                events_rx,
                 sign_tx_for_run,
                 rpc,
                 backlog_for_run,
@@ -944,11 +900,12 @@ mod tests {
             chain: Chain::Ethereum,
         };
 
-        let client = EthereumTestStream::new(vec![
+        let (indexer, rx) = EthereumTestStream::new(vec![
             Some(ChainEvent::Respond(respond)),
             Some(ChainEvent::CatchupCompleted),
             None,
-        ]);
+        ])
+        .build();
 
         let backlog = Backlog::persisted(storage);
         let (sign_tx, mut sign_rx) = mpsc::channel(8);
@@ -993,7 +950,8 @@ mod tests {
         let (rpc, _rpc_rx) = test_rpc_channel(8);
 
         run_stream(
-            client,
+            indexer,
+            rx,
             sign_tx,
             rpc,
             backlog.clone(),
@@ -1040,11 +998,12 @@ mod tests {
 
         let replacement =
             IndexedSignRequest::sign(sign_id, args.clone(), Chain::Ethereum, replayed_timestamp);
-        let client = EthereumTestStream::new(vec![
+        let (indexer, rx) = EthereumTestStream::new(vec![
             Some(ChainEvent::SignRequest(replacement)),
             Some(ChainEvent::CatchupCompleted),
             None,
-        ]);
+        ])
+        .build();
 
         let backlog = Backlog::persisted(storage);
         let (sign_tx, mut sign_rx) = mpsc::channel(8);
@@ -1089,7 +1048,8 @@ mod tests {
         let (rpc, _rpc_rx) = test_rpc_channel(8);
 
         run_stream(
-            client,
+            indexer,
+            rx,
             sign_tx,
             rpc,
             backlog.clone(),
@@ -1154,7 +1114,8 @@ mod tests {
             )
             .await;
 
-        let client = SolanaTestStream::new(vec![Some(ChainEvent::CatchupCompleted), None]);
+        let (indexer, rx) =
+            SolanaTestStream::new(vec![Some(ChainEvent::CatchupCompleted), None]).build();
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
         let (rpc, mut rpc_rx) = test_rpc_channel(4);
         let (contract_watcher, _tx) = ContractStateWatcher::with_running(
@@ -1168,7 +1129,8 @@ mod tests {
 
         let run_handle = tokio::spawn(async move {
             run_stream(
-                client,
+                indexer,
+                rx,
                 sign_tx,
                 rpc,
                 backlog,
@@ -1235,7 +1197,8 @@ mod tests {
             )
             .await;
 
-        let client = SolanaTestStream::new(vec![Some(ChainEvent::CatchupCompleted), None]);
+        let (indexer, rx) =
+            SolanaTestStream::new(vec![Some(ChainEvent::CatchupCompleted), None]).build();
         let (sign_tx, _sign_rx) = mpsc::channel(4);
         let (rpc, mut rpc_rx) = test_rpc_channel(4);
         let (contract_watcher, _tx) = ContractStateWatcher::with_running(
@@ -1249,7 +1212,8 @@ mod tests {
 
         let run_handle = tokio::spawn(async move {
             run_stream(
-                client,
+                indexer,
+                rx,
                 sign_tx,
                 rpc,
                 backlog,

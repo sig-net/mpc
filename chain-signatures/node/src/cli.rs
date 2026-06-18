@@ -1,8 +1,9 @@
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
-use crate::indexer_eth::EthereumStream;
-use crate::indexer_sol::SolanaStream;
+use crate::indexer_canton::CantonIndexer;
+use crate::indexer_eth::EthereumIndexer;
+use crate::indexer_sol::SolanaIndexer;
 use crate::mesh::Mesh;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
@@ -407,39 +408,61 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 backlog.clone(),
             ));
 
-            tracing::info!(
-                eth_configured = eth.is_some(),
-                "initializing ethereum indexer stream"
-            );
-            match EthereumStream::new(eth, backlog.clone()).await {
-                Ok(eth_stream) => {
-                    tracing::info!("ethereum indexer stream created successfully");
-                    tokio::spawn(run_stream(
-                        eth_stream,
-                        sign_tx.clone(),
-                        rpc_channel.clone(),
-                        backlog.clone(),
-                        contract_watcher.clone(),
-                        mesh_state.clone(),
-                        client.clone(),
-                    ));
-                }
-                Err(err) => {
-                    tracing::error!(?err, "failed to create ethereum indexer stream");
-                }
-            };
+            let eth_configured = eth.is_some();
+            let sol_configured = sol.is_some();
+            let canton_configured = canton.is_some();
 
-            if let Some(sol_stream) = SolanaStream::new(sol.clone(), backlog.clone()) {
-                tokio::spawn(run_stream(
-                    sol_stream,
-                    sign_tx.clone(),
-                    rpc_channel.clone(),
-                    backlog.clone(),
-                    contract_watcher.clone(),
-                    mesh_state.clone(),
-                    client.clone(),
-                ));
+            tracing::info!(
+                eth_configured,
+                sol_configured,
+                canton_configured,
+                "initializing chain indexers"
+            );
+
+            // Spawn the Ethereum indexer if the configuration is provided
+            if let Some(eth_config) = eth {
+                match EthereumIndexer::new(eth_config, backlog.clone()).await {
+                    Ok((indexer, rx)) => {
+                        tracing::info!("ethereum indexer created successfully");
+                        tokio::spawn(run_stream(
+                            indexer,
+                            rx,
+                            sign_tx.clone(),
+                            rpc_channel.clone(),
+                            backlog.clone(),
+                            contract_watcher.clone(),
+                            mesh_state.clone(),
+                            client.clone(),
+                        ));
+                    }
+                    Err(err) => {
+                        tracing::error!(?err, "failed to create ethereum indexer");
+                    }
+                }
             }
+
+            // Spawn the Solana indexer if the configuration is provided
+            if let Some(sol_config) = sol.clone() {
+                match SolanaIndexer::new(sol_config, backlog.clone()).await {
+                    Ok((indexer, rx)) => {
+                        tokio::spawn(run_stream(
+                            indexer,
+                            rx,
+                            sign_tx.clone(),
+                            rpc_channel.clone(),
+                            backlog.clone(),
+                            contract_watcher.clone(),
+                            mesh_state.clone(),
+                            client.clone(),
+                        ));
+                    }
+                    Err(err) => {
+                        tracing::error!(?err, "failed to create solana indexer");
+                    }
+                }
+            }
+
+            // Spawn the Hydration indexer
             tokio::spawn(indexer_hydration::run(
                 hydration,
                 sign_tx.clone(),
@@ -448,18 +471,28 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 mesh_state.clone(),
                 client.clone(),
             ));
-            if let Some(canton_stream) = indexer_canton::CantonStream::new(canton, backlog.clone())
-            {
-                tokio::spawn(run_stream(
-                    canton_stream,
-                    sign_tx.clone(),
-                    rpc_channel.clone(),
-                    backlog.clone(),
-                    contract_watcher.clone(),
-                    mesh_state.clone(),
-                    client.clone(),
-                ));
+
+            // Spawn the Canton indexer if the configuration is provided
+            if let Some(canton_config) = canton {
+                match CantonIndexer::new(canton_config, backlog.clone()).await {
+                    Ok((indexer, rx)) => {
+                        tokio::spawn(run_stream(
+                            indexer,
+                            rx,
+                            sign_tx.clone(),
+                            rpc_channel.clone(),
+                            backlog.clone(),
+                            contract_watcher.clone(),
+                            mesh_state.clone(),
+                            client.clone(),
+                        ));
+                    }
+                    Err(err) => {
+                        tracing::error!(?err, "failed to create canton indexer");
+                    }
+                }
             }
+
             tracing::info!("protocol http server spawned");
             protocol_handle.await?;
             web_handle.await?;
