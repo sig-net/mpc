@@ -1,7 +1,7 @@
 use crate::backlog::Backlog;
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::solana_client::{SolanaCatchupBlock, SolanaClient, MAX_CHUNK_SIZE};
+use crate::solana_client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
 use crate::stream::{ChainIndexer, ChainStream};
 use crate::util::ethabi_request_id;
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
@@ -279,7 +279,7 @@ impl ChainIndexer for SolanaIndexer {
                     }
 
                     let chunk_slots: BTreeSet<u64> = remaining_slots
-                        .drain(..std::cmp::min(MAX_CHUNK_SIZE, remaining_slots.len()))
+                        .drain(..std::cmp::min(MAX_CONCURRENT_CHUNK_SIZE, remaining_slots.len()))
                         .collect();
 
                     let blocks = client.fetch_blocks_for_slots(chunk_slots).await;
