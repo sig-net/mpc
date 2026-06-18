@@ -4,7 +4,7 @@ use integration_tests::containers::Solana;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::ScalarExt;
 use mpc_node::backlog::Backlog;
-use mpc_node::indexer_sol::{SolConfig, SolanaStream};
+use mpc_node::indexer_sol::{SolConfig, SolanaIndexer, SolanaStream};
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
@@ -441,7 +441,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     seeded_backlog.checkpoint(Chain::Solana).await;
 
     let recovered_backlog = Backlog::persisted(storage);
-    let stream = SolanaStream::new(Some(config), recovered_backlog.clone())
+    let (indexer, events_rx) = SolanaIndexer::new(config, recovered_backlog.clone())
         .context("failed to create SolanaStream")?;
 
     let (sign_tx, mut sign_rx) = mpsc::channel::<Sign>(4);
@@ -467,7 +467,8 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
 
     let run_handle = tokio::spawn(async move {
         run_stream(
-            stream,
+            indexer,
+            events_rx,
             sign_tx,
             rpc,
             recovered_backlog,

@@ -10,7 +10,7 @@ use integration_tests::eth::{self, ChainSignatures, SignRequest};
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_node::backlog::Backlog;
-use mpc_node::indexer_eth::{EthConfig, EthereumStream};
+use mpc_node::indexer_eth::{EthConfig, EthereumIndexer, EthereumStream};
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign};
@@ -397,7 +397,7 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     }
 
     let backlog = Backlog::persisted(storage);
-    let stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
+    let (indexer, events_rx) = EthereumIndexer::new(ctx.config(true), backlog.clone()).await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
@@ -414,7 +414,8 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
     let run_handle = tokio::spawn(run_stream(
-        stream,
+        indexer,
+        events_rx,
         sign_tx,
         rpc,
         backlog,
@@ -572,7 +573,8 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let catchup_payload = [0x55; 32];
     submit_sign_request(&ctx, catchup_payload, "catchup-linear-path").await?;
 
-    let stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
+    let (indexer, events_rx): (EthereumIndexer<Backlog>, mpsc::Receiver<ChainEvent>) =
+        EthereumIndexer::new(ctx.config(true), backlog.clone()).await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
@@ -589,7 +591,8 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
     let run_handle = tokio::spawn(run_stream(
-        stream,
+        indexer,
+        events_rx,
         sign_tx,
         rpc,
         backlog.clone(),
@@ -757,7 +760,8 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         ))
         .await;
 
-    let stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
+    let (indexer, events_rx): (EthereumIndexer<Backlog>, mpsc::Receiver<ChainEvent>) =
+        EthereumIndexer::new(ctx.config(true), backlog.clone()).await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
@@ -774,7 +778,8 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
     let run_handle = tokio::spawn(run_stream(
-        stream,
+        indexer,
+        events_rx,
         sign_tx,
         rpc,
         backlog.clone(),
