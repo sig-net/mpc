@@ -302,7 +302,6 @@ async fn test_presignature_persistence() -> anyhow::Result<()> {
 
 #[test(tokio::test)]
 async fn test_checkpoint_persistence() -> anyhow::Result<()> {
-    use deadpool_redis::redis::AsyncCommands;
     use mpc_node::storage::checkpoint_storage::CheckpointStorage;
     use mpc_primitives::{Chain, Checkpoint};
     use near_account_id::AccountId;
@@ -366,21 +365,20 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     heights.sort();
     assert_eq!(heights, vec![10, 20]);
 
-    // 6. Test expiration/pruning: modify score of cp1 to be expired (e.g. now - 2000s)
-    let mut conn = pool.get().await?;
-    let history_key = format!(
-        "party0.near:checkpoint:history:{}:Solana",
-        mpc_node::storage::checkpoint_storage::CHECKPOINT_VERSION
-    );
-    let cp1_str = serde_json::to_string(&cp1)?;
-    let expired_score = mpc_node::util::current_unix_timestamp() - 2000;
+    // 6. Test pruning: persist more checkpoints to exceed limit
+    for i in 1..=31 {
+        let cp = Checkpoint {
+            chain: Chain::Solana,
+            block_height: 20 + i * 10,
+            pending_requests: vec![],
+        };
+        storage.persist(&cp).await?;
+    }
 
-    let _: () = conn.zadd(history_key, cp1_str, expired_score).await?;
-
-    // 7. Load history again - this triggers pruning in the Lua script!
+    // 7. Verify oldest (height 10) is pruned, keeping MAX_RECENT_CHECKPOINTS (32)
     let history = storage.load_history(Chain::Solana).await?;
-    assert_eq!(history.len(), 1);
-    assert_eq!(history[0].block_height, 20); // cp1 is pruned, only cp2 remains
+    assert_eq!(history.len(), 32);
+    assert_eq!(history[0].block_height, 20);
 
     Ok(())
 }
