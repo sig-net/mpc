@@ -1,9 +1,8 @@
 use crate::backlog::Backlog;
-use crate::mesh::{wait_threshold_active, MeshState};
+use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::protocol::Chain;
-use crate::rpc::ContractStateWatcher;
 
 use cait_sith::protocol::Participant;
 use mpc_primitives::Checkpoint;
@@ -73,63 +72,6 @@ pub(crate) async fn align_backlog_with_consensus(
     }
 
     Some(height)
-}
-
-pub(crate) async fn recover_backlog(
-    backlog: &Backlog,
-    contract_watcher: &mut ContractStateWatcher,
-    mesh_state: &mut watch::Receiver<MeshState>,
-    node_client: &NodeClient,
-    source_chain: Chain,
-    checkpoints_rx: &mut watch::Receiver<CheckpointDigest>,
-) {
-    // Recover backlog before doing anything.
-    // Wait for threshold to be available
-    let threshold = contract_watcher.wait_threshold().await;
-    wait_threshold_active(mesh_state, threshold).await;
-
-    // Load local checkpoint from storage first
-    match backlog.storage.load_latest(source_chain).await {
-        Ok(Some(checkpoint)) => {
-            tracing::info!(
-                ?source_chain,
-                height = checkpoint.block_height,
-                "loaded local checkpoint"
-            );
-            if let Err(err) = backlog.recover_by_checkpoint(checkpoint).await {
-                tracing::warn!(?source_chain, %err, "failed to recover from local checkpoint");
-            }
-        }
-        Ok(None) => {
-            tracing::info!(?source_chain, "no local checkpoint found");
-        }
-        Err(err) => {
-            tracing::warn!(?source_chain, %err, "failed to load local checkpoint");
-        }
-    }
-
-    // Load historical checkpoints from storage
-    match backlog.storage.load_history(source_chain).await {
-        Ok(history) => {
-            for checkpoint in history {
-                backlog.remember_checkpoint(checkpoint).await;
-            }
-        }
-        Err(err) => {
-            tracing::warn!(?source_chain, %err, "failed to load historical checkpoints");
-        }
-    }
-
-    // Align with consensus
-    align_backlog_with_consensus(
-        source_chain,
-        backlog,
-        checkpoints_rx,
-        mesh_state,
-        node_client,
-        contract_watcher.account_id(),
-    )
-    .await;
 }
 
 async fn fetch_peer_checkpoint(

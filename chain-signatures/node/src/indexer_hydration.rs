@@ -405,14 +405,49 @@ pub async fn run(
     };
     let legacy_rpc = LegacyRpcMethods::<SubstrateConfig>::new(rpc_client);
 
-    // Wait for threshold to be available
-    crate::backlog::consensus::recover_backlog(
+    let threshold = contract_watcher.wait_threshold().await;
+    crate::mesh::wait_threshold_active(&mut mesh_state, threshold).await;
+
+    // Load local checkpoint from storage first
+    match backlog.storage.load_latest(Chain::Hydration).await {
+        Ok(Some(checkpoint)) => {
+            tracing::info!(
+                chain = ?Chain::Hydration,
+                height = checkpoint.block_height,
+                "loaded local checkpoint"
+            );
+            if let Err(err) = backlog.recover_by_checkpoint(checkpoint).await {
+                tracing::warn!(chain = ?Chain::Hydration, %err, "failed to recover from local checkpoint");
+            }
+        }
+        Ok(None) => {
+            tracing::info!(chain = ?Chain::Hydration, "no local checkpoint found");
+        }
+        Err(err) => {
+            tracing::warn!(chain = ?Chain::Hydration, %err, "failed to load local checkpoint");
+        }
+    }
+
+    // Load historical checkpoints from storage
+    match backlog.storage.load_history(Chain::Hydration).await {
+        Ok(history) => {
+            for checkpoint in history {
+                backlog.remember_checkpoint(checkpoint).await;
+            }
+        }
+        Err(err) => {
+            tracing::warn!(chain = ?Chain::Hydration, %err, "failed to load historical checkpoints");
+        }
+    }
+
+    // Align with consensus
+    crate::backlog::consensus::align_backlog_with_consensus(
+        Chain::Hydration,
         &backlog,
-        &mut contract_watcher,
+        &mut checkpoints_rx,
         &mut mesh_state,
         &node_client,
-        Chain::Hydration,
-        &mut checkpoints_rx,
+        contract_watcher.account_id(),
     )
     .await;
 

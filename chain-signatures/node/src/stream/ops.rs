@@ -432,7 +432,6 @@ pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backlog::consensus::recover_backlog;
     use crate::backlog::Backlog;
     use crate::mesh::connection::NodeStatus;
     use crate::mesh::wait_threshold_active;
@@ -448,7 +447,7 @@ mod tests {
     use cait_sith::protocol::Participant;
     use k256::{ProjectivePoint, Scalar};
     use mpc_primitives::{
-        CheckpointDigest, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind,
+        RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind,
     };
     use near_primitives::types::AccountId;
     use solana_sdk::pubkey::Pubkey;
@@ -589,25 +588,9 @@ mod tests {
         let account_id: AccountId = "test.near".parse().unwrap();
         let public_key = ProjectivePoint::GENERATOR.to_affine();
         let participants = Participants::default();
-        let (mut contract_watcher, _tx) =
-            ContractStateWatcher::with_running(&account_id, public_key, threshold, participants);
-
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
-        let node_client = NodeClient::new(&Default::default());
-
-        let (_cp_tx, mut cp_rx) = watch::channel(CheckpointDigest {
-            height: 0,
-            digest: [0u8; 32],
-        });
-        recover_backlog(
-            &backlog,
-            &mut contract_watcher,
-            &mut mesh_rx,
-            &node_client,
-            Chain::Solana,
-            &mut cp_rx,
-        )
-        .await;
+        let checkpoint = backlog.storage.load_latest(Chain::Solana).await.unwrap().unwrap();
+        backlog.recover_by_checkpoint(checkpoint).await.unwrap();
 
         requeue_pending_sign_requests(&backlog, Chain::Solana, sign_tx).await;
 
@@ -907,26 +890,11 @@ mod tests {
         let account_id: AccountId = "test.near".parse().unwrap();
         let public_key = ProjectivePoint::GENERATOR.to_affine();
         let participants = Participants::default();
-        let (mut contract_watcher, _tx) =
-            ContractStateWatcher::with_running(&account_id, public_key, threshold, participants);
-
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
-        let node_client = NodeClient::new(&Default::default());
         let recovered = Backlog::persisted(storage.clone());
 
-        let (_cp_tx, mut cp_rx) = watch::channel(CheckpointDigest {
-            height: 0,
-            digest: [0u8; 32],
-        });
-        recover_backlog(
-            &recovered,
-            &mut contract_watcher,
-            &mut mesh_rx,
-            &node_client,
-            tx.source_chain,
-            &mut cp_rx,
-        )
-        .await;
+        let checkpoint = recovered.storage.load_latest(tx.source_chain).await.unwrap().unwrap();
+        recovered.recover_by_checkpoint(checkpoint).await.unwrap();
 
         requeue_pending_sign_requests(&recovered, tx.source_chain, sign_tx).await;
 
