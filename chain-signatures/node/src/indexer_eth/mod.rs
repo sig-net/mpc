@@ -1011,15 +1011,6 @@ impl EthereumIndexer {
             .collect_execution_confirmations(block_number, block_receipts)
             .await?;
 
-        for _request in &sign_requests {
-            record_request_latency_since(
-                Chain::Ethereum,
-                SignRequestStep::Indexing,
-                "ok",
-                block_timestamp,
-            );
-        }
-
         // Always forward the processed block to the "finalization" stage so it can emit
         // `ChainEvent::Block` even when there are no relevant contract logs.
         Ok(BlockAndRequests::new(
