@@ -130,8 +130,8 @@ impl PendingRequests {
         }
     }
 
-    fn from_checkpoint(checkpoint: Checkpoint) -> anyhow::Result<Self> {
-        fn decode(pending: mpc_primitives::PendingTx) -> anyhow::Result<(SignId, BacklogEntry)> {
+    fn from_checkpoint(checkpoint: &Checkpoint) -> anyhow::Result<Self> {
+        fn decode(pending: &mpc_primitives::PendingTx) -> anyhow::Result<(SignId, BacklogEntry)> {
             let entry: BacklogEntry = ciborium::de::from_reader(pending.transaction.as_slice())
                 .with_context(|| {
                     format!(
@@ -143,7 +143,7 @@ impl PendingRequests {
         }
 
         let mut requests = HashMap::new();
-        for pending_tx in checkpoint.pending_requests {
+        for pending_tx in &checkpoint.pending_requests {
             let (sign_id, tx) = decode(pending_tx)?;
             requests.insert(sign_id, tx);
         }
@@ -654,7 +654,7 @@ impl Backlog {
 
             // Execution watchers are ephemeral, we need to get all the execution watchers here
             let cleared = pending.len();
-            *pending = PendingRequests::from_checkpoint(checkpoint.clone())?;
+            *pending = PendingRequests::from_checkpoint(&checkpoint)?;
             let restored = pending.len();
 
             // Update total pending count based on the difference between cleared and restored requests
