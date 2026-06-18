@@ -24,9 +24,9 @@ async fn stream_canton(
     backlog: Backlog,
 ) -> Result<mpsc::Receiver<ChainEvent>> {
     let config = sandbox.get_config();
-    let stream = CantonStream::new(Some(config)).context("failed to create CantonStream")?;
-    let start_height = backlog.processed_block(Chain::Canton).await;
-    let (indexer, events_rx) = stream.start(start_height).await?;
+    let stream =
+        CantonStream::new(Some(config), backlog).context("failed to create CantonStream")?;
+    let (indexer, events_rx) = stream.start().await?;
     tokio::spawn(catchup_then_livestream(indexer));
     Ok(events_rx)
 }

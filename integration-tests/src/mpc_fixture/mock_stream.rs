@@ -54,10 +54,7 @@ impl ChainIndexer for MockIndexer {
 impl ChainStream for MockStream {
     type Indexer = MockIndexer;
 
-    async fn start(
-        self,
-        _start_height: Option<u64>,
-    ) -> anyhow::Result<(MockIndexer, mpsc::Receiver<ChainEvent>)> {
+    async fn start(self) -> anyhow::Result<(MockIndexer, mpsc::Receiver<ChainEvent>)> {
         let (events_tx, events_rx) = mpsc::channel(100);
         let inner_clone = self.inner.clone();
 

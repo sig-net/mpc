@@ -46,9 +46,9 @@ async fn stream_solana_with_backlog(
     config: SolConfig,
     backlog: Backlog,
 ) -> Result<mpsc::Receiver<ChainEvent>> {
-    let start_height = backlog.processed_block(Chain::Solana).await;
-    let stream = SolanaStream::new(Some(config)).context("failed to create SolanaStream")?;
-    let (indexer, events_rx) = stream.start(start_height).await?;
+    let stream =
+        SolanaStream::new(Some(config), backlog).context("failed to create SolanaStream")?;
+    let (indexer, events_rx) = stream.start().await?;
     tokio::spawn(catchup_then_livestream(indexer));
     Ok(events_rx)
 }
@@ -439,7 +439,8 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     seeded_backlog.checkpoint(Chain::Solana).await;
 
     let recovered_backlog = Backlog::persisted(storage);
-    let stream = SolanaStream::new(Some(config)).context("failed to create SolanaStream")?;
+    let stream = SolanaStream::new(Some(config), recovered_backlog.clone())
+        .context("failed to create SolanaStream")?;
 
     let (sign_tx, mut sign_rx) = mpsc::channel::<Sign>(4);
     let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcAction>(4);
