@@ -12,6 +12,7 @@ use crate::protocol::Governance;
 use crate::types::{KeygenProtocol, SecretKeyShare};
 use crate::util::AffinePointExt;
 
+use mpc_crypto::PublicKey;
 use rand::random;
 
 use std::cmp::Ordering;
@@ -33,183 +34,233 @@ impl<G: Governance> ConsensusProtocol<G> for StartedState {
         contract_state: ProtocolState,
     ) -> NodeState {
         match self.persistent_node_data {
-            Some(PersistentNodeData {
-                epoch,
-                private_share,
-                public_key,
-            }) => match contract_state {
-                ProtocolState::Initializing(contract_state) => {
-                    tracing::warn!(
-                        ?contract_state,
-                        "started(initializing): contract state has not been finalized yet"
-                    );
-                    NodeState::Started(self)
-                }
-                ProtocolState::Running(contract_state) => {
-                    if contract_state.public_key != public_key {
-                        tracing::warn!(
-                            node_pk = ?public_key,
-                            contract_pk = ?contract_state.public_key,
-                            "started(running): our public key is different from the contract, rejoining...",
-                        );
-                        return NodeState::Joining(JoiningState {
-                            participants: contract_state.participants,
-                            public_key,
-                        });
-                    }
-                    match contract_state.epoch.cmp(&epoch) {
-                        Ordering::Greater => {
-                            tracing::warn!(
-                                node_epoch = epoch,
-                                contract_epoch = contract_state.epoch,
-                                "started(running): our current epoch is less than contract, rejoining...",
-                            );
-                            NodeState::Joining(JoiningState {
-                                participants: contract_state.participants,
-                                public_key,
-                            })
-                        }
-                        Ordering::Less => {
-                            tracing::error!(
-                                node_epoch = epoch,
-                                contract_epoch = contract_state.epoch,
-                                "started(running): unexpected, our current epoch is greater than contract, rejoining...",
-                            );
-                            NodeState::Joining(JoiningState {
-                                participants: contract_state.participants,
-                                public_key,
-                            })
-                        }
-                        Ordering::Equal => {
-                            let Some(&me) = contract_state
-                                .participants
-                                .find_participant(&ctx.my_account_id)
-                            else {
-                                return NodeState::Joining(JoiningState {
-                                    participants: contract_state.participants,
-                                    public_key,
-                                });
-                            };
-
-                            tracing::info!(
-                                "started: contract state is running and we are already a participant"
-                            );
-
-                            let threshold = contract_state.threshold;
-                            // Initialize identity for storage; this is an entry point into Running.
-                            ctx.triple_storage.set_me(me);
-                            ctx.presignature_storage.set_me(me);
-                            let triple_task = TripleSpawnerTask::run(me, threshold, epoch, ctx);
-                            let presign_task = PresignatureSpawnerTask::run(
-                                me,
-                                threshold,
-                                epoch,
-                                ctx,
-                                &private_share,
-                                &public_key,
-                            );
-
-                            NodeState::Running(RunningState {
-                                epoch,
-                                me,
-                                participants: contract_state.participants,
-                                threshold: contract_state.threshold,
-                                private_share,
-                                public_key,
-                                triple_task,
-                                presign_task,
-                            })
-                        }
-                    }
-                }
-                ProtocolState::Resharing(contract_state) => {
-                    if contract_state.public_key != public_key {
-                        tracing::warn!(
-                            node_pk = ?public_key,
-                            contract_pk = ?contract_state.public_key,
-                            "started(resharing): our public key is different from the contract, rejoining...",
-                        );
-                        return NodeState::Joining(JoiningState {
-                            participants: contract_state.old_participants,
-                            public_key,
-                        });
-                    }
-                    match contract_state.old_epoch.cmp(&epoch) {
-                        Ordering::Greater => {
-                            tracing::warn!(
-                                node_epoch = epoch,
-                                contract_epoch = contract_state.old_epoch,
-                                "started(resharing): contract epoch is greater than node epoch, rejoining...",
-                            );
-                            NodeState::Joining(JoiningState {
-                                participants: contract_state.old_participants,
-                                public_key,
-                            })
-                        }
-                        Ordering::Less => {
-                            tracing::error!(
-                                node_epoch = epoch,
-                                contract_epoch = contract_state.old_epoch,
-                                "started(resharing): unexpected, contract epoch is less than node epoch, rejoining...",
-                            );
-                            NodeState::Joining(JoiningState {
-                                participants: contract_state.old_participants,
-                                public_key,
-                            })
-                        }
-                        Ordering::Equal => {
-                            tracing::info!(
-                                "started(resharing): contract state is resharing with us, joining as a participant"
-                            );
-                            resharing(Some(private_share), ctx, contract_state).await
-                        }
-                    }
-                }
-            },
-            None => match contract_state {
-                ProtocolState::Initializing(contract_state) => {
-                    let participants: Participants = contract_state.candidates.clone().into();
-                    let Some(&me) = participants.find_participant(&ctx.my_account_id) else {
-                        tracing::info!("started(initializing): we are not a part of the initial participant set, waiting for key generation to complete");
-                        return NodeState::Started(self);
-                    };
-
-                    tracing::info!(
-                        "started(initializing): starting key generation as a part of the participant set"
-                    );
-                    let protocol = match KeygenProtocol::new(
-                        &participants.keys_vec(),
-                        me,
-                        contract_state.threshold,
-                    ) {
-                        Ok(protocol) => protocol,
-                        Err(err) => {
-                            tracing::error!(
-                                ?err,
-                                "started(initializing): failed to initialize key generation"
-                            );
-                            return NodeState::Started(self);
-                        }
-                    };
-                    NodeState::Generating(GeneratingState {
-                        me,
-                        participants,
-                        threshold: contract_state.threshold,
-                        protocol,
-                        failed_store: Default::default(),
-                    })
-                }
-                ProtocolState::Running(contract_state) => NodeState::Joining(JoiningState {
-                    participants: contract_state.participants,
-                    public_key: contract_state.public_key,
-                }),
-                ProtocolState::Resharing(contract_state) => NodeState::Joining(JoiningState {
-                    participants: contract_state.old_participants,
-                    public_key: contract_state.public_key,
-                }),
-            },
+            Some(data) => advance_started_persistent(ctx, contract_state, data).await,
+            None => advance_started_fresh(ctx, contract_state),
         }
     }
+}
+
+async fn advance_started_persistent(
+    ctx: &mut MpcSignProtocol,
+    contract_state: ProtocolState,
+    PersistentNodeData {
+        epoch,
+        private_share,
+        public_key,
+    }: PersistentNodeData,
+) -> NodeState {
+    match contract_state {
+        ProtocolState::Initializing(contract_state) => {
+            tracing::warn!(
+                ?contract_state,
+                "started(initializing): contract state has not been finalized yet"
+            );
+            started_with_data(epoch, private_share, public_key)
+        }
+        ProtocolState::Running(contract_state) => {
+            advance_started_running(ctx, contract_state, epoch, private_share, public_key)
+        }
+        ProtocolState::Resharing(contract_state) => {
+            advance_started_resharing(ctx, contract_state, epoch, private_share, public_key).await
+        }
+    }
+}
+
+fn advance_started_fresh(ctx: &mut MpcSignProtocol, contract_state: ProtocolState) -> NodeState {
+    match contract_state {
+        ProtocolState::Initializing(contract_state) => {
+            let participants: Participants = contract_state.candidates.clone().into();
+            let Some(&me) = participants.find_participant(&ctx.my_account_id) else {
+                tracing::info!("started(initializing): we are not a part of the initial participant set, waiting for key generation to complete");
+                return NodeState::Started(StartedState {
+                    persistent_node_data: None,
+                });
+            };
+
+            tracing::info!(
+                "started(initializing): starting key generation as a part of the participant set"
+            );
+            let protocol = match KeygenProtocol::new(
+                &participants.keys_vec(),
+                me,
+                contract_state.threshold,
+            ) {
+                Ok(protocol) => protocol,
+                Err(err) => {
+                    tracing::error!(
+                        ?err,
+                        "started(initializing): failed to initialize key generation"
+                    );
+                    return NodeState::Started(StartedState {
+                        persistent_node_data: None,
+                    });
+                }
+            };
+            NodeState::Generating(GeneratingState {
+                me,
+                participants,
+                threshold: contract_state.threshold,
+                protocol,
+                failed_store: Default::default(),
+            })
+        }
+        ProtocolState::Running(contract_state) => NodeState::Joining(JoiningState {
+            participants: contract_state.participants,
+            public_key: contract_state.public_key,
+        }),
+        ProtocolState::Resharing(contract_state) => NodeState::Joining(JoiningState {
+            participants: contract_state.old_participants,
+            public_key: contract_state.public_key,
+        }),
+    }
+}
+
+fn advance_started_running(
+    ctx: &mut MpcSignProtocol,
+    contract_state: super::contract::RunningContractState,
+    epoch: u64,
+    private_share: SecretKeyShare,
+    public_key: PublicKey,
+) -> NodeState {
+    if contract_state.public_key != public_key {
+        tracing::warn!(
+            node_pk = ?public_key,
+            contract_pk = ?contract_state.public_key,
+            "started(running): our public key is different from the contract, rejoining...",
+        );
+        return NodeState::Joining(JoiningState {
+            participants: contract_state.participants,
+            public_key,
+        });
+    }
+
+    match contract_state.epoch.cmp(&epoch) {
+        Ordering::Greater => {
+            tracing::warn!(
+                node_epoch = epoch,
+                contract_epoch = contract_state.epoch,
+                "started(running): our current epoch is less than contract, rejoining...",
+            );
+            NodeState::Joining(JoiningState {
+                participants: contract_state.participants,
+                public_key,
+            })
+        }
+        Ordering::Less => {
+            tracing::error!(
+                node_epoch = epoch,
+                contract_epoch = contract_state.epoch,
+                "started(running): unexpected, our current epoch is greater than contract, rejoining...",
+            );
+            NodeState::Joining(JoiningState {
+                participants: contract_state.participants,
+                public_key,
+            })
+        }
+        Ordering::Equal => start_running(ctx, contract_state, epoch, private_share, public_key),
+    }
+}
+
+async fn advance_started_resharing(
+    ctx: &mut MpcSignProtocol,
+    contract_state: ResharingContractState,
+    epoch: u64,
+    private_share: SecretKeyShare,
+    public_key: PublicKey,
+) -> NodeState {
+    if contract_state.public_key != public_key {
+        tracing::warn!(
+            node_pk = ?public_key,
+            contract_pk = ?contract_state.public_key,
+            "started(resharing): our public key is different from the contract, rejoining...",
+        );
+        return NodeState::Joining(JoiningState {
+            participants: contract_state.old_participants,
+            public_key,
+        });
+    }
+
+    match contract_state.old_epoch.cmp(&epoch) {
+        Ordering::Greater => {
+            tracing::warn!(
+                node_epoch = epoch,
+                contract_epoch = contract_state.old_epoch,
+                "started(resharing): contract epoch is greater than node epoch, rejoining...",
+            );
+            NodeState::Joining(JoiningState {
+                participants: contract_state.old_participants,
+                public_key,
+            })
+        }
+        Ordering::Less => {
+            tracing::error!(
+                node_epoch = epoch,
+                contract_epoch = contract_state.old_epoch,
+                "started(resharing): unexpected, contract epoch is less than node epoch, rejoining...",
+            );
+            NodeState::Joining(JoiningState {
+                participants: contract_state.old_participants,
+                public_key,
+            })
+        }
+        Ordering::Equal => {
+            tracing::info!(
+                "started(resharing): contract state is resharing with us, joining as a participant"
+            );
+            resharing(Some(private_share), ctx, contract_state).await
+        }
+    }
+}
+
+fn start_running(
+    ctx: &mut MpcSignProtocol,
+    contract_state: super::contract::RunningContractState,
+    epoch: u64,
+    private_share: SecretKeyShare,
+    public_key: PublicKey,
+) -> NodeState {
+    let Some(&me) = contract_state.participants.find_participant(&ctx.my_account_id) else {
+        return NodeState::Joining(JoiningState {
+            participants: contract_state.participants,
+            public_key,
+        });
+    };
+
+    tracing::info!("started: contract state is running and we are already a participant");
+
+    let threshold = contract_state.threshold;
+    ctx.triple_storage.set_me(me);
+    ctx.presignature_storage.set_me(me);
+    let triple_task = TripleSpawnerTask::run(me, threshold, epoch, ctx);
+    let presign_task = PresignatureSpawnerTask::run(
+        me,
+        threshold,
+        epoch,
+        ctx,
+        &private_share,
+        &public_key,
+    );
+
+    NodeState::Running(RunningState {
+        epoch,
+        me,
+        participants: contract_state.participants,
+        threshold: contract_state.threshold,
+        private_share,
+        public_key,
+        triple_task,
+        presign_task,
+    })
+}
+
+fn started_with_data(epoch: u64, private_share: SecretKeyShare, public_key: PublicKey) -> NodeState {
+    NodeState::Started(StartedState {
+        persistent_node_data: Some(PersistentNodeData {
+            epoch,
+            private_share,
+            public_key,
+        }),
+    })
 }
 
 impl<G: Governance> ConsensusProtocol<G> for GeneratingState {

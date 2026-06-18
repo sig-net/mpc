@@ -183,33 +183,39 @@ impl<'a, R> WaitAction<'a, R> {
     }
 
     async fn execute(self) -> anyhow::Result<&'a Cluster> {
+        let nodes = self.nodes;
         for action in self.actions {
-            match action {
-                WaitActions::Running(epoch) => {
-                    running_mpc(self.nodes, if epoch > 0 { Some(epoch) } else { None }).await?;
-                }
-                WaitActions::MinTriples(expected, mine) => {
-                    require_triples(self.nodes, expected, mine).await?;
-                }
-                WaitActions::MinPresignatures(expected, mine) => {
-                    require_presignatures(self.nodes, expected, mine).await?;
-                }
-                WaitActions::Signable(count) => {
-                    require_presignatures(self.nodes, count, true).await?;
-                }
-                WaitActions::NodeState(state, id) => {
-                    require_node_state(self.nodes, state, id).await?;
-                }
-                WaitActions::ContractState(state) => {
-                    require_contract_state(self.nodes, state).await?;
-                }
-                WaitActions::Checkpoint(id, chain, block_height) => {
-                    require_checkpoint(self.nodes, id, chain, block_height).await?;
-                }
-            }
+            Self::execute_action(nodes, action).await?;
         }
 
-        Ok(self.nodes)
+        Ok(nodes)
+    }
+
+    async fn execute_action(nodes: &Cluster, action: WaitActions) -> anyhow::Result<()> {
+        match action {
+            WaitActions::Running(epoch) => {
+                running_mpc(nodes, if epoch > 0 { Some(epoch) } else { None }).await?;
+                Ok(())
+            }
+            WaitActions::MinTriples(expected, mine) => {
+                require_triples(nodes, expected, mine).await?;
+                Ok(())
+            }
+            WaitActions::MinPresignatures(expected, mine) => {
+                require_presignatures(nodes, expected, mine).await?;
+                Ok(())
+            }
+            WaitActions::Signable(count) => {
+                require_presignatures(nodes, count, true).await?;
+                Ok(())
+            }
+            WaitActions::NodeState(state, id) => require_node_state(nodes, state, id).await,
+            WaitActions::ContractState(state) => require_contract_state(nodes, state).await,
+            WaitActions::Checkpoint(id, chain, block_height) => {
+                require_checkpoint(nodes, id, chain, block_height).await?;
+                Ok(())
+            }
+        }
     }
 }
 

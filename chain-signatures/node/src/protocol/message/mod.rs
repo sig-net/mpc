@@ -235,104 +235,151 @@ impl MessageInbox {
 
     pub fn process_subscribe(&mut self, sub: SubscribeRequest) {
         match sub.id {
-            SubscribeId::Generating => match sub.action {
-                SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self.generating.subscribe();
-                    let _ = resp.send(SubscribeResponse::Generating(rx));
+            SubscribeId::Generating => self.process_generating_subscribe(sub.action),
+            SubscribeId::Resharing => self.process_resharing_subscribe(sub.action),
+            SubscribeId::Triple(id) => self.process_triple_subscribe(id, sub.action),
+            SubscribeId::Presignature(id) => self.process_presignature_subscribe(id, sub.action),
+            SubscribeId::Signature(sign_id, presignature_id) => {
+                self.process_signature_subscribe(sign_id, presignature_id, sub.action)
+            }
+            SubscribeId::Ready => self.process_ready_subscribe(sub.action),
+            SubscribeId::Triples => self.process_triple_posit_subscribe(sub.action),
+            SubscribeId::Presignatures => self.process_presignature_posit_subscribe(sub.action),
+            SubscribeId::Signatures => self.process_signature_posit_subscribe(sub.action),
+        }
+    }
+
+    fn process_generating_subscribe(&mut self, action: SubscribeRequestAction) {
+        match action {
+            SubscribeRequestAction::Subscribe(resp) => {
+                let rx = self.generating.subscribe();
+                let _ = resp.send(SubscribeResponse::Generating(rx));
+            }
+            SubscribeRequestAction::Unsubscribe => {
+                tracing::warn!("unsubscribing from generation not supported");
+            }
+        }
+    }
+
+    fn process_resharing_subscribe(&mut self, action: SubscribeRequestAction) {
+        match action {
+            SubscribeRequestAction::Subscribe(resp) => {
+                let rx = self.resharing.subscribe();
+                let _ = resp.send(SubscribeResponse::Resharing(rx));
+            }
+            SubscribeRequestAction::Unsubscribe => {
+                tracing::warn!("unsubscribing from resharing not supported");
+            }
+        }
+    }
+
+    fn process_triple_subscribe(&mut self, id: TripleId, action: SubscribeRequestAction) {
+        match action {
+            SubscribeRequestAction::Subscribe(resp) => {
+                let rx = self.triple.entry(id).or_default().subscribe();
+                let _ = resp.send(SubscribeResponse::Triple(rx));
+            }
+            SubscribeRequestAction::Unsubscribe => {
+                if self.triple.remove(&id).is_none() {
+                    tracing::warn!(id, "trying to unsub from an unknown triple subscription");
                 }
-                SubscribeRequestAction::Unsubscribe => {
-                    tracing::warn!("unsubscribing from generation not supported");
+            }
+        }
+    }
+
+    fn process_presignature_subscribe(
+        &mut self,
+        id: PresignatureId,
+        action: SubscribeRequestAction,
+    ) {
+        match action {
+            SubscribeRequestAction::Subscribe(resp) => {
+                let rx = self.presignature.entry(id).or_default().subscribe();
+                let _ = resp.send(SubscribeResponse::Presignature(rx));
+            }
+            SubscribeRequestAction::Unsubscribe => {
+                if self.presignature.remove(&id).is_none() {
+                    tracing::warn!(
+                        id,
+                        "trying to unsub from an unknown presignature subscription"
+                    );
                 }
-            },
-            SubscribeId::Resharing => match sub.action {
-                SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self.resharing.subscribe();
-                    let _ = resp.send(SubscribeResponse::Resharing(rx));
+            }
+        }
+    }
+
+    fn process_signature_subscribe(
+        &mut self,
+        sign_id: SignId,
+        presignature_id: PresignatureId,
+        action: SubscribeRequestAction,
+    ) {
+        match action {
+            SubscribeRequestAction::Subscribe(resp) => {
+                let rx = self
+                    .signature
+                    .entry((sign_id, presignature_id))
+                    .or_default()
+                    .subscribe();
+                let _ = resp.send(SubscribeResponse::Signature(rx));
+            }
+            SubscribeRequestAction::Unsubscribe => {
+                if self.signature.remove(&(sign_id, presignature_id)).is_none() {
+                    tracing::warn!(
+                        ?sign_id,
+                        ?presignature_id,
+                        "trying to unsub from an unknown signature subscription"
+                    );
                 }
-                SubscribeRequestAction::Unsubscribe => {
-                    tracing::warn!("unsubscribing from resharing not supported");
-                }
-            },
-            SubscribeId::Triple(id) => match sub.action {
-                SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self.triple.entry(id).or_default().subscribe();
-                    let _ = resp.send(SubscribeResponse::Triple(rx));
-                }
-                SubscribeRequestAction::Unsubscribe => {
-                    if self.triple.remove(&id).is_none() {
-                        tracing::warn!(id, "trying to unsub from an unknown triple subscription");
-                    }
-                }
-            },
-            SubscribeId::Presignature(id) => match sub.action {
-                SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self.presignature.entry(id).or_default().subscribe();
-                    let _ = resp.send(SubscribeResponse::Presignature(rx));
-                }
-                SubscribeRequestAction::Unsubscribe => {
-                    if self.presignature.remove(&id).is_none() {
-                        tracing::warn!(
-                            id,
-                            "trying to unsub from an unknown presignature subscription"
-                        );
-                    }
-                }
-            },
-            SubscribeId::Signature(sign_id, presignature_id) => match sub.action {
-                SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self
-                        .signature
-                        .entry((sign_id, presignature_id))
-                        .or_default()
-                        .subscribe();
-                    let _ = resp.send(SubscribeResponse::Signature(rx));
-                }
-                SubscribeRequestAction::Unsubscribe => {
-                    if self.signature.remove(&(sign_id, presignature_id)).is_none() {
-                        tracing::warn!(
-                            ?sign_id,
-                            ?presignature_id,
-                            "trying to unsub from an unknown signature subscription"
-                        );
-                    }
-                }
-            },
-            SubscribeId::Ready => match sub.action {
-                SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self.ready.subscribe();
-                    let _ = resp.send(SubscribeResponse::Ready(rx));
-                }
-                SubscribeRequestAction::Unsubscribe => {
-                    self.ready.unsubscribe();
-                }
-            },
-            SubscribeId::Triples => match sub.action {
-                SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self.triple_init.subscribe();
-                    let _ = resp.send(SubscribeResponse::TriplePosit(rx));
-                }
-                SubscribeRequestAction::Unsubscribe => {
-                    self.triple_init.unsubscribe();
-                }
-            },
-            SubscribeId::Presignatures => match sub.action {
-                SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self.presignature_init.subscribe();
-                    let _ = resp.send(SubscribeResponse::PresignaturePosit(rx));
-                }
-                SubscribeRequestAction::Unsubscribe => {
-                    self.presignature_init.unsubscribe();
-                }
-            },
-            SubscribeId::Signatures => match sub.action {
-                SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self.signature_init.subscribe();
-                    let _ = resp.send(SubscribeResponse::SignaturePosit(rx));
-                }
-                SubscribeRequestAction::Unsubscribe => {
-                    self.signature_init.unsubscribe();
-                }
-            },
+            }
+        }
+    }
+
+    fn process_ready_subscribe(&mut self, action: SubscribeRequestAction) {
+        match action {
+            SubscribeRequestAction::Subscribe(resp) => {
+                let rx = self.ready.subscribe();
+                let _ = resp.send(SubscribeResponse::Ready(rx));
+            }
+            SubscribeRequestAction::Unsubscribe => {
+                self.ready.unsubscribe();
+            }
+        }
+    }
+
+    fn process_triple_posit_subscribe(&mut self, action: SubscribeRequestAction) {
+        match action {
+            SubscribeRequestAction::Subscribe(resp) => {
+                let rx = self.triple_init.subscribe();
+                let _ = resp.send(SubscribeResponse::TriplePosit(rx));
+            }
+            SubscribeRequestAction::Unsubscribe => {
+                self.triple_init.unsubscribe();
+            }
+        }
+    }
+
+    fn process_presignature_posit_subscribe(&mut self, action: SubscribeRequestAction) {
+        match action {
+            SubscribeRequestAction::Subscribe(resp) => {
+                let rx = self.presignature_init.subscribe();
+                let _ = resp.send(SubscribeResponse::PresignaturePosit(rx));
+            }
+            SubscribeRequestAction::Unsubscribe => {
+                self.presignature_init.unsubscribe();
+            }
+        }
+    }
+
+    fn process_signature_posit_subscribe(&mut self, action: SubscribeRequestAction) {
+        match action {
+            SubscribeRequestAction::Subscribe(resp) => {
+                let rx = self.signature_init.subscribe();
+                let _ = resp.send(SubscribeResponse::SignaturePosit(rx));
+            }
+            SubscribeRequestAction::Unsubscribe => {
+                self.signature_init.unsubscribe();
+            }
         }
     }
 

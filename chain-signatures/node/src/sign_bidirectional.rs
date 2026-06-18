@@ -409,52 +409,57 @@ fn encode_abi_values(schema: &[AbiField], values: &[DynSolValue]) -> anyhow::Res
 /* ---------- DynSolValue -> Borsh serializer (runtime) ---------- */
 
 fn serialize_dynsol<W: Write>(w: &mut W, v: &DynSolValue) -> anyhow::Result<()> {
-    use DynSolValue::*;
+    if serialize_scalar(w, v)? || serialize_bytes_like(w, v)? {
+        return Ok(());
+    }
+
     match v {
-        // -------- Primitives --------
-        Bool(b) => {
-            // Borsh bool is u8 (0/1) via BorshSerialize on bool
-            b.serialize(w)?;
+        DynSolValue::Array(values) => serialize_values(w, values, true)?,
+        DynSolValue::FixedArray(values) | DynSolValue::Tuple(values) => {
+            serialize_values(w, values, false)?
         }
-        Address(a) => a.serialize(w)?,
-        Uint(u, size) => write_u256(w, *u, *size)?,
-        Int(i, size) => write_i256(w, *i, *size)?,
-
-        // -------- Bytes-like --------
-        // Fixed bytes -> raw bytes (no length)
-        FixedBytes(b, _) => w.write_all(b.as_slice())?,
-        // Dynamic bytes -> Vec<u8> (u32 length + bytes)
-        Bytes(b) => b.serialize(w)?,
-
-        // -------- Strings --------
-        String(s) => s.serialize(w)?,
-
-        // -------- Arrays --------
-        // Dynamic array -> Borsh Vec<T>: u32 length + elements
-        Array(xs) => {
-            (xs.len() as u32).serialize(w)?;
-            for x in xs {
-                serialize_dynsol(w, x)?;
-            }
-        }
-        // Fixed array -> elements inline (no length)
-        FixedArray(xs) => {
-            for x in xs {
-                serialize_dynsol(w, x)?;
-            }
-        }
-
-        // -------- Tuple --------
-        // Concatenate members
-        Tuple(xs) => {
-            for x in xs {
-                serialize_dynsol(w, x)?;
-            }
-        }
-
-        // Add more variants if you use them (e.g., custom types).
         other => anyhow::bail!("unsupported DynSolValue variant: {other:?}"),
     }
+
+    Ok(())
+}
+
+fn serialize_scalar<W: Write>(w: &mut W, v: &DynSolValue) -> anyhow::Result<bool> {
+    match v {
+        DynSolValue::Bool(value) => value.serialize(w)?,
+        DynSolValue::Address(value) => value.serialize(w)?,
+        DynSolValue::Uint(value, size) => write_u256(w, *value, *size)?,
+        DynSolValue::Int(value, size) => write_i256(w, *value, *size)?,
+        DynSolValue::String(value) => value.serialize(w)?,
+        _ => return Ok(false),
+    }
+
+    Ok(true)
+}
+
+fn serialize_bytes_like<W: Write>(w: &mut W, v: &DynSolValue) -> anyhow::Result<bool> {
+    match v {
+        DynSolValue::FixedBytes(value, _) => w.write_all(value.as_slice())?,
+        DynSolValue::Bytes(value) => value.serialize(w)?,
+        _ => return Ok(false),
+    }
+
+    Ok(true)
+}
+
+fn serialize_values<W: Write>(
+    w: &mut W,
+    values: &[DynSolValue],
+    include_len: bool,
+) -> anyhow::Result<()> {
+    if include_len {
+        (values.len() as u32).serialize(w)?;
+    }
+
+    for value in values {
+        serialize_dynsol(w, value)?;
+    }
+
     Ok(())
 }
 
@@ -503,4 +508,41 @@ pub struct SignBidirectionalSignature {
     pub public_key: mpc_crypto::PublicKey,
     pub indexed: IndexedSignRequest,
     pub signature: Signature,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialize_dynsol_writes_nested_dynamic_values() {
+        let value = DynSolValue::Array(vec![
+            DynSolValue::Bool(true),
+            DynSolValue::Tuple(vec![
+                DynSolValue::String("ok".to_string()),
+                DynSolValue::Bytes(vec![1_u8, 2, 3]),
+            ]),
+        ]);
+
+        let mut buffer = Vec::new();
+        serialize_dynsol(&mut buffer, &value).unwrap();
+
+        assert_eq!(
+            buffer,
+            vec![2, 0, 0, 0, 1, 2, 0, 0, 0, b'o', b'k', 3, 0, 0, 0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn serialize_dynsol_respects_integer_sizes() {
+        let value = DynSolValue::Tuple(vec![
+            DynSolValue::Uint(U256::from(0x1234_u64), 2),
+            DynSolValue::Int(I256::try_from(-2_i32).unwrap(), 2),
+        ]);
+
+        let mut buffer = Vec::new();
+        serialize_dynsol(&mut buffer, &value).unwrap();
+
+        assert_eq!(buffer, vec![0x34, 0x12, 0xfe, 0xff]);
+    }
 }
