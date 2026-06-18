@@ -5,7 +5,6 @@ pub mod indexer_eth_helios;
 
 use crate::backlog::Backlog;
 use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
-use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::Chain;
 use crate::respond_bidirectional::CompletedTx;
 use crate::stream::{ChainIndexer, ChainStream};
