@@ -21,7 +21,7 @@ use mpc_node::stream::{catchup_then_livestream, run_stream, ChainStream};
 use mpc_node::util::current_unix_timestamp;
 use mpc_primitives::{
     ChainEvent, SignArgs, SignBidirectionalEvent as NodeSignBidirectionalEvent, SignId, SignKind,
-    LATEST_MPC_KEY_VERSION,
+    StateManager, LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
 use std::time::Duration;
@@ -802,7 +802,10 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
 
     timeout(Duration::from_secs(20), async {
         loop {
-            let processed_block = backlog.processed_block(Chain::Ethereum).await.unwrap_or(0);
+            let processed_block = backlog
+                .get_processed_block(Chain::Ethereum)
+                .await
+                .unwrap_or(0);
             if processed_block >= tx_block {
                 break;
             }
@@ -885,7 +888,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         other => panic!("expected Sign::Request from late watcher backfill, got {other:?}"),
     }
 
-    let watchers = backlog.execution_watchers(Chain::Ethereum).await;
+    let watchers = backlog.get_execution_watchers(Chain::Ethereum).await;
     assert!(
         watchers.is_empty(),
         "late watcher should be cleared after backfill"

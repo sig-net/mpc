@@ -8,7 +8,9 @@ use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
 use mpc_node::protocol::{Chain, IndexedSignRequest};
 use mpc_node::sign_bidirectional::{hash_rlp_data, SignBidirectionalEventExt};
 use mpc_node::stream::{catchup_then_livestream, ChainStream};
-use mpc_primitives::{ChainEvent, ScalarExt, SignKind, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{
+    ChainEvent, ScalarExt, SignKind, Signature, StateManager, LATEST_MPC_KEY_VERSION,
+};
 use serde_json::json;
 use serial_test::serial;
 use std::collections::HashSet;
@@ -282,7 +284,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
 
     // Verify the backlog actually persisted the block height
     assert_eq!(
-        backlog.processed_block(Chain::Canton).await,
+        backlog.get_processed_block(Chain::Canton).await,
         Some(checkpoint_height),
         "backlog should retain checkpoint height after stream1 is dropped"
     );

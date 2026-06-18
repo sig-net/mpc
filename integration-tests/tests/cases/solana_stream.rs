@@ -14,7 +14,9 @@ use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{catchup_then_livestream, run_stream, ChainStream};
-use mpc_primitives::{ChainEvent, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{
+    ChainEvent, SignArgs, SignId, Signature, StateManager, LATEST_MPC_KEY_VERSION,
+};
 use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;
 use tokio::sync::mpsc;
@@ -356,7 +358,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
     let mut events_rx2 = stream_solana_with_backlog(config, backlog.clone()).await?;
 
     // Verify the backlog was persisted
-    let persisted_block = backlog.processed_block(Chain::Solana).await;
+    let persisted_block = backlog.get_processed_block(Chain::Solana).await;
     assert_eq!(
         persisted_block, checkpoint_block,
         "backlog did not persist the checkpoint block"
