@@ -5,6 +5,7 @@ pub mod indexer_eth_helios;
 
 use crate::backlog::Backlog;
 use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
+use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::Chain;
 use crate::respond_bidirectional::CompletedTx;
 use crate::stream::{ChainIndexer, ChainStream};
@@ -1009,6 +1010,15 @@ impl EthereumIndexer {
         let exec_events = self
             .collect_execution_confirmations(block_number, block_receipts)
             .await?;
+
+        for _request in &sign_requests {
+            record_request_latency_since(
+                Chain::Ethereum,
+                SignRequestStep::Indexing,
+                "ok",
+                block_timestamp,
+            );
+        }
 
         // Always forward the processed block to the "finalization" stage so it can emit
         // `ChainEvent::Block` even when there are no relevant contract logs.

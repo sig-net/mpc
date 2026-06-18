@@ -20,7 +20,10 @@ pub(crate) async fn process_sign_request(
     backlog: Backlog,
     caught_up: bool,
 ) -> anyhow::Result<()> {
-    record_indexing_step_reached(sign_request.chain);
+    // ethereum has indexer delay due to finality, its indexing latency is not zero, so we don't emit it here. We emit it in prase_block() in eth indexer.
+    if sign_request.chain != Chain::Ethereum {
+        record_indexing_step_reached(sign_request.chain);
+    }
 
     if matches!(sign_request.kind, SignKind::RespondBidirectional(_)) {
         anyhow::bail!("Unexpected sign request kind");
