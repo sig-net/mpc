@@ -1,7 +1,5 @@
 pub mod consensus;
 
-use crate::mesh::MeshState;
-use crate::node_client::NodeClient;
 use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt, SignStatus};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
@@ -9,7 +7,6 @@ use anyhow::Context;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PendingTx, SignId, SignKind,
 };
-use sha3::{Digest, Sha3_256};
 use std::collections::{hash_map, BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};

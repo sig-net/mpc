@@ -1,17 +1,15 @@
 use crate::backlog::Backlog;
 use crate::metrics::requests::record_indexing_step_reached;
-use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::{SignBidirectionalEventExt, SignStatus};
 use anchor_lang::prelude::Pubkey;
-use k256::Scalar;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, ExecutionOutcome, RespondBidirectionalEvent, SignId,
     SignKind, Signature, SignatureRespondedEvent,
 };
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 
 pub(crate) async fn process_sign_request(
     sign_request: IndexedSignRequest,

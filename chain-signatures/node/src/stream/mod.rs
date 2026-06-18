@@ -4,7 +4,7 @@ pub mod pipeline;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::{Chain, IndexedSignRequest, Sign};
+use crate::protocol::{Chain, Sign};
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::stream::ops::{
     process_block_event, process_execution_confirmed, process_respond_bidirectional_event,
@@ -14,7 +14,7 @@ use crate::stream::ops::{
 pub use crate::stream::pipeline::ChainPipeline;
 
 use async_trait::async_trait;
-use futures_util::{Stream, StreamExt};
+use futures_util::Stream;
 use mpc_primitives::{ChainEvent, CheckpointDigest};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
@@ -86,43 +86,6 @@ pub trait ChainStream: Send + 'static {
     async fn next_event(&mut self) -> Option<ChainEvent>;
 }
 
-pub async fn catchup_then_livestream<I: ChainIndexer>(mut indexer: I) {
-    let chain = I::CHAIN;
-    tracing::info!(%chain, "starting ChainStream catchup then livestream");
-
-    let anchor_height = match indexer.livestream().await {
-        Ok(anchor_height) => anchor_height,
-        Err(err) => {
-            tracing::error!(?err, %chain, "failed to initialize livestream");
-            return;
-        }
-    };
-    let Some(anchor_height) = anchor_height else {
-        if let Err(err) = indexer.notify_catchup_completed().await {
-            tracing::warn!(?err, %chain, "failed to signal catchup completion");
-        }
-        return;
-    };
-
-    tracing::info!(%chain, anchor_height, "livestream initialized => starting catchup");
-    let catchup_stream = indexer.catchup_range(anchor_height).await;
-    // Pin the stream
-    tokio::pin!(catchup_stream);
-    while let Some(catchup_item) = catchup_stream.next().await {
-        while let Err(err) = indexer.process_catchup(&catchup_item).await {
-            tracing::warn!(?err, %chain, "catchup item processing failed; retrying");
-            tokio::time::sleep(I::RETRY_DELAY).await;
-        }
-    }
-
-    tracing::info!(%chain, "catchup completed => processing livestream");
-    if let Err(err) = indexer.notify_catchup_completed().await {
-        tracing::warn!(?err, %chain, "failed to signal catchup completion");
-        return;
-    }
-
-    while indexer.process_next_block().await {}
-}
 /// Shared indexer loop: recovers backlog then processes events from the stream
 #[allow(clippy::too_many_arguments)]
 pub async fn run_stream<S: ChainStream>(
@@ -253,18 +216,15 @@ mod tests {
     use crate::backlog::Backlog;
     use crate::mesh::{connection::NodeStatus, MeshState};
     use crate::node_client::NodeClient;
-    use crate::protocol::ParticipantInfo;
-    use crate::protocol::Sign;
+    use crate::protocol::{ParticipantInfo, Sign};
     use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
     use crate::storage::checkpoint_storage::CheckpointStorage;
     use crate::util::current_unix_timestamp;
     use k256::{AffinePoint, Scalar};
     use mockito::Server;
-    use mpc_primitives::CheckpointDigest;
-    use mpc_primitives::SignArgs;
-    use mpc_primitives::SignId;
-    use mpc_primitives::Signature;
-    use mpc_primitives::SignatureRespondedEvent;
+    use mpc_primitives::{
+        CheckpointDigest, IndexedSignRequest, SignArgs, SignId, Signature, SignatureRespondedEvent,
+    };
     use near_primitives::types::AccountId;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};

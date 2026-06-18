@@ -13,9 +13,7 @@ use mpc_node::protocol::{Chain, IndexedSignRequest, Sign};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{
-    catchup_then_livestream, run_stream, ChainPipeline, ChainStream, ChainStreaming,
-};
+use mpc_node::stream::{run_stream, ChainPipeline, ChainStream, ChainStreaming};
 use mpc_primitives::CheckpointDigest;
 use mpc_primitives::{ChainEvent, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use near_primitives::types::AccountId;

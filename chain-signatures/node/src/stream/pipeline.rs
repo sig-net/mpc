@@ -263,19 +263,19 @@ async fn detect_regression(
     }
 
     // Check if we are ahead of consensus and aligned
-    if current_checkpoint.block_height > checkpoint_digest.height {
-        if let Some(historical) = backlog
+    if current_checkpoint.block_height > checkpoint_digest.height
+        && backlog
             .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
             .await
-        {
-            tracing::info!(
+            .is_some()
+    {
+        tracing::info!(
                 ?chain,
                 local_height = current_checkpoint.block_height,
                 consensus_height = checkpoint_digest.height,
                 "local backlog is ahead of consensus and matches past consensus checkpoint; no regression needed"
             );
-            return None;
-        }
+        return None;
     }
 
     Some(ChainStreaming::Recovery { load_local: false })

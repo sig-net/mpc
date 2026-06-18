@@ -36,19 +36,19 @@ pub(crate) async fn align_backlog_with_consensus(
 
     // If our current height is greater than consensus height,
     // check if we have a historical checkpoint that matches the consensus digest.
-    if current_checkpoint.block_height > checkpoint_digest.height {
-        if let Some(historical) = backlog
+    if current_checkpoint.block_height > checkpoint_digest.height
+        && backlog
             .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
             .await
-        {
-            tracing::info!(
+            .is_some()
+    {
+        tracing::info!(
                 ?chain,
                 local_height = current_checkpoint.block_height,
                 consensus_height = checkpoint_digest.height,
                 "local backlog is ahead of consensus and matches past consensus checkpoint; no regression needed"
             );
-            return None;
-        }
+        return None;
     }
 
     tracing::warn!(

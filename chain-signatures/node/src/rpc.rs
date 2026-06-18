@@ -11,9 +11,7 @@ use std::collections::BTreeSet;
 pub use mpc_contract::primitives::{Read, View};
 
 use enum_map::EnumMap;
-use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signer::keypair::Keypair;
 
 use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
@@ -54,7 +52,6 @@ use sp_runtime::{
 };
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use subxt::config::substrate::{
     AccountId32, BlakeTwo256, MultiSignature, SubstrateConfig, SubstrateExtrinsicParams,
