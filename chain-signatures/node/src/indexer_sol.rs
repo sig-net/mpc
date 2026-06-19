@@ -1,14 +1,14 @@
 use crate::backlog::Backlog;
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::solana_client::{SolanaCatchupBlock, SolanaClient};
+use crate::solana_client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
 use crate::stream::{ChainIndexer, ChainStream};
 use crate::util::ethabi_request_id;
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 
 pub use crate::solana_client::SolConfig;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -263,8 +263,32 @@ impl ChainIndexer for SolanaIndexer {
         }
 
         let slots = self.client.fetch_slots(start_slot, end_slot).await;
-        let items = self.client.fetch_blocks_for_slots(slots).await;
-        Box::pin(futures_util::stream::iter(items.into_iter()))
+        let remaining_slots: VecDeque<u64> = slots.into_iter().collect();
+
+        let client = self.client.clone();
+        let stream = futures_util::stream::unfold(
+            (remaining_slots, client, VecDeque::new()),
+            |state| async move {
+                let (mut remaining_slots, client, mut current_chunk) = state;
+                loop {
+                    if let Some(block) = current_chunk.pop_front() {
+                        return Some((block, (remaining_slots, client, current_chunk)));
+                    }
+                    if remaining_slots.is_empty() {
+                        return None;
+                    }
+
+                    let chunk_slots: BTreeSet<u64> = remaining_slots
+                        .drain(..std::cmp::min(MAX_CONCURRENT_CHUNK_SIZE, remaining_slots.len()))
+                        .collect();
+
+                    let blocks = client.fetch_blocks_for_slots(chunk_slots).await;
+                    current_chunk = blocks.into_iter().collect();
+                }
+            },
+        );
+
+        Box::pin(stream)
     }
 
     async fn process_catchup(&mut self, (slot, block): &Self::Block) -> anyhow::Result<()> {

@@ -10,7 +10,8 @@ use tokio::sync::RwLock;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-pub const CHECKPOINT_VERSION: &str = "v9";
+const CHECKPOINT_VERSION: &str = "v11";
+
 pub const MAX_RECENT_CHECKPOINTS: usize = 32;
 
 #[derive(Clone, Debug)]
