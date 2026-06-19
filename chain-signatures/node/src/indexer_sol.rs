@@ -132,6 +132,7 @@ pub struct SolanaIndexer<S: StateManager> {
     pub state_manager: S,
     pub events_tx: mpsc::Sender<ChainEvent>,
     pub live_rx: Option<mpsc::Receiver<ChainEvent>>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 #[async_trait]
@@ -151,13 +152,15 @@ impl<S: StateManager> ChainIndexer for SolanaIndexer<S> {
         // Oneshot to receive the first observed slot from the live subscription.
         let (anchor_tx, anchor_rx) = oneshot::channel::<u64>();
 
-        tokio::spawn(subscribe_and_buffer_live_events(
+        // Capture handle so it can be aborted on drop
+        let handle = tokio::spawn(subscribe_and_buffer_live_events(
             program_id,
             rpc_http_url,
             rpc_ws_url,
             live_tx,
             anchor_tx,
         ));
+        self.tasks.push(handle);
 
         // Wait for the first slot observed on the live feed to use as anchor.
         Ok(Some(anchor_rx.await?))
@@ -239,6 +242,7 @@ impl<S: StateManager> SolanaIndexer<S> {
                 state_manager,
                 events_tx,
                 live_rx: None,
+                tasks: Vec::new(),
             },
             events_rx,
         ))
@@ -268,6 +272,14 @@ impl<S: StateManager> SolanaIndexer<S> {
 
         self.events_tx.send(ChainEvent::Block(height)).await?;
         Ok(())
+    }
+}
+
+impl<S: StateManager> Drop for SolanaIndexer<S> {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
     }
 }
 
@@ -1138,6 +1150,7 @@ mod tests {
             state_manager: backlog,
             events_tx,
             live_rx: None,
+            tasks: Vec::new(),
         };
 
         // Initialize livestream (resolves anchor slot via get_slot and starts WS)

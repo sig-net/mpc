@@ -259,7 +259,6 @@ mod tests {
                     Self { events }
                 }
 
-                // Replaces ChainStream::start() — returns (indexer, rx) directly
                 pub fn build(self) -> ($indexer, mpsc::Receiver<ChainEvent>) {
                     let (tx, rx) = crate::stream::channel();
 
