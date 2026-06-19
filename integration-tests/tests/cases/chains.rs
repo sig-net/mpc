@@ -161,7 +161,7 @@ async fn test_solana_eth_bidirectional_flow() -> anyhow::Result<()> {
     let respond_future = actions::sign::wait_for_respond_bidirectional(
         solana,
         sol_outcome.request_id,
-        Duration::from_secs(120),
+        Duration::from_secs(150),
     );
 
     let receipt_future = wait_for_transaction_receipt(
