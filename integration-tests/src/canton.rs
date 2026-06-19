@@ -5,8 +5,7 @@ use alloy::primitives::keccak256;
 use anyhow::{Context as _, Result};
 use async_process::{Child, Command};
 use mpc_node::indexer_canton::contracts::{
-    EvmAccessListEntry, EvmType2TransactionParams, SignBidirectionalRequestedEvent,
-    SignRequestPayload, TxParams,
+    EvmAccessListEntry, EvmType2TransactionParams, SignBidirectionalRequestedEvent, TxParams,
 };
 use mpc_node::indexer_canton::ledger_api::{
     self, AllocatePartyRequest, AllocatePartyResponse, ContractEntry, CreateUserRequest,
@@ -22,7 +21,19 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const CANTON_JSON_API_PORT: u16 = 7575;
-const DEFAULT_DAR_RELATIVE_PATH: &str = "fixtures/canton/daml-vault-0.0.1.dar";
+const DEFAULT_DAR_RELATIVE_PATH: &str = "fixtures/canton/signet-signer-v1-0.0.1.dar";
+const DEFAULT_FEE_DAR_RELATIVE_PATH: &str = "fixtures/canton/signet-fee-amulet-0.0.1.dar";
+
+/// Charge-context key; mirrors Daml `Signet.Fee.Amulet.priceConfigContextKey`.
+const PRICE_CONFIG_CONTEXT_KEY: &str = "signet.network/fee/price-config";
+
+// Package-name template refs (stable across DAR upgrades), used at create + disclosure sites.
+const SIGNER_TEMPLATE_ID: &str = "#signet-signer-v1:Signer:Signer";
+const SIGNER_PROPOSAL_TEMPLATE_ID: &str = "#signet-signer-v1:Signer:SignerProposal";
+const FEE_REGISTRATION_TEMPLATE_ID: &str =
+    "#signet-api-fee-v1:Signet.Api.Fee.V1:FeeCollectorRegistration";
+const CC_FEE_COLLECTOR_TEMPLATE_ID: &str = "#signet-fee-amulet:Signet.Fee.Amulet:CcFeeCollector";
+const FEE_PRICE_CONFIG_TEMPLATE_ID: &str = "#signet-fee-amulet:Signet.Fee.Amulet:FeePriceConfig";
 pub const EVM_TYPE2_TEST_CONTRACT_ADDRESS: &str = "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
 const EVM_TYPE2_BOOL_OUTPUT_SCHEMA: &str = r#"[{"name":"output","type":"bool"}]"#;
 
@@ -139,7 +150,7 @@ pub fn test_evm_type2_anvil_cases() -> Vec<EvmType2AnvilCase> {
 /// Build a test SignBidirectionalRequestedEvent for Canton.
 ///
 /// `sender` is set to `computeOperatorsHash([operator])` — exactly what
-/// `SignRequest.Execute` will compute on-ledger, so the locally computed
+/// `Signer.RequestSignature` will compute on-ledger, so the locally computed
 /// request_id matches the one the MPC node derives from the emitted event.
 pub fn test_sign_request_event(
     sandbox: &CantonSandbox,
@@ -164,24 +175,6 @@ pub fn test_sign_request_event(
     }
 }
 
-/// Build the SignRequest create payload from the test event (same fields minus `sender`).
-pub fn test_sign_request_payload(event: &SignBidirectionalRequestedEvent) -> SignRequestPayload {
-    SignRequestPayload {
-        operators: event.operators.clone(),
-        requester: event.requester.clone(),
-        sig_network: event.sig_network.clone(),
-        tx_params: event.tx_params.clone(),
-        caip2_id: event.caip2_id.clone(),
-        key_version: event.key_version,
-        path: event.path.clone(),
-        algo: event.algo.clone(),
-        dest: event.dest.clone(),
-        params: event.params.clone(),
-        output_deserialization_schema: event.output_deserialization_schema.clone(),
-        respond_serialization_schema: event.respond_serialization_schema.clone(),
-    }
-}
-
 /// A running Canton sandbox process with OAuth token retrieval and deployed Daml contracts.
 pub struct CantonSandbox {
     process: Child,
@@ -192,11 +185,18 @@ pub struct CantonSandbox {
     pub app_ledger_api_user: String,
     pub ledger_api_user: String,
     pub party_id: String,
+    pub sig_network_fa_party: String,
     pub operator_party: String,
     pub requester_party: String,
     pub signer_cid: String,
     pub signer_template_id: String,
     pub signer_disclosure: DisclosedContract,
+    /// Active `FeeCollectorRegistration` cid — the `feeRegistrationCid` choice arg.
+    pub fee_registration_cid: String,
+    /// Current `FeePriceConfig` cid — referenced via the fee charge context.
+    pub fee_price_config_cid: String,
+    /// Disclosures a fee-bearing submission attaches: registration, collector, price config.
+    pub fee_disclosures: Vec<DisclosedContract>,
     pub sig_network_runtime_client: CantonTestClient,
     pub requester_workflow_client: CantonTestClient,
 }
@@ -222,12 +222,21 @@ impl CantonSandbox {
             );
         }
 
-        // Resolve DAR path (env var with fallback).
+        // Two DARs: signer (Signer + frozen fee API) and fee impl (CcFeeCollector/FeePriceConfig).
         let dar_path = match std::env::var("CANTON_DAR_PATH") {
             Ok(p) => PathBuf::from(p),
             Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_DAR_RELATIVE_PATH),
         };
         anyhow::ensure!(dar_path.exists(), "DAR not found at {}", dar_path.display());
+        let fee_dar_path = match std::env::var("CANTON_FEE_DAR_PATH") {
+            Ok(p) => PathBuf::from(p),
+            Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(DEFAULT_FEE_DAR_RELATIVE_PATH),
+        };
+        anyhow::ensure!(
+            fee_dar_path.exists(),
+            "fee DAR not found at {}",
+            fee_dar_path.display()
+        );
 
         // Start the local OAuth/JWKS test provider before writing Canton auth config.
         // Canton will validate bearer tokens by fetching this provider's JWKS.
@@ -252,6 +261,7 @@ canton.parameters.non-standard-config = yes
 canton.parameters.state-refresh-interval = 5s
 canton.participants.sandbox.alpha-dynamic {{
   dars = [
+    {{ location = "{}" }},
     {{ location = "{}" }}
   ]
   # The local client-credentials tokens resolve against Canton's default
@@ -271,6 +281,7 @@ canton.participants.sandbox.ledger-api {{
   jwt-timestamp-leeway.default = 10
 }}"#,
                 dar_path.display(),
+                fee_dar_path.display(),
                 oidc_provider.jwks_url(),
                 LOCAL_OIDC_AUDIENCE
             ),
@@ -335,8 +346,10 @@ canton.participants.sandbox.ledger-api {{
         // Setup parties, runtime/app users, and contracts.
         let sig_network_runtime_user_id =
             format!("mpc-sig-network-runtime-{}", uuid::Uuid::new_v4());
+        let fa_admin_user_id = format!("mpc-fa-admin-{}", uuid::Uuid::new_v4());
         let requester_workflow_user_id = format!("mpc-requester-workflow-{}", uuid::Uuid::new_v4());
         let sig_network = admin_client.allocate_party("SigNetwork").await?;
+        let sig_network_fa = admin_client.allocate_party("SigNetworkFA").await?;
         let operator = admin_client.allocate_party("Operator").await?;
         let requester = admin_client.allocate_party("Requester").await?;
 
@@ -348,6 +361,15 @@ canton.participants.sandbox.ledger-api {{
         ];
         admin_client
             .create_user(&sig_network_runtime_user_id, &sig_network, runtime_rights)
+            .await?;
+
+        // FA admin = featured-app/fee identity: co-signs the Signer and owns the fee contracts.
+        let fa_rights = vec![
+            ledger_api::can_act_as(&sig_network_fa),
+            ledger_api::can_read_as(&sig_network_fa),
+        ];
+        admin_client
+            .create_user(&fa_admin_user_id, &sig_network_fa, fa_rights)
             .await?;
 
         // App/test user drives requester/operator workflow traffic and can read
@@ -372,6 +394,15 @@ canton.participants.sandbox.ledger-api {{
         ))
         .await?;
 
+        let fa_admin_client = CantonTestClient::new(canton_test_client_config(
+            &base_url,
+            &ws_url,
+            oidc_provider.token_url(),
+            &fa_admin_user_id,
+            &sig_network_fa,
+        ))
+        .await?;
+
         let requester_workflow_client = CantonTestClient::new(canton_test_client_config(
             &base_url,
             &ws_url,
@@ -381,20 +412,97 @@ canton.participants.sandbox.ledger-api {{
         ))
         .await?;
 
-        // The Signer contract is owned by SigNetwork and created through the
-        // sig_network_runtime_client so later runtime choices use the same party/user pair.
-        let signer_result = sig_network_runtime_client
+        // Two-party Signer ceremony (SignerProposal → AcceptSigner). The proposal uses the
+        // runtime client so later runtime choices share its party/user pair.
+        let proposal_result = sig_network_runtime_client
             .create_contract(
                 &[&sig_network],
-                "#daml-signer:Signer:Signer",
-                json!({ "sigNetwork": &sig_network }),
+                SIGNER_PROPOSAL_TEMPLATE_ID,
+                json!({ "sigNetwork": &sig_network, "sigNetworkFA": &sig_network_fa }),
             )
             .await?;
-        let (signer_cid, signer_template_id) = find_created_contract(&signer_result, "Signer")?;
+        let (proposal_cid, _) = find_created_contract(&proposal_result, "SignerProposal")?;
+        let accept_result = fa_admin_client
+            .exercise_choice(
+                &[&sig_network_fa],
+                SIGNER_PROPOSAL_TEMPLATE_ID,
+                &proposal_cid,
+                "AcceptSigner",
+                json!({}),
+                &[],
+            )
+            .await?;
+        let (signer_cid, _) = find_created_contract(&accept_result, "Signer")?;
+        let signer_template_id = SIGNER_TEMPLATE_ID.to_string();
 
         let signer_disclosure = sig_network_runtime_client
-            .get_disclosed_contract(&[&sig_network], "#daml-signer:Signer:Signer", &signer_cid)
+            .get_disclosed_contract(&[&sig_network], &signer_template_id, &signer_cid)
             .await?;
+
+        // Fee infrastructure (sigNetworkFA-signed). A zero-fee FeePriceConfig is the
+        // production "free mode" that skips the CC transfer, keeping tests off Splice Amulet.
+        let collector_result = fa_admin_client
+            .create_contract(
+                &[&sig_network_fa],
+                CC_FEE_COLLECTOR_TEMPLATE_ID,
+                json!({
+                    "sigNetworkFA": &sig_network_fa,
+                    "feeReceiver": &sig_network_fa,
+                    "meta": { "values": {} },
+                }),
+            )
+            .await?;
+        let (collector_cid, _) = find_created_contract(&collector_result, "CcFeeCollector")?;
+
+        let registration_result = fa_admin_client
+            .create_contract(
+                &[&sig_network_fa],
+                FEE_REGISTRATION_TEMPLATE_ID,
+                json!({
+                    "sigNetworkFA": &sig_network_fa,
+                    "collector": &collector_cid,
+                    "meta": { "values": {} },
+                }),
+            )
+            .await?;
+        let (fee_registration_cid, _) =
+            find_created_contract(&registration_result, "FeeCollectorRegistration")?;
+
+        // Wide validity window (wall-clock sandbox); window-edge cases live in the canton Daml tests.
+        let price_config_result = fa_admin_client
+            .create_contract(
+                &[&sig_network_fa],
+                FEE_PRICE_CONFIG_TEMPLATE_ID,
+                json!({
+                    "sigNetworkFA": &sig_network_fa,
+                    "feeReceiver": &sig_network_fa,
+                    "instrumentAdmin": &sig_network_fa,
+                    "instrumentId": "Amulet",
+                    "feeAmount": "0.0",
+                    "validFrom": "2020-01-01T00:00:00Z",
+                    "validUntil": "2099-01-01T00:00:00Z",
+                    // Send Int64 as a string (JSON API canonical form).
+                    "version": "0",
+                    "meta": { "values": {} },
+                }),
+            )
+            .await?;
+        let (fee_price_config_cid, _) =
+            find_created_contract(&price_config_result, "FeePriceConfig")?;
+
+        // Fee disclosures attached per submission (the FA fee endpoint serves these in prod).
+        let mut fee_disclosures = Vec::new();
+        for (template_id, cid) in [
+            (FEE_REGISTRATION_TEMPLATE_ID, &fee_registration_cid),
+            (CC_FEE_COLLECTOR_TEMPLATE_ID, &collector_cid),
+            (FEE_PRICE_CONFIG_TEMPLATE_ID, &fee_price_config_cid),
+        ] {
+            fee_disclosures.push(
+                fa_admin_client
+                    .get_disclosed_contract(&[&sig_network_fa], template_id, cid)
+                    .await?,
+            );
+        }
 
         Ok(CantonSandbox {
             process,
@@ -405,11 +513,15 @@ canton.participants.sandbox.ledger-api {{
             app_ledger_api_user: requester_workflow_user_id,
             ledger_api_user: sig_network_runtime_user_id,
             party_id: sig_network,
+            sig_network_fa_party: sig_network_fa,
             operator_party: operator,
             requester_party: requester,
             signer_cid,
             signer_template_id,
             signer_disclosure,
+            fee_registration_cid,
+            fee_price_config_cid,
+            fee_disclosures,
             sig_network_runtime_client,
             requester_workflow_client,
         })
@@ -447,32 +559,61 @@ canton.participants.sandbox.ledger-api {{
         let case = test_evm_type2_anvil_cases()[0]
             .clone()
             .with_nonce(nonce.unwrap_or(0));
-        let event = test_sign_request_event(self, &case);
-        let payload = test_sign_request_payload(&event);
-        let sign_request = self
-            .requester_workflow_client
-            .create_contract(
-                &[&self.operator_party, &self.requester_party],
-                "#daml-signer:Signer:SignRequest",
-                serde_json::to_value(&payload)?,
-            )
-            .await?;
-        let sign_request_cid = find_created_contract(&sign_request, "SignRequest")?.0;
+        self.submit_sign_request_case(&case).await
+    }
 
+    /// Exercise `Signer.RequestSignature` for an EVM case — one atomic tx that charges
+    /// the (zero) CC fee and emits the `SignBidirectionalEvent` the MPC watches. Acts as
+    /// operators + requester (the controllers); the Signer + fee disclosures ride along.
+    pub async fn submit_sign_request_case(&self, case: &EvmType2AnvilCase) -> Result<()> {
+        let event = test_sign_request_event(self, case);
+        let args = self.request_signature_args(&event);
+        let mut disclosures = vec![self.signer_disclosure.clone()];
+        disclosures.extend(self.fee_disclosures.iter().cloned());
         self.requester_workflow_client
             .exercise_choice(
-                &[&self.requester_party],
+                &[&self.operator_party, &self.requester_party],
                 &self.signer_template_id,
                 &self.signer_cid,
-                "SignBidirectional",
-                json!({
-                    "signRequestCid": sign_request_cid,
-                    "requester": &self.requester_party,
-                }),
-                std::slice::from_ref(&self.signer_disclosure),
+                "RequestSignature",
+                args,
+                &disclosures,
             )
             .await?;
         Ok(())
+    }
+
+    /// `Signer.RequestSignature` args for a test event: request fields mirror the event
+    /// (minus the ledger-derived `sender`/`sigNetwork`/`sigNetworkFA`) plus zero-fee args
+    /// (registration + price config, no holdings). A non-zero fee needs more (see `Signet.Fee.Amulet`).
+    fn request_signature_args(&self, event: &SignBidirectionalRequestedEvent) -> Value {
+        json!({
+            "operators": event.operators,
+            "requester": event.requester,
+            "txParams": event.tx_params,
+            "caip2Id": event.caip2_id,
+            // Send Int64 as a string (JSON API canonical form).
+            "keyVersion": event.key_version.to_string(),
+            "path": event.path,
+            "algo": event.algo,
+            "dest": event.dest,
+            "params": event.params,
+            "outputDeserializationSchema": event.output_deserialization_schema,
+            "respondSerializationSchema": event.respond_serialization_schema,
+            "feeRegistrationCid": self.fee_registration_cid,
+            "feeInputs": [],
+            "feeExtraArgs": {
+                "context": {
+                    "values": {
+                        PRICE_CONFIG_CONTEXT_KEY: {
+                            "tag": "AV_ContractId",
+                            "value": self.fee_price_config_cid,
+                        },
+                    },
+                },
+                "meta": { "values": {} },
+            },
+        })
     }
 }
 

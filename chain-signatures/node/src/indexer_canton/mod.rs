@@ -32,11 +32,10 @@ pub struct CantonChainCtx {
 /// transaction params. This type is created at the indexer boundary and carries
 /// the byte fields expected by the shared bidirectional signing flow.
 ///
-/// The current Daml Signer contract does not model signature fees/deposits:
-/// Canton Coin transfers are explicit token-standard/Daml workflows, not an
-/// attached value on this `SignBidirectional` choice. Until the contract composes
-/// that transfer and exposes a deposit amount, the shared bidirectional flow
-/// treats Canton deposit as zero.
+/// `RequestSignature` charges the Canton Coin fee atomically on-ledger (fail-closed),
+/// so the indexer only sees already-charged requests. The fee never enters the event
+/// payload, request id, KDF epsilon, or signed tx — the MPC neither sees nor verifies
+/// it — so the bidirectional flow carries no Canton deposit (deposit = zero).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CantonSignBidirectionalRequestedEvent {
     pub sign_event_contract_id: String,
@@ -163,13 +162,6 @@ impl CantonSignBidirectionalRequestedEvent {
 }
 
 /// Canton JSON Ledger API configuration.
-///
-/// # Contract migration
-///
-/// When the Signer DAR is upgraded and redeployed, both `signer_contract_id`
-/// and `signer_template_id` change (similar to deploying a new Ethereum
-/// contract — the old address/ID is gone). Currently the MPC node requires a
-/// restart with updated CLI args to pick up the new IDs.
 #[derive(Clone)]
 pub struct CantonConfig {
     pub json_api_url: String,
@@ -180,8 +172,8 @@ pub struct CantonConfig {
     /// The Signer contract ID on the Canton ledger. Changes on every DAR
     /// redeployment — requires MPC node restart with the new value.
     pub signer_contract_id: String,
-    /// The full template ID of the Signer contract (e.g. "<packageHash>:Signer:Signer").
-    /// The package hash changes on every DAR upgrade, invalidating this value.
+    /// Template ID of the Signer contract, in package-name form
+    /// (`#signet-signer-v1:Signer:Signer`) — stable across DAR upgrades.
     pub signer_template_id: String,
 }
 
@@ -266,8 +258,8 @@ pub struct CantonArgs {
         requires = "canton_json_api_url"
     )]
     pub canton_signer_contract_id: Option<String>,
-    /// The full template ID of the Signer contract (e.g. "<packageHash>:Signer:Signer").
-    /// Must be updated if the DAR is upgraded.
+    /// Template ID of the Signer contract, in package-name form
+    /// (`#signet-signer-v1:Signer:Signer`).
     #[arg(
         long,
         env("MPC_CANTON_SIGNER_TEMPLATE_ID"),
