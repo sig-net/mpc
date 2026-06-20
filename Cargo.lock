@@ -7453,6 +7453,7 @@ dependencies = [
 name = "mpc-primitives"
 version = "1.16.4"
 dependencies = [
+ "async-trait",
  "borsh 1.5.7",
  "ciborium",
  "enum-map",

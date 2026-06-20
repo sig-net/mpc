@@ -17,6 +17,7 @@ version = "1.16.4"
 [workspace.dependencies]
 alloy = { version = "=1.0.38", features = ["contract", "json"] }
 anyhow = { version = "1.0.95", features = ["backtrace"] }
+async-trait = "0.1"
 backon = "0.4"
 borsh = { version = "1.5.3", features = ["derive"] }
 enum-map = "2.7.3"

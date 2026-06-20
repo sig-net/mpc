@@ -4,6 +4,7 @@ version.workspace = true
 edition = "2021"
 
 [dependencies]
+async-trait.workspace = true
 borsh.workspace = true
 ciborium.workspace = true
 enum-map.workspace = true
