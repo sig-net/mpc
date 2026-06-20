@@ -23,7 +23,10 @@ use tokio::time::timeout;
 
 /// Create a CantonStream from the sandbox config with an externally-provided Backlog.
 /// Accepts Backlog as parameter (needed for checkpoint tests).
-async fn stream_canton(sandbox: &CantonSandbox, backlog: Backlog) -> Result<CantonStream> {
+async fn stream_canton(
+    sandbox: &CantonSandbox,
+    backlog: Backlog,
+) -> Result<CantonStream<impl StateManager>> {
     let config = sandbox.get_config();
     let mut stream = CantonStream::new(Some(config), backlog.clone())
         .context("failed to create CantonStream")?;
@@ -61,7 +64,7 @@ async fn stream_canton(sandbox: &CantonSandbox, backlog: Backlog) -> Result<Cant
 
 /// Poll stream for a SignRequest event with timeout.
 async fn wait_for_sign_request(
-    stream: &mut CantonStream,
+    stream: &mut CantonStream<impl StateManager>,
     timeout_secs: u64,
 ) -> Result<IndexedSignRequest> {
     timeout(Duration::from_secs(timeout_secs), async {
