@@ -10,10 +10,11 @@ use solana_sdk::signer::keypair::Keypair;
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
 use solana_transaction_status::{TransactionDetails, UiConfirmedBlock, UiTransactionEncoding};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+
+use super::SolConfig;
 
 const MAX_SIGNATURES_FOR_FAST_CATCHUP: usize = 1000;
 
@@ -25,29 +26,6 @@ const MAX_CHUNK_SIZE: usize = 50;
 
 /// The max chunk size allowed for fetching concurrently.
 pub const MAX_CONCURRENT_CHUNK_SIZE: usize = MAX_CONCURRENT_FETCH * MAX_CHUNK_SIZE;
-
-#[derive(Clone)]
-pub struct SolConfig {
-    /// The solana account secret key used to sign solana respond txn.
-    pub account_sk: String,
-    /// Solana RPC http URL
-    pub rpc_http_url: String,
-    /// Solana RPC websocket URL
-    pub rpc_ws_url: String,
-    /// The program address to watch
-    pub program_address: String,
-}
-
-impl fmt::Debug for SolConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SolConfig")
-            .field("account_sk", &"<hidden>")
-            .field("rpc_http_url", &self.rpc_http_url)
-            .field("rpc_ws_url", &self.rpc_ws_url)
-            .field("program_address", &self.program_address)
-            .finish()
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum SolanaCatchupBlock {
