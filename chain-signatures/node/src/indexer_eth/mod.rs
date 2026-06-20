@@ -3,7 +3,6 @@ pub mod indexer_eth_direct_rpc;
 #[cfg(feature = "helios")]
 pub mod indexer_eth_helios;
 
-use crate::backlog::Backlog;
 use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::Chain;
@@ -837,9 +836,9 @@ impl EthereumClient {
     }
 }
 
-pub struct EthereumIndexer {
+pub struct EthereumIndexer<S: StateManager> {
     eth: EthConfig,
-    backlog: Backlog,
+    state_manager: S,
     client: Arc<EthereumClient>,
     events_tx: mpsc::Sender<ChainEvent>,
     contract_address: Address,
@@ -857,10 +856,10 @@ enum BackfillOutcome {
     Observed { event: Option<ChainEvent> },
 }
 
-impl EthereumIndexer {
+impl<S: StateManager> EthereumIndexer<S> {
     pub async fn new(
         eth: EthConfig,
-        backlog: Backlog,
+        state_manager: S,
         events_tx: mpsc::Sender<ChainEvent>,
     ) -> anyhow::Result<Self> {
         let client = Arc::new(EthereumClient::new(eth.clone()).await?);
@@ -871,7 +870,7 @@ impl EthereumIndexer {
 
         Ok(Self {
             eth,
-            backlog,
+            state_manager,
             client,
             events_tx,
             contract_address,
@@ -1174,7 +1173,10 @@ impl EthereumIndexer {
         let mut events = Vec::new();
         let mut resolved_tx_ids = HashSet::new();
 
-        let watchers = self.backlog.get_execution_watchers(Chain::Ethereum).await;
+        let watchers = self
+            .state_manager
+            .get_execution_watchers(Chain::Ethereum)
+            .await;
         tracing::info!(
             watchers_count = watchers.len(),
             block_number,
@@ -1218,7 +1220,10 @@ impl EthereumIndexer {
         }
 
         // Staleness checks (nonce too low)
-        let remaining_pending = self.backlog.get_execution_watchers(Chain::Ethereum).await;
+        let remaining_pending = self
+            .state_manager
+            .get_execution_watchers(Chain::Ethereum)
+            .await;
 
         for (tx_id, (sign_id, tx)) in remaining_pending {
             if resolved_tx_ids.contains(&tx_id) || observed_tx_ids.contains(&tx_id) {
@@ -1378,7 +1383,7 @@ impl EthereumIndexer {
 }
 
 #[async_trait]
-impl ChainIndexer for EthereumIndexer {
+impl<S: StateManager> ChainIndexer for EthereumIndexer<S> {
     const CHAIN: Chain = Chain::Ethereum;
     type Block = MaybeBlock;
     type Iter = std::pin::Pin<Box<dyn stream::Stream<Item = Self::Block> + Send + 'static>>;
@@ -1414,7 +1419,7 @@ impl ChainIndexer for EthereumIndexer {
         // the history of the network in case where we do not have a checkpoint.
         // https://github.com/sig-net/mpc/issues/777
         let current_block = self
-            .backlog
+            .state_manager
             .get_processed_block(Chain::Ethereum)
             .await
             .map(|n| n.saturating_add(1))
@@ -1487,13 +1492,13 @@ impl ChainIndexer for EthereumIndexer {
 /// Ethereum indexer stream implementing the `ChainStream` trait.
 /// Construction is side-effect free; the shared `run_stream()` loop calls
 /// `start()` after recovery has completed.
-pub struct EthereumStream {
+pub struct EthereumStream<S: StateManager> {
     events_rx: Option<mpsc::Receiver<ChainEvent>>,
-    start_state: Option<EthereumIndexer>,
+    start_state: Option<EthereumIndexer<S>>,
 }
 
-impl EthereumStream {
-    pub async fn new(eth: Option<EthConfig>, backlog: Backlog) -> anyhow::Result<Self> {
+impl<S: StateManager> EthereumStream<S> {
+    pub async fn new(eth: Option<EthConfig>, state_manager: S) -> anyhow::Result<Self> {
         let Some(eth) = eth else {
             tracing::warn!(
                 "ethereum indexer is disabled: no EthConfig provided \
@@ -1507,7 +1512,7 @@ impl EthereumStream {
         );
 
         let (events_tx, events_rx) = crate::stream::channel();
-        let indexer = EthereumIndexer::new(eth, backlog, events_tx).await?;
+        let indexer = EthereumIndexer::new(eth, state_manager, events_tx).await?;
 
         Ok(Self {
             events_rx: Some(events_rx),
@@ -1517,8 +1522,8 @@ impl EthereumStream {
 }
 
 #[async_trait]
-impl ChainStream for EthereumStream {
-    type Indexer = EthereumIndexer;
+impl<S: StateManager> ChainStream for EthereumStream<S> {
+    type Indexer = EthereumIndexer<S>;
 
     async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
         self.start_state
@@ -1607,7 +1612,7 @@ mod tests {
     #[tokio::test]
     async fn missing_catchup_block_is_refetched() {
         let mut server = Server::new_async().await;
-        let backlog = Backlog::new();
+        let state_manager = Backlog::new();
         let (events_tx, mut events_rx) = mpsc::channel(1);
 
         server
@@ -1646,7 +1651,7 @@ mod tests {
                 optimistic_requests: true,
                 light_client: false,
             },
-            backlog,
+            state_manager,
             client: Arc::new(EthereumClient::DirectRpc(
                 super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
             )),
@@ -1671,7 +1676,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_catchup_block_returns_error_when_refetch_fails() {
-        let backlog = Backlog::new();
+        let state_manager = Backlog::new();
         let (events_tx, mut events_rx) = mpsc::channel(1);
         let mut indexer = EthereumIndexer {
             eth: EthConfig {
@@ -1685,7 +1690,7 @@ mod tests {
                 optimistic_requests: true,
                 light_client: false,
             },
-            backlog,
+            state_manager,
             client: Arc::new(EthereumClient::DirectRpc(
                 super::indexer_eth_direct_rpc::RpcEthereumClient::new("http://127.0.0.1:1"),
             )),
@@ -2000,7 +2005,7 @@ mod tests {
             .create_async()
             .await;
 
-        let backlog = Backlog::new();
+        let state_manager = Backlog::new();
         let sign_id = SignId::new([0x55; 32]);
         let tx = BidirectionalTx {
             id: BidirectionalTxId(tx_hash.0),
@@ -2021,7 +2026,9 @@ mod tests {
             from_address: **from_address,
             nonce: 0,
         };
-        backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;
+        state_manager
+            .watch_execution(Chain::Ethereum, sign_id, tx)
+            .await;
 
         let (events_tx, _events_rx) = mpsc::channel(1);
         let indexer = EthereumIndexer {
@@ -2036,7 +2043,7 @@ mod tests {
                 optimistic_requests: true,
                 light_client: false,
             },
-            backlog,
+            state_manager,
             client: Arc::new(EthereumClient::DirectRpc(
                 super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
             )),

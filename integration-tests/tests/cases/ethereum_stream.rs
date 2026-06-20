@@ -339,27 +339,27 @@ fn test_bidirectional_event() -> NodeSignBidirectionalEvent {
     }
 }
 
-struct StartedEthereumStream {
-    stream: EthereumStream,
+struct StartedEthereumStream<S: StateManager> {
+    stream: EthereumStream<S>,
     _indexer_task: tokio::task::JoinHandle<()>,
 }
 
-impl std::ops::Deref for StartedEthereumStream {
-    type Target = EthereumStream;
+impl<S: StateManager> std::ops::Deref for StartedEthereumStream<S> {
+    type Target = EthereumStream<S>;
 
     fn deref(&self) -> &Self::Target {
         &self.stream
     }
 }
 
-impl std::ops::DerefMut for StartedEthereumStream {
+impl<S: StateManager> std::ops::DerefMut for StartedEthereumStream<S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.stream
     }
 }
 
-async fn next_event_within(
-    client: &mut StartedEthereumStream,
+async fn next_event_within<S: StateManager>(
+    client: &mut StartedEthereumStream<S>,
     duration: Duration,
 ) -> Result<ChainEvent> {
     timeout(duration, async {
@@ -378,7 +378,7 @@ async fn next_event_within(
 async fn stream_ethereum(
     ctx: &EthereumTestEnvironment,
     backlog: Backlog,
-) -> Result<StartedEthereumStream> {
+) -> Result<StartedEthereumStream<impl StateManager>> {
     let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
     let indexer = stream.start().await?;
     let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
