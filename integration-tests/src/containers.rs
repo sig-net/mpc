@@ -25,8 +25,8 @@ use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
 use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
+use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, SolArgs};
 use mpc_node::config::OverrideConfig;
-use mpc_node::indexer_eth::EthArgs;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;
@@ -161,12 +161,10 @@ impl Node {
             running_threshold: 120,
         };
         let eth_args = EthArgs::from_config(config.cfg.eth.clone());
-        let sol_args = mpc_node::indexer_sol::SolArgs::from_config(config.cfg.sol.clone());
-        let hydration_args =
-            mpc_node::indexer_hydration::HydrationArgs::from_config(config.cfg.hydration.clone());
-        let canton_args =
-            mpc_node::indexer_canton::CantonArgs::from_config(config.cfg.canton.clone());
-        let args = mpc_node::cli::Cli::Start {
+        let sol_args = SolArgs::from_config(config.cfg.sol.clone());
+        let hydration_args = HydrationArgs::from_config(config.cfg.hydration.clone());
+        let canton_args = CantonArgs::from_config(config.cfg.canton.clone());
+        let args = Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
             account_id: config.account.id().clone(),
