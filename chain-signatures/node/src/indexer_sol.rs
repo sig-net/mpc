@@ -26,7 +26,8 @@ use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
-    ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+    ChainEvent, IndexedSignRequest, SignArgs, SignId, StateManager, LATEST_MPC_KEY_VERSION,
+    MAX_SECP256K1_SCALAR,
 };
 use serde::{Deserialize, Serialize};
 use signet_program::{
@@ -253,7 +254,7 @@ impl ChainIndexer for SolanaIndexer {
         // TODO: https://github.com/sig-net/mpc/issues/777
         let start_slot = self
             .backlog
-            .processed_block(Chain::Solana)
+            .get_processed_block(Chain::Solana)
             .await
             .map(|n| n.saturating_add(1))
             .unwrap_or(anchor_height);

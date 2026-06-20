@@ -6,6 +6,7 @@ use crate::storage::checkpoint_storage::{CheckpointStorage, MAX_RECENT_CHECKPOIN
 use anyhow::Context;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PendingTx, SignId, SignKind,
+    StateManager,
 };
 use std::collections::{hash_map, BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
@@ -473,15 +474,6 @@ impl Backlog {
             .map(|watcher| (watcher.sign_id, watcher.tx))
     }
 
-    /// Get the set of bidirectional transactions currently awaiting execution on the
-    /// specified destination chain.
-    pub async fn execution_watchers(
-        &self,
-        chain: Chain,
-    ) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)> {
-        self.watchers(&chain).read().await.all()
-    }
-
     /// Update the status of a tracked bidirectional transaction on the source chain.
     pub async fn set_status(
         &self,
@@ -529,11 +521,6 @@ impl Backlog {
         self.watch_execution(target_chain, sign_id, bidirectional_tx)
             .await;
         Ok(())
-    }
-
-    /// Get the processed block height for a specific chain
-    pub async fn processed_block(&self, chain: Chain) -> Option<u64> {
-        self.pending(&chain).read().await.processed_block_height()
     }
 
     /// Set the processed block height for a specific chain.
@@ -681,6 +668,21 @@ impl Backlog {
         }
 
         Ok(())
+    }
+}
+
+/// Implement the StateManager trait for Backlog to provide access to processed block height and execution watchers for indexers
+#[async_trait::async_trait]
+impl StateManager for Backlog {
+    async fn get_processed_block(&self, chain: Chain) -> Option<u64> {
+        self.pending(&chain).read().await.processed_block_height()
+    }
+
+    async fn get_execution_watchers(
+        &self,
+        chain: Chain,
+    ) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)> {
+        self.watchers(&chain).read().await.all()
     }
 }
 
@@ -1421,7 +1423,7 @@ mod tests {
             .await
             .expect("failed to recover");
 
-        let watchers = recovered.execution_watchers(Chain::Ethereum).await;
+        let watchers = recovered.get_execution_watchers(Chain::Ethereum).await;
         assert_eq!(watchers.len(), 1);
         assert!(watchers.contains_key(&tx.id));
     }

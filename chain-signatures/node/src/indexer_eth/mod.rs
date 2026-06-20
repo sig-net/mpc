@@ -24,8 +24,8 @@ use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, IndexedSignRequest, SignArgs,
-    SignId, Signature as MpcSignature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
-    MAX_SECP256K1_SCALAR,
+    SignId, Signature as MpcSignature, SignatureRespondedEvent, StateManager,
+    LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -1174,7 +1174,7 @@ impl EthereumIndexer {
         let mut events = Vec::new();
         let mut resolved_tx_ids = HashSet::new();
 
-        let watchers = self.backlog.execution_watchers(Chain::Ethereum).await;
+        let watchers = self.backlog.get_execution_watchers(Chain::Ethereum).await;
         tracing::info!(
             watchers_count = watchers.len(),
             block_number,
@@ -1218,7 +1218,7 @@ impl EthereumIndexer {
         }
 
         // Staleness checks (nonce too low)
-        let remaining_pending = self.backlog.execution_watchers(Chain::Ethereum).await;
+        let remaining_pending = self.backlog.get_execution_watchers(Chain::Ethereum).await;
 
         for (tx_id, (sign_id, tx)) in remaining_pending {
             if resolved_tx_ids.contains(&tx_id) || observed_tx_ids.contains(&tx_id) {
@@ -1415,7 +1415,7 @@ impl ChainIndexer for EthereumIndexer {
         // https://github.com/sig-net/mpc/issues/777
         let current_block = self
             .backlog
-            .processed_block(Chain::Ethereum)
+            .get_processed_block(Chain::Ethereum)
             .await
             .map(|n| n.saturating_add(1))
             .unwrap_or(anchor_height);

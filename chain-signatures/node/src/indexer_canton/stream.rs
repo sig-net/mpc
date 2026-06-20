@@ -9,6 +9,7 @@ use futures_util::stream::{self, SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use mpc_primitives::{
     ChainEvent, RespondBidirectionalEvent, ScalarExt, Signature, SignatureRespondedEvent,
+    StateManager,
 };
 use std::collections::HashSet;
 use std::ops::Range;
@@ -351,7 +352,7 @@ impl ChainIndexer for CantonIndexer {
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         let checkpoint = self
             .backlog
-            .processed_block(Chain::Canton)
+            .get_processed_block(Chain::Canton)
             .await
             .unwrap_or(0);
         self.last_seen_offset = checkpoint;
