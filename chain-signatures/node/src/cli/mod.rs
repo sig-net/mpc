@@ -1,3 +1,5 @@
+mod args;
+
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
@@ -16,9 +18,8 @@ use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::triple_storage::TriplePair;
 use crate::stream::run_stream;
-use crate::{
-    indexer, indexer_canton, indexer_eth, indexer_hydration, indexer_sol, logs, mesh, storage, web,
-};
+use crate::{indexer, indexer_canton, indexer_hydration, logs, mesh, storage, web};
+pub use args::{canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, solana::SolArgs};
 
 use clap::Parser;
 use deadpool_redis::Runtime;
@@ -68,16 +69,16 @@ pub enum Cli {
         sign_sk: Option<SecretKey>,
         /// Ethereum Indexer options
         #[clap(flatten)]
-        eth: indexer_eth::EthArgs,
+        eth: EthArgs,
         /// Solana Indexer options
         #[clap(flatten)]
-        sol: indexer_sol::SolArgs,
+        sol: SolArgs,
         /// Hydration Indexer options
         #[clap(flatten)]
-        hydration: indexer_hydration::HydrationArgs,
+        hydration: HydrationArgs,
         /// Canton Indexer options
         #[clap(flatten)]
-        canton: indexer_canton::CantonArgs,
+        canton: CantonArgs,
         /// NEAR requests options
         #[clap(flatten)]
         indexer_options: indexer::Options,
@@ -484,7 +485,7 @@ fn configuration_digest(
     account_sk: SecretKey,
     cipher_pk: String,
     sign_sk: Option<SecretKey>,
-    eth: indexer_eth::EthArgs,
+    eth: args::ethereum::EthArgs,
 ) -> i64 {
     let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
     let eth_contract_address = eth.eth_contract_address.unwrap_or_default();
