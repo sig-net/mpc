@@ -38,12 +38,15 @@ fn test_dependencies() -> (Backlog, watch::Receiver<MeshState>, NodeClient) {
     (backlog, mesh_rx, node_client)
 }
 
-async fn stream_solana(config: SolConfig) -> Result<SolanaStream> {
+async fn stream_solana(config: SolConfig) -> Result<SolanaStream<impl StateManager>> {
     let (backlog, _, _) = test_dependencies();
     stream_solana_with_backlog(config, backlog).await
 }
 
-async fn stream_solana_with_backlog(config: SolConfig, backlog: Backlog) -> Result<SolanaStream> {
+async fn stream_solana_with_backlog(
+    config: SolConfig,
+    backlog: Backlog,
+) -> Result<SolanaStream<impl StateManager>> {
     let mut stream = SolanaStream::new(Some(config), backlog.clone())
         .context("failed to create SolanaStream")?;
     let indexer = ChainStream::start(&mut stream).await?;
@@ -83,7 +86,9 @@ async fn stream_solana_with_backlog(config: SolConfig, backlog: Backlog) -> Resu
 }
 
 /// Helper to wait for a specific event type, skipping block events
-async fn wait_for_sign_request(stream: &mut SolanaStream) -> Result<IndexedSignRequest> {
+async fn wait_for_sign_request<S: StateManager>(
+    stream: &mut SolanaStream<S>,
+) -> Result<IndexedSignRequest> {
     loop {
         match timeout(Duration::from_secs(6), stream.next_event()).await {
             Ok(Some(ChainEvent::SignRequest(req))) => return Ok(req),

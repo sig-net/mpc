@@ -1,4 +1,3 @@
-use crate::backlog::Backlog;
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::solana_client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
@@ -128,29 +127,29 @@ pub struct SolSignRequest {
 }
 
 /// Solana stream that implements the new ChainStream abstraction
-pub struct SolanaStream {
+pub struct SolanaStream<S: StateManager> {
     rx: Option<mpsc::Receiver<ChainEvent>>,
-    start_state: Option<SolanaStreamStartState>,
+    start_state: Option<SolanaStreamStartState<S>>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
-pub struct SolanaIndexer {
+pub struct SolanaIndexer<S: StateManager> {
     pub program_id: Pubkey,
     pub client: SolanaClient,
     pub events_tx: mpsc::Sender<ChainEvent>,
-    pub backlog: Backlog,
+    pub state_manager: S,
     pub live_rx: Option<mpsc::Receiver<ChainEvent>>,
 }
 
-struct SolanaStreamStartState {
+struct SolanaStreamStartState<S: StateManager> {
     program_id: Pubkey,
     rpc_http_url: String,
     rpc_ws_url: String,
-    backlog: Backlog,
+    state_manager: S,
     tx: mpsc::Sender<ChainEvent>,
 }
 
-impl Drop for SolanaStream {
+impl<S: StateManager> Drop for SolanaStream<S> {
     fn drop(&mut self) {
         for task in &self.tasks {
             task.abort();
@@ -158,8 +157,8 @@ impl Drop for SolanaStream {
     }
 }
 
-impl SolanaStream {
-    pub fn new(sol: Option<SolConfig>, backlog: Backlog) -> Option<Self> {
+impl<S: StateManager> SolanaStream<S> {
+    pub fn new(sol: Option<SolConfig>, state_manager: S) -> Option<Self> {
         let Some(sol) = sol else {
             tracing::warn!("solana indexer is disabled");
             return None;
@@ -178,7 +177,7 @@ impl SolanaStream {
                 program_id,
                 rpc_http_url: sol.rpc_http_url.clone(),
                 rpc_ws_url: sol.rpc_ws_url.clone(),
-                backlog,
+                state_manager,
                 tx,
             }),
             tasks: Vec::new(),
@@ -187,8 +186,8 @@ impl SolanaStream {
 }
 
 #[async_trait]
-impl ChainStream for SolanaStream {
-    type Indexer = SolanaIndexer;
+impl<S: StateManager> ChainStream for SolanaStream<S> {
+    type Indexer = SolanaIndexer<S>;
 
     async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
         let Some(start_state) = self.start_state.take() else {
@@ -205,7 +204,7 @@ impl ChainStream for SolanaStream {
             program_id: start_state.program_id,
             client,
             events_tx: start_state.tx.clone(),
-            backlog: start_state.backlog.clone(),
+            state_manager: start_state.state_manager,
             live_rx: None,
         };
 
@@ -221,7 +220,7 @@ impl ChainStream for SolanaStream {
 }
 
 #[async_trait]
-impl ChainIndexer for SolanaIndexer {
+impl<S: StateManager> ChainIndexer for SolanaIndexer<S> {
     const CHAIN: Chain = Chain::Solana;
     type Block = (u64, SolanaCatchupBlock);
     type Iter = Pin<Box<dyn Stream<Item = Self::Block> + Send + 'static>>;
@@ -253,7 +252,7 @@ impl ChainIndexer for SolanaIndexer {
         // Get the last persisted processed block height from backlog
         // TODO: https://github.com/sig-net/mpc/issues/777
         let start_slot = self
-            .backlog
+            .state_manager
             .get_processed_block(Chain::Solana)
             .await
             .map(|n| n.saturating_add(1))
@@ -322,7 +321,7 @@ impl ChainIndexer for SolanaIndexer {
     }
 }
 
-impl SolanaIndexer {
+impl<S: StateManager> SolanaIndexer<S> {
     async fn process_block(&mut self, height: u64, block: &UiConfirmedBlock) -> anyhow::Result<()> {
         let Some(transactions) = &block.transactions else {
             self.events_tx.send(ChainEvent::Block(height)).await?;
@@ -1058,6 +1057,8 @@ async fn get_tx(
 mod tests {
     use std::collections::BTreeMap;
 
+    use crate::backlog::Backlog;
+
     use super::*;
     use solana_sdk::commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
@@ -1215,7 +1216,7 @@ mod tests {
         let http_url = format!("https://solana-devnet.g.alchemy.com/v2/{api_key}");
         let ws_url = format!("wss://solana-devnet.g.alchemy.com/v2/{api_key}");
 
-        let backlog = Backlog::new();
+        let state_manager = Backlog::new();
         let (events_tx, mut events_rx) = mpsc::channel(1_000_000);
 
         let client = SolanaClient::for_indexer(
@@ -1228,7 +1229,7 @@ mod tests {
             program_id: Pubkey::from_str(&sol_addr).unwrap(),
             client,
             events_tx,
-            backlog,
+            state_manager,
             live_rx: None,
         };
 
@@ -1246,7 +1247,7 @@ mod tests {
         tracing::debug!("Starting catchup from slot: {start_slot} (~1 week behind)");
 
         indexer
-            .backlog
+            .state_manager
             .set_processed_block_interval(Chain::Solana, start_slot.saturating_sub(1), 1)
             .await;
 
