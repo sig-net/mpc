@@ -1,5 +1,4 @@
 use crate::backlog::Backlog;
-// TODO: use ChainTelemetry trait method instead
 use crate::metrics::requests::record_indexing_step_reached;
 use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use crate::respond_bidirectional::CompletedTx;
