@@ -14,7 +14,9 @@ use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{run_stream, ChainPipeline, ChainStream, ChainStreaming};
-use mpc_primitives::{ChainEvent, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{
+    ChainEvent, NoopChainTelemetry, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION,
+};
 use mpc_primitives::{CheckpointDigest, StateManager};
 use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;
@@ -504,6 +506,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
             sign_tx,
             rpc,
             recovered_backlog,
+            NoopChainTelemetry,
             contract_watcher,
             mesh_rx,
             node_client,
