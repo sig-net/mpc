@@ -666,7 +666,7 @@ pub async fn run<T: ChainTelemetry>(
         }
 
         // Update Prometheus metrics
-        telemetry.indexed(number.into());
+        telemetry.block_indexed(number.into());
     }
 }
 
