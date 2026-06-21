@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 borsh.workspace = true
 ciborium.workspace = true
+enum-map.workspace = true
 hex.workspace = true
 k256.workspace = true
 serde.workspace = true

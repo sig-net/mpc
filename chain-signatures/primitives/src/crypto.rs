@@ -83,6 +83,17 @@ impl SignId {
         let request_id: [u8; 32] = hasher.finalize().into();
         Self { request_id }
     }
+
+    pub fn from_checkpoint(chain: crate::Chain, height: u64, payload: &[u8; 32]) -> Self {
+        let mut hasher = sha3::Sha3_256::new();
+        hasher.update(b"checkpoint");
+        hasher.update(chain.caip2_chain_id().as_bytes());
+        hasher.update(height.to_le_bytes());
+        hasher.update(payload);
+        hasher.update(crate::LATEST_MPC_KEY_VERSION.to_le_bytes());
+        let request_id: [u8; 32] = hasher.finalize().into();
+        Self::new(request_id)
+    }
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]

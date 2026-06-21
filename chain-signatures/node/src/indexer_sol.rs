@@ -1,14 +1,14 @@
 use crate::backlog::Backlog;
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::solana_client::{SolanaCatchupBlock, SolanaClient};
+use crate::solana_client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
 use crate::stream::{ChainIndexer, ChainStream};
 use crate::util::ethabi_request_id;
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 
 pub use crate::solana_client::SolConfig;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -263,8 +263,32 @@ impl ChainIndexer for SolanaIndexer {
         }
 
         let slots = self.client.fetch_slots(start_slot, end_slot).await;
-        let items = self.client.fetch_blocks_for_slots(slots).await;
-        Box::pin(futures_util::stream::iter(items.into_iter()))
+        let remaining_slots: VecDeque<u64> = slots.into_iter().collect();
+
+        let client = self.client.clone();
+        let stream = futures_util::stream::unfold(
+            (remaining_slots, client, VecDeque::new()),
+            |state| async move {
+                let (mut remaining_slots, client, mut current_chunk) = state;
+                loop {
+                    if let Some(block) = current_chunk.pop_front() {
+                        return Some((block, (remaining_slots, client, current_chunk)));
+                    }
+                    if remaining_slots.is_empty() {
+                        return None;
+                    }
+
+                    let chunk_slots: BTreeSet<u64> = remaining_slots
+                        .drain(..std::cmp::min(MAX_CONCURRENT_CHUNK_SIZE, remaining_slots.len()))
+                        .collect();
+
+                    let blocks = client.fetch_blocks_for_slots(chunk_slots).await;
+                    current_chunk = blocks.into_iter().collect();
+                }
+            },
+        );
+
+        Box::pin(stream)
     }
 
     async fn process_catchup(&mut self, (slot, block): &Self::Block) -> anyhow::Result<()> {
@@ -470,8 +494,9 @@ impl SolanaSignEvent {
 /// in `live_tx`. The anchor slot (current confirmed slot at subscription time) is sent
 /// via `anchor_tx` so that `livestream()` can return it to the catchup logic.
 ///
-/// Events accumulate in the channel while catchup runs; `process_next_block` drains them
-/// only after catchup completes (enforced by `catchup_then_livestream`).
+/// The anchor is resolved inside `subscribe_to_program_events` immediately after the WS
+/// subscription is established — ensuring the subscription is live before we anchor, so
+/// catchup covers `[persisted_block, anchor)` with no gaps.
 async fn subscribe_and_buffer_live_events(
     program_id: Pubkey,
     rpc_url: String,
@@ -479,7 +504,6 @@ async fn subscribe_and_buffer_live_events(
     live_tx: mpsc::Sender<ChainEvent>,
     anchor_tx: oneshot::Sender<u64>,
 ) {
-    // Get anchor slot immediately so livestream() can return without waiting for an event.
     let rpc = RpcClient::new(rpc_url);
     let mut anchor_tx = Some(anchor_tx);
     loop {
@@ -605,12 +629,27 @@ async fn subscribe_to_program_events(
 
     let (mut stream, _unsubscriber) = pubsub_client.logs_subscribe(filter, config).await?;
 
-    // Resolve the anchor slot immediately after successfully subscribing, avoiding gaps.
-    // We cannot wait for the websocket stream to get the first signature on our program
-    // since our program can potentially not generate any transactions for a while.
-    if let Some(tx) = anchor_tx.take() {
-        let slot = rpc_client.get_slot().await?;
-        let _ = tx.send(slot);
+    // The WS subscription is now live. Fetch the current confirmed slot via RPC as the
+    // anchor: this is the correct boundary because the subscription is already buffering
+    // all new events, so catchup can safely cover [persisted_block, anchor) via RPC history
+    // with no gaps. We do not wait for the first WS event because that could deadlock if
+    // no program-mentioning transactions arrive (e.g. in tests after a single sign call).
+    if let Some(anchor_tx) = anchor_tx.take() {
+        match rpc_client
+            .get_slot_with_commitment(CommitmentConfig::confirmed())
+            .await
+        {
+            Ok(slot) => {
+                let _ = anchor_tx.send(slot);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "failed to fetch anchor slot after WS subscribe; retry on reconnect"
+                );
+                // Drop anchor_tx — livestream() will receive a RecvError and propagate the failure.
+            }
+        }
     }
 
     // stall watchdog

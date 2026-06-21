@@ -23,6 +23,7 @@ pub enum SerDeserFormat {
     PartialOrd,
     Ord,
     Hash,
+    enum_map::Enum,
 )]
 pub enum Chain {
     NEAR,

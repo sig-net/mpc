@@ -46,6 +46,7 @@ sp-state-machine = { version = "0.48", default-features = false, features = ["st
 # workspace dependencies
 alloy.workspace = true
 anyhow.workspace = true
+enum-map.workspace = true
 backon.workspace = true
 borsh.workspace = true
 cait-sith.workspace = true

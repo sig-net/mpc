@@ -1,49 +1,56 @@
 use crate::config::{Config, ContractConfig, NetworkConfig};
+use crate::indexer_eth::EthConfig;
+use crate::indexer_sol::SolConfig;
+use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
+use crate::protocol::contract::primitives::{ParticipantMap, Participants};
+use crate::protocol::contract::RunningContractState;
+use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState};
+use crate::util::AffinePointExt as _;
+use std::collections::BTreeSet;
+
+pub use mpc_contract::primitives::{Read, View};
+
+use enum_map::EnumMap;
+use solana_sdk::pubkey::Pubkey;
+
+use alloy::primitives::Address;
+use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
+use alloy::providers::{Provider, RootProvider, WalletProvider};
+use alloy::rpc::types::{Transaction, TransactionReceipt};
+use cait_sith::protocol::Participant;
+use cait_sith::FullSignature;
+use k256::{AffinePoint, Secp256k1};
+use mpc_keys::hpke;
+use mpc_primitives::{CheckpointDigest, ConsensusCheckpointDigest, SignId, SignKind, Signature};
+
 use crate::indexer_canton::ledger_api::{
     ActiveContractEntry, CumulativeFilter, EventFormat, GetActiveContractsRequest,
     IdentifierFilter, JsCommands, LedgerEndResponse, PartyFilter,
     SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse, TemplateFilterValue,
 };
 use crate::indexer_canton::{CantonAuthProvider, CantonConfig};
-use crate::indexer_eth::EthConfig;
 use crate::indexer_hydration::HydrationConfig;
-use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
-use crate::protocol::contract::primitives::{ParticipantMap, Participants};
-use crate::protocol::contract::RunningContractState;
-use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState};
-use crate::solana_client::{SolConfig, SolanaClient};
+use crate::solana_client::SolanaClient;
 use crate::util::retry::{retry_async, Backoff, RetryConfig, RetryError, RetryReason};
-use crate::util::AffinePointExt as _;
-
 use alloy::contract::{ContractInstance, Interface};
 use alloy::dyn_abi::DynSolValue;
 use alloy::network::EthereumWallet;
-use alloy::primitives::Address;
 use alloy::primitives::U256;
-use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
 use alloy::providers::ProviderBuilder;
-use alloy::providers::{Provider, RootProvider, WalletProvider};
-use alloy::rpc::types::{Transaction, TransactionReceipt};
 use alloy_signer_local::PrivateKeySigner;
-use cait_sith::protocol::Participant;
-use cait_sith::FullSignature;
 use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
-use k256::{AffinePoint, Secp256k1};
-use mpc_keys::hpke;
-use mpc_primitives::{SignId, SignKind, Signature};
 use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 use near_fetch::result::ExecutionFinalResult;
 use parity_scale_codec::{Decode, Encode};
 use serde_json::json;
-use solana_sdk::pubkey::Pubkey;
 use sp_core::{sr25519, Pair as _};
 use sp_runtime::{
     traits::{IdentifyAccount, Verify},
     MultiSignature as SpMultiSignature,
 };
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 use subxt::config::substrate::{
@@ -60,7 +67,7 @@ use url::Url;
 const MAX_PUBLISH_RETRY: usize = 6;
 /// The maximum number of concurrent RPC requests the system can make
 const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
-/// The update interval to fetch and update the contract state and config
+/// The update interval to fetch and update the contract's state
 const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 /// The interval to batch send Ethereum responses
 const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
@@ -464,15 +471,20 @@ impl RpcExecutor {
         mut self,
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
+        checkpoints: EnumMap<Chain, watch::Sender<CheckpointDigest>>,
     ) {
-        // spin up update task for updating contract state and config
+        // spin up update task for updating contract state, config and checkpoints
         let near = self.near.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(UPDATE_INTERVAL);
             loop {
                 interval.tick().await;
-                tokio::spawn(update_contract(near.clone(), contract.clone()));
-                tokio::spawn(update_config(near.clone(), config.clone()));
+                tokio::spawn(update_contract_data(
+                    near.clone(),
+                    contract.clone(),
+                    config.clone(),
+                    checkpoints.clone(),
+                ));
             }
         });
 
@@ -704,6 +716,32 @@ impl NearClient {
             .args_json(json!({
                 "sign_id": id,
                 "signature": response,
+            }))
+            .max_gas()
+            .transact()
+            .await
+    }
+
+    pub async fn read(&self, reads: Vec<Read>) -> anyhow::Result<Vec<View>> {
+        let views: Vec<View> = self
+            .client
+            .view(&self.contract_id, "read")
+            .args_json(json!({ "reads": reads }))
+            .await?
+            .json()?;
+        Ok(views)
+    }
+
+    pub async fn call_respond_checkpoint(
+        &self,
+        checkpoint: &ConsensusCheckpointDigest,
+        signature: &Signature,
+    ) -> Result<ExecutionFinalResult, near_fetch::Error> {
+        self.client
+            .call(&self.signer, &self.contract_id, "respond_checkpoint")
+            .args_json(json!({
+                "checkpoint": checkpoint,
+                "signature": signature,
             }))
             .max_gas()
             .transact()
@@ -1151,32 +1189,73 @@ pub enum ChainClient {
     Canton(CantonClient),
 }
 
-async fn update_contract(near: NearClient, contract: watch::Sender<Option<ProtocolState>>) {
-    let new_state = match near.fetch_state().await {
-        Ok(state) => state,
+async fn update_contract_data(
+    near: NearClient,
+    contract: watch::Sender<Option<ProtocolState>>,
+    config: watch::Sender<Config>,
+    checkpoints: EnumMap<Chain, watch::Sender<CheckpointDigest>>,
+) {
+    let reads = vec![Read::State, Read::Config, Read::Checkpoints];
+    let views = match near.read(reads).await {
+        Ok(views) => views,
         Err(error) => {
-            tracing::error!(?error, "could not fetch contract state");
+            tracing::error!(?error, "could not fetch contract data via read");
             return;
         }
     };
 
-    contract.send_if_modified(|old_state| {
-        if let Some(old_state) = old_state {
-            if *old_state == new_state {
-                return false;
+    let mut state_view = None;
+    let mut config_view = None;
+    let mut checkpoints_view = None;
+
+    for view in views {
+        match view {
+            View::State(s) => state_view = Some(s),
+            View::Config(c) => config_view = Some(c),
+            View::Checkpoints(cp) => checkpoints_view = Some(cp),
+        }
+    }
+
+    if let Some(state) = state_view {
+        if let Ok(protocol_state) = ProtocolState::try_from(state) {
+            contract.send_if_modified(|old_state| {
+                if let Some(old_state) = old_state {
+                    if *old_state == protocol_state {
+                        return false;
+                    }
+                }
+                *old_state = Some(protocol_state);
+                true
+            });
+        }
+    }
+
+    if let Some(contract_config) = config_view {
+        if let Ok(config_val) = serde_json::to_value(contract_config) {
+            if let Ok(node_config) =
+                serde_json::from_value::<crate::config::ContractConfig>(config_val)
+            {
+                config.send_if_modified(|c| c.update(node_config));
             }
         }
-        *old_state = Some(new_state);
-        true
-    });
-}
+    }
 
-async fn update_config(near: NearClient, config: watch::Sender<Config>) {
-    let Some(contract_config) = near.fetch_config().await else {
-        return;
-    };
-
-    config.send_if_modified(|config| config.update(contract_config));
+    if let Some(signed_checkpoints) = checkpoints_view {
+        for (chain, sc) in signed_checkpoints {
+            let new_digest = CheckpointDigest {
+                height: sc.checkpoint.height,
+                digest: sc.checkpoint.digest,
+            };
+            let tx = &checkpoints[chain];
+            tx.send_if_modified(|old| {
+                if *old == new_digest {
+                    return false;
+                }
+                *old = new_digest;
+                true
+            });
+        }
+    }
 }
 
 /// Publish the signature and retry if it fails
@@ -1317,16 +1396,19 @@ async fn try_publish_near(
     timestamp: &Instant,
     signature: &Signature,
 ) -> Result<(), near_fetch::Error> {
-    let outcome = near
-        .call_respond(&action.indexed.id, signature)
-        .await
-        .inspect_err(|err| {
-            tracing::error!(
-                sign_id = ?action.indexed.id,
-                ?err,
-                "failed to publish signature",
-            );
-        })?;
+    let outcome = match &action.indexed.kind {
+        SignKind::Checkpoint(checkpoint) => {
+            near.call_respond_checkpoint(checkpoint, signature).await
+        }
+        _ => near.call_respond(&action.indexed.id, signature).await,
+    }
+    .inspect_err(|err| {
+        tracing::error!(
+            sign_id = ?action.indexed.id,
+            ?err,
+            "failed to publish signature",
+        );
+    })?;
 
     let _: () = outcome.json().inspect_err(|err| {
         tracing::error!(
@@ -1945,6 +2027,13 @@ async fn try_publish_sol(
                 "published respond bidirectional solana signature successfully"
             );
         }
+        SignKind::Checkpoint(_) => {
+            tracing::error!(
+                ?sign_id,
+                "try_publish_sol: checkpoint signature publishing not supported on Solana"
+            );
+            return Err(());
+        }
     }
 
     Ok(())
@@ -2005,6 +2094,13 @@ async fn try_publish_hydration(
                 elapsed = ?timestamp.elapsed(),
                 "published respond bidirectional hydration signature successfully"
             );
+        }
+        SignKind::Checkpoint(_) => {
+            tracing::error!(
+                ?sign_id,
+                "try_publish_hydration: checkpoint signature publishing not supported on Hydration"
+            );
+            return Err(());
         }
     }
 

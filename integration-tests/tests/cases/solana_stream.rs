@@ -13,7 +13,8 @@ use mpc_node::protocol::{Chain, IndexedSignRequest, Sign};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{catchup_then_livestream, run_stream, ChainStream};
+use mpc_node::stream::{run_stream, ChainPipeline, ChainStream, ChainStreaming};
+use mpc_primitives::CheckpointDigest;
 use mpc_primitives::{ChainEvent, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION};
 use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;
@@ -43,10 +44,41 @@ async fn stream_solana(config: SolConfig) -> Result<SolanaStream> {
 }
 
 async fn stream_solana_with_backlog(config: SolConfig, backlog: Backlog) -> Result<SolanaStream> {
-    let mut stream =
-        SolanaStream::new(Some(config), backlog).context("failed to create SolanaStream")?;
+    let mut stream = SolanaStream::new(Some(config), backlog.clone())
+        .context("failed to create SolanaStream")?;
     let indexer = ChainStream::start(&mut stream).await?;
-    tokio::spawn(catchup_then_livestream(indexer));
+    let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+    let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+    let node_client = NodeClient::new(&Default::default());
+    // Start from Recovery so that handle_recovery() calls livestream(), which
+    // spawns the live event subscription and initializes the live_rx channel.
+    // Starting in Live would skip this initialization and produce no events.
+    let (pipeline, mut state_rx) = ChainPipeline::new(
+        indexer,
+        cp_rx,
+        backlog,
+        mesh_rx,
+        node_client,
+        0,
+        "test.near".parse().unwrap(),
+    );
+    tokio::spawn(pipeline.run());
+
+    // Wait until the pipeline is live so the WS subscription and anchor are established
+    // before callers begin submitting transactions.
+    timeout(Duration::from_secs(30), async {
+        loop {
+            if *state_rx.borrow() == ChainStreaming::Live {
+                return Ok(());
+            }
+            if state_rx.changed().await.is_err() {
+                anyhow::bail!("pipeline shut down before reaching Live state");
+            }
+        }
+    })
+    .await
+    .context("timed out waiting for pipeline to reach Live state")??;
+
     Ok(stream)
 }
 
@@ -460,6 +492,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let node_client = NodeClient::new(&Default::default());
 
+    let (_, checkpoints_rx) = watch::channel(CheckpointDigest::default());
     let run_handle = tokio::spawn(async move {
         run_stream(
             stream,
@@ -469,6 +502,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
             contract_watcher,
             mesh_rx,
             node_client,
+            checkpoints_rx,
         )
         .await;
     });

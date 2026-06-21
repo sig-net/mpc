@@ -1,27 +1,19 @@
-pub mod selection;
+pub mod consensus;
 
-use self::selection::select_checkpoints;
-use crate::mesh::MeshState;
-use crate::node_client::NodeClient;
 use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt, SignStatus};
-use crate::storage::checkpoint_storage::CheckpointStorage;
+use crate::storage::checkpoint_storage::{CheckpointStorage, MAX_RECENT_CHECKPOINTS};
 
 use anyhow::Context;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PendingTx, SignId, SignKind,
 };
-use sha3::{Digest, Sha3_256};
-use std::collections::{hash_map, HashMap};
+use std::collections::{hash_map, BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 pub use mpc_primitives::Checkpoint;
-
-// Clean up old checkpoints (older than 30 minutes)
-const RETENTION_DURATION: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone)]
 pub struct PendingRequests {
@@ -131,8 +123,8 @@ impl PendingRequests {
         }
     }
 
-    fn from_checkpoint(checkpoint: Checkpoint) -> anyhow::Result<Self> {
-        fn decode(pending: mpc_primitives::PendingTx) -> anyhow::Result<(SignId, BacklogEntry)> {
+    fn from_checkpoint(checkpoint: &Checkpoint) -> anyhow::Result<Self> {
+        fn decode(pending: &mpc_primitives::PendingTx) -> anyhow::Result<(SignId, BacklogEntry)> {
             let entry: BacklogEntry = ciborium::de::from_reader(pending.transaction.as_slice())
                 .with_context(|| {
                     format!(
@@ -144,7 +136,7 @@ impl PendingRequests {
         }
 
         let mut requests = HashMap::new();
-        for pending_tx in checkpoint.pending_requests {
+        for pending_tx in &checkpoint.pending_requests {
             let (sign_id, tx) = decode(pending_tx)?;
             requests.insert(sign_id, tx);
         }
@@ -153,32 +145,6 @@ impl PendingRequests {
             processed_block_height: Some(checkpoint.block_height),
         })
     }
-}
-
-pub fn checkpoint_digest(checkpoint: &Checkpoint) -> anyhow::Result<[u8; 32]> {
-    let mut pending_entries = checkpoint
-        .pending_requests
-        .iter()
-        .map(|pending| {
-            let entry: BacklogEntry = ciborium::de::from_reader(pending.transaction.as_slice())
-                .with_context(|| {
-                    format!(
-                        "failed to deserialize pending backlog entry for sign_id {:?}",
-                        pending.sign_id
-                    )
-                })?;
-            Ok((pending.sign_id, entry.status()))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    pending_entries.sort_by_key(|(sign_id, _)| *sign_id);
-
-    let mut digest = Sha3_256::new();
-    for (sign_id, status) in pending_entries {
-        digest.update(sign_id.request_id);
-        digest.update(status.digest_bytes());
-    }
-
-    Ok(digest.finalize().into())
 }
 
 #[derive(Debug, Clone)]
@@ -213,11 +179,10 @@ impl ExecutionWatchers {
     }
 }
 
-/// Historical checkpoint with timestamp for retention management
+/// Historical checkpoint entry.
 #[derive(Debug, Clone)]
 struct HistoricalCheckpoint {
     checkpoint: Checkpoint,
-    created_at: Instant,
 }
 
 /// Backlog manages pending sign-respond requests across multiple chains.
@@ -226,13 +191,13 @@ struct HistoricalCheckpoint {
 #[derive(Debug, Clone)]
 pub struct Backlog {
     /// Storage for checkpoints, which can be in-memory or persisted to disk
-    storage: CheckpointStorage,
+    pub(crate) storage: CheckpointStorage,
     /// Pending requests indexed by chain
     requests: Arc<HashMap<Chain, RwLock<PendingRequests>>>,
     /// Execution watchers indexed by chain
     execution_watchers: Arc<HashMap<Chain, RwLock<ExecutionWatchers>>>,
     /// Historical checkpoints kept for 30 minutes, indexed by chain
-    historical_checkpoints: Arc<HashMap<Chain, RwLock<Vec<HistoricalCheckpoint>>>>,
+    historical_checkpoints: Arc<HashMap<Chain, RwLock<BTreeMap<u64, HistoricalCheckpoint>>>>,
     /// Total number of pending requests across all chains, wrapped in Arc to make clonable
     total_pending: Arc<AtomicUsize>,
 }
@@ -258,7 +223,7 @@ impl Backlog {
         for chain in Chain::iter() {
             requests.insert(chain, RwLock::new(PendingRequests::new()));
             execution_watchers.insert(chain, RwLock::new(ExecutionWatchers::default()));
-            historical_checkpoints.insert(chain, RwLock::new(Vec::new()));
+            historical_checkpoints.insert(chain, RwLock::new(BTreeMap::new()));
         }
 
         Self {
@@ -291,20 +256,19 @@ impl Backlog {
     /// Get the historical checkpoints for a specific chain.
     /// Panics if the chain is not initialized, which should never happen since we pre-allocate for all chains in `persisted`.
     #[inline]
-    fn checkpoints(&self, chain: &Chain) -> &RwLock<Vec<HistoricalCheckpoint>> {
+    fn checkpoints(&self, chain: &Chain) -> &RwLock<BTreeMap<u64, HistoricalCheckpoint>> {
         self.historical_checkpoints
             .get(chain)
             .expect("chain should be initialized within `persisted` method")
     }
 
-    /// Remember a checkpoint in the historical checkpoints list and clean up old checkpoints
-    async fn remember_checkpoint(&self, checkpoint: &Checkpoint) {
+    /// Remember a checkpoint and keep only the most recent `MAX_RECENT_CHECKPOINTS`.
+    pub(crate) async fn remember_checkpoint(&self, checkpoint: Checkpoint) {
         let mut historical = self.checkpoints(&checkpoint.chain).write().await;
-        historical.push(HistoricalCheckpoint {
-            checkpoint: checkpoint.clone(),
-            created_at: Instant::now(),
-        });
-        historical.retain(|hcp| hcp.created_at.elapsed() < RETENTION_DURATION);
+        historical.insert(checkpoint.block_height, HistoricalCheckpoint { checkpoint });
+        while historical.len() > MAX_RECENT_CHECKPOINTS {
+            historical.pop_first();
+        }
     }
 
     /// Insert a new Sign request into the backlog for the specified chain.
@@ -614,30 +578,43 @@ impl Backlog {
     pub async fn checkpoint(&self, chain: Chain) -> Checkpoint {
         let checkpoint = self.pending(&chain).read().await.checkpoint(chain);
 
-        self.remember_checkpoint(&checkpoint).await;
-
         if let Err(err) = self.storage.persist(&checkpoint).await {
             tracing::warn!(?chain, %err, "failed to persist checkpoint");
         }
 
+        self.remember_checkpoint(checkpoint.clone()).await;
         checkpoint
     }
 
     /// Get the latest checkpoint for a specific chain.
     pub async fn latest_checkpoint(&self, chain: Chain) -> Option<Checkpoint> {
-        self.checkpoints(&chain)
-            .read()
-            .await
-            .iter()
-            .max_by_key(|hcp| hcp.checkpoint.block_height)
+        let historical = self.checkpoints(&chain).read().await;
+        historical
+            .values()
+            .next_back()
             .map(|hcp| hcp.checkpoint.clone())
+    }
+
+    /// Find a historical checkpoint by its consensus digest.
+    pub async fn find_checkpoint_by_digest(
+        &self,
+        chain: Chain,
+        digest: [u8; 32],
+    ) -> Option<Checkpoint> {
+        let historical = self.checkpoints(&chain).read().await;
+        for hcp in historical.values() {
+            if hcp.checkpoint.digest() == digest {
+                return Some(hcp.checkpoint.clone());
+            }
+        }
+        None
     }
 
     /// Find a historical checkpoint by hash
     pub async fn find_checkpoint_by_hash(&self, chain: Chain, hash: u64) -> Option<Checkpoint> {
         let checkpoints = self.checkpoints(&chain).read().await;
 
-        for hcp in checkpoints.iter() {
+        for hcp in checkpoints.values() {
             let mut hasher = hash_map::DefaultHasher::new();
             hcp.checkpoint.hash(&mut hasher);
             if hasher.finish() == hash {
@@ -647,35 +624,30 @@ impl Backlog {
         None
     }
 
-    /// Recover backlog state from a checkpoint
-    /// This is called when a node restarts and needs to catch up
+    /// Recover backlog state from a checkpoint.
+    /// This is called when a node restarts or when it needs to align/regress to consensus.
     pub async fn recover_by_checkpoint(&self, checkpoint: Checkpoint) -> anyhow::Result<()> {
         let chain = checkpoint.chain;
+        let checkpoint_height = checkpoint.block_height;
         tracing::info!(
             ?chain,
-            block_height = checkpoint.block_height,
+            height = checkpoint_height,
             num_pending = checkpoint.pending_requests.len(),
-            "recovering from checkpoint"
+            "recovering backlog to checkpoint"
         );
 
-        let mut pending = self.pending(&checkpoint.chain).write().await;
+        let execution_to_watch = {
+            let mut pending = self.pending(&checkpoint.chain).write().await;
+            let previous_height = pending.processed_block_height().unwrap_or(0);
 
-        let previous_height = pending.processed_block_height().unwrap_or(0);
-        let checkpoint_height = checkpoint.block_height;
-
-        // Execution watchers are ephemeral, we need to get all the execution watchers here
-        let execution_to_watch = if checkpoint_height > previous_height {
+            // Execution watchers are ephemeral, we need to get all the execution watchers here
             let cleared = pending.len();
-            let new_pending = PendingRequests::from_checkpoint(checkpoint)?;
-            let restored = new_pending.len();
-
-            *pending = new_pending;
+            *pending = PendingRequests::from_checkpoint(&checkpoint)?;
+            let restored = pending.len();
 
             // Update total pending count based on the difference between cleared and restored requests
             self.total_pending.fetch_sub(cleared, Ordering::Relaxed);
             self.total_pending.fetch_add(restored, Ordering::Relaxed);
-
-            let execution_to_watch = pending.pending_executions();
 
             tracing::info!(
                 ?chain,
@@ -685,26 +657,19 @@ impl Backlog {
                 restored_requests = restored,
                 "successfully recovered from checkpoint"
             );
-
-            execution_to_watch
-        } else {
-            tracing::warn!(
-                chain = ?checkpoint.chain,
-                checkpoint_block = checkpoint.block_height,
-                previous_height,
-                "checkpoint block is not newer than current block, skipping recovery"
-            );
-
-            Vec::new()
+            pending.pending_executions()
         };
-        drop(pending);
 
         // Need to set the checkpoint as latest in our historical checkpoints
         // when we initially recover for this particular chain.
-        if checkpoint_height > previous_height {
-            let checkpoint = self.pending(&chain).read().await.checkpoint(chain);
+        self.remember_checkpoint(checkpoint).await;
 
-            self.remember_checkpoint(&checkpoint).await;
+        // Clear execution watchers whose source chain is the recovered chain
+        for destination_chain in Chain::iter() {
+            let mut watchers = self.watchers(&destination_chain).write().await;
+            watchers
+                .watchers
+                .retain(|_, watcher| watcher.tx.source_chain != chain);
         }
 
         // now repopulate our execution watchers
@@ -716,74 +681,6 @@ impl Backlog {
         }
 
         Ok(())
-    }
-
-    /// Recover backlog state by selecting checkpoints from active participants in the mesh network.
-    pub async fn recover(
-        &self,
-        mesh_state: &MeshState,
-        node_client: &NodeClient,
-        threshold: usize,
-        chains: &[Chain],
-    ) {
-        tracing::info!("attempting to recover from latest checkpoints via node selection");
-
-        // Load local checkpoints first
-        let mut local_checkpoints = HashMap::new();
-        for &chain in chains {
-            match self.storage.load_latest(chain).await {
-                Ok(Some(checkpoint)) => {
-                    tracing::info!(
-                        ?chain,
-                        block_height = checkpoint.block_height,
-                        "loaded local checkpoint"
-                    );
-                    local_checkpoints.insert(chain, checkpoint);
-                }
-                Ok(None) => {
-                    tracing::info!(?chain, "no local checkpoint found");
-                }
-                Err(err) => {
-                    tracing::warn!(?chain, %err, "failed to load local checkpoint");
-                }
-            }
-        }
-
-        // p2p node selection to find checkpoints.
-        // Fetches all checkpoints from active participants and creates a selected checkpoint:
-        // - sorts all checkpoints by block height
-        // - selects threshold lowest block height checkpoint
-        let mut remote_checkpoints =
-            select_checkpoints(mesh_state, node_client, threshold, chains).await;
-
-        if local_checkpoints.is_empty() && remote_checkpoints.is_empty() {
-            tracing::info!("no selected checkpoints found, starting with empty state");
-            return;
-        }
-
-        for &chain in chains {
-            let local_checkpoint = local_checkpoints.remove(&chain);
-            let remote_checkpoint = remote_checkpoints.remove(&chain);
-
-            let Some(checkpoint) =
-                select_recovery_checkpoint(chain, local_checkpoint, remote_checkpoint)
-            else {
-                continue;
-            };
-            tracing::info!(
-                ?chain,
-                block_height = checkpoint.block_height,
-                "found selected checkpoint, attempting recovery"
-            );
-            if let Err(err) = self.recover_by_checkpoint(checkpoint).await {
-                tracing::warn!(
-                    ?chain,
-                    %err,
-                    "failed to recover from selected checkpoint, continuing with empty state"
-                );
-                continue;
-            }
-        }
     }
 }
 
@@ -894,6 +791,7 @@ impl BacklogEntry {
                 .map(|tx| tx.target_chain)
                 .or_else(|| event.target_chain().ok()),
             SignKind::RespondBidirectional(_) => None,
+            SignKind::Checkpoint(_) => None,
         }
     }
 
@@ -920,32 +818,9 @@ impl BacklogEntry {
                 "BidirectionalRespondPending"
             }
             (SignKind::RespondBidirectional(_), _) => "RespondBidirectional",
+            (SignKind::Checkpoint(_), _) => "Checkpoint",
         }
     }
-}
-
-fn select_recovery_checkpoint(
-    chain: Chain,
-    local_checkpoint: Option<Checkpoint>,
-    remote_checkpoint: Option<Checkpoint>,
-) -> Option<Checkpoint> {
-    let checkpoint = match (local_checkpoint, remote_checkpoint) {
-        (Some(local), None) => local,
-        (None, Some(remote)) => remote,
-        (Some(local), Some(remote)) => {
-            if local.block_height >= remote.block_height {
-                local
-            } else {
-                remote
-            }
-        }
-        (None, None) => {
-            tracing::warn!(?chain, "no checkpoint available for recovery");
-            return None;
-        }
-    };
-
-    Some(checkpoint)
 }
 
 #[cfg(test)]
@@ -1374,8 +1249,8 @@ mod tests {
         assert_eq!(checkpoint.chain, Chain::Ethereum);
         assert_eq!(checkpoint.pending_requests.len(), 2);
         assert_eq!(
-            checkpoint_digest(&checkpoint).unwrap(),
-            digest_hex("287237dc78e67eb9695b1472da0353a64a97a2b76d643cf50b4ce0ccdb28073b")
+            checkpoint.digest(),
+            digest_hex("1375def17d26f1771024dc8a2fd7814b216d4e9d2922517364d7515a77f70ca6")
         );
     }
 
@@ -1429,10 +1304,7 @@ mod tests {
         let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
         // Same data should be equal
         assert_eq!(checkpoint1, checkpoint2);
-        assert_eq!(
-            checkpoint_digest(&checkpoint1).unwrap(),
-            checkpoint_digest(&checkpoint2).unwrap()
-        );
+        assert_eq!(checkpoint1.digest(), checkpoint2.digest());
 
         // Different block height should not be equal
         let mut checkpoint3 = pending2.checkpoint(Chain::Ethereum);
@@ -1472,12 +1344,12 @@ mod tests {
         let checkpoint2 = pending2.checkpoint(Chain::Ethereum);
 
         assert_eq!(
-            checkpoint_digest(&checkpoint1).unwrap(),
-            digest_hex("009a777d41ac9c8dbae41c1b1a582142b68923e350975eb055e695ff2796d0df")
+            checkpoint1.digest(),
+            digest_hex("9f63c8dcffa4b078f57c0be1d0031969f45023a56a81309951ed4e48e78cee06")
         );
         assert_eq!(
-            checkpoint_digest(&checkpoint2).unwrap(),
-            digest_hex("6fc5d31bd61077c86d7fc7ec3df209b9bd6ee18cb17c3bc34b1302c996bb58b0")
+            checkpoint2.digest(),
+            digest_hex("216925686b085ef868ae5e3c40d1ce616f71374a3d1b82228dc7abde8adebe24")
         );
     }
 
@@ -1504,13 +1376,10 @@ mod tests {
 
         assert_eq!(checkpoint, deserialized);
         assert_eq!(
-            checkpoint_digest(&checkpoint).unwrap(),
-            digest_hex("ebe96b88e51f1c6a128563289f3cf83b6d282b40f2dafc81fef7f2f073f5436f")
+            checkpoint.digest(),
+            digest_hex("b41606a6b5be62aa9098f55058195c270e08aeffee149e0b0f299538197cde19")
         );
-        assert_eq!(
-            checkpoint_digest(&checkpoint).unwrap(),
-            checkpoint_digest(&deserialized).unwrap()
-        );
+        assert_eq!(checkpoint.digest(), deserialized.digest());
 
         let (sign_id, restored_tx) = {
             let pending = &deserialized.pending_requests[0];

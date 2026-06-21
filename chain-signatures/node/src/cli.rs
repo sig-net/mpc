@@ -10,6 +10,7 @@ use crate::protocol::presignature::Presignature;
 use crate::protocol::signature::SignatureSpawnerTask;
 use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
+use crate::protocol::Chain;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
@@ -21,9 +22,11 @@ use crate::{
 
 use clap::Parser;
 use deadpool_redis::Runtime;
+use enum_map::EnumMap;
 use k256::sha2::Sha256;
 use local_ip_address::local_ip;
 use mpc_keys::hpke;
+use mpc_primitives::CheckpointDigest;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey, Signer};
 use secrecy::ExposeSecret;
@@ -354,7 +357,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 network,
             });
             let (config_tx, config_rx) = watch::channel(config);
-
+            let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
             let node = Node::new();
             let node_watcher = node.watch();
 
@@ -388,7 +391,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             tracing::info!("protocol initialized");
             tokio::spawn(sync.run());
-            tokio::spawn(rpc.run(contract_state_tx, config_tx.clone()));
+            tokio::spawn(rpc.run(contract_state_tx, config_tx.clone(), checkpoints_tx));
 
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics().await;
@@ -425,6 +428,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                         contract_watcher.clone(),
                         mesh_state.clone(),
                         client.clone(),
+                        checkpoints_rx[Chain::Ethereum].clone(),
                     ));
                 }
                 Err(err) => {
@@ -441,6 +445,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     contract_watcher.clone(),
                     mesh_state.clone(),
                     client.clone(),
+                    checkpoints_rx[Chain::Solana].clone(),
                 ));
             }
             tokio::spawn(indexer_hydration::run(
@@ -450,6 +455,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher.clone(),
                 mesh_state.clone(),
                 client.clone(),
+                checkpoints_rx[Chain::Hydration].clone(),
             ));
             if let Some(canton_stream) = indexer_canton::CantonStream::new(canton, backlog.clone())
             {
@@ -461,6 +467,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     contract_watcher.clone(),
                     mesh_state.clone(),
                     client.clone(),
+                    checkpoints_rx[Chain::Canton].clone(),
                 ));
             }
             tracing::info!("protocol http server spawned");
@@ -530,6 +537,16 @@ fn calculate_digest(
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&result[..8]);
     i64::from_le_bytes(bytes)
+}
+
+fn checkpoint_watchers() -> (
+    EnumMap<Chain, watch::Sender<CheckpointDigest>>,
+    EnumMap<Chain, watch::Receiver<CheckpointDigest>>,
+) {
+    let channels = EnumMap::from_fn(|_| watch::channel(CheckpointDigest::default()));
+    let checkpoints_tx = EnumMap::from_fn(|chain| channels[chain].0.clone());
+    let checkpoints_rx = EnumMap::from_fn(|chain| channels[chain].1.clone());
+    (checkpoints_tx, checkpoints_rx)
 }
 
 #[cfg(test)]

@@ -5,10 +5,14 @@ use integration_tests::canton::{
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
 use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
+use mpc_node::mesh::MeshState;
+use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest};
 use mpc_node::sign_bidirectional::{hash_rlp_data, SignBidirectionalEventExt};
-use mpc_node::stream::{catchup_then_livestream, ChainStream};
-use mpc_primitives::{ChainEvent, ScalarExt, SignKind, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_node::stream::{ChainPipeline, ChainStream, ChainStreaming};
+use mpc_primitives::{
+    ChainEvent, CheckpointDigest, ScalarExt, SignKind, Signature, LATEST_MPC_KEY_VERSION,
+};
 use serde_json::json;
 use serial_test::serial;
 use std::collections::HashSet;
@@ -20,10 +24,37 @@ use tokio::time::timeout;
 /// Accepts Backlog as parameter (needed for checkpoint tests).
 async fn stream_canton(sandbox: &CantonSandbox, backlog: Backlog) -> Result<CantonStream> {
     let config = sandbox.get_config();
-    let mut stream =
-        CantonStream::new(Some(config), backlog).context("failed to create CantonStream")?;
+    let mut stream = CantonStream::new(Some(config), backlog.clone())
+        .context("failed to create CantonStream")?;
     let indexer = ChainStream::start(&mut stream).await?;
-    tokio::spawn(catchup_then_livestream(indexer));
+    let (_cp_tx, cp_rx) = tokio::sync::watch::channel(CheckpointDigest::default());
+    let (_mesh_tx, mesh_rx) = tokio::sync::watch::channel(MeshState::default());
+    let node_client = NodeClient::new(&Default::default());
+    let (pipeline, mut state_rx) = ChainPipeline::new(
+        indexer,
+        cp_rx,
+        backlog,
+        mesh_rx,
+        node_client,
+        0,
+        "test.near".parse().unwrap(),
+    );
+    tokio::spawn(pipeline.run());
+
+    // Wait until the pipeline is live so the subscription and anchor are established
+    // before callers begin submitting transactions.
+    timeout(Duration::from_secs(30), async {
+        loop {
+            if *state_rx.borrow() == ChainStreaming::Live {
+                return Ok(());
+            }
+            if state_rx.changed().await.is_err() {
+                anyhow::bail!("pipeline shut down before reaching Live state");
+            }
+        }
+    })
+    .await
+    .context("timed out waiting for pipeline to reach Live state")??;
     Ok(stream)
 }
 

@@ -12,8 +12,9 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
-    IndexedSignRequest, RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignId,
-    Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+    CheckpointDigest, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
+    SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
+    MAX_SECP256K1_SCALAR,
 };
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{twox_128, H256};
@@ -373,6 +374,7 @@ pub async fn run(
     mut contract_watcher: ContractStateWatcher,
     mut mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
+    mut checkpoints_rx: watch::Receiver<CheckpointDigest>,
 ) {
     let Some(hydration) = hydration else {
         tracing::warn!("hydration indexer is disabled");
@@ -403,13 +405,49 @@ pub async fn run(
     };
     let legacy_rpc = LegacyRpcMethods::<SubstrateConfig>::new(rpc_client);
 
-    // Wait for threshold to be available
-    crate::stream::ops::recover_backlog(
+    let threshold = contract_watcher.wait_threshold().await;
+    crate::mesh::wait_threshold_active(&mut mesh_state, threshold).await;
+
+    // Load local checkpoint from storage first
+    match backlog.storage.load_latest(Chain::Hydration).await {
+        Ok(Some(checkpoint)) => {
+            tracing::info!(
+                chain = ?Chain::Hydration,
+                height = checkpoint.block_height,
+                "loaded local checkpoint"
+            );
+            if let Err(err) = backlog.recover_by_checkpoint(checkpoint).await {
+                tracing::warn!(chain = ?Chain::Hydration, %err, "failed to recover from local checkpoint");
+            }
+        }
+        Ok(None) => {
+            tracing::info!(chain = ?Chain::Hydration, "no local checkpoint found");
+        }
+        Err(err) => {
+            tracing::warn!(chain = ?Chain::Hydration, %err, "failed to load local checkpoint");
+        }
+    }
+
+    // Load historical checkpoints from storage
+    match backlog.storage.load_history(Chain::Hydration).await {
+        Ok(history) => {
+            for checkpoint in history {
+                backlog.remember_checkpoint(checkpoint).await;
+            }
+        }
+        Err(err) => {
+            tracing::warn!(chain = ?Chain::Hydration, %err, "failed to load historical checkpoints");
+        }
+    }
+
+    // Align with consensus
+    crate::backlog::consensus::align_backlog_with_consensus(
+        Chain::Hydration,
         &backlog,
-        &mut contract_watcher,
+        &mut checkpoints_rx,
         &mut mesh_state,
         &node_client,
-        Chain::Hydration,
+        contract_watcher.account_id(),
     )
     .await;
 

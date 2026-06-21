@@ -17,6 +17,15 @@ use std::time::Duration;
 
 const MAX_SIGNATURES_FOR_FAST_CATCHUP: usize = 1000;
 
+/// The max amount of batches to fetch concurrently
+const MAX_CONCURRENT_FETCH: usize = 5;
+
+/// The max chunk size for fetching slots and blocks per batch.
+const MAX_CHUNK_SIZE: usize = 50;
+
+/// The max chunk size allowed for fetching concurrently.
+pub const MAX_CONCURRENT_CHUNK_SIZE: usize = MAX_CONCURRENT_FETCH * MAX_CHUNK_SIZE;
+
 #[derive(Clone)]
 pub struct SolConfig {
     /// The solana account secret key used to sign solana respond txn.
@@ -340,9 +349,6 @@ impl SolanaClient {
         &self,
         slots: BTreeSet<u64>,
     ) -> BTreeMap<u64, SolanaCatchupBlock> {
-        const MAX_CONCURRENT_FETCH: usize = 5;
-        const MAX_CHUNK_SIZE: usize = 50;
-
         tracing::trace!(total_slots = slots.len(), "fetching blocks for slots...");
         let slots_vec: Vec<u64> = slots.into_iter().collect();
         let chunks: Vec<Vec<u64>> = slots_vec

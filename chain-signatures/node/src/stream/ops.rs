@@ -1,8 +1,5 @@
 use crate::backlog::Backlog;
-
-use crate::mesh::{wait_threshold_active, MeshState};
 use crate::metrics::requests::record_indexing_step_reached;
-use crate::node_client::NodeClient;
 use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
@@ -12,7 +9,7 @@ use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, ExecutionOutcome, RespondBidirectionalEvent, SignId,
     SignKind, Signature, SignatureRespondedEvent,
 };
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 
 pub(crate) async fn process_sign_request(
     sign_request: IndexedSignRequest,
@@ -20,7 +17,10 @@ pub(crate) async fn process_sign_request(
     backlog: Backlog,
     caught_up: bool,
 ) -> anyhow::Result<()> {
-    record_indexing_step_reached(sign_request.chain);
+    // Ethereum records its own indexing latency (includes finality delay) from the block timestamp in `parse_block`.
+    if sign_request.chain != Chain::Ethereum {
+        record_indexing_step_reached(sign_request.chain);
+    }
 
     if matches!(sign_request.kind, SignKind::RespondBidirectional(_)) {
         anyhow::bail!("Unexpected sign request kind");
@@ -36,27 +36,6 @@ pub(crate) async fn process_sign_request(
     }
 
     Ok(())
-}
-
-pub(crate) async fn recover_backlog(
-    backlog: &Backlog,
-    contract_watcher: &mut ContractStateWatcher,
-    mesh_state: &mut watch::Receiver<MeshState>,
-    node_client: &NodeClient,
-    source_chain: Chain,
-) {
-    // Recover backlog before doing anything.
-    // Wait for threshold to be available
-    let threshold = contract_watcher.wait_threshold().await;
-    if threshold == 0 {
-        return;
-    }
-    wait_threshold_active(mesh_state, threshold).await;
-
-    let mesh_state = mesh_state.borrow().clone();
-    backlog
-        .recover(&mesh_state, node_client, threshold, &[source_chain])
-        .await;
 }
 
 pub(crate) async fn requeue_pending_sign_requests(
@@ -165,6 +144,11 @@ pub(crate) async fn process_respond_event(
         SignKind::SignBidirectional(event) => event,
         SignKind::RespondBidirectional(_) => {
             anyhow::bail!("unexpected sign type: RespondBidirectional should not be generated from a sign event");
+        }
+        SignKind::Checkpoint(_) => {
+            anyhow::bail!(
+                "unexpected sign type: Checkpoint should not be generated from a sign event"
+            );
         }
     };
 
@@ -397,6 +381,42 @@ pub async fn process_execution_confirmed(
     Ok(())
 }
 
+pub(crate) async fn process_block_event(
+    chain: Chain,
+    block: u64,
+    backlog: &Backlog,
+    sign_tx: &mpsc::Sender<Sign>,
+    caught_up: bool,
+) {
+    let Some(checkpoint) = backlog.set_processed_block(chain, block).await else {
+        crate::metrics::indexers::LATEST_BLOCK_NUMBER
+            .with_label_values(&[chain.as_str(), "finalized"])
+            .set(block as i64);
+        return;
+    };
+
+    tracing::info!(block, ?checkpoint, %chain, "created checkpoint");
+    if caught_up {
+        let digest = checkpoint.digest();
+        let epsilon = mpc_crypto::derive_epsilon_checkpoint(chain, checkpoint.block_height);
+        let sign = Sign::Checkpoint(IndexedSignRequest::checkpoint(
+            mpc_primitives::ConsensusCheckpointDigest {
+                chain,
+                height: checkpoint.block_height,
+                digest,
+            },
+            epsilon,
+        ));
+        if let Err(err) = sign_tx.send(sign).await {
+            tracing::error!(?err, %chain, "failed to enqueue checkpoint sign request");
+        }
+    }
+
+    crate::metrics::indexers::LATEST_BLOCK_NUMBER
+        .with_label_values(&[chain.as_str(), "finalized"])
+        .set(block as i64);
+}
+
 /// Decode a [u8; 32] sender into its canonical on-chain address string.
 /// Canton is intentionally absent: its sender is a variable-length party ID
 /// hashed irreversibly into the [u8; 32] slot, so callers with access to the
@@ -417,13 +437,13 @@ mod tests {
     use super::*;
     use crate::backlog::Backlog;
     use crate::mesh::connection::NodeStatus;
-    use crate::mesh::wait_threshold_active;
-    use crate::node_client::NodeClient;
-    use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
+    use crate::mesh::{wait_threshold_active, MeshState};
+    use crate::protocol::contract::primitives::ParticipantInfo;
     use crate::sign_bidirectional::SignStatus;
     use crate::storage::checkpoint_storage::CheckpointStorage;
     use crate::stream::ops::process_execution_confirmed;
     use crate::util::current_unix_timestamp;
+
     use alloy::primitives::{Address, B256};
     use cait_sith::protocol::Participant;
     use k256::{ProjectivePoint, Scalar};
@@ -431,7 +451,7 @@ mod tests {
     use near_primitives::types::AccountId;
     use solana_sdk::pubkey::Pubkey;
     use std::time::Duration;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, watch};
     use tokio::time::timeout;
 
     fn test_indexed_request(
@@ -563,24 +583,14 @@ mod tests {
         mesh_state.update(participant, NodeStatus::Active, ParticipantInfo::new(0));
         let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
         wait_threshold_active(&mut mesh_rx, threshold).await;
-
-        let account_id: AccountId = "test.near".parse().unwrap();
-        let public_key = ProjectivePoint::GENERATOR.to_affine();
-        let participants = Participants::default();
-        let (mut contract_watcher, _tx) =
-            ContractStateWatcher::with_running(&account_id, public_key, threshold, participants);
-
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
-        let node_client = NodeClient::new(&Default::default());
-
-        recover_backlog(
-            &backlog,
-            &mut contract_watcher,
-            &mut mesh_rx,
-            &node_client,
-            Chain::Solana,
-        )
-        .await;
+        let checkpoint = backlog
+            .storage
+            .load_latest(Chain::Solana)
+            .await
+            .unwrap()
+            .unwrap();
+        backlog.recover_by_checkpoint(checkpoint).await.unwrap();
 
         requeue_pending_sign_requests(&backlog, Chain::Solana, sign_tx).await;
 
@@ -876,25 +886,16 @@ mod tests {
         mesh_state.update(participant, NodeStatus::Active, ParticipantInfo::new(0));
         let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
         wait_threshold_active(&mut mesh_rx, threshold).await;
-
-        let account_id: AccountId = "test.near".parse().unwrap();
-        let public_key = ProjectivePoint::GENERATOR.to_affine();
-        let participants = Participants::default();
-        let (mut contract_watcher, _tx) =
-            ContractStateWatcher::with_running(&account_id, public_key, threshold, participants);
-
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
-        let node_client = NodeClient::new(&Default::default());
         let recovered = Backlog::persisted(storage.clone());
 
-        recover_backlog(
-            &recovered,
-            &mut contract_watcher,
-            &mut mesh_rx,
-            &node_client,
-            tx.source_chain,
-        )
-        .await;
+        let checkpoint = recovered
+            .storage
+            .load_latest(tx.source_chain)
+            .await
+            .unwrap()
+            .unwrap();
+        recovered.recover_by_checkpoint(checkpoint).await.unwrap();
 
         requeue_pending_sign_requests(&recovered, tx.source_chain, sign_tx).await;
 

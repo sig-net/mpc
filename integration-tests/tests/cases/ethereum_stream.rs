@@ -17,11 +17,11 @@ use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign};
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{catchup_then_livestream, run_stream, ChainStream};
+use mpc_node::stream::{run_stream, ChainPipeline, ChainStream, ChainStreaming};
 use mpc_node::util::current_unix_timestamp;
 use mpc_primitives::{
-    ChainEvent, SignArgs, SignBidirectionalEvent as NodeSignBidirectionalEvent, SignId, SignKind,
-    LATEST_MPC_KEY_VERSION,
+    ChainEvent, CheckpointDigest, SignArgs, SignBidirectionalEvent as NodeSignBidirectionalEvent,
+    SignId, SignKind, LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
 use std::time::Duration;
@@ -379,9 +379,36 @@ async fn stream_ethereum(
     ctx: &EthereumTestEnvironment,
     backlog: Backlog,
 ) -> Result<StartedEthereumStream> {
-    let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog).await?;
+    let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
     let indexer = stream.start().await?;
-    let indexer_task = tokio::spawn(catchup_then_livestream(indexer));
+    let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+    let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+    let node_client = NodeClient::new(&Default::default());
+    let (pipeline, mut state_rx) = ChainPipeline::new(
+        indexer,
+        cp_rx,
+        backlog,
+        mesh_rx,
+        node_client,
+        0,
+        "test.near".parse().unwrap(),
+    );
+    let indexer_task = tokio::spawn(pipeline.run());
+
+    // Wait until the pipeline is live so the subscription and anchor are established
+    // before callers begin submitting transactions.
+    timeout(Duration::from_secs(30), async {
+        loop {
+            if *state_rx.borrow() == ChainStreaming::Live {
+                return Ok(());
+            }
+            if state_rx.changed().await.is_err() {
+                anyhow::bail!("pipeline shut down before reaching Live state");
+            }
+        }
+    })
+    .await
+    .context("timed out waiting for pipeline to reach Live state")??;
 
     Ok(StartedEthereumStream {
         stream,
@@ -432,6 +459,7 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
+    let (_, checkpoints_rx) = watch::channel(CheckpointDigest::default());
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
@@ -440,6 +468,7 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
         contract_watcher,
         mesh_rx,
         NodeClient::new(&Default::default()),
+        checkpoints_rx,
     ));
 
     let mut saw_replayed_payload = false;
@@ -607,6 +636,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
+    let (_, checkpoints_rx) = watch::channel(CheckpointDigest::default());
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
@@ -615,6 +645,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         contract_watcher,
         mesh_rx,
         NodeClient::new(&Default::default()),
+        checkpoints_rx,
     ));
 
     let mut saw_execution_follow_up = false;
@@ -792,6 +823,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
+    let (_, checkpoints_rx) = watch::channel(CheckpointDigest::default());
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
@@ -800,6 +832,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         contract_watcher,
         mesh_rx,
         NodeClient::new(&Default::default()),
+        checkpoints_rx,
     ));
 
     let mut saw_catchup_flush = false;

@@ -67,6 +67,7 @@ const SIGN_POSIT_INBOX_LABEL: &str = "sign_posit_inbox";
 pub enum Sign {
     Request(IndexedSignRequest),
     Completion(SignId),
+    Checkpoint(IndexedSignRequest),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1284,16 +1285,18 @@ impl SignGenerator {
                         self.participants.clone(),
                         is_proposer,
                     ) {
-                        if let Err(err) = ctx
-                            .backlog
-                            .mark_publishing(self.indexed.chain, &sign_id, publish)
-                            .await
-                        {
-                            tracing::warn!(
-                                ?sign_id,
-                                ?err,
-                                "failed to mark publishing for sign request"
-                            );
+                        if !matches!(self.indexed.kind, SignKind::Checkpoint(_)) {
+                            if let Err(err) = ctx
+                                .backlog
+                                .mark_publishing(self.indexed.chain, &sign_id, publish)
+                                .await
+                            {
+                                tracing::warn!(
+                                    ?sign_id,
+                                    ?err,
+                                    "failed to mark publishing for sign request"
+                                );
+                            }
                         }
                     }
 
@@ -1578,7 +1581,9 @@ impl SignatureSpawner {
             Duration::from_secs(expected_response_time_secs).saturating_sub(already_elapsed);
         let is_proposer = Arc::new(AtomicBool::new(false));
         // prevent incrementing delayed metric for already delayed requests
-        if remaining_time > Duration::from_secs(0) {
+        if remaining_time > Duration::from_secs(0)
+            && !matches!(indexed.kind, SignKind::Checkpoint(_))
+        {
             let is_proposer = Arc::clone(&is_proposer);
             let watcher = tokio::spawn(async move {
                 tokio::time::sleep(remaining_time).await;
@@ -1715,7 +1720,7 @@ impl SignatureSpawner {
             Sign::Completion(sign_id) => {
                 self.handle_completion(sign_id);
             }
-            Sign::Request(request) => {
+            Sign::Request(request) | Sign::Checkpoint(request) => {
                 let sign_id = request.id;
 
                 // Skip if we already have a task handling this request.

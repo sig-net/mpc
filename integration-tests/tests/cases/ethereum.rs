@@ -240,12 +240,12 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     let checkpoint = checkpoints
         .get(&Chain::Ethereum)
         .expect("checkpoint not found for eth");
-    let checkpoint_height_after_request = checkpoint.block_height;
+    let checkpoint_height = checkpoint.block_height;
     let checkpoint_interval = Chain::Ethereum
         .checkpoint_interval()
         .expect("ethereum checkpoint interval should be configured");
     tracing::info!(
-        checkpoint_height_after_request,
+        checkpoint_height,
         checkpoint_interval,
         pending_count = checkpoint.pending_requests.len(),
         "pending transactions in checkpoint"
@@ -296,7 +296,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     produce_empty_eth_blocks(&client, requester, checkpoint_interval).await?;
 
     let min_next_checkpoint_height =
-        ((checkpoint_height_after_request / checkpoint_interval) + 1) * checkpoint_interval;
+        ((checkpoint_height / checkpoint_interval) + 1) * checkpoint_interval;
     let checkpoint = wait_node_checkpoint(
         &cluster,
         node_idx,

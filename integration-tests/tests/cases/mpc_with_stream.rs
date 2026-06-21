@@ -39,10 +39,29 @@ async fn test_sign() {
         .await;
 
     let timeout = Duration::from_secs(10);
-    let actions = network.assert_actions(1, timeout).await;
-
-    assert_eq!(actions.len(), 1);
-    let action_str = actions.iter().next().unwrap();
+    let start = std::time::Instant::now();
+    let actions = loop {
+        let rpc_actions = network.output.rpc_actions.lock().await;
+        let filtered_actions: Vec<_> = rpc_actions
+            .iter()
+            .filter(|action| !action.contains("kind: Checkpoint"))
+            .cloned()
+            .collect();
+        if !filtered_actions.is_empty() {
+            break filtered_actions;
+        }
+        if start.elapsed() > timeout {
+            drop(rpc_actions);
+            network.print_actions().await;
+            panic!(
+                "timed out waiting for 1 signature, got {}",
+                filtered_actions.len()
+            );
+        }
+        drop(rpc_actions);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let action_str = actions.first().unwrap();
     assert!(
         action_str.contains("RpcAction::Publish"),
         "unexpected rpc action {action_str}"
@@ -99,12 +118,31 @@ async fn check_channel_contention(
         }
     }
 
-    let actions = network
-        .assert_actions(expected_signatures, Duration::from_secs(120))
-        .await;
-
-    assert_eq!(actions.len(), expected_signatures);
-    let action_str = actions.iter().next().unwrap();
+    let timeout = Duration::from_secs(120);
+    let start = std::time::Instant::now();
+    let actions = loop {
+        let rpc_actions = network.output.rpc_actions.lock().await;
+        let filtered_actions: Vec<_> = rpc_actions
+            .iter()
+            .filter(|action| !action.contains("kind: Checkpoint"))
+            .cloned()
+            .collect();
+        if filtered_actions.len() >= expected_signatures {
+            break filtered_actions;
+        }
+        if start.elapsed() > timeout {
+            drop(rpc_actions);
+            network.print_actions().await;
+            panic!(
+                "timed out waiting for {} signatures, got {}",
+                expected_signatures,
+                filtered_actions.len()
+            );
+        }
+        drop(rpc_actions);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let action_str = actions.first().unwrap();
     assert!(
         action_str.contains("RpcAction::Publish"),
         "unexpected rpc action {action_str}"

@@ -304,12 +304,34 @@ impl CantonIndexer {
         }
 
         loop {
-            let Some(update) = self.next_update().await else {
-                anyhow::bail!("canton WebSocket closed during catchup; reconnecting");
-            };
-            let offset = self.process_update(&update).await?;
-            if offset >= target_offset {
-                return Ok(());
+            // Try to get the next update with a conservative timeout during catchup.
+            // If the WebSocket is silent for a short period, we check the current ledger end.
+            match tokio::time::timeout(Duration::from_secs(2), self.next_update()).await {
+                Ok(Some(update)) => {
+                    let offset = self.process_update(&update).await?;
+                    if offset >= target_offset {
+                        return Ok(());
+                    }
+                }
+                Ok(None) => {
+                    anyhow::bail!("canton WebSocket closed during catchup; reconnecting");
+                }
+                Err(_) => {
+                    // Timeout elapsed. Check if the global ledger end has progressed past target_offset.
+                    // This is necessary in cases where we have no catchup events in this period of time.
+                    // next_update only gives us an update when there is a new event, so this timeout
+                    // allows us to transition to live streaming
+                    let current_ledger_end = self.client.fetch_ledger_end().await?;
+                    if current_ledger_end >= target_offset {
+                        tracing::info!(
+                            current_ledger_end,
+                            target_offset,
+                            "catchup timeout: ledger has passed target offset with no new updates for our party"
+                        );
+                        self.last_seen_offset = target_offset;
+                        return Ok(());
+                    }
+                }
             }
         }
     }

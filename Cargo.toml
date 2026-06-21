@@ -12,13 +12,14 @@ exclude = ["infra/scripts/generate_keys"]
 resolver = "2"
 
 [workspace.package]
-version = "1.16.3"
+version = "1.16.4"
 
 [workspace.dependencies]
 alloy = { version = "=1.0.38", features = ["contract", "json"] }
 anyhow = { version = "1.0.95", features = ["backtrace"] }
 backon = "0.4"
-borsh = "1.6.1"
+borsh = { version = "1.6.1", features = ["derive"] }
+enum-map = "2.7.3"
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
 ciborium = "0.2.2"
 clap = { version = "4.5.4", features = ["derive", "env"] }
