@@ -4,6 +4,7 @@ use crate::gcp::GcpService;
 use crate::indexer_eth::EthereumStream;
 use crate::indexer_sol::SolanaStream;
 use crate::mesh::Mesh;
+use crate::metrics::indexers::PrometheusChainTelemetry;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
@@ -414,7 +415,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 eth_configured = eth.is_some(),
                 "initializing ethereum indexer stream"
             );
-            match EthereumStream::new(eth, backlog.clone()).await {
+            let eth_telemetry = PrometheusChainTelemetry::new(Chain::Ethereum);
+            match EthereumStream::new(eth, backlog.clone(), eth_telemetry.clone()).await {
                 Ok(eth_stream) => {
                     tracing::info!("ethereum indexer stream created successfully");
                     tokio::spawn(run_stream(
@@ -422,6 +424,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                         sign_tx.clone(),
                         rpc_channel.clone(),
                         backlog.clone(),
+                        eth_telemetry.clone(),
                         contract_watcher.clone(),
                         mesh_state.clone(),
                         client.clone(),
@@ -433,27 +436,34 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 }
             };
 
+            let solana_telemetry = PrometheusChainTelemetry::new(Chain::Solana);
             if let Some(sol_stream) = SolanaStream::new(sol.clone(), backlog.clone()) {
                 tokio::spawn(run_stream(
                     sol_stream,
                     sign_tx.clone(),
                     rpc_channel.clone(),
                     backlog.clone(),
+                    solana_telemetry.clone(),
                     contract_watcher.clone(),
                     mesh_state.clone(),
                     client.clone(),
                     checkpoints_rx[Chain::Solana].clone(),
                 ));
             }
+
+            let hydration_telemetry = PrometheusChainTelemetry::new(Chain::Hydration);
             tokio::spawn(indexer_hydration::run(
                 hydration,
                 sign_tx.clone(),
                 backlog.clone(),
+                hydration_telemetry,
                 contract_watcher.clone(),
                 mesh_state.clone(),
                 client.clone(),
                 checkpoints_rx[Chain::Hydration].clone(),
             ));
+
+            let canton_telemetry = PrometheusChainTelemetry::new(Chain::Canton);
             if let Some(canton_stream) = indexer_canton::CantonStream::new(canton, backlog.clone())
             {
                 tokio::spawn(run_stream(
@@ -461,6 +471,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                     sign_tx.clone(),
                     rpc_channel.clone(),
                     backlog.clone(),
+                    canton_telemetry,
                     contract_watcher.clone(),
                     mesh_state.clone(),
                     client.clone(),

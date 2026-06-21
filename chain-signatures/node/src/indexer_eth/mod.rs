@@ -22,9 +22,9 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, IndexedSignRequest, SignArgs,
-    SignId, Signature as MpcSignature, SignatureRespondedEvent, StateManager,
-    LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+    BidirectionalTx, BidirectionalTxId, ChainEvent, ChainTelemetry, ExecutionOutcome,
+    IndexedSignRequest, SignArgs, SignId, Signature as MpcSignature, SignatureRespondedEvent,
+    StateManager, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -836,9 +836,10 @@ impl EthereumClient {
     }
 }
 
-pub struct EthereumIndexer<S: StateManager> {
+pub struct EthereumIndexer<S: StateManager, T: ChainTelemetry> {
     eth: EthConfig,
     state_manager: S,
+    telemetry: T,
     client: Arc<EthereumClient>,
     events_tx: mpsc::Sender<ChainEvent>,
     contract_address: Address,
@@ -856,10 +857,11 @@ enum BackfillOutcome {
     Observed { event: Option<ChainEvent> },
 }
 
-impl<S: StateManager> EthereumIndexer<S> {
+impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     pub async fn new(
         eth: EthConfig,
         state_manager: S,
+        telemetry: T,
         events_tx: mpsc::Sender<ChainEvent>,
     ) -> anyhow::Result<Self> {
         let client = Arc::new(EthereumClient::new(eth.clone()).await?);
@@ -871,6 +873,7 @@ impl<S: StateManager> EthereumIndexer<S> {
         Ok(Self {
             eth,
             state_manager,
+            telemetry,
             client,
             events_tx,
             contract_address,
@@ -932,11 +935,8 @@ impl<S: StateManager> EthereumIndexer<S> {
 
     /// Process the block and emit relevant ChainEvents from the block.
     async fn process_block(&self, block: &Block) -> anyhow::Result<()> {
-        let block_number = block.header.number;
-        crate::metrics::indexers::LATEST_BLOCK_NUMBER
-            .with_label_values(&[Chain::Ethereum.as_str(), "indexed"])
-            .set(block_number as i64);
-
+        // Emit telemetry for the indexed block number
+        self.telemetry.indexed(block.header.number);
         let processed = self.parse_block(block).await?;
         self.emit_processed_block(processed).await?;
 
@@ -1383,7 +1383,7 @@ impl<S: StateManager> EthereumIndexer<S> {
 }
 
 #[async_trait]
-impl<S: StateManager> ChainIndexer for EthereumIndexer<S> {
+impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> {
     const CHAIN: Chain = Chain::Ethereum;
     type Block = MaybeBlock;
     type Iter = std::pin::Pin<Box<dyn stream::Stream<Item = Self::Block> + Send + 'static>>;
@@ -1492,13 +1492,17 @@ impl<S: StateManager> ChainIndexer for EthereumIndexer<S> {
 /// Ethereum indexer stream implementing the `ChainStream` trait.
 /// Construction is side-effect free; the shared `run_stream()` loop calls
 /// `start()` after recovery has completed.
-pub struct EthereumStream<S: StateManager> {
+pub struct EthereumStream<S: StateManager, T: ChainTelemetry> {
     events_rx: Option<mpsc::Receiver<ChainEvent>>,
-    start_state: Option<EthereumIndexer<S>>,
+    start_state: Option<EthereumIndexer<S, T>>,
 }
 
-impl<S: StateManager> EthereumStream<S> {
-    pub async fn new(eth: Option<EthConfig>, state_manager: S) -> anyhow::Result<Self> {
+impl<S: StateManager, T: ChainTelemetry> EthereumStream<S, T> {
+    pub async fn new(
+        eth: Option<EthConfig>,
+        state_manager: S,
+        telemetry: T,
+    ) -> anyhow::Result<Self> {
         let Some(eth) = eth else {
             tracing::warn!(
                 "ethereum indexer is disabled: no EthConfig provided \
@@ -1512,7 +1516,7 @@ impl<S: StateManager> EthereumStream<S> {
         );
 
         let (events_tx, events_rx) = crate::stream::channel();
-        let indexer = EthereumIndexer::new(eth, state_manager, events_tx).await?;
+        let indexer = EthereumIndexer::new(eth, state_manager, telemetry, events_tx).await?;
 
         Ok(Self {
             events_rx: Some(events_rx),
@@ -1522,8 +1526,8 @@ impl<S: StateManager> EthereumStream<S> {
 }
 
 #[async_trait]
-impl<S: StateManager> ChainStream for EthereumStream<S> {
-    type Indexer = EthereumIndexer<S>;
+impl<S: StateManager, T: ChainTelemetry> ChainStream for EthereumStream<S, T> {
+    type Indexer = EthereumIndexer<S, T>;
 
     async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
         self.start_state
@@ -1551,8 +1555,8 @@ mod tests {
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
     use mpc_primitives::{
-        BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, SignId,
-        LATEST_MPC_KEY_VERSION,
+        BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, NoopChainTelemetry,
+        SignId, LATEST_MPC_KEY_VERSION,
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -1652,6 +1656,7 @@ mod tests {
                 light_client: false,
             },
             state_manager,
+            telemetry: NoopChainTelemetry,
             client: Arc::new(EthereumClient::DirectRpc(
                 super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
             )),
@@ -1691,6 +1696,7 @@ mod tests {
                 light_client: false,
             },
             state_manager,
+            telemetry: NoopChainTelemetry,
             client: Arc::new(EthereumClient::DirectRpc(
                 super::indexer_eth_direct_rpc::RpcEthereumClient::new("http://127.0.0.1:1"),
             )),
@@ -2044,6 +2050,7 @@ mod tests {
                 light_client: false,
             },
             state_manager,
+            telemetry: NoopChainTelemetry,
             client: Arc::new(EthereumClient::DirectRpc(
                 super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
             )),
