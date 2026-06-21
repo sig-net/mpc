@@ -936,7 +936,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     /// Process the block and emit relevant ChainEvents from the block.
     async fn process_block(&self, block: &Block) -> anyhow::Result<()> {
         // Emit telemetry for the indexed block number
-        self.telemetry.indexed(block.header.number);
+        self.telemetry.block_indexed(block.header.number);
         let processed = self.parse_block(block).await?;
         self.emit_processed_block(processed).await?;
 

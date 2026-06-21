@@ -390,7 +390,7 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
     telemetry: &T,
 ) {
     let Some(checkpoint) = backlog.set_processed_block(chain, block).await else {
-        telemetry.finalized(block);
+        telemetry.block_finalized(block);
         return;
     };
 
@@ -411,7 +411,7 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
         }
     }
 
-    telemetry.finalized(block);
+    telemetry.block_finalized(block);
 }
 
 /// Decode a [u8; 32] sender into its canonical on-chain address string.

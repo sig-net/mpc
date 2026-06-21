@@ -22,10 +22,10 @@ pub trait StateManager: Send + Sync + Clone + 'static {
 /// Interface for the Indexer to report telemetry data.
 pub trait ChainTelemetry: Send + Sync + Clone + 'static {
     /// Records that a block was parsed at the live tip
-    fn indexed(&self, block: u64);
+    fn block_indexed(&self, block_number: u64);
 
     /// Records that a block has reached finality/consensus
-    fn finalized(&self, block: u64);
+    fn block_finalized(&self, block_number: u64);
 }
 
 /// No-op implementation for tests
@@ -33,6 +33,6 @@ pub trait ChainTelemetry: Send + Sync + Clone + 'static {
 pub struct NoopChainTelemetry;
 
 impl ChainTelemetry for NoopChainTelemetry {
-    fn indexed(&self, _block: u64) {}
-    fn finalized(&self, _block: u64) {}
+    fn block_indexed(&self, _block_number: u64) {}
+    fn block_finalized(&self, _block_number: u64) {}
 }

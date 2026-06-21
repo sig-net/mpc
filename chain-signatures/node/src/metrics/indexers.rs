@@ -28,15 +28,15 @@ impl PrometheusChainTelemetry {
 }
 
 impl ChainTelemetry for PrometheusChainTelemetry {
-    fn indexed(&self, block: u64) {
+    fn block_indexed(&self, block_number: u64) {
         LATEST_BLOCK_NUMBER
             .with_label_values(&[self.chain.as_str(), "indexed"])
-            .set(block as i64);
+            .set(block_number as i64);
     }
 
-    fn finalized(&self, block: u64) {
+    fn block_finalized(&self, block_number: u64) {
         LATEST_BLOCK_NUMBER
             .with_label_values(&[self.chain.as_str(), "finalized"])
-            .set(block as i64);
+            .set(block_number as i64);
     }
 }
