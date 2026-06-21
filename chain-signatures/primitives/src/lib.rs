@@ -17,7 +17,7 @@ pub use crypto::{
 };
 pub use events::{ChainEvent, ExecutionOutcome, SignatureRespondedEvent};
 pub use requests::{IndexedSignRequest, SignKind};
-pub use traits::StateManager;
+pub use traits::{ChainTelemetry, NoopChainTelemetry, StateManager};
 
 pub const LATEST_MPC_KEY_VERSION: u32 = 1;
 pub const LEGACY_MPC_KEY_VERSION_0: u32 = 0;
