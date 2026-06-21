@@ -367,6 +367,7 @@ pub(crate) fn ss58_address_from_account32(sender: [u8; 32]) -> String {
     acc.to_ss58check_with_version(Ss58AddressFormatRegistry::PolkadotAccount.into())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run<T: ChainTelemetry>(
     hydration: Option<HydrationConfig>,
     sign_tx: mpsc::Sender<Sign>,
