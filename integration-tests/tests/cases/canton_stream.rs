@@ -11,8 +11,8 @@ use mpc_node::protocol::{Chain, IndexedSignRequest};
 use mpc_node::sign_bidirectional::{hash_rlp_data, SignBidirectionalEventExt};
 use mpc_node::stream::{ChainPipeline, ChainStream, ChainStreaming};
 use mpc_primitives::{
-    ChainEvent, CheckpointDigest, ScalarExt, SignKind, Signature, StateManager,
-    LATEST_MPC_KEY_VERSION,
+    ChainEvent, ChainTelemetry, CheckpointDigest, NoopChainTelemetry, ScalarExt, SignKind,
+    Signature, StateManager, LATEST_MPC_KEY_VERSION,
 };
 use serde_json::json;
 use serial_test::serial;
@@ -26,9 +26,9 @@ use tokio::time::timeout;
 async fn stream_canton(
     sandbox: &CantonSandbox,
     backlog: Backlog,
-) -> Result<CantonStream<impl StateManager>> {
+) -> Result<CantonStream<impl StateManager, impl ChainTelemetry>> {
     let config = sandbox.get_config();
-    let mut stream = CantonStream::new(Some(config), backlog.clone())
+    let mut stream = CantonStream::new(Some(config), backlog.clone(), NoopChainTelemetry)
         .context("failed to create CantonStream")?;
     let indexer = ChainStream::start(&mut stream).await?;
     let (_cp_tx, cp_rx) = tokio::sync::watch::channel(CheckpointDigest::default());
@@ -64,7 +64,7 @@ async fn stream_canton(
 
 /// Poll stream for a SignRequest event with timeout.
 async fn wait_for_sign_request(
-    stream: &mut CantonStream<impl StateManager>,
+    stream: &mut CantonStream<impl StateManager, impl ChainTelemetry>,
     timeout_secs: u64,
 ) -> Result<IndexedSignRequest> {
     timeout(Duration::from_secs(timeout_secs), async {

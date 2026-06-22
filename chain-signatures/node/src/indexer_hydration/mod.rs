@@ -15,7 +15,7 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
-    CheckpointDigest, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
+    ChainTelemetry, CheckpointDigest, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
     SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
 };
@@ -307,10 +307,12 @@ pub(crate) fn ss58_address_from_account32(sender: [u8; 32]) -> String {
     acc.to_ss58check_with_version(Ss58AddressFormatRegistry::PolkadotAccount.into())
 }
 
-pub async fn run(
+#[allow(clippy::too_many_arguments)]
+pub async fn run<T: ChainTelemetry>(
     hydration: Option<HydrationConfig>,
     sign_tx: mpsc::Sender<Sign>,
     backlog: Backlog,
+    telemetry: T,
     mut contract_watcher: ContractStateWatcher,
     mut mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
@@ -604,9 +606,8 @@ pub async fn run(
             }
         }
 
-        crate::metrics::indexers::LATEST_BLOCK_NUMBER
-            .with_label_values(&[crate::protocol::Chain::Hydration.as_str(), "indexed"])
-            .set(number as i64);
+        // Update Prometheus metrics
+        telemetry.block_indexed(number.into());
     }
 }
 

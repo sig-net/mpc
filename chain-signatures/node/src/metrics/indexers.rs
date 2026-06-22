@@ -1,13 +1,13 @@
-use std::sync::LazyLock;
-
+use mpc_primitives::{Chain, ChainTelemetry};
 use prometheus::IntGaugeVec;
+use std::sync::LazyLock;
 
 use super::try_create_int_gauge_vec_with_node_account_id;
 
 /// Possible status options:
 ///     - "indexed" - latest block number seen by the indexer
 ///     - "finalized" - latest block number seen as finalized by the indexer
-pub(crate) static LATEST_BLOCK_NUMBER: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+static LATEST_BLOCK_NUMBER: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     try_create_int_gauge_vec_with_node_account_id(
         "multichain_latest_block_number",
         "Latest block number seen by the node",
@@ -15,3 +15,28 @@ pub(crate) static LATEST_BLOCK_NUMBER: LazyLock<IntGaugeVec> = LazyLock::new(|| 
     )
     .unwrap()
 });
+
+#[derive(Clone)]
+pub struct PrometheusChainTelemetry {
+    chain: Chain,
+}
+
+impl PrometheusChainTelemetry {
+    pub fn new(chain: Chain) -> Self {
+        Self { chain }
+    }
+}
+
+impl ChainTelemetry for PrometheusChainTelemetry {
+    fn block_indexed(&self, block_number: u64) {
+        LATEST_BLOCK_NUMBER
+            .with_label_values(&[self.chain.as_str(), "indexed"])
+            .set(block_number as i64);
+    }
+
+    fn block_finalized(&self, block_number: u64) {
+        LATEST_BLOCK_NUMBER
+            .with_label_values(&[self.chain.as_str(), "finalized"])
+            .set(block_number as i64);
+    }
+}

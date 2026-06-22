@@ -14,7 +14,10 @@ use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{run_stream, ChainPipeline, ChainStream, ChainStreaming};
-use mpc_primitives::{ChainEvent, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{
+    ChainEvent, ChainTelemetry, NoopChainTelemetry, SignArgs, SignId, Signature,
+    LATEST_MPC_KEY_VERSION,
+};
 use mpc_primitives::{CheckpointDigest, StateManager};
 use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;
@@ -38,7 +41,9 @@ fn test_dependencies() -> (Backlog, watch::Receiver<MeshState>, NodeClient) {
     (backlog, mesh_rx, node_client)
 }
 
-async fn stream_solana(config: SolConfig) -> Result<SolanaStream<impl StateManager>> {
+async fn stream_solana(
+    config: SolConfig,
+) -> Result<SolanaStream<impl StateManager, impl ChainTelemetry>> {
     let (backlog, _, _) = test_dependencies();
     stream_solana_with_backlog(config, backlog).await
 }
@@ -46,8 +51,8 @@ async fn stream_solana(config: SolConfig) -> Result<SolanaStream<impl StateManag
 async fn stream_solana_with_backlog(
     config: SolConfig,
     backlog: Backlog,
-) -> Result<SolanaStream<impl StateManager>> {
-    let mut stream = SolanaStream::new(Some(config), backlog.clone())
+) -> Result<SolanaStream<impl StateManager, impl ChainTelemetry>> {
+    let mut stream = SolanaStream::new(Some(config), backlog.clone(), NoopChainTelemetry)
         .context("failed to create SolanaStream")?;
     let indexer = ChainStream::start(&mut stream).await?;
     let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
@@ -86,8 +91,8 @@ async fn stream_solana_with_backlog(
 }
 
 /// Helper to wait for a specific event type, skipping block events
-async fn wait_for_sign_request<S: StateManager>(
-    stream: &mut SolanaStream<S>,
+async fn wait_for_sign_request<S: StateManager, T: ChainTelemetry>(
+    stream: &mut SolanaStream<S, T>,
 ) -> Result<IndexedSignRequest> {
     loop {
         match timeout(Duration::from_secs(6), stream.next_event()).await {
@@ -473,7 +478,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     seeded_backlog.checkpoint(Chain::Solana).await;
 
     let recovered_backlog = Backlog::persisted(storage);
-    let stream = SolanaStream::new(Some(config), recovered_backlog.clone())
+    let stream = SolanaStream::new(Some(config), recovered_backlog.clone(), NoopChainTelemetry)
         .context("failed to create SolanaStream")?;
 
     let (sign_tx, mut sign_rx) = mpsc::channel::<Sign>(4);
@@ -504,6 +509,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
             sign_tx,
             rpc,
             recovered_backlog,
+            NoopChainTelemetry,
             contract_watcher,
             mesh_rx,
             node_client,

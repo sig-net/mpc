@@ -15,7 +15,7 @@ pub use crate::stream::pipeline::ChainPipeline;
 
 use async_trait::async_trait;
 use futures_util::Stream;
-use mpc_primitives::{ChainEvent, CheckpointDigest};
+use mpc_primitives::{ChainEvent, ChainTelemetry, CheckpointDigest};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
@@ -88,11 +88,12 @@ pub trait ChainStream: Send + 'static {
 
 /// Shared indexer loop: recovers backlog then processes events from the stream
 #[allow(clippy::too_many_arguments)]
-pub async fn run_stream<S: ChainStream>(
+pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
     mut stream: S,
     sign_tx: mpsc::Sender<Sign>,
     rpc: RpcChannel,
     backlog: Backlog,
+    telemetry: T,
     mut contract_watcher: ContractStateWatcher,
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
@@ -170,7 +171,7 @@ pub async fn run_stream<S: ChainStream>(
                         }
                     }
                     ChainEvent::Block(block) => {
-                        process_block_event(chain, block, &backlog, &sign_tx, caught_up).await;
+                        process_block_event(chain, block, &backlog, &sign_tx, caught_up, &telemetry).await;
                     }
                     ChainEvent::ExecutionConfirmed {
                         tx_id,
@@ -223,8 +224,8 @@ mod tests {
     use k256::{AffinePoint, Scalar};
     use mockito::Server;
     use mpc_primitives::{
-        CheckpointDigest, IndexedSignRequest, SignArgs, SignId, Signature, SignatureRespondedEvent,
-        StateManager,
+        CheckpointDigest, IndexedSignRequest, NoopChainTelemetry, SignArgs, SignId, Signature,
+        SignatureRespondedEvent, StateManager,
     };
     use near_primitives::types::AccountId;
     use std::collections::HashMap;
@@ -584,6 +585,7 @@ mod tests {
             sign_tx.clone(),
             rpc,
             backlog.clone(),
+            NoopChainTelemetry,
             contract_watcher,
             mesh_state_rx,
             node_client,
@@ -699,6 +701,7 @@ mod tests {
                 sign_tx_for_run,
                 rpc,
                 backlog_for_run,
+                NoopChainTelemetry,
                 contract_watcher,
                 mesh_state_rx,
                 node_client,
@@ -1020,6 +1023,7 @@ mod tests {
             sign_tx,
             rpc,
             backlog.clone(),
+            NoopChainTelemetry,
             contract_watcher,
             mesh_state_rx,
             node_client,
@@ -1118,6 +1122,7 @@ mod tests {
             sign_tx,
             rpc,
             backlog.clone(),
+            NoopChainTelemetry,
             contract_watcher,
             mesh_state_rx,
             node_client,
@@ -1199,6 +1204,7 @@ mod tests {
                 sign_tx,
                 rpc,
                 backlog,
+                NoopChainTelemetry,
                 contract_watcher,
                 mesh_state_rx,
                 node_client,
@@ -1282,6 +1288,7 @@ mod tests {
                 sign_tx,
                 rpc,
                 backlog,
+                NoopChainTelemetry,
                 contract_watcher,
                 mesh_state_rx,
                 node_client,

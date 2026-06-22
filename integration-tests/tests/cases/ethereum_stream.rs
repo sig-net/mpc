@@ -20,8 +20,9 @@ use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{run_stream, ChainPipeline, ChainStream, ChainStreaming};
 use mpc_node::util::current_unix_timestamp;
 use mpc_primitives::{
-    ChainEvent, CheckpointDigest, SignArgs, SignBidirectionalEvent as NodeSignBidirectionalEvent,
-    SignId, SignKind, StateManager, LATEST_MPC_KEY_VERSION,
+    ChainEvent, ChainTelemetry, CheckpointDigest, NoopChainTelemetry, SignArgs,
+    SignBidirectionalEvent as NodeSignBidirectionalEvent, SignId, SignKind, StateManager,
+    LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
 use std::time::Duration;
@@ -339,27 +340,27 @@ fn test_bidirectional_event() -> NodeSignBidirectionalEvent {
     }
 }
 
-struct StartedEthereumStream<S: StateManager> {
-    stream: EthereumStream<S>,
+struct StartedEthereumStream<S: StateManager, T: ChainTelemetry> {
+    stream: EthereumStream<S, T>,
     _indexer_task: tokio::task::JoinHandle<()>,
 }
 
-impl<S: StateManager> std::ops::Deref for StartedEthereumStream<S> {
-    type Target = EthereumStream<S>;
+impl<S: StateManager, T: ChainTelemetry> std::ops::Deref for StartedEthereumStream<S, T> {
+    type Target = EthereumStream<S, T>;
 
     fn deref(&self) -> &Self::Target {
         &self.stream
     }
 }
 
-impl<S: StateManager> std::ops::DerefMut for StartedEthereumStream<S> {
+impl<S: StateManager, T: ChainTelemetry> std::ops::DerefMut for StartedEthereumStream<S, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.stream
     }
 }
 
-async fn next_event_within<S: StateManager>(
-    client: &mut StartedEthereumStream<S>,
+async fn next_event_within<S: StateManager, T: ChainTelemetry>(
+    client: &mut StartedEthereumStream<S, T>,
     duration: Duration,
 ) -> Result<ChainEvent> {
     timeout(duration, async {
@@ -378,8 +379,9 @@ async fn next_event_within<S: StateManager>(
 async fn stream_ethereum(
     ctx: &EthereumTestEnvironment,
     backlog: Backlog,
-) -> Result<StartedEthereumStream<impl StateManager>> {
-    let mut stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
+) -> Result<StartedEthereumStream<impl StateManager, NoopChainTelemetry>> {
+    let mut stream =
+        EthereumStream::new(Some(ctx.config(true)), backlog.clone(), NoopChainTelemetry).await?;
     let indexer = stream.start().await?;
     let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
@@ -443,7 +445,8 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     }
 
     let backlog = Backlog::persisted(storage);
-    let stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
+    let stream =
+        EthereumStream::new(Some(ctx.config(true)), backlog.clone(), NoopChainTelemetry).await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
@@ -465,6 +468,7 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
         sign_tx,
         rpc,
         backlog,
+        NoopChainTelemetry,
         contract_watcher,
         mesh_rx,
         NodeClient::new(&Default::default()),
@@ -620,7 +624,8 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let catchup_payload = [0x55; 32];
     submit_sign_request(&ctx, catchup_payload, "catchup-linear-path").await?;
 
-    let stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
+    let stream =
+        EthereumStream::new(Some(ctx.config(true)), backlog.clone(), NoopChainTelemetry).await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
@@ -642,6 +647,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
         sign_tx,
         rpc,
         backlog.clone(),
+        NoopChainTelemetry,
         contract_watcher,
         mesh_rx,
         NodeClient::new(&Default::default()),
@@ -807,7 +813,8 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         ))
         .await;
 
-    let stream = EthereumStream::new(Some(ctx.config(true)), backlog.clone()).await?;
+    let stream =
+        EthereumStream::new(Some(ctx.config(true)), backlog.clone(), NoopChainTelemetry).await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
@@ -829,6 +836,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         sign_tx,
         rpc,
         backlog.clone(),
+        NoopChainTelemetry,
         contract_watcher,
         mesh_rx,
         NodeClient::new(&Default::default()),

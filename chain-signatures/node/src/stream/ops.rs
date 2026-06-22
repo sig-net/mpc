@@ -6,8 +6,8 @@ use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::{SignBidirectionalEventExt, SignStatus};
 use anchor_lang::prelude::Pubkey;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, ExecutionOutcome, RespondBidirectionalEvent, SignId,
-    SignKind, Signature, SignatureRespondedEvent,
+    BidirectionalTx, BidirectionalTxId, ChainTelemetry, ExecutionOutcome,
+    RespondBidirectionalEvent, SignId, SignKind, Signature, SignatureRespondedEvent,
 };
 use tokio::sync::mpsc;
 
@@ -381,17 +381,16 @@ pub async fn process_execution_confirmed(
     Ok(())
 }
 
-pub(crate) async fn process_block_event(
+pub(crate) async fn process_block_event<T: ChainTelemetry>(
     chain: Chain,
     block: u64,
     backlog: &Backlog,
     sign_tx: &mpsc::Sender<Sign>,
     caught_up: bool,
+    telemetry: &T,
 ) {
     let Some(checkpoint) = backlog.set_processed_block(chain, block).await else {
-        crate::metrics::indexers::LATEST_BLOCK_NUMBER
-            .with_label_values(&[chain.as_str(), "finalized"])
-            .set(block as i64);
+        telemetry.block_finalized(block);
         return;
     };
 
@@ -412,9 +411,7 @@ pub(crate) async fn process_block_event(
         }
     }
 
-    crate::metrics::indexers::LATEST_BLOCK_NUMBER
-        .with_label_values(&[chain.as_str(), "finalized"])
-        .set(block as i64);
+    telemetry.block_finalized(block);
 }
 
 /// Decode a [u8; 32] sender into its canonical on-chain address string.
