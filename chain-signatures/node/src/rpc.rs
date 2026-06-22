@@ -32,7 +32,6 @@ use crate::indexer_canton::ledger_api::{
 use crate::indexer_canton::{CantonAuthProvider, CantonConfig};
 use crate::indexer_hydration::HydrationConfig;
 use crate::indexer_sol::SolanaClient;
-// use crate::util::retry::{retry_async, Backoff, RetryConfig, RetryError, RetryReason};
 use alloy::contract::{ContractInstance, Interface};
 use alloy::dyn_abi::DynSolValue;
 use alloy::network::EthereumWallet;
@@ -95,6 +94,38 @@ type EthContractFillProvider = FillProvider<
     >,
     RootProvider,
 >;
+
+// Publish retry constants
+const PUBLISH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
+const PUBLISH_FIXED_DELAY: Duration = Duration::from_secs(5);
+const BATCH_PUBLISH_MIN_DELAY: Duration = Duration::from_secs(1);
+const BATCH_PUBLISH_MAX_DELAY: Duration = Duration::from_secs(10);
+
+// Get nonce retry constants
+const ETH_NONCE_MAX_ATTEMPTS: usize = 3;
+const ETH_NONCE_TIMEOUT: Duration = Duration::from_secs(2);
+const ETH_NONCE_MIN_DELAY: Duration = Duration::from_millis(500);
+const ETH_NONCE_MAX_DELAY: Duration = Duration::from_secs(5);
+
+// Send Ethereum tx retry constants
+const ETH_SEND_MAX_ATTEMPTS: usize = 3;
+const ETH_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+const ETH_SEND_MIN_DELAY: Duration = Duration::from_millis(500);
+const ETH_SEND_MAX_DELAY: Duration = Duration::from_secs(10);
+
+// Polling Mempool
+const ETH_MEMPOOL_TIMEOUT: Duration = Duration::from_secs(5);
+const ETH_MEMPOOL_MIN_DELAY: Duration = Duration::from_secs(1);
+const ETH_MEMPOOL_MAX_DELAY: Duration = Duration::from_secs(10);
+
+// Polling Receipt
+const ETH_RECEIPT_TIMEOUT: Duration = Duration::from_secs(2);
+const ETH_RECEIPT_MIN_DELAY: Duration = Duration::from_secs(1);
+const ETH_RECEIPT_MAX_DELAY: Duration = Duration::from_secs(20);
+
+// Ethereum gas limits
+const ETH_BASE_GAS_LIMIT: u64 = 40_000;
+const ETH_BATCH_GAS_PER_REQUEST: u64 = 20_000;
 
 type EthContractInstance = ContractInstance<EthContractFillProvider>;
 
@@ -1271,9 +1302,9 @@ async fn execute_publish(client: ChainClient, action: PublishAction) {
         "trying to publish signature",
     );
 
-    // TODO: consider adding jitter
     let backoff = ConstantBuilder::default()
-        .with_delay(Duration::from_secs(5)) // TODO: use constant
+        .with_jitter()
+        .with_delay(PUBLISH_FIXED_DELAY)
         .with_max_times(MAX_PUBLISH_RETRY);
 
     let mut attempt = 0;
@@ -1313,7 +1344,7 @@ async fn execute_publish(client: ChainClient, action: PublishAction) {
             }
         };
 
-        match tokio::time::timeout(Duration::from_secs(120), fut).await {
+        match tokio::time::timeout(PUBLISH_ATTEMPT_TIMEOUT, fut).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(e),
             Err(_) => Err(anyhow::anyhow!("Publish attempt timed out")),
@@ -1435,17 +1466,16 @@ async fn wait_for_pending_tx(
     sign_ids: Vec<SignId>,
     max_attempts: usize,
 ) -> Result<Transaction, ()> {
-    // TODO: use constants
     let backoff = ExponentialBuilder::default()
         .with_jitter()
-        .with_min_delay(Duration::from_secs(1))
-        .with_max_delay(Duration::from_secs(10))
+        .with_min_delay(ETH_MEMPOOL_MIN_DELAY)
+        .with_max_delay(ETH_MEMPOOL_MAX_DELAY)
         .with_max_times(max_attempts);
 
     let mut attempt = 0;
     let poll_op = || async {
         let fut = provider.get_transaction_by_hash(tx_hash);
-        match tokio::time::timeout(Duration::from_secs(5), fut).await {
+        match tokio::time::timeout(ETH_MEMPOOL_TIMEOUT, fut).await {
             Ok(Ok(Some(tx))) => {
                 tracing::info!(?sign_ids, "eth signature respond pending transaction found");
                 Ok(tx)
@@ -1480,14 +1510,14 @@ async fn wait_for_transaction_receipt(
     // TODO: use constants
     let backoff = ExponentialBuilder::default()
         .with_jitter()
-        .with_min_delay(Duration::from_secs(1))
-        .with_max_delay(Duration::from_secs(20))
+        .with_min_delay(ETH_RECEIPT_MIN_DELAY)
+        .with_max_delay(ETH_RECEIPT_MAX_DELAY)
         .with_max_times(max_attempts);
 
     let mut attempt = 0;
     let poll_op = || async {
         let fut = provider.get_transaction_receipt(tx_hash);
-        match tokio::time::timeout(Duration::from_secs(2), fut).await {
+        match tokio::time::timeout(ETH_RECEIPT_TIMEOUT, fut).await {
             Ok(Ok(Some(receipt))) => {
                 tracing::info!(?sign_ids, "eth signature respond transaction receipt found");
                 Ok(receipt)
@@ -1519,12 +1549,11 @@ async fn send_eth_transaction(
     sign_ids: &[SignId],
 ) -> Result<alloy::primitives::B256, ()> {
     // 1. Fetch Nonce
-    // TODO: constants
     let nonce_backoff = ExponentialBuilder::default()
         .with_jitter()
-        .with_min_delay(Duration::from_millis(500))
-        .with_max_delay(Duration::from_secs(5))
-        .with_max_times(3);
+        .with_min_delay(ETH_NONCE_MIN_DELAY)
+        .with_max_delay(ETH_NONCE_MAX_DELAY)
+        .with_max_times(ETH_NONCE_MAX_ATTEMPTS);
 
     let mut nonce_attempt = 0;
     let nonce_op = || async {
@@ -1533,7 +1562,7 @@ async fn send_eth_transaction(
             .get_transaction_count(contract.provider().default_signer_address())
             .pending();
 
-        match tokio::time::timeout(Duration::from_secs(2), fut).await {
+        match tokio::time::timeout(ETH_NONCE_TIMEOUT, fut).await {
             Ok(Ok(n)) => Ok(n),
             Ok(Err(e)) => Err(anyhow::anyhow!("RPC Error: {e}")),
             Err(_) => Err(anyhow::anyhow!("Timeout getting nonce")),
@@ -1567,12 +1596,11 @@ async fn send_eth_transaction(
     };
 
     // 2. Send Tx
-    // TODO: constants
     let send_backoff = ExponentialBuilder::default()
         .with_jitter()
-        .with_min_delay(Duration::from_millis(500))
-        .with_max_delay(Duration::from_secs(10))
-        .with_max_times(3);
+        .with_min_delay(ETH_SEND_MIN_DELAY)
+        .with_max_delay(ETH_SEND_MAX_DELAY)
+        .with_max_times(ETH_SEND_MAX_ATTEMPTS);
 
     let mut send_attempt = 0;
     let send_op = || async {
@@ -1583,7 +1611,7 @@ async fn send_eth_transaction(
             .nonce(nonce);
         let fut = respond_call.send();
 
-        match tokio::time::timeout(Duration::from_secs(5), fut).await {
+        match tokio::time::timeout(ETH_SEND_TIMEOUT, fut).await {
             Ok(Ok(pending)) => Ok(*pending.tx_hash()),
             Ok(Err(e)) => Err(anyhow::anyhow!("RPC Error: {e}")),
             Err(_) => Err(anyhow::anyhow!("Timeout sending tx")),
@@ -1635,7 +1663,7 @@ async fn try_publish_eth(
     let tx_hash = send_eth_transaction(
         &eth.contract,
         &params,
-        40000,
+        ETH_BASE_GAS_LIMIT,
         std::slice::from_ref(&action.indexed.id),
     )
     .await?;
@@ -1701,7 +1729,10 @@ async fn try_batch_publish_eth(
     }
 
     let params = [DynSolValue::Array(params_vec.clone())];
-    let gas = std::cmp::max(40000, 20000 * num_requests as u64);
+    let gas = std::cmp::max(
+        ETH_BASE_GAS_LIMIT,
+        ETH_BATCH_GAS_PER_REQUEST * num_requests as u64,
+    );
 
     let tx_hash = send_eth_transaction(&eth.contract, &params, gas, &sign_ids).await?;
 
@@ -1752,11 +1783,11 @@ async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAc
         .map(|action| (action.indexed.id, action.signature))
         .collect();
 
-    // TODO: use constants, consider adding jitter
     let backoff = ExponentialBuilder::default()
-        .with_min_delay(Duration::from_secs(1))
-        .with_max_delay(Duration::from_secs(10))
-        .with_max_times(MAX_PUBLISH_RETRY);
+        .with_min_delay(BATCH_PUBLISH_MIN_DELAY)
+        .with_max_delay(BATCH_PUBLISH_MAX_DELAY)
+        .with_max_times(MAX_PUBLISH_RETRY)
+        .with_jitter();
 
     let mut attempt = 0;
 
