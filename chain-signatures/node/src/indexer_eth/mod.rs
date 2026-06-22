@@ -637,7 +637,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 current_block_number,
                 "skipping late watcher backfill for future ethereum block"
             );
-            
+
             return Ok(BackfillOutcome::NotObserved);
         }
 
