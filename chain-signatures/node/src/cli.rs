@@ -466,7 +466,8 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             ));
 
             let canton_telemetry = PrometheusChainTelemetry::new(Chain::Canton);
-            if let Some(canton_stream) = indexer_canton::CantonStream::new(canton, backlog.clone())
+            if let Some(canton_stream) =
+                indexer_canton::CantonStream::new(canton, backlog.clone(), canton_telemetry.clone())
             {
                 tokio::spawn(run_stream(
                     canton_stream,
