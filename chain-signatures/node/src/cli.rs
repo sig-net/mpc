@@ -424,7 +424,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                         sign_tx.clone(),
                         rpc_channel.clone(),
                         backlog.clone(),
-                        eth_telemetry.clone(),
+                        eth_telemetry,
                         contract_watcher.clone(),
                         mesh_state.clone(),
                         client.clone(),
@@ -437,13 +437,15 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             };
 
             let solana_telemetry = PrometheusChainTelemetry::new(Chain::Solana);
-            if let Some(sol_stream) = SolanaStream::new(sol.clone(), backlog.clone()) {
+            if let Some(sol_stream) =
+                SolanaStream::new(sol.clone(), backlog.clone(), solana_telemetry.clone())
+            {
                 tokio::spawn(run_stream(
                     sol_stream,
                     sign_tx.clone(),
                     rpc_channel.clone(),
                     backlog.clone(),
-                    solana_telemetry.clone(),
+                    solana_telemetry,
                     contract_watcher.clone(),
                     mesh_state.clone(),
                     client.clone(),
