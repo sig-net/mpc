@@ -1435,8 +1435,9 @@ async fn wait_for_pending_tx(
     sign_ids: Vec<SignId>,
     max_attempts: usize,
 ) -> Result<Transaction, ()> {
-    // TODO: use constants, consider adding jitter
+    // TODO: use constants
     let backoff = ExponentialBuilder::default()
+        .with_jitter()
         .with_min_delay(Duration::from_secs(1))
         .with_max_delay(Duration::from_secs(10))
         .with_max_times(max_attempts);
@@ -1476,8 +1477,9 @@ async fn wait_for_transaction_receipt(
     sign_ids: Vec<SignId>,
     max_attempts: usize,
 ) -> Result<TransactionReceipt, ()> {
-    // TODO: use constants, consider adding jitter
+    // TODO: use constants
     let backoff = ExponentialBuilder::default()
+        .with_jitter()
         .with_min_delay(Duration::from_secs(1))
         .with_max_delay(Duration::from_secs(20))
         .with_max_times(max_attempts);
@@ -1517,8 +1519,9 @@ async fn send_eth_transaction(
     sign_ids: &[SignId],
 ) -> Result<alloy::primitives::B256, ()> {
     // 1. Fetch Nonce
-    // TODO: constants + jitter
+    // TODO: constants
     let nonce_backoff = ExponentialBuilder::default()
+        .with_jitter()
         .with_min_delay(Duration::from_millis(500))
         .with_max_delay(Duration::from_secs(5))
         .with_max_times(3);
@@ -1564,8 +1567,9 @@ async fn send_eth_transaction(
     };
 
     // 2. Send Tx
-    // TODO: constants + jitter
+    // TODO: constants
     let send_backoff = ExponentialBuilder::default()
+        .with_jitter()
         .with_min_delay(Duration::from_millis(500))
         .with_max_delay(Duration::from_secs(10))
         .with_max_times(3);
