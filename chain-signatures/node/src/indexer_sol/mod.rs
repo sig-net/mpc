@@ -609,7 +609,9 @@ async fn subscribe_to_program_events<T: ChainTelemetry>(
             "get_slot",
             SOL_RPC_TIMEOUT,
             &sol_retry_strategy(),
-            rpc_client.get_slot_with_commitment(CommitmentConfig::confirmed()).await
+            rpc_client
+                .get_slot_with_commitment(CommitmentConfig::confirmed())
+                .await
         )?;
         let _ = anchor_tx.send(slot);
     }
