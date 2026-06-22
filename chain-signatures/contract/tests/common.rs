@@ -170,7 +170,12 @@ pub async fn create_response(
 
     let s = signature.s();
     let (r_bytes, _s_bytes) = signature.split_bytes();
-    let sign_id = SignId::from_parts(predecessor_id, &payload_hash, path, LATEST_MPC_KEY_VERSION);
+    let sign_id = SignId::from_parts(
+        predecessor_id.as_str(),
+        &payload_hash,
+        path,
+        LATEST_MPC_KEY_VERSION,
+    );
     let big_r =
         AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0)).unwrap();
     let s: k256::Scalar = *s.as_ref();

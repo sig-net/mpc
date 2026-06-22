@@ -2,6 +2,7 @@ use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::kdf::derive_delta;
 use crate::mesh::MeshState;
+use crate::metrics::messaging::set_inbox_count;
 use crate::metrics::requests::{
     record_request_latency, record_request_latency_since, SignRequestStep, SIGN_REQUEST_LOOPS,
 };
@@ -11,15 +12,13 @@ use crate::protocol::message::{
 };
 use crate::protocol::posit::{PositAction, PositRejectReason, SinglePositCounter};
 use crate::protocol::presignature::PresignatureId;
-use crate::protocol::SignKind;
 use crate::protocol::{Chain, ProtocolState};
 use crate::rpc::{ContractStateWatcher, GovernanceInfo, RpcChannel};
-use crate::sign_bidirectional::PublishState;
+use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt};
 use crate::storage::presignature_storage::{
     PresignatureReservation, PresignatureTaken, PresignatureTakenDropper,
 };
 use crate::storage::PresignatureStorage;
-use crate::stream::ops::SignBidirectionalEvent;
 use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap, TimeoutBudget};
 
@@ -29,7 +28,7 @@ use chrono::Utc;
 use k256::Secp256k1;
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::derive_key;
-use mpc_primitives::{SignArgs, SignId};
+use mpc_primitives::{IndexedSignRequest, SignId, SignKind};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
@@ -63,77 +62,12 @@ const ACCEPT_POSIT_TIMEOUT: Duration = Duration::from_millis(500);
 /// Metric channel label shared by every entry in `SignatureSpawner.inboxes`.
 const SIGN_POSIT_INBOX_LABEL: &str = "sign_posit_inbox";
 
-/// All relevant info pertaining to an indexed sign request.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct IndexedSignRequest {
-    pub id: SignId,
-    pub args: SignArgs,
-    pub chain: Chain,
-    /// Unix timestamp when the request was indexed by MPC node.
-    /// Preserved across recoveries to maintain original request creation time.
-    pub unix_timestamp_indexed: u64,
-    pub kind: SignKind,
-}
-
-impl IndexedSignRequest {
-    pub fn new(
-        id: SignId,
-        args: SignArgs,
-        chain: Chain,
-        unix_timestamp_indexed: u64,
-        kind: SignKind,
-    ) -> Self {
-        Self {
-            id,
-            args,
-            chain,
-            unix_timestamp_indexed,
-            kind,
-        }
-    }
-
-    pub fn sign(id: SignId, args: SignArgs, chain: Chain, unix_timestamp_indexed: u64) -> Self {
-        Self::new(id, args, chain, unix_timestamp_indexed, SignKind::Sign)
-    }
-
-    pub fn sign_bidirectional(
-        id: SignId,
-        args: SignArgs,
-        chain: Chain,
-        unix_timestamp_indexed: u64,
-        event: SignBidirectionalEvent,
-    ) -> Self {
-        Self::new(
-            id,
-            args,
-            chain,
-            unix_timestamp_indexed,
-            SignKind::SignBidirectional(event),
-        )
-    }
-
-    pub fn respond_bidirectional(
-        id: SignId,
-        args: SignArgs,
-        chain: Chain,
-        unix_timestamp_indexed: u64,
-        tx: crate::protocol::RespondBidirectionalTx,
-    ) -> Self {
-        Self::new(
-            id,
-            args,
-            chain,
-            unix_timestamp_indexed,
-            SignKind::RespondBidirectional(tx),
-        )
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Sign {
     Request(IndexedSignRequest),
     Completion(SignId),
+    Checkpoint(IndexedSignRequest),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1351,16 +1285,18 @@ impl SignGenerator {
                         self.participants.clone(),
                         is_proposer,
                     ) {
-                        if let Err(err) = ctx
-                            .backlog
-                            .mark_publishing(self.indexed.chain, &sign_id, publish)
-                            .await
-                        {
-                            tracing::warn!(
-                                ?sign_id,
-                                ?err,
-                                "failed to mark publishing for sign request"
-                            );
+                        if !matches!(self.indexed.kind, SignKind::Checkpoint(_)) {
+                            if let Err(err) = ctx
+                                .backlog
+                                .mark_publishing(self.indexed.chain, &sign_id, publish)
+                                .await
+                            {
+                                tracing::warn!(
+                                    ?sign_id,
+                                    ?err,
+                                    "failed to mark publishing for sign request"
+                                );
+                            }
                         }
                     }
 
@@ -1645,7 +1581,9 @@ impl SignatureSpawner {
             Duration::from_secs(expected_response_time_secs).saturating_sub(already_elapsed);
         let is_proposer = Arc::new(AtomicBool::new(false));
         // prevent incrementing delayed metric for already delayed requests
-        if remaining_time > Duration::from_secs(0) {
+        if remaining_time > Duration::from_secs(0)
+            && !matches!(indexed.kind, SignKind::Checkpoint(_))
+        {
             let is_proposer = Arc::clone(&is_proposer);
             let watcher = tokio::spawn(async move {
                 tokio::time::sleep(remaining_time).await;
@@ -1674,6 +1612,7 @@ impl SignatureSpawner {
             .or_insert_with(|| Subscriber::unsubscribed(SIGN_POSIT_INBOX_LABEL));
         let rx = inbox.subscribe();
         inbox.report_capacity();
+        set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
 
         let task = SignTask {
             governance: governance.clone(),
@@ -1695,7 +1634,7 @@ impl SignatureSpawner {
     }
 
     /// Handle a posit message - routes to existing task or buffers if task not yet created
-    async fn handle_posit(
+    fn handle_posit(
         &mut self,
         me: Participant,
         sign_id: SignId,
@@ -1708,18 +1647,20 @@ impl SignatureSpawner {
         if from == me {
             return;
         }
-        let inbox = self
-            .inboxes
-            .entry(sign_id)
-            .or_insert_with(|| Subscriber::unsubscribed(SIGN_POSIT_INBOX_LABEL));
-        let _ = inbox
-            .send(SignTaskMessage::PositMessage {
-                presignature_id,
-                round,
-                from,
-                action,
-            })
-            .await;
+        let inbox = self.inboxes.entry(sign_id).or_insert_with(|| {
+            Subscriber::unsubscribed_with_capacity(
+                SIGN_POSIT_INBOX_LABEL,
+                crate::protocol::message::POSIT_INBOX_CHANNEL_SIZE,
+            )
+        });
+        if let Err(err) = inbox.try_send_lossy(SignTaskMessage::PositMessage {
+            presignature_id,
+            round,
+            from,
+            action,
+        }) {
+            tracing::error!(?err, ?sign_id, "failed to send posit message");
+        }
         inbox.report_capacity();
     }
 
@@ -1727,6 +1668,7 @@ impl SignatureSpawner {
         if let Some(inbox) = self.inboxes.remove(&sign_id) {
             inbox.clear_capacity_global();
         }
+        set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
         self.abort_delayed_watcher(sign_id, "completion");
         if self.tasks.abort(sign_id) {
             tracing::info!(?sign_id, "aborting signature task due to completion event");
@@ -1744,6 +1686,7 @@ impl SignatureSpawner {
                 if let Some(inbox) = self.inboxes.remove(&sign_id) {
                     inbox.clear_capacity_global();
                 }
+                set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
                 self.abort_delayed_watcher(sign_id, "interruption");
                 return;
             }
@@ -1751,6 +1694,7 @@ impl SignatureSpawner {
         if let Some(inbox) = self.inboxes.remove(&sign_id) {
             inbox.clear_capacity_global();
         }
+        set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
         self.abort_delayed_watcher(sign_id, "task completion");
         match result {
             Ok(()) => {
@@ -1776,7 +1720,7 @@ impl SignatureSpawner {
             Sign::Completion(sign_id) => {
                 self.handle_completion(sign_id);
             }
-            Sign::Request(request) => {
+            Sign::Request(request) | Sign::Checkpoint(request) => {
                 let sign_id = request.id;
 
                 // Skip if we already have a task handling this request.
@@ -1822,7 +1766,7 @@ impl SignatureSpawner {
                     self.handle_request(&governance, sign, &protocol);
                 }
                 Some((sign_id, presignature_id, round, from, action)) = posits.recv() => {
-                    self.handle_posit(governance.me, sign_id, presignature_id, round, from, action).await;
+                    self.handle_posit(governance.me, sign_id, presignature_id, round, from, action);
                 }
                 Some(result) = self.tasks.join_next(), if !self.tasks.is_empty() => {
                     self.handle_task_exit(result);

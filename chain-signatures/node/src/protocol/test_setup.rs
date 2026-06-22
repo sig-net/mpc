@@ -4,13 +4,13 @@ use crate::mesh::MeshState;
 use crate::protocol::signature::SignatureSpawnerTask;
 use crate::protocol::{MessageChannel, MpcSignProtocol, Sign};
 use crate::rpc::{ContractStateWatcher, RpcChannel};
-use crate::storage::secret_storage::SecretNodeStorageBox;
+use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::{PresignatureStorage, TripleStorage};
 use near_sdk::AccountId;
 use tokio::sync::{mpsc, watch};
 
 pub struct TestProtocolStorage {
-    pub secret_storage: SecretNodeStorageBox,
+    pub secret_storage: SecretNodeStorageVariant,
     pub triple_storage: TripleStorage,
     pub presignature_storage: PresignatureStorage,
 }

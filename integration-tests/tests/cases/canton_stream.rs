@@ -5,10 +5,15 @@ use integration_tests::canton::{
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
 use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
-use mpc_node::protocol::{Chain, IndexedSignRequest, SignKind};
-use mpc_node::stream::ops::SignatureRespondedEvent;
-use mpc_node::stream::{catchup_then_livestream, ChainEvent, ChainStream};
-use mpc_primitives::{ScalarExt, Signature, LATEST_MPC_KEY_VERSION};
+use mpc_node::mesh::MeshState;
+use mpc_node::node_client::NodeClient;
+use mpc_node::protocol::{Chain, IndexedSignRequest};
+use mpc_node::sign_bidirectional::{hash_rlp_data, SignBidirectionalEventExt};
+use mpc_node::stream::{ChainPipeline, ChainStream, ChainStreaming};
+use mpc_primitives::{
+    ChainEvent, ChainTelemetry, CheckpointDigest, NoopChainTelemetry, ScalarExt, SignKind,
+    Signature, StateManager, LATEST_MPC_KEY_VERSION,
+};
 use serde_json::json;
 use serial_test::serial;
 use std::collections::HashSet;
@@ -18,18 +23,48 @@ use tokio::time::timeout;
 
 /// Create a CantonStream from the sandbox config with an externally-provided Backlog.
 /// Accepts Backlog as parameter (needed for checkpoint tests).
-async fn stream_canton(sandbox: &CantonSandbox, backlog: Backlog) -> Result<CantonStream> {
+async fn stream_canton(
+    sandbox: &CantonSandbox,
+    backlog: Backlog,
+) -> Result<CantonStream<impl StateManager, impl ChainTelemetry>> {
     let config = sandbox.get_config();
-    let mut stream =
-        CantonStream::new(Some(config), backlog).context("failed to create CantonStream")?;
+    let mut stream = CantonStream::new(Some(config), backlog.clone(), NoopChainTelemetry)
+        .context("failed to create CantonStream")?;
     let indexer = ChainStream::start(&mut stream).await?;
-    tokio::spawn(catchup_then_livestream(indexer));
+    let (_cp_tx, cp_rx) = tokio::sync::watch::channel(CheckpointDigest::default());
+    let (_mesh_tx, mesh_rx) = tokio::sync::watch::channel(MeshState::default());
+    let node_client = NodeClient::new(&Default::default());
+    let (pipeline, mut state_rx) = ChainPipeline::new(
+        indexer,
+        cp_rx,
+        backlog,
+        mesh_rx,
+        node_client,
+        0,
+        "test.near".parse().unwrap(),
+    );
+    tokio::spawn(pipeline.run());
+
+    // Wait until the pipeline is live so the subscription and anchor are established
+    // before callers begin submitting transactions.
+    timeout(Duration::from_secs(30), async {
+        loop {
+            if *state_rx.borrow() == ChainStreaming::Live {
+                return Ok(());
+            }
+            if state_rx.changed().await.is_err() {
+                anyhow::bail!("pipeline shut down before reaching Live state");
+            }
+        }
+    })
+    .await
+    .context("timed out waiting for pipeline to reach Live state")??;
     Ok(stream)
 }
 
 /// Poll stream for a SignRequest event with timeout.
 async fn wait_for_sign_request(
-    stream: &mut CantonStream,
+    stream: &mut CantonStream<impl StateManager, impl ChainTelemetry>,
     timeout_secs: u64,
 ) -> Result<IndexedSignRequest> {
     timeout(Duration::from_secs(timeout_secs), async {
@@ -73,23 +108,23 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
         panic!("expected SignBidirectional, got {:?}", event.kind);
     };
 
-    let expected_hash = mpc_node::sign_bidirectional::hash_rlp_data(bidir.serialized_transaction());
+    let expected_hash = hash_rlp_data(&bidir.serialized_transaction);
     let expected_payload = <k256::Scalar as ScalarExt>::from_bytes(expected_hash)
         .expect("test tx hash must be a valid scalar");
     assert_eq!(
         event.args.payload, expected_payload,
         "payload should match keccak256 of normalized serialized_transaction"
     );
-    assert_eq!(bidir.caip2_id(), expected_event.caip2_id);
-    assert_eq!(bidir.dest(), expected_event.dest);
-    assert_eq!(bidir.key_version(), expected_event.key_version);
-    assert_eq!(bidir.path(), expected_event.path);
+    assert_eq!(bidir.caip2_id, expected_event.caip2_id);
+    assert_eq!(bidir.dest, expected_event.dest);
+    assert_eq!(bidir.key_version, expected_event.key_version);
+    assert_eq!(bidir.path, expected_event.path);
     assert_eq!(
-        bidir.output_deserialization_schema(),
+        bidir.output_deserialization_schema,
         expected_event.output_deserialization_schema.as_bytes()
     );
     assert_eq!(
-        bidir.respond_serialization_schema(),
+        bidir.respond_serialization_schema,
         expected_event.respond_serialization_schema.as_bytes()
     );
     Ok(())
@@ -277,7 +312,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
 
     // Verify the backlog actually persisted the block height
     assert_eq!(
-        backlog.processed_block(Chain::Canton).await,
+        backlog.get_processed_block(Chain::Canton).await,
         Some(checkpoint_height),
         "backlog should retain checkpoint height after stream1 is dropped"
     );
@@ -363,9 +398,15 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     assert_eq!(sign_event.chain, Chain::Canton);
     let request_id = hex::encode(sign_event.id.request_id);
     let sign_event_cid = match &sign_event.kind {
-        SignKind::SignBidirectional(mpc_node::stream::ops::SignBidirectionalEvent::Canton(
-            canton_event,
-        )) => canton_event.sign_event_contract_id.clone(),
+        SignKind::SignBidirectional(event) if event.chain == Chain::Canton => {
+            let chain_ctx_bytes = event
+                .chain_ctx
+                .as_deref()
+                .expect("missing chain_ctx on Canton sign request");
+            let ctx: mpc_node::indexer_canton::CantonChainCtx =
+                borsh::from_slice(chain_ctx_bytes).expect("failed to deserialize CantonChainCtx");
+            ctx.sign_event_contract_id.clone()
+        }
         _ => panic!("expected Canton SignBidirectional event"),
     };
 
@@ -402,7 +443,8 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     let mut saw_respond = false;
     for _ in 0..10 {
         match timeout(Duration::from_secs(5), stream.next_event()).await {
-            Ok(Some(ChainEvent::Respond(SignatureRespondedEvent::Canton(ev)))) => {
+            Ok(Some(ChainEvent::Respond(ev))) => {
+                assert_eq!(ev.chain, mpc_primitives::Chain::Canton);
                 assert_eq!(hex::encode(ev.request_id), request_id);
                 assert_eq!(ev.signature.big_r, expected_big_r);
                 assert_eq!(ev.signature.s, expected_s);
@@ -441,37 +483,31 @@ async fn test_canton_stream_parse_sign_bidirectional_fields() -> Result<()> {
         panic!("expected SignBidirectional, got {:?}", req.kind);
     };
 
-    assert_eq!(bidir.caip2_id(), expected_event.caip2_id);
-    assert_eq!(bidir.dest(), expected_event.dest);
-    assert_eq!(bidir.path(), expected_event.path);
-    assert_eq!(bidir.key_version(), expected_event.key_version);
+    assert_eq!(bidir.caip2_id, expected_event.caip2_id);
+    assert_eq!(bidir.dest, expected_event.dest);
+    assert_eq!(bidir.path, expected_event.path);
+    assert_eq!(bidir.key_version, expected_event.key_version);
     let expected_sender = hex::decode(&expected_event.sender)?;
     assert_eq!(
-        bidir.sender(),
+        bidir.sender,
         <[u8; 32]>::try_from(expected_sender.as_slice())?
     );
-    assert!(
-        matches!(
-            bidir,
-            mpc_node::stream::ops::SignBidirectionalEvent::Canton(_)
-        ),
-        "expected Canton variant"
-    );
+    assert_eq!(bidir.chain, Chain::Canton, "expected Canton chain");
     assert_eq!(
         bidir.target_chain()?,
         Chain::Ethereum,
         "caip2_id should parse to Chain::Ethereum"
     );
     assert_eq!(
-        bidir.output_deserialization_schema(),
+        bidir.output_deserialization_schema,
         expected_event.output_deserialization_schema.as_bytes()
     );
     assert_eq!(
-        bidir.respond_serialization_schema(),
+        bidir.respond_serialization_schema,
         expected_event.respond_serialization_schema.as_bytes()
     );
     assert!(
-        !bidir.serialized_transaction().is_empty(),
+        !bidir.serialized_transaction.is_empty(),
         "RLP-encoded tx should not be empty"
     );
     Ok(())

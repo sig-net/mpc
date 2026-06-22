@@ -12,12 +12,15 @@ exclude = ["infra/scripts/generate_keys"]
 resolver = "2"
 
 [workspace.package]
-version = "1.16.0"
+version = "1.16.4"
 
 [workspace.dependencies]
 alloy = { version = "=1.0.38", features = ["contract", "json"] }
 anyhow = { version = "1.0.95", features = ["backtrace"] }
-borsh = "1.5.3"
+async-trait = "0.1"
+backon = "0.4"
+borsh = { version = "1.5.3", features = ["derive"] }
+enum-map = "2.7.3"
 cait-sith = { git = "https://github.com/sig-net/cait-sith", rev = "9f34e8c", features = ["k256"] }
 ciborium = "0.2.2"
 clap = { version = "4.5.4", features = ["derive", "env"] }
@@ -53,8 +56,8 @@ tracing-subscriber = { version = "0.3.20", default-features = false, features = 
 url = { version = "2.4.0", features = ["serde"] }
 anchor-client = { version = "0.31.0", features = ["async"] }
 anchor-lang = "0.31.0"
-solana-sdk = "2.2.2"
-solana-transaction-status = "2.2.6"
+solana-sdk = "2.3.1"
+solana-transaction-status = "2.3.13"
 alloy-dyn-abi = "1.4.1"
 secp256k1 = "0.28.2"
 rlp = "0.5"
@@ -62,13 +65,15 @@ alloy-consensus = { version = "1.0.38", features = ["serde"] }
 alloy-primitives = "1.4.1"
 alloy-json-abi = "1.4.1"
 alloy-rlp = "0.3.12"
-solana-client = "2.2.7"
+solana-client = "2.3.13"
 futures-util = "0.3.31"
 parity-scale-codec = { version = "3", features = ["derive"] }
 
 near-account-id = "1.0.0"
-near-primitives = "0.26.0"
-near-sdk = { version = "5.6.0", features = ["unstable", "unit-testing"] }
+near-crypto = "0.28.0"
+near-fetch = "0.7.0"
+near-primitives = "0.28.0"
+near-sdk = { version = "=5.7.0", features = ["unstable", "unit-testing"] }
 
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }
@@ -87,3 +92,21 @@ x25519-dalek = { git = "https://github.com/dalek-cryptography/curve25519-dalek",
 # big optimization even in test builds for math heavy crates
 [profile.dev.package.curve25519-dalek]
 opt-level = 3
+
+# Disable debug symbols in all profiles to reduce binary size
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
+
+[profile.fixture]
+inherits = "release"
+debug = 0
+
+[profile.cluster]
+inherits = "release"
+debug = 0
+
+[profile.release]
+debug = 0

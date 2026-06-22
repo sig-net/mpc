@@ -1,10 +1,15 @@
 pub mod common;
 use common::{candidates, create_response, init, init_env, sign_and_validate};
 
+use digest::Digest as _;
+use k256::elliptic_curve::point::DecompressPoint as _;
+use k256::elliptic_curve::subtle::Choice;
 use mpc_contract::errors;
 use mpc_contract::primitives::{CandidateInfo, SignRequest};
-use mpc_primitives::{Signature, LATEST_MPC_KEY_VERSION};
+use mpc_crypto::kdf;
+use mpc_primitives::{Chain, ConsensusCheckpointDigest, Signature, LATEST_MPC_KEY_VERSION};
 use near_workspaces::types::{AccountId, NearToken};
+use signature::DigestSigner as _;
 
 use std::collections::HashMap;
 
@@ -345,6 +350,107 @@ async fn test_contract_respond_rogue_signature() -> anyhow::Result<()> {
             .to_string()
             .contains(&errors::RespondError::InvalidSignature.to_string()),
         "expected InvalidSignature error, got: {failure}",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_contract_checkpoint_verification() -> anyhow::Result<()> {
+    let (_, contract, _, sk) = init_env().await;
+
+    let checkpoint = ConsensusCheckpointDigest::new(Chain::Ethereum, 100, [42u8; 32]);
+
+    // 1. Sign using the correct derived key (with height)
+    let epsilon = kdf::derive_epsilon_checkpoint(checkpoint.chain, checkpoint.height);
+    let derived_sk = kdf::derive_secret_key(&sk, epsilon);
+    let derived_pk = kdf::derive_key(sk.public_key().into(), epsilon);
+
+    let signing_key = k256::ecdsa::SigningKey::from(&derived_sk);
+    let digest = <k256::Secp256k1 as ecdsa::hazmat::DigestPrimitive>::Digest::new_with_prefix(
+        checkpoint.sign_payload_bytes(),
+    );
+    let (signature, _): (ecdsa::Signature<k256::Secp256k1>, _) =
+        signing_key.try_sign_digest(digest).unwrap();
+    let s = signature.s();
+    let (r_bytes, _) = signature.split_bytes();
+    let big_r = k256::AffinePoint::decompress(&r_bytes, Choice::from(0)).unwrap();
+    let s: k256::Scalar = *s.as_ref();
+    let recovery_id =
+        if kdf::check_ec_signature(&derived_pk, &big_r, &s, checkpoint.sign_payload_scalar(), 0)
+            .is_ok()
+        {
+            0
+        } else {
+            1
+        };
+
+    let valid_signature = Signature {
+        big_r,
+        s,
+        recovery_id,
+    };
+
+    // 2. Call respond_checkpoint, which should succeed
+    let respond = contract
+        .call("respond_checkpoint")
+        .args_json(serde_json::json!({
+            "checkpoint": checkpoint,
+            "signature": valid_signature,
+        }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        respond.is_success(),
+        "respond_checkpoint failed: {:?}",
+        respond
+    );
+
+    // 3. Verify against root key signature (which should fail now)
+    let root_signing_key = k256::ecdsa::SigningKey::from(&sk);
+    let root_digest = <k256::Secp256k1 as ecdsa::hazmat::DigestPrimitive>::Digest::new_with_prefix(
+        checkpoint.sign_payload_bytes(),
+    );
+    let (root_signature, _): (ecdsa::Signature<k256::Secp256k1>, _) =
+        root_signing_key.try_sign_digest(root_digest).unwrap();
+    let root_s = root_signature.s();
+    let (root_r_bytes, _) = root_signature.split_bytes();
+    let root_big_r = k256::AffinePoint::decompress(&root_r_bytes, Choice::from(0)).unwrap();
+    let root_s_scalar: k256::Scalar = *root_s.as_ref();
+    let root_pk_affine = sk.public_key().into();
+    let root_recovery_id = if kdf::check_ec_signature(
+        &root_pk_affine,
+        &root_big_r,
+        &root_s_scalar,
+        checkpoint.sign_payload_scalar(),
+        0,
+    )
+    .is_ok()
+    {
+        0
+    } else {
+        1
+    };
+
+    let root_key_signature = Signature {
+        big_r: root_big_r,
+        s: root_s_scalar,
+        recovery_id: root_recovery_id,
+    };
+
+    let respond_root_key = contract
+        .call("respond_checkpoint")
+        .args_json(serde_json::json!({
+            "checkpoint": checkpoint,
+            "signature": root_key_signature,
+        }))
+        .max_gas()
+        .transact()
+        .await?;
+    assert!(
+        respond_root_key.is_failure(),
+        "respond_checkpoint with root key signature should have failed"
     );
 
     Ok(())

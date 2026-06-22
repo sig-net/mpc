@@ -1,16 +1,15 @@
 pub mod abi;
+mod client;
+mod config;
 pub mod indexer_eth_direct_rpc;
 #[cfg(feature = "helios")]
 pub mod indexer_eth_helios;
 
-use crate::backlog::Backlog;
 use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
-use crate::protocol::{Chain, IndexedSignRequest};
+use crate::protocol::Chain;
 use crate::respond_bidirectional::CompletedTx;
-use crate::stream::ops::{EthereumSignatureRespondedEvent, SignatureRespondedEvent};
-use crate::stream::{AsyncCatchupIter, ChainEvent, ChainIndexer, ChainStream, ExecutionOutcome};
-use crate::util::retry;
+use crate::stream::{ChainIndexer, ChainStream};
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
@@ -19,15 +18,19 @@ use alloy::rpc::types::{Block, BlockId, Log};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
+pub use client::EthereumClient;
+pub use config::EthConfig;
+use futures_util::stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{
-    SignArgs, SignId, Signature as MpcSignature, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+    BidirectionalTx, BidirectionalTxId, ChainEvent, ChainTelemetry, ExecutionOutcome,
+    IndexedSignRequest, SignArgs, SignId, Signature as MpcSignature, SignatureRespondedEvent,
+    StateManager, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
@@ -75,15 +78,10 @@ impl CatchupIter {
         self.buffered_blocks = self.client.get_blocks(&batch_block_ids).await.into_iter();
         self.next_block = batch_end;
     }
-}
 
-#[async_trait]
-impl AsyncCatchupIter for CatchupIter {
-    type Item = MaybeBlock;
-
-    async fn next(&mut self) -> Option<Self::Item> {
+    pub async fn next(&mut self) -> Option<MaybeBlock> {
         loop {
-            if let Some(block) = Iterator::next(&mut self.buffered_blocks) {
+            if let Some(block) = self.buffered_blocks.next() {
                 return Some(block);
             }
 
@@ -125,214 +123,6 @@ impl BlockAndRequests {
             indexed_requests,
             respond_logs,
             execution_events,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct EthConfig {
-    /// The ethereum account secret key used to sign eth respond txn.
-    pub account_sk: String,
-    /// Ethereum consensus HTTP RPC URL
-    pub consensus_rpc_http_url: String,
-    /// Ethereum execution HTTP RPC URL
-    pub execution_rpc_http_url: String,
-    /// The contract address to watch without the `0x` prefix
-    pub contract_address: String,
-    /// must be one of sepolia, mainnet
-    pub network: String,
-    /// path to store helios data
-    pub helios_data_path: String,
-    /// refresh finalized block interval in milliseconds
-    pub refresh_finalized_interval: u64,
-    /// Enable the indexer to just send requests optimistically instead waiting for final.
-    pub optimistic_requests: bool,
-    /// light client is true if using helios, false if using direct rpc
-    pub light_client: bool,
-}
-
-impl fmt::Debug for EthConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EthConfig")
-            .field("account_sk", &"<hidden>")
-            .field("consensus_rpc_http_url", &self.consensus_rpc_http_url)
-            .field("execution_rpc_http_url", &self.execution_rpc_http_url)
-            .field("contract_address", &self.contract_address)
-            .field("network", &self.network)
-            .field("helios_data_path", &self.helios_data_path)
-            .field(
-                "refresh_finalized_interval",
-                &self.refresh_finalized_interval,
-            )
-            .field("optimistic_requests", &self.optimistic_requests)
-            .field("light_client", &self.light_client)
-            .finish()
-    }
-}
-
-// Configures Ethereum indexer.
-#[derive(Debug, Clone, clap::Parser)]
-#[group(id = "indexer_eth_options")]
-pub struct EthArgs {
-    // -- Core --
-    /// The ethereum account secret key used to sign eth respond txn.
-    #[arg(
-        long,
-        env("MPC_ETH_ACCOUNT_SK"),
-        requires_all = ["eth_execution_rpc_http_url", "eth_contract_address"]
-    )]
-    pub eth_account_sk: Option<String>,
-    /// The contract address to watch without the `0x` prefix
-    #[clap(long, env("MPC_ETH_CONTRACT_ADDRESS"), requires = "eth_account_sk")]
-    pub eth_contract_address: Option<String>,
-
-    // -- RPC endpoints --
-    /// Ethereum execution RPC URL
-    #[clap(
-        long,
-        env("MPC_ETH_EXECUTION_RPC_HTTP_URL"),
-        requires = "eth_account_sk"
-    )]
-    pub eth_execution_rpc_http_url: Option<String>,
-
-    // -- Helios light-client --
-    /// Use Helios light client instead of direct RPC
-    #[clap(
-        long,
-        env("MPC_ETH_LIGHT_CLIENT"),
-        default_value = "false",
-        requires_if("true", "eth_consensus_rpc_http_url")
-    )]
-    pub eth_light_client: bool,
-    /// Ethereum consensus RPC URL (required when --eth-light-client is set)
-    #[clap(
-        long,
-        env("MPC_ETH_CONSENSUS_RPC_HTTP_URL"),
-        requires = "eth_account_sk"
-    )]
-    pub eth_consensus_rpc_http_url: Option<String>,
-    /// The network that the eth indexer is running on. Either "sepolia"/"mainnet"
-    #[clap(
-        long,
-        env("MPC_ETH_NETWORK"),
-        requires = "eth_account_sk",
-        default_value = "sepolia",
-        value_parser = ["sepolia", "mainnet"],
-    )]
-    pub eth_network: Option<String>,
-    /// Helios light client data path
-    #[clap(
-        long,
-        env("MPC_ETH_HELIOS_DATA_PATH"),
-        requires = "eth_account_sk",
-        default_value = "/helios/sepolia"
-    )]
-    pub eth_helios_data_path: Option<String>,
-
-    // -- Behaviour --
-    /// Refresh finalized block interval in milliseconds
-    #[clap(
-        long,
-        env("MPC_ETH_REFRESH_FINALIZED_INTERVAL"),
-        default_value = "10000"
-    )]
-    pub eth_refresh_finalized_interval: Option<u64>,
-    /// Enable the indexer to just send requests optimistically instead waiting for final.
-    /// Useful for testing where we do not want to reach finality due to how long it takes.
-    #[clap(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "false")]
-    pub eth_optimistic_requests: bool,
-}
-
-impl EthArgs {
-    pub fn into_str_args(self) -> Vec<String> {
-        let mut args = Vec::with_capacity(10);
-        if let Some(eth_account_sk) = self.eth_account_sk {
-            args.extend(["--eth-account-sk".to_string(), eth_account_sk]);
-        }
-        if let Some(eth_consensus_rpc_http_url) = self.eth_consensus_rpc_http_url {
-            args.extend([
-                "--eth-consensus-rpc-http-url".to_string(),
-                eth_consensus_rpc_http_url,
-            ]);
-        }
-        if let Some(eth_execution_rpc_http_url) = self.eth_execution_rpc_http_url {
-            args.extend([
-                "--eth-execution-rpc-http-url".to_string(),
-                eth_execution_rpc_http_url,
-            ]);
-        }
-        if let Some(eth_contract_address) = self.eth_contract_address {
-            args.extend(["--eth-contract-address".to_string(), eth_contract_address]);
-        }
-        if let Some(eth_network) = self.eth_network {
-            args.extend(["--eth-network".to_string(), eth_network]);
-        }
-        if let Some(eth_helios_data_path) = self.eth_helios_data_path {
-            args.extend(["--eth-helios-data-path".to_string(), eth_helios_data_path]);
-        }
-        if let Some(eth_refresh_finalized_interval) = self.eth_refresh_finalized_interval {
-            args.extend([
-                "--eth-refresh-finalized-interval".to_string(),
-                eth_refresh_finalized_interval.to_string(),
-            ]);
-        }
-        if self.eth_optimistic_requests {
-            args.push("--eth-optimistic-requests".to_string());
-        }
-        if self.eth_light_client {
-            args.push("--eth-light-client".to_string());
-        }
-        args
-    }
-
-    pub fn into_config(self) -> Option<EthConfig> {
-        #[cfg(not(feature = "helios"))]
-        if self.eth_light_client {
-            tracing::warn!(
-                "ignoring ethereum light client request because mpc-node was built without helios feature"
-            );
-        }
-
-        Some(EthConfig {
-            account_sk: self.eth_account_sk?,
-            consensus_rpc_http_url: self.eth_consensus_rpc_http_url.unwrap_or_default(),
-            execution_rpc_http_url: self.eth_execution_rpc_http_url.unwrap(),
-            contract_address: self.eth_contract_address.unwrap(),
-            network: self.eth_network.unwrap_or_default(),
-            helios_data_path: self.eth_helios_data_path.unwrap_or_default(),
-            refresh_finalized_interval: self.eth_refresh_finalized_interval.unwrap(),
-            optimistic_requests: self.eth_optimistic_requests,
-            #[cfg(feature = "helios")]
-            light_client: self.eth_light_client,
-            #[cfg(not(feature = "helios"))]
-            light_client: false,
-        })
-    }
-
-    pub fn from_config(config: Option<EthConfig>) -> Self {
-        match config {
-            Some(config) if !config.account_sk.is_empty() => Self {
-                eth_account_sk: Some(config.account_sk),
-                eth_consensus_rpc_http_url: Some(config.consensus_rpc_http_url),
-                eth_execution_rpc_http_url: Some(config.execution_rpc_http_url),
-                eth_contract_address: Some(config.contract_address),
-                eth_network: Some(config.network),
-                eth_helios_data_path: Some(config.helios_data_path),
-                eth_refresh_finalized_interval: Some(config.refresh_finalized_interval),
-                eth_optimistic_requests: config.optimistic_requests,
-                eth_light_client: config.light_client,
-            },
-            _ => Self {
-                eth_account_sk: None,
-                eth_consensus_rpc_http_url: None,
-                eth_execution_rpc_http_url: None,
-                eth_contract_address: None,
-                eth_network: None,
-                eth_helios_data_path: None,
-                eth_refresh_finalized_interval: None,
-                eth_optimistic_requests: false,
-                eth_light_client: false,
-            },
         }
     }
 }
@@ -489,8 +279,6 @@ async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEvent>) 
             continue;
         }
 
-        // responder: offset 0..32 (address right-padded)
-        let responder_addr = Address::from_slice(&data[12..32]);
         // signature struct encoding layout:
         // bigR.x at 32..64, bigR.y at 64..96, s at 96..128, recoveryId at 159
         let big_r_x = &data[32..64];
@@ -513,13 +301,11 @@ async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEvent>) 
 
         let signature = MpcSignature::new(big_r, s, recovery_id);
 
-        let eth_event = EthereumSignatureRespondedEvent {
+        let respond_event = SignatureRespondedEvent {
             request_id: sign_id.request_id,
-            responder: responder_addr,
             signature,
+            chain: Chain::Ethereum,
         };
-
-        let respond_event = SignatureRespondedEvent::Ethereum(eth_event);
         tracing::info!(?sign_id, "emitting SignatureResponded event");
         if let Err(err) = events_tx.send(ChainEvent::Respond(respond_event)).await {
             tracing::error!(?err, "failed to emit Respond event");
@@ -574,275 +360,10 @@ impl SignatureRequestedEvent {
     }
 }
 
-#[derive(Clone)]
-pub enum EthereumClient {
-    #[cfg(feature = "helios")]
-    Helios(indexer_eth_helios::HeliosEthereumClient),
-    DirectRpc(indexer_eth_direct_rpc::RpcEthereumClient),
-}
-
-impl EthereumClient {
-    pub async fn new(eth: EthConfig) -> anyhow::Result<EthereumClient> {
-        if eth.light_client {
-            #[cfg(feature = "helios")]
-            {
-                return Ok(EthereumClient::Helios(
-                    indexer_eth_helios::build_client(eth.clone()).await?,
-                ));
-            }
-
-            #[cfg(not(feature = "helios"))]
-            {
-                anyhow::bail!(
-                    "ethereum light client requested, but mpc-node was built without helios feature"
-                );
-            }
-        }
-
-        {
-            Ok(EthereumClient::DirectRpc(
-                indexer_eth_direct_rpc::RpcEthereumClient::new(&eth.execution_rpc_http_url),
-            ))
-        }
-    }
-
-    fn client_name(&self) -> &str {
-        match self {
-            #[cfg(feature = "helios")]
-            EthereumClient::Helios(_) => "Helios",
-            EthereumClient::DirectRpc(_) => "DirectRpc",
-        }
-    }
-
-    async fn get_block(&self, block_id: BlockId) -> Option<Block> {
-        // Configure retry behaviour and delegate to shared retry_async helper.
-        let retry_config = retry::RetryConfig::default();
-        let get_block_op = |_attempt: usize| async {
-            match self {
-                #[cfg(feature = "helios")]
-                EthereumClient::Helios(client) => client.get_block(block_id).await,
-                EthereumClient::DirectRpc(client) => client.get_block(block_id).await,
-            }
-        };
-
-        let res = retry::retry_async(
-            retry_config,
-            get_block_op,
-            |_attempt, _reason| true,
-            |attempt, reason, sleep_duration| match reason {
-                retry::RetryReason::Error(e) => {
-                    tracing::warn!(
-                        client = self.client_name(),
-                        "get_block failed (attempt {attempt}) for {block_id:?}: {e:#}; retrying in {sleep_duration:?}"
-                    );
-                }
-                retry::RetryReason::Timeout(t) => {
-                    tracing::warn!(
-                        client = self.client_name(),
-                        "get_block timed out after {t:?} (attempt {attempt}) for {block_id:?}; retrying in {sleep_duration:?}"
-                    );
-                }
-            },
-        )
-        .await;
-
-        match res {
-            Ok(Some(block)) => Some(block),
-            Ok(None) => {
-                tracing::warn!(client = self.client_name(), "Block {block_id:?} not found");
-                None
-            }
-            Err(retry::RetryError::Exhausted {
-                attempts,
-                last_error,
-            }) => {
-                tracing::warn!(
-                    client = self.client_name(),
-                    "get_block failed for {block_id:?}: {last_error:#}; exhausted after {attempts} attempts"
-                );
-                None
-            }
-            Err(retry::RetryError::TimeoutExhausted {
-                attempts,
-                last_timeout,
-            }) => {
-                tracing::warn!(
-                    client = self.client_name(),
-                    "get_block timed out for {block_id:?} (last timeout {last_timeout:?}); exhausted after {attempts} attempts"
-                );
-                None
-            }
-        }
-    }
-
-    async fn get_blocks(&self, block_ids: &[BlockId]) -> Vec<MaybeBlock> {
-        if block_ids.is_empty() {
-            return Vec::new();
-        }
-
-        let retry_config = retry::RetryConfig::default();
-        let block_ids = block_ids.to_vec();
-        let get_blocks_op = |_attempt: usize| {
-            let block_ids = block_ids.clone();
-            async move {
-                match self {
-                    #[cfg(feature = "helios")]
-                    EthereumClient::Helios(client) => client.get_blocks(&block_ids).await,
-                    EthereumClient::DirectRpc(client) => client.get_blocks(&block_ids).await,
-                }
-            }
-        };
-
-        match retry::retry_async(
-            retry_config,
-            get_blocks_op,
-            |_attempt, _reason| true,
-            |attempt, reason, sleep_duration| match reason {
-                retry::RetryReason::Error(e) => {
-                    tracing::warn!(
-                        client = self.client_name(),
-                        num_blocks = block_ids.len(),
-                        "get_blocks failed (attempt {attempt}): {e:#}; retrying in {sleep_duration:?}"
-                    );
-                }
-                retry::RetryReason::Timeout(t) => {
-                    tracing::warn!(
-                        client = self.client_name(),
-                        num_blocks = block_ids.len(),
-                        "get_blocks timed out after {t:?} (attempt {attempt}); retrying in {sleep_duration:?}"
-                    );
-                }
-            },
-        )
-        .await
-        {
-            Ok(blocks) => blocks,
-            Err(retry::RetryError::Exhausted { attempts, last_error }) => {
-                tracing::warn!(
-                    client = self.client_name(),
-                    num_blocks = block_ids.len(),
-                    "get_blocks failed: {last_error:#}; exhausted after {attempts} attempts"
-                );
-                block_ids.iter().copied().map(MaybeBlock::Missing).collect()
-            }
-            Err(retry::RetryError::TimeoutExhausted { attempts, last_timeout }) => {
-                tracing::warn!(
-                    client = self.client_name(),
-                    num_blocks = block_ids.len(),
-                    "get_blocks timed out (last timeout {last_timeout:?}); exhausted after {attempts} attempts"
-                );
-                block_ids.iter().copied().map(MaybeBlock::Missing).collect()
-            }
-        }
-    }
-
-    async fn get_block_receipts(
-        &self,
-        block_id: BlockId,
-    ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>> {
-        match self {
-            #[cfg(feature = "helios")]
-            EthereumClient::Helios(client) => client.get_block_receipts(block_id).await,
-            EthereumClient::DirectRpc(client) => client.get_block_receipts(block_id).await,
-        }
-    }
-
-    async fn get_nonce(&self, address: Address, block_id: BlockId) -> anyhow::Result<u64> {
-        match self {
-            #[cfg(feature = "helios")]
-            EthereumClient::Helios(client) => client.get_nonce(address, block_id).await,
-            EthereumClient::DirectRpc(client) => client.get_nonce(address, block_id).await,
-        }
-    }
-
-    pub fn block_number_from_id(block_id: BlockId) -> BlockNumber {
-        match block_id {
-            BlockId::Number(BlockNumberOrTag::Number(block_number)) => block_number,
-            BlockId::Number(tag) => panic!("expected numbered block id, got {tag:?}"),
-            BlockId::Hash(hash) => panic!("expected numbered block id, got hash {hash:?}"),
-        }
-    }
-
-    pub async fn get_transaction_by_hash(
-        &self,
-        tx_hash: alloy::primitives::B256,
-    ) -> anyhow::Result<Option<alloy::rpc::types::Transaction>> {
-        match self {
-            #[cfg(feature = "helios")]
-            EthereumClient::Helios(client) => client.get_transaction_by_hash(tx_hash).await,
-            EthereumClient::DirectRpc(client) => client.get_transaction_by_hash(tx_hash).await,
-        }
-    }
-
-    pub async fn trace_transaction_output(
-        &self,
-        tx_hash: alloy::primitives::B256,
-    ) -> anyhow::Result<alloy::primitives::Bytes> {
-        match self {
-            #[cfg(feature = "helios")]
-            EthereumClient::Helios(client) => client.trace_transaction_output(tx_hash).await,
-            EthereumClient::DirectRpc(client) => client.trace_transaction_output(tx_hash).await,
-        }
-    }
-
-    pub async fn call(
-        &self,
-        from: Address,
-        to: Address,
-        data: Bytes,
-        block_number: u64,
-    ) -> anyhow::Result<Bytes> {
-        match self {
-            #[cfg(feature = "helios")]
-            EthereumClient::Helios(client) => client.call(from, to, data, block_number).await,
-            EthereumClient::DirectRpc(client) => client.call(from, to, data, block_number).await,
-        }
-    }
-
-    async fn get_latest_block_number(&self) -> Option<u64> {
-        self.get_block(BlockId::Number(alloy::rpc::types::BlockNumberOrTag::Latest))
-            .await
-            .map(|block| block.header.number)
-    }
-
-    fn clamp_oldest_supported(
-        &self,
-        requested_start: u64,
-        anchor_height: BlockNumber,
-    ) -> BlockNumber {
-        let max_catchup_blocks = match self {
-            #[cfg(feature = "helios")]
-            EthereumClient::Helios(_) => indexer_eth_helios::MAX_CATCHUP_BLOCKS,
-            EthereumClient::DirectRpc(_) => indexer_eth_direct_rpc::MAX_CATCHUP_BLOCKS,
-        };
-        Self::clamp_oldest_supported_with(requested_start, anchor_height, max_catchup_blocks)
-    }
-
-    fn clamp_oldest_supported_with(
-        requested_start: u64,
-        anchor_height: BlockNumber,
-        max_catchup_blocks: u64,
-    ) -> BlockNumber {
-        let catchup_end = anchor_height.saturating_sub(1);
-        let oldest_supported = catchup_end.saturating_sub(max_catchup_blocks);
-
-        if requested_start < oldest_supported {
-            tracing::warn!(
-                requested_start,
-                anchor_height,
-                oldest_supported,
-                "ethereum catchup start is older than supported range; clamping"
-            );
-            oldest_supported
-        } else {
-            requested_start
-        }
-    }
-}
-
-pub struct EthereumIndexer {
+pub struct EthereumIndexer<S: StateManager, T: ChainTelemetry> {
     eth: EthConfig,
-    backlog: Backlog,
+    state_manager: S,
+    telemetry: T,
     client: Arc<EthereumClient>,
     events_tx: mpsc::Sender<ChainEvent>,
     contract_address: Address,
@@ -860,10 +381,11 @@ enum BackfillOutcome {
     Observed { event: Option<ChainEvent> },
 }
 
-impl EthereumIndexer {
+impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     pub async fn new(
         eth: EthConfig,
-        backlog: Backlog,
+        state_manager: S,
+        telemetry: T,
         events_tx: mpsc::Sender<ChainEvent>,
     ) -> anyhow::Result<Self> {
         let client = Arc::new(EthereumClient::new(eth.clone()).await?);
@@ -874,7 +396,8 @@ impl EthereumIndexer {
 
         Ok(Self {
             eth,
-            backlog,
+            state_manager,
+            telemetry,
             client,
             events_tx,
             contract_address,
@@ -936,11 +459,8 @@ impl EthereumIndexer {
 
     /// Process the block and emit relevant ChainEvents from the block.
     async fn process_block(&self, block: &Block) -> anyhow::Result<()> {
-        let block_number = block.header.number;
-        crate::metrics::indexers::LATEST_BLOCK_NUMBER
-            .with_label_values(&[Chain::Ethereum.as_str(), "indexed"])
-            .set(block_number as i64);
-
+        // Emit telemetry for the indexed block number
+        self.telemetry.block_indexed(block.header.number);
         let processed = self.parse_block(block).await?;
         self.emit_processed_block(processed).await?;
 
@@ -1036,9 +556,9 @@ impl EthereumIndexer {
 
     async fn execution_confirmed_event(
         &self,
-        tx_id: crate::sign_bidirectional::BidirectionalTxId,
+        tx_id: BidirectionalTxId,
         sign_id: SignId,
-        pending_tx: &crate::sign_bidirectional::BidirectionalTx,
+        pending_tx: &BidirectionalTx,
         block_number: u64,
         receipt: &alloy::rpc::types::TransactionReceipt,
     ) -> Option<ChainEvent> {
@@ -1096,12 +616,12 @@ impl EthereumIndexer {
 
     async fn backfill_execution_confirmation(
         &self,
-        tx_id: crate::sign_bidirectional::BidirectionalTxId,
+        tx_id: BidirectionalTxId,
         sign_id: SignId,
-        pending_tx: &crate::sign_bidirectional::BidirectionalTx,
+        pending_tx: &BidirectionalTx,
         current_block_number: u64,
     ) -> anyhow::Result<BackfillOutcome> {
-        let Some(tx) = self.client.get_transaction_by_hash(tx_id.0).await? else {
+        let Some(tx) = self.client.get_transaction_by_hash(tx_id.0.into()).await? else {
             return Ok(BackfillOutcome::NotObserved);
         };
 
@@ -1117,6 +637,7 @@ impl EthereumIndexer {
                 current_block_number,
                 "skipping late watcher backfill for future ethereum block"
             );
+
             return Ok(BackfillOutcome::NotObserved);
         }
 
@@ -1177,7 +698,10 @@ impl EthereumIndexer {
         let mut events = Vec::new();
         let mut resolved_tx_ids = HashSet::new();
 
-        let watchers = self.backlog.execution_watchers(Chain::Ethereum).await;
+        let watchers = self
+            .state_manager
+            .get_execution_watchers(Chain::Ethereum)
+            .await;
         tracing::info!(
             watchers_count = watchers.len(),
             block_number,
@@ -1221,7 +745,10 @@ impl EthereumIndexer {
         }
 
         // Staleness checks (nonce too low)
-        let remaining_pending = self.backlog.execution_watchers(Chain::Ethereum).await;
+        let remaining_pending = self
+            .state_manager
+            .get_execution_watchers(Chain::Ethereum)
+            .await;
 
         for (tx_id, (sign_id, tx)) in remaining_pending {
             if resolved_tx_ids.contains(&tx_id) || observed_tx_ids.contains(&tx_id) {
@@ -1232,7 +759,7 @@ impl EthereumIndexer {
                 .client
                 .as_ref()
                 .get_nonce(
-                    tx.from_address,
+                    tx.from_address.into(),
                     BlockId::Number(BlockNumberOrTag::Number(block_number)),
                 )
                 .await
@@ -1381,10 +908,10 @@ impl EthereumIndexer {
 }
 
 #[async_trait]
-impl ChainIndexer for EthereumIndexer {
+impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> {
     const CHAIN: Chain = Chain::Ethereum;
     type Block = MaybeBlock;
-    type Iter = CatchupIter;
+    type Iter = std::pin::Pin<Box<dyn stream::Stream<Item = Self::Block> + Send + 'static>>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         let start_block_number = loop {
@@ -1417,8 +944,8 @@ impl ChainIndexer for EthereumIndexer {
         // the history of the network in case where we do not have a checkpoint.
         // https://github.com/sig-net/mpc/issues/777
         let current_block = self
-            .backlog
-            .processed_block(Chain::Ethereum)
+            .state_manager
+            .get_processed_block(Chain::Ethereum)
             .await
             .map(|n| n.saturating_add(1))
             .unwrap_or(anchor_height);
@@ -1426,7 +953,15 @@ impl ChainIndexer for EthereumIndexer {
             .client
             .clamp_oldest_supported(current_block, anchor_height);
 
-        CatchupIter::new(self.client.clone(), catchup_start, anchor_height)
+        let catchup_iter = CatchupIter::new(self.client.clone(), catchup_start, anchor_height);
+
+        // Convert the async state machine into a Stream
+        let stream = stream::unfold(catchup_iter, |mut state| async move {
+            let item = state.next().await;
+            item.map(|block| (block, state))
+        });
+
+        Box::pin(stream)
     }
 
     async fn process_catchup(&mut self, block: &Self::Block) -> anyhow::Result<()> {
@@ -1482,13 +1017,17 @@ impl ChainIndexer for EthereumIndexer {
 /// Ethereum indexer stream implementing the `ChainStream` trait.
 /// Construction is side-effect free; the shared `run_stream()` loop calls
 /// `start()` after recovery has completed.
-pub struct EthereumStream {
+pub struct EthereumStream<S: StateManager, T: ChainTelemetry> {
     events_rx: Option<mpsc::Receiver<ChainEvent>>,
-    start_state: Option<EthereumIndexer>,
+    start_state: Option<EthereumIndexer<S, T>>,
 }
 
-impl EthereumStream {
-    pub async fn new(eth: Option<EthConfig>, backlog: Backlog) -> anyhow::Result<Self> {
+impl<S: StateManager, T: ChainTelemetry> EthereumStream<S, T> {
+    pub async fn new(
+        eth: Option<EthConfig>,
+        state_manager: S,
+        telemetry: T,
+    ) -> anyhow::Result<Self> {
         let Some(eth) = eth else {
             tracing::warn!(
                 "ethereum indexer is disabled: no EthConfig provided \
@@ -1502,7 +1041,7 @@ impl EthereumStream {
         );
 
         let (events_tx, events_rx) = crate::stream::channel();
-        let indexer = EthereumIndexer::new(eth, backlog, events_tx).await?;
+        let indexer = EthereumIndexer::new(eth, state_manager, telemetry, events_tx).await?;
 
         Ok(Self {
             events_rx: Some(events_rx),
@@ -1512,8 +1051,8 @@ impl EthereumStream {
 }
 
 #[async_trait]
-impl ChainStream for EthereumStream {
-    type Indexer = EthereumIndexer;
+impl<S: StateManager, T: ChainTelemetry> ChainStream for EthereumStream<S, T> {
+    type Indexer = EthereumIndexer<S, T>;
 
     async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
         self.start_state
@@ -1535,13 +1074,15 @@ mod tests {
     #[cfg(feature = "helios")]
     use crate::indexer_eth::indexer_eth_helios;
     use crate::protocol::Chain;
-    use crate::sign_bidirectional::{BidirectionalTx, BidirectionalTxId};
-    use crate::stream::{AsyncCatchupIter, ChainEvent, ChainIndexer, ExecutionOutcome};
+    use crate::stream::ChainIndexer;
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{address, b256, Address};
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
-    use mpc_primitives::{SignId, LATEST_MPC_KEY_VERSION};
+    use mpc_primitives::{
+        BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, NoopChainTelemetry,
+        SignId, LATEST_MPC_KEY_VERSION,
+    };
     use serde_json::json;
     use std::sync::Arc;
     use tokio::sync::{mpsc, Notify};
@@ -1600,7 +1141,7 @@ mod tests {
     #[tokio::test]
     async fn missing_catchup_block_is_refetched() {
         let mut server = Server::new_async().await;
-        let backlog = Backlog::new();
+        let state_manager = Backlog::new();
         let (events_tx, mut events_rx) = mpsc::channel(1);
 
         server
@@ -1639,7 +1180,8 @@ mod tests {
                 optimistic_requests: true,
                 light_client: false,
             },
-            backlog,
+            state_manager,
+            telemetry: NoopChainTelemetry,
             client: Arc::new(EthereumClient::DirectRpc(
                 super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
             )),
@@ -1664,7 +1206,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_catchup_block_returns_error_when_refetch_fails() {
-        let backlog = Backlog::new();
+        let state_manager = Backlog::new();
         let (events_tx, mut events_rx) = mpsc::channel(1);
         let mut indexer = EthereumIndexer {
             eth: EthConfig {
@@ -1678,7 +1220,8 @@ mod tests {
                 optimistic_requests: true,
                 light_client: false,
             },
-            backlog,
+            state_manager,
+            telemetry: NoopChainTelemetry,
             client: Arc::new(EthereumClient::DirectRpc(
                 super::indexer_eth_direct_rpc::RpcEthereumClient::new("http://127.0.0.1:1"),
             )),
@@ -1993,10 +1536,10 @@ mod tests {
             .create_async()
             .await;
 
-        let backlog = Backlog::new();
+        let state_manager = Backlog::new();
         let sign_id = SignId::new([0x55; 32]);
         let tx = BidirectionalTx {
-            id: BidirectionalTxId(tx_hash),
+            id: BidirectionalTxId(tx_hash.0),
             sender: [0u8; 32],
             serialized_transaction: vec![],
             source_chain: Chain::Solana,
@@ -2011,10 +1554,12 @@ mod tests {
             output_deserialization_schema: vec![],
             respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
             request_id: sign_id.request_id,
-            from_address,
+            from_address: **from_address,
             nonce: 0,
         };
-        backlog.watch_execution(Chain::Ethereum, sign_id, tx).await;
+        state_manager
+            .watch_execution(Chain::Ethereum, sign_id, tx)
+            .await;
 
         let (events_tx, _events_rx) = mpsc::channel(1);
         let indexer = EthereumIndexer {
@@ -2029,7 +1574,8 @@ mod tests {
                 optimistic_requests: true,
                 light_client: false,
             },
-            backlog,
+            state_manager,
+            telemetry: NoopChainTelemetry,
             client: Arc::new(EthereumClient::DirectRpc(
                 super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
             )),
@@ -2053,7 +1599,7 @@ mod tests {
                 block_height,
                 result,
             } => {
-                assert_eq!(*event_tx_id, BidirectionalTxId(tx_hash));
+                assert_eq!(*event_tx_id, BidirectionalTxId(tx_hash.0));
                 assert_eq!(*event_sign_id, sign_id);
                 assert_eq!(*source_chain, Chain::Solana);
                 assert_eq!(*block_height, 2);
