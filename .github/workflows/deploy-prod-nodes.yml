@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: prod
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
         name: "Checkout mpc-recovery"
 
       - name: Login to GCP Artifact Registry Mainnet

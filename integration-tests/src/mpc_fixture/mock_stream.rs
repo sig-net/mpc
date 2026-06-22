@@ -1,10 +1,8 @@
 use async_trait::async_trait;
-use elliptic_curve::sec1::ToEncodedPoint;
-use mpc_node::protocol::{IndexedSignRequest, SignKind};
+use mpc_node::protocol::IndexedSignRequest;
 use mpc_node::rpc::RpcAction;
-use mpc_node::stream::{ChainEvent, ChainIndexer, ChainStream};
-use mpc_primitives::Chain;
-use solana_sdk::pubkey::Pubkey;
+use mpc_node::stream::{ChainIndexer, ChainStream};
+use mpc_primitives::{Chain, ChainEvent, SignKind};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -37,10 +35,10 @@ pub struct MockIndexer {
 impl ChainIndexer for MockIndexer {
     const CHAIN: Chain = Chain::Solana;
     type Block = ();
-    type Iter = std::iter::Empty<()>;
+    type Iter = futures_util::stream::Empty<()>;
 
     async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
-        std::iter::empty()
+        futures_util::stream::empty()
     }
 
     async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
@@ -103,6 +101,12 @@ impl MockStream {
         guard.prepare_block_of_sign_requests(requests)
     }
 
+    /// Add a future block containing arbitrary chain events.
+    pub async fn prepare_block_of_events(&self, events: &[ChainEvent]) {
+        let mut guard = self.inner.lock().await;
+        guard.future_blocks.push(events.to_vec());
+    }
+
     /// Add a future block that contains events corresponding to the provided rpc actions.
     pub async fn prepare_block_of_rpc_actions(&self, actions: &[RpcAction]) {
         let mut guard = self.inner.lock().await;
@@ -159,15 +163,11 @@ impl InnerMockStream {
                 continue;
             }
 
-            // type conversions that would usually happen in RPC publishing -> Solana contract -> CPI event library
-            let big_r = publish_action.signature.big_r.to_encoded_point(false);
-            let sol_event = signet_program::SignatureRespondedEvent {
+            let respond_event = mpc_primitives::SignatureRespondedEvent {
                 request_id: publish_action.indexed.id.request_id,
-                responder: Pubkey::new_unique(),
-                signature: mpc_node::util::mpc_to_sol_signature(&publish_action.signature, big_r),
+                signature: publish_action.signature,
+                chain: Chain::Solana,
             };
-
-            let respond_event = mpc_node::stream::ops::SignatureRespondedEvent::Solana(sol_event);
 
             block.push(ChainEvent::Respond(respond_event));
         }

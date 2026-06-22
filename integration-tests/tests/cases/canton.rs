@@ -5,8 +5,8 @@ use alloy::providers::ext::AnvilApi;
 use alloy::providers::{Provider, ProviderBuilder};
 use anyhow::{Context as _, Result};
 use integration_tests::canton::{
-    test_evm_type2_anvil_cases, test_sign_request_event, test_sign_request_payload,
-    EvmType2AnvilCase, EVM_TYPE2_TEST_CONTRACT_ADDRESS,
+    test_evm_type2_anvil_cases, test_sign_request_event, EvmType2AnvilCase,
+    EVM_TYPE2_TEST_CONTRACT_ADDRESS,
 };
 use integration_tests::cluster;
 use mpc_node::indexer_canton::contracts::{
@@ -17,7 +17,6 @@ use mpc_node::respond_bidirectional::CANTON_RESPOND_BIDIRECTIONAL_PATH;
 use mpc_node::sign_bidirectional::{derive_user_address, sign_and_hash_transaction};
 use mpc_node::util::NearPublicKeyExt;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
-use serde_json::json;
 use serial_test::serial;
 use std::time::Duration;
 use test_log::test;
@@ -102,48 +101,16 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
     let expected_event = test_sign_request_event(canton, &case);
     let expected_request_id = hex::encode(compute_request_id(&expected_event)?);
 
-    // EVM analogy: an EVM contract could call another contract directly and
-    // emit the request event in one transaction. Canton does not model this
-    // as a contract-to-contract call, so we first create a SignRequest
-    // contract that stores the unsigned EVM transaction request. The next
-    // command passes this contract ID into Signer.SignBidirectional, which
-    // validates it and emits the event watched by the MPC Canton indexer.
-    let sign_request = client
-        .create_contract(
-            &[&canton.operator_party, &canton.requester_party],
-            "#daml-signer:Signer:SignRequest",
-            serde_json::to_value(test_sign_request_payload(&expected_event))?,
-        )
-        .await?;
-    let (sign_request_cid, _) =
-        integration_tests::canton::find_created_contract(&sign_request, "SignRequest")?;
-
-    // EVM contracts are globally visible, so a caller can reference any
-    // contract address. Canton contracts are private to stakeholders. The
-    // requester is not a stakeholder on the Signer contract, so the Signer
-    // stakeholder gives the requester an explicit disclosure blob. Attaching
-    // it lets the command read the Signer contract while Daml still enforces
-    // authorization checks:
-    // https://docs.digitalasset.com/build/3.4/sdlc-howtos/applications/develop/explicit-contract-disclosure.html
-    client
-        .exercise_choice(
-            &[&canton.requester_party],
-            &canton.signer_template_id,
-            &canton.signer_cid,
-            "SignBidirectional",
-            json!({
-                "signRequestCid": sign_request_cid,
-                "requester": &canton.requester_party,
-            }),
-            std::slice::from_ref(&canton.signer_disclosure),
-        )
-        .await?;
+    // The requester isn't a stakeholder on the Signer/fee contracts, so disclosure
+    // blobs ride along (Daml still enforces authorization):
+    // https://docs.digitalasset.com/build/3.5/sdlc-howtos/applications/develop/explicit-contract-disclosure.html
+    canton.submit_sign_request_case(&case).await?;
     tracing::info!(case_name, "canton sign request submitted via Signer");
 
     let sig_payload: SignatureRespondedEventPayload = client
         .poll_for_contract(
             &[&canton.party_id],
-            "#daml-signer:Signer:SignatureRespondedEvent",
+            "#signet-signer-v1:Signer:SignatureRespondedEvent",
             |p: &SignatureRespondedEventPayload| p.request_id == expected_request_id,
             Duration::from_secs(120),
         )
@@ -198,7 +165,7 @@ async fn run_canton_eth_bidirectional_flow_case(case: EvmType2AnvilCase) -> Resu
     let respond_payload = client
         .poll_for_contract(
             &[&canton.party_id],
-            "#daml-signer:Signer:RespondBidirectionalEvent",
+            "#signet-signer-v1:Signer:RespondBidirectionalEvent",
             |p: &RespondBidirectionalEventPayload| p.request_id == expected_request_id,
             Duration::from_secs(300),
         )

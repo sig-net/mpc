@@ -82,10 +82,21 @@ pub struct LocalConfig {
     pub over: OverrideConfig,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct NetworkConfig {
     pub sign_sk: near_crypto::SecretKey,
     pub cipher_sk: hpke::SecretKey,
+}
+
+/// Custom Debug implementation to avoid printing the secret keys in logs.
+/// Underlying crates probably redact already, but it's better to be 100% sure
+impl std::fmt::Debug for NetworkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NetworkConfig")
+            .field("sign_sk", &"<hidden>")
+            .field("cipher_sk", &"<hidden>")
+            .finish()
+    }
 }
 
 impl Default for NetworkConfig {

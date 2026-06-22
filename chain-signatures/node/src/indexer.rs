@@ -1,9 +1,9 @@
 use crate::backlog::Backlog;
 
-use crate::protocol::{Chain, IndexedSignRequest, Sign};
+use crate::protocol::{Chain, Sign};
 
 use mpc_contract::primitives::PendingRequest;
-use mpc_primitives::{SignArgs, SignId};
+use mpc_primitives::{IndexedSignRequest, SignArgs, SignId};
 use near_account_id::AccountId;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -182,11 +182,6 @@ async fn poll_pending_requests(ctx: &mut Context) -> anyhow::Result<()> {
 
     // Update timestamp to indicate we're still running
     ctx.indexer.update_timestamp();
-
-    // Update metrics
-    crate::metrics::indexers::LATEST_BLOCK_NUMBER
-        .with_label_values(&[Chain::NEAR.as_str(), "indexed"])
-        .set(latest_height as i64);
 
     // Send all new requests
     for request in new_requests {

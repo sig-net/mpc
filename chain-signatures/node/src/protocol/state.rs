@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 pub const RESHARING_READY_BROADCAST_INTERVAL: Duration = Duration::from_secs(10);
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct PersistentNodeData {
     pub epoch: u64,
     pub private_share: SecretKeyShare,

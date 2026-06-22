@@ -25,8 +25,8 @@ use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
 use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
+use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, SolArgs};
 use mpc_node::config::OverrideConfig;
-use mpc_node::indexer_eth::EthArgs;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
 use mpc_node::storage::triple_storage::TriplePair;
@@ -161,12 +161,10 @@ impl Node {
             running_threshold: 120,
         };
         let eth_args = EthArgs::from_config(config.cfg.eth.clone());
-        let sol_args = mpc_node::indexer_sol::SolArgs::from_config(config.cfg.sol.clone());
-        let hydration_args =
-            mpc_node::indexer_hydration::HydrationArgs::from_config(config.cfg.hydration.clone());
-        let canton_args =
-            mpc_node::indexer_canton::CantonArgs::from_config(config.cfg.canton.clone());
-        let args = mpc_node::cli::Cli::Start {
+        let sol_args = SolArgs::from_config(config.cfg.sol.clone());
+        let hydration_args = HydrationArgs::from_config(config.cfg.hydration.clone());
+        let canton_args = CantonArgs::from_config(config.cfg.canton.clone());
+        let args = Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
             account_id: config.account.id().clone(),
@@ -761,12 +759,19 @@ impl Solana {
 
         let mut last_error = None;
         for attempt in 1..=3 {
-            // Reserve rpc/ws as one contiguous block so parallel Solana validators do not overlap.
-            let rpc_port = pick_preferred_or_unused_port_block(8899, 2).await;
+            // Generate a random base port for THIS specific test process
+            let block_index = rand::random::<u16>() % 400;
+            let base_port = 10000 + (block_index * 100);
+
+            // Because the preferred port is randomized per-process, Test A and Test B
+            // will query completely different areas of the OS port space, avoiding the race condition.
+            let rpc_port = pick_preferred_or_unused_port_block(base_port, 2).await;
             let ws_port = rpc_port + 1;
-            let faucet_port = pick_preferred_or_unused_port(9900).await;
-            let gossip_port = pick_preferred_or_unused_port(8000).await;
-            let dynamic_port_start = pick_preferred_or_unused_port_block(gossip_port + 1, 33).await;
+
+            let faucet_port = pick_preferred_or_unused_port(base_port + 2).await;
+            let gossip_port = pick_preferred_or_unused_port(base_port + 3).await;
+
+            let dynamic_port_start = pick_preferred_or_unused_port_block(base_port + 4, 33).await;
             let dynamic_port_end = dynamic_port_start + 32;
 
             let rpc_address = format!("http://127.0.0.1:{}", rpc_port);

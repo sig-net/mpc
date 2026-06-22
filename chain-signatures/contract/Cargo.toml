@@ -27,8 +27,8 @@ signature = "2.2.0"
 digest = "0.10.7"
 
 # near dependencies
-near-crypto = "0.27.0"
-near-workspaces = "0.15.0"
+near-crypto.workspace = true
+near-workspaces = "0.16.0"
 
 [features]
 default = []

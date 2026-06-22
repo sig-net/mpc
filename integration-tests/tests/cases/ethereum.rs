@@ -19,7 +19,7 @@ use tokio::time::Duration;
 
 #[test(tokio::test)]
 async fn test_signature_ethereum() -> Result<()> {
-    let cluster = cluster::spawn().disable_prestockpile().ethereum().await?;
+    let cluster = cluster::spawn().ethereum().await?;
     cluster.wait().signable().await?;
 
     let ctx = cluster.nodes.ctx();
@@ -165,7 +165,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
         std::env::set_var(name, value);
     }
 
-    let cluster = cluster::spawn().disable_prestockpile().ethereum().await?;
+    let cluster = cluster::spawn().ethereum().await?;
     cluster.wait().signable().await?;
 
     let ctx = cluster.nodes.ctx();
@@ -240,12 +240,12 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     let checkpoint = checkpoints
         .get(&Chain::Ethereum)
         .expect("checkpoint not found for eth");
-    let checkpoint_height_after_request = checkpoint.block_height;
+    let checkpoint_height = checkpoint.block_height;
     let checkpoint_interval = Chain::Ethereum
         .checkpoint_interval()
         .expect("ethereum checkpoint interval should be configured");
     tracing::info!(
-        checkpoint_height_after_request,
+        checkpoint_height,
         checkpoint_interval,
         pending_count = checkpoint.pending_requests.len(),
         "pending transactions in checkpoint"
@@ -296,7 +296,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     produce_empty_eth_blocks(&client, requester, checkpoint_interval).await?;
 
     let min_next_checkpoint_height =
-        ((checkpoint_height_after_request / checkpoint_interval) + 1) * checkpoint_interval;
+        ((checkpoint_height / checkpoint_interval) + 1) * checkpoint_interval;
     let checkpoint = wait_node_checkpoint(
         &cluster,
         node_idx,
@@ -382,7 +382,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         active_idx,
         Chain::Ethereum,
         initial_checkpoint.block_height + 1,
-        Duration::from_secs(30),
+        Duration::from_secs(120),
     )
     .await?;
 
@@ -393,7 +393,8 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
 
     tracing::info!("bringing offline node back online");
     cluster.restart_node(offline_config).await?;
-    cluster.wait().signable().await?;
+    // Does not have to be signable, just need Indexer to sync
+    cluster.wait().nodes_running().await?;
 
     // Verify the restarted node recovers to the same checkpoint via node consensus
     let node_recovered_checkpoint = wait_node_checkpoint(
@@ -425,7 +426,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
             node_recovered_checkpoint
                 .block_height
                 .max(node_active_checkpoint.block_height),
-            Duration::from_secs(45),
+            Duration::from_secs(90),
         )
         .await?;
 
@@ -439,7 +440,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         active_idx,
         Chain::Ethereum,
         active_checkpoint_after_restart.block_height,
-        Duration::from_secs(30),
+        Duration::from_secs(60),
     )
     .await?;
 

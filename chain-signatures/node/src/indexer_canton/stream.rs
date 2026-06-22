@@ -1,14 +1,15 @@
-use crate::backlog::Backlog;
 use crate::protocol::Chain;
 use crate::rpc::CantonClient;
-use crate::stream::ops::{RespondBidirectionalEvent, SignatureEvent, SignatureRespondedEvent};
-use crate::stream::{ChainEvent, ChainIndexer, ChainStream};
+use crate::stream::{ChainIndexer, ChainStream};
 
 use alloy::primitives::keccak256;
 use async_trait::async_trait;
-use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::stream::{self, SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use mpc_primitives::{ScalarExt, Signature};
+use mpc_primitives::{
+    ChainEvent, ChainTelemetry, RespondBidirectionalEvent, ScalarExt, Signature,
+    SignatureRespondedEvent, StateManager,
+};
 use std::collections::HashSet;
 use std::ops::Range;
 use std::time::Duration;
@@ -19,24 +20,22 @@ use tokio_tungstenite::tungstenite::http::header;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-use super::{
-    contracts, ledger_api, CantonConfig, CantonRespondBidirectionalEvent,
-    CantonSignBidirectionalRequestedEvent, CantonSignatureRespondedEvent,
-};
+use super::{contracts, ledger_api, CantonConfig, CantonSignBidirectionalRequestedEvent};
 
 type CantonWs = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type CantonWsRead = SplitStream<CantonWs>;
 type CantonWsWrite = SplitSink<CantonWs, Message>;
 
-pub struct CantonStream {
+pub struct CantonStream<S: StateManager, T: ChainTelemetry> {
     config: CantonConfig,
-    backlog: Backlog,
+    state_manager: S,
+    telemetry: T,
     events_rx: mpsc::Receiver<ChainEvent>,
     events_tx: Option<mpsc::Sender<ChainEvent>>,
 }
 
-impl CantonStream {
-    pub fn new(config: Option<CantonConfig>, backlog: Backlog) -> Option<Self> {
+impl<S: StateManager, T: ChainTelemetry> CantonStream<S, T> {
+    pub fn new(config: Option<CantonConfig>, state_manager: S, telemetry: T) -> Option<Self> {
         let config = match config {
             Some(c) => c,
             None => {
@@ -49,7 +48,8 @@ impl CantonStream {
 
         Some(CantonStream {
             config,
-            backlog,
+            state_manager,
+            telemetry,
             events_rx,
             events_tx: Some(events_tx),
         })
@@ -57,8 +57,8 @@ impl CantonStream {
 }
 
 #[async_trait]
-impl ChainStream for CantonStream {
-    type Indexer = CantonIndexer;
+impl<S: StateManager, T: ChainTelemetry> ChainStream for CantonStream<S, T> {
+    type Indexer = CantonIndexer<S, T>;
 
     async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
         let Some(events_tx) = self.events_tx.take() else {
@@ -66,7 +66,12 @@ impl ChainStream for CantonStream {
         };
 
         let client = CantonClient::new(&self.config).await?;
-        Ok(Self::Indexer::new(client, self.backlog.clone(), events_tx))
+        Ok(Self::Indexer::new(
+            client,
+            self.state_manager.clone(),
+            self.telemetry.clone(),
+            events_tx,
+        ))
     }
 
     async fn next_event(&mut self) -> Option<ChainEvent> {
@@ -88,6 +93,7 @@ impl CantonConnection {
         ws_url: &str,
         jwt_token: &str,
         party_id: &str,
+        signer_template_id: &str,
         begin_exclusive: u64,
     ) -> anyhow::Result<Self> {
         let mut request = ws_url.into_client_request()?;
@@ -103,8 +109,14 @@ impl CantonConnection {
         let (mut ws_write, ws_read) = ws_stream.split();
         tracing::info!(begin_exclusive, "canton WebSocket connected");
 
+        // Subscribe to only the Signer package's templates (not every contract visible to
+        // the party) — enforces the package at the ledger; the client-side suffix match in
+        // process_canton_event stays as a second layer.
+        let party_filter = ledger_api::template_party_filter(
+            &ledger_api::signer_subscription_template_ids(signer_template_id),
+        );
         let mut filters_by_party = serde_json::Map::new();
-        filters_by_party.insert(party_id.to_string(), serde_json::json!({}));
+        filters_by_party.insert(party_id.to_string(), serde_json::to_value(party_filter)?);
 
         let subscribe_msg = ledger_api::GetUpdatesRequest {
             begin_exclusive,
@@ -176,23 +188,26 @@ impl CantonConnection {
     }
 }
 
-pub struct CantonIndexer {
+pub struct CantonIndexer<S: StateManager, T: ChainTelemetry> {
     client: CantonClient,
-    backlog: Backlog,
+    state_manager: S,
+    telemetry: T,
     events_tx: mpsc::Sender<ChainEvent>,
     ws_conn: CantonConnection,
     last_seen_offset: u64,
 }
 
-impl CantonIndexer {
+impl<S: StateManager, T: ChainTelemetry> CantonIndexer<S, T> {
     pub fn new(
         client: CantonClient,
-        backlog: Backlog,
+        state_manager: S,
+        telemetry: T,
         events_tx: mpsc::Sender<ChainEvent>,
     ) -> Self {
         Self {
             client,
-            backlog,
+            state_manager,
+            telemetry,
             events_tx,
             ws_conn: CantonConnection::Disconnected,
             last_seen_offset: 0,
@@ -203,8 +218,14 @@ impl CantonIndexer {
         let jwt_token = self.client.bearer_token().await?;
         let ws_url = format!("{}/v2/updates", self.client.config.json_api_ws_url);
         let party_id = &self.client.config.party_id;
-        self.ws_conn =
-            CantonConnection::connect(&ws_url, &jwt_token, party_id, begin_exclusive).await?;
+        self.ws_conn = CantonConnection::connect(
+            &ws_url,
+            &jwt_token,
+            party_id,
+            &self.client.config.signer_template_id,
+            begin_exclusive,
+        )
+        .await?;
         Ok(())
     }
 
@@ -281,6 +302,9 @@ impl CantonIndexer {
             ledger_api::Update::OffsetCheckpoint { value } => value.offset,
         };
 
+        // Update the telemetry with the latest block number seen by the indexer
+        self.telemetry.block_indexed(offset);
+
         self.events_tx.send(ChainEvent::Block(offset)).await?;
         self.last_seen_offset = offset;
         Ok(offset)
@@ -293,12 +317,34 @@ impl CantonIndexer {
         }
 
         loop {
-            let Some(update) = self.next_update().await else {
-                anyhow::bail!("canton WebSocket closed during catchup; reconnecting");
-            };
-            let offset = self.process_update(&update).await?;
-            if offset >= target_offset {
-                return Ok(());
+            // Try to get the next update with a conservative timeout during catchup.
+            // If the WebSocket is silent for a short period, we check the current ledger end.
+            match tokio::time::timeout(Duration::from_secs(2), self.next_update()).await {
+                Ok(Some(update)) => {
+                    let offset = self.process_update(&update).await?;
+                    if offset >= target_offset {
+                        return Ok(());
+                    }
+                }
+                Ok(None) => {
+                    anyhow::bail!("canton WebSocket closed during catchup; reconnecting");
+                }
+                Err(_) => {
+                    // Timeout elapsed. Check if the global ledger end has progressed past target_offset.
+                    // This is necessary in cases where we have no catchup events in this period of time.
+                    // next_update only gives us an update when there is a new event, so this timeout
+                    // allows us to transition to live streaming
+                    let current_ledger_end = self.client.fetch_ledger_end().await?;
+                    if current_ledger_end >= target_offset {
+                        tracing::info!(
+                            current_ledger_end,
+                            target_offset,
+                            "catchup timeout: ledger has passed target offset with no new updates for our party"
+                        );
+                        self.last_seen_offset = target_offset;
+                        return Ok(());
+                    }
+                }
             }
         }
     }
@@ -310,15 +356,15 @@ fn catchup_offset_range(checkpoint: u64, anchor_height: u64) -> Range<u64> {
 }
 
 #[async_trait]
-impl ChainIndexer for CantonIndexer {
+impl<S: StateManager, T: ChainTelemetry> ChainIndexer for CantonIndexer<S, T> {
     const CHAIN: Chain = Chain::Canton;
     type Block = u64;
-    type Iter = Range<u64>;
+    type Iter = stream::Iter<Range<u64>>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
         let checkpoint = self
-            .backlog
-            .processed_block(Chain::Canton)
+            .state_manager
+            .get_processed_block(Chain::Canton)
             .await
             .unwrap_or(0);
         self.last_seen_offset = checkpoint;
@@ -329,7 +375,7 @@ impl ChainIndexer for CantonIndexer {
 
     async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
         // After a reconnect, we resume from last_seen_offset, so catchup should start there.
-        catchup_offset_range(self.last_seen_offset, anchor_height)
+        stream::iter(catchup_offset_range(self.last_seen_offset, anchor_height))
     }
 
     async fn process_catchup(&mut self, &item: &Self::Block) -> anyhow::Result<()> {
@@ -421,8 +467,7 @@ async fn process_canton_event(
         ledger_api::templates::SIGNATURE_RESPONDED_EVENT,
     ) {
         match parse_signature_responded_event(created) {
-            Ok(responded) => {
-                let event = SignatureRespondedEvent::Canton(responded);
+            Ok(event) => {
                 if events_tx.send(ChainEvent::Respond(event)).await.is_err() {
                     tracing::error!("canton event channel closed");
                 }
@@ -435,15 +480,34 @@ async fn process_canton_event(
         template_id,
         ledger_api::templates::RESPOND_BIDIRECTIONAL_EVENT,
     ) {
-        match parse_respond_bidirectional_event(created) {
-            Ok(respond) => {
-                let event = RespondBidirectionalEvent::Canton(respond);
-                if events_tx
-                    .send(ChainEvent::RespondBidirectional(event))
-                    .await
-                    .is_err()
-                {
-                    tracing::error!("canton event channel closed");
+        match serde_json::from_value::<contracts::RespondBidirectionalEventPayload>(
+            created.payload.clone(),
+        ) {
+            Ok(payload) => {
+                let mut request_id = [0u8; 32];
+                if let Err(e) = hex::decode_to_slice(&payload.request_id, &mut request_id) {
+                    tracing::warn!(%e, "invalid request_id hex");
+                } else {
+                    let signature = match parse_canton_signature(&payload.signature) {
+                        Ok(signature) => signature,
+                        Err(e) => {
+                            tracing::warn!(%e, "invalid signature in canton RespondBidirectionalEvent");
+                            return;
+                        }
+                    };
+                    if events_tx
+                        .send(ChainEvent::RespondBidirectional(
+                            RespondBidirectionalEvent {
+                                request_id,
+                                signature,
+                                chain: crate::protocol::Chain::Canton,
+                            },
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        tracing::error!("canton event channel closed");
+                    }
                 }
             }
             Err(e) => {
@@ -458,7 +522,7 @@ async fn process_canton_event(
 /// These checks are defense-in-depth on top of the Daml ledger guarantees:
 /// 1. Operators from the payload must be actual signatories on the CreatedEvent
 /// 2. Requester must be a signatory
-/// 3. An ExercisedEvent with choice "SignBidirectional" on Signer:Signer must
+/// 3. An ExercisedEvent with choice "RequestSignature" on Signer:Signer must
 ///    exist in the same transaction — proves the event was created through the
 ///    correct Daml code path, not fabricated
 fn verify_sign_event(
@@ -486,7 +550,7 @@ fn verify_sign_event(
         );
     }
 
-    // Check 3: ExercisedEvent with choice "SignBidirectional" on the pinned
+    // Check 3: ExercisedEvent with choice "RequestSignature" on the pinned
     // Signer contract must exist in the same transaction. Exact contract ID
     // match since the operator pinned it via CLI.
     // NOTE: after a DAR upgrade/redeployment the contract ID changes — this
@@ -495,13 +559,13 @@ fn verify_sign_event(
         matches!(
             e,
             ledger_api::Event::ExercisedEvent(ex)
-                if ex.choice == "SignBidirectional"
+                if ex.choice == "RequestSignature"
                     && ex.contract_id == signer_contract_id
         )
     });
     if !has_exercise {
         anyhow::bail!(
-            "no ExercisedEvent with choice SignBidirectional on contract {signer_contract_id} found in transaction"
+            "no ExercisedEvent with choice RequestSignature on contract {signer_contract_id} found in transaction"
         );
     }
 
@@ -510,37 +574,17 @@ fn verify_sign_event(
 
 fn parse_signature_responded_event(
     created: &ledger_api::CreatedEvent,
-) -> anyhow::Result<CantonSignatureRespondedEvent> {
+) -> anyhow::Result<SignatureRespondedEvent> {
     let payload: contracts::SignatureRespondedEventPayload =
         serde_json::from_value(created.payload.clone())?;
     let mut request_id = [0u8; 32];
     hex::decode_to_slice(&payload.request_id, &mut request_id)
         .map_err(|e| anyhow::anyhow!("invalid request_id hex: {e}"))?;
 
-    Ok(CantonSignatureRespondedEvent {
+    Ok(SignatureRespondedEvent {
         request_id,
-        responder: payload.responder,
         signature: parse_canton_signature(&payload.signature)?,
-    })
-}
-
-fn parse_respond_bidirectional_event(
-    created: &ledger_api::CreatedEvent,
-) -> anyhow::Result<CantonRespondBidirectionalEvent> {
-    let payload: contracts::RespondBidirectionalEventPayload =
-        serde_json::from_value(created.payload.clone())?;
-    let mut request_id = [0u8; 32];
-    hex::decode_to_slice(&payload.request_id, &mut request_id)
-        .map_err(|e| anyhow::anyhow!("invalid request_id hex: {e}"))?;
-
-    let serialized_output = hex::decode(&payload.serialized_output)
-        .map_err(|e| anyhow::anyhow!("invalid serializedOutput hex: {e}"))?;
-
-    Ok(CantonRespondBidirectionalEvent {
-        request_id,
-        responder: payload.responder,
-        serialized_output,
-        signature: parse_canton_signature(&payload.signature)?,
+        chain: Chain::Canton,
     })
 }
 
@@ -635,7 +679,7 @@ mod tests {
         ledger_api::Event::ExercisedEvent(ledger_api::ExercisedEvent {
             contract_id: contract_id.to_string(),
             template_id: "pkg:Signer:Signer".to_string(),
-            choice: "SignBidirectional".to_string(),
+            choice: "RequestSignature".to_string(),
             acting_parties: Vec::new(),
             consuming: false,
             node_id: Some(2),
@@ -755,11 +799,16 @@ mod tests {
             package_name: None,
         };
 
-        let event = parse_respond_bidirectional_event(&created).expect("payload should parse");
-        assert_eq!(event.request_id, [5u8; 32]);
-        assert_eq!(event.responder, "alice");
-        assert_eq!(event.serialized_output, vec![8u8, 9u8]);
-        assert_eq!(event.signature.recovery_id, 0);
+        let payload: contracts::RespondBidirectionalEventPayload =
+            serde_json::from_value(created.payload.clone()).expect("payload should parse");
+        let mut request_id = [0u8; 32];
+        hex::decode_to_slice(&payload.request_id, &mut request_id).unwrap();
+        assert_eq!(request_id, [5u8; 32]);
+        assert_eq!(payload.responder, "alice");
+        assert_eq!(
+            hex::decode(&payload.serialized_output).unwrap(),
+            vec![8u8, 9u8]
+        );
     }
 
     #[tokio::test]
@@ -789,7 +838,8 @@ mod tests {
         .await;
 
         match events_rx.recv().await {
-            Some(ChainEvent::Respond(SignatureRespondedEvent::Canton(event))) => {
+            Some(ChainEvent::Respond(event)) => {
+                assert_eq!(event.chain, Chain::Canton);
                 assert_eq!(event.request_id, [6u8; 32]);
             }
             other => panic!("expected Canton respond event, got {other:?}"),

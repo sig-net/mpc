@@ -1,4 +1,5 @@
 mod auth;
+mod config;
 pub mod contracts;
 pub mod ledger_api;
 mod request_id;
@@ -12,14 +13,12 @@ pub use stream::{parse_canton_signature, CantonStream};
 
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::stream::ops::{SignBidirectionalEvent, SignatureEvent};
 use alloy::consensus::{SignableTransaction, TxEip1559};
 use borsh::{BorshDeserialize, BorshSerialize};
-use k256::Scalar;
-use mpc_primitives::{ScalarExt, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION};
-use std::fmt;
-
+pub use config::CantonConfig;
 use contracts::TxParams as CantonTxParams;
+use k256::Scalar;
+use mpc_primitives::{ScalarExt, SignArgs, SignBidirectionalEvent, SignId, LATEST_MPC_KEY_VERSION};
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 #[borsh(crate = "borsh")]
@@ -33,11 +32,10 @@ pub struct CantonChainCtx {
 /// transaction params. This type is created at the indexer boundary and carries
 /// the byte fields expected by the shared bidirectional signing flow.
 ///
-/// The current Daml Signer contract does not model signature fees/deposits:
-/// Canton Coin transfers are explicit token-standard/Daml workflows, not an
-/// attached value on this `SignBidirectional` choice. Until the contract composes
-/// that transfer and exposes a deposit amount, the shared bidirectional flow
-/// treats Canton deposit as zero.
+/// `RequestSignature` charges the Canton Coin fee atomically on-ledger (fail-closed),
+/// so the indexer only sees already-charged requests. The fee never enters the event
+/// payload, request id, KDF epsilon, or signed tx — the MPC neither sees nor verifies
+/// it — so the bidirectional flow carries no Canton deposit (deposit = zero).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CantonSignBidirectionalRequestedEvent {
     pub sign_event_contract_id: String,
@@ -86,29 +84,12 @@ impl CantonSignBidirectionalRequestedEvent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CantonRespondBidirectionalEvent {
-    pub request_id: [u8; 32],
-    pub responder: String,
-    pub serialized_output: Vec<u8>,
-    pub signature: Signature,
-}
-// NOTE: No Hash derive — Signature contains k256 types that don't impl Hash
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct CantonSignatureRespondedEvent {
-    pub request_id: [u8; 32],
-    pub responder: String,
-    pub signature: Signature,
-}
-// NOTE: No Hash, PartialEq, Eq derives — matches HydrationSignatureRespondedEvent
-
-impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
-    fn generate_request_id(&self) -> [u8; 32] {
+impl CantonSignBidirectionalRequestedEvent {
+    pub fn generate_request_id(&self) -> [u8; 32] {
         self.request_id
     }
 
-    fn generate_sign_request(
+    pub fn generate_sign_request(
         &self,
         entropy: [u8; 32],
     ) -> anyhow::Result<crate::protocol::IndexedSignRequest> {
@@ -127,7 +108,7 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
             &self.path,
         );
 
-        let unsigned_tx_hash = hash_rlp_data(self.serialized_transaction.clone());
+        let unsigned_tx_hash = hash_rlp_data(&self.serialized_transaction);
 
         let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
             anyhow::bail!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
@@ -135,6 +116,12 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
 
         let sign_id = SignId::new(request_id);
         tracing::info!(?sign_id, "canton signature requested");
+
+        let ctx = CantonChainCtx {
+            sign_event_contract_id: self.sign_event_contract_id.clone(),
+        };
+        let chain_ctx =
+            Some(borsh::to_vec(&ctx).expect("CantonChainCtx Borsh serialization is infallible"));
 
         Ok(crate::protocol::IndexedSignRequest::sign_bidirectional(
             sign_id,
@@ -147,230 +134,29 @@ impl SignatureEvent for CantonSignBidirectionalRequestedEvent {
             },
             Chain::Canton,
             crate::util::current_unix_timestamp(),
-            SignBidirectionalEvent::Canton(self.clone()),
+            SignBidirectionalEvent {
+                sender: self.sender,
+                serialized_transaction: self.serialized_transaction.clone(),
+                caip2_id: self.caip2_id.clone(),
+                key_version: self.key_version,
+                deposit: 0,
+                path: self.path.clone(),
+                algo: self.algo.clone(),
+                dest: self.dest.clone(),
+                params: self.params.clone(),
+                output_deserialization_schema: self.output_deserialization_schema.clone(),
+                respond_serialization_schema: self.respond_serialization_schema.clone(),
+                chain: Chain::Canton,
+                chain_ctx,
+            },
         ))
     }
 
-    fn source_chain(&self) -> Chain {
+    pub fn source_chain(&self) -> Chain {
         Chain::Canton
     }
 
-    fn sender_string(&self) -> String {
+    pub fn sender_string(&self) -> String {
         hex::encode(self.sender)
-    }
-}
-
-/// Canton JSON Ledger API configuration.
-///
-/// # Contract migration
-///
-/// When the Signer DAR is upgraded and redeployed, both `signer_contract_id`
-/// and `signer_template_id` change (similar to deploying a new Ethereum
-/// contract — the old address/ID is gone). Currently the MPC node requires a
-/// restart with updated CLI args to pick up the new IDs.
-#[derive(Clone)]
-pub struct CantonConfig {
-    pub json_api_url: String,
-    pub json_api_ws_url: String,
-    pub auth: CantonAuthConfig,
-    pub ledger_api_user: String,
-    pub party_id: String,
-    /// The Signer contract ID on the Canton ledger. Changes on every DAR
-    /// redeployment — requires MPC node restart with the new value.
-    pub signer_contract_id: String,
-    /// The full template ID of the Signer contract (e.g. "<packageHash>:Signer:Signer").
-    /// The package hash changes on every DAR upgrade, invalidating this value.
-    pub signer_template_id: String,
-}
-
-impl fmt::Debug for CantonConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CantonConfig")
-            .field("json_api_url", &self.json_api_url)
-            .field("json_api_ws_url", &self.json_api_ws_url)
-            .field("auth", &self.auth.kind())
-            .field("ledger_api_user", &self.ledger_api_user)
-            .field("party_id", &self.party_id)
-            .field("signer_contract_id", &self.signer_contract_id)
-            .field("signer_template_id", &self.signer_template_id)
-            .finish()
-    }
-}
-
-/// CLI arguments for the Canton indexer.
-#[derive(Debug, Clone, clap::Parser)]
-#[group(id = "indexer_canton_options")]
-pub struct CantonArgs {
-    #[arg(
-        long,
-        env("MPC_CANTON_JSON_API_URL"),
-        requires_all = [
-            "canton_json_api_ws_url",
-            "canton_ledger_api_user",
-            "canton_oidc_token_url",
-            "canton_oidc_client_id",
-            "canton_oidc_client_secret",
-            "canton_oidc_audience",
-            "canton_party_id",
-            "canton_signer_contract_id",
-            "canton_signer_template_id",
-        ]
-    )]
-    pub canton_json_api_url: Option<String>,
-    #[arg(
-        long,
-        env("MPC_CANTON_JSON_API_WS_URL"),
-        requires = "canton_json_api_url"
-    )]
-    pub canton_json_api_ws_url: Option<String>,
-    #[arg(
-        long,
-        env("MPC_CANTON_LEDGER_API_USER"),
-        requires = "canton_json_api_url"
-    )]
-    pub canton_ledger_api_user: Option<String>,
-    #[arg(
-        long,
-        env("MPC_CANTON_OIDC_TOKEN_URL"),
-        requires = "canton_json_api_url"
-    )]
-    pub canton_oidc_token_url: Option<String>,
-    #[arg(
-        long,
-        env("MPC_CANTON_OIDC_CLIENT_ID"),
-        requires = "canton_json_api_url"
-    )]
-    pub canton_oidc_client_id: Option<String>,
-    #[arg(
-        long,
-        env("MPC_CANTON_OIDC_CLIENT_SECRET"),
-        requires = "canton_json_api_url"
-    )]
-    pub canton_oidc_client_secret: Option<String>,
-    #[arg(
-        long,
-        env("MPC_CANTON_OIDC_AUDIENCE"),
-        requires = "canton_json_api_url"
-    )]
-    pub canton_oidc_audience: Option<String>,
-    #[arg(long, env("MPC_CANTON_OIDC_SCOPE"), requires = "canton_json_api_url")]
-    pub canton_oidc_scope: Option<String>,
-    #[arg(long, env("MPC_CANTON_PARTY_ID"), requires = "canton_json_api_url")]
-    pub canton_party_id: Option<String>,
-    /// The Signer contract ID on the Canton ledger. Must be updated if the contract is re-deployed.
-    #[arg(
-        long,
-        env("MPC_CANTON_SIGNER_CONTRACT_ID"),
-        requires = "canton_json_api_url"
-    )]
-    pub canton_signer_contract_id: Option<String>,
-    /// The full template ID of the Signer contract (e.g. "<packageHash>:Signer:Signer").
-    /// Must be updated if the DAR is upgraded.
-    #[arg(
-        long,
-        env("MPC_CANTON_SIGNER_TEMPLATE_ID"),
-        requires = "canton_json_api_url"
-    )]
-    pub canton_signer_template_id: Option<String>,
-}
-
-impl CantonArgs {
-    pub fn into_str_args(self) -> Vec<String> {
-        let mut args = Vec::with_capacity(16);
-        if let Some(v) = self.canton_json_api_url {
-            args.extend(["--canton-json-api-url".to_string(), v]);
-        }
-        if let Some(v) = self.canton_json_api_ws_url {
-            args.extend(["--canton-json-api-ws-url".to_string(), v]);
-        }
-        if let Some(v) = self.canton_ledger_api_user {
-            args.extend(["--canton-ledger-api-user".to_string(), v]);
-        }
-        if let Some(v) = self.canton_oidc_token_url {
-            args.extend(["--canton-oidc-token-url".to_string(), v]);
-        }
-        if let Some(v) = self.canton_oidc_client_id {
-            args.extend(["--canton-oidc-client-id".to_string(), v]);
-        }
-        if let Some(v) = self.canton_oidc_client_secret {
-            args.extend(["--canton-oidc-client-secret".to_string(), v]);
-        }
-        if let Some(v) = self.canton_oidc_audience {
-            args.extend(["--canton-oidc-audience".to_string(), v]);
-        }
-        if let Some(v) = self.canton_oidc_scope {
-            args.extend(["--canton-oidc-scope".to_string(), v]);
-        }
-        if let Some(v) = self.canton_party_id {
-            args.extend(["--canton-party-id".to_string(), v]);
-        }
-        if let Some(v) = self.canton_signer_contract_id {
-            args.extend(["--canton-signer-contract-id".to_string(), v]);
-        }
-        if let Some(v) = self.canton_signer_template_id {
-            args.extend(["--canton-signer-template-id".to_string(), v]);
-        }
-        args
-    }
-
-    pub fn into_config(self) -> Option<CantonConfig> {
-        let auth = CantonAuthConfig {
-            token_url: self.canton_oidc_token_url?,
-            client_id: self.canton_oidc_client_id?,
-            client_secret: self.canton_oidc_client_secret?,
-            audience: self.canton_oidc_audience?,
-            scope: self.canton_oidc_scope,
-        };
-        Some(CantonConfig {
-            json_api_url: self.canton_json_api_url?,
-            json_api_ws_url: self.canton_json_api_ws_url?,
-            auth,
-            ledger_api_user: self.canton_ledger_api_user?,
-            party_id: self.canton_party_id?,
-            signer_contract_id: self.canton_signer_contract_id?,
-            signer_template_id: self.canton_signer_template_id?,
-        })
-    }
-
-    pub fn from_config(config: Option<CantonConfig>) -> Self {
-        match config {
-            Some(c) => {
-                let CantonAuthConfig {
-                    token_url,
-                    client_id,
-                    client_secret,
-                    audience,
-                    scope,
-                } = c.auth;
-                CantonArgs {
-                    canton_json_api_url: Some(c.json_api_url),
-                    canton_json_api_ws_url: Some(c.json_api_ws_url),
-                    canton_ledger_api_user: Some(c.ledger_api_user),
-                    canton_oidc_token_url: Some(token_url),
-                    canton_oidc_client_id: Some(client_id),
-                    canton_oidc_client_secret: Some(client_secret),
-                    canton_oidc_audience: Some(audience),
-                    canton_oidc_scope: scope,
-                    canton_party_id: Some(c.party_id),
-
-                    canton_signer_contract_id: Some(c.signer_contract_id),
-                    canton_signer_template_id: Some(c.signer_template_id),
-                }
-            }
-            None => CantonArgs {
-                canton_json_api_url: None,
-                canton_json_api_ws_url: None,
-                canton_ledger_api_user: None,
-                canton_oidc_token_url: None,
-                canton_oidc_client_id: None,
-                canton_oidc_client_secret: None,
-                canton_oidc_audience: None,
-                canton_oidc_scope: None,
-                canton_party_id: None,
-
-                canton_signer_contract_id: None,
-                canton_signer_template_id: None,
-            },
-        }
     }
 }

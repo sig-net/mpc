@@ -1,6 +1,9 @@
-pub use mpc_primitives::{Chain, Checkpoint, PendingTx};
+pub use mpc_primitives::{Chain, Checkpoint, ConsensusCheckpointDigest, PendingTx};
 
-use mpc_primitives::{bytes::borsh_scalar, SignId, Signature};
+use crate::config::Config;
+use crate::state::ProtocolContractState;
+
+use mpc_primitives::{borsh_scalar, SignId, Signature};
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::{AccountId, BorshStorageKey, CryptoHash, NearToken, PublicKey};
@@ -15,6 +18,43 @@ pub mod hpke {
 pub enum StorageKey {
     PendingRequests,
     ProposedUpdatesEntries,
+    LatestCheckpoints,
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
+#[borsh(crate = "near_sdk::borsh")]
+pub struct SignedCheckpoint {
+    pub checkpoint: ConsensusCheckpointDigest,
+    pub signature: Signature,
+}
+
+#[derive(
+    BorshDeserialize,
+    BorshSerialize,
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+)]
+#[borsh(crate = "near_sdk::borsh")]
+pub enum Read {
+    State,
+    Config,
+    Checkpoints,
+}
+
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+#[borsh(crate = "near_sdk::borsh")]
+pub enum View {
+    State(ProtocolContractState),
+    Config(Config),
+    Checkpoints(HashMap<Chain, SignedCheckpoint>),
 }
 
 /// The index into calling the YieldResume feature of NEAR. This will allow to resume
@@ -276,7 +316,7 @@ impl IntoIterator for Candidates {
     }
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct Votes {
     pub votes: BTreeMap<AccountId, HashSet<AccountId>>,
 }
@@ -315,7 +355,7 @@ impl Votes {
     }
 }
 
-#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug)]
+#[derive(BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, Clone)]
 pub struct PkVotes {
     pub votes: BTreeMap<PublicKey, HashSet<AccountId>>,
 }
