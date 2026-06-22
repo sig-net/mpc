@@ -26,6 +26,9 @@ pub trait ChainTelemetry: Send + Sync + Clone + 'static {
 
     /// Records that a block has reached finality/consensus
     fn block_finalized(&self, block_number: u64);
+
+    /// Records that a checkpoint was created
+    fn checkpoint_created(&self, block_number: u64);
 }
 
 /// No-op implementation for tests
@@ -35,4 +38,5 @@ pub struct NoopChainTelemetry;
 impl ChainTelemetry for NoopChainTelemetry {
     fn block_indexed(&self, _block_number: u64) {}
     fn block_finalized(&self, _block_number: u64) {}
+    fn checkpoint_created(&self, _block_number: u64) {}
 }
