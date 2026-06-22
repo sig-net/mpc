@@ -30,7 +30,7 @@ use crate::indexer_canton::ledger_api::{
 };
 use crate::indexer_canton::{CantonAuthProvider, CantonConfig};
 use crate::indexer_hydration::HydrationConfig;
-use crate::solana_client::SolanaClient;
+use crate::indexer_sol::SolanaClient;
 use crate::util::retry::{retry_async, Backoff, RetryConfig, RetryError, RetryReason};
 use alloy::contract::{ContractInstance, Interface};
 use alloy::dyn_abi::DynSolValue;

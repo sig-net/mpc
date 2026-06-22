@@ -19,7 +19,6 @@ pub mod protocol;
 pub mod respond_bidirectional;
 pub mod rpc;
 pub mod sign_bidirectional;
-pub mod solana_client;
 pub mod storage;
 pub mod stream;
 pub mod types;

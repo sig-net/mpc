@@ -1,9 +1,12 @@
+mod config;
+
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, Sign};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
+pub use config::HydrationConfig;
 
 use crate::util::ethabi_request_id;
 use alloy_sol_types::SolValue;
@@ -12,7 +15,7 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
-    CheckpointDigest, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
+    ChainTelemetry, CheckpointDigest, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
     SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
 };
@@ -22,7 +25,6 @@ use sp_runtime::traits::BlakeTwo256;
 use sp_state_machine::read_proof_check;
 use sp_trie::StorageProof;
 use std::convert::TryInto;
-use std::fmt;
 use subxt::backend::{legacy::LegacyRpcMethods, rpc::RpcClient};
 use subxt::config::HashFor;
 use subxt::events::EventDetails;
@@ -30,68 +32,6 @@ use subxt::ext::scale_value::{Composite, Value, ValueDef};
 use subxt::{client::OnlineClient, SubstrateConfig};
 use tokio::sync::mpsc;
 use tokio::sync::watch;
-
-/// Configures Hydration indexer.
-#[derive(Debug, Clone, clap::Parser)]
-#[group(id = "indexer_hydration_options")]
-pub struct HydrationArgs {
-    /// Hydration RPC ws URL
-    #[clap(long = "hydration-rpc-ws-url", env("MPC_HYDRATION_RPC_WS_URL"))]
-    pub rpc_ws_url: Option<String>,
-    /// Hydration signer URI
-    #[clap(long = "hydration-signer-uri", env("MPC_HYDRATION_SIGNER_URI"))]
-    pub signer_uri: Option<String>,
-}
-
-impl HydrationArgs {
-    pub fn into_str_args(self) -> Vec<String> {
-        let mut args = Vec::with_capacity(2);
-        if let Some(rpc_ws_url) = self.rpc_ws_url {
-            args.extend(["--hydration-rpc-ws-url".to_string(), rpc_ws_url]);
-        }
-        if let Some(signer_uri) = self.signer_uri {
-            args.extend(["--hydration-signer-uri".to_string(), signer_uri]);
-        }
-        args
-    }
-
-    pub fn into_config(self) -> Option<HydrationConfig> {
-        Some(HydrationConfig {
-            rpc_ws_url: self.rpc_ws_url?,
-            signer_uri: self.signer_uri?,
-        })
-    }
-
-    pub fn from_config(config: Option<HydrationConfig>) -> Self {
-        match config {
-            Some(config) => HydrationArgs {
-                rpc_ws_url: Some(config.rpc_ws_url),
-                signer_uri: Some(config.signer_uri),
-            },
-            None => HydrationArgs {
-                rpc_ws_url: None,
-                signer_uri: None,
-            },
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct HydrationConfig {
-    /// Hydration RPC ws URL
-    pub rpc_ws_url: String,
-    /// Hydration signer URI
-    pub signer_uri: String,
-}
-
-impl fmt::Debug for HydrationConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HydrationConfig")
-            .field("rpc_ws_url", &self.rpc_ws_url)
-            .field("signer_uri", &"<hidden>")
-            .finish()
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct HydrationSignatureRequestedEvent {
@@ -367,10 +307,12 @@ pub(crate) fn ss58_address_from_account32(sender: [u8; 32]) -> String {
     acc.to_ss58check_with_version(Ss58AddressFormatRegistry::PolkadotAccount.into())
 }
 
-pub async fn run(
+#[allow(clippy::too_many_arguments)]
+pub async fn run<T: ChainTelemetry>(
     hydration: Option<HydrationConfig>,
     sign_tx: mpsc::Sender<Sign>,
     backlog: Backlog,
+    telemetry: T,
     mut contract_watcher: ContractStateWatcher,
     mut mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
@@ -664,9 +606,8 @@ pub async fn run(
             }
         }
 
-        crate::metrics::indexers::LATEST_BLOCK_NUMBER
-            .with_label_values(&[crate::protocol::Chain::Hydration.as_str(), "indexed"])
-            .set(number as i64);
+        // Update Prometheus metrics
+        telemetry.block_indexed(number.into());
     }
 }
 

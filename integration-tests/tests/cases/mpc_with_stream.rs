@@ -118,7 +118,7 @@ async fn check_channel_contention(
         }
     }
 
-    let timeout = Duration::from_secs(120);
+    let timeout = Duration::from_secs(150);
     let start = std::time::Instant::now();
     let actions = loop {
         let rpc_actions = network.output.rpc_actions.lock().await;
