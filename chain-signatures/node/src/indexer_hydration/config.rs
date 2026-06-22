@@ -11,7 +11,7 @@ pub struct HydrationConfig {
 impl fmt::Debug for HydrationConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HydrationConfig")
-            .field("rpc_ws_url", &self.rpc_ws_url)
+            .field("rpc_ws_url", &"<hidden>") // May contain API keys
             .field("signer_uri", &"<hidden>")
             .finish()
     }
