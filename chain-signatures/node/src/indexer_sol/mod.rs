@@ -5,7 +5,8 @@ use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::{ChainIndexer, ChainStream};
 use crate::util::ethabi_request_id;
-use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
+// TODO: import from mpc-indexer-core later
+use crate::retry_rpc;
 pub use client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
 pub use config::SolConfig;
 
@@ -20,6 +21,7 @@ use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
 use anyhow::Context;
 use async_trait::async_trait;
+use backon::ExponentialBuilder;
 use futures_util::stream::StreamExt;
 use futures_util::Stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -58,6 +60,19 @@ const CPI_RESPOND_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: RespondBidirectional",
 ];
 
+const SOL_RPC_TIMEOUT: Duration = Duration::from_secs(2);
+const SOL_RPC_MIN_DELAY: Duration = Duration::from_millis(500);
+const SOL_RPC_MAX_DELAY: Duration = Duration::from_secs(10);
+const SOL_RPC_MAX_RETRIES: usize = 5;
+
+/// Helper for consistent config
+fn sol_retry_strategy() -> ExponentialBuilder {
+    ExponentialBuilder::default()
+        .with_jitter()
+        .with_min_delay(SOL_RPC_MIN_DELAY)
+        .with_max_delay(SOL_RPC_MAX_DELAY)
+        .with_max_times(SOL_RPC_MAX_RETRIES)
+}
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct SolSignRequest {
     pub payload: [u8; 32],
@@ -590,21 +605,13 @@ async fn subscribe_to_program_events<T: ChainTelemetry>(
     // with no gaps. We do not wait for the first WS event because that could deadlock if
     // no program-mentioning transactions arrive (e.g. in tests after a single sign call).
     if let Some(anchor_tx) = anchor_tx.take() {
-        match rpc_client
-            .get_slot_with_commitment(CommitmentConfig::confirmed())
-            .await
-        {
-            Ok(slot) => {
-                let _ = anchor_tx.send(slot);
-            }
-            Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    "failed to fetch anchor slot after WS subscribe; retry on reconnect"
-                );
-                // Drop anchor_tx — livestream() will receive a RecvError and propagate the failure.
-            }
-        }
+        let slot = retry_rpc!(
+            "get_slot",
+            SOL_RPC_TIMEOUT,
+            &sol_retry_strategy(),
+            rpc_client.get_slot_with_commitment(CommitmentConfig::confirmed()).await
+        )?;
+        let _ = anchor_tx.send(slot);
     }
 
     // stall watchdog
@@ -651,7 +658,7 @@ async fn subscribe_to_program_events<T: ChainTelemetry>(
                             continue;
                         }
 
-                        let tx_res = match get_tx(rpc_client, &signature, RetryConfig::default()).await {
+                        let tx_res = match get_tx(rpc_client, &signature).await {
                             Ok(tx) => tx,
                             Err(e) => {
                                 tracing::warn!("Failed to fetch transaction {}: {}", signature, e);
@@ -948,68 +955,27 @@ pub fn to_mpc_signature(
     })
 }
 
-/// Fetch transaction with timeout + retry.
+/// Fetch transaction with timeout + retry using `backon`.
 /// Returns the same type as `RpcClient::get_transaction_with_config`.
 async fn get_tx(
     rpc_client: &RpcClient,
     signature: &Signature,
-    retry_cfg: RetryConfig,
 ) -> anyhow::Result<EncodedConfirmedTransactionWithStatusMeta> {
-    let max_attempts = retry_cfg.max_attempts;
-
-    let res = retry_async(
-        retry_cfg,
-        |attempt| async move {
-            rpc_client
-                .get_transaction_with_config(
-                    signature,
-                    solana_client::rpc_config::RpcTransactionConfig {
-                        encoding: Some(UiTransactionEncoding::JsonParsed),
-                        commitment: Some(CommitmentConfig::confirmed()),
-                        max_supported_transaction_version: Some(0),
-                    },
-                )
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(e).context(format!(
-                        "getTransaction failed (attempt {attempt}/{}) for {}",
-                        max_attempts, signature
-                    ))
-                })
-        },
-        |_attempt, _reason| true,
-        |attempt, reason, sleep| match reason {
-            RetryReason::Error(e) => {
-                tracing::warn!(
-                    "getTransaction failed (attempt {attempt}/{}) for {}: {e:#}; retrying in {sleep:?}",
-                    max_attempts,
-                    signature
-                );
-            }
-            RetryReason::Timeout(t) => {
-                tracing::warn!(
-                    "getTransaction timed out after {t:?} (attempt {attempt}/{}) for {}; retrying in {sleep:?}",
-                    max_attempts,
-                    signature
-                );
-            }
-        },
+    retry_rpc!(
+        format!("get_tx({})", signature),
+        SOL_RPC_TIMEOUT,
+        &sol_retry_strategy(),
+        rpc_client
+            .get_transaction_with_config(
+                signature,
+                solana_client::rpc_config::RpcTransactionConfig {
+                    encoding: Some(UiTransactionEncoding::JsonParsed),
+                    commitment: Some(CommitmentConfig::confirmed()),
+                    max_supported_transaction_version: Some(0),
+                },
+            )
+            .await
     )
-    .await;
-
-    match res {
-        Ok(tx) => Ok(tx),
-        Err(RetryError::Exhausted { last_error, .. }) => Err(last_error),
-        Err(RetryError::TimeoutExhausted {
-            attempts,
-            last_timeout,
-        }) => Err(anyhow::anyhow!(
-            "getTransaction timed out after {:?} (attempt {attempts}/{}) for {}",
-            last_timeout,
-            max_attempts,
-            signature
-        )),
-    }
 }
 
 #[cfg(test)]
