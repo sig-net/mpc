@@ -4,6 +4,8 @@ mod config;
 pub mod indexer_eth_direct_rpc;
 #[cfg(feature = "helios")]
 pub mod indexer_eth_helios;
+#[cfg(test)]
+pub mod test_utils;
 
 use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
@@ -1069,7 +1071,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainStream for EthereumStream<S, T> {
 }
 #[cfg(test)]
 mod tests {
-    use super::{CatchupIter, EthConfig, EthereumClient, EthereumIndexer, MaybeBlock};
+    use super::{test_utils, CatchupIter, EthConfig, EthereumClient, EthereumIndexer, MaybeBlock};
     use crate::backlog::Backlog;
     #[cfg(feature = "helios")]
     use crate::indexer_eth::indexer_eth_helios;
@@ -1086,36 +1088,6 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use tokio::sync::{mpsc, Notify};
-
-    fn block_response(request_id: u64, number: u64) -> serde_json::Value {
-        json!({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "number": format!("0x{number:x}"),
-                "hash": format!("0x{:064x}", number),
-                "parentHash": format!("0x{:064x}", number.saturating_sub(1)),
-                "sha3Uncles": format!("0x{:064x}", 1),
-                "logsBloom": format!("0x{}", "0".repeat(512)),
-                "transactionsRoot": format!("0x{:064x}", 2),
-                "stateRoot": format!("0x{:064x}", 3),
-                "receiptsRoot": format!("0x{:064x}", 4),
-                "miner": format!("0x{:040x}", 5),
-                "difficulty": "0x0",
-                "totalDifficulty": "0x0",
-                "extraData": "0x",
-                "size": "0x1",
-                "gasLimit": "0x1c9c380",
-                "gasUsed": "0x0",
-                "timestamp": "0x1",
-                "uncles": [],
-                "nonce": "0x0000000000000000",
-                "mixHash": format!("0x{:064x}", 9),
-                "baseFeePerGas": "0x1",
-                "transactions": []
-            }
-        })
-    }
 
     fn missing_block_response(request_id: u64) -> serde_json::Value {
         json!({
@@ -1152,7 +1124,7 @@ mod tests {
             })))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(block_response(1, 12).to_string())
+            .with_body(test_utils::block_response(1, 12).to_string())
             .create_async()
             .await;
 
@@ -1182,9 +1154,7 @@ mod tests {
             },
             state_manager,
             telemetry: NoopChainTelemetry,
-            client: Arc::new(EthereumClient::DirectRpc(
-                super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
-            )),
+            client: Arc::new(test_utils::create_test_ethereum_client(&server.url()).await),
             events_tx,
             contract_address: Address::ZERO,
             catchup_complete: Arc::new(Notify::new()),
@@ -1222,9 +1192,7 @@ mod tests {
             },
             state_manager,
             telemetry: NoopChainTelemetry,
-            client: Arc::new(EthereumClient::DirectRpc(
-                super::indexer_eth_direct_rpc::RpcEthereumClient::new("http://127.0.0.1:1"),
-            )),
+            client: Arc::new(test_utils::create_test_ethereum_client("http://127.0.0.1:1").await),
             events_tx,
             contract_address: Address::ZERO,
             catchup_complete: Arc::new(Notify::new()),
@@ -1254,8 +1222,8 @@ mod tests {
             .with_header("content-type", "application/json")
             .with_body(
                 json!([
-                    block_response(3, 9),
-                    block_response(1, 7),
+                    test_utils::block_response(3, 9),
+                    test_utils::block_response(1, 7),
                     missing_block_response(2),
                 ])
                 .to_string(),
@@ -1263,9 +1231,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = EthereumClient::DirectRpc(
-            super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
-        );
+        let client = test_utils::create_test_ethereum_client(&server.url()).await;
         let block_ids = vec![
             BlockId::Number(BlockNumberOrTag::Number(7)),
             BlockId::Number(BlockNumberOrTag::Number(8)),
@@ -1305,18 +1271,16 @@ mod tests {
             .with_header("content-type", "application/json")
             .with_body(
                 json!([
-                    block_response(4, 20),
+                    test_utils::block_response(4, 20),
                     missing_block_response(5),
-                    block_response(6, 22),
+                    test_utils::block_response(6, 22),
                 ])
                 .to_string(),
             )
             .create_async()
             .await;
 
-        let client = EthereumClient::DirectRpc(
-            super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
-        );
+        let client = test_utils::create_test_ethereum_client(&server.url()).await;
         let block_ids = vec![
             BlockId::Number(BlockNumberOrTag::Number(20)),
             BlockId::Number(BlockNumberOrTag::Number(21)),
@@ -1340,9 +1304,9 @@ mod tests {
 
         let first_batch = (10..42)
             .enumerate()
-            .map(|(index, block_number)| block_response(index as u64 + 1, block_number))
+            .map(|(index, block_number)| test_utils::block_response(index as u64 + 1, block_number))
             .collect::<Vec<_>>();
-        let second_batch = vec![block_response(33, 42)];
+        let second_batch = vec![test_utils::block_response(33, 42)];
 
         let second_batch_mock = server
             .mock("POST", "/")
@@ -1364,9 +1328,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = Arc::new(EthereumClient::DirectRpc(
-            super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
-        ));
+        let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
         let mut iter = CatchupIter::new(client, 10, 43);
 
         for expected_number in 10..42 {
@@ -1392,13 +1354,13 @@ mod tests {
 
         let first_batch = (0..32)
             .enumerate()
-            .map(|(idx, block_number)| block_response(idx as u64 + 1, block_number))
+            .map(|(idx, block_number)| test_utils::block_response(idx as u64 + 1, block_number))
             .collect::<Vec<_>>();
         let second_batch = (32..64)
             .enumerate()
-            .map(|(idx, block_number)| block_response((idx + 33) as u64, block_number))
+            .map(|(idx, block_number)| test_utils::block_response((idx + 33) as u64, block_number))
             .collect::<Vec<_>>();
-        let third_batch = vec![block_response(65, 64)];
+        let third_batch = vec![test_utils::block_response(65, 64)];
 
         let first_batch_mock = server
             .mock("POST", "/")
@@ -1430,9 +1392,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = Arc::new(EthereumClient::DirectRpc(
-            super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
-        ));
+        let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
         let mut iter = CatchupIter::new(client, 0, 65);
 
         for expected_number in 0..65 {
@@ -1576,9 +1536,7 @@ mod tests {
             },
             state_manager,
             telemetry: NoopChainTelemetry,
-            client: Arc::new(EthereumClient::DirectRpc(
-                super::indexer_eth_direct_rpc::RpcEthereumClient::new(&server.url()),
-            )),
+            client: Arc::new(test_utils::create_test_ethereum_client(&server.url()).await),
             events_tx,
             contract_address: Address::ZERO,
             catchup_complete: Arc::new(Notify::new()),

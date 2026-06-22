@@ -110,7 +110,7 @@ impl EthereumClient {
 
         let res = retry_rpc!("get_blocks", ETH_RPC_BATCH_TIMEOUT, &self.retry_strategy, {
             match &self.inner {
-                    #[cfg(feature = "helios")]
+                #[cfg(feature = "helios")]
                 EthereumClientInner::Helios(client) => client.get_blocks(block_ids).await,
                 EthereumClientInner::DirectRpc(client) => client.get_blocks(block_ids).await,
             }
@@ -267,5 +267,119 @@ impl EthereumClient {
         } else {
             requested_start
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::indexer_eth::test_utils;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn get_block_returns_block_on_200() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::block_response(1, 99).to_string())
+            .create_async()
+            .await;
+
+        let client = test_utils::create_test_ethereum_client(&server.url()).await;
+        let block = client
+            .get_block(BlockId::Number(BlockNumberOrTag::Number(99)))
+            .await;
+
+        assert!(block.is_some());
+        assert_eq!(block.unwrap().header.number, 99);
+    }
+
+    #[tokio::test]
+    async fn get_block_returns_none_on_null_result() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"jsonrpc":"2.0","id":1,"result":null}"#)
+            .create_async()
+            .await;
+
+        let client = test_utils::create_test_ethereum_client(&server.url()).await;
+        let block = client
+            .get_block(BlockId::Number(BlockNumberOrTag::Number(1)))
+            .await;
+
+        assert!(block.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_block_retries_on_500_then_succeeds() {
+        let mut server = mockito::Server::new_async().await;
+        // First call → 500, second call → valid block
+        let _fail = server
+            .mock("POST", "/")
+            .with_status(500)
+            .with_body("error")
+            .expect(1)
+            .create_async()
+            .await;
+        let _ok = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(test_utils::block_response(1, 7).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = test_utils::create_test_ethereum_client(&server.url()).await;
+        let block = client
+            .get_block(BlockId::Number(BlockNumberOrTag::Number(7)))
+            .await;
+
+        assert!(block.is_some());
+    }
+
+    #[tokio::test]
+    async fn get_block_retries_on_500_then_fails() {
+        let mut server = mockito::Server::new_async().await;
+        // Always return 500
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .with_body("error")
+            .expect(5) // should retry 5 times
+            .create_async()
+            .await;
+
+        let client = test_utils::create_test_ethereum_client(&server.url()).await;
+        let block = client
+            .get_block(BlockId::Number(BlockNumberOrTag::Number(8)))
+            .await;
+
+        assert!(block.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_block_does_not_retry_on_4xx() {
+        let mut server = mockito::Server::new_async().await;
+        // Always return 4xx
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(400)
+            .with_body("bad request")
+            .expect(1) // should not retry
+            .create_async()
+            .await;
+
+        let client = test_utils::create_test_ethereum_client(&server.url()).await;
+        let block = client
+            .get_block(BlockId::Number(BlockNumberOrTag::Number(9)))
+            .await;
+
+        assert!(block.is_none());
     }
 }
