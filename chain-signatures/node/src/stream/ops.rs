@@ -412,8 +412,6 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
             tracing::error!(?err, %chain, "failed to enqueue checkpoint sign request");
         }
     }
-
-    telemetry.block_finalized(block);
 }
 
 /// Decode a [u8; 32] sender into its canonical on-chain address string.
