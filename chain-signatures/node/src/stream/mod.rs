@@ -568,7 +568,10 @@ mod tests {
         };
         let client = SolanaTestStream::new(vec![
             Some(ChainEvent::CatchupCompleted),
-            Some(ChainEvent::SignRequest(indexed.clone())),
+            Some(ChainEvent::SignRequest {
+                request: indexed.clone(),
+                block_timestamp: None,
+            }),
             Some(ChainEvent::Respond(sig_responded)),
             None,
         ]);
@@ -768,7 +771,10 @@ mod tests {
 
         // push SignRequest
         events_tx
-            .send(ChainEvent::SignRequest(indexed.clone()))
+            .send(ChainEvent::SignRequest {
+                request: indexed.clone(),
+                block_timestamp: None,
+            })
             .await
             .unwrap();
 
@@ -1076,7 +1082,10 @@ mod tests {
         let replacement =
             IndexedSignRequest::sign(sign_id, args.clone(), Chain::Ethereum, replayed_timestamp);
         let client = EthereumTestStream::new(vec![
-            Some(ChainEvent::SignRequest(replacement)),
+            Some(ChainEvent::SignRequest {
+                request: replacement,
+                block_timestamp: None
+            }),
             Some(ChainEvent::CatchupCompleted),
             None,
         ]);
