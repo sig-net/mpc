@@ -469,7 +469,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     async fn parse_block(&self, block: &Block) -> anyhow::Result<BlockAndRequests> {
         let block_number = block.header.number;
         let block_hash = block.header.hash;
-        let block_timestamp = block.header.timestamp;
+
         tracing::info!(
             "Processing block number {} with hash {:?}",
             block_number,
