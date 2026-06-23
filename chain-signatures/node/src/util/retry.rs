@@ -1,12 +1,14 @@
+use std::time::Duration;
+
 use backon::ExponentialBuilder;
 
 /// Configuration for retrying RPC calls with exponential backoff.
 #[derive(Clone, Copy)]
 pub struct RetryConfig {
-    min_delay: Duration,
-    max_delay: Duration,
-    max_times: usize,
-    jitter: bool,
+    pub min_delay: Duration,
+    pub max_delay: Duration,
+    pub max_times: usize,
+    pub jitter: bool,
 }
 
 impl RetryConfig {
@@ -90,7 +92,6 @@ impl RetryConfig {
 ///     }
 /// )?;
 /// ```
-#[macro_export]
 macro_rules! retry_rpc {
     // Bare form: no op_name
     ($timeout:expr, $strategy:expr, { $($code:tt)* }) => {
@@ -109,7 +110,7 @@ macro_rules! retry_rpc {
             }
         };
         use backon::Retryable;
-        op.retry($strategy.build())
+        op.retry(&$strategy.build())
             .notify(|err: &anyhow::Error, sleep: std::time::Duration| {
                 attempt_counter += 1;
                 tracing::warn!(
@@ -135,7 +136,7 @@ macro_rules! retry_rpc {
             }
         };
         use backon::Retryable;
-        op.retry($strategy.build())
+        op.retry(&$strategy.build())
             .notify(|$err: &anyhow::Error, $sleep: std::time::Duration| {
                 attempt_counter += 1;
                 let $attempt = attempt_counter;
@@ -144,3 +145,5 @@ macro_rules! retry_rpc {
             .await
     }};
 }
+
+pub(crate) use retry_rpc;

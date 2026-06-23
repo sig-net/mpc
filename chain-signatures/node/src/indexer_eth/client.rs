@@ -3,11 +3,9 @@ use std::time::Duration;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::{Address, Bytes};
 use alloy::rpc::types::{Block, BlockId};
-use backon::ExponentialBuilder;
 
 use super::{indexer_eth_direct_rpc, BlockNumber, EthConfig, MaybeBlock};
-use crate::retry_rpc;
-use create::util::retry::RetryConfig;
+use crate::util::retry::{RetryConfig, retry_rpc};
 
 #[cfg(feature = "helios")]
 use super::indexer_eth_helios;
