@@ -50,13 +50,11 @@ impl ChainTelemetry for PrometheusChainTelemetry {
             .set(block_number as i64);
     }
 
-    fn request_indexed(&self, block_timestamp: Option<u64>) {
-        if let Some(ts) = block_timestamp {
-            // Ethereum path
-            record_request_latency_since(self.chain, SignRequestStep::Indexing, "ok", ts);
-        } else {
-            // Solana, Hydration, Canton path
-            record_indexing_step_reached(self.chain);
-        }
+    fn request_indexed_at(&self, block_timestamp: u64) {
+        record_request_latency_since(self.chain, SignRequestStep::Indexing, "ok", block_timestamp);
+    }
+
+    fn request_indexed(&self) {
+        record_indexing_step_reached(self.chain);
     }
 }
