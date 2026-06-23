@@ -164,6 +164,7 @@ impl SolanaClient {
         &self,
         signature: &Signature,
     ) -> anyhow::Result<EncodedConfirmedTransactionWithStatusMeta> {
+        let max_attempts = self.retry_strategy.max_times;
         retry_rpc!(
             SOL_RPC_TIMEOUT,
             self.retry_strategy,
@@ -171,6 +172,7 @@ impl SolanaClient {
                 tracing::warn!(
                     operation = %signature,
                     attempt,
+                    max_attempts,
                     error = %err,
                     retry_in = ?sleep,
                     "get_tx failed, retrying"
@@ -193,15 +195,17 @@ impl SolanaClient {
     }
 
     pub async fn get_block(&self, slot: u64) -> anyhow::Result<UiConfirmedBlock> {
+        let max_attempts = self.retry_strategy.max_times;
         retry_rpc!(
             SOL_RPC_TIMEOUT,
             self.retry_strategy,
             // Notify on retry with structured logging
-            |attempts, err, delay| {
+            |attempt, err, delay| {
                 tracing::warn!(
                     ?err,
-                    attempts,
-                    slot,
+                    attempt,
+                    max_attempts,
+                    ?slot,
                     "failed to fetch Solana block; retrying in {:?}",
                     delay
                 );
@@ -220,14 +224,16 @@ impl SolanaClient {
             return HashMap::new();
         }
 
+        let max_attempts = self.retry_strategy.max_times;
         let res = retry_rpc!(
             SOL_BATCH_TIMEOUT,
             self.retry_strategy,
             // Notify on retry with structured logging
-            |attempts, err, delay| {
+            |attempt, err, delay| {
                 tracing::warn!(
                     ?err,
-                    attempts,
+                    attempt,
+                    max_attempts,
                     "failed to send batch request or deserialize response; retrying in {:?}",
                     delay
                 );

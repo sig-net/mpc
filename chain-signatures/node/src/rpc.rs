@@ -1589,7 +1589,7 @@ async fn send_eth_transaction(
 
     retry_rpc!(
         ETH_SEND_TIMEOUT,
-        &send_retry,
+        send_retry,
         |attempt, err, sleep| {
             tracing::warn!(
                 ?sign_ids,
@@ -1784,10 +1784,22 @@ async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAc
                 ChainClient::Ethereum(eth) => try_batch_publish_eth(eth, actions, &signatures)
                     .await
                     .map_err(|_| anyhow::anyhow!("Eth batch publish failed")),
-                ChainClient::Near(_) => Err(anyhow::anyhow!("Near has no batch publish")),
-                ChainClient::Solana(_) => Err(anyhow::anyhow!("Solana has no batch publish")),
-                ChainClient::Hydration(_) => Err(anyhow::anyhow!("Hydration has no batch publish")),
-                ChainClient::Canton(_) => Err(anyhow::anyhow!("Canton has no batch publish")),
+                ChainClient::Near(_) => {
+                    tracing::error!("Near has no batch publish");
+                    Ok(())
+                }
+                ChainClient::Solana(_) => {
+                    tracing::error!("Solana has no batch publish");
+                    Ok(())
+                }
+                ChainClient::Hydration(_) => {
+                    tracing::error!("Hydration has no batch publish");
+                    Ok(())
+                }
+                ChainClient::Canton(_) => {
+                    tracing::error!("Canton has no batch publish");
+                    Ok(())
+                }
                 ChainClient::Err(msg) => {
                     tracing::error!(msg, "no client for chain");
                     Ok(())

@@ -82,13 +82,24 @@ impl EthereumClient {
     }
 
     pub async fn get_block(&self, block_id: BlockId) -> Option<Block> {
-        let res = retry_rpc!(ETH_RPC_TIMEOUT, self.retry_strategy, "get_block", {
-            match &self.inner {
-                #[cfg(feature = "helios")]
-                EthereumClientInner::Helios(client) => client.get_block(block_id).await,
-                EthereumClientInner::DirectRpc(client) => client.get_block(block_id).await,
+        let max_attempts = self.retry_strategy.max_times;
+        let res = retry_rpc!(
+            ETH_RPC_TIMEOUT,
+            self.retry_strategy,
+            |attempt, err, sleep| {
+                tracing::warn!(
+                    client = self.client_name(),
+                    "get_block failed (attempt {attempt}/{max_attempts}) for {block_id:?}: {err:#}; retrying in {sleep:?}"
+                );
+            },
+            {
+                match &self.inner {
+                    #[cfg(feature = "helios")]
+                    EthereumClientInner::Helios(client) => client.get_block(block_id).await,
+                    EthereumClientInner::DirectRpc(client) => client.get_block(block_id).await,
+                }
             }
-        });
+        );
 
         match res {
             Ok(Some(block)) => Some(block),
@@ -97,7 +108,10 @@ impl EthereumClient {
                 None
             }
             Err(err) => {
-                tracing::warn!(client = self.client_name(), "{err}");
+                tracing::warn!(
+                    client = self.client_name(),
+                    "get_block failed for {block_id:?}: {err:#}"
+                );
                 None
             }
         }
@@ -108,18 +122,36 @@ impl EthereumClient {
             return Vec::new();
         }
 
-        let res = retry_rpc!(ETH_RPC_BATCH_TIMEOUT, self.retry_strategy, "get_blocks", {
-            match &self.inner {
-                #[cfg(feature = "helios")]
-                EthereumClientInner::Helios(client) => client.get_blocks(block_ids).await,
-                EthereumClientInner::DirectRpc(client) => client.get_blocks(block_ids).await,
+        let max_attempts = self.retry_strategy.max_times;
+        let num_blocks = block_ids.len();
+
+        let res = retry_rpc!(
+            ETH_RPC_BATCH_TIMEOUT,
+            self.retry_strategy,
+            |attempt, err, sleep| {
+                tracing::warn!(
+                    client = self.client_name(),
+                    num_blocks,
+                    "get_blocks failed (attempt {attempt}/{max_attempts}): {err:#}; retrying in {sleep:?}"
+                );
+            },
+            {
+                match &self.inner {
+                    #[cfg(feature = "helios")]
+                    EthereumClientInner::Helios(client) => client.get_blocks(block_ids).await,
+                    EthereumClientInner::DirectRpc(client) => client.get_blocks(block_ids).await,
+                }
             }
-        });
+        );
 
         match res {
             Ok(blocks) => blocks,
             Err(err) => {
-                tracing::warn!(client = self.client_name(), "{err}");
+                tracing::warn!(
+                    client = self.client_name(),
+                    num_blocks,
+                    "get_blocks failed: {err:#}"
+                );
                 block_ids.iter().copied().map(MaybeBlock::Missing).collect()
             }
         }
@@ -191,6 +223,7 @@ impl EthereumClient {
         &self,
         tx_hash: alloy::primitives::B256,
     ) -> anyhow::Result<alloy::primitives::Bytes> {
+        // TODO: trace_transaction_output can be slow, consider a longer timeout than ETH_RPC_TIMEOUT if necessary
         retry_rpc!(
             ETH_RPC_TIMEOUT,
             self.retry_strategy,
