@@ -1,3 +1,5 @@
+// TODO: this should be moved somewhere so that it can be re-used by both indexer crates and the node crate
+
 use std::time::Duration;
 
 use backon::ExponentialBuilder;

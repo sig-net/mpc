@@ -5,7 +5,7 @@ use alloy::primitives::{Address, Bytes};
 use alloy::rpc::types::{Block, BlockId};
 
 use super::{indexer_eth_direct_rpc, BlockNumber, EthConfig, MaybeBlock};
-use crate::util::retry::{RetryConfig, retry_rpc};
+use crate::util::retry::{retry_rpc, RetryConfig};
 
 #[cfg(feature = "helios")]
 use super::indexer_eth_helios;
