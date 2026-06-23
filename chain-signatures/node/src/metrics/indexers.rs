@@ -7,6 +7,7 @@ use super::try_create_int_gauge_vec_with_node_account_id;
 /// Possible status options:
 ///     - "indexed" - latest block number seen by the indexer
 ///     - "finalized" - latest block number seen as finalized by the indexer
+///     - "checkpoint" - latest block number for which a checkpoint was created
 static LATEST_BLOCK_NUMBER: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     try_create_int_gauge_vec_with_node_account_id(
         "multichain_latest_block_number",
@@ -37,6 +38,12 @@ impl ChainTelemetry for PrometheusChainTelemetry {
     fn block_finalized(&self, block_number: u64) {
         LATEST_BLOCK_NUMBER
             .with_label_values(&[self.chain.as_str(), "finalized"])
+            .set(block_number as i64);
+    }
+
+    fn checkpoint_created(&self, block_number: u64) {
+        LATEST_BLOCK_NUMBER
+            .with_label_values(&[self.chain.as_str(), "checkpoint"])
             .set(block_number as i64);
     }
 }

@@ -389,10 +389,12 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
     caught_up: bool,
     telemetry: &T,
 ) {
+    telemetry.block_finalized(block);
     let Some(checkpoint) = backlog.set_processed_block(chain, block).await else {
-        telemetry.block_finalized(block);
         return;
     };
+
+    telemetry.checkpoint_created(checkpoint.block_height);
 
     tracing::info!(block, ?checkpoint, %chain, "created checkpoint");
     if caught_up {
@@ -410,8 +412,6 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
             tracing::error!(?err, %chain, "failed to enqueue checkpoint sign request");
         }
     }
-
-    telemetry.block_finalized(block);
 }
 
 /// Decode a [u8; 32] sender into its canonical on-chain address string.
