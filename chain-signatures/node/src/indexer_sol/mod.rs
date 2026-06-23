@@ -959,7 +959,9 @@ mod tests {
     use mpc_primitives::NoopChainTelemetry;
     use solana_sdk::commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
-    use solana_transaction_status::{TransactionDetails, UiTransactionEncoding, UiTransactionStatusMeta};
+    use solana_transaction_status::{
+        TransactionDetails, UiTransactionEncoding, UiTransactionStatusMeta,
+    };
 
     #[test]
     fn request_id_matches_ethabi() {

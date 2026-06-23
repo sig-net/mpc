@@ -31,17 +31,12 @@ impl RetryConfig {
 ///
 /// # Forms
 ///
-/// ## 1. Bare — no operation name, silent on retry
-/// ```ignore
-/// retry_rpc!(timeout, strategy, { code })
-/// ```
-///
-/// ## 2. Standard — named operation, structured [`tracing::warn`] on every retry
+/// ## 1. Standard — named operation, structured [`tracing::warn`] on every retry
 /// ```ignore
 /// retry_rpc!(timeout, strategy, "op_name", { code })
 /// ```
 ///
-/// ## 3. Full — named operation, custom notify closure
+/// ## 2. Full — named operation, custom notify closure
 /// ```ignore
 /// retry_rpc!(timeout, strategy, "op_name", |attempt, err, sleep| { notify }, { code })
 /// ```
@@ -73,13 +68,6 @@ impl RetryConfig {
 /// })?;
 /// ```
 ///
-/// ## Bare form (fire-and-forget, no logging)
-/// ```ignore
-/// let slot: u64 = retry_rpc!(SOL_RPC_TIMEOUT, self.retry_strategy, {
-///     self.rpc_client.get_slot().await.map_err(anyhow::Error::from)
-/// })?;
-/// ```
-///
 /// ## Full form (custom retry logging)
 /// ```ignore
 /// let block = retry_rpc!(
@@ -95,13 +83,8 @@ impl RetryConfig {
 /// )?;
 /// ```
 macro_rules! retry_rpc {
-    // Bare form: no op_name
-    ($timeout:expr, $strategy:expr, { $($code:tt)* }) => {
-        $crate::retry_rpc!($timeout, $strategy, "rpc", { $($code)* })
-    };
-
-    // Standard form: op_name with default structured logging
-    ($timeout:expr, $strategy:expr, $op_name:expr, { $($code:tt)* }) => {{
+    // Standard form: op_name string, default structured logging
+    ($timeout:expr, $strategy:expr, $op_name:literal, { $($code:tt)* }) => {{
         let mut attempt_counter: u32 = 0;
         let op = || async {
             let fut = async { $($code)* };
@@ -126,8 +109,8 @@ macro_rules! retry_rpc {
             .await
     }};
 
-    // Full form: custom notify
-    ($timeout:expr, $strategy:expr, $op_name:expr, |$attempt:ident, $err:ident, $sleep:ident| $notify:block, { $($code:tt)* }) => {{
+    // Full form: custom notify closure, no op_name
+    ($timeout:expr, $strategy:expr, |$attempt:ident, $err:ident, $sleep:ident| $notify:block, { $($code:tt)* }) => {{
         let mut attempt_counter: u32 = 0;
         let op = || async {
             let fut = async { $($code)* };

@@ -5,6 +5,7 @@ use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState};
+use crate::util::retry::{retry_rpc, RetryConfig};
 use crate::util::AffinePointExt as _;
 use std::collections::BTreeSet;
 
@@ -17,7 +18,6 @@ use alloy::primitives::Address;
 use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
 use alloy::providers::{Provider, RootProvider, WalletProvider};
 use alloy::rpc::types::{Transaction, TransactionReceipt};
-use backon::{ConstantBuilder, ExponentialBuilder};
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
@@ -126,29 +126,6 @@ const ETH_RECEIPT_MAX_DELAY: Duration = Duration::from_secs(20);
 // Ethereum gas limits
 const ETH_BASE_GAS_LIMIT: u64 = 40_000;
 const ETH_BATCH_GAS_PER_REQUEST: u64 = 20_000;
-
-/// A macro to wrap async closures for backon retries with a timeout and notification.
-macro_rules! retry_action {
-    ($timeout:expr, $strategy:expr, |$attempt:ident, $err:ident, $sleep:ident| $notify:block, $code:block) => {{
-        let mut $attempt = 0;
-        let op = || async {
-            let fut = async $code;
-            match tokio::time::timeout($timeout, fut).await {
-                Ok(Ok(res)) => Ok(res),
-                Ok(Err(e)) => Err(e),
-                Err(_) => Err(anyhow::anyhow!("Operation timed out")),
-            }
-        };
-
-        use backon::Retryable;
-        op.retry($strategy)
-            .notify(|$err: &anyhow::Error, $sleep: std::time::Duration| {
-                $attempt += 1;
-                $notify
-            })
-            .await
-    }};
-}
 
 type EthContractInstance = ContractInstance<EthContractFillProvider>;
 
@@ -1325,14 +1302,16 @@ async fn execute_publish(client: ChainClient, action: PublishAction) {
         "trying to publish signature",
     );
 
-    let backoff = ConstantBuilder::default()
-        .with_jitter()
-        .with_delay(PUBLISH_FIXED_DELAY)
-        .with_max_times(MAX_PUBLISH_RETRY);
+    let retry_config = RetryConfig {
+        max_times: MAX_PUBLISH_RETRY,
+        min_delay: PUBLISH_FIXED_DELAY,
+        max_delay: PUBLISH_FIXED_DELAY,
+        jitter: true,
+    };
 
-    let publish_res = retry_action!(
+    let publish_res = retry_rpc!(
         PUBLISH_ATTEMPT_TIMEOUT,
-        &backoff,
+        retry_config,
         // Log the error and retry attempt
         |attempt, err, sleep| {
             tracing::warn!(
@@ -1480,15 +1459,16 @@ async fn wait_for_pending_tx(
     sign_ids: Vec<SignId>,
     max_attempts: usize,
 ) -> Result<Transaction, ()> {
-    let backoff = ExponentialBuilder::default()
-        .with_jitter()
-        .with_min_delay(ETH_MEMPOOL_MIN_DELAY)
-        .with_max_delay(ETH_MEMPOOL_MAX_DELAY)
-        .with_max_times(max_attempts);
+    let retry_config = RetryConfig {
+        max_times: max_attempts,
+        min_delay: ETH_MEMPOOL_MIN_DELAY,
+        max_delay: ETH_MEMPOOL_MAX_DELAY,
+        jitter: true,
+    };
 
-    retry_action!(
+    retry_rpc!(
         ETH_MEMPOOL_TIMEOUT,
-        &backoff,
+        retry_config,
         // Log the error and retry attempt
         |attempt, err, sleep| {
             tracing::error!(
@@ -1518,16 +1498,16 @@ async fn wait_for_transaction_receipt(
     sign_ids: Vec<SignId>,
     max_attempts: usize,
 ) -> Result<TransactionReceipt, ()> {
-    // TODO: use constants
-    let backoff = ExponentialBuilder::default()
-        .with_jitter()
-        .with_min_delay(ETH_RECEIPT_MIN_DELAY)
-        .with_max_delay(ETH_RECEIPT_MAX_DELAY)
-        .with_max_times(max_attempts);
+    let retry_config = RetryConfig {
+        max_times: max_attempts,
+        min_delay: ETH_RECEIPT_MIN_DELAY,
+        max_delay: ETH_RECEIPT_MAX_DELAY,
+        jitter: true,
+    };
 
-    retry_action!(
+    retry_rpc!(
         ETH_RECEIPT_TIMEOUT,
-        &backoff,
+        retry_config,
         // Log the error and retry attempt
         |attempt, err, sleep| {
             tracing::error!(
@@ -1558,15 +1538,16 @@ async fn send_eth_transaction(
 ) -> Result<alloy::primitives::B256, ()> {
     // TODO: fetching nonce from RPC is slow and expensive, consider better approach (fetch once, increment locally, etc.)
     // 1. Fetch Nonce
-    let nonce_backoff = ExponentialBuilder::default()
-        .with_jitter()
-        .with_min_delay(ETH_NONCE_MIN_DELAY)
-        .with_max_delay(ETH_NONCE_MAX_DELAY)
-        .with_max_times(ETH_NONCE_MAX_ATTEMPTS);
+    let nonce_retry = RetryConfig {
+        max_times: ETH_NONCE_MAX_ATTEMPTS,
+        min_delay: ETH_NONCE_MIN_DELAY,
+        max_delay: ETH_NONCE_MAX_DELAY,
+        jitter: true,
+    };
 
-    let nonce = match retry_action!(
+    let nonce = match retry_rpc!(
         ETH_NONCE_TIMEOUT,
-        &nonce_backoff,
+        nonce_retry,
         // Log the error and retry attempt
         |attempt, err, sleep| {
             tracing::warn!(
@@ -1599,15 +1580,16 @@ async fn send_eth_transaction(
     tracing::info!(nonce, "will send eth tx with nonce");
 
     // 2. Send Tx
-    let send_backoff = ExponentialBuilder::default()
-        .with_jitter()
-        .with_min_delay(ETH_SEND_MIN_DELAY)
-        .with_max_delay(ETH_SEND_MAX_DELAY)
-        .with_max_times(ETH_SEND_MAX_ATTEMPTS);
+    let send_retry = RetryConfig {
+        max_times: ETH_SEND_MAX_ATTEMPTS,
+        min_delay: ETH_SEND_MIN_DELAY,
+        max_delay: ETH_SEND_MAX_DELAY,
+        jitter: true,
+    };
 
-    retry_action!(
+    retry_rpc!(
         ETH_SEND_TIMEOUT,
-        &send_backoff,
+        &send_retry,
         |attempt, err, sleep| {
             tracing::warn!(
                 ?sign_ids,
@@ -1633,6 +1615,7 @@ async fn send_eth_transaction(
             ?err,
             "failed to send ethereum signature transaction: retry attempts exhausted"
         );
+        ()
     })
 }
 
@@ -1780,15 +1763,16 @@ async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAc
         .map(|action| (action.indexed.id, action.signature))
         .collect();
 
-    let backoff = ExponentialBuilder::default()
-        .with_min_delay(BATCH_PUBLISH_MIN_DELAY)
-        .with_max_delay(BATCH_PUBLISH_MAX_DELAY)
-        .with_max_times(MAX_PUBLISH_RETRY)
-        .with_jitter();
+    let retry_config = RetryConfig {
+        max_times: MAX_PUBLISH_RETRY,
+        min_delay: BATCH_PUBLISH_MIN_DELAY,
+        max_delay: BATCH_PUBLISH_MAX_DELAY,
+        jitter: true,
+    };
 
-    let res = retry_action!(
-        Duration::from_secs(120),
-        &backoff,
+    let res = retry_rpc!(
+        PUBLISH_ATTEMPT_TIMEOUT,
+        retry_config,
         // Log the error and retry attempt
         |attempt, err, sleep| {
             tracing::warn!(

@@ -167,7 +167,15 @@ impl SolanaClient {
         retry_rpc!(
             SOL_RPC_TIMEOUT,
             self.retry_strategy,
-            format!("get_tx({})", signature),
+            |attempt, err, sleep| {
+                tracing::warn!(
+                    operation = %signature,
+                    attempt,
+                    error = %err,
+                    retry_in = ?sleep,
+                    "get_tx failed, retrying"
+                );
+            },
             {
                 self.rpc_client
                     .get_transaction_with_config(
@@ -188,7 +196,6 @@ impl SolanaClient {
         retry_rpc!(
             SOL_RPC_TIMEOUT,
             self.retry_strategy,
-            format!("get_block({})", slot),
             // Notify on retry with structured logging
             |attempts, err, delay| {
                 tracing::warn!(
@@ -216,7 +223,6 @@ impl SolanaClient {
         let res = retry_rpc!(
             SOL_BATCH_TIMEOUT,
             self.retry_strategy,
-            "fetch_blocks",
             // Notify on retry with structured logging
             |attempts, err, delay| {
                 tracing::warn!(
@@ -285,7 +291,6 @@ impl SolanaClient {
         retry_rpc!(
             SOL_RPC_TIMEOUT,
             self.retry_strategy,
-            format!("fetch_signatures_from_latest({})", address),
             // Notify on retry with structured logging
             |attempts, err, delay| {
                 tracing::warn!(
