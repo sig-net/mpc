@@ -1,14 +1,16 @@
 use super::{EthConfig, EthereumClient};
-use backon::ExponentialBuilder;
+use crate::util::retry::RetryConfig;
 use std::time::Duration;
 
 /// Creates a test Ethereum client with a small retry strategy for testing purposes.
 pub async fn create_test_ethereum_client(url: &str) -> EthereumClient {
     // Use a small retry strategy for testing to avoid long delays
-    let retry_strategy = ExponentialBuilder::default()
-        .with_min_delay(Duration::from_millis(1))
-        .with_max_delay(Duration::from_millis(10))
-        .with_max_times(2);
+    let retry_strategy = RetryConfig {
+        min_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(10),
+        max_times: 2,
+        jitter: false,
+    };
 
     let eth = EthConfig {
         execution_rpc_http_url: url.to_string(),
