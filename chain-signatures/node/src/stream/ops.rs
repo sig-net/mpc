@@ -1,5 +1,4 @@
 use crate::backlog::Backlog;
-use crate::metrics::requests::record_indexing_step_reached;
 use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
@@ -17,11 +16,6 @@ pub(crate) async fn process_sign_request(
     backlog: Backlog,
     caught_up: bool,
 ) -> anyhow::Result<()> {
-    // Ethereum records its own indexing latency (includes finality delay) from the block timestamp in `parse_block`.
-    if sign_request.chain != Chain::Ethereum {
-        record_indexing_step_reached(sign_request.chain);
-    }
-
     if matches!(sign_request.kind, SignKind::RespondBidirectional(_)) {
         anyhow::bail!("Unexpected sign request kind");
     }
