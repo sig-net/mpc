@@ -604,6 +604,7 @@ async fn subscribe_to_program_events<T: ChainTelemetry>(
                     ?err,
                     "failed to fetch anchor slot after WS subscribe; retry on reconnect"
                 );
+                // Drop anchor_tx — livestream() will receive a RecvError and propagate the failure.
             }
         }
     }
