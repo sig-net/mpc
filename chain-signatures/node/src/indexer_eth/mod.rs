@@ -6,7 +6,6 @@ pub mod indexer_eth_direct_rpc;
 pub mod indexer_eth_helios;
 
 use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
-use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::Chain;
 use crate::respond_bidirectional::CompletedTx;
 use crate::stream::{ChainIndexer, ChainStream};
@@ -535,12 +534,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             .await?;
 
         for _request in &sign_requests {
-            record_request_latency_since(
-                Chain::Ethereum,
-                SignRequestStep::Indexing,
-                "ok",
-                block_timestamp,
-            );
+            self.telemetry.request_indexed(Some(block_timestamp));
         }
 
         // Always forward the processed block to the "finalization" stage so it can emit
