@@ -27,6 +27,26 @@ impl RetryConfig {
     }
 }
 
+/// Helper to identify whether an RPC error should be retried.
+/// Protects against endlessly retrying terminal client errors (4xx).
+pub fn is_retryable(e: &anyhow::Error) -> bool {
+    let s = e.to_string();
+    // 408 Request Timeout and 429 Too Many Requests are retryable.
+    if s.contains("408") || s.contains("429") {
+        return true;
+    }
+    // Other 4xx errors are generally client errors and should not be retried.
+    if s.contains("400")
+        || s.contains("401")
+        || s.contains("403")
+        || s.contains("404")
+        || s.contains("405")
+    {
+        return false;
+    }
+    true
+}
+
 /// Wraps an async RPC call with a timeout and [`backon`] exponential-backoff retry strategy.
 ///
 /// # Forms
@@ -96,6 +116,9 @@ macro_rules! retry_rpc {
         };
         use backon::Retryable;
         op.retry(&$strategy.build())
+            // Retry only if the error is retryable (e.g., not a 4xx client error)
+            .when(|e: &anyhow::Error| crate::util::retry::is_retryable(e))
+            // Log each retry attempt with structured tracing
             .notify(|err: &anyhow::Error, sleep: std::time::Duration| {
                 attempt_counter += 1;
                 tracing::warn!(
@@ -107,6 +130,7 @@ macro_rules! retry_rpc {
                 );
             })
             .await
+            .map_err(|e| anyhow::anyhow!("{e} (exhausted after {} attempts)", attempt_counter + 1))
     }};
 
     // Full form: custom notify closure, no op_name
@@ -122,12 +146,16 @@ macro_rules! retry_rpc {
         };
         use backon::Retryable;
         op.retry(&$strategy.build())
+            // Retry only if the error is retryable (e.g., not a 4xx client error)
+            .when(|e: &anyhow::Error| crate::util::retry::is_retryable(e))
+            // Log each retry attempt with the user-provided notify closure
             .notify(|$err: &anyhow::Error, $sleep: std::time::Duration| {
                 attempt_counter += 1;
                 let $attempt = attempt_counter;
                 $notify
             })
             .await
+            .map_err(|e| anyhow::anyhow!("{e} (exhausted after {} attempts)", attempt_counter + 1))
     }};
 }
 
