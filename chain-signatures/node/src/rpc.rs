@@ -1615,7 +1615,6 @@ async fn send_eth_transaction(
             ?err,
             "failed to send ethereum signature transaction: retry attempts exhausted"
         );
-        ()
     })
 }
 
