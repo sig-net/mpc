@@ -5,8 +5,6 @@ use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::stream::{ChainIndexer, ChainStream};
 use crate::util::ethabi_request_id;
-// TODO: import from mpc-indexer-core later
-use crate::retry_rpc;
 pub use client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
 pub use config::SolConfig;
 
@@ -21,7 +19,6 @@ use anchor_lang::solana_program::keccak;
 use anchor_lang::Discriminator;
 use anyhow::Context;
 use async_trait::async_trait;
-use backon::ExponentialBuilder;
 use futures_util::stream::StreamExt;
 use futures_util::Stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -38,15 +35,14 @@ use signet_program::{
     SignatureRespondedEvent,
 };
 use solana_client::{
-    nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient},
+    nonblocking::pubsub_client::PubsubClient,
     rpc_config::{RpcTransactionLogsConfig, RpcTransactionLogsFilter},
 };
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
 use solana_transaction_status::option_serializer::OptionSerializer;
 use solana_transaction_status::{
-    EncodedConfirmedTransactionWithStatusMeta, EncodedTransaction,
-    EncodedTransactionWithStatusMeta, UiConfirmedBlock, UiInstruction, UiParsedInstruction,
-    UiTransactionEncoding,
+    EncodedTransaction, EncodedTransactionWithStatusMeta, UiConfirmedBlock, UiInstruction,
+    UiParsedInstruction,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -60,19 +56,6 @@ const CPI_RESPOND_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: RespondBidirectional",
 ];
 
-const SOL_RPC_TIMEOUT: Duration = Duration::from_secs(2);
-const SOL_RPC_MIN_DELAY: Duration = Duration::from_millis(500);
-const SOL_RPC_MAX_DELAY: Duration = Duration::from_secs(10);
-const SOL_RPC_MAX_RETRIES: usize = 5;
-
-/// Helper for consistent config
-fn sol_retry_strategy() -> ExponentialBuilder {
-    ExponentialBuilder::default()
-        .with_jitter()
-        .with_min_delay(SOL_RPC_MIN_DELAY)
-        .with_max_delay(SOL_RPC_MAX_DELAY)
-        .with_max_times(SOL_RPC_MAX_RETRIES)
-}
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct SolSignRequest {
     pub payload: [u8; 32],
@@ -188,16 +171,13 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
         self.live_rx = Some(live_rx);
 
         let program_id = self.program_id;
-        let rpc_http_url = self.client.rpc_http_url.clone();
-        let rpc_ws_url = self.client.rpc_ws_url.clone();
 
         // Oneshot to receive the first observed slot from the live subscription.
         let (anchor_tx, anchor_rx) = oneshot::channel::<u64>();
 
         tokio::spawn(subscribe_and_buffer_live_events(
             program_id,
-            rpc_http_url,
-            rpc_ws_url,
+            self.client.clone(),
             live_tx,
             anchor_tx,
             self.telemetry.clone(),
@@ -221,7 +201,17 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
             return Box::pin(futures_util::stream::empty());
         }
 
-        let slots = self.client.fetch_slots(start_slot, end_slot).await;
+        // TODO: should probably propagate the error, but it would require updating the ChainIndexer trait
+        let slots = match self.client.fetch_slots(start_slot, end_slot).await {
+            Ok(slots) => slots,
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "failed to fetch slots for catchup, returning empty stream"
+                );
+                return Box::pin(futures_util::stream::empty());
+            }
+        };
         let remaining_slots: VecDeque<u64> = slots.into_iter().collect();
 
         let client = self.client.clone();
@@ -254,7 +244,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
         match block {
             SolanaCatchupBlock::Block(block) => self.process_block(*slot, block).await,
             SolanaCatchupBlock::Missing => {
-                let block = self.client.get_block(*slot).await;
+                let block = self.client.get_block(*slot).await?;
                 self.process_block(*slot, &block).await
             }
         }
@@ -461,13 +451,11 @@ impl SolanaSignEvent {
 /// catchup covers `[persisted_block, anchor)` with no gaps.
 async fn subscribe_and_buffer_live_events<T: ChainTelemetry>(
     program_id: Pubkey,
-    rpc_url: String,
-    ws_url: String,
+    client: SolanaClient,
     live_tx: mpsc::Sender<ChainEvent>,
     anchor_tx: oneshot::Sender<u64>,
     telemetry: T,
 ) {
-    let rpc = RpcClient::new(rpc_url);
     let mut anchor_tx = Some(anchor_tx);
     loop {
         // TODO: if solana ever fails and needs to retry, we actually need to do catchup
@@ -475,8 +463,7 @@ async fn subscribe_and_buffer_live_events<T: ChainTelemetry>(
         // high level of run_stream. Issue: https://github.com/sig-net/mpc/issues/811
         let result = subscribe_to_program_events(
             program_id,
-            &rpc,
-            &ws_url,
+            &client,
             live_tx.clone(),
             &mut anchor_tx,
             telemetry.clone(),
@@ -584,13 +571,12 @@ fn parse_cpi_events(
 
 async fn subscribe_to_program_events<T: ChainTelemetry>(
     program_id: Pubkey,
-    rpc_client: &RpcClient,
-    ws_url: &str,
+    client: &SolanaClient,
     events_tx: mpsc::Sender<ChainEvent>,
     anchor_tx: &mut Option<oneshot::Sender<u64>>,
     telemetry: T,
 ) -> anyhow::Result<()> {
-    let pubsub_client = PubsubClient::new(ws_url).await?;
+    let pubsub_client = PubsubClient::new(&client.rpc_ws_url).await?;
 
     let filter = RpcTransactionLogsFilter::Mentions(vec![program_id.to_string()]);
     let config = RpcTransactionLogsConfig {
@@ -605,15 +591,21 @@ async fn subscribe_to_program_events<T: ChainTelemetry>(
     // with no gaps. We do not wait for the first WS event because that could deadlock if
     // no program-mentioning transactions arrive (e.g. in tests after a single sign call).
     if let Some(anchor_tx) = anchor_tx.take() {
-        let slot = retry_rpc!(
-            "get_slot",
-            SOL_RPC_TIMEOUT,
-            &sol_retry_strategy(),
-            rpc_client
-                .get_slot_with_commitment(CommitmentConfig::confirmed())
-                .await
-        )?;
-        let _ = anchor_tx.send(slot);
+        match client
+            .rpc_client
+            .get_slot_with_commitment(CommitmentConfig::confirmed())
+            .await
+        {
+            Ok(slot) => {
+                let _ = anchor_tx.send(slot);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "failed to fetch anchor slot after WS subscribe; retry on reconnect"
+                );
+            }
+        }
     }
 
     // stall watchdog
@@ -660,7 +652,7 @@ async fn subscribe_to_program_events<T: ChainTelemetry>(
                             continue;
                         }
 
-                        let tx_res = match get_tx(rpc_client, &signature).await {
+                        let tx_res = match client.get_tx(&signature).await {
                             Ok(tx) => tx,
                             Err(e) => {
                                 tracing::warn!("Failed to fetch transaction {}: {}", signature, e);
@@ -957,29 +949,6 @@ pub fn to_mpc_signature(
     })
 }
 
-/// Fetch transaction with timeout + retry using `backon`.
-/// Returns the same type as `RpcClient::get_transaction_with_config`.
-async fn get_tx(
-    rpc_client: &RpcClient,
-    signature: &Signature,
-) -> anyhow::Result<EncodedConfirmedTransactionWithStatusMeta> {
-    retry_rpc!(
-        format!("get_tx({})", signature),
-        SOL_RPC_TIMEOUT,
-        &sol_retry_strategy(),
-        rpc_client
-            .get_transaction_with_config(
-                signature,
-                solana_client::rpc_config::RpcTransactionConfig {
-                    encoding: Some(UiTransactionEncoding::JsonParsed),
-                    commitment: Some(CommitmentConfig::confirmed()),
-                    max_supported_transaction_version: Some(0),
-                },
-            )
-            .await
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -990,7 +959,7 @@ mod tests {
     use mpc_primitives::NoopChainTelemetry;
     use solana_sdk::commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
-    use solana_transaction_status::{TransactionDetails, UiTransactionStatusMeta};
+    use solana_transaction_status::{TransactionDetails, UiTransactionEncoding, UiTransactionStatusMeta};
 
     #[test]
     fn request_id_matches_ethabi() {
