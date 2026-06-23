@@ -6,8 +6,8 @@ use alloy::rpc::types::{Block, BlockId};
 use backon::ExponentialBuilder;
 
 use super::{indexer_eth_direct_rpc, BlockNumber, EthConfig, MaybeBlock};
-// TODO: import from mpc-indexer-core later
 use crate::retry_rpc;
+use create::util::retry::RetryConfig;
 
 #[cfg(feature = "helios")]
 use super::indexer_eth_helios;
@@ -20,18 +20,19 @@ const ETH_RPC_MAX_DELAY: Duration = Duration::from_secs(10);
 const ETH_RPC_MAX_RETRIES: usize = 5;
 
 /// Helper for consistent config
-fn eth_retry_strategy() -> ExponentialBuilder {
-    ExponentialBuilder::default()
-        .with_jitter()
-        .with_min_delay(ETH_RPC_MIN_DELAY)
-        .with_max_delay(ETH_RPC_MAX_DELAY)
-        .with_max_times(ETH_RPC_MAX_RETRIES)
+fn default_eth_retry_strategy() -> RetryConfig {
+    RetryConfig {
+        min_delay: ETH_RPC_MIN_DELAY,
+        max_delay: ETH_RPC_MAX_DELAY,
+        max_times: ETH_RPC_MAX_RETRIES,
+        jitter: true,
+    }
 }
 
 #[derive(Clone)]
 pub struct EthereumClient {
     inner: EthereumClientInner,
-    retry_strategy: ExponentialBuilder,
+    retry_strategy: RetryConfig,
 }
 
 #[derive(Clone)]
@@ -43,12 +44,13 @@ pub enum EthereumClientInner {
 
 impl EthereumClient {
     pub async fn new(eth: EthConfig) -> anyhow::Result<EthereumClient> {
-        Self::new_with_strategy(eth, eth_retry_strategy()).await
+        Self::new_with_strategy(eth, default_eth_retry_strategy()).await
     }
 
+    /// Creates a new Ethereum client with the specified retry strategy.
     pub async fn new_with_strategy(
         eth: EthConfig,
-        retry_strategy: ExponentialBuilder,
+        retry_strategy: RetryConfig,
     ) -> anyhow::Result<Self> {
         let inner = if eth.light_client {
             #[cfg(feature = "helios")]
@@ -82,7 +84,7 @@ impl EthereumClient {
     }
 
     pub async fn get_block(&self, block_id: BlockId) -> Option<Block> {
-        let res = retry_rpc!("get_block", ETH_RPC_TIMEOUT, &self.retry_strategy, {
+        let res = retry_rpc!(ETH_RPC_TIMEOUT, self.retry_strategy, "get_block", {
             match &self.inner {
                 #[cfg(feature = "helios")]
                 EthereumClientInner::Helios(client) => client.get_block(block_id).await,
@@ -108,7 +110,7 @@ impl EthereumClient {
             return Vec::new();
         }
 
-        let res = retry_rpc!("get_blocks", ETH_RPC_BATCH_TIMEOUT, &self.retry_strategy, {
+        let res = retry_rpc!(ETH_RPC_BATCH_TIMEOUT, self.retry_strategy, "get_blocks", {
             match &self.inner {
                 #[cfg(feature = "helios")]
                 EthereumClientInner::Helios(client) => client.get_blocks(block_ids).await,
@@ -130,9 +132,9 @@ impl EthereumClient {
         block_id: BlockId,
     ) -> anyhow::Result<Option<Vec<alloy::rpc::types::TransactionReceipt>>> {
         retry_rpc!(
-            "get_block_receipts",
             ETH_RPC_TIMEOUT,
-            &self.retry_strategy,
+            self.retry_strategy,
+            "get_block_receipts",
             {
                 match &self.inner {
                     #[cfg(feature = "helios")]
@@ -148,7 +150,7 @@ impl EthereumClient {
     }
 
     pub async fn get_nonce(&self, address: Address, block_id: BlockId) -> anyhow::Result<u64> {
-        retry_rpc!("get_nonce", ETH_RPC_TIMEOUT, &self.retry_strategy, {
+        retry_rpc!(ETH_RPC_TIMEOUT, self.retry_strategy, "get_nonce", {
             match &self.inner {
                 #[cfg(feature = "helios")]
                 EthereumClientInner::Helios(client) => client.get_nonce(address, block_id).await,
@@ -170,9 +172,9 @@ impl EthereumClient {
         tx_hash: alloy::primitives::B256,
     ) -> anyhow::Result<Option<alloy::rpc::types::Transaction>> {
         retry_rpc!(
-            "get_transaction_by_hash",
             ETH_RPC_TIMEOUT,
-            &self.retry_strategy,
+            self.retry_strategy,
+            "get_transaction_by_hash",
             {
                 match &self.inner {
                     #[cfg(feature = "helios")]
@@ -192,9 +194,9 @@ impl EthereumClient {
         tx_hash: alloy::primitives::B256,
     ) -> anyhow::Result<alloy::primitives::Bytes> {
         retry_rpc!(
-            "trace_transaction_output",
             ETH_RPC_TIMEOUT,
-            &self.retry_strategy,
+            self.retry_strategy,
+            "trace_transaction_output",
             {
                 match &self.inner {
                     #[cfg(feature = "helios")]
@@ -216,7 +218,7 @@ impl EthereumClient {
         data: Bytes,
         block_number: u64,
     ) -> anyhow::Result<Bytes> {
-        retry_rpc!("call", ETH_RPC_TIMEOUT, &self.retry_strategy, {
+        retry_rpc!(ETH_RPC_TIMEOUT, self.retry_strategy, "call", {
             match &self.inner {
                 #[cfg(feature = "helios")]
                 EthereumClientInner::Helios(client) => {
@@ -275,6 +277,8 @@ mod tests {
     use crate::indexer_eth::test_utils;
 
     use super::*;
+
+    // TODO: add more tests for non HTTP-related functionality, e.g. clamp_oldest_supported_with
 
     #[tokio::test]
     async fn get_block_returns_block_on_200() {
