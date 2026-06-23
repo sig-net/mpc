@@ -29,6 +29,10 @@ pub trait ChainTelemetry: Send + Sync + Clone + 'static {
 
     /// Records that a checkpoint was created
     fn checkpoint_created(&self, block_number: u64);
+
+    /// Report that a request was indexed.
+    /// Pass `Some(timestamp)` if the chain supports block timestamps (Ethereum), otherwise `None`.
+    fn request_indexed(&self, block_timestamp: Option<u64>);
 }
 
 /// No-op implementation for tests
@@ -39,4 +43,5 @@ impl ChainTelemetry for NoopChainTelemetry {
     fn block_indexed(&self, _block_number: u64) {}
     fn block_finalized(&self, _block_number: u64) {}
     fn checkpoint_created(&self, _block_number: u64) {}
+    fn request_indexed(&self, _block_timestamp: Option<u64>) {}
 }

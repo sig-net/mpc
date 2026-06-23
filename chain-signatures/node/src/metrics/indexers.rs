@@ -2,7 +2,10 @@ use mpc_primitives::{Chain, ChainTelemetry};
 use prometheus::IntGaugeVec;
 use std::sync::LazyLock;
 
-use super::try_create_int_gauge_vec_with_node_account_id;
+use super::{
+    requests::{record_indexing_step_reached, record_request_latency_since, SignRequestStep},
+    try_create_int_gauge_vec_with_node_account_id,
+};
 
 /// Possible status options:
 ///     - "indexed" - latest block number seen by the indexer
@@ -45,5 +48,15 @@ impl ChainTelemetry for PrometheusChainTelemetry {
         LATEST_BLOCK_NUMBER
             .with_label_values(&[self.chain.as_str(), "checkpoint"])
             .set(block_number as i64);
+    }
+
+    fn request_indexed(&self, block_timestamp: Option<u64>) {
+        if let Some(ts) = block_timestamp {
+            // Ethereum path
+            record_request_latency_since(self.chain, SignRequestStep::Indexing, "ok", ts);
+        } else {
+            // Solana, Hydration, Canton path
+            record_indexing_step_reached(self.chain);
+        }
     }
 }
