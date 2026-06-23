@@ -142,9 +142,16 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
                         requeue_pending_sign_requests(&backlog, chain, sign_tx.clone()).await;
                         resume_pending_publish_requests(&backlog, chain, &contract_watcher, &rpc).await;
                     }
-                    ChainEvent::SignRequest(req) => {
+                    ChainEvent::SignRequest { request, block_timestamp } => {
+                        // Handle metrics reporting for the sign request event
+                        if let Some(ts) = block_timestamp {
+                            telemetry.request_indexed_at(ts);
+                        } else {
+                            telemetry.request_indexed();
+                        }
+
                         if let Err(err) =
-                            process_sign_request(req, sign_tx.clone(), backlog.clone(), caught_up).await
+                            process_sign_request(request, sign_tx.clone(), backlog.clone(), caught_up).await
                         {
                             tracing::error!(?err, %chain, "failed to process sign request");
                         }

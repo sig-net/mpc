@@ -533,10 +533,6 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             .collect_execution_confirmations(block_number, block_receipts)
             .await?;
 
-        for _request in &sign_requests {
-            self.telemetry.request_indexed(Some(block_timestamp));
-        }
-
         // Always forward the processed block to the "finalization" stage so it can emit
         // `ChainEvent::Block` even when there are no relevant contract logs.
         Ok(BlockAndRequests::new(
@@ -830,9 +826,12 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 .context("failed to emit ExecutionConfirmed event")?;
         }
 
-        for req in indexed_requests {
+        for request in indexed_requests {
             self.events_tx
-                .send(ChainEvent::SignRequest(req))
+                .send(ChainEvent::SignRequest {
+                    request,
+                    block_timestamp: Some(block.header.timestamp),
+                })
                 .await
                 .context("failed to emit SignRequest event")?;
         }

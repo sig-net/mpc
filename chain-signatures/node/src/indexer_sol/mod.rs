@@ -858,8 +858,13 @@ async fn emit_events(
         SolanaEvents::Sign(events) => {
             let signature = signature.as_ref().to_vec();
             for ev in events {
-                if let Some(req) = ev.build_sign_request(&signature) {
-                    events_tx.send(ChainEvent::SignRequest(req)).await?;
+                if let Some(request) = ev.build_sign_request(&signature) {
+                    events_tx
+                        .send(ChainEvent::SignRequest {
+                            request,
+                            block_timestamp: None, // Solana does not provide block timestamps in the event
+                        })
+                        .await?;
                 }
             }
         }
