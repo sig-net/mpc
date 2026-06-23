@@ -1084,7 +1084,7 @@ mod tests {
         let client = EthereumTestStream::new(vec![
             Some(ChainEvent::SignRequest {
                 request: replacement,
-                block_timestamp: None
+                block_timestamp: None,
             }),
             Some(ChainEvent::CatchupCompleted),
             None,

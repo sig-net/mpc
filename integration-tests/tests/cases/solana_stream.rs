@@ -96,7 +96,7 @@ async fn wait_for_sign_request<S: StateManager, T: ChainTelemetry>(
 ) -> Result<IndexedSignRequest> {
     loop {
         match timeout(Duration::from_secs(6), stream.next_event()).await {
-            Ok(Some(ChainEvent::SignRequest(req))) => return Ok(req),
+            Ok(Some(ChainEvent::SignRequest { request, .. })) => return Ok(request),
             Ok(Some(ChainEvent::Block(_))) => continue,
             Ok(Some(ChainEvent::CatchupCompleted)) => {
                 tracing::info!("received CatchupCompleted event while waiting for SignRequest");
@@ -197,7 +197,7 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     for _ in 0..10 {
         if let Ok(Some(event)) = timeout(Duration::from_millis(500), stream1.next_event()).await {
             match event {
-                ChainEvent::SignRequest(_) => seen_by_client1 += 1,
+                ChainEvent::SignRequest { .. } => seen_by_client1 += 1,
                 ChainEvent::Block(block) => last_block_client1 = last_block_client1.max(block),
                 _ => {}
             }
@@ -226,8 +226,8 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     for _ in 0..20 {
         if let Ok(Some(event)) = timeout(Duration::from_secs(1), stream2.next_event()).await {
             match event {
-                ChainEvent::SignRequest(req) => {
-                    sign_events.push(req);
+                ChainEvent::SignRequest { request, .. } => {
+                    sign_events.push(request);
                 }
                 ChainEvent::Block(block) if block >= last_block_client1 => {
                     caught_up = true;
@@ -319,10 +319,10 @@ async fn test_solana_stream_concurrent_events() -> Result<()> {
             break;
         }
 
-        if let Ok(Some(ChainEvent::SignRequest(req))) =
+        if let Ok(Some(ChainEvent::SignRequest { request, .. })) =
             timeout(remaining, stream.next_event()).await
         {
-            sign_events.push(req);
+            sign_events.push(request);
         }
     }
 
@@ -417,7 +417,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
     timeout(Duration::from_secs(5), async {
         loop {
             match stream2.next_event().await {
-                Some(ChainEvent::SignRequest(req)) => break Ok(req),
+                Some(ChainEvent::SignRequest { request, .. }) => break Ok(request),
                 Some(other) => {
                     tracing::info!(?other, "received non-sign/block event");
                     continue;
