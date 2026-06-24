@@ -23,10 +23,10 @@ use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap, TimeoutBudget};
 
 use cait_sith::protocol::{Action, InitializationError, Participant};
-use lru::LruCache;
 use cait_sith::PresignOutput;
 use chrono::Utc;
 use k256::Secp256k1;
+use lru::LruCache;
 use mpc_contract::config::ProtocolConfig;
 use mpc_crypto::derive_key;
 use mpc_primitives::{IndexedSignRequest, SignId, SignKind};
@@ -1776,7 +1776,10 @@ impl SignatureSpawner {
                 self.spawn_task(governance, request, cfg.clone());
             }
             Sign::AbortChain { chain } => {
-                tracing::warn!(?chain, "aborting all in-flight signature tasks on chain regression");
+                tracing::warn!(
+                    ?chain,
+                    "aborting all in-flight signature tasks on chain regression"
+                );
                 let to_abort: Vec<SignId> = self
                     .task_chains
                     .iter()
@@ -1834,6 +1837,25 @@ impl SignatureSpawner {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl SignatureSpawner {
+    fn test_dead_ids_contains(&self, sign_id: &SignId) -> bool {
+        self.dead_ids.contains(sign_id)
+    }
+
+    fn test_inboxes_contains(&self, sign_id: &SignId) -> bool {
+        self.inboxes.contains_key(sign_id)
+    }
+
+    fn test_tasks_contains(&self, sign_id: SignId) -> bool {
+        self.tasks.contains_key(&sign_id)
+    }
+
+    fn test_task_chains_contains(&self, sign_id: &SignId) -> bool {
+        self.task_chains.contains_key(sign_id)
     }
 }
 
@@ -2168,5 +2190,109 @@ mod tests {
             SignOrganizer::proposer_per_round(2, &participants, &entropy),
             Participant::from(0)
         );
+    }
+
+    #[tokio::test]
+    async fn test_abort_chain_dead_ids_lifecycle() {
+        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+
+        let governance = GovernanceInfo {
+            me: Participant::from(0),
+            threshold: 1,
+            epoch: 0,
+            public_key: k256::AffinePoint::default(),
+            participants: [Participant::from(0)].into_iter().collect(),
+            is_running: true,
+        };
+
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let presignatures = Presignature::storage(&pool, &account_id);
+        let (_inbox, _outbox, msg_channel) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let rpc_channel = RpcChannel { tx: rpc_tx };
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants.clone(),
+        );
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+
+        let mut spawner = SignatureSpawner {
+            contract,
+            presignatures,
+            tasks: JoinMap::new(),
+            inboxes: HashMap::new(),
+            delayed_watchers: HashMap::new(),
+            task_chains: HashMap::new(),
+            dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
+            mesh_state: mesh_rx,
+            limiter: SignLimiter::new(MAX_CONCURRENT_PROPOSERS),
+            msg: msg_channel,
+            rpc: rpc_channel,
+            backlog: Backlog::new(),
+            node_account_id: account_id,
+        };
+
+        let cfg = ProtocolConfig::default();
+        let sign_id = SignId::new([42u8; 32]);
+        let args = mpc_primitives::SignArgs {
+            entropy: [1u8; 32],
+            epsilon: k256::Scalar::from(1u64),
+            payload: k256::Scalar::from(2u64),
+            path: "test".to_string(),
+            key_version: 1,
+        };
+        let request = IndexedSignRequest::sign(sign_id, args, Chain::Solana, 0);
+
+        // Step 1: Spawn → inbox created, task_chains populated, not dead
+        spawner.spawn_task(&governance, request.clone(), cfg.clone());
+        assert!(spawner.test_tasks_contains(sign_id));
+        assert!(spawner.test_inboxes_contains(&sign_id));
+        assert!(spawner.test_task_chains_contains(&sign_id));
+        assert!(!spawner.test_dead_ids_contains(&sign_id));
+
+        // Step 2: Abort chain → inbox removed, task_chains cleared, marked dead
+        spawner.handle_request(
+            &governance,
+            Sign::AbortChain {
+                chain: Chain::Solana,
+            },
+            &cfg,
+        );
+        assert!(!spawner.test_tasks_contains(sign_id));
+        assert!(!spawner.test_inboxes_contains(&sign_id));
+        assert!(!spawner.test_task_chains_contains(&sign_id));
+        assert!(spawner.test_dead_ids_contains(&sign_id));
+
+        // Step 3: Late posit → dropped (dead_id check), inbox NOT recreated
+        spawner.handle_posit(
+            Participant::from(0),
+            sign_id,
+            0,
+            0,
+            Participant::from(1),
+            PositAction::Propose,
+        );
+        assert!(!spawner.test_inboxes_contains(&sign_id));
+
+        // Step 4: Re-spawn → dead cleared, task_chains repopulated
+        spawner.spawn_task(&governance, request, cfg.clone());
+        assert!(spawner.test_tasks_contains(sign_id));
+        assert!(!spawner.test_dead_ids_contains(&sign_id));
+
+        // Step 5: Posit after re-spawn → accepted, inbox re-created
+        spawner.handle_posit(
+            Participant::from(0),
+            sign_id,
+            0,
+            0,
+            Participant::from(1),
+            PositAction::Propose,
+        );
+        assert!(spawner.test_inboxes_contains(&sign_id));
     }
 }
