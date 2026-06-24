@@ -1,4 +1,3 @@
-
 /// Interface for the Indexer to report telemetry data.
 pub trait ChainTelemetry: Send + Sync + Clone + 'static {
     /// Records that a block was parsed at the live tip
