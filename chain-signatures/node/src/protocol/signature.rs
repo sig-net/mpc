@@ -2256,11 +2256,7 @@ mod tests {
         assert!(!spawner.test_dead_ids_contains(&sign_id));
 
         // Step 2: Abort chain → inbox removed, task_chains cleared, marked dead
-        spawner.handle_request(
-            &governance,
-            Sign::AbortChain(Chain::Solana),
-            &cfg,
-        );
+        spawner.handle_request(&governance, Sign::AbortChain(Chain::Solana), &cfg);
         assert!(!spawner.test_tasks_contains(sign_id));
         assert!(!spawner.test_inboxes_contains(&sign_id));
         assert!(!spawner.test_task_chains_contains(&sign_id));
