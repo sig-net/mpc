@@ -170,35 +170,25 @@ impl<Id: Copy + Hash + Eq + fmt::Debug, S> Posits<Id, S> {
 
         match action {
             PositAction::Propose => {
-                // We have no information about this posit, so we can just accept it.
-                let Some((positor, _)) = self.posits.get(&id) else {
-                    self.posits
-                        .insert(id, (Positor::Deliberator(from), Instant::now()));
-                    return PositInternalAction::Reply(PositAction::Accept);
+                // The only thing we reject is a proposal for a protocol we are
+                // already the proposer of. We no longer require the proposer to
+                // match any previously recorded one: we accept whoever reaches
+                // us and (re)record them as the proposer.
+                let already_proposer = match self.posits.get(&id) {
+                    Some((positor, _)) => positor.is_proposer(),
+                    None => false,
                 };
 
-                // Checks:
-                // 1. We are not the proposer.
-                // 2. Somebody else hasn't also proposed the protocol.
-                let proposer = positor.id();
-                if positor.is_proposer() {
+                if already_proposer {
                     tracing::warn!(?id, ?from, "received INIT on protocol we already proposed");
-                    PositInternalAction::Reply(PositAction::RejectWithReason(
+                    return PositInternalAction::Reply(PositAction::RejectWithReason(
                         PositRejectReason::InvalidRequest,
-                    ))
-                } else if proposer != from {
-                    tracing::warn!(
-                        ?id,
-                        ?from,
-                        ?proposer,
-                        "received INIT on conflicting proposer"
-                    );
-                    PositInternalAction::Reply(PositAction::RejectWithReason(
-                        PositRejectReason::InvalidRequest,
-                    ))
-                } else {
-                    PositInternalAction::Reply(PositAction::Accept)
+                    ));
                 }
+
+                self.posits
+                    .insert(id, (Positor::Deliberator(from), Instant::now()));
+                PositInternalAction::Reply(PositAction::Accept)
             }
             PositAction::Start(participants) => {
                 // Checks:
@@ -521,15 +511,14 @@ mod tests {
             action,
             PositInternalAction::Reply(PositAction::Accept)
         ));
-        // propose(conflict): a second node claims this posit, but only the first is accepted. reject this one
+        // propose: we now accept whoever reaches us, even a different proposer than
+        // the one we previously recorded.
         let action = posits1.act(id, incorrect_proposer, threshold, &PositAction::Propose);
         assert!(matches!(
             action,
-            PositInternalAction::Reply(PositAction::RejectWithReason(
-                PositRejectReason::InvalidRequest,
-            ))
+            PositInternalAction::Reply(PositAction::Accept)
         ));
-        // propose: act on posit again should be idempotent
+        // propose: act on posit again should be accepted (re-records the proposer)
         let action = posits1.act(id, correct_proposer, threshold, &PositAction::Propose);
         assert!(matches!(
             action,

@@ -526,13 +526,16 @@ impl SignOrganizer {
 }
 
 impl SignPositor {
-    /// Deliberator waits for the proposer to send a Propose message with a presignature_id.
+    /// Deliberator waits for a Propose message with a presignature_id, accepting
+    /// whoever reaches it in the current round. Returns the accepted
+    /// presignature_id alongside the node we accepted it from, which is the only
+    /// node we will subsequently accept a Start from.
     async fn wait_propose(
         ctx: &mut SignTask,
         state: &mut SignState,
         task_rx: &mut mpsc::Receiver<SignTaskMessage>,
         proposer: Participant,
-    ) -> Result<PresignatureId, SignPhase> {
+    ) -> Result<(PresignatureId, Participant), SignPhase> {
         let sign_id = ctx.sign_id;
         let round = state.round;
         let remaining = state.budget.remaining();
@@ -607,50 +610,23 @@ impl SignPositor {
                     continue;
                 }
 
-                if from == &proposer {
-                    tracing::info!(
-                        ?sign_id,
-                        ?presignature_id,
-                        ?from,
-                        "deliberator received Propose"
-                    );
+                // We no longer require the Propose to come from the proposer we
+                // independently selected for this round: we accept whoever
+                // reaches us in the current round as the proposer.
+                tracing::info!(
+                    ?sign_id,
+                    ?presignature_id,
+                    ?from,
+                    "deliberator received Propose"
+                );
 
-                    // Check if we have access to this presignature (in storage or generating)
-                    if !ctx.presignatures.contains(*presignature_id).await {
-                        tracing::warn!(
-                            ?sign_id,
-                            presignature_id,
-                            "deliberator does not have access to proposed presignature, rejecting"
-                        );
-                        ctx.msg
-                            .send(
-                                ctx.governance.me,
-                                proposer,
-                                PositMessage {
-                                    id: PositProtocolId::Signature(
-                                        sign_id,
-                                        *presignature_id,
-                                        state.round,
-                                    ),
-                                    from: ctx.governance.me,
-                                    action: PositAction::RejectWithReason(
-                                        PositRejectReason::MissingArtifact,
-                                    ),
-                                },
-                            )
-                            .await;
-                        continue;
-                    }
-
-                    break Ok(*presignature_id);
-                } else {
+                // Check if we have access to this presignature (in storage or generating)
+                if !ctx.presignatures.contains(*presignature_id).await {
                     tracing::warn!(
                         ?sign_id,
-                        ?from,
-                        ?proposer,
-                        "received Propose from non-proposer, rejecting"
+                        presignature_id,
+                        "deliberator does not have access to proposed presignature, rejecting"
                     );
-
                     ctx.msg
                         .send(
                             ctx.governance.me,
@@ -663,18 +639,23 @@ impl SignPositor {
                                 ),
                                 from: ctx.governance.me,
                                 action: PositAction::RejectWithReason(
-                                    PositRejectReason::InvalidRequest,
+                                    PositRejectReason::MissingArtifact,
                                 ),
                             },
                         )
                         .await;
+                    continue;
                 }
+
+                break Ok((*presignature_id, *from));
             }
         })
         .await;
 
-        let presignature_id = match outcome {
-            Ok(Ok(id)) => id,
+        // The proposer we accept is whoever reached us with the Propose, not
+        // necessarily the one we independently selected for this round.
+        let (presignature_id, proposer) = match outcome {
+            Ok(Ok(accepted)) => accepted,
             Ok(Err(phase)) => return Err(phase),
             Err(_) => {
                 tracing::warn!(
@@ -702,7 +683,7 @@ impl SignPositor {
             )
             .await;
 
-        Ok(presignature_id)
+        Ok((presignature_id, proposer))
     }
 
     async fn advance(
@@ -711,7 +692,12 @@ impl SignPositor {
         state: &mut SignState,
         task_rx: &mut mpsc::Receiver<SignTaskMessage>,
     ) -> SignPhase {
+        // The proposer we independently selected for this round. It decides our
+        // role below; the proposer we actually accept a Propose from (and the
+        // only one we will accept a Start from) is tracked separately once we
+        // receive the Propose as a deliberator.
         let proposer = self.proposer;
+        let mut accepted_proposer = self.proposer;
         let active = self.active.clone();
         let mut presignature_id = self.presignature_id;
         let presignature = self.presignature.take();
@@ -737,10 +723,11 @@ impl SignPositor {
                 "deliberator waiting for Propose"
             );
 
-            presignature_id = match Self::wait_propose(ctx, state, task_rx, proposer).await {
-                Ok(id) => id,
-                Err(phase) => return phase,
-            }
+            (presignature_id, accepted_proposer) =
+                match Self::wait_propose(ctx, state, task_rx, proposer).await {
+                    Ok(accepted) => accepted,
+                    Err(phase) => return phase,
+                }
         }
 
         // GUARANTEE: at least threshold participants from organizing phase.
@@ -792,8 +779,11 @@ impl SignPositor {
 
                     if is_deliberator {
                         if let PositAction::Start(participants) = action {
-                            if from != proposer {
-                                tracing::warn!(?sign_id, ?round, ?from, ?proposer, "received Start from non-proposer, ignoring");
+                            // We accepted a Propose from `accepted_proposer`; the
+                            // Start must come from that same node, not from an
+                            // unrelated peer.
+                            if from != accepted_proposer {
+                                tracing::warn!(?sign_id, ?round, ?from, ?accepted_proposer, "received Start from a node other than the one we accepted a Propose from, ignoring");
                                 continue;
                             }
 
