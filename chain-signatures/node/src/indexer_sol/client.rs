@@ -36,12 +36,22 @@ const SOL_RPC_MIN_DELAY: Duration = Duration::from_millis(500);
 const SOL_RPC_MAX_DELAY: Duration = Duration::from_secs(10);
 const SOL_RPC_MAX_RETRIES: usize = 5;
 
-/// Helper for consistent config
-fn default_sol_retry_strategy() -> RetryConfig {
+/// Default retry strategy
+fn default_retry_strategy() -> RetryConfig {
     RetryConfig {
         min_delay: SOL_RPC_MIN_DELAY,
         max_delay: SOL_RPC_MAX_DELAY,
         max_times: SOL_RPC_MAX_RETRIES,
+        jitter: true,
+    }
+}
+
+/// Retry strategy with infinite retries, used for get_block, fetch_blocks and fetch_signatures_from_latest (catchup path).
+fn catchup_retry_strategy() -> RetryConfig {
+    RetryConfig {
+        min_delay: SOL_RPC_MIN_DELAY,
+        max_delay: SOL_RPC_MAX_DELAY,
+        max_times: usize::MAX,
         jitter: true,
     }
 }
@@ -70,7 +80,10 @@ struct JsonRpcResponse<T> {
 #[derive(Clone)]
 pub struct SolanaClient {
     pub client: Arc<anchor_client::Client<Arc<Keypair>>>,
-    retry_strategy: RetryConfig,
+    /// Retry strategy for RPC calls that are not part of catchup (e.g. get_slot, get_tx)
+    rpc_retry: RetryConfig,
+    /// Retry strategy for RPC calls that are part of catchup (e.g. get_block, fetch_blocks, fetch_signatures_from_latest)
+    catchup_retry: RetryConfig,
     pub rpc_client: Arc<RpcClient>,
     pub rpc_http_url: String,
     pub rpc_ws_url: String,
@@ -95,7 +108,8 @@ impl SolanaClient {
             .expect("Invalid Solana program address provided in configuration");
         Self {
             client: Arc::new(client),
-            retry_strategy: default_sol_retry_strategy(),
+            rpc_retry: default_retry_strategy(),
+            catchup_retry: catchup_retry_strategy(),
             rpc_client,
             rpc_http_url: sol.rpc_http_url.clone(),
             rpc_ws_url: sol.rpc_ws_url.clone(),
@@ -119,7 +133,8 @@ impl SolanaClient {
         let rpc_client = Arc::new(RpcClient::new(rpc_http_url.clone()));
         Self {
             client: Arc::new(client),
-            retry_strategy: default_sol_retry_strategy(),
+            rpc_retry: default_retry_strategy(),
+            catchup_retry: catchup_retry_strategy(),
             rpc_client,
             rpc_http_url,
             rpc_ws_url,
@@ -132,12 +147,15 @@ impl SolanaClient {
     /// A helper function to create a SolanaClient with a custom retry strategy for testing purposes.
     #[cfg(test)]
     pub(crate) fn with_fast_retry(mut self) -> Self {
-        self.retry_strategy = RetryConfig {
+        let retry_config = RetryConfig {
             min_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(10),
             max_times: 2,
             jitter: true,
         };
+
+        self.rpc_retry = retry_config;
+        self.catchup_retry = retry_config;
         self
     }
 
@@ -152,7 +170,7 @@ impl SolanaClient {
     }
 
     pub async fn get_slot(&self) -> anyhow::Result<u64> {
-        retry_rpc!(SOL_RPC_TIMEOUT, self.retry_strategy, "get_slot", {
+        retry_rpc!(SOL_RPC_TIMEOUT, self.rpc_retry, "get_slot", {
             self.rpc_client
                 .get_slot()
                 .await
@@ -164,10 +182,10 @@ impl SolanaClient {
         &self,
         signature: &Signature,
     ) -> anyhow::Result<EncodedConfirmedTransactionWithStatusMeta> {
-        let max_attempts = self.retry_strategy.max_times;
+        let max_attempts = self.rpc_retry.max_times;
         retry_rpc!(
             SOL_RPC_TIMEOUT,
-            self.retry_strategy,
+            self.rpc_retry,
             |attempt, err, sleep| {
                 tracing::warn!(
                     operation = %signature,
@@ -195,10 +213,10 @@ impl SolanaClient {
     }
 
     pub async fn get_block(&self, slot: u64) -> anyhow::Result<UiConfirmedBlock> {
-        let max_attempts = self.retry_strategy.max_times;
+        let max_attempts = self.catchup_retry.max_times;
         retry_rpc!(
             SOL_RPC_TIMEOUT,
-            self.retry_strategy,
+            self.catchup_retry,
             // Notify on retry with structured logging
             |attempt, err, delay| {
                 tracing::warn!(
@@ -224,10 +242,10 @@ impl SolanaClient {
             return HashMap::new();
         }
 
-        let max_attempts = self.retry_strategy.max_times;
+        let max_attempts = self.catchup_retry.max_times;
         let res = retry_rpc!(
             SOL_BATCH_TIMEOUT,
-            self.retry_strategy,
+            self.catchup_retry,
             // Notify on retry with structured logging
             |attempt, err, delay| {
                 tracing::warn!(
@@ -296,7 +314,7 @@ impl SolanaClient {
     ) -> anyhow::Result<Vec<RpcConfirmedTransactionStatusWithSignature>> {
         retry_rpc!(
             SOL_RPC_TIMEOUT,
-            self.retry_strategy,
+            self.catchup_retry,
             // Notify on retry with structured logging
             |attempts, err, delay| {
                 tracing::warn!(
