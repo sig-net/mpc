@@ -25,11 +25,10 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
+use mpc_indexer_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
 use mpc_primitives::{
-    ChainEvent, IndexedSignRequest, SignArgs, SignId,
-    LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+    ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
-use mpc_indexer_core::{ChainTelemetry, StateManager, ChainIndexer, ChainStream};
 use serde::{Deserialize, Serialize};
 use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,

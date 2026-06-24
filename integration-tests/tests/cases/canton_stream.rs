@@ -2,9 +2,7 @@ use anyhow::{Context as _, Result};
 use integration_tests::canton::{
     test_evm_type2_anvil_cases, test_sign_request_event, CantonSandbox,
 };
-use mpc_indexer_core::{
-    ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager,
-};
+use mpc_indexer_core::{ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager};
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
 use mpc_node::indexer_canton::{der_encode_signature, CantonStream};

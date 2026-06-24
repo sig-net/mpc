@@ -23,7 +23,7 @@ use futures_util::stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
-use mpc_indexer_core::{ChainTelemetry, StateManager, ChainIndexer, ChainStream};
+use mpc_indexer_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, IndexedSignRequest, SignArgs,
     SignId, Signature as MpcSignature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
@@ -1078,11 +1078,11 @@ mod tests {
     use alloy::primitives::{address, b256, Address};
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
-    use mpc_primitives::{
-        BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome,
-        SignId, LATEST_MPC_KEY_VERSION,
-    };
     use mpc_indexer_core::{ChainIndexer, NoopChainTelemetry};
+    use mpc_primitives::{
+        BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, SignId,
+        LATEST_MPC_KEY_VERSION,
+    };
     use serde_json::json;
     use std::sync::Arc;
     use tokio::sync::{mpsc, Notify};

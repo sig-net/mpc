@@ -1,8 +1,8 @@
+use super::ChainStreaming;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::Chain;
-use super::ChainStreaming;
 use futures_util::StreamExt;
 use mpc_indexer_core::ChainIndexer;
 use mpc_primitives::CheckpointDigest;
