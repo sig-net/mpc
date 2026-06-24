@@ -1,4 +1,5 @@
-use mpc_primitives::{Chain, ChainTelemetry};
+use mpc_indexer_core::ChainTelemetry;
+use mpc_primitives::Chain;
 use prometheus::IntGaugeVec;
 use std::sync::LazyLock;
 

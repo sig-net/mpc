@@ -27,9 +27,10 @@ use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
-    ChainEvent, ChainTelemetry, IndexedSignRequest, SignArgs, SignId, StateManager,
+    ChainEvent, IndexedSignRequest, SignArgs, SignId,
     LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
+use mpc_indexer_core::{ChainTelemetry, StateManager};
 use serde::{Deserialize, Serialize};
 use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
@@ -1019,7 +1020,7 @@ mod tests {
     use crate::backlog::Backlog;
 
     use super::*;
-    use mpc_primitives::NoopChainTelemetry;
+    use mpc_indexer_core::NoopChainTelemetry;
     use solana_sdk::commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
     use solana_transaction_status::{TransactionDetails, UiTransactionStatusMeta};

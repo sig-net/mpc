@@ -7,7 +7,7 @@ members = [
     "chain-signatures/node",
     "chain-signatures/primitives",
     "integration-tests"
-]
+, "chain-signatures/indexer-core"]
 exclude = ["infra/scripts/generate_keys"]
 resolver = "2"
 
@@ -77,6 +77,7 @@ near-sdk = { version = "=5.7.0", features = ["unstable", "unit-testing"] }
 
 mpc-contract = { path = "./chain-signatures/contract" }
 mpc-crypto = { path = "./chain-signatures/crypto" }
+mpc-indexer-core = { path = "./chain-signatures/indexer-core" }
 mpc-keys = { path = "./chain-signatures/keys" }
 mpc-node = { path = "./chain-signatures/node" }
 mpc-primitives = { path = "./chain-signatures/primitives" }

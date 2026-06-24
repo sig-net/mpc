@@ -6,9 +6,9 @@ use alloy::primitives::keccak256;
 use async_trait::async_trait;
 use futures_util::stream::{self, SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use mpc_indexer_core::{ChainTelemetry, StateManager};
 use mpc_primitives::{
-    ChainEvent, ChainTelemetry, RespondBidirectionalEvent, ScalarExt, Signature,
-    SignatureRespondedEvent, StateManager,
+    ChainEvent, RespondBidirectionalEvent, ScalarExt, Signature, SignatureRespondedEvent,
 };
 use std::collections::HashSet;
 use std::ops::Range;

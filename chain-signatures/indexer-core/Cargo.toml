@@ -1,0 +1,8 @@
+[package]
+name = "mpc-indexer-core"
+edition = "2024"
+version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+mpc-primitives.workspace = true

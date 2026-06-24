@@ -15,7 +15,8 @@ pub use crate::stream::pipeline::ChainPipeline;
 
 use async_trait::async_trait;
 use futures_util::Stream;
-use mpc_primitives::{ChainEvent, ChainTelemetry, CheckpointDigest};
+use mpc_indexer_core::ChainTelemetry;
+use mpc_primitives::{ChainEvent, CheckpointDigest};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
@@ -223,9 +224,9 @@ mod tests {
     use crate::util::current_unix_timestamp;
     use k256::{AffinePoint, Scalar};
     use mockito::Server;
+    use mpc_indexer_core::{NoopChainTelemetry, StateManager};
     use mpc_primitives::{
-        CheckpointDigest, IndexedSignRequest, NoopChainTelemetry, SignArgs, SignId, Signature,
-        SignatureRespondedEvent, StateManager,
+        CheckpointDigest, IndexedSignRequest, SignArgs, SignId, Signature, SignatureRespondedEvent,
     };
     use near_primitives::types::AccountId;
     use std::collections::HashMap;

@@ -24,10 +24,11 @@ use futures_util::stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
+use mpc_indexer_core::{ChainTelemetry, StateManager};
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, ChainEvent, ChainTelemetry, ExecutionOutcome,
-    IndexedSignRequest, SignArgs, SignId, Signature as MpcSignature, SignatureRespondedEvent,
-    StateManager, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+    BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, IndexedSignRequest, SignArgs,
+    SignId, Signature as MpcSignature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
+    MAX_SECP256K1_SCALAR,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -1080,9 +1081,10 @@ mod tests {
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
     use mpc_primitives::{
-        BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, NoopChainTelemetry,
+        BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome,
         SignId, LATEST_MPC_KEY_VERSION,
     };
+    use mpc_indexer_core::NoopChainTelemetry;
     use serde_json::json;
     use std::sync::Arc;
     use tokio::sync::{mpsc, Notify};
