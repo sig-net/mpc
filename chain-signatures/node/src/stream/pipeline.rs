@@ -1,12 +1,13 @@
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
+use crate::protocol::signature::Sign;
 use crate::protocol::Chain;
 use crate::stream::{ChainIndexer, ChainStreaming};
 use futures_util::StreamExt;
 use mpc_primitives::CheckpointDigest;
 use near_account_id::AccountId;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 pub struct ChainPipeline<I: ChainIndexer> {
     indexer: I,
@@ -14,6 +15,7 @@ pub struct ChainPipeline<I: ChainIndexer> {
     state_rx: watch::Receiver<ChainStreaming>,
     checkpoints_rx: watch::Receiver<CheckpointDigest>,
     backlog: Backlog,
+    sign_tx: mpsc::Sender<Sign>,
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
     threshold: usize,
@@ -25,6 +27,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         indexer: I,
         checkpoints_rx: watch::Receiver<CheckpointDigest>,
         backlog: Backlog,
+        sign_tx: mpsc::Sender<Sign>,
         mesh_state: watch::Receiver<MeshState>,
         node_client: NodeClient,
         threshold: usize,
@@ -35,6 +38,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             indexer,
             checkpoints_rx,
             backlog,
+            sign_tx,
             mesh_state,
             node_client,
             threshold,
@@ -48,6 +52,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         indexer: I,
         checkpoints_rx: watch::Receiver<CheckpointDigest>,
         backlog: Backlog,
+        sign_tx: mpsc::Sender<Sign>,
         mesh_state: watch::Receiver<MeshState>,
         node_client: NodeClient,
         threshold: usize,
@@ -60,6 +65,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             state_rx: state_rx.clone(),
             backlog,
             checkpoints_rx,
+            sign_tx,
             mesh_state,
             node_client,
             threshold,
@@ -140,9 +146,10 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         }
 
         // Perform consensus checkpoint alignment. Returns None when no alignment is
-        // needed (the normal case); returns Some(height) when the backlog was aligned.
-        // Either way, continue to livestream initialization.
-        crate::backlog::consensus::align_backlog_with_consensus(
+        // needed (the normal case); returns Some(height) when the backlog was regressed.
+        // When regression occurs, abort all in-flight signature tasks for this chain
+        // so stale tasks don't complete and publish abandoned signatures/checkpoints.
+        if crate::backlog::consensus::align_backlog_with_consensus(
             chain,
             &self.backlog,
             &mut self.checkpoints_rx,
@@ -150,7 +157,12 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             &self.node_client,
             &self.my_account_id,
         )
-        .await;
+        .await
+        .is_some()
+        {
+            tracing::warn!(%chain, "backlog regressed via consensus checkpoint; aborting in-flight tasks");
+            let _ = self.sign_tx.send(Sign::AbortChain { chain }).await;
+        }
 
         // Determine anchor height
         let anchor_height = loop {

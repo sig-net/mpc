@@ -116,6 +116,7 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
         indexer,
         checkpoints_rx.clone(),
         backlog.clone(),
+        sign_tx.clone(),
         mesh_state.clone(),
         node_client,
         threshold,
@@ -462,11 +463,13 @@ mod tests {
         indexer.livestream().await.unwrap();
         let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
         let (_m_tx, m_rx) = watch::channel(MeshState::default());
+        let (_sign_tx, _sign_rx) = mpsc::channel(1);
         let (pipeline, _state_rx) = ChainPipeline::from_state(
             ChainStreaming::Catchup { anchor_height: 4 },
             indexer,
             cp_rx,
             Backlog::new(),
+            _sign_tx,
             m_rx,
             NodeClient::new(&Default::default()),
             0,
@@ -501,11 +504,13 @@ mod tests {
         indexer.livestream().await.unwrap();
         let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
         let (_m_tx, m_rx) = watch::channel(MeshState::default());
+        let (_stx, _srx) = mpsc::channel(1);
         let (pipeline, _state_rx) = ChainPipeline::from_state(
             ChainStreaming::Catchup { anchor_height: 4 },
             indexer,
             cp_rx,
             Backlog::new(),
+            _stx,
             m_rx,
             NodeClient::new(&Default::default()),
             0,
@@ -1365,6 +1370,7 @@ mod tests {
         });
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
 
+        let (_stx, _srx) = mpsc::channel(1);
         let (catchup_tx, catchup_rx) = oneshot::channel();
         let indexer = MockCatchupIndexer {
             catchup_started_tx: Arc::new(Mutex::new(Some(catchup_tx))),
@@ -1374,6 +1380,7 @@ mod tests {
             indexer,
             cp_rx,
             backlog,
+            _stx,
             mesh_rx,
             NodeClient::new(&Default::default()),
             0,
@@ -1446,6 +1453,7 @@ mod tests {
         let (cp_tx, cp_rx) = watch::channel(CheckpointDigest { height: 10, digest });
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
         let (next_called_tx, next_called_rx) = oneshot::channel();
+        let (_stx, _srx) = mpsc::channel(1);
         let indexer = MockLiveIndexer {
             next_called_tx: Arc::new(Mutex::new(Some(next_called_tx))),
         };
@@ -1455,6 +1463,7 @@ mod tests {
             indexer,
             cp_rx,
             backlog,
+            _stx,
             mesh_rx,
             NodeClient::new(&Default::default()),
             1,

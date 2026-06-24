@@ -68,6 +68,7 @@ pub enum Sign {
     Request(IndexedSignRequest),
     Completion(SignId),
     Checkpoint(IndexedSignRequest),
+    AbortChain { chain: Chain },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1544,6 +1545,8 @@ pub struct SignatureSpawner {
     inboxes: HashMap<SignId, Subscriber<SignTaskMessage>>,
     /// Tracks delay watcher tasks that will increment the delayed metric when response time exceeds expected
     delayed_watchers: HashMap<SignId, JoinHandle<()>>,
+    /// Maps in-flight tasks to their chain, enabling bulk abort on checkpoint regression.
+    task_chains: HashMap<SignId, Chain>,
     mesh_state: watch::Receiver<MeshState>,
     /// Limiter that limits the amount of sign tasks from progressing and utilizing
     /// too much compute otherwise the whole system will be flooded with requests.
@@ -1569,6 +1572,7 @@ impl SignatureSpawner {
         cfg: ProtocolConfig,
     ) {
         let sign_id = indexed.id;
+        self.task_chains.insert(sign_id, indexed.chain);
         tracing::info!(?sign_id, "spawning signature task");
 
         // Spawn a reactive watcher task that increments the delayed metric
@@ -1665,6 +1669,7 @@ impl SignatureSpawner {
     }
 
     fn handle_completion(&mut self, sign_id: SignId) {
+        self.task_chains.remove(&sign_id);
         if let Some(inbox) = self.inboxes.remove(&sign_id) {
             inbox.clear_capacity_global();
         }
@@ -1683,6 +1688,7 @@ impl SignatureSpawner {
             Ok(outcome) => outcome,
             Err(sign_id) => {
                 tracing::warn!(?sign_id, "signature task interrupted");
+                self.task_chains.remove(&sign_id);
                 if let Some(inbox) = self.inboxes.remove(&sign_id) {
                     inbox.clear_capacity_global();
                 }
@@ -1691,6 +1697,7 @@ impl SignatureSpawner {
                 return;
             }
         };
+        self.task_chains.remove(&sign_id);
         if let Some(inbox) = self.inboxes.remove(&sign_id) {
             inbox.clear_capacity_global();
         }
@@ -1740,6 +1747,24 @@ impl SignatureSpawner {
                 );
 
                 self.spawn_task(governance, request, cfg.clone());
+            }
+            Sign::AbortChain { chain } => {
+                tracing::warn!(?chain, "aborting all in-flight signature tasks on chain regression");
+                let to_abort: Vec<SignId> = self
+                    .task_chains
+                    .iter()
+                    .filter(|(_, c)| **c == chain)
+                    .map(|(id, _)| *id)
+                    .collect();
+                for sign_id in to_abort {
+                    self.task_chains.remove(&sign_id);
+                    if let Some(inbox) = self.inboxes.remove(&sign_id) {
+                        inbox.clear_capacity_global();
+                    }
+                    self.abort_delayed_watcher(sign_id, "chain aborted");
+                    self.tasks.abort(sign_id);
+                }
+                set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
             }
         }
 
@@ -1813,6 +1838,7 @@ impl SignatureSpawnerTask {
             tasks: JoinMap::new(),
             inboxes: HashMap::new(),
             delayed_watchers: HashMap::new(),
+            task_chains: HashMap::new(),
             presignatures: presignature_storage,
             mesh_state,
             limiter: SignLimiter::new(MAX_CONCURRENT_PROPOSERS),
