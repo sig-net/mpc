@@ -17,11 +17,12 @@ use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign};
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{run_stream, ChainPipeline, ChainStream, ChainStreaming};
+use mpc_node::stream::{run_stream, ChainPipeline, ChainStreaming};
 use mpc_node::util::current_unix_timestamp;
+use mpc_indexer_core::{ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager};
 use mpc_primitives::{
-    ChainEvent, ChainTelemetry, CheckpointDigest, NoopChainTelemetry, SignArgs,
-    SignBidirectionalEvent as NodeSignBidirectionalEvent, SignId, SignKind, StateManager,
+    ChainEvent, CheckpointDigest, SignArgs,
+    SignBidirectionalEvent as NodeSignBidirectionalEvent, SignId, SignKind,
     LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
