@@ -4,7 +4,6 @@ mod config;
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
 use crate::util::ethabi_request_id;
-use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 pub use client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
 pub use config::SolConfig;
 
@@ -35,15 +34,14 @@ use signet_program::{
     SignatureRespondedEvent,
 };
 use solana_client::{
-    nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient},
+    nonblocking::pubsub_client::PubsubClient,
     rpc_config::{RpcTransactionLogsConfig, RpcTransactionLogsFilter},
 };
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
 use solana_transaction_status::option_serializer::OptionSerializer;
 use solana_transaction_status::{
-    EncodedConfirmedTransactionWithStatusMeta, EncodedTransaction,
-    EncodedTransactionWithStatusMeta, UiConfirmedBlock, UiInstruction, UiParsedInstruction,
-    UiTransactionEncoding,
+    EncodedTransaction, EncodedTransactionWithStatusMeta, UiConfirmedBlock, UiInstruction,
+    UiParsedInstruction,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -172,16 +170,13 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
         self.live_rx = Some(live_rx);
 
         let program_id = self.program_id;
-        let rpc_http_url = self.client.rpc_http_url.clone();
-        let rpc_ws_url = self.client.rpc_ws_url.clone();
 
         // Oneshot to receive the first observed slot from the live subscription.
         let (anchor_tx, anchor_rx) = oneshot::channel::<u64>();
 
         tokio::spawn(subscribe_and_buffer_live_events(
             program_id,
-            rpc_http_url,
-            rpc_ws_url,
+            self.client.clone(),
             live_tx,
             anchor_tx,
             self.telemetry.clone(),
@@ -205,7 +200,17 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
             return Box::pin(futures_util::stream::empty());
         }
 
-        let slots = self.client.fetch_slots(start_slot, end_slot).await;
+        // TODO: should probably propagate the error, but it would require updating the ChainIndexer trait
+        let slots = match self.client.fetch_slots(start_slot, end_slot).await {
+            Ok(slots) => slots,
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    "failed to fetch slots for catchup, returning empty stream"
+                );
+                return Box::pin(futures_util::stream::empty());
+            }
+        };
         let remaining_slots: VecDeque<u64> = slots.into_iter().collect();
 
         let client = self.client.clone();
@@ -238,7 +243,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
         match block {
             SolanaCatchupBlock::Block(block) => self.process_block(*slot, block).await,
             SolanaCatchupBlock::Missing => {
-                let block = self.client.get_block(*slot).await;
+                let block = self.client.get_block(*slot).await?;
                 self.process_block(*slot, &block).await
             }
         }
@@ -445,13 +450,11 @@ impl SolanaSignEvent {
 /// catchup covers `[persisted_block, anchor)` with no gaps.
 async fn subscribe_and_buffer_live_events<T: ChainTelemetry>(
     program_id: Pubkey,
-    rpc_url: String,
-    ws_url: String,
+    client: SolanaClient,
     live_tx: mpsc::Sender<ChainEvent>,
     anchor_tx: oneshot::Sender<u64>,
     telemetry: T,
 ) {
-    let rpc = RpcClient::new(rpc_url);
     let mut anchor_tx = Some(anchor_tx);
     loop {
         // TODO: if solana ever fails and needs to retry, we actually need to do catchup
@@ -459,8 +462,7 @@ async fn subscribe_and_buffer_live_events<T: ChainTelemetry>(
         // high level of run_stream. Issue: https://github.com/sig-net/mpc/issues/811
         let result = subscribe_to_program_events(
             program_id,
-            &rpc,
-            &ws_url,
+            &client,
             live_tx.clone(),
             &mut anchor_tx,
             telemetry.clone(),
@@ -568,13 +570,12 @@ fn parse_cpi_events(
 
 async fn subscribe_to_program_events<T: ChainTelemetry>(
     program_id: Pubkey,
-    rpc_client: &RpcClient,
-    ws_url: &str,
+    client: &SolanaClient,
     events_tx: mpsc::Sender<ChainEvent>,
     anchor_tx: &mut Option<oneshot::Sender<u64>>,
     telemetry: T,
 ) -> anyhow::Result<()> {
-    let pubsub_client = PubsubClient::new(ws_url).await?;
+    let pubsub_client = PubsubClient::new(&client.rpc_ws_url).await?;
 
     let filter = RpcTransactionLogsFilter::Mentions(vec![program_id.to_string()]);
     let config = RpcTransactionLogsConfig {
@@ -589,7 +590,8 @@ async fn subscribe_to_program_events<T: ChainTelemetry>(
     // with no gaps. We do not wait for the first WS event because that could deadlock if
     // no program-mentioning transactions arrive (e.g. in tests after a single sign call).
     if let Some(anchor_tx) = anchor_tx.take() {
-        match rpc_client
+        match client
+            .rpc_client
             .get_slot_with_commitment(CommitmentConfig::confirmed())
             .await
         {
@@ -650,7 +652,7 @@ async fn subscribe_to_program_events<T: ChainTelemetry>(
                             continue;
                         }
 
-                        let tx_res = match get_tx(rpc_client, &signature, RetryConfig::default()).await {
+                        let tx_res = match client.get_tx(&signature).await {
                             Ok(tx) => tx,
                             Err(e) => {
                                 tracing::warn!("Failed to fetch transaction {}: {}", signature, e);
@@ -857,8 +859,13 @@ async fn emit_events(
         SolanaEvents::Sign(events) => {
             let signature = signature.as_ref().to_vec();
             for ev in events {
-                if let Some(req) = ev.build_sign_request(&signature) {
-                    events_tx.send(ChainEvent::SignRequest(req)).await?;
+                if let Some(request) = ev.build_sign_request(&signature) {
+                    events_tx
+                        .send(ChainEvent::SignRequest {
+                            request,
+                            block_timestamp: None,
+                        })
+                        .await?;
                 }
             }
         }
@@ -947,70 +954,6 @@ pub fn to_mpc_signature(
     })
 }
 
-/// Fetch transaction with timeout + retry.
-/// Returns the same type as `RpcClient::get_transaction_with_config`.
-async fn get_tx(
-    rpc_client: &RpcClient,
-    signature: &Signature,
-    retry_cfg: RetryConfig,
-) -> anyhow::Result<EncodedConfirmedTransactionWithStatusMeta> {
-    let max_attempts = retry_cfg.max_attempts;
-
-    let res = retry_async(
-        retry_cfg,
-        |attempt| async move {
-            rpc_client
-                .get_transaction_with_config(
-                    signature,
-                    solana_client::rpc_config::RpcTransactionConfig {
-                        encoding: Some(UiTransactionEncoding::JsonParsed),
-                        commitment: Some(CommitmentConfig::confirmed()),
-                        max_supported_transaction_version: Some(0),
-                    },
-                )
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(e).context(format!(
-                        "getTransaction failed (attempt {attempt}/{}) for {}",
-                        max_attempts, signature
-                    ))
-                })
-        },
-        |_attempt, _reason| true,
-        |attempt, reason, sleep| match reason {
-            RetryReason::Error(e) => {
-                tracing::warn!(
-                    "getTransaction failed (attempt {attempt}/{}) for {}: {e:#}; retrying in {sleep:?}",
-                    max_attempts,
-                    signature
-                );
-            }
-            RetryReason::Timeout(t) => {
-                tracing::warn!(
-                    "getTransaction timed out after {t:?} (attempt {attempt}/{}) for {}; retrying in {sleep:?}",
-                    max_attempts,
-                    signature
-                );
-            }
-        },
-    )
-    .await;
-
-    match res {
-        Ok(tx) => Ok(tx),
-        Err(RetryError::Exhausted { last_error, .. }) => Err(last_error),
-        Err(RetryError::TimeoutExhausted {
-            attempts,
-            last_timeout,
-        }) => Err(anyhow::anyhow!(
-            "getTransaction timed out after {:?} (attempt {attempts}/{}) for {}",
-            last_timeout,
-            max_attempts,
-            signature
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1021,7 +964,9 @@ mod tests {
     use mpc_indexer_core::NoopChainTelemetry;
     use solana_sdk::commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
-    use solana_transaction_status::{TransactionDetails, UiTransactionStatusMeta};
+    use solana_transaction_status::{
+        TransactionDetails, UiTransactionEncoding, UiTransactionStatusMeta,
+    };
 
     #[test]
     fn request_id_matches_ethabi() {

@@ -136,7 +136,10 @@ impl InnerMockStream {
                 continue;
             }
 
-            block.push(ChainEvent::SignRequest(request.clone()))
+            block.push(ChainEvent::SignRequest {
+                request: request.clone(),
+                block_timestamp: None,
+            });
         }
 
         self.future_blocks.push(block);

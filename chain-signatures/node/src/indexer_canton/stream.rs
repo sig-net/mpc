@@ -443,9 +443,12 @@ async fn process_canton_event(
                 let request_id = canton_event.generate_request_id();
                 let entropy: [u8; 32] = keccak256(request_id).into();
                 match canton_event.generate_sign_request(entropy) {
-                    Ok(indexed) => {
+                    Ok(request) => {
                         if events_tx
-                            .send(ChainEvent::SignRequest(indexed))
+                            .send(ChainEvent::SignRequest {
+                                request,
+                                block_timestamp: None,
+                            })
                             .await
                             .is_err()
                         {

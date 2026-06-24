@@ -86,9 +86,18 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
                         requeue_pending_sign_requests(&backlog, chain, sign_tx.clone()).await;
                         resume_pending_publish_requests(&backlog, chain, &contract_watcher, &rpc).await;
                     }
-                    ChainEvent::SignRequest(req) => {
+                    ChainEvent::SignRequest { request, block_timestamp } => {
+                        // Handle metrics reporting for the sign request event
+                        if let Some(ts) = block_timestamp {
+                            // Report the request was indexed at the given block timestamp is currently used for Ethereum due to ~15 min finality delay
+                            telemetry.request_indexed_at(ts);
+                        } else {
+                            // Other faster chains (e.g. for Solana, Canton, or Hydration) report that a request was indexed without a block timestamp
+                            telemetry.request_indexed();
+                        }
+
                         if let Err(err) =
-                            process_sign_request(req, sign_tx.clone(), backlog.clone(), caught_up).await
+                            process_sign_request(request, sign_tx.clone(), backlog.clone(), caught_up).await
                         {
                             tracing::error!(?err, %chain, "failed to process sign request");
                         }
@@ -507,7 +516,10 @@ mod tests {
         };
         let client = SolanaTestStream::new(vec![
             Some(ChainEvent::CatchupCompleted),
-            Some(ChainEvent::SignRequest(indexed.clone())),
+            Some(ChainEvent::SignRequest {
+                request: indexed.clone(),
+                block_timestamp: None,
+            }),
             Some(ChainEvent::Respond(sig_responded)),
             None,
         ]);
@@ -707,7 +719,10 @@ mod tests {
 
         // push SignRequest
         events_tx
-            .send(ChainEvent::SignRequest(indexed.clone()))
+            .send(ChainEvent::SignRequest {
+                request: indexed.clone(),
+                block_timestamp: None,
+            })
             .await
             .unwrap();
 
@@ -1015,7 +1030,10 @@ mod tests {
         let replacement =
             IndexedSignRequest::sign(sign_id, args.clone(), Chain::Ethereum, replayed_timestamp);
         let client = EthereumTestStream::new(vec![
-            Some(ChainEvent::SignRequest(replacement)),
+            Some(ChainEvent::SignRequest {
+                request: replacement,
+                block_timestamp: None,
+            }),
             Some(ChainEvent::CatchupCompleted),
             None,
         ]);

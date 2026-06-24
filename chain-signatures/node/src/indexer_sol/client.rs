@@ -1,4 +1,4 @@
-use backon::{ExponentialBuilder, Retryable};
+use super::SolConfig;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -8,13 +8,16 @@ use solana_client::rpc_config::RpcBlockConfig;
 use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
 use solana_sdk::signer::keypair::Keypair;
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
-use solana_transaction_status::{TransactionDetails, UiConfirmedBlock, UiTransactionEncoding};
+use solana_transaction_status::{
+    EncodedConfirmedTransactionWithStatusMeta, TransactionDetails, UiConfirmedBlock,
+    UiTransactionEncoding,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::SolConfig;
+use crate::util::retry::{retry_rpc, RetryConfig};
 
 const MAX_SIGNATURES_FOR_FAST_CATCHUP: usize = 1000;
 
@@ -26,6 +29,32 @@ const MAX_CHUNK_SIZE: usize = 50;
 
 /// The max chunk size allowed for fetching concurrently.
 pub const MAX_CONCURRENT_CHUNK_SIZE: usize = MAX_CONCURRENT_FETCH * MAX_CHUNK_SIZE;
+
+const SOL_RPC_TIMEOUT: Duration = Duration::from_secs(2);
+const SOL_BATCH_TIMEOUT: Duration = Duration::from_secs(30);
+const SOL_RPC_MIN_DELAY: Duration = Duration::from_millis(500);
+const SOL_RPC_MAX_DELAY: Duration = Duration::from_secs(10);
+const SOL_RPC_MAX_RETRIES: usize = 5;
+
+/// Default retry strategy
+fn default_retry_strategy() -> RetryConfig {
+    RetryConfig {
+        min_delay: SOL_RPC_MIN_DELAY,
+        max_delay: SOL_RPC_MAX_DELAY,
+        max_times: SOL_RPC_MAX_RETRIES,
+        jitter: true,
+    }
+}
+
+/// Retry strategy with infinite retries, used for get_block, fetch_blocks and fetch_signatures_from_latest (catchup path).
+fn catchup_retry_strategy() -> RetryConfig {
+    RetryConfig {
+        min_delay: SOL_RPC_MIN_DELAY,
+        max_delay: SOL_RPC_MAX_DELAY,
+        max_times: usize::MAX,
+        jitter: true,
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum SolanaCatchupBlock {
@@ -51,6 +80,10 @@ struct JsonRpcResponse<T> {
 #[derive(Clone)]
 pub struct SolanaClient {
     pub client: Arc<anchor_client::Client<Arc<Keypair>>>,
+    /// Retry strategy for RPC calls that are not part of catchup (e.g. get_slot, get_tx)
+    rpc_retry: RetryConfig,
+    /// Retry strategy for RPC calls that are part of catchup (e.g. get_block, fetch_blocks, fetch_signatures_from_latest)
+    catchup_retry: RetryConfig,
     pub rpc_client: Arc<RpcClient>,
     pub rpc_http_url: String,
     pub rpc_ws_url: String,
@@ -75,6 +108,8 @@ impl SolanaClient {
             .expect("Invalid Solana program address provided in configuration");
         Self {
             client: Arc::new(client),
+            rpc_retry: default_retry_strategy(),
+            catchup_retry: catchup_retry_strategy(),
             rpc_client,
             rpc_http_url: sol.rpc_http_url.clone(),
             rpc_ws_url: sol.rpc_ws_url.clone(),
@@ -98,6 +133,8 @@ impl SolanaClient {
         let rpc_client = Arc::new(RpcClient::new(rpc_http_url.clone()));
         Self {
             client: Arc::new(client),
+            rpc_retry: default_retry_strategy(),
+            catchup_retry: catchup_retry_strategy(),
             rpc_client,
             rpc_http_url,
             rpc_ws_url,
@@ -105,6 +142,21 @@ impl SolanaClient {
             program_id: program_address,
             payer,
         }
+    }
+
+    /// A helper function to create a SolanaClient with a custom retry strategy for testing purposes.
+    #[cfg(test)]
+    pub(crate) fn with_fast_retry(mut self) -> Self {
+        let retry_config = RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(10),
+            max_times: 2,
+            jitter: true,
+        };
+
+        self.rpc_retry = retry_config;
+        self.catchup_retry = retry_config;
+        self
     }
 
     pub fn block_fetch_config() -> RpcBlockConfig {
@@ -117,32 +169,72 @@ impl SolanaClient {
         }
     }
 
-    pub async fn get_block(&self, slot: u64) -> UiConfirmedBlock {
-        let mut attempts = 1;
-        let fetch = || async {
+    pub async fn get_slot(&self) -> anyhow::Result<u64> {
+        retry_rpc!(SOL_RPC_TIMEOUT, self.rpc_retry, "get_slot", {
             self.rpc_client
-                .get_block_with_config(slot, Self::block_fetch_config())
+                .get_slot()
                 .await
-        };
-        fetch
-            .retry(
-                &ExponentialBuilder::default()
-                    .with_min_delay(Duration::from_millis(500))
-                    .with_max_delay(Duration::from_secs(10))
-                    .with_max_times(usize::MAX),
-            )
-            .notify(|err, delay| {
+                .map_err(|e| anyhow::anyhow!(e))
+        })
+    }
+
+    pub async fn get_tx(
+        &self,
+        signature: &Signature,
+    ) -> anyhow::Result<EncodedConfirmedTransactionWithStatusMeta> {
+        let max_attempts = self.rpc_retry.max_times;
+        retry_rpc!(
+            SOL_RPC_TIMEOUT,
+            self.rpc_retry,
+            |attempt, err, sleep| {
+                tracing::warn!(
+                    operation = %signature,
+                    attempt,
+                    max_attempts,
+                    error = %err,
+                    retry_in = ?sleep,
+                    "get_tx failed, retrying"
+                );
+            },
+            {
+                self.rpc_client
+                    .get_transaction_with_config(
+                        signature,
+                        solana_client::rpc_config::RpcTransactionConfig {
+                            encoding: Some(UiTransactionEncoding::JsonParsed),
+                            commitment: Some(CommitmentConfig::confirmed()),
+                            max_supported_transaction_version: Some(0),
+                        },
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+            }
+        )
+    }
+
+    pub async fn get_block(&self, slot: u64) -> anyhow::Result<UiConfirmedBlock> {
+        let max_attempts = self.catchup_retry.max_times;
+        retry_rpc!(
+            SOL_RPC_TIMEOUT,
+            self.catchup_retry,
+            // Notify on retry with structured logging
+            |attempt, err, delay| {
                 tracing::warn!(
                     ?err,
-                    attempts,
-                    slot,
+                    attempt,
+                    max_attempts,
+                    ?slot,
                     "failed to fetch Solana block; retrying in {:?}",
                     delay
                 );
-                attempts += 1;
-            })
-            .await
-            .expect("Solana get_block eventually succeeded")
+            },
+            {
+                self.rpc_client
+                    .get_block_with_config(slot, Self::block_fetch_config())
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+            }
+        )
     }
 
     pub async fn fetch_blocks(&self, slots: &[u64]) -> HashMap<u64, UiConfirmedBlock> {
@@ -150,108 +242,101 @@ impl SolanaClient {
             return HashMap::new();
         }
 
-        let mut attempts = 1;
-        let fetch = || async {
-            let mut requests = Vec::new();
-            for (i, &slot) in slots.iter().enumerate() {
-                let config = Self::block_fetch_config();
-                let config_val = serde_json::to_value(config)
-                    .map_err(|e| anyhow::anyhow!("serialization error: {e}"))?;
-                requests.push(JsonRpcRequest {
-                    jsonrpc: "2.0",
-                    id: i,
-                    method: "getBlock",
-                    params: json!([slot, config_val]),
-                });
-            }
-
-            let resp = self
-                .http_client
-                .post(&self.rpc_http_url)
-                .json(&requests)
-                .send()
-                .await?;
-            let responses = resp
-                .json::<Vec<JsonRpcResponse<UiConfirmedBlock>>>()
-                .await?;
-
-            let mut results = HashMap::new();
-            for resp_obj in responses {
-                if let Some(block) = resp_obj.result {
-                    if resp_obj.id < slots.len() {
-                        let slot = slots[resp_obj.id];
-                        results.insert(slot, block);
-                    }
-                } else if let Some(err) = resp_obj.error {
-                    let is_skipped = err
-                        .get("code")
-                        .and_then(|c| c.as_i64())
-                        .map(|c| c == -32007)
-                        .unwrap_or(false);
-                    let slot = slots.get(resp_obj.id);
-                    if !is_skipped {
-                        tracing::warn!(?err, ?slot, "JSON-RPC batch response error");
-                    }
-                }
-            }
-            Ok(results)
-        };
-
-        fetch
-            .retry(
-                &ExponentialBuilder::default()
-                    .with_min_delay(Duration::from_millis(500))
-                    .with_max_delay(Duration::from_secs(10))
-                    .with_max_times(usize::MAX),
-            )
-            .notify(|err: &anyhow::Error, delay| {
+        let max_attempts = self.catchup_retry.max_times;
+        let res = retry_rpc!(
+            SOL_BATCH_TIMEOUT,
+            self.catchup_retry,
+            // Notify on retry with structured logging
+            |attempt, err, delay| {
                 tracing::warn!(
                     ?err,
-                    attempts,
+                    attempt,
+                    max_attempts,
                     "failed to send batch request or deserialize response; retrying in {:?}",
                     delay
                 );
-                attempts += 1;
-            })
-            .await
-            .unwrap_or_default()
+            },
+            {
+                let mut requests = Vec::new();
+                for (i, &slot) in slots.iter().enumerate() {
+                    let config = Self::block_fetch_config();
+                    let config_val = serde_json::to_value(config)
+                        .map_err(|e| anyhow::anyhow!("serialization error: {e}"))?;
+                    requests.push(JsonRpcRequest {
+                        jsonrpc: "2.0",
+                        id: i,
+                        method: "getBlock",
+                        params: json!([slot, config_val]),
+                    });
+                }
+
+                let resp = self
+                    .http_client
+                    .post(&self.rpc_http_url)
+                    .json(&requests)
+                    .send()
+                    .await?;
+                let responses = resp
+                    .json::<Vec<JsonRpcResponse<UiConfirmedBlock>>>()
+                    .await?;
+
+                let mut results = HashMap::new();
+                for resp_obj in responses {
+                    if let Some(block) = resp_obj.result {
+                        if resp_obj.id < slots.len() {
+                            let slot = slots[resp_obj.id];
+                            results.insert(slot, block);
+                        }
+                    } else if let Some(err) = resp_obj.error {
+                        let is_skipped = err
+                            .get("code")
+                            .and_then(|c| c.as_i64())
+                            .map(|c| c == -32007)
+                            .unwrap_or(false);
+                        let slot = slots.get(resp_obj.id);
+                        if !is_skipped {
+                            tracing::warn!(?err, ?slot, "JSON-RPC batch response error");
+                        }
+                    }
+                }
+                Ok::<HashMap<u64, UiConfirmedBlock>, anyhow::Error>(results)
+            }
+        );
+
+        // If batch fails entirely, return an empty map
+        res.unwrap_or_default()
     }
 
     pub async fn fetch_signatures_from_latest(
         &self,
         address: &Pubkey,
         before: Option<Signature>,
-    ) -> Vec<RpcConfirmedTransactionStatusWithSignature> {
-        let mut attempts = 1;
-        let fetch = || async {
-            let config = GetConfirmedSignaturesForAddress2Config {
-                before,
-                until: None,
-                limit: Some(MAX_SIGNATURES_FOR_FAST_CATCHUP),
-                commitment: Some(CommitmentConfig::confirmed()),
-            };
-            self.rpc_client
-                .get_signatures_for_address_with_config(address, config)
-                .await
-        };
-        fetch
-            .retry(
-                &ExponentialBuilder::default()
-                    .with_min_delay(Duration::from_millis(500))
-                    .with_max_delay(Duration::from_secs(10))
-                    .with_max_times(usize::MAX),
-            )
-            .notify(|err, delay| {
+    ) -> anyhow::Result<Vec<RpcConfirmedTransactionStatusWithSignature>> {
+        retry_rpc!(
+            SOL_RPC_TIMEOUT,
+            self.catchup_retry,
+            // Notify on retry with structured logging
+            |attempts, err, delay| {
                 tracing::warn!(
                     ?err,
                     attempts,
                     "failed to fetch signatures for address; retrying in {:?}",
                     delay
                 );
-                attempts += 1;
-            })
-            .await
-            .expect("Solana fetch_signatures_from_latest eventually succeeded")
+            },
+            {
+                let config = GetConfirmedSignaturesForAddress2Config {
+                    before,
+                    until: None,
+                    limit: Some(MAX_SIGNATURES_FOR_FAST_CATCHUP),
+                    commitment: Some(CommitmentConfig::confirmed()),
+                };
+                self.rpc_client
+                    .get_signatures_for_address_with_config(address, config)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+            }
+        )
     }
 
     /// Fetch signatures within the range provided [start_slot, end_slot]
@@ -259,7 +344,7 @@ impl SolanaClient {
         &self,
         start_slot: u64,
         end_slot: u64,
-    ) -> Vec<RpcConfirmedTransactionStatusWithSignature> {
+    ) -> anyhow::Result<Vec<RpcConfirmedTransactionStatusWithSignature>> {
         let mut signatures = Vec::new();
         let mut before = None;
         tracing::trace!(start_slot, end_slot, "fetching signatures in range");
@@ -272,7 +357,8 @@ impl SolanaClient {
         loop {
             let batch = self
                 .fetch_signatures_from_latest(&self.program_id, before)
-                .await;
+                .await?;
+
             if batch.is_empty() {
                 tracing::trace!(
                     ?before,
@@ -311,16 +397,17 @@ impl SolanaClient {
             }
             before = last_sig;
         }
-        signatures
+        Ok(signatures)
     }
 
     /// Fetch slots covered by signatures in the range provided [start_slot, end_slot]
-    pub async fn fetch_slots(&self, start_slot: u64, end_slot: u64) -> BTreeSet<u64> {
-        self.fetch_signatures(start_slot, end_slot)
-            .await
-            .into_iter()
-            .map(|sig| sig.slot)
-            .collect()
+    pub async fn fetch_slots(
+        &self,
+        start_slot: u64,
+        end_slot: u64,
+    ) -> anyhow::Result<BTreeSet<u64>> {
+        let sigs = self.fetch_signatures(start_slot, end_slot).await?;
+        Ok(sigs.into_iter().map(|sig| sig.slot).collect())
     }
 
     pub async fn fetch_blocks_for_slots(
@@ -356,5 +443,300 @@ impl SolanaClient {
         }
 
         blocks_by_height
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solana_sdk::pubkey::Pubkey;
+    use solana_sdk::signature::Signature;
+
+    /// Helper to create a SolanaClient for testing with mockito
+    fn test_client(url: &str) -> SolanaClient {
+        SolanaClient::for_indexer(
+            url.to_string(),
+            url.replace("http", "ws"),
+            Pubkey::new_unique(),
+        )
+        .with_fast_retry()
+    }
+
+    /// Helper to create a mock JSON-RPC response for getSlot
+    fn slot_response(slot: u64) -> String {
+        format!(r#"{{"jsonrpc":"2.0","id":1,"result":{slot}}}"#)
+    }
+
+    /// Helper to create a mock JSON-RPC response for getBlock
+    fn make_block_response(id: usize, slot: u64) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "result": {
+                "blockHeight": slot,
+                "blockTime": null,
+                "blockhash": "11111111111111111111111111111111",
+                "parentSlot": slot.saturating_sub(1),
+                "previousBlockhash": "11111111111111111111111111111111",
+                "transactions": [],
+                "rewards": []
+            }
+        })
+    }
+
+    /// Helper to create a mock JSON-RPC response for getSignaturesForAddress
+    fn signature_entry(slot: u64, sig: &str) -> serde_json::Value {
+        serde_json::json!({
+            "signature": sig,
+            "slot": slot,
+            "err": null,
+            "memo": null,
+            "blockTime": null,
+            "confirmationStatus": "confirmed"
+        })
+    }
+
+    /// Helper to create a mock JSON-RPC response for getSignaturesForAddress
+    fn signatures_response(entries: &[serde_json::Value]) -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": entries
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn block_fetch_config_fields() {
+        let config = SolanaClient::block_fetch_config();
+        assert_eq!(config.encoding, Some(UiTransactionEncoding::Json));
+        assert_eq!(config.transaction_details, Some(TransactionDetails::Full));
+        assert_eq!(config.rewards, Some(false));
+        assert_eq!(
+            config.commitment.map(|c| c.commitment),
+            Some(solana_sdk::commitment_config::CommitmentLevel::Confirmed)
+        );
+        assert_eq!(config.max_supported_transaction_version, Some(0));
+    }
+
+    #[tokio::test]
+    async fn get_slot_returns_slot_on_200() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(slot_response(42))
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        assert_eq!(client.get_slot().await.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn get_slot_retries_on_500_then_succeeds() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _fail = server
+            .mock("POST", "/")
+            .with_status(500)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let _ok = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(slot_response(7))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        assert_eq!(client.get_slot().await.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn get_slot_exhausts_retries_on_persistent_500() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .expect(3) // 1 attempt + 2 retries
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        assert!(client.get_slot().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn fetch_blocks_returns_blocks_on_200() {
+        let mut server = mockito::Server::new_async().await;
+        let body = serde_json::json!([make_block_response(0, 100), make_block_response(1, 101),])
+            .to_string();
+
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let result = client.fetch_blocks(&[100, 101]).await;
+
+        assert_eq!(result.len(), 2);
+        assert!(result.contains_key(&100));
+        assert!(result.contains_key(&101));
+    }
+
+    #[tokio::test]
+    async fn fetch_blocks_returns_empty_for_empty_input() {
+        let server = mockito::Server::new_async().await;
+        let client = test_client(&server.url());
+        // Should short-circuit without any HTTP call
+        let result = client.fetch_blocks(&[]).await;
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_blocks_skips_skipped_slots() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Slot 101 is skipped (error code -32007), slot 100 is present
+        let body = serde_json::json!([
+            make_block_response(0, 100),
+            { "id": 1, "result": null, "error": { "code": -32007, "message": "Slot was skipped" } }
+        ])
+        .to_string();
+
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let result = client.fetch_blocks(&[100, 101]).await;
+
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key(&100));
+        assert!(!result.contains_key(&101));
+    }
+
+    #[tokio::test]
+    async fn fetch_blocks_returns_empty_on_persistent_failure() {
+        let mut server = mockito::Server::new_async().await;
+
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .expect(3) // 1 attempt + 2 retries
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+
+        // fetch_blocks swallows errors and returns empty map
+        let result = client.fetch_blocks(&[100, 101]).await;
+
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_slots_filters_to_range() {
+        let mut server = mockito::Server::new_async().await;
+
+        // First page: slots 105, 103, 101, 98
+        // Second page: empty → stop
+        let sig_a = Signature::new_unique().to_string();
+        let sig_b = Signature::new_unique().to_string();
+        let sig_c = Signature::new_unique().to_string();
+        let sig_d = Signature::new_unique().to_string();
+
+        let page1 = signatures_response(&[
+            signature_entry(105, &sig_a),
+            signature_entry(103, &sig_b),
+            signature_entry(101, &sig_c),
+            signature_entry(98, &sig_d), // below start_slot=100, triggers stop
+        ]);
+
+        let _mock1 = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(page1)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+
+        // Range [100, 104]: should include 103, 101 but not 105 (above end) or 98 (below start)
+        let slots = client.fetch_slots(100, 104).await.unwrap();
+
+        assert_eq!(slots, BTreeSet::from([101, 103]));
+    }
+
+    #[tokio::test]
+    async fn fetch_slots_returns_empty_when_no_signatures() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(signatures_response(&[]))
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let slots = client.fetch_slots(100, 200).await.unwrap();
+        assert!(slots.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_signatures_paginates_until_start_slot() {
+        let mut server = mockito::Server::new_async().await;
+
+        let sig_a = Signature::new_unique().to_string();
+        let sig_b = Signature::new_unique().to_string();
+        let sig_c = Signature::new_unique().to_string();
+
+        // Page 1: slots 200, 150 — both in range [100, 200]
+        let page1 =
+            signatures_response(&[signature_entry(200, &sig_a), signature_entry(150, &sig_b)]);
+        // Page 2: slot 90 — below start_slot, stops pagination
+        let page2 = signatures_response(&[signature_entry(90, &sig_c)]);
+
+        let _mock1 = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(page1)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let _mock2 = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(page2)
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let sigs = client.fetch_signatures(100, 200).await.unwrap();
+
+        assert_eq!(sigs.len(), 2);
+        assert_eq!(sigs[0].slot, 200);
+        assert_eq!(sigs[1].slot, 150);
     }
 }

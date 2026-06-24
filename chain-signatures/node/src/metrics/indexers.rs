@@ -3,7 +3,10 @@ use mpc_primitives::Chain;
 use prometheus::IntGaugeVec;
 use std::sync::LazyLock;
 
-use super::try_create_int_gauge_vec_with_node_account_id;
+use super::{
+    requests::{record_indexing_step_reached, record_request_latency_since, SignRequestStep},
+    try_create_int_gauge_vec_with_node_account_id,
+};
 
 /// Possible status options:
 ///     - "indexed" - latest block number seen by the indexer
@@ -46,5 +49,13 @@ impl ChainTelemetry for PrometheusChainTelemetry {
         LATEST_BLOCK_NUMBER
             .with_label_values(&[self.chain.as_str(), "checkpoint"])
             .set(block_number as i64);
+    }
+
+    fn request_indexed_at(&self, block_timestamp: u64) {
+        record_request_latency_since(self.chain, SignRequestStep::Indexing, "ok", block_timestamp);
+    }
+
+    fn request_indexed(&self) {
+        record_indexing_step_reached(self.chain);
     }
 }
