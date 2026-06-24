@@ -32,7 +32,7 @@ use mpc_primitives::{IndexedSignRequest, SignId, SignKind};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -61,6 +61,10 @@ const ACCEPT_POSIT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Metric channel label shared by every entry in `SignatureSpawner.inboxes`.
 const SIGN_POSIT_INBOX_LABEL: &str = "sign_posit_inbox";
+
+/// Upper bound on the number of recently-completed/aborted sign IDs we remember
+/// so that late-arriving peer posit messages do not re-create orphan inboxes.
+const MAX_DEAD_IDS: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
@@ -1547,6 +1551,9 @@ pub struct SignatureSpawner {
     delayed_watchers: HashMap<SignId, JoinHandle<()>>,
     /// Maps in-flight tasks to their chain, enabling bulk abort on checkpoint regression.
     task_chains: HashMap<SignId, Chain>,
+    /// Cache of recently completed/aborted sign IDs. Prevents late-arriving peer
+    /// posit messages from re-creating orphan inboxes after a task is gone.
+    dead_ids: HashSet<SignId>,
     mesh_state: watch::Receiver<MeshState>,
     /// Limiter that limits the amount of sign tasks from progressing and utilizing
     /// too much compute otherwise the whole system will be flooded with requests.
@@ -1651,6 +1658,11 @@ impl SignatureSpawner {
         if from == me {
             return;
         }
+        // Drop late-arriving posits for already-completed/aborted sign IDs
+        // to prevent re-creating orphan inboxes.
+        if self.dead_ids.contains(&sign_id) {
+            return;
+        }
         let inbox = self.inboxes.entry(sign_id).or_insert_with(|| {
             Subscriber::unsubscribed_with_capacity(
                 SIGN_POSIT_INBOX_LABEL,
@@ -1669,6 +1681,7 @@ impl SignatureSpawner {
     }
 
     fn handle_completion(&mut self, sign_id: SignId) {
+        self.mark_dead(sign_id);
         self.task_chains.remove(&sign_id);
         if let Some(inbox) = self.inboxes.remove(&sign_id) {
             inbox.clear_capacity_global();
@@ -1688,6 +1701,7 @@ impl SignatureSpawner {
             Ok(outcome) => outcome,
             Err(sign_id) => {
                 tracing::warn!(?sign_id, "signature task interrupted");
+                self.mark_dead(sign_id);
                 self.task_chains.remove(&sign_id);
                 if let Some(inbox) = self.inboxes.remove(&sign_id) {
                     inbox.clear_capacity_global();
@@ -1697,6 +1711,7 @@ impl SignatureSpawner {
                 return;
             }
         };
+        self.mark_dead(sign_id);
         self.task_chains.remove(&sign_id);
         if let Some(inbox) = self.inboxes.remove(&sign_id) {
             inbox.clear_capacity_global();
@@ -1711,6 +1726,17 @@ impl SignatureSpawner {
                 tracing::warn!(?sign_id, "signature task terminated");
             }
         }
+    }
+
+    /// Record a sign ID as dead so that late-arriving peer posits are dropped
+    /// instead of recreating an orphan inbox. Evicts the oldest entry when the
+    /// cache exceeds [`MAX_DEAD_IDS`] — safe because the stalest IDs are the
+    /// least likely to still receive late messages.
+    fn mark_dead(&mut self, sign_id: SignId) {
+        if self.dead_ids.len() >= MAX_DEAD_IDS {
+            self.dead_ids.clear();
+        }
+        self.dead_ids.insert(sign_id);
     }
 
     fn abort_delayed_watcher(&mut self, sign_id: SignId, reason: &str) {
@@ -1757,6 +1783,7 @@ impl SignatureSpawner {
                     .map(|(id, _)| *id)
                     .collect();
                 for sign_id in to_abort {
+                    self.mark_dead(sign_id);
                     self.task_chains.remove(&sign_id);
                     if let Some(inbox) = self.inboxes.remove(&sign_id) {
                         inbox.clear_capacity_global();
@@ -1839,6 +1866,7 @@ impl SignatureSpawnerTask {
             inboxes: HashMap::new(),
             delayed_watchers: HashMap::new(),
             task_chains: HashMap::new(),
+            dead_ids: HashSet::new(),
             presignatures: presignature_storage,
             mesh_state,
             limiter: SignLimiter::new(MAX_CONCURRENT_PROPOSERS),
