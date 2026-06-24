@@ -23,6 +23,7 @@ use crate::types::SignatureProtocol;
 use crate::util::{AffinePointExt, JoinMap, TimeoutBudget};
 
 use cait_sith::protocol::{Action, InitializationError, Participant};
+use lru::LruCache;
 use cait_sith::PresignOutput;
 use chrono::Utc;
 use k256::Secp256k1;
@@ -32,7 +33,8 @@ use mpc_primitives::{IndexedSignRequest, SignId, SignKind};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -1551,9 +1553,9 @@ pub struct SignatureSpawner {
     delayed_watchers: HashMap<SignId, JoinHandle<()>>,
     /// Maps in-flight tasks to their chain, enabling bulk abort on checkpoint regression.
     task_chains: HashMap<SignId, Chain>,
-    /// Cache of recently completed/aborted sign IDs. Prevents late-arriving peer
-    /// posit messages from re-creating orphan inboxes after a task is gone.
-    dead_ids: HashSet<SignId>,
+    /// LRU cache of recently completed/aborted sign IDs. Prevents late-arriving
+    /// peer posit messages from re-creating orphan inboxes after a task is gone.
+    dead_ids: LruCache<SignId, ()>,
     mesh_state: watch::Receiver<MeshState>,
     /// Limiter that limits the amount of sign tasks from progressing and utilizing
     /// too much compute otherwise the whole system will be flooded with requests.
@@ -1579,6 +1581,9 @@ impl SignatureSpawner {
         cfg: ProtocolConfig,
     ) {
         let sign_id = indexed.id;
+        // Ensure we don't retain the dead tag from a prior incarnation of this
+        // sign ID (e.g. after regression recovery re-queues a completed request).
+        self.dead_ids.pop(&sign_id);
         self.task_chains.insert(sign_id, indexed.chain);
         tracing::info!(?sign_id, "spawning signature task");
 
@@ -1729,14 +1734,10 @@ impl SignatureSpawner {
     }
 
     /// Record a sign ID as dead so that late-arriving peer posits are dropped
-    /// instead of recreating an orphan inbox. Evicts the oldest entry when the
-    /// cache exceeds [`MAX_DEAD_IDS`] — safe because the stalest IDs are the
-    /// least likely to still receive late messages.
+    /// instead of recreating an orphan inbox. Automatically LRU-evicts the
+    /// stalest entry when the cache exceeds [`MAX_DEAD_IDS`].
     fn mark_dead(&mut self, sign_id: SignId) {
-        if self.dead_ids.len() >= MAX_DEAD_IDS {
-            self.dead_ids.clear();
-        }
-        self.dead_ids.insert(sign_id);
+        self.dead_ids.put(sign_id, ());
     }
 
     fn abort_delayed_watcher(&mut self, sign_id: SignId, reason: &str) {
@@ -1866,7 +1867,7 @@ impl SignatureSpawnerTask {
             inboxes: HashMap::new(),
             delayed_watchers: HashMap::new(),
             task_chains: HashMap::new(),
-            dead_ids: HashSet::new(),
+            dead_ids: LruCache::new(NonZeroUsize::new(MAX_DEAD_IDS).unwrap()),
             presignatures: presignature_storage,
             mesh_state,
             limiter: SignLimiter::new(MAX_CONCURRENT_PROPOSERS),
