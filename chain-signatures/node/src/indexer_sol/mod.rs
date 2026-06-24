@@ -3,7 +3,6 @@ mod config;
 
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::stream::{ChainIndexer, ChainStream};
 use crate::util::ethabi_request_id;
 use crate::util::retry::{retry_async, RetryConfig, RetryError, RetryReason};
 pub use client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
@@ -30,7 +29,7 @@ use mpc_primitives::{
     ChainEvent, IndexedSignRequest, SignArgs, SignId,
     LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
-use mpc_indexer_core::{ChainTelemetry, StateManager};
+use mpc_indexer_core::{ChainTelemetry, StateManager, ChainIndexer, ChainStream};
 use serde::{Deserialize, Serialize};
 use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,

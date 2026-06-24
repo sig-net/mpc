@@ -1,7 +1,7 @@
 mod indexer;
 mod state;
-mod stream;
 mod telemetry;
 
+pub use indexer::{ChainIndexer, ChainStream};
 pub use state::StateManager;
 pub use telemetry::{ChainTelemetry, NoopChainTelemetry};

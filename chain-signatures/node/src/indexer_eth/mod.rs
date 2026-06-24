@@ -9,7 +9,6 @@ use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::Chain;
 use crate::respond_bidirectional::CompletedTx;
-use crate::stream::{ChainIndexer, ChainStream};
 
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
@@ -24,7 +23,7 @@ use futures_util::stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
-use mpc_indexer_core::{ChainTelemetry, StateManager};
+use mpc_indexer_core::{ChainTelemetry, StateManager, ChainIndexer, ChainStream};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, IndexedSignRequest, SignArgs,
     SignId, Signature as MpcSignature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
@@ -1075,7 +1074,6 @@ mod tests {
     #[cfg(feature = "helios")]
     use crate::indexer_eth::indexer_eth_helios;
     use crate::protocol::Chain;
-    use crate::stream::ChainIndexer;
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{address, b256, Address};
     use alloy::rpc::types::BlockId;
@@ -1084,7 +1082,7 @@ mod tests {
         BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome,
         SignId, LATEST_MPC_KEY_VERSION,
     };
-    use mpc_indexer_core::NoopChainTelemetry;
+    use mpc_indexer_core::{ChainIndexer, NoopChainTelemetry};
     use serde_json::json;
     use std::sync::Arc;
     use tokio::sync::{mpsc, Notify};

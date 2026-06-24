@@ -6023,6 +6023,7 @@ dependencies = [
  "k256",
  "mpc-contract",
  "mpc-crypto",
+ "mpc-indexer-core",
  "mpc-keys",
  "mpc-node",
  "mpc-primitives",
@@ -7350,8 +7351,12 @@ dependencies = [
 name = "mpc-indexer-core"
 version = "1.16.4"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "futures-util",
  "mpc-primitives",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
