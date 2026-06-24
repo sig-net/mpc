@@ -74,7 +74,7 @@ pub enum Sign {
     Request(IndexedSignRequest),
     Completion(SignId),
     Checkpoint(IndexedSignRequest),
-    AbortChain { chain: Chain },
+    AbortChain(Chain),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1775,7 +1775,7 @@ impl SignatureSpawner {
 
                 self.spawn_task(governance, request, cfg.clone());
             }
-            Sign::AbortChain { chain } => {
+            Sign::AbortChain(chain) => {
                 tracing::warn!(
                     ?chain,
                     "aborting all in-flight signature tasks on chain regression"
@@ -2258,9 +2258,7 @@ mod tests {
         // Step 2: Abort chain → inbox removed, task_chains cleared, marked dead
         spawner.handle_request(
             &governance,
-            Sign::AbortChain {
-                chain: Chain::Solana,
-            },
+            Sign::AbortChain(Chain::Solana),
             &cfg,
         );
         assert!(!spawner.test_tasks_contains(sign_id));

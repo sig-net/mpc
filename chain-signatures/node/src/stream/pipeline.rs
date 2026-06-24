@@ -23,6 +23,7 @@ pub struct ChainPipeline<I: ChainIndexer> {
 }
 
 impl<I: ChainIndexer> ChainPipeline<I> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         indexer: I,
         checkpoints_rx: watch::Receiver<CheckpointDigest>,
@@ -161,7 +162,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         .is_some()
         {
             tracing::warn!(%chain, "backlog regressed via consensus checkpoint; aborting in-flight tasks");
-            let _ = self.sign_tx.send(Sign::AbortChain { chain }).await;
+            let _ = self.sign_tx.send(Sign::AbortChain(chain)).await;
         }
 
         // Determine anchor height
