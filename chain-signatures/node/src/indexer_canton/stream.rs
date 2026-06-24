@@ -448,7 +448,7 @@ async fn process_canton_event(
                         if events_tx
                             .send(ChainEvent::SignRequest {
                                 request,
-                                block_timestamp: None, // Canton does not provide block timestamps in the event
+                                block_timestamp: None,
                             })
                             .await
                             .is_err()

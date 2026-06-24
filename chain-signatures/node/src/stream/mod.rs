@@ -145,8 +145,10 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
                     ChainEvent::SignRequest { request, block_timestamp } => {
                         // Handle metrics reporting for the sign request event
                         if let Some(ts) = block_timestamp {
+                            // Report the request was indexed at the given block timestamp is currently used for Ethereum due to ~15 min finality delay
                             telemetry.request_indexed_at(ts);
                         } else {
+                            // Other faster chains (e.g. for Solana, Canton, or Hydration) report that a request was indexed without a block timestamp
                             telemetry.request_indexed();
                         }
 

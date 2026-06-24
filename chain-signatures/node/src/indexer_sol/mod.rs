@@ -862,7 +862,7 @@ async fn emit_events(
                     events_tx
                         .send(ChainEvent::SignRequest {
                             request,
-                            block_timestamp: None, // Solana does not provide block timestamps in the event
+                            block_timestamp: None,
                         })
                         .await?;
                 }
