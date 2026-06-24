@@ -1438,7 +1438,7 @@ fn test_truncate_per_owner_insufficient() {
 /// generation — while triple generation (no redis IO in posit processing)
 /// continues on all nodes. Once healthy nodes reach their presig target
 /// and stop proposing, node 0's presignature posit message channel clears and it recovers.
-#[test(tokio::test(flavor = "multi_thread"))]
+#[test(tokio::test(flavor = "multi_thread", worker_threads = 8))]
 async fn test_presig_stall_from_slow_redis() {
     use std::collections::{HashMap, HashSet};
 

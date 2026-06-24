@@ -5,7 +5,9 @@ use redis::{AsyncCommands, FromRedisValue, ToRedisArgs};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+#[cfg(feature = "test-feature")]
+use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing;
 
