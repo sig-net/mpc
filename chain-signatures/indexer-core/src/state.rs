@@ -2,8 +2,6 @@ use std::collections::HashMap;
 
 use mpc_primitives::{BidirectionalTx, BidirectionalTxId, Chain, SignId};
 
-// TODO: Move these traits to a separate crate (mpc-indexer-core) later
-
 /// Interface for the Indexer to query and update state.
 /// Currently implemented by the Backlog
 #[async_trait::async_trait]

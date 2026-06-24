@@ -3,7 +3,8 @@ use std::time::Duration;
 use futures_util::Stream;
 use mpc_primitives::{Chain, ChainEvent};
 
-// TODO: probably better remove default method implementations from the trait and force implementors to implement (also removes dependency for `tokio` and `tracing`)
+// TODO: Consider removing default implementations from the trait and force to implement (also removes dependency for `tokio` and `tracing` in this crate)
+/// Interface for a chain indexer that can catch up and livestream events from a specific chain.
 #[async_trait::async_trait]
 pub trait ChainIndexer: Send + 'static {
     const CHAIN: Chain;
@@ -50,6 +51,7 @@ pub trait ChainIndexer: Send + 'static {
     }
 }
 
+/// Interface for a chain stream that can be started and can provide the next chain event.
 #[async_trait::async_trait]
 pub trait ChainStream: Send + 'static {
     type Indexer: ChainIndexer + Send;

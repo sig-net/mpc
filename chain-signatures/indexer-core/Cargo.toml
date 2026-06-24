@@ -1,7 +1,8 @@
 [package]
 name = "mpc-indexer-core"
-edition = "2024"
+edition = "2021"
 version.workspace = true
+description = "Core traits and types for the MPC indexers"
 
 [dependencies]
 # TODO: replace anyhow with thiserror
