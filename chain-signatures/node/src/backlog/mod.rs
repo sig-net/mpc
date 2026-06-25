@@ -17,7 +17,7 @@ use tokio::sync::RwLock;
 pub use mpc_primitives::Checkpoint;
 
 /// Max pending (unconfirmed) checkpoints per chain before stalling.
-pub const MAX_PENDING_CHECKPOINTS: usize = 3;
+pub const MAX_PENDING_CHECKPOINTS: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct PendingRequests {
