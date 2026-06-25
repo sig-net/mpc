@@ -174,15 +174,13 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                         tokio::time::sleep(I::RETRY_DELAY).await;
                     }
                 }
-                new_state = wait_detected_regression(
+                Some(new_state) = wait_detected_regression(
                     &mut self.checkpoints_rx,
                     &self.backlog,
                     chain,
                 ) => {
-                    if let Some(new_state) = new_state {
-                        let _ = self.state_tx.send(new_state);
-                        return Some(new_state);
-                    }
+                    let _ = self.state_tx.send(new_state);
+                    return Some(new_state);
                 }
             }
         }
@@ -205,15 +203,13 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                         return None; // shutdown
                     }
                 }
-                new_state = wait_detected_regression(
+                Some(new_state) = wait_detected_regression(
                     &mut self.checkpoints_rx,
                     &self.backlog,
                     chain,
                 ) => {
-                    if let Some(new_state) = new_state {
-                        let _ = self.state_tx.send(new_state);
-                        return Some(new_state);
-                    }
+                    let _ = self.state_tx.send(new_state);
+                    return Some(new_state);
                 }
             }
         }
