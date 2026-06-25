@@ -1,28 +1,27 @@
-use crate::config::{Config, ContractConfig, NetworkConfig};
+mod ethereum;
+mod near;
+
+use crate::config::Config;
 use crate::indexer_eth::EthConfig;
 use crate::indexer_sol::SolConfig;
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
-use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState};
+use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
 use crate::util::retry::{retry_rpc, RetryConfig};
-use crate::util::AffinePointExt as _;
 use std::collections::BTreeSet;
 
+pub use ethereum::{try_batch_publish_eth, try_publish_eth, EthClient};
 pub use mpc_contract::primitives::{Read, View};
+pub use near::{try_publish_near, NearClient};
 
 use enum_map::EnumMap;
 use solana_sdk::pubkey::Pubkey;
 
-use alloy::primitives::Address;
-use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
-use alloy::providers::{Provider, RootProvider, WalletProvider};
-use alloy::rpc::types::{Transaction, TransactionReceipt};
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
-use mpc_keys::hpke;
-use mpc_primitives::{CheckpointDigest, ConsensusCheckpointDigest, SignId, SignKind, Signature};
+use mpc_primitives::{CheckpointDigest, SignId, SignKind, Signature};
 
 use crate::indexer_canton::ledger_api::{
     ActiveContractEntry, CumulativeFilter, EventFormat, GetActiveContractsRequest,
@@ -32,26 +31,16 @@ use crate::indexer_canton::ledger_api::{
 use crate::indexer_canton::{CantonAuthProvider, CantonConfig};
 use crate::indexer_hydration::HydrationConfig;
 use crate::indexer_sol::SolanaClient;
-use alloy::contract::{ContractInstance, Interface};
-use alloy::dyn_abi::DynSolValue;
-use alloy::network::EthereumWallet;
-use alloy::primitives::U256;
-use alloy::providers::ProviderBuilder;
-use alloy_signer_local::PrivateKeySigner;
-use k256::elliptic_curve::point::AffineCoordinates;
+
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use near_account_id::AccountId;
-use near_crypto::InMemorySigner;
-use near_fetch::result::ExecutionFinalResult;
 use parity_scale_codec::{Decode, Encode};
-use serde_json::json;
 use sp_core::{sr25519, Pair as _};
 use sp_runtime::{
     traits::{IdentifyAccount, Verify},
     MultiSignature as SpMultiSignature,
 };
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::time::{Duration, Instant};
 use subxt::config::substrate::{
     AccountId32, BlakeTwo256, MultiSignature, SubstrateConfig, SubstrateExtrinsicParams,
@@ -61,7 +50,6 @@ use subxt::tx::Payload;
 use subxt::Config as SubxtConfig;
 use subxt::OnlineClient;
 use tokio::sync::{mpsc, watch};
-use url::Url;
 
 /// The maximum amount of times to retry publishing a signature.
 const MAX_PUBLISH_RETRY: usize = 6;
@@ -70,64 +58,15 @@ const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 /// The update interval to fetch and update the contract's state
 const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 /// The interval to batch send Ethereum responses
-const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
+pub const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
 /// The batch size for Ethereum responses
-const ETH_RESPOND_BATCH_SIZE: usize = 10;
-/// The maximum number of attempts to fetch eth tx and its receipt
-const ETH_TX_RECEIPT_MAX_ATTEMPTS: usize = 6;
-type EthContractFillProvider = FillProvider<
-    JoinFill<
-        JoinFill<
-            alloy::providers::Identity,
-            JoinFill<
-                alloy::providers::fillers::GasFiller,
-                JoinFill<
-                    alloy::providers::fillers::BlobGasFiller,
-                    JoinFill<
-                        alloy::providers::fillers::NonceFiller,
-                        alloy::providers::fillers::ChainIdFiller,
-                    >,
-                >,
-            >,
-        >,
-        WalletFiller<EthereumWallet>,
-    >,
-    RootProvider,
->;
+pub const ETH_RESPOND_BATCH_SIZE: usize = 10;
 
 // Publish retry constants
 const PUBLISH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
 const PUBLISH_FIXED_DELAY: Duration = Duration::from_secs(5);
 const BATCH_PUBLISH_MIN_DELAY: Duration = Duration::from_secs(1);
 const BATCH_PUBLISH_MAX_DELAY: Duration = Duration::from_secs(10);
-
-// Get nonce retry constants
-const ETH_NONCE_MAX_ATTEMPTS: usize = 3;
-const ETH_NONCE_TIMEOUT: Duration = Duration::from_secs(2);
-const ETH_NONCE_MIN_DELAY: Duration = Duration::from_millis(500);
-const ETH_NONCE_MAX_DELAY: Duration = Duration::from_secs(5);
-
-// Send Ethereum tx retry constants
-const ETH_SEND_MAX_ATTEMPTS: usize = 3;
-const ETH_SEND_TIMEOUT: Duration = Duration::from_secs(5);
-const ETH_SEND_MIN_DELAY: Duration = Duration::from_millis(500);
-const ETH_SEND_MAX_DELAY: Duration = Duration::from_secs(10);
-
-// Polling Mempool
-const ETH_MEMPOOL_TIMEOUT: Duration = Duration::from_secs(5);
-const ETH_MEMPOOL_MIN_DELAY: Duration = Duration::from_secs(1);
-const ETH_MEMPOOL_MAX_DELAY: Duration = Duration::from_secs(10);
-
-// Polling Receipt
-const ETH_RECEIPT_TIMEOUT: Duration = Duration::from_secs(2);
-const ETH_RECEIPT_MIN_DELAY: Duration = Duration::from_secs(1);
-const ETH_RECEIPT_MAX_DELAY: Duration = Duration::from_secs(20);
-
-// Ethereum gas limits
-const ETH_BASE_GAS_LIMIT: u64 = 40_000;
-const ETH_BATCH_GAS_PER_REQUEST: u64 = 20_000;
-
-type EthContractInstance = ContractInstance<EthContractFillProvider>;
 
 #[derive(Clone)]
 pub struct PublishAction {
@@ -598,220 +537,6 @@ impl RpcExecutor {
             }
             Chain::Bitcoin => ChainClient::Err("no bitcoin client available for node"),
         }
-    }
-}
-
-#[derive(Clone)]
-pub struct NearClient {
-    client: near_fetch::Client,
-    contract_id: AccountId,
-    my_addr: Url,
-    signer: InMemorySigner,
-    cipher_pk: hpke::PublicKey,
-    sign_pk: near_crypto::PublicKey,
-}
-
-impl Governance for NearClient {
-    async fn propose_join(&self) -> anyhow::Result<()> {
-        self.propose_join().await
-    }
-
-    async fn vote_reshared(&self, epoch: u64) -> anyhow::Result<bool> {
-        self.vote_reshared(epoch).await
-    }
-
-    async fn vote_public_key(&self, public_key: &near_crypto::PublicKey) -> anyhow::Result<bool> {
-        self.vote_public_key(public_key).await
-    }
-}
-
-impl NearClient {
-    pub fn new(
-        near_rpc: &str,
-        my_addr: &Url,
-        network: &NetworkConfig,
-        contract_id: &AccountId,
-        signer: InMemorySigner,
-    ) -> Self {
-        Self {
-            client: near_fetch::Client::new(near_rpc),
-            contract_id: contract_id.clone(),
-            my_addr: my_addr.clone(),
-            signer,
-            cipher_pk: network.cipher_sk.public_key(),
-            sign_pk: network.sign_sk.public_key(),
-        }
-    }
-
-    pub fn rpc_addr(&self) -> String {
-        self.client.rpc_addr()
-    }
-
-    pub async fn fetch_state(&self) -> anyhow::Result<ProtocolState> {
-        let contract_state: mpc_contract::ProtocolContractState =
-            self.client.view(&self.contract_id, "state").await?.json()?;
-
-        let protocol_state: ProtocolState = contract_state.try_into().map_err(|_| {
-            anyhow::anyhow!("failed to parse protocol state, has it been initialized?")
-        })?;
-
-        tracing::debug!(?protocol_state, "protocol state");
-        Ok(protocol_state)
-    }
-
-    pub async fn fetch_config(&self) -> Option<ContractConfig> {
-        self.client
-            .view(&self.contract_id, "config")
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(%err, "failed to fetch contract config");
-            })
-            .ok()?
-            .json()
-            .inspect(|configs| {
-                tracing::debug!(?configs, "contract config");
-            })
-            .inspect_err(|err| {
-                tracing::warn!(%err, "unable to parse config");
-            })
-            .ok()
-    }
-
-    pub async fn vote_public_key(
-        &self,
-        public_key: &near_crypto::PublicKey,
-    ) -> anyhow::Result<bool> {
-        tracing::info!(%public_key, signer_id = %self.signer.account_id, "voting for public key");
-        let result = self
-            .client
-            .call(&self.signer, &self.contract_id, "vote_pk")
-            .args_json(json!({
-                "public_key": public_key
-            }))
-            .max_gas()
-            .retry_exponential(10, 5)
-            .transact()
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(%err, "failed to vote for public key");
-            })?
-            .json()?;
-
-        Ok(result)
-    }
-
-    pub async fn vote_reshared(&self, epoch: u64) -> anyhow::Result<bool> {
-        tracing::info!(%epoch, signer_id = %self.signer.account_id, "voting for reshared");
-        let result = self
-            .client
-            .call(&self.signer, &self.contract_id, "vote_reshared")
-            .args_json(json!({
-                "epoch": epoch
-            }))
-            .max_gas()
-            .retry_exponential(10, 5)
-            .transact()
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(%err, "failed to vote for reshared");
-            })?
-            .json()?;
-
-        Ok(result)
-    }
-
-    pub async fn propose_join(&self) -> anyhow::Result<()> {
-        tracing::info!(signer_id = %self.signer.account_id, "joining the protocol");
-        self.client
-            .call(&self.signer, &self.contract_id, "join")
-            .args_json(json!({
-                "url": self.my_addr,
-                "cipher_pk": self.cipher_pk.to_bytes(),
-                "sign_pk": self.sign_pk,
-            }))
-            .max_gas()
-            .retry_exponential(10, 3)
-            .transact()
-            .await?
-            .into_result()?;
-
-        Ok(())
-    }
-
-    pub async fn call_respond(
-        &self,
-        id: &SignId,
-        response: &Signature,
-    ) -> Result<ExecutionFinalResult, near_fetch::Error> {
-        self.client
-            .call(&self.signer, &self.contract_id, "respond")
-            .args_json(json!({
-                "sign_id": id,
-                "signature": response,
-            }))
-            .max_gas()
-            .transact()
-            .await
-    }
-
-    pub async fn read(&self, reads: Vec<Read>) -> anyhow::Result<Vec<View>> {
-        let views: Vec<View> = self
-            .client
-            .view(&self.contract_id, "read")
-            .args_json(json!({ "reads": reads }))
-            .await?
-            .json()?;
-        Ok(views)
-    }
-
-    pub async fn call_respond_checkpoint(
-        &self,
-        checkpoint: &ConsensusCheckpointDigest,
-        signature: &Signature,
-    ) -> Result<ExecutionFinalResult, near_fetch::Error> {
-        self.client
-            .call(&self.signer, &self.contract_id, "respond_checkpoint")
-            .args_json(json!({
-                "checkpoint": checkpoint,
-                "signature": signature,
-            }))
-            .max_gas()
-            .transact()
-            .await
-    }
-}
-
-#[derive(Clone)]
-pub struct EthClient {
-    contract: EthContractInstance,
-}
-
-impl EthClient {
-    pub fn new(eth: &EthConfig) -> Self {
-        let signer: PrivateKeySigner = eth
-            .account_sk
-            .parse()
-            .expect("cannot parse Eth account sk into PrivateKeySigner");
-        let wallet = EthereumWallet::from(signer.clone());
-        let provider = ProviderBuilder::new()
-            .wallet(wallet)
-            .connect_http(eth.execution_rpc_http_url.parse().unwrap());
-        // Create a contract instance.
-        let json: serde_json::Value = serde_json::from_slice(include_bytes!(
-            "../../contract-eth/artifacts/contracts/ChainSignatures.sol/ChainSignatures.json"
-        ))
-        .unwrap();
-
-        // Get `abi` from the artifact.
-        let abi_value = json.get("abi").expect("Failed to get ABI from artifact");
-        let abi = serde_json::from_str(&abi_value.to_string()).unwrap();
-
-        let contract = ContractInstance::new(
-            Address::from_str(&format!("0x{}", eth.contract_address)).unwrap(),
-            provider.clone(),
-            Interface::new(abi),
-        );
-        Self { contract }
     }
 }
 
@@ -1411,349 +1136,6 @@ async fn run_batch_respond(
             actions_batch.push(action);
         }
     }
-}
-
-async fn try_publish_near(
-    near: &NearClient,
-    action: &PublishAction,
-    timestamp: &Instant,
-    signature: &Signature,
-) -> Result<(), near_fetch::Error> {
-    let outcome = match &action.indexed.kind {
-        SignKind::Checkpoint(checkpoint) => {
-            near.call_respond_checkpoint(checkpoint, signature).await
-        }
-        _ => near.call_respond(&action.indexed.id, signature).await,
-    }
-    .inspect_err(|err| {
-        tracing::error!(
-            sign_id = ?action.indexed.id,
-            ?err,
-            "failed to publish signature",
-        );
-    })?;
-
-    let _: () = outcome.json().inspect_err(|err| {
-        tracing::error!(
-            sign_id = ?action.indexed.id,
-            big_r = signature.big_r.to_base58(),
-            s = ?signature.s,
-            ?err,
-            "smart contract threw error",
-        );
-    })?;
-    tracing::info!(
-        sign_id = ?action.indexed.id,
-        big_r = signature.big_r.to_base58(),
-        s = ?signature.s,
-        elapsed = ?timestamp.elapsed(),
-        "published signature sucessfully",
-    );
-    Ok(())
-}
-
-// wait for transaction receipt with max_attempts and exponential delay backoff starting at 5s
-async fn wait_for_pending_tx(
-    provider: &EthContractFillProvider,
-    tx_hash: alloy::primitives::B256,
-    sign_ids: Vec<SignId>,
-    max_attempts: usize,
-) -> Result<Transaction, ()> {
-    let retry_config = RetryConfig {
-        max_times: max_attempts,
-        min_delay: ETH_MEMPOOL_MIN_DELAY,
-        max_delay: ETH_MEMPOOL_MAX_DELAY,
-        jitter: true,
-    };
-
-    retry_rpc!(
-        ETH_MEMPOOL_TIMEOUT,
-        retry_config,
-        // Log the error and retry attempt
-        |attempt, err, sleep| {
-            tracing::error!(
-                ?sign_ids,
-                attempt,
-                "failed to get eth signature respond pending transaction: {err}, retrying in {sleep:?}"
-            );
-        },
-        // Try to get the pending transaction
-        {
-            match provider.get_transaction_by_hash(tx_hash).await {
-                Ok(Some(tx)) => {
-                    tracing::info!(?sign_ids, "eth signature respond pending transaction found");
-                    Ok(tx)
-                }
-                Ok(None) => Err(anyhow::anyhow!("Transaction not in mempool yet")),
-                Err(e) => Err(anyhow::anyhow!("RPC Error: {e}")),
-            }
-        }
-    ).map_err(|_| ())
-}
-
-// wait for transaction receipt with max_attempts and exponential delay backoff starting at 5s
-async fn wait_for_transaction_receipt(
-    provider: &EthContractFillProvider,
-    tx_hash: alloy::primitives::B256,
-    sign_ids: Vec<SignId>,
-    max_attempts: usize,
-) -> Result<TransactionReceipt, ()> {
-    let retry_config = RetryConfig {
-        max_times: max_attempts,
-        min_delay: ETH_RECEIPT_MIN_DELAY,
-        max_delay: ETH_RECEIPT_MAX_DELAY,
-        jitter: true,
-    };
-
-    retry_rpc!(
-        ETH_RECEIPT_TIMEOUT,
-        retry_config,
-        // Log the error and retry attempt
-        |attempt, err, sleep| {
-            tracing::error!(
-                ?sign_ids,
-                attempt,
-                "failed to get eth signature respond transaction receipt: {err}, retrying in {sleep:?}"
-            );
-        },
-        // Try to get the transaction receipt
-        {
-            match provider.get_transaction_receipt(tx_hash).await {
-                Ok(Some(receipt)) => {
-                    tracing::info!(?sign_ids, "eth signature respond transaction receipt found");
-                    Ok(receipt)
-                }
-                Ok(None) => Err(anyhow::anyhow!("Receipt not ready yet")),
-                Err(e) => Err(anyhow::anyhow!("RPC Error: {e}")),
-            }
-        }
-    ).map_err(|_| ())
-}
-
-async fn send_eth_transaction(
-    contract: &EthContractInstance,
-    params: &[DynSolValue],
-    gas: u64,
-    sign_ids: &[SignId],
-) -> Result<alloy::primitives::B256, ()> {
-    // TODO: fetching nonce from RPC is slow and expensive, consider better approach (fetch once, increment locally, etc.)
-    // 1. Fetch Nonce
-    let nonce_retry = RetryConfig {
-        max_times: ETH_NONCE_MAX_ATTEMPTS,
-        min_delay: ETH_NONCE_MIN_DELAY,
-        max_delay: ETH_NONCE_MAX_DELAY,
-        jitter: true,
-    };
-
-    let nonce = match retry_rpc!(
-        ETH_NONCE_TIMEOUT,
-        nonce_retry,
-        // Log the error and retry attempt
-        |attempt, err, sleep| {
-            tracing::warn!(
-                ?sign_ids,
-                attempt,
-                "get_nonce failed: {err}, retrying in {sleep:?}"
-            );
-        },
-        // Try to get the nonce
-        {
-            contract
-                .provider()
-                .get_transaction_count(contract.provider().default_signer_address())
-                .pending()
-                .await
-                .map_err(|e| anyhow::anyhow!("RPC Error: {e}"))
-        }
-    ) {
-        Ok(n) => n,
-        Err(err) => {
-            tracing::error!(
-                ?sign_ids,
-                ?err,
-                "failed to get nonce: retry attempts exhausted"
-            );
-            return Err(());
-        }
-    };
-
-    tracing::info!(nonce, "will send eth tx with nonce");
-
-    // 2. Send Tx
-    let send_retry = RetryConfig {
-        max_times: ETH_SEND_MAX_ATTEMPTS,
-        min_delay: ETH_SEND_MIN_DELAY,
-        max_delay: ETH_SEND_MAX_DELAY,
-        jitter: true,
-    };
-
-    retry_rpc!(
-        ETH_SEND_TIMEOUT,
-        send_retry,
-        |attempt, err, sleep| {
-            tracing::warn!(
-                ?sign_ids,
-                attempt,
-                "send eth tx failed: {err}, retrying in {sleep:?}"
-            );
-        },
-        {
-            contract
-                .function("respond", params)
-                .unwrap()
-                .gas(gas)
-                .nonce(nonce)
-                .send()
-                .await
-                .map(|pending| *pending.tx_hash())
-                .map_err(|e| anyhow::anyhow!("RPC Error: {e}"))
-        }
-    )
-    .map_err(|err| {
-        tracing::error!(
-            ?sign_ids,
-            ?err,
-            "failed to send ethereum signature transaction: retry attempts exhausted"
-        );
-    })
-}
-
-async fn try_publish_eth(
-    eth: &EthClient,
-    action: &PublishAction,
-    timestamp: &Instant,
-    signature: &Signature,
-) -> Result<(), ()> {
-    let sign_id = action.indexed.id;
-    let params = [DynSolValue::Array(vec![DynSolValue::Tuple(vec![
-        DynSolValue::FixedBytes(action.indexed.id.request_id.into(), 32),
-        DynSolValue::Tuple(vec![
-            DynSolValue::Tuple(vec![
-                DynSolValue::from(U256::from_be_slice(&signature.big_r.x())),
-                DynSolValue::from(U256::from_be_slice(
-                    signature.big_r.to_encoded_point(false).y().unwrap(),
-                )),
-            ]),
-            DynSolValue::from(U256::from_be_slice(&signature.s.to_bytes())),
-            DynSolValue::from(signature.recovery_id),
-        ]),
-    ])])];
-
-    let tx_hash = send_eth_transaction(
-        &eth.contract,
-        &params,
-        ETH_BASE_GAS_LIMIT,
-        std::slice::from_ref(&action.indexed.id),
-    )
-    .await?;
-
-    let receipt = wait_for_transaction_receipt(
-        eth.contract.provider(),
-        tx_hash,
-        vec![action.indexed.id],
-        ETH_TX_RECEIPT_MAX_ATTEMPTS,
-    )
-    .await?;
-
-    // Check if transaction was successful
-    if !receipt.status() {
-        tracing::error!(
-            ?sign_id,
-            tx_hash = ?receipt.transaction_hash,
-            "transaction failed"
-        );
-        return Err(());
-    }
-
-    let tx_hash = receipt.transaction_hash;
-    tracing::info!(
-        ?sign_id,
-        tx_hash = ?tx_hash,
-        elapsed = ?timestamp.elapsed(),
-        "published ethereum signature successfully"
-    );
-    Ok(())
-}
-
-async fn try_batch_publish_eth(
-    eth: &EthClient,
-    actions: &Vec<PublishAction>,
-    signatures: &HashMap<SignId, Signature>,
-) -> Result<(), ()> {
-    let chain = Chain::Ethereum;
-    let mut params_vec = vec![];
-    let num_requests = actions.len();
-    let sign_ids = actions
-        .iter()
-        .map(|action| action.indexed.id)
-        .collect::<Vec<_>>();
-    tracing::info!(?sign_ids, "will send eth batch tx");
-    for action in actions {
-        let signature = signatures
-            .get(&action.indexed.id)
-            .expect("signature not found in map");
-        params_vec.push(DynSolValue::Tuple(vec![
-            DynSolValue::FixedBytes(action.indexed.id.request_id.into(), 32),
-            DynSolValue::Tuple(vec![
-                DynSolValue::Tuple(vec![
-                    DynSolValue::from(U256::from_be_slice(&signature.big_r.x())),
-                    DynSolValue::from(U256::from_be_slice(
-                        signature.big_r.to_encoded_point(false).y().unwrap(),
-                    )),
-                ]),
-                DynSolValue::from(U256::from_be_slice(&signature.s.to_bytes())),
-                DynSolValue::from(signature.recovery_id),
-            ]),
-        ]));
-    }
-
-    let params = [DynSolValue::Array(params_vec.clone())];
-    let gas = std::cmp::max(
-        ETH_BASE_GAS_LIMIT,
-        ETH_BATCH_GAS_PER_REQUEST * num_requests as u64,
-    );
-
-    let tx_hash = send_eth_transaction(&eth.contract, &params, gas, &sign_ids).await?;
-
-    tracing::info!(?tx_hash, "sent eth tx");
-
-    let tx = wait_for_pending_tx(
-        eth.contract.provider(),
-        tx_hash,
-        sign_ids.clone(),
-        ETH_TX_RECEIPT_MAX_ATTEMPTS,
-    )
-    .await?;
-
-    tracing::info!(?tx, "tx found in mempool");
-
-    let receipt = wait_for_transaction_receipt(
-        eth.contract.provider(),
-        tx_hash,
-        sign_ids.clone(),
-        ETH_TX_RECEIPT_MAX_ATTEMPTS,
-    )
-    .await?;
-
-    // Check if transaction was successful
-    if !receipt.status() {
-        tracing::error!(
-            ?sign_ids,
-            tx_hash = ?receipt.transaction_hash,
-            "eth batch transaction failed"
-        );
-        return Err(());
-    }
-
-    let tx_hash = receipt.transaction_hash;
-    tracing::info!(
-        ?chain,
-        ?sign_ids,
-        ?tx_hash,
-        num_requests,
-        "eth batch published ethereum signatures successfully"
-    );
-    Ok(())
 }
 
 async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAction>) {
