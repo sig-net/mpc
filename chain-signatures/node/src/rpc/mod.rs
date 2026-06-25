@@ -824,6 +824,7 @@ mod tests {
     use k256::elliptic_curve::ops::Reduce;
     use k256::elliptic_curve::point::DecompressPoint;
     use mpc_crypto::kdf::derive_secret_key;
+    use mpc_primitives::SignKind;
 
     fn scalar(bytes: &[u8; 32]) -> k256::Scalar {
         <k256::Scalar as Reduce<<Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(
