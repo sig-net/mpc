@@ -6023,6 +6023,7 @@ dependencies = [
  "k256",
  "mpc-contract",
  "mpc-crypto",
+ "mpc-indexer-core",
  "mpc-keys",
  "mpc-node",
  "mpc-primitives",
@@ -7347,6 +7348,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-indexer-core"
+version = "1.16.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures-util",
+ "mpc-primitives",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "mpc-keys"
 version = "1.16.4"
 dependencies = [
@@ -7401,6 +7414,7 @@ dependencies = [
  "mockito",
  "mpc-contract",
  "mpc-crypto",
+ "mpc-indexer-core",
  "mpc-keys",
  "mpc-primitives",
  "near-account-id",
@@ -7453,7 +7467,6 @@ dependencies = [
 name = "mpc-primitives"
 version = "1.16.4"
 dependencies = [
- "async-trait",
  "borsh 1.5.7",
  "ciborium",
  "enum-map",

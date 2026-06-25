@@ -9,6 +9,7 @@ use integration_tests::containers::EthereumSandbox;
 use integration_tests::eth::{self, ChainSignatures, SignRequest};
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
+use mpc_indexer_core::{ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager};
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
@@ -17,12 +18,11 @@ use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign};
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{run_stream, ChainPipeline, ChainStream, ChainStreaming};
+use mpc_node::stream::{run_stream, ChainPipeline, ChainStreaming};
 use mpc_node::util::current_unix_timestamp;
 use mpc_primitives::{
-    ChainEvent, ChainTelemetry, CheckpointDigest, NoopChainTelemetry, SignArgs,
-    SignBidirectionalEvent as NodeSignBidirectionalEvent, SignId, SignKind, StateManager,
-    LATEST_MPC_KEY_VERSION,
+    ChainEvent, CheckpointDigest, SignArgs, SignBidirectionalEvent as NodeSignBidirectionalEvent,
+    SignId, SignKind, LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
 use std::time::Duration;
@@ -716,7 +716,7 @@ async fn test_ethereum_stream_parse_sign_event() -> Result<()> {
 
     let req = loop {
         match next_event_within(&mut stream, Duration::from_secs(10)).await? {
-            ChainEvent::SignRequest(req) => break req,
+            ChainEvent::SignRequest { request, .. } => break request,
             _ => continue,
         }
     };
@@ -984,10 +984,10 @@ async fn test_ethereum_stream_concurrent_events() -> Result<()> {
 
     let mut received: Vec<[u8; 32]> = Vec::new();
     while received.len() < payloads.len() {
-        if let ChainEvent::SignRequest(req) =
+        if let ChainEvent::SignRequest { request, .. } =
             next_event_within(&mut stream, Duration::from_secs(10)).await?
         {
-            let bytes: [u8; 32] = req.args.payload.to_bytes().into();
+            let bytes: [u8; 32] = request.args.payload.to_bytes().into();
             received.push(bytes);
         }
     }
@@ -1015,16 +1015,16 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
                 break None;
             };
             match event {
-                ChainEvent::SignRequest(req) => {
+                ChainEvent::SignRequest { request, .. } => {
                     saw_sign_request = true;
 
                     // The production indexer loop inserts sign requests into the backlog.
                     // These integration tests consume `ChainEvent`s directly, so replicate
                     // that behavior here so checkpoints capture pending requests.
-                    if matches!(req.kind, SignKind::RespondBidirectional(_)) {
+                    if matches!(request.kind, SignKind::RespondBidirectional(_)) {
                         continue;
                     }
-                    backlog.insert(req.clone()).await;
+                    backlog.insert(request.clone()).await;
                 }
                 ChainEvent::Block(height) => {
                     tracing::info!(height, "observed block event");
@@ -1063,13 +1063,13 @@ async fn test_ethereum_stream_checkpointing() -> Result<()> {
     let mut saw_new_checkpoint = false;
     for _ in 0..12 {
         match next_event_within(&mut stream, Duration::from_secs(10)).await? {
-            ChainEvent::SignRequest(req) => {
+            ChainEvent::SignRequest { request, .. } => {
                 saw_new_event = true;
 
-                if matches!(req.kind, SignKind::RespondBidirectional(_)) {
+                if matches!(request.kind, SignKind::RespondBidirectional(_)) {
                     continue;
                 }
-                backlog.insert(req.clone()).await;
+                backlog.insert(request.clone()).await;
 
                 if saw_new_checkpoint {
                     break;
@@ -1113,7 +1113,7 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
 
     let sign_req = loop {
         match next_event_within(&mut stream, Duration::from_secs(30)).await? {
-            ChainEvent::SignRequest(req) => break req,
+            ChainEvent::SignRequest { request, .. } => break request,
             _ => continue,
         }
     };

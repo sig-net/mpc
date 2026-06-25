@@ -5,6 +5,7 @@ use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, Governance, IndexedSignRequest, ProtocolState};
+use crate::util::retry::{retry_rpc, RetryConfig};
 use crate::util::AffinePointExt as _;
 use std::collections::BTreeSet;
 
@@ -31,7 +32,6 @@ use crate::indexer_canton::ledger_api::{
 use crate::indexer_canton::{CantonAuthProvider, CantonConfig};
 use crate::indexer_hydration::HydrationConfig;
 use crate::indexer_sol::SolanaClient;
-use crate::util::retry::{retry_async, Backoff, RetryConfig, RetryError, RetryReason};
 use alloy::contract::{ContractInstance, Interface};
 use alloy::dyn_abi::DynSolValue;
 use alloy::network::EthereumWallet;
@@ -94,6 +94,38 @@ type EthContractFillProvider = FillProvider<
     >,
     RootProvider,
 >;
+
+// Publish retry constants
+const PUBLISH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
+const PUBLISH_FIXED_DELAY: Duration = Duration::from_secs(5);
+const BATCH_PUBLISH_MIN_DELAY: Duration = Duration::from_secs(1);
+const BATCH_PUBLISH_MAX_DELAY: Duration = Duration::from_secs(10);
+
+// Get nonce retry constants
+const ETH_NONCE_MAX_ATTEMPTS: usize = 3;
+const ETH_NONCE_TIMEOUT: Duration = Duration::from_secs(2);
+const ETH_NONCE_MIN_DELAY: Duration = Duration::from_millis(500);
+const ETH_NONCE_MAX_DELAY: Duration = Duration::from_secs(5);
+
+// Send Ethereum tx retry constants
+const ETH_SEND_MAX_ATTEMPTS: usize = 3;
+const ETH_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+const ETH_SEND_MIN_DELAY: Duration = Duration::from_millis(500);
+const ETH_SEND_MAX_DELAY: Duration = Duration::from_secs(10);
+
+// Polling Mempool
+const ETH_MEMPOOL_TIMEOUT: Duration = Duration::from_secs(5);
+const ETH_MEMPOOL_MIN_DELAY: Duration = Duration::from_secs(1);
+const ETH_MEMPOOL_MAX_DELAY: Duration = Duration::from_secs(10);
+
+// Polling Receipt
+const ETH_RECEIPT_TIMEOUT: Duration = Duration::from_secs(2);
+const ETH_RECEIPT_MIN_DELAY: Duration = Duration::from_secs(1);
+const ETH_RECEIPT_MAX_DELAY: Duration = Duration::from_secs(20);
+
+// Ethereum gas limits
+const ETH_BASE_GAS_LIMIT: u64 = 40_000;
+const ETH_BATCH_GAS_PER_REQUEST: u64 = 20_000;
 
 type EthContractInstance = ContractInstance<EthContractFillProvider>;
 
@@ -1270,72 +1302,63 @@ async fn execute_publish(client: ChainClient, action: PublishAction) {
         "trying to publish signature",
     );
 
-    let retry_cfg = RetryConfig {
-        max_attempts: MAX_PUBLISH_RETRY,
-        per_attempt_timeout: Duration::from_secs(120),
-        backoff: Backoff::Fixed(Duration::from_secs(5)),
+    let retry_config = RetryConfig {
+        max_times: MAX_PUBLISH_RETRY,
+        min_delay: PUBLISH_FIXED_DELAY,
+        max_delay: PUBLISH_FIXED_DELAY,
+        jitter: true,
     };
 
-    let publish_res: Result<(), RetryError<()>> = retry_async(
-        retry_cfg,
-        |_attempt| async {
+    let publish_res = retry_rpc!(
+        PUBLISH_ATTEMPT_TIMEOUT,
+        retry_config,
+        // Log the error and retry attempt
+        |attempt, err, sleep| {
+            tracing::warn!(
+                ?sign_id,
+                retry_count = attempt,
+                elapsed = ?action.timestamp.elapsed(),
+                ?chain,
+                "failed to publish ({err}), retrying in {sleep:?}"
+            );
+        },
+        // Try to publish the signature
+        {
             match &client {
                 ChainClient::Near(near) => {
                     try_publish_near(near, &action, &action.timestamp, &action.signature)
                         .await
-                        .map_err(|_| ())
+                        .map_err(|_| anyhow::anyhow!("Near publish failed"))
                 }
                 ChainClient::Ethereum(eth) => {
-                    try_publish_eth(eth, &action, &action.timestamp, &action.signature).await
+                    try_publish_eth(eth, &action, &action.timestamp, &action.signature)
+                        .await
+                        .map_err(|_| anyhow::anyhow!("Ethereum publish failed"))
                 }
                 ChainClient::Solana(sol) => {
                     try_publish_sol(sol, &action, &action.timestamp, &action.signature)
                         .await
-                        .map_err(|_| ())
+                        .map_err(|_| anyhow::anyhow!("Solana publish failed"))
                 }
                 ChainClient::Hydration(hyd) => {
                     try_publish_hydration(hyd, &action, &action.timestamp, &action.signature)
                         .await
-                        .map_err(|_| ())
+                        .map_err(|_| anyhow::anyhow!("Hydration publish failed"))
                 }
                 ChainClient::Canton(canton) => {
                     try_publish_canton(canton, &action, &action.timestamp, &action.signature)
                         .await
-                        .map_err(|_| ())
+                        .map_err(|_| anyhow::anyhow!("Canton publish failed"))
                 }
                 ChainClient::Err(msg) => {
                     tracing::error!(msg, "no client for chain");
                     Ok(())
                 }
             }
-        },
-        |_attempt, _reason| true,
-        |attempt, reason, sleep| match reason {
-            RetryReason::Error(_) => {
-                tracing::warn!(
-                    ?sign_id,
-                    retry_count = attempt.saturating_sub(1),
-                    elapsed = ?action.timestamp.elapsed(),
-                    chain = ?action.indexed.chain,
-                    "failed to publish, retrying in {sleep:?}"
-                );
-            }
-            RetryReason::Timeout(t) => {
-                tracing::warn!(
-                    ?sign_id,
-                    retry_count = attempt.saturating_sub(1),
-                    elapsed = ?action.timestamp.elapsed(),
-                    chain = ?action.indexed.chain,
-                    "publish timed out after {t:?}, retrying in {sleep:?}"
-                );
-            }
-        },
-    )
-    .await;
+        }
+    );
 
-    let publish_ok = publish_res.is_ok();
-
-    if publish_ok {
+    if publish_res.is_ok() {
         let elapsed_secs =
             crate::util::unix_elapsed(action.indexed.unix_timestamp_indexed).as_secs();
         if elapsed_secs <= chain.expected_response_time_secs() {
@@ -1429,12 +1452,6 @@ async fn try_publish_near(
     Ok(())
 }
 
-#[derive(Debug)]
-enum PollErr {
-    NotReady,
-    Rpc(anyhow::Error),
-}
-
 // wait for transaction receipt with max_attempts and exponential delay backoff starting at 5s
 async fn wait_for_pending_tx(
     provider: &EthContractFillProvider,
@@ -1442,61 +1459,36 @@ async fn wait_for_pending_tx(
     sign_ids: Vec<SignId>,
     max_attempts: usize,
 ) -> Result<Transaction, ()> {
-    let sign_ids_ref = &sign_ids;
-
-    let cfg = RetryConfig {
-        max_attempts,
-        per_attempt_timeout: Duration::from_secs(5),
-        backoff: Backoff::ExponentialJitter {
-            base: Duration::from_secs(1),
-            cap: Duration::from_secs(10),
-            jitter_max_ms: 0,
-        },
+    let retry_config = RetryConfig {
+        max_times: max_attempts,
+        min_delay: ETH_MEMPOOL_MIN_DELAY,
+        max_delay: ETH_MEMPOOL_MAX_DELAY,
+        jitter: true,
     };
 
-    let res: Result<Transaction, RetryError<PollErr>> = retry_async(
-        cfg,
-        |_attempt| async {
+    retry_rpc!(
+        ETH_MEMPOOL_TIMEOUT,
+        retry_config,
+        // Log the error and retry attempt
+        |attempt, err, sleep| {
+            tracing::error!(
+                ?sign_ids,
+                attempt,
+                "failed to get eth signature respond pending transaction: {err}, retrying in {sleep:?}"
+            );
+        },
+        // Try to get the pending transaction
+        {
             match provider.get_transaction_by_hash(tx_hash).await {
                 Ok(Some(tx)) => {
-                    tracing::info!(?sign_ids_ref, "eth signature respond pending transaction found");
+                    tracing::info!(?sign_ids, "eth signature respond pending transaction found");
                     Ok(tx)
                 }
-                Ok(None) => Err(PollErr::NotReady),
-                Err(e) => Err(PollErr::Rpc(anyhow::anyhow!(e))),
+                Ok(None) => Err(anyhow::anyhow!("Transaction not in mempool yet")),
+                Err(e) => Err(anyhow::anyhow!("RPC Error: {e}")),
             }
-        },
-        |_attempt, _reason| true,
-        |attempt, reason, sleep| match reason {
-            RetryReason::Error(PollErr::NotReady) => {
-                tracing::error!(
-                    ?sign_ids_ref,
-                    attempt,
-                    "eth signature respond pending transaction not found, retrying in {sleep:?}"
-                );
-            }
-            RetryReason::Error(PollErr::Rpc(e)) => {
-                tracing::error!(
-                    ?sign_ids_ref,
-                    attempt,
-                    "failed to get eth signature respond pending transaction, retrying in {sleep:?}: {e:?}"
-                );
-            }
-            RetryReason::Timeout(_t) => {
-                tracing::error!(
-                    ?sign_ids_ref,
-                    attempt,
-                    "timeout while getting eth signature respond pending transaction, retrying in {sleep:?}"
-                );
-            }
-        },
-    )
-    .await;
-
-    match res {
-        Ok(tx) => Ok(tx),
-        Err(_) => Err(()),
-    }
+        }
+    ).map_err(|_| ())
 }
 
 // wait for transaction receipt with max_attempts and exponential delay backoff starting at 5s
@@ -1506,88 +1498,36 @@ async fn wait_for_transaction_receipt(
     sign_ids: Vec<SignId>,
     max_attempts: usize,
 ) -> Result<TransactionReceipt, ()> {
-    let sign_ids_ref = &sign_ids;
-
     let retry_config = RetryConfig {
-        max_attempts,
-        per_attempt_timeout: Duration::from_secs(2),
-        backoff: Backoff::ExponentialJitter {
-            base: Duration::from_secs(1),
-            cap: Duration::from_secs(20),
-            jitter_max_ms: 0,
-        },
+        max_times: max_attempts,
+        min_delay: ETH_RECEIPT_MIN_DELAY,
+        max_delay: ETH_RECEIPT_MAX_DELAY,
+        jitter: true,
     };
 
-    let res: Result<TransactionReceipt, RetryError<PollErr>> = retry_async(
+    retry_rpc!(
+        ETH_RECEIPT_TIMEOUT,
         retry_config,
-        |_attempt| async {
+        // Log the error and retry attempt
+        |attempt, err, sleep| {
+            tracing::error!(
+                ?sign_ids,
+                attempt,
+                "failed to get eth signature respond transaction receipt: {err}, retrying in {sleep:?}"
+            );
+        },
+        // Try to get the transaction receipt
+        {
             match provider.get_transaction_receipt(tx_hash).await {
                 Ok(Some(receipt)) => {
-                    tracing::info!(?sign_ids_ref, "eth signature respond transaction receipt found");
+                    tracing::info!(?sign_ids, "eth signature respond transaction receipt found");
                     Ok(receipt)
                 }
-                Ok(None) => Err(PollErr::NotReady),
-                Err(e) => Err(PollErr::Rpc(anyhow::anyhow!(e))),
+                Ok(None) => Err(anyhow::anyhow!("Receipt not ready yet")),
+                Err(e) => Err(anyhow::anyhow!("RPC Error: {e}")),
             }
-        },
-        |_attempt, _reason| true,
-        |attempt, reason, sleep| match reason {
-            RetryReason::Error(PollErr::NotReady) => {
-                tracing::error!(
-                    ?sign_ids_ref,
-                    attempt,
-                    "eth signature respond transaction receipt not found, retrying in {sleep:?}"
-                );
-            }
-            RetryReason::Error(PollErr::Rpc(e)) => {
-                tracing::error!(
-                    ?sign_ids_ref,
-                    attempt,
-                    "failed to get eth signature respond transaction receipt, retrying in {sleep:?}: {e:?}"
-                );
-            }
-            RetryReason::Timeout(_t) => {
-                tracing::error!(
-                    ?sign_ids_ref,
-                    attempt,
-                    "timeout while getting eth signature respond transaction receipt, retrying in {sleep:?}"
-                );
-            }
-        },
-    )
-    .await;
-
-    match res {
-        Ok(r) => Ok(r),
-        Err(_) => Err(()),
-    }
-}
-
-fn log_retry_err(ctx: &str, sign_ids: &[SignId], err: RetryError<anyhow::Error>) {
-    match err {
-        RetryError::Exhausted {
-            attempts,
-            last_error,
-        } => {
-            tracing::error!(
-                ?sign_ids,
-                attempts,
-                ?last_error,
-                "{ctx}: retry attempts exhausted"
-            );
         }
-        RetryError::TimeoutExhausted {
-            attempts,
-            last_timeout,
-        } => {
-            tracing::error!(
-                ?sign_ids,
-                attempts,
-                ?last_timeout,
-                "{ctx}: timeout exhausted"
-            );
-        }
-    }
+    ).map_err(|_| ())
 }
 
 async fn send_eth_transaction(
@@ -1596,114 +1536,86 @@ async fn send_eth_transaction(
     gas: u64,
     sign_ids: &[SignId],
 ) -> Result<alloy::primitives::B256, ()> {
-    let cfg_nonce = RetryConfig {
-        max_attempts: 3,
-        per_attempt_timeout: Duration::from_secs(2),
-        backoff: Backoff::ExponentialJitter {
-            base: Duration::from_millis(500),
-            cap: Duration::from_secs(5),
-            jitter_max_ms: 200,
-        },
+    // TODO: fetching nonce from RPC is slow and expensive, consider better approach (fetch once, increment locally, etc.)
+    // 1. Fetch Nonce
+    let nonce_retry = RetryConfig {
+        max_times: ETH_NONCE_MAX_ATTEMPTS,
+        min_delay: ETH_NONCE_MIN_DELAY,
+        max_delay: ETH_NONCE_MAX_DELAY,
+        jitter: true,
     };
 
-    let nonce_res: Result<u64, RetryError<anyhow::Error>> = retry_async(
-        cfg_nonce,
-        |_attempt| async {
+    let nonce = match retry_rpc!(
+        ETH_NONCE_TIMEOUT,
+        nonce_retry,
+        // Log the error and retry attempt
+        |attempt, err, sleep| {
+            tracing::warn!(
+                ?sign_ids,
+                attempt,
+                "get_nonce failed: {err}, retrying in {sleep:?}"
+            );
+        },
+        // Try to get the nonce
+        {
             contract
                 .provider()
                 .get_transaction_count(contract.provider().default_signer_address())
                 .pending()
                 .await
-                .map_err(|e| anyhow::anyhow!(e))
-        },
-        |_attempt, _reason| true,
-        |attempt, reason, sleep| match reason {
-            RetryReason::Error(e) => {
-                tracing::warn!(
-                    ?sign_ids,
-                    attempt,
-                    ?e,
-                    "get_nonce failed, retrying in {sleep:?}"
-                );
-            }
-            RetryReason::Timeout(t) => {
-                tracing::warn!(
-                    ?sign_ids,
-                    attempt,
-                    "get_nonce timed out after {t:?}, retrying in {sleep:?}"
-                );
-            }
-        },
-    )
-    .await;
-
-    let nonce = match nonce_res {
-        Ok(nonce) => {
-            tracing::info!(nonce, "will send eth tx with nonce");
-            nonce
+                .map_err(|e| anyhow::anyhow!("RPC Error: {e}"))
         }
+    ) {
+        Ok(n) => n,
         Err(err) => {
-            log_retry_err("failed to get nonce", sign_ids, err);
+            tracing::error!(
+                ?sign_ids,
+                ?err,
+                "failed to get nonce: retry attempts exhausted"
+            );
             return Err(());
         }
     };
 
-    let cfg_send = RetryConfig {
-        max_attempts: 3,
-        per_attempt_timeout: Duration::from_secs(5),
-        backoff: Backoff::ExponentialJitter {
-            base: Duration::from_millis(500),
-            cap: Duration::from_secs(10),
-            jitter_max_ms: 200,
-        },
+    tracing::info!(nonce, "will send eth tx with nonce");
+
+    // 2. Send Tx
+    let send_retry = RetryConfig {
+        max_times: ETH_SEND_MAX_ATTEMPTS,
+        min_delay: ETH_SEND_MIN_DELAY,
+        max_delay: ETH_SEND_MAX_DELAY,
+        jitter: true,
     };
 
-    let send_res: Result<alloy::primitives::B256, RetryError<anyhow::Error>> = retry_async(
-        cfg_send,
-        |_attempt| async {
-            let pending = contract
+    retry_rpc!(
+        ETH_SEND_TIMEOUT,
+        send_retry,
+        |attempt, err, sleep| {
+            tracing::warn!(
+                ?sign_ids,
+                attempt,
+                "send eth tx failed: {err}, retrying in {sleep:?}"
+            );
+        },
+        {
+            contract
                 .function("respond", params)
                 .unwrap()
                 .gas(gas)
                 .nonce(nonce)
                 .send()
                 .await
-                .map_err(|e| anyhow::anyhow!(e))?;
-
-            Ok(*pending.tx_hash())
-        },
-        |_attempt, _reason| true,
-        |attempt, reason, sleep| match reason {
-            RetryReason::Error(e) => {
-                tracing::warn!(
-                    ?sign_ids,
-                    attempt,
-                    ?e,
-                    "send eth tx failed, retrying in {sleep:?}"
-                );
-            }
-            RetryReason::Timeout(t) => {
-                tracing::warn!(
-                    ?sign_ids,
-                    attempt,
-                    "send eth tx timed out after {t:?}, retrying in {sleep:?}"
-                );
-            }
-        },
-    )
-    .await;
-
-    match send_res {
-        Ok(tx_hash) => Ok(tx_hash),
-        Err(err) => {
-            log_retry_err(
-                "failed to send ethereum signature transaction",
-                sign_ids,
-                err,
-            );
-            Err(())
+                .map(|pending| *pending.tx_hash())
+                .map_err(|e| anyhow::anyhow!("RPC Error: {e}"))
         }
-    }
+    )
+    .map_err(|err| {
+        tracing::error!(
+            ?sign_ids,
+            ?err,
+            "failed to send ethereum signature transaction: retry attempts exhausted"
+        );
+    })
 }
 
 async fn try_publish_eth(
@@ -1730,7 +1642,7 @@ async fn try_publish_eth(
     let tx_hash = send_eth_transaction(
         &eth.contract,
         &params,
-        40000,
+        ETH_BASE_GAS_LIMIT,
         std::slice::from_ref(&action.indexed.id),
     )
     .await?;
@@ -1796,7 +1708,10 @@ async fn try_batch_publish_eth(
     }
 
     let params = [DynSolValue::Array(params_vec.clone())];
-    let gas = std::cmp::max(40000, 20000 * num_requests as u64);
+    let gas = std::cmp::max(
+        ETH_BASE_GAS_LIMIT,
+        ETH_BATCH_GAS_PER_REQUEST * num_requests as u64,
+    );
 
     let tx_hash = send_eth_transaction(&eth.contract, &params, gas, &sign_ids).await?;
 
@@ -1847,37 +1762,42 @@ async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAc
         .map(|action| (action.indexed.id, action.signature))
         .collect();
 
-    let cfg = RetryConfig {
-        max_attempts: MAX_PUBLISH_RETRY,
-        per_attempt_timeout: Duration::from_secs(120),
-        backoff: Backoff::ExponentialJitter {
-            base: Duration::from_secs(1),
-            cap: Duration::from_secs(10),
-            jitter_max_ms: 0,
-        },
+    let retry_config = RetryConfig {
+        max_times: MAX_PUBLISH_RETRY,
+        min_delay: BATCH_PUBLISH_MIN_DELAY,
+        max_delay: BATCH_PUBLISH_MAX_DELAY,
+        jitter: true,
     };
 
-    let res: Result<(), RetryError<()>> = retry_async(
-        cfg,
-        |_attempt| async {
+    let res = retry_rpc!(
+        PUBLISH_ATTEMPT_TIMEOUT,
+        retry_config,
+        // Log the error and retry attempt
+        |attempt, err, sleep| {
+            tracing::warn!(
+                "batch publish failed (attempt {attempt}): {err}, retrying in {sleep:?}"
+            );
+        },
+        // Try to publish the signatures in batch
+        {
             match client {
+                ChainClient::Ethereum(eth) => try_batch_publish_eth(eth, actions, &signatures)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Eth batch publish failed")),
                 ChainClient::Near(_) => {
-                    tracing::error!("near has no batch publish");
+                    tracing::error!("Near has no batch publish");
                     Ok(())
                 }
                 ChainClient::Solana(_) => {
                     tracing::error!("Solana has no batch publish");
                     Ok(())
                 }
-                ChainClient::Ethereum(eth) => {
-                    try_batch_publish_eth(eth, actions, &signatures).await
-                }
                 ChainClient::Hydration(_) => {
                     tracing::error!("Hydration has no batch publish");
                     Ok(())
                 }
                 ChainClient::Canton(_) => {
-                    tracing::error!("Canton does not support batch publish");
+                    tracing::error!("Canton has no batch publish");
                     Ok(())
                 }
                 ChainClient::Err(msg) => {
@@ -1885,20 +1805,8 @@ async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAc
                     Ok(())
                 }
             }
-        },
-        |_attempt, _reason| true,
-        |attempt, reason, sleep| match reason {
-            RetryReason::Error(_e) => {
-                tracing::warn!("batch publish failed (attempt {attempt}), retrying in {sleep:?}");
-            }
-            RetryReason::Timeout(t) => {
-                tracing::warn!(
-                    "batch publish timed out after {t:?} (attempt {attempt}), retrying in {sleep:?}"
-                );
-            }
-        },
-    )
-    .await;
+        }
+    );
 
     if res.is_ok() {
         for action in actions.iter() {
@@ -1926,11 +1834,10 @@ async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAc
                 action.timestamp,
             );
         }
-        actions.clear();
-        return;
+    } else {
+        tracing::info!("exceeded max retries, trashing publish request");
     }
 
-    tracing::info!("exceeded max retries, trashing publish request");
     actions.clear();
 }
 

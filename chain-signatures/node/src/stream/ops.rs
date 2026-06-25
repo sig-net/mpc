@@ -1,13 +1,13 @@
 use crate::backlog::Backlog;
-use crate::metrics::requests::record_indexing_step_reached;
 use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::{SignBidirectionalEventExt, SignStatus};
 use anchor_lang::prelude::Pubkey;
+use mpc_indexer_core::ChainTelemetry;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, ChainTelemetry, ExecutionOutcome,
-    RespondBidirectionalEvent, SignId, SignKind, Signature, SignatureRespondedEvent,
+    BidirectionalTx, BidirectionalTxId, ExecutionOutcome, RespondBidirectionalEvent, SignId,
+    SignKind, Signature, SignatureRespondedEvent,
 };
 use tokio::sync::mpsc;
 
@@ -17,11 +17,6 @@ pub(crate) async fn process_sign_request(
     backlog: Backlog,
     caught_up: bool,
 ) -> anyhow::Result<()> {
-    // Ethereum records its own indexing latency (includes finality delay) from the block timestamp in `parse_block`.
-    if sign_request.chain != Chain::Ethereum {
-        record_indexing_step_reached(sign_request.chain);
-    }
-
     if matches!(sign_request.kind, SignKind::RespondBidirectional(_)) {
         anyhow::bail!("Unexpected sign request kind");
     }
@@ -444,9 +439,8 @@ mod tests {
     use alloy::primitives::{Address, B256};
     use cait_sith::protocol::Participant;
     use k256::{ProjectivePoint, Scalar};
-    use mpc_primitives::{
-        RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind, StateManager,
-    };
+    use mpc_indexer_core::StateManager;
+    use mpc_primitives::{RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind};
     use near_primitives::types::AccountId;
     use solana_sdk::pubkey::Pubkey;
     use std::time::Duration;

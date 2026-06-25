@@ -4,9 +4,9 @@ use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt, SignSta
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use anyhow::Context;
+use mpc_indexer_core::StateManager;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PendingTx, SignId, SignKind,
-    StateManager,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
