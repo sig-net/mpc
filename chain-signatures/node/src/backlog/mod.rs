@@ -587,7 +587,7 @@ impl Backlog {
 
     /// Called when consensus confirms a checkpoint (via the watcher).
     /// Removes it from pending and persists to storage as the latest consensus checkpoint.
-    pub(crate) async fn on_consensus_confirmed(&self, chain: Chain, checkpoint: &Checkpoint) {
+    pub async fn on_consensus_confirmed(&self, chain: Chain, checkpoint: &Checkpoint) {
         // Remove from pending checkpoints (frees a slot for future checkpoints)
         {
             let mut pending = self.pending_checkpoints(&chain).write().await;

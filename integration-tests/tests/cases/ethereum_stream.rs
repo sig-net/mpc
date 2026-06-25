@@ -431,7 +431,10 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     seeded_backlog
         .set_processed_block(Chain::Ethereum, processed_height)
         .await;
-    seeded_backlog.checkpoint(Chain::Ethereum).await;
+    let checkpoint = seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
+    seeded_backlog
+        .on_consensus_confirmed(Chain::Ethereum, &checkpoint)
+        .await;
 
     let mut expected_payload = [0x32; 32];
     loop {
@@ -550,7 +553,10 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     seeded_backlog
         .set_processed_block(Chain::Ethereum, checkpoint_height)
         .await;
-    seeded_backlog.checkpoint(Chain::Ethereum).await;
+    let checkpoint = seeded_backlog.checkpoint(Chain::Ethereum).await.unwrap();
+    seeded_backlog
+        .on_consensus_confirmed(Chain::Ethereum, &checkpoint)
+        .await;
 
     let backlog = Backlog::persisted(storage.clone());
 
