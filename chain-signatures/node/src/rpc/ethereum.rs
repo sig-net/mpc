@@ -3,16 +3,17 @@ use crate::indexer_eth::abi::ChainSignatures;
 use crate::indexer_eth::EthConfig;
 use crate::util::retry::{retry_rpc, RetryConfig};
 use alloy::network::EthereumWallet;
-use alloy::primitives::Address;
-use alloy::primitives::U256;
-use alloy::providers::fillers::{FillProvider, JoinFill, WalletFiller};
-use alloy::providers::ProviderBuilder;
-use alloy::providers::{Provider, RootProvider, WalletProvider};
-use alloy::rpc::types::{Transaction, TransactionReceipt};
+use alloy::primitives::{Address, B256, U256};
+use alloy::providers::{
+    fillers::{
+        BlobGasFiller, ChainIdFiller, FillProvider, GasFiller, JoinFill, NonceFiller, WalletFiller,
+    },
+    Provider, ProviderBuilder, RootProvider, WalletProvider,
+};
+use alloy::rpc::types::TransactionReceipt;
 use alloy_signer_local::PrivateKeySigner;
-use k256::elliptic_curve::point::AffineCoordinates;
-use k256::elliptic_curve::sec1::ToEncodedPoint;
-use mpc_primitives::{Chain, SignId, Signature};
+use k256::elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint};
+use mpc_primitives::{SignId, Signature};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -21,16 +22,7 @@ type EthContractFillProvider = FillProvider<
     JoinFill<
         JoinFill<
             alloy::providers::Identity,
-            JoinFill<
-                alloy::providers::fillers::GasFiller,
-                JoinFill<
-                    alloy::providers::fillers::BlobGasFiller,
-                    JoinFill<
-                        alloy::providers::fillers::NonceFiller,
-                        alloy::providers::fillers::ChainIdFiller,
-                    >,
-                >,
-            >,
+            JoinFill<GasFiller, JoinFill<BlobGasFiller, JoinFill<NonceFiller, ChainIdFiller>>>,
         >,
         WalletFiller<EthereumWallet>,
     >,
@@ -42,11 +34,6 @@ const ETH_SEND_MAX_ATTEMPTS: usize = 3;
 const ETH_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const ETH_SEND_MIN_DELAY: Duration = Duration::from_millis(500);
 const ETH_SEND_MAX_DELAY: Duration = Duration::from_secs(10);
-
-// Polling Mempool
-const ETH_MEMPOOL_TIMEOUT: Duration = Duration::from_secs(5);
-const ETH_MEMPOOL_MIN_DELAY: Duration = Duration::from_secs(1);
-const ETH_MEMPOOL_MAX_DELAY: Duration = Duration::from_secs(10);
 
 // Polling Receipt
 const ETH_RECEIPT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -100,8 +87,8 @@ impl EthClient {
     // Wait for transaction receipt with max_attempts and exponential delay backoff starting at 5s
     async fn wait_for_transaction_receipt(
         &self,
-        tx_hash: alloy::primitives::B256,
-        sign_ids: Vec<SignId>,
+        tx_hash: B256,
+        sign_ids: &[SignId],
     ) -> Result<TransactionReceipt, ()> {
         let retry_config = RetryConfig {
             max_times: ETH_TX_RECEIPT_MAX_ATTEMPTS,
@@ -129,45 +116,6 @@ impl EthClient {
                         Ok(receipt)
                     }
                     Ok(None) => Err(anyhow::anyhow!("Receipt not ready yet")),
-                    Err(e) => Err(anyhow::anyhow!("RPC Error: {e}")),
-                }
-            }
-        ).map_err(|_| ())
-    }
-
-    // TODO: This is probably redundant since `wait_for_transaction_receipt` already waits for the transaction to be mined.
-    // Wait for transaction receipt with max_attempts and exponential delay backoff starting at 5s
-    async fn wait_for_pending_tx(
-        &self,
-        tx_hash: alloy::primitives::B256,
-        sign_ids: Vec<SignId>,
-    ) -> Result<Transaction, ()> {
-        let retry_config = RetryConfig {
-            max_times: ETH_TX_RECEIPT_MAX_ATTEMPTS,
-            min_delay: ETH_MEMPOOL_MIN_DELAY,
-            max_delay: ETH_MEMPOOL_MAX_DELAY,
-            jitter: true,
-        };
-
-        retry_rpc!(
-            ETH_MEMPOOL_TIMEOUT,
-            retry_config,
-            // Log the error and retry attempt
-            |attempt, err, sleep| {
-                tracing::error!(
-                    ?sign_ids,
-                    attempt,
-                    "failed to get eth signature respond pending transaction: {err}, retrying in {sleep:?}"
-                );
-            },
-            // Try to get the pending transaction
-            {
-                match self.contract.provider().get_transaction_by_hash(tx_hash).await {
-                    Ok(Some(tx)) => {
-                        tracing::info!(?sign_ids, "eth signature respond pending transaction found");
-                        Ok(tx)
-                    }
-                    Ok(None) => Err(anyhow::anyhow!("Transaction not in mempool yet")),
                     Err(e) => Err(anyhow::anyhow!("RPC Error: {e}")),
                 }
             }
@@ -233,73 +181,65 @@ impl EthClient {
         })
     }
 
+    /// Shared logic to send the transaction, wait for the receipt, and verify success.
+    async fn execute_publish(
+        &self,
+        responses: Vec<ChainSignatures::Response>,
+        gas: u64,
+        sign_ids: &[SignId],
+    ) -> Result<(), ()> {
+        let tx_hash = self.send_responses(responses, gas, sign_ids).await?;
+        let receipt = self.wait_for_transaction_receipt(tx_hash, sign_ids).await?;
+
+        if !receipt.status() {
+            tracing::error!(?sign_ids, ?tx_hash, "ethereum transaction failed");
+            return Err(());
+        }
+
+        tracing::info!(
+            ?sign_ids,
+            ?tx_hash,
+            "ethereum transaction published successfully"
+        );
+        Ok(())
+    }
+
     pub async fn publish_signature(
         &self,
         action: &PublishAction,
         timestamp: &Instant,
         mpc_sig: &mpc_primitives::Signature,
     ) -> Result<(), ()> {
-        let sign_id = action.indexed.id;
-
         let response = ChainSignatures::Response {
             requestId: action.indexed.id.request_id.into(),
             signature: mpc_sig.into(),
         };
 
-        let tx_hash = self
-            .send_responses(
-                vec![response],
-                ETH_BASE_GAS_LIMIT,
-                std::slice::from_ref(&action.indexed.id),
-            )
-            .await?;
+        self.execute_publish(
+            vec![response],
+            ETH_BASE_GAS_LIMIT,
+            std::slice::from_ref(&action.indexed.id),
+        )
+        .await?;
 
-        let receipt = self
-            .wait_for_transaction_receipt(tx_hash, vec![action.indexed.id])
-            .await?;
-
-        // Check if transaction was successful
-        if !receipt.status() {
-            tracing::error!(
-                ?sign_id,
-                tx_hash = ?receipt.transaction_hash,
-                "transaction failed"
-            );
-            return Err(());
-        }
-
-        let tx_hash = receipt.transaction_hash;
-        tracing::info!(
-            ?sign_id,
-            tx_hash = ?tx_hash,
-            elapsed = ?timestamp.elapsed(),
-            "published ethereum signature successfully"
-        );
+        tracing::info!(elapsed = ?timestamp.elapsed(), "single publish complete");
         Ok(())
     }
 
-    pub async fn batch_publish_signature(
+    pub async fn batch_publish_signatures(
         &self,
         actions: &[PublishAction],
         signatures: &HashMap<SignId, Signature>,
     ) -> Result<(), ()> {
-        let chain = Chain::Ethereum;
         let num_requests = actions.len();
-        let sign_ids = actions
-            .iter()
-            .map(|action| action.indexed.id)
-            .collect::<Vec<_>>();
+        let sign_ids: Vec<_> = actions.iter().map(|a| a.indexed.id).collect();
 
-        tracing::info!(?sign_ids, "will send eth batch tx");
-
-        // Map to typed ABI structs
         let responses: Vec<ChainSignatures::Response> = actions
             .iter()
             .map(|action| {
                 let mpc_sig = signatures
                     .get(&action.indexed.id)
-                    .expect("signature not found in map");
-
+                    .expect("signature not found");
                 ChainSignatures::Response {
                     requestId: action.indexed.id.request_id.into(),
                     signature: mpc_sig.into(),
@@ -307,45 +247,14 @@ impl EthClient {
             })
             .collect();
 
-        // Calculate Gas
         let gas = std::cmp::max(
             ETH_BASE_GAS_LIMIT,
             ETH_BATCH_GAS_PER_REQUEST * num_requests as u64,
         );
 
-        // Send Transaction with typed ABI Call
-        let tx_hash = self.send_responses(responses, gas, &sign_ids).await?;
+        self.execute_publish(responses, gas, &sign_ids).await?;
 
-        tracing::info!(?tx_hash, "sent eth tx");
-
-        // Wait for mempool
-        let tx = self.wait_for_pending_tx(tx_hash, sign_ids.clone()).await?;
-
-        tracing::info!(?tx, "tx found in mempool");
-
-        // Wait for receipt
-        let receipt = self
-            .wait_for_transaction_receipt(tx_hash, sign_ids.clone())
-            .await?;
-
-        // Check status
-        if !receipt.status() {
-            tracing::error!(
-                ?sign_ids,
-                tx_hash = ?receipt.transaction_hash,
-                "eth batch transaction failed"
-            );
-            return Err(());
-        }
-
-        let tx_hash = receipt.transaction_hash;
-        tracing::info!(
-            ?chain,
-            ?sign_ids,
-            ?tx_hash,
-            num_requests,
-            "eth batch published ethereum signatures successfully"
-        );
+        tracing::info!(num_requests, "batch publish complete");
         Ok(())
     }
 }

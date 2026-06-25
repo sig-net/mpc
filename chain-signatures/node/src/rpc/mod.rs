@@ -754,7 +754,7 @@ async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAc
         {
             match client {
                 ChainClient::Ethereum(eth) => eth
-                    .batch_publish_signature(actions, &signatures)
+                    .batch_publish_signatures(actions, &signatures)
                     .await
                     .map_err(|_| anyhow::anyhow!("Eth batch publish failed")),
                 ChainClient::Near(_) => {
