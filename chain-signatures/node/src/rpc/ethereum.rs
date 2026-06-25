@@ -1,8 +1,7 @@
 use super::PublishAction;
+use crate::indexer_eth::abi::ChainSignatures;
 use crate::indexer_eth::EthConfig;
 use crate::util::retry::{retry_rpc, RetryConfig};
-use alloy::contract::{ContractInstance, Interface};
-use alloy::dyn_abi::DynSolValue;
 use alloy::network::EthereumWallet;
 use alloy::primitives::Address;
 use alloy::primitives::U256;
@@ -37,7 +36,6 @@ type EthContractFillProvider = FillProvider<
     >,
     RootProvider,
 >;
-type EthContractInstance = ContractInstance<EthContractFillProvider>;
 
 // Get nonce retry constants
 const ETH_NONCE_MAX_ATTEMPTS: usize = 3;
@@ -70,7 +68,7 @@ const ETH_TX_RECEIPT_MAX_ATTEMPTS: usize = 6;
 
 #[derive(Clone)]
 pub struct EthClient {
-    contract: EthContractInstance,
+    contract: ChainSignatures::ChainSignaturesInstance<EthContractFillProvider>,
 }
 
 impl EthClient {
@@ -83,21 +81,11 @@ impl EthClient {
         let provider = ProviderBuilder::new()
             .wallet(wallet)
             .connect_http(eth.execution_rpc_http_url.parse().unwrap());
-        // Create a contract instance.
-        let json: serde_json::Value = serde_json::from_slice(include_bytes!(
-            "../../../contract-eth/artifacts/contracts/ChainSignatures.sol/ChainSignatures.json"
-        ))
-        .unwrap();
 
-        // Get `abi` from the artifact.
-        let abi_value = json.get("abi").expect("Failed to get ABI from artifact");
-        let abi = serde_json::from_str(&abi_value.to_string()).unwrap();
+        // Build the contract instance
+        let address = Address::from_str(&format!("0x{}", eth.contract_address)).unwrap();
+        let contract = ChainSignatures::new(address, provider);
 
-        let contract = ContractInstance::new(
-            Address::from_str(&format!("0x{}", eth.contract_address)).unwrap(),
-            provider.clone(),
-            Interface::new(abi),
-        );
         Self { contract }
     }
 }
@@ -180,9 +168,9 @@ async fn wait_for_transaction_receipt(
     ).map_err(|_| ())
 }
 
-async fn send_eth_transaction(
-    contract: &EthContractInstance,
-    params: &[DynSolValue],
+async fn send_eth_responses(
+    contract: &ChainSignatures::ChainSignaturesInstance<EthContractFillProvider>,
+    responses: Vec<ChainSignatures::Response>,
     gas: u64,
     sign_ids: &[SignId],
 ) -> Result<alloy::primitives::B256, ()> {
@@ -249,8 +237,7 @@ async fn send_eth_transaction(
         },
         {
             contract
-                .function("respond", params)
-                .unwrap()
+                .respond(responses)
                 .gas(gas)
                 .nonce(nonce)
                 .send()
@@ -272,26 +259,25 @@ pub async fn try_publish_eth(
     eth: &EthClient,
     action: &PublishAction,
     timestamp: &Instant,
-    signature: &Signature,
+    mpc_sig: &mpc_primitives::Signature,
 ) -> Result<(), ()> {
     let sign_id = action.indexed.id;
-    let params = [DynSolValue::Array(vec![DynSolValue::Tuple(vec![
-        DynSolValue::FixedBytes(action.indexed.id.request_id.into(), 32),
-        DynSolValue::Tuple(vec![
-            DynSolValue::Tuple(vec![
-                DynSolValue::from(U256::from_be_slice(&signature.big_r.x())),
-                DynSolValue::from(U256::from_be_slice(
-                    signature.big_r.to_encoded_point(false).y().unwrap(),
-                )),
-            ]),
-            DynSolValue::from(U256::from_be_slice(&signature.s.to_bytes())),
-            DynSolValue::from(signature.recovery_id),
-        ]),
-    ])])];
 
-    let tx_hash = send_eth_transaction(
+    let response = ChainSignatures::Response {
+        requestId: action.indexed.id.request_id.into(),
+        signature: ChainSignatures::Signature {
+            bigR: ChainSignatures::AffinePoint {
+                x: U256::from_be_slice(&mpc_sig.big_r.x()),
+                y: U256::from_be_slice(mpc_sig.big_r.to_encoded_point(false).y().unwrap()),
+            },
+            s: U256::from_be_slice(&mpc_sig.s.to_bytes()),
+            recoveryId: mpc_sig.recovery_id,
+        },
+    };
+
+    let tx_hash = send_eth_responses(
         &eth.contract,
-        &params,
+        vec![response],
         ETH_BASE_GAS_LIMIT,
         std::slice::from_ref(&action.indexed.id),
     )
@@ -331,42 +317,47 @@ pub async fn try_batch_publish_eth(
     signatures: &HashMap<SignId, Signature>,
 ) -> Result<(), ()> {
     let chain = Chain::Ethereum;
-    let mut params_vec = vec![];
     let num_requests = actions.len();
     let sign_ids = actions
         .iter()
         .map(|action| action.indexed.id)
         .collect::<Vec<_>>();
+
     tracing::info!(?sign_ids, "will send eth batch tx");
+
+    // Map to typed ABI structs
+    let mut responses = Vec::with_capacity(num_requests);
     for action in actions {
-        let signature = signatures
+        let mpc_sig = signatures
             .get(&action.indexed.id)
             .expect("signature not found in map");
-        params_vec.push(DynSolValue::Tuple(vec![
-            DynSolValue::FixedBytes(action.indexed.id.request_id.into(), 32),
-            DynSolValue::Tuple(vec![
-                DynSolValue::Tuple(vec![
-                    DynSolValue::from(U256::from_be_slice(&signature.big_r.x())),
-                    DynSolValue::from(U256::from_be_slice(
-                        signature.big_r.to_encoded_point(false).y().unwrap(),
-                    )),
-                ]),
-                DynSolValue::from(U256::from_be_slice(&signature.s.to_bytes())),
-                DynSolValue::from(signature.recovery_id),
-            ]),
-        ]));
+
+        let response = ChainSignatures::Response {
+            requestId: action.indexed.id.request_id.into(),
+            signature: ChainSignatures::Signature {
+                bigR: ChainSignatures::AffinePoint {
+                    x: U256::from_be_slice(&mpc_sig.big_r.x()),
+                    y: U256::from_be_slice(mpc_sig.big_r.to_encoded_point(false).y().unwrap()),
+                },
+                s: U256::from_be_slice(&mpc_sig.s.to_bytes()),
+                recoveryId: mpc_sig.recovery_id,
+            },
+        };
+        responses.push(response);
     }
 
-    let params = [DynSolValue::Array(params_vec.clone())];
+    // Calculate Gas
     let gas = std::cmp::max(
         ETH_BASE_GAS_LIMIT,
         ETH_BATCH_GAS_PER_REQUEST * num_requests as u64,
     );
 
-    let tx_hash = send_eth_transaction(&eth.contract, &params, gas, &sign_ids).await?;
+    // Send Transaction with typed ABI Call
+    let tx_hash = send_eth_responses(&eth.contract, responses, gas, &sign_ids).await?;
 
     tracing::info!(?tx_hash, "sent eth tx");
 
+    // Wait for mempool
     let tx = wait_for_pending_tx(
         eth.contract.provider(),
         tx_hash,
@@ -377,6 +368,7 @@ pub async fn try_batch_publish_eth(
 
     tracing::info!(?tx, "tx found in mempool");
 
+    // Wait for receipt
     let receipt = wait_for_transaction_receipt(
         eth.contract.provider(),
         tx_hash,
@@ -385,7 +377,7 @@ pub async fn try_batch_publish_eth(
     )
     .await?;
 
-    // Check if transaction was successful
+    // Check status
     if !receipt.status() {
         tracing::error!(
             ?sign_ids,
