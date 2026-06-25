@@ -637,7 +637,8 @@ impl MpcFixtureNodeBuilder {
             web_handle: None,
         };
 
-        let _ = node.start_web_interface(self.participant_info.account_id)
+        let _ = node
+            .start_web_interface(self.participant_info.account_id)
             .await;
 
         node

@@ -33,7 +33,9 @@ pub async fn align_backlog_with_consensus(
     if let Some(current_checkpoint) = backlog.latest_checkpoint(chain).await {
         if current_checkpoint.digest() == checkpoint_digest.digest {
             // Consensus matches our latest → confirm and persist it.
-            backlog.on_consensus_confirmed(chain, &current_checkpoint).await;
+            backlog
+                .on_consensus_confirmed(chain, &current_checkpoint)
+                .await;
             return None;
         }
 
@@ -127,8 +129,13 @@ mod tests {
     #[tokio::test]
     async fn test_align_zero_digest_returns_none() {
         let chain = Chain::Ethereum;
-        let (backlog, mut checkpoints_rx, mut mesh_rx, node_client, my_account_id) =
-            make_test_env(chain, CheckpointDigest { height: 0, digest: [0u8; 32] });
+        let (backlog, mut checkpoints_rx, mut mesh_rx, node_client, my_account_id) = make_test_env(
+            chain,
+            CheckpointDigest {
+                height: 0,
+                digest: [0u8; 32],
+            },
+        );
 
         let result = align_backlog_with_consensus(
             chain,
@@ -175,7 +182,10 @@ mod tests {
 
         // Checkpoint should be persisted as latest consensus checkpoint
         let persisted = backlog.storage.load_latest(chain).await.unwrap();
-        assert!(persisted.is_some(), "matching checkpoint should be persisted");
+        assert!(
+            persisted.is_some(),
+            "matching checkpoint should be persisted"
+        );
         assert_eq!(persisted.unwrap().block_height, 100);
     }
 
@@ -211,13 +221,22 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_none(), "ahead with pending match should return None");
+        assert!(
+            result.is_none(),
+            "ahead with pending match should return None"
+        );
 
         // The matching checkpoint should be persisted
         let persisted = backlog.storage.load_latest(chain).await.unwrap();
-        assert!(persisted.is_some(), "matched checkpoint should be persisted");
-        assert_eq!(persisted.unwrap().block_height, 100,
-            "the persisted checkpoint should be the older matching one, not the latest");
+        assert!(
+            persisted.is_some(),
+            "matched checkpoint should be persisted"
+        );
+        assert_eq!(
+            persisted.unwrap().block_height,
+            100,
+            "the persisted checkpoint should be the older matching one, not the latest"
+        );
     }
 
     #[tokio::test]

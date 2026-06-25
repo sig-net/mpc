@@ -125,7 +125,6 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     tracing::warn!(?chain, %err, "failed to load local checkpoint");
                 }
             }
-
         }
 
         // Perform consensus checkpoint alignment. Returns None when no alignment is
@@ -255,7 +254,9 @@ async fn detect_regression(
 
     // Consensus matches our latest local checkpoint → confirm and persist.
     if current_checkpoint.digest() == checkpoint_digest.digest {
-        backlog.on_consensus_confirmed(chain, &current_checkpoint).await;
+        backlog
+            .on_consensus_confirmed(chain, &current_checkpoint)
+            .await;
         return None;
     }
 
@@ -283,7 +284,13 @@ mod tests {
     use super::*;
     use crate::backlog::Backlog;
 
-    fn make_digest(height: u64, digest: [u8; 32]) -> (watch::Sender<CheckpointDigest>, watch::Receiver<CheckpointDigest>) {
+    fn make_digest(
+        height: u64,
+        digest: [u8; 32],
+    ) -> (
+        watch::Sender<CheckpointDigest>,
+        watch::Receiver<CheckpointDigest>,
+    ) {
         watch::channel(CheckpointDigest { height, digest })
     }
 
@@ -294,7 +301,10 @@ mod tests {
         let (_tx, mut rx) = make_digest(0, [0u8; 32]);
 
         let result = detect_regression(chain, &backlog, &mut rx).await;
-        assert!(result.is_none(), "zero digest should not trigger regression");
+        assert!(
+            result.is_none(),
+            "zero digest should not trigger regression"
+        );
     }
 
     #[tokio::test]
@@ -309,11 +319,17 @@ mod tests {
         let (_tx, mut rx) = make_digest(100, digest);
 
         let result = detect_regression(chain, &backlog, &mut rx).await;
-        assert!(result.is_none(), "matching digest should not trigger regression");
+        assert!(
+            result.is_none(),
+            "matching digest should not trigger regression"
+        );
 
         // Checkpoint should have been persisted
         let persisted = backlog.storage.load_latest(chain).await.unwrap();
-        assert!(persisted.is_some(), "matching checkpoint should be persisted");
+        assert!(
+            persisted.is_some(),
+            "matching checkpoint should be persisted"
+        );
         assert_eq!(persisted.unwrap().block_height, 100);
     }
 
@@ -333,7 +349,10 @@ mod tests {
         let (_tx, mut rx) = make_digest(100, digest1);
 
         let result = detect_regression(chain, &backlog, &mut rx).await;
-        assert!(result.is_none(), "ahead with match should not trigger regression");
+        assert!(
+            result.is_none(),
+            "ahead with match should not trigger regression"
+        );
 
         // The earlier checkpoint should be persisted
         let persisted = backlog.storage.load_latest(chain).await.unwrap();
@@ -370,6 +389,9 @@ mod tests {
         let (_tx, mut rx) = make_digest(100, digest);
 
         let result = detect_regression(chain, &backlog, &mut rx).await;
-        assert!(result.is_none(), "no local checkpoint should not trigger regression");
+        assert!(
+            result.is_none(),
+            "no local checkpoint should not trigger regression"
+        );
     }
 }

@@ -1,10 +1,10 @@
 //! Tests checkpoint consensus alignment via peer-to-peer HTTP fetch.
 
 use integration_tests::mpc_fixture::{mock_stream::MockStream, MpcFixtureBuilder};
-use mpc_node::backlog::Backlog;
 use mpc_node::backlog::consensus::align_backlog_with_consensus;
-use mpc_node::mesh::MeshState;
+use mpc_node::backlog::Backlog;
 use mpc_node::mesh::connection::NodeStatus;
+use mpc_node::mesh::MeshState;
 use mpc_node::node_client::{NodeClient, Options as NodeClientOptions};
 use mpc_node::protocol::ParticipantInfo;
 use mpc_node::storage::CheckpointStorage;
@@ -24,7 +24,9 @@ async fn test_web_server_serves_checkpoint() {
 
     network.wait_for_running().await;
     network.assert_triples(4, Duration::from_secs(30)).await;
-    network.assert_presignatures(4, Duration::from_secs(30)).await;
+    network
+        .assert_presignatures(4, Duration::from_secs(30))
+        .await;
 
     let chain = Chain::Ethereum;
     let interval = chain.checkpoint_interval().unwrap();
@@ -68,7 +70,9 @@ async fn test_web_server_serves_checkpoint() {
     let checkpoints: std::collections::HashMap<Chain, mpc_primitives::Checkpoint> =
         ciborium::from_reader(body.as_ref()).expect("should deserialize checkpoint");
 
-    let retrieved = checkpoints.get(&chain).expect("should have ethereum checkpoint");
+    let retrieved = checkpoints
+        .get(&chain)
+        .expect("should have ethereum checkpoint");
     assert_eq!(
         retrieved.block_height, interval,
         "retrieved checkpoint height should match"
@@ -91,7 +95,9 @@ async fn test_consensus_alignment_peer_fetch() {
 
     network.wait_for_running().await;
     network.assert_triples(4, Duration::from_secs(30)).await;
-    network.assert_presignatures(4, Duration::from_secs(30)).await;
+    network
+        .assert_presignatures(4, Duration::from_secs(30))
+        .await;
 
     let chain = Chain::Ethereum;
     let interval = chain.checkpoint_interval().unwrap();
@@ -198,7 +204,9 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
 
     network.wait_for_running().await;
     network.assert_triples(4, Duration::from_secs(30)).await;
-    network.assert_presignatures(4, Duration::from_secs(30)).await;
+    network
+        .assert_presignatures(4, Duration::from_secs(30))
+        .await;
 
     let chain = Chain::Ethereum;
 

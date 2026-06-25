@@ -548,7 +548,9 @@ impl Backlog {
                 Some(checkpoint)
             } else {
                 tracing::warn!(
-                    ?chain, height, tx_count,
+                    ?chain,
+                    height,
+                    tx_count,
                     "checkpoint creation stalled (pending cap reached)"
                 );
                 None
@@ -2192,10 +2194,7 @@ mod tests {
 
         // Use set_processed_block at interval boundaries which auto-creates
         // checkpoints. Each call creates one checkpoint.
-        let cp1 = backlog
-            .set_processed_block(chain, interval)
-            .await
-            .unwrap();
+        let cp1 = backlog.set_processed_block(chain, interval).await.unwrap();
         let cp2 = backlog
             .set_processed_block(chain, 2 * interval)
             .await
@@ -2218,10 +2217,7 @@ mod tests {
 
         // Confirm second → pending has 0
         backlog.on_consensus_confirmed(chain, &cp2).await;
-        assert_eq!(
-            backlog.pending_checkpoints(&chain).read().await.len(),
-            0
-        );
+        assert_eq!(backlog.pending_checkpoints(&chain).read().await.len(), 0);
     }
 
     #[tokio::test]
@@ -2231,7 +2227,10 @@ mod tests {
         let interval = chain.checkpoint_interval().unwrap();
 
         backlog.set_processed_block(chain, interval).await.unwrap();
-        backlog.set_processed_block(chain, 2 * interval).await.unwrap();
+        backlog
+            .set_processed_block(chain, 2 * interval)
+            .await
+            .unwrap();
 
         assert_eq!(
             backlog.pending_checkpoints(&chain).read().await.len(),
@@ -2241,9 +2240,7 @@ mod tests {
 
         // Recover to a new checkpoint (simulating regression)
         let fresh = Backlog::new();
-        let recovery_cp = fresh
-            .set_processed_block(chain, interval / 2)
-            .await;
+        let recovery_cp = fresh.set_processed_block(chain, interval / 2).await;
         // interval/2 is not a multiple of interval → no auto-checkpoint
         assert!(recovery_cp.is_none());
         // Force create a checkpoint at that height
@@ -2271,10 +2268,7 @@ mod tests {
         let interval = chain.checkpoint_interval().unwrap();
 
         // Generate 3 checkpoints. Each call creates one checkpoint.
-        let _cp1 = backlog
-            .set_processed_block(chain, interval)
-            .await
-            .unwrap();
+        let _cp1 = backlog.set_processed_block(chain, interval).await.unwrap();
         let cp2 = backlog
             .set_processed_block(chain, 2 * interval)
             .await
@@ -2332,10 +2326,7 @@ mod tests {
         let chain = Chain::Ethereum;
         let interval = chain.checkpoint_interval().unwrap();
 
-        let cp = backlog
-            .set_processed_block(chain, interval)
-            .await
-            .unwrap();
+        let cp = backlog.set_processed_block(chain, interval).await.unwrap();
         let digest = cp.digest();
 
         // Confirm it (removes from pending, persists to storage)

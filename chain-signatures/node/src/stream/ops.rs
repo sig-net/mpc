@@ -880,7 +880,9 @@ mod tests {
         let checkpoint = backlog.checkpoint(tx.source_chain).await.unwrap();
 
         // Simulate consensus confirmation so storage has the checkpoint
-        backlog.on_consensus_confirmed(tx.source_chain, &checkpoint).await;
+        backlog
+            .on_consensus_confirmed(tx.source_chain, &checkpoint)
+            .await;
 
         let threshold = 1;
         let mut mesh_state = MeshState::default();

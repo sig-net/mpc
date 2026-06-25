@@ -84,9 +84,7 @@ impl CheckpointStorage {
                     None => Ok(None),
                 }
             }
-            CheckpointStorage::InMemory { latest } => {
-                Ok(latest.read().await.get(&chain).cloned())
-            }
+            CheckpointStorage::InMemory { latest } => Ok(latest.read().await.get(&chain).cloned()),
         }
     }
 
