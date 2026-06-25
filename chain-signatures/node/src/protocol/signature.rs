@@ -411,7 +411,7 @@ impl SignOrganizer {
             (active, proposer, is_proposer)
         };
 
-        if is_proposer {
+        if is_proposer && !matches!(state.indexed().kind, SignKind::Checkpoint(_)) {
             let remaining = state.budget.remaining();
             tracing::info!(
                 ?sign_id,
