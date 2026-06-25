@@ -13,7 +13,7 @@ use rand::thread_rng;
 use std::time::Duration;
 use tokio::sync::watch;
 
-pub(crate) async fn align_backlog_with_consensus(
+pub async fn align_backlog_with_consensus(
     chain: Chain,
     backlog: &Backlog,
     checkpoints_rx: &mut watch::Receiver<CheckpointDigest>,
@@ -97,6 +97,160 @@ pub(crate) async fn align_backlog_with_consensus(
     }
 
     Some(height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backlog::Backlog;
+    use crate::node_client::Options as NodeClientOptions;
+
+    fn make_test_env(
+        _chain: Chain,
+        checkpoint_digest: CheckpointDigest,
+    ) -> (
+        Backlog,
+        watch::Receiver<CheckpointDigest>,
+        watch::Receiver<MeshState>,
+        NodeClient,
+        AccountId,
+    ) {
+        let backlog = Backlog::new();
+        let (checkpoints_tx, checkpoints_rx) = watch::channel(checkpoint_digest);
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let node_client = NodeClient::new(&NodeClientOptions::default());
+        let my_account_id: AccountId = "test.near".parse().unwrap();
+        drop(checkpoints_tx);
+        (backlog, checkpoints_rx, mesh_rx, node_client, my_account_id)
+    }
+
+    #[tokio::test]
+    async fn test_align_zero_digest_returns_none() {
+        let chain = Chain::Ethereum;
+        let (backlog, mut checkpoints_rx, mut mesh_rx, node_client, my_account_id) =
+            make_test_env(chain, CheckpointDigest { height: 0, digest: [0u8; 32] });
+
+        let result = align_backlog_with_consensus(
+            chain,
+            &backlog,
+            &mut checkpoints_rx,
+            &mut mesh_rx,
+            &node_client,
+            &my_account_id,
+        )
+        .await;
+
+        assert!(result.is_none(), "zero digest should return None");
+    }
+
+    #[tokio::test]
+    async fn test_align_matching_latest_confirms() {
+        let chain = Chain::Ethereum;
+        let backlog = Backlog::new();
+
+        backlog.set_processed_block(chain, 100).await;
+        let cp = backlog.checkpoint(chain).await.unwrap();
+        let digest = cp.digest();
+
+        let (checkpoints_tx, mut checkpoints_rx) = watch::channel(CheckpointDigest {
+            height: 100,
+            digest,
+        });
+        let (_mesh_tx, mut mesh_rx) = watch::channel(MeshState::default());
+        let node_client = NodeClient::new(&NodeClientOptions::default());
+        let my_account_id: AccountId = "test.near".parse().unwrap();
+        drop(checkpoints_tx);
+
+        let result = align_backlog_with_consensus(
+            chain,
+            &backlog,
+            &mut checkpoints_rx,
+            &mut mesh_rx,
+            &node_client,
+            &my_account_id,
+        )
+        .await;
+
+        assert!(result.is_none(), "matching latest should return None");
+
+        // Checkpoint should be persisted as latest consensus checkpoint
+        let persisted = backlog.storage.load_latest(chain).await.unwrap();
+        assert!(persisted.is_some(), "matching checkpoint should be persisted");
+        assert_eq!(persisted.unwrap().block_height, 100);
+    }
+
+    #[tokio::test]
+    async fn test_align_ahead_with_pending_match_confirms() {
+        let chain = Chain::Ethereum;
+        let backlog = Backlog::new();
+
+        // Create two checkpoints: at 100 and 200
+        backlog.set_processed_block(chain, 100).await;
+        let cp1 = backlog.checkpoint(chain).await.unwrap();
+        backlog.set_processed_block(chain, 200).await;
+        backlog.checkpoint(chain).await.unwrap();
+
+        // Consensus matches the earlier checkpoint (height 100)
+        let digest = cp1.digest();
+        let (checkpoints_tx, mut checkpoints_rx) = watch::channel(CheckpointDigest {
+            height: 100,
+            digest,
+        });
+        let (_mesh_tx, mut mesh_rx) = watch::channel(MeshState::default());
+        let node_client = NodeClient::new(&NodeClientOptions::default());
+        let my_account_id: AccountId = "test.near".parse().unwrap();
+        drop(checkpoints_tx);
+
+        let result = align_backlog_with_consensus(
+            chain,
+            &backlog,
+            &mut checkpoints_rx,
+            &mut mesh_rx,
+            &node_client,
+            &my_account_id,
+        )
+        .await;
+
+        assert!(result.is_none(), "ahead with pending match should return None");
+
+        // The matching checkpoint should be persisted
+        let persisted = backlog.storage.load_latest(chain).await.unwrap();
+        assert!(persisted.is_some(), "matched checkpoint should be persisted");
+        assert_eq!(persisted.unwrap().block_height, 100,
+            "the persisted checkpoint should be the older matching one, not the latest");
+    }
+
+    #[tokio::test]
+    async fn test_align_no_local_nonzero_digest_does_not_panic() {
+        // This path falls through to find_consensus_checkpoint, which needs
+        // actual peers to query. For a unit test we verify it doesn't panic
+        // and returns None when no peers are available.
+        let chain = Chain::Ethereum;
+        let backlog = Backlog::new();
+
+        let digest = [0x42u8; 32];
+        let (checkpoints_tx, mut checkpoints_rx) = watch::channel(CheckpointDigest {
+            height: 100,
+            digest,
+        });
+        let (_mesh_tx, mut mesh_rx) = watch::channel(MeshState::default());
+        let node_client = NodeClient::new(&NodeClientOptions::default());
+        let my_account_id: AccountId = "test.near".parse().unwrap();
+        drop(checkpoints_tx);
+
+        let result = align_backlog_with_consensus(
+            chain,
+            &backlog,
+            &mut checkpoints_rx,
+            &mut mesh_rx,
+            &node_client,
+            &my_account_id,
+        )
+        .await;
+
+        // No peers available → find_consensus_checkpoint returns None
+        assert!(result.is_none(), "no peers available should return None");
+    }
 }
 
 async fn fetch_peer_checkpoint(

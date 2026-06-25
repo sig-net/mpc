@@ -2136,4 +2136,132 @@ mod tests {
             "Total should reflect exactly the restored checkpoint size, ignoring the overwritten dirty state"
         );
     }
+
+    #[tokio::test]
+    async fn test_checkpoint_stalls_at_cap() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+        let interval = chain.checkpoint_interval().unwrap();
+
+        // Fill pending to MAX_PENDING_CHECKPOINTS using set_processed_block
+        // which auto-creates checkpoints at interval boundaries.
+        for i in 1..=MAX_PENDING_CHECKPOINTS {
+            let h = i as u64 * interval;
+            assert!(
+                backlog.set_processed_block(chain, h).await.is_some(),
+                "auto-checkpoint at height {} should succeed",
+                h
+            );
+        }
+
+        // Next checkpoint should be None (stalled)
+        let h = (MAX_PENDING_CHECKPOINTS as u64 + 1) * interval;
+        assert!(
+            backlog.set_processed_block(chain, h).await.is_none(),
+            "checkpoint should stall at cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_checkpoint_unblocks_after_confirmation() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+        let interval = chain.checkpoint_interval().unwrap();
+
+        // Fill pending to cap using set_processed_block
+        for i in 1..=MAX_PENDING_CHECKPOINTS {
+            let h = i as u64 * interval;
+            backlog.set_processed_block(chain, h).await.unwrap();
+        }
+
+        // Confirm one checkpoint → frees a slot
+        let cp = backlog.latest_checkpoint(chain).await.unwrap();
+        backlog.on_consensus_confirmed(chain, &cp).await;
+
+        // Should be able to create a new checkpoint now
+        let h = (MAX_PENDING_CHECKPOINTS as u64 + 1) * interval;
+        assert!(
+            backlog.set_processed_block(chain, h).await.is_some(),
+            "checkpoint should unblock after confirmation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_on_consensus_confirmed_removes_from_pending() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+        let interval = chain.checkpoint_interval().unwrap();
+
+        // Use set_processed_block at interval boundaries which auto-creates
+        // checkpoints. Each call creates one checkpoint.
+        let cp1 = backlog
+            .set_processed_block(chain, interval)
+            .await
+            .unwrap();
+        let cp2 = backlog
+            .set_processed_block(chain, 2 * interval)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            backlog.pending_checkpoints(&chain).read().await.len(),
+            2,
+            "two checkpoints should be pending"
+        );
+
+        // Confirm first → pending has 1
+        backlog.on_consensus_confirmed(chain, &cp1).await;
+        assert_eq!(backlog.pending_checkpoints(&chain).read().await.len(), 1);
+        assert_eq!(
+            backlog.latest_checkpoint(chain).await.unwrap().block_height,
+            2 * interval,
+            "latest pending is the confirmed checkpoint"
+        );
+
+        // Confirm second → pending has 0
+        backlog.on_consensus_confirmed(chain, &cp2).await;
+        assert_eq!(
+            backlog.pending_checkpoints(&chain).read().await.len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_recovery_clears_pending_checkpoints() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+        let interval = chain.checkpoint_interval().unwrap();
+
+        backlog.set_processed_block(chain, interval).await.unwrap();
+        backlog.set_processed_block(chain, 2 * interval).await.unwrap();
+
+        assert_eq!(
+            backlog.pending_checkpoints(&chain).read().await.len(),
+            2,
+            "two checkpoints should be pending"
+        );
+
+        // Recover to a new checkpoint (simulating regression)
+        let fresh = Backlog::new();
+        let recovery_cp = fresh
+            .set_processed_block(chain, interval / 2)
+            .await;
+        // interval/2 is not a multiple of interval → no auto-checkpoint
+        assert!(recovery_cp.is_none());
+        // Force create a checkpoint at that height
+        let fresh_cp = fresh.checkpoint(chain).await.unwrap();
+        assert_eq!(fresh_cp.block_height, interval / 2);
+
+        backlog.recover_by_checkpoint(fresh_cp).await.unwrap();
+        assert_eq!(
+            backlog.pending_checkpoints(&chain).read().await.len(),
+            1,
+            "pending should contain only the recovered checkpoint"
+        );
+        assert_eq!(
+            backlog.latest_checkpoint(chain).await.unwrap().block_height,
+            interval / 2,
+            "latest should be the recovered checkpoint"
+        );
+    }
 }

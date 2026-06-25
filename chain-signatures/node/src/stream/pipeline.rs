@@ -279,3 +279,99 @@ async fn detect_regression(
     // No match → regression detected.
     Some(ChainStreaming::Recovery { load_local: false })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backlog::Backlog;
+
+    fn make_digest(height: u64, digest: [u8; 32]) -> (watch::Sender<CheckpointDigest>, watch::Receiver<CheckpointDigest>) {
+        watch::channel(CheckpointDigest { height, digest })
+    }
+
+    #[tokio::test]
+    async fn test_zero_digest_returns_none() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+        let (_tx, mut rx) = make_digest(0, [0u8; 32]);
+
+        let result = detect_regression(chain, &backlog, &mut rx).await;
+        assert!(result.is_none(), "zero digest should not trigger regression");
+    }
+
+    #[tokio::test]
+    async fn test_matching_consensus_confirms_and_returns_none() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+
+        backlog.set_processed_block(chain, 100).await;
+        let cp = backlog.checkpoint(chain).await.unwrap();
+        let digest = cp.digest();
+
+        let (_tx, mut rx) = make_digest(100, digest);
+
+        let result = detect_regression(chain, &backlog, &mut rx).await;
+        assert!(result.is_none(), "matching digest should not trigger regression");
+
+        // Checkpoint should have been persisted
+        let persisted = backlog.storage.load_latest(chain).await.unwrap();
+        assert!(persisted.is_some(), "matching checkpoint should be persisted");
+        assert_eq!(persisted.unwrap().block_height, 100);
+    }
+
+    #[tokio::test]
+    async fn test_ahead_with_pending_match_confirms() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+
+        // Create two checkpoints
+        backlog.set_processed_block(chain, 100).await;
+        let cp1 = backlog.checkpoint(chain).await.unwrap();
+        backlog.set_processed_block(chain, 200).await;
+        backlog.checkpoint(chain).await.unwrap();
+
+        // Consensus matches the earlier one
+        let digest1 = cp1.digest();
+        let (_tx, mut rx) = make_digest(100, digest1);
+
+        let result = detect_regression(chain, &backlog, &mut rx).await;
+        assert!(result.is_none(), "ahead with match should not trigger regression");
+
+        // The earlier checkpoint should be persisted
+        let persisted = backlog.storage.load_latest(chain).await.unwrap();
+        assert!(persisted.is_some());
+        assert_eq!(persisted.unwrap().block_height, 100);
+    }
+
+    #[tokio::test]
+    async fn test_mismatch_triggers_recovery() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+
+        backlog.set_processed_block(chain, 100).await;
+        backlog.checkpoint(chain).await.unwrap();
+
+        // Completely different digest
+        let different_digest = [0xabu8; 32];
+        let (_tx, mut rx) = make_digest(200, different_digest);
+
+        let result = detect_regression(chain, &backlog, &mut rx).await;
+        assert_eq!(
+            result,
+            Some(ChainStreaming::Recovery { load_local: false }),
+            "mismatched digest should trigger recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_local_returns_none() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+
+        let digest = [0x42u8; 32];
+        let (_tx, mut rx) = make_digest(100, digest);
+
+        let result = detect_regression(chain, &backlog, &mut rx).await;
+        assert!(result.is_none(), "no local checkpoint should not trigger regression");
+    }
+}
