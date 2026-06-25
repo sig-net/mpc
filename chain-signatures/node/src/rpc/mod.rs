@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 
 pub use canton::{try_publish_canton, CantonClient};
 pub use ethereum::EthClient;
-pub use hydration::{try_publish_hydration, HydrationClient};
+pub use hydration::HydrationClient;
 pub use mpc_contract::primitives::{Read, View};
 pub use near::{try_publish_near, NearClient};
 pub use solana::try_publish_sol;
@@ -655,11 +655,10 @@ async fn execute_publish(client: ChainClient, action: PublishAction) {
                         .await
                         .map_err(|_| anyhow::anyhow!("Solana publish failed"))
                 }
-                ChainClient::Hydration(hyd) => {
-                    try_publish_hydration(hyd, &action, &action.timestamp, &action.signature)
-                        .await
-                        .map_err(|_| anyhow::anyhow!("Hydration publish failed"))
-                }
+                ChainClient::Hydration(hyd) => hyd
+                    .publish_signature(&action, &action.timestamp, &action.signature)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Hydration publish failed")),
                 ChainClient::Canton(canton) => {
                     try_publish_canton(canton, &action, &action.timestamp, &action.signature)
                         .await
