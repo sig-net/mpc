@@ -258,3 +258,339 @@ impl EthClient {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::{B256, U256};
+    use k256::{AffinePoint, Scalar};
+    use mockito::{Matcher, Server};
+    use serde_json::json;
+
+    fn create_test_signature() -> mpc_primitives::Signature {
+        mpc_primitives::Signature::new(AffinePoint::GENERATOR, Scalar::from(42u64), 1)
+    }
+
+    fn mock_config(url: &str) -> EthConfig {
+        EthConfig {
+            account_sk: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            execution_rpc_http_url: url.to_string(),
+            contract_address: "1234567890123456789012345678901234567890".to_string(),
+            consensus_rpc_http_url: "".to_string(),
+            network: "sepolia".to_string(),
+            helios_data_path: "".to_string(),
+            refresh_finalized_interval: 1000,
+            optimistic_requests: false,
+            light_client: false,
+        }
+    }
+
+    fn mock_receipt_json(tx_hash: B256, status: &str) -> serde_json::Value {
+        json!({
+            "transactionHash": format!("{tx_hash:#x}"),
+            "status": status,
+            "blockHash": format!("{:#x}", B256::repeat_byte(0xbb)),
+            "blockNumber": "0x2",
+            "transactionIndex": "0x0",
+            "from": format!("{:#x}", Address::ZERO),
+            "to": format!("{:#x}", Address::ZERO),
+            "gasUsed": "0x5208",
+            "effectiveGasPrice": "0x3a29f0f8",
+            "contractAddress": null,
+            "logsBloom": format!("0x{}", "0".repeat(512)),
+            "cumulativeGasUsed": "0x5208",
+            "type": "0x2",
+            "logs": []
+        })
+    }
+
+    /// Alloy's FillProvider automatically queries the network to estimate gas and fees
+    /// before submitting a transaction. We must mock these to prevent mockito from panicking.
+    async fn mock_alloy_background_rpcs(server: &mut Server) {
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({"method": "eth_chainId"})))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({"method": "eth_feeHistory"})))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": {
+                        "oldestBlock": "0x1",
+                        "reward": [["0x1"]],
+                        "baseFeePerGas": ["0x1", "0x1"],
+                        "gasUsedRatio": [0.5]
+                    }
+                })
+                .to_string(),
+            )
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getBlockByNumber"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": {
+                        "number": "0x1",
+                        "baseFeePerGas": "0x1",
+                        "timestamp": "0x1"
+                    }
+                })
+                .to_string(),
+            )
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({"method": "eth_estimateGas"})))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x5208"}).to_string())
+            .expect_at_least(0)
+            .create_async()
+            .await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_maxPriorityFeePerGas"}),
+            ))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+            .expect_at_least(0)
+            .create_async()
+            .await;
+    }
+
+    #[test]
+    fn test_signature_to_abi_conversion() {
+        let mpc_sig = create_test_signature();
+        let abi_sig: ChainSignatures::Signature = (&mpc_sig).into();
+
+        assert_eq!(abi_sig.recoveryId, 1);
+        assert_eq!(abi_sig.s, U256::from(42));
+        assert_eq!(abi_sig.bigR.x, U256::from_be_slice(&mpc_sig.big_r.x()));
+        assert_eq!(
+            abi_sig.bigR.y,
+            U256::from_be_slice(mpc_sig.big_r.to_encoded_point(false).y().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_transaction_receipt_retries_on_null() {
+        let mut server = Server::new_async().await;
+        let tx_hash = B256::repeat_byte(0xcc);
+
+        // First call returns null (pending in mempool)
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": null}).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        // Second call returns reverted receipt
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 2,
+                    "result": mock_receipt_json(tx_hash, "0x0")
+                })
+                .to_string(),
+            )
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = EthClient::new(&mock_config(&server.url()));
+        let receipt = client
+            .wait_for_transaction_receipt(tx_hash, &[SignId::new([2u8; 32])])
+            .await
+            .unwrap();
+
+        // Assert it fetched successfully and caught the reverted status
+        assert!(!receipt.status());
+    }
+
+    #[tokio::test]
+    async fn test_send_eth_responses_refetches_nonce_on_retry() {
+        let mut server = Server::new_async().await;
+        mock_alloy_background_rpcs(&mut server).await;
+
+        // Mock the nonce fetch.
+        // We use expect_at_least(2) to prove the retry mechanism successfully fires and refetches.
+        let nonce_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionCount"}),
+            ))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+            .expect_at_least(2)
+            .create_async()
+            .await;
+
+        // Mock the transaction send failing every time
+        let send_mock = server.mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({"method": "eth_sendRawTransaction"})))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "mock error"}}).to_string())
+            .expect_at_least(2)
+            .create_async().await;
+
+        let client = EthClient::new(&mock_config(&server.url()));
+
+        // Attempt to send
+        let result = client
+            .send_responses(vec![], 21000, &[SignId::new([3u8; 32])])
+            .await;
+
+        // Verify it failed completely
+        assert!(result.is_err());
+
+        // Assert that `eth_getTransactionCount` was called multiple times.
+        nonce_mock.assert_async().await;
+        send_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_execute_publish_fails_on_reverted_tx() {
+        let mut server = Server::new_async().await;
+        let tx_hash = B256::repeat_byte(0xaa);
+        mock_alloy_background_rpcs(&mut server).await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionCount"}),
+            ))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+            .create_async()
+            .await;
+
+        // Mock send succeeding
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({"jsonrpc": "2.0", "id": 1, "result": format!("{tx_hash:#x}")}).to_string(),
+            )
+            .create_async()
+            .await;
+
+        // Mock receipt showing a reverted transaction (status: "0x0")
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": mock_receipt_json(tx_hash, "0x0")
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = EthClient::new(&mock_config(&server.url()));
+
+        // Execute the full publish pipeline
+        let result = client
+            .execute_publish(vec![], 21000, &[SignId::new([4u8; 32])])
+            .await;
+
+        // It should return Err(()) because the receipt status was 0x0
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_execute_publish_success() {
+        let mut server = Server::new_async().await;
+        let tx_hash = B256::repeat_byte(0x77);
+        mock_alloy_background_rpcs(&mut server).await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionCount"}),
+            ))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+            .create_async()
+            .await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({"jsonrpc": "2.0", "id": 1, "result": format!("{tx_hash:#x}")}).to_string(),
+            )
+            .create_async()
+            .await;
+
+        // Mock the receipt confirming the transaction was mined successfully (status: "0x1")
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": mock_receipt_json(tx_hash, "0x1")
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = EthClient::new(&mock_config(&server.url()));
+
+        let result = client
+            .execute_publish(vec![], 21000, &[SignId::new([5u8; 32])])
+            .await;
+
+        // Assert the happy path returns Ok
+        assert!(
+            result.is_ok(),
+            "The happy path should complete successfully"
+        );
+    }
+}
