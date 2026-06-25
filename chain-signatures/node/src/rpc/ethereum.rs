@@ -37,12 +37,6 @@ type EthContractFillProvider = FillProvider<
     RootProvider,
 >;
 
-// Get nonce retry constants
-const ETH_NONCE_MAX_ATTEMPTS: usize = 3;
-const ETH_NONCE_TIMEOUT: Duration = Duration::from_secs(2);
-const ETH_NONCE_MIN_DELAY: Duration = Duration::from_millis(500);
-const ETH_NONCE_MAX_DELAY: Duration = Duration::from_secs(5);
-
 // Send Ethereum tx retry constants
 const ETH_SEND_MAX_ATTEMPTS: usize = 3;
 const ETH_SEND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -188,50 +182,6 @@ async fn send_eth_responses(
     gas: u64,
     sign_ids: &[SignId],
 ) -> Result<alloy::primitives::B256, ()> {
-    // TODO: fetching nonce from RPC is slow and expensive, consider better approach (fetch once, increment locally, etc.)
-    // 1. Fetch Nonce
-    let nonce_retry = RetryConfig {
-        max_times: ETH_NONCE_MAX_ATTEMPTS,
-        min_delay: ETH_NONCE_MIN_DELAY,
-        max_delay: ETH_NONCE_MAX_DELAY,
-        jitter: true,
-    };
-
-    let nonce = match retry_rpc!(
-        ETH_NONCE_TIMEOUT,
-        nonce_retry,
-        // Log the error and retry attempt
-        |attempt, err, sleep| {
-            tracing::warn!(
-                ?sign_ids,
-                attempt,
-                "get_nonce failed: {err}, retrying in {sleep:?}"
-            );
-        },
-        // Try to get the nonce
-        {
-            contract
-                .provider()
-                .get_transaction_count(contract.provider().default_signer_address())
-                .pending()
-                .await
-                .map_err(|e| anyhow::anyhow!("RPC Error: {e}"))
-        }
-    ) {
-        Ok(n) => n,
-        Err(err) => {
-            tracing::error!(
-                ?sign_ids,
-                ?err,
-                "failed to get nonce: retry attempts exhausted"
-            );
-            return Err(());
-        }
-    };
-
-    tracing::info!(nonce, "will send eth tx with nonce");
-
-    // 2. Send Tx
     let send_retry = RetryConfig {
         max_times: ETH_SEND_MAX_ATTEMPTS,
         min_delay: ETH_SEND_MIN_DELAY,
@@ -250,6 +200,21 @@ async fn send_eth_responses(
             );
         },
         {
+            // TODO: fetching nonce from RPC is slow and expensive, consider better approach (fetch once, increment locally, etc.)
+            // Fetch nonce here in the retry loop, otherwise we may get the same nonce on retry
+            let nonce = contract
+                .provider()
+                .get_transaction_count(contract.provider().default_signer_address())
+                .pending()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to fetch nonce: {e}"))?;
+
+            tracing::info!(
+                nonce,
+                "will send eth tx with nonce {nonce} for sign_ids: {:?}",
+                sign_ids
+            );
+
             contract
                 .respond(responses.clone()) // Need to clone because closure has to implement `FnMut` (otherwise it's `FnOnce`)
                 .gas(gas)
@@ -320,7 +285,7 @@ pub async fn try_publish_eth(
 
 pub async fn try_batch_publish_eth(
     eth: &EthClient,
-    actions: &Vec<PublishAction>,
+    actions: &[PublishAction],
     signatures: &HashMap<SignId, Signature>,
 ) -> Result<(), ()> {
     let chain = Chain::Ethereum;
