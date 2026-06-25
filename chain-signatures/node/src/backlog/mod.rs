@@ -611,6 +611,12 @@ impl Backlog {
         pending.values().next_back().cloned()
     }
 
+    /// Check if the chain backlog has an available checkpoint slot.
+    pub async fn has_checkpoint_slot(&self, chain: Chain) -> bool {
+        let pending = self.pending_checkpoints(&chain).read().await;
+        pending.len() < MAX_PENDING_CHECKPOINTS
+    }
+
     /// Find a checkpoint by its consensus digest.
     pub async fn find_checkpoint_by_digest(
         &self,

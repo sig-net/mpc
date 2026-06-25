@@ -166,7 +166,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
 
         loop {
             tokio::select! {
-                catchup_item = catchup_iter.next() => {
+                catchup_item = catchup_iter.next(), if self.backlog.has_checkpoint_slot(chain).await => {
                     let Some(catchup_item) = catchup_item else {
                         break;
                     };
@@ -177,11 +177,13 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                 }
                 new_state = wait_detected_regression(
                     &mut self.checkpoints_rx,
-                    &self.state_tx,
                     &self.backlog,
                     chain,
                 ) => {
-                    return Some(new_state);
+                    if let Some(new_state) = new_state {
+                        let _ = self.state_tx.send(new_state);
+                        return Some(new_state);
+                    }
                 }
             }
         }
@@ -199,18 +201,20 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         let chain = I::CHAIN;
         loop {
             tokio::select! {
-                alive = self.indexer.process_next_block() => {
+                alive = self.indexer.process_next_block(), if self.backlog.has_checkpoint_slot(chain).await => {
                     if !alive {
                         return None; // shutdown
                     }
                 }
                 new_state = wait_detected_regression(
                     &mut self.checkpoints_rx,
-                    &self.state_tx,
                     &self.backlog,
                     chain,
                 ) => {
-                    return Some(new_state);
+                    if let Some(new_state) = new_state {
+                        let _ = self.state_tx.send(new_state);
+                        return Some(new_state);
+                    }
                 }
             }
         }
@@ -219,19 +223,13 @@ impl<I: ChainIndexer> ChainPipeline<I> {
 
 async fn wait_detected_regression(
     checkpoints_rx: &mut watch::Receiver<CheckpointDigest>,
-    state_tx: &watch::Sender<ChainStreaming>,
     backlog: &Backlog,
     chain: Chain,
-) -> ChainStreaming {
-    loop {
-        if checkpoints_rx.changed().await.is_err() {
-            std::future::pending::<()>().await;
-        }
-        if let Some(new_state) = detect_regression(chain, backlog, checkpoints_rx).await {
-            let _ = state_tx.send(new_state);
-            return new_state;
-        }
+) -> Option<ChainStreaming> {
+    if checkpoints_rx.changed().await.is_err() {
+        std::future::pending::<()>().await;
     }
+    detect_regression(chain, backlog, checkpoints_rx).await
 }
 
 /// Returns `Some(ChainStreaming::Recovery)` if a regression is detected.
