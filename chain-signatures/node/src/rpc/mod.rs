@@ -18,7 +18,7 @@ pub use canton::CantonClient;
 pub use ethereum::EthClient;
 pub use hydration::HydrationClient;
 pub use mpc_contract::primitives::{Read, View};
-pub use near::{try_publish_near, NearClient};
+pub use near::NearClient;
 pub use solana::try_publish_sol;
 
 use enum_map::EnumMap;
@@ -641,11 +641,10 @@ async fn execute_publish(client: ChainClient, action: PublishAction) {
         // Try to publish the signature
         {
             match &client {
-                ChainClient::Near(near) => {
-                    try_publish_near(near, &action, &action.timestamp, &action.signature)
-                        .await
-                        .map_err(|_| anyhow::anyhow!("Near publish failed"))
-                }
+                ChainClient::Near(near) => near
+                    .publish_signature(&action, &action.timestamp, &action.signature)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Near publish failed")),
                 ChainClient::Ethereum(eth) => eth
                     .publish_signature(&action, &action.timestamp, &action.signature)
                     .await

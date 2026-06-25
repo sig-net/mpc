@@ -1,6 +1,6 @@
 use super::PublishAction;
-use crate::config::{ContractConfig, NetworkConfig};
-use crate::protocol::{Governance, ProtocolState};
+use crate::config::NetworkConfig;
+use crate::protocol::Governance;
 use crate::util::AffinePointExt as _;
 pub use mpc_contract::primitives::{Read, View};
 
@@ -60,40 +60,7 @@ impl NearClient {
         self.client.rpc_addr()
     }
 
-    pub async fn fetch_state(&self) -> anyhow::Result<ProtocolState> {
-        let contract_state: mpc_contract::ProtocolContractState =
-            self.client.view(&self.contract_id, "state").await?.json()?;
-
-        let protocol_state: ProtocolState = contract_state.try_into().map_err(|_| {
-            anyhow::anyhow!("failed to parse protocol state, has it been initialized?")
-        })?;
-
-        tracing::debug!(?protocol_state, "protocol state");
-        Ok(protocol_state)
-    }
-
-    pub async fn fetch_config(&self) -> Option<ContractConfig> {
-        self.client
-            .view(&self.contract_id, "config")
-            .await
-            .inspect_err(|err| {
-                tracing::warn!(%err, "failed to fetch contract config");
-            })
-            .ok()?
-            .json()
-            .inspect(|configs| {
-                tracing::debug!(?configs, "contract config");
-            })
-            .inspect_err(|err| {
-                tracing::warn!(%err, "unable to parse config");
-            })
-            .ok()
-    }
-
-    pub async fn vote_public_key(
-        &self,
-        public_key: &near_crypto::PublicKey,
-    ) -> anyhow::Result<bool> {
+    async fn vote_public_key(&self, public_key: &near_crypto::PublicKey) -> anyhow::Result<bool> {
         tracing::info!(%public_key, signer_id = %self.signer.account_id, "voting for public key");
         let result = self
             .client
@@ -113,7 +80,7 @@ impl NearClient {
         Ok(result)
     }
 
-    pub async fn vote_reshared(&self, epoch: u64) -> anyhow::Result<bool> {
+    async fn vote_reshared(&self, epoch: u64) -> anyhow::Result<bool> {
         tracing::info!(%epoch, signer_id = %self.signer.account_id, "voting for reshared");
         let result = self
             .client
@@ -133,7 +100,7 @@ impl NearClient {
         Ok(result)
     }
 
-    pub async fn propose_join(&self) -> anyhow::Result<()> {
+    async fn propose_join(&self) -> anyhow::Result<()> {
         tracing::info!(signer_id = %self.signer.account_id, "joining the protocol");
         self.client
             .call(&self.signer, &self.contract_id, "join")
@@ -151,7 +118,7 @@ impl NearClient {
         Ok(())
     }
 
-    pub async fn call_respond(
+    async fn call_respond(
         &self,
         id: &SignId,
         response: &Signature,
@@ -177,7 +144,7 @@ impl NearClient {
         Ok(views)
     }
 
-    pub async fn call_respond_checkpoint(
+    async fn call_respond_checkpoint(
         &self,
         checkpoint: &ConsensusCheckpointDigest,
         signature: &Signature,
@@ -192,44 +159,43 @@ impl NearClient {
             .transact()
             .await
     }
-}
 
-// TODO: make client method
-pub async fn try_publish_near(
-    near: &NearClient,
-    action: &PublishAction,
-    timestamp: &Instant,
-    signature: &Signature,
-) -> Result<(), near_fetch::Error> {
-    let outcome = match &action.indexed.kind {
-        SignKind::Checkpoint(checkpoint) => {
-            near.call_respond_checkpoint(checkpoint, signature).await
+    pub async fn publish_signature(
+        &self,
+        action: &PublishAction,
+        timestamp: &Instant,
+        signature: &Signature,
+    ) -> Result<(), near_fetch::Error> {
+        let outcome = match &action.indexed.kind {
+            SignKind::Checkpoint(checkpoint) => {
+                self.call_respond_checkpoint(checkpoint, signature).await
+            }
+            _ => self.call_respond(&action.indexed.id, signature).await,
         }
-        _ => near.call_respond(&action.indexed.id, signature).await,
-    }
-    .inspect_err(|err| {
-        tracing::error!(
-            sign_id = ?action.indexed.id,
-            ?err,
-            "failed to publish signature",
-        );
-    })?;
+        .inspect_err(|err| {
+            tracing::error!(
+                sign_id = ?action.indexed.id,
+                ?err,
+                "failed to publish signature",
+            );
+        })?;
 
-    let _: () = outcome.json().inspect_err(|err| {
-        tracing::error!(
+        let _: () = outcome.json().inspect_err(|err| {
+            tracing::error!(
+                sign_id = ?action.indexed.id,
+                big_r = signature.big_r.to_base58(),
+                s = ?signature.s,
+                ?err,
+                "smart contract threw error",
+            );
+        })?;
+        tracing::info!(
             sign_id = ?action.indexed.id,
             big_r = signature.big_r.to_base58(),
             s = ?signature.s,
-            ?err,
-            "smart contract threw error",
+            elapsed = ?timestamp.elapsed(),
+            "published signature sucessfully",
         );
-    })?;
-    tracing::info!(
-        sign_id = ?action.indexed.id,
-        big_r = signature.big_r.to_base58(),
-        s = ?signature.s,
-        elapsed = ?timestamp.elapsed(),
-        "published signature sucessfully",
-    );
-    Ok(())
+        Ok(())
+    }
 }
