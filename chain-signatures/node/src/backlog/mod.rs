@@ -628,24 +628,17 @@ impl Backlog {
         chain: Chain,
         digest: [u8; 32],
     ) -> Option<Checkpoint> {
-        let pending = self.pending_checkpoints(&chain).read().await;
-        for cp in pending.values() {
-            if cp.digest() == digest {
-                return Some(cp.clone());
+        {
+            let pending = self.pending_checkpoints(&chain).read().await;
+            for cp in pending.values() {
+                if cp.digest() == digest {
+                    return Some(cp.clone());
+                }
             }
         }
-        None
-    }
-
-    /// Find a checkpoint by hash
-    pub async fn find_checkpoint_by_hash(&self, chain: Chain, hash: u64) -> Option<Checkpoint> {
-        let pending = self.pending_checkpoints(&chain).read().await;
-
-        for cp in pending.values() {
-            let mut hasher = hash_map::DefaultHasher::new();
-            cp.hash(&mut hasher);
-            if hasher.finish() == hash {
-                return Some(cp.clone());
+        if let Ok(Some(latest)) = self.storage.load_latest(chain).await {
+            if latest.digest() == digest {
+                return Some(latest);
             }
         }
         None
@@ -2278,7 +2271,7 @@ mod tests {
         let interval = chain.checkpoint_interval().unwrap();
 
         // Generate 3 checkpoints. Each call creates one checkpoint.
-        let cp1 = backlog
+        let _cp1 = backlog
             .set_processed_block(chain, interval)
             .await
             .unwrap();
@@ -2331,5 +2324,34 @@ mod tests {
             backlog.latest_checkpoint(chain).await.unwrap().block_height,
             3 * interval,
         );
+    }
+
+    #[tokio::test]
+    async fn test_find_checkpoint_by_digest_falls_back_to_storage() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+        let interval = chain.checkpoint_interval().unwrap();
+
+        let cp = backlog
+            .set_processed_block(chain, interval)
+            .await
+            .unwrap();
+        let digest = cp.digest();
+
+        // Confirm it (removes from pending, persists to storage)
+        backlog.on_consensus_confirmed(chain, &cp).await;
+
+        assert_eq!(
+            backlog.pending_checkpoints(&chain).read().await.len(),
+            0,
+            "should not be in pending"
+        );
+
+        // Should still be findable by digest
+        let found = backlog
+            .find_checkpoint_by_digest(chain, digest)
+            .await
+            .unwrap();
+        assert_eq!(found.block_height, interval);
     }
 }
