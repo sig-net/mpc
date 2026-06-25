@@ -12,6 +12,7 @@ use rand::thread_rng;
 use std::time::Duration;
 use tokio::sync::watch;
 
+/// Returns None if we are aligned, Some(<new_height>) if we have regressed.
 pub async fn align_backlog_with_consensus(
     chain: Chain,
     backlog: &Backlog,
@@ -26,47 +27,19 @@ pub async fn align_backlog_with_consensus(
         return None;
     }
 
-    // If we have a local checkpoint, check if we're already aligned.
-    // Use latest_checkpoint (read-only) instead of checkpoint() to avoid
-    // creating a new checkpoint as a side-effect during alignment.
-    if let Some(current_checkpoint) = backlog.latest_checkpoint(chain).await {
-        if current_checkpoint.digest() == checkpoint_digest.digest {
-            // Consensus matches our latest → confirm and persist it.
-            backlog
-                .on_consensus_confirmed(chain, &current_checkpoint)
-                .await;
-            return None;
-        }
-
-        // If our current height is greater than consensus height,
-        // check if we have a checkpoint in our pending set that matches
-        // the consensus digest (we're ahead but aligned).
-        if current_checkpoint.block_height > checkpoint_digest.height
-            && backlog
-                .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
-                .await
-                .is_some()
-        {
-            tracing::info!(
-                ?chain,
-                local_height = current_checkpoint.block_height,
-                consensus_height = checkpoint_digest.height,
-                "local backlog is ahead of consensus and matches past consensus checkpoint; confirming"
-            );
-            if let Some(matched) = backlog
-                .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
-                .await
-            {
-                backlog.on_consensus_confirmed(chain, &matched).await;
-            }
-            return None;
-        }
-    } else {
+    // If we can find the consensus checkpoint locally, confirm it and return.
+    if let Some(matched) = backlog
+        .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
+        .await
+    {
         tracing::info!(
             ?chain,
-            ?checkpoint_digest,
-            "no local checkpoint; consensus checkpoint exists, fetching..."
+            matched_height = matched.block_height,
+            consensus_height = checkpoint_digest.height,
+            "consensus checkpoint matches a local checkpoint; confirming"
         );
+        backlog.on_consensus_confirmed(chain, &matched).await;
+        return None;
     }
 
     tracing::warn!(
