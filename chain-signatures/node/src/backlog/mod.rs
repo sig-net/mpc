@@ -663,9 +663,6 @@ impl Backlog {
             "recovering backlog to checkpoint"
         );
 
-        // Persist the recovered checkpoint to storage so that latest_checkpoint fallback loads it.
-        self.storage.persist(&checkpoint).await?;
-
         // Clear all pending (unconfirmed) checkpoints for this chain.
         // Any checkpoint that was waiting for consensus is now obsolete.
         self.pending_checkpoints(&chain).write().await.clear();
@@ -1472,7 +1469,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_recover_makes_checkpoint_visible_as_latest() {
+    async fn test_recovery_makes_checkpoint_visible_as_latest() {
         let backlog = Backlog::new();
         let tx = create_test_tx(16);
 
@@ -1489,6 +1486,7 @@ mod tests {
         let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
         let recovered = Backlog::new();
+        recovered.storage.persist(&checkpoint).await.unwrap();
         recovered
             .recover_by_checkpoint(checkpoint.clone())
             .await
@@ -2259,6 +2257,7 @@ mod tests {
         let fresh_cp = fresh.checkpoint(chain).await.unwrap();
         assert_eq!(fresh_cp.block_height, interval / 2);
 
+        backlog.storage.persist(&fresh_cp).await.unwrap();
         backlog.recover_by_checkpoint(fresh_cp).await.unwrap();
         assert_eq!(
             backlog.pending_checkpoints(&chain).read().await.len(),
