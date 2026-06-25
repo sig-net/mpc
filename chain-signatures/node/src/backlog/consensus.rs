@@ -335,7 +335,7 @@ mod tests {
                 expected_persisted_height: None,
             },
             TestCase {
-                name: "Case 4a: Both Agree",
+                name: "Case 4: Both Present, Matches",
                 local_checkpoints: vec![100],
                 local_has_pending_tx: false,
                 remote_height: 100,
@@ -348,7 +348,7 @@ mod tests {
                 expected_persisted_height: Some(100),
             },
             TestCase {
-                name: "Case 4b: Ahead but Aligned",
+                name: "Case 5: Ahead but Aligned",
                 local_checkpoints: vec![100, 200],
                 local_has_pending_tx: false,
                 remote_height: 100,
@@ -361,7 +361,7 @@ mod tests {
                 expected_persisted_height: Some(100),
             },
             TestCase {
-                name: "Case 4c: Both Present, Divergent",
+                name: "Case 6: Both Present, Divergent. Take Remote",
                 local_checkpoints: vec![100],
                 local_has_pending_tx: true,
                 remote_height: 100,
