@@ -590,7 +590,7 @@ impl Backlog {
         // Remove from pending checkpoints (frees a slot for future checkpoints)
         {
             let mut pending = self.pending_checkpoints(&chain).write().await;
-            pending.remove(&checkpoint.block_height);
+            pending.retain(|&height, _| height > checkpoint.block_height);
         }
 
         // Persist as the latest consensus checkpoint
@@ -607,8 +607,13 @@ impl Backlog {
 
     /// Get the latest checkpoint for a specific chain.
     pub async fn latest_checkpoint(&self, chain: Chain) -> Option<Checkpoint> {
-        let pending = self.pending_checkpoints(&chain).read().await;
-        pending.values().next_back().cloned()
+        {
+            let pending = self.pending_checkpoints(&chain).read().await;
+            if let Some(cp) = pending.values().next_back().cloned() {
+                return Some(cp);
+            }
+        }
+        self.storage.load_latest(chain).await.ok().flatten()
     }
 
     /// Check if the chain backlog has an available checkpoint slot.
@@ -658,6 +663,9 @@ impl Backlog {
             "recovering backlog to checkpoint"
         );
 
+        // Persist the recovered checkpoint to storage so that latest_checkpoint fallback loads it.
+        self.storage.persist(&checkpoint).await?;
+
         // Clear all pending (unconfirmed) checkpoints for this chain.
         // Any checkpoint that was waiting for consensus is now obsolete.
         self.pending_checkpoints(&chain).write().await.clear();
@@ -685,13 +693,6 @@ impl Backlog {
             );
             pending.pending_executions()
         };
-
-        // Insert the recovered checkpoint into our pending set so it's
-        // visible via latest_checkpoint for the HTTP endpoint.
-        self.pending_checkpoints(&chain)
-            .write()
-            .await
-            .insert(checkpoint.block_height, checkpoint);
 
         // Clear execution watchers whose source chain is the recovered chain
         for destination_chain in Chain::iter() {
@@ -2261,13 +2262,75 @@ mod tests {
         backlog.recover_by_checkpoint(fresh_cp).await.unwrap();
         assert_eq!(
             backlog.pending_checkpoints(&chain).read().await.len(),
-            1,
-            "pending should contain only the recovered checkpoint"
+            0,
+            "pending checkpoints should be completely cleared"
         );
         assert_eq!(
             backlog.latest_checkpoint(chain).await.unwrap().block_height,
             interval / 2,
             "latest should be the recovered checkpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_on_consensus_confirmed_evicts_older_pending_checkpoints() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+        let interval = chain.checkpoint_interval().unwrap();
+
+        // Generate 3 checkpoints. Each call creates one checkpoint.
+        let cp1 = backlog
+            .set_processed_block(chain, interval)
+            .await
+            .unwrap();
+        let cp2 = backlog
+            .set_processed_block(chain, 2 * interval)
+            .await
+            .unwrap();
+        let cp3 = backlog
+            .set_processed_block(chain, 3 * interval)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            backlog.pending_checkpoints(&chain).read().await.len(),
+            3,
+            "three checkpoints should be pending"
+        );
+
+        // Confirming the second checkpoint should evict the first and second
+        backlog.on_consensus_confirmed(chain, &cp2).await;
+        assert_eq!(
+            backlog.pending_checkpoints(&chain).read().await.len(),
+            1,
+            "only checkpoints newer than cp2 should remain"
+        );
+
+        // Verify remaining is cp3
+        assert!(backlog
+            .pending_checkpoints(&chain)
+            .read()
+            .await
+            .contains_key(&(3 * interval)));
+
+        // Verify latest_checkpoint returns cp3 (highest pending)
+        assert_eq!(
+            backlog.latest_checkpoint(chain).await.unwrap().block_height,
+            3 * interval,
+        );
+
+        // Confirming the third checkpoint should evict cp3 (0 pending)
+        backlog.on_consensus_confirmed(chain, &cp3).await;
+        assert_eq!(
+            backlog.pending_checkpoints(&chain).read().await.len(),
+            0,
+            "all checkpoints confirmed, pending should be empty"
+        );
+
+        // Verify latest_checkpoint fallback to storage returns cp3
+        assert_eq!(
+            backlog.latest_checkpoint(chain).await.unwrap().block_height,
+            3 * interval,
         );
     }
 }
