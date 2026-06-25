@@ -14,7 +14,7 @@ use crate::util::retry::{retry_rpc, RetryConfig};
 use std::collections::BTreeSet;
 
 pub use canton::{try_publish_canton, CantonClient};
-pub use ethereum::{try_batch_publish_eth, try_publish_eth, EthClient};
+pub use ethereum::EthClient;
 pub use hydration::{try_publish_hydration, HydrationClient};
 pub use mpc_contract::primitives::{Read, View};
 pub use near::{try_publish_near, NearClient};
@@ -646,11 +646,10 @@ async fn execute_publish(client: ChainClient, action: PublishAction) {
                         .await
                         .map_err(|_| anyhow::anyhow!("Near publish failed"))
                 }
-                ChainClient::Ethereum(eth) => {
-                    try_publish_eth(eth, &action, &action.timestamp, &action.signature)
-                        .await
-                        .map_err(|_| anyhow::anyhow!("Ethereum publish failed"))
-                }
+                ChainClient::Ethereum(eth) => eth
+                    .publish_signature(&action, &action.timestamp, &action.signature)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Ethereum publish failed")),
                 ChainClient::Solana(sol) => {
                     try_publish_sol(sol, &action, &action.timestamp, &action.signature)
                         .await
@@ -754,7 +753,8 @@ async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAc
         // Try to publish the signatures in batch
         {
             match client {
-                ChainClient::Ethereum(eth) => try_batch_publish_eth(eth, actions, &signatures)
+                ChainClient::Ethereum(eth) => eth
+                    .batch_publish_signature(actions, &signatures)
                     .await
                     .map_err(|_| anyhow::anyhow!("Eth batch publish failed")),
                 ChainClient::Near(_) => {
