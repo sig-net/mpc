@@ -1,11 +1,20 @@
 use super::SolConfig;
 use futures_util::StreamExt;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
+use mpc_primitives::SignKind;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use signet_program::accounts::{
+    Respond as SolanaRespondAccount, RespondBidirectional as SolanaRespondBidirectionalAccount,
+};
+use signet_program::instruction::{
+    Respond as SolanaRespond, RespondBidirectional as SolanaRespondBidirectional,
+};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
 use solana_client::rpc_config::RpcBlockConfig;
 use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
+use solana_sdk::signature::Signer as SolanaSigner;
 use solana_sdk::signer::keypair::Keypair;
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
 use solana_transaction_status::{
@@ -15,8 +24,9 @@ use solana_transaction_status::{
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use crate::rpc::PublishAction;
 use crate::util::retry::{retry_rpc, RetryConfig};
 
 const MAX_SIGNATURES_FOR_FAST_CATCHUP: usize = 1000;
@@ -443,6 +453,107 @@ impl SolanaClient {
         }
 
         blocks_by_height
+    }
+
+    pub async fn publish_signature(
+        &self,
+        action: &PublishAction,
+        timestamp: &Instant,
+        mpc_sig: &mpc_primitives::Signature,
+    ) -> Result<(), ()> {
+        let program = self.client.program(self.program_id).map_err(|_| ())?;
+
+        let sign_id = action.indexed.id;
+        let request_ids = vec![action.indexed.id.request_id];
+        let big_r = mpc_sig.big_r.to_encoded_point(false);
+        let signature = crate::util::mpc_to_sol_signature(mpc_sig, big_r);
+
+        tracing::debug!(
+            ?sign_id,
+            request_type = ?action.indexed.kind,
+            "try_publish_sol: dispatching request"
+        );
+
+        match &action.indexed.kind {
+            SignKind::Sign | SignKind::SignBidirectional(_) => {
+                let (event_authority, _) =
+                    Pubkey::find_program_address(&[b"__event_authority"], &self.program_id);
+                let tx = program
+                    .request()
+                    .signer(self.payer.clone())
+                    .accounts(SolanaRespondAccount {
+                        responder: self.payer.pubkey(),
+                        event_authority,
+                        program: self.program_id,
+                    })
+                    .args(SolanaRespond {
+                        request_ids,
+                        signatures: vec![signature.clone()],
+                    })
+                    .send()
+                    .await
+                    .map_err(|err| {
+                        tracing::error!(
+                            sign_id = ?action.indexed.id,
+                            error = ?err,
+                            "failed to publish solana signature"
+                        );
+                    })?;
+
+                tracing::info!(
+                    ?sign_id,
+                    tx_hash = ?tx,
+                    elapsed = ?timestamp.elapsed(),
+                    "published solana signature successfully"
+                );
+            }
+            SignKind::RespondBidirectional(respond_bidirectional_tx) => {
+                tracing::debug!(
+                    ?sign_id,
+                    request_id = ?request_ids[0],
+                    serialized_output_len = respond_bidirectional_tx.output.len(),
+                    "try_publish_sol: entering RespondBidirectional arm"
+                );
+                let respond_bidirectional_serialized_output =
+                    respond_bidirectional_tx.output.clone();
+                let tx = program
+                    .request()
+                    .signer(self.payer.clone())
+                    .accounts(SolanaRespondBidirectionalAccount {
+                        responder: self.payer.clone().try_pubkey().unwrap(),
+                    })
+                    .args(SolanaRespondBidirectional {
+                        request_id: request_ids[0],
+                        serialized_output: respond_bidirectional_serialized_output.clone(),
+                        signature: signature.clone(),
+                    })
+                    .send()
+                    .await
+                    .map_err(|err| {
+                        tracing::error!(
+                            ?sign_id,
+                            error = ?err,
+                            "failed to publish respond bidirectional solana signature"
+                        );
+                    })?;
+
+                tracing::info!(
+                    ?sign_id,
+                    tx_hash = ?tx,
+                    elapsed = ?timestamp.elapsed(),
+                    "published respond bidirectional solana signature successfully"
+                );
+            }
+            SignKind::Checkpoint(_) => {
+                tracing::error!(
+                    ?sign_id,
+                    "try_publish_sol: checkpoint signature publishing not supported on Solana"
+                );
+                return Err(());
+            }
+        }
+
+        Ok(())
     }
 }
 

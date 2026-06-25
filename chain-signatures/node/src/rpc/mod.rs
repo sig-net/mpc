@@ -2,7 +2,6 @@ mod canton;
 mod ethereum;
 mod hydration;
 mod near;
-mod solana;
 
 use crate::config::Config;
 use crate::indexer_eth::EthConfig;
@@ -19,7 +18,6 @@ pub use ethereum::EthClient;
 pub use hydration::HydrationClient;
 pub use mpc_contract::primitives::{Read, View};
 pub use near::NearClient;
-pub use solana::try_publish_sol;
 
 use enum_map::EnumMap;
 
@@ -649,11 +647,10 @@ async fn execute_publish(client: ChainClient, action: PublishAction) {
                     .publish_signature(&action, &action.timestamp, &action.signature)
                     .await
                     .map_err(|_| anyhow::anyhow!("Ethereum publish failed")),
-                ChainClient::Solana(sol) => {
-                    try_publish_sol(sol, &action, &action.timestamp, &action.signature)
-                        .await
-                        .map_err(|_| anyhow::anyhow!("Solana publish failed"))
-                }
+                ChainClient::Solana(sol) => sol
+                    .publish_signature(&action, &action.timestamp, &action.signature)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Solana publish failed")),
                 ChainClient::Hydration(hyd) => hyd
                     .publish_signature(&action, &action.timestamp, &action.signature)
                     .await
