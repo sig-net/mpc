@@ -66,6 +66,20 @@ const ETH_BATCH_GAS_PER_REQUEST: u64 = 20_000;
 /// The maximum number of attempts to fetch eth tx and its receipt
 const ETH_TX_RECEIPT_MAX_ATTEMPTS: usize = 6;
 
+/// Convert MPC Signature to ChainSignatures::Signature
+impl From<&Signature> for ChainSignatures::Signature {
+    fn from(mpc_sig: &Signature) -> Self {
+        ChainSignatures::Signature {
+            bigR: ChainSignatures::AffinePoint {
+                x: U256::from_be_slice(&mpc_sig.big_r.x()),
+                y: U256::from_be_slice(mpc_sig.big_r.to_encoded_point(false).y().unwrap()),
+            },
+            s: U256::from_be_slice(&mpc_sig.s.to_bytes()),
+            recoveryId: mpc_sig.recovery_id,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct EthClient {
     contract: ChainSignatures::ChainSignaturesInstance<EthContractFillProvider>,
@@ -237,7 +251,7 @@ async fn send_eth_responses(
         },
         {
             contract
-                .respond(responses)
+                .respond(responses.clone()) // Need to clone because closure has to implement `FnMut` (otherwise it's `FnOnce`)
                 .gas(gas)
                 .nonce(nonce)
                 .send()
@@ -265,14 +279,7 @@ pub async fn try_publish_eth(
 
     let response = ChainSignatures::Response {
         requestId: action.indexed.id.request_id.into(),
-        signature: ChainSignatures::Signature {
-            bigR: ChainSignatures::AffinePoint {
-                x: U256::from_be_slice(&mpc_sig.big_r.x()),
-                y: U256::from_be_slice(mpc_sig.big_r.to_encoded_point(false).y().unwrap()),
-            },
-            s: U256::from_be_slice(&mpc_sig.s.to_bytes()),
-            recoveryId: mpc_sig.recovery_id,
-        },
+        signature: mpc_sig.into(),
     };
 
     let tx_hash = send_eth_responses(
@@ -326,25 +333,19 @@ pub async fn try_batch_publish_eth(
     tracing::info!(?sign_ids, "will send eth batch tx");
 
     // Map to typed ABI structs
-    let mut responses = Vec::with_capacity(num_requests);
-    for action in actions {
-        let mpc_sig = signatures
-            .get(&action.indexed.id)
-            .expect("signature not found in map");
+    let responses: Vec<ChainSignatures::Response> = actions
+        .iter()
+        .map(|action| {
+            let mpc_sig = signatures
+                .get(&action.indexed.id)
+                .expect("signature not found in map");
 
-        let response = ChainSignatures::Response {
-            requestId: action.indexed.id.request_id.into(),
-            signature: ChainSignatures::Signature {
-                bigR: ChainSignatures::AffinePoint {
-                    x: U256::from_be_slice(&mpc_sig.big_r.x()),
-                    y: U256::from_be_slice(mpc_sig.big_r.to_encoded_point(false).y().unwrap()),
-                },
-                s: U256::from_be_slice(&mpc_sig.s.to_bytes()),
-                recoveryId: mpc_sig.recovery_id,
-            },
-        };
-        responses.push(response);
-    }
+            ChainSignatures::Response {
+                requestId: action.indexed.id.request_id.into(),
+                signature: mpc_sig.into(),
+            }
+        })
+        .collect();
 
     // Calculate Gas
     let gas = std::cmp::max(
