@@ -1,14 +1,15 @@
 use super::PublishAction;
-use crate::indexer_canton::ledger_api::{
-    ActiveContractEntry, CumulativeFilter, EventFormat, GetActiveContractsRequest,
-    IdentifierFilter, JsCommands, LedgerEndResponse, PartyFilter,
-    SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse, TemplateFilterValue,
-};
 use crate::indexer_canton::{
     contracts::{CantonSignature, EcdsaSigData},
-    CantonAuthProvider, CantonConfig,
+    der_encode_signature,
+    ledger_api::{
+        ActiveContractEntry, CumulativeFilter, EventFormat, GetActiveContractsRequest,
+        IdentifierFilter, JsCommands, LedgerEndResponse, PartyFilter,
+        SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse,
+        TemplateFilterValue,
+    },
+    CantonAuthProvider, CantonChainCtx, CantonConfig,
 };
-use crate::indexer_canton::{der_encode_signature, CantonChainCtx};
 use mpc_primitives::{Chain, SignKind, Signature};
 use std::time::{Duration, Instant};
 
@@ -51,6 +52,7 @@ impl CantonClient {
         })
     }
 
+    // TODO: this method is only used in integration tests, cosider hiding it behind a feature flag or get api user from config directly
     pub fn ledger_api_user(&self) -> &str {
         &self.config.ledger_api_user
     }
@@ -71,7 +73,8 @@ impl CantonClient {
             .bearer_auth(token))
     }
 
-    pub async fn auth_get(&self, path: &str) -> anyhow::Result<reqwest::RequestBuilder> {
+    // TODO: this method is only used in integration tests, cosider hiding it behind a feature flag
+    async fn auth_get(&self, path: &str) -> anyhow::Result<reqwest::RequestBuilder> {
         let token = self.bearer_token().await?;
         Ok(self
             .http_client
@@ -86,6 +89,7 @@ impl CantonClient {
         Ok(body.offset)
     }
 
+    // TODO: this method is only used in integration tests, cosider hiding it behind a feature flag
     pub async fn fetch_active_contracts(
         &self,
         parties: &[&str],
@@ -131,6 +135,7 @@ impl CantonClient {
         Ok(resp.json().await?)
     }
 
+    // TODO: this method is only used in integration tests, cosider hiding it behind a feature flag
     pub async fn submit_and_wait(
         &self,
         commands: JsCommands,
@@ -146,7 +151,7 @@ impl CantonClient {
         Ok(resp.json().await?)
     }
 
-    pub async fn exercise_choice(
+    async fn exercise_choice(
         &self,
         command_id: &str,
         choice: &str,
@@ -170,6 +175,92 @@ impl CantonClient {
             .await?;
         Ok(())
     }
+
+    pub async fn publish_signature(
+        &self,
+        action: &PublishAction,
+        timestamp: &Instant,
+        signature: &Signature,
+    ) -> anyhow::Result<()> {
+        let sign_id = action.indexed.id;
+        let request_id_hex = hex::encode(action.indexed.id.request_id);
+
+        tracing::info!(
+            ?sign_id,
+            chain = ?action.indexed.chain,
+            elapsed = ?timestamp.elapsed(),
+            request_id = %request_id_hex,
+            "canton: publishing signature"
+        );
+
+        let der_sig = hex::encode(der_encode_signature(signature)?);
+        let canton_signature = serde_json::to_value(CantonSignature::EcdsaSig(EcdsaSigData {
+            der: der_sig,
+            recovery_id: signature.recovery_id,
+        }))?;
+
+        let (choice, command_id, choice_argument) = match &action.indexed.kind {
+            SignKind::SignBidirectional(event) if event.chain == Chain::Canton => {
+                let chain_ctx_bytes = event
+                    .chain_ctx
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("missing chain_ctx on Canton sign request"))?;
+                let ctx: CantonChainCtx = borsh::from_slice(chain_ctx_bytes)
+                    .map_err(|e| anyhow::anyhow!("failed to deserialize CantonChainCtx: {e}"))?;
+                (
+                    "Respond",
+                    format!("mpc-respond-{request_id_hex}"),
+                    serde_json::json!({
+                        "signEventCid": ctx.sign_event_contract_id,
+                        "requestId": request_id_hex,
+                        "signature": canton_signature,
+                    }),
+                )
+            }
+            SignKind::RespondBidirectional(respond_tx) => {
+                let chain_ctx_bytes = respond_tx
+                    .chain_ctx
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("missing chain_ctx on Canton response"))?;
+                let ctx: CantonChainCtx = borsh::from_slice(chain_ctx_bytes)
+                    .map_err(|e| anyhow::anyhow!("failed to deserialize CantonChainCtx: {e}"))?;
+                (
+                    "RespondBidirectional",
+                    format!("mpc-respond-bidir-{request_id_hex}"),
+                    serde_json::json!({
+                        "signEventCid": ctx.sign_event_contract_id,
+                        "requestId": request_id_hex,
+                        "serializedOutput": hex::encode(&respond_tx.output),
+                        "signature": canton_signature,
+                    }),
+                )
+            }
+            _ => anyhow::bail!(
+                "Canton supports only Canton SignBidirectional or RespondBidirectional"
+            ),
+        };
+
+        self.exercise_choice(&command_id, choice, choice_argument)
+            .await
+            .inspect_err(|err| {
+                tracing::error!(
+                    ?sign_id,
+                    choice,
+                    request_id = %request_id_hex,
+                    error = %err,
+                    "canton: failed to publish signature"
+                );
+            })?;
+
+        tracing::info!(
+            ?sign_id,
+            choice,
+            elapsed = ?timestamp.elapsed(),
+            "published canton {choice} successfully"
+        );
+
+        Ok(())
+    }
 }
 
 async fn check_response(
@@ -184,86 +275,4 @@ async fn check_response(
     Ok(resp)
 }
 
-pub async fn try_publish_canton(
-    canton: &CantonClient,
-    action: &PublishAction,
-    timestamp: &Instant,
-    signature: &Signature,
-) -> anyhow::Result<()> {
-    let sign_id = action.indexed.id;
-    let request_id_hex = hex::encode(action.indexed.id.request_id);
-
-    tracing::info!(
-        ?sign_id,
-        chain = ?action.indexed.chain,
-        elapsed = ?timestamp.elapsed(),
-        request_id = %request_id_hex,
-        "canton: publishing signature"
-    );
-
-    let der_sig = hex::encode(der_encode_signature(signature)?);
-    let canton_signature = serde_json::to_value(CantonSignature::EcdsaSig(EcdsaSigData {
-        der: der_sig,
-        recovery_id: signature.recovery_id,
-    }))?;
-    let (choice, command_id, choice_argument) = match &action.indexed.kind {
-        SignKind::SignBidirectional(event) if event.chain == Chain::Canton => {
-            let chain_ctx_bytes = event
-                .chain_ctx
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("missing chain_ctx on Canton sign request"))?;
-            let ctx: CantonChainCtx = borsh::from_slice(chain_ctx_bytes)
-                .map_err(|e| anyhow::anyhow!("failed to deserialize CantonChainCtx: {e}"))?;
-            (
-                "Respond",
-                format!("mpc-respond-{request_id_hex}"),
-                serde_json::json!({
-                    "signEventCid": ctx.sign_event_contract_id,
-                    "requestId": request_id_hex,
-                    "signature": canton_signature,
-                }),
-            )
-        }
-        SignKind::RespondBidirectional(respond_tx) => {
-            let chain_ctx_bytes = respond_tx
-                .chain_ctx
-                .as_deref()
-                .ok_or_else(|| anyhow::anyhow!("missing chain_ctx on Canton response"))?;
-            let ctx: CantonChainCtx = borsh::from_slice(chain_ctx_bytes)
-                .map_err(|e| anyhow::anyhow!("failed to deserialize CantonChainCtx: {e}"))?;
-            (
-                "RespondBidirectional",
-                format!("mpc-respond-bidir-{request_id_hex}"),
-                serde_json::json!({
-                    "signEventCid": ctx.sign_event_contract_id,
-                    "requestId": request_id_hex,
-                    "serializedOutput": hex::encode(&respond_tx.output),
-                    "signature": canton_signature,
-                }),
-            )
-        }
-        _ => anyhow::bail!("Canton supports only Canton SignBidirectional or RespondBidirectional"),
-    };
-
-    canton
-        .exercise_choice(&command_id, choice, choice_argument)
-        .await
-        .inspect_err(|err| {
-            tracing::error!(
-                ?sign_id,
-                choice,
-                request_id = %request_id_hex,
-                error = %err,
-                "canton: failed to publish signature"
-            );
-        })?;
-
-    tracing::info!(
-        ?sign_id,
-        choice,
-        elapsed = ?timestamp.elapsed(),
-        "published canton {choice} successfully"
-    );
-
-    Ok(())
-}
+// TODO: add unit tests

@@ -14,7 +14,7 @@ use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
 use crate::util::retry::{retry_rpc, RetryConfig};
 use std::collections::BTreeSet;
 
-pub use canton::{try_publish_canton, CantonClient};
+pub use canton::CantonClient;
 pub use ethereum::EthClient;
 pub use hydration::HydrationClient;
 pub use mpc_contract::primitives::{Read, View};
@@ -659,11 +659,10 @@ async fn execute_publish(client: ChainClient, action: PublishAction) {
                     .publish_signature(&action, &action.timestamp, &action.signature)
                     .await
                     .map_err(|_| anyhow::anyhow!("Hydration publish failed")),
-                ChainClient::Canton(canton) => {
-                    try_publish_canton(canton, &action, &action.timestamp, &action.signature)
-                        .await
-                        .map_err(|_| anyhow::anyhow!("Canton publish failed"))
-                }
+                ChainClient::Canton(canton) => canton
+                    .publish_signature(&action, &action.timestamp, &action.signature)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Canton publish failed")),
                 ChainClient::Err(msg) => {
                     tracing::error!(msg, "no client for chain");
                     Ok(())
