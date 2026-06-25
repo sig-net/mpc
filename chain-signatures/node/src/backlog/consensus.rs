@@ -27,27 +27,45 @@ pub(crate) async fn align_backlog_with_consensus(
         return None;
     }
 
-    // No mismatch/divergence, we are aligned with the consensus.
-    let current_checkpoint = backlog.checkpoint(chain).await;
-    if current_checkpoint.digest() == checkpoint_digest.digest {
-        return None;
-    }
+    // If we have a local checkpoint, check if we're already aligned.
+    // Use latest_checkpoint (read-only) instead of checkpoint() to avoid
+    // creating a new checkpoint as a side-effect during alignment.
+    if let Some(current_checkpoint) = backlog.latest_checkpoint(chain).await {
+        if current_checkpoint.digest() == checkpoint_digest.digest {
+            // Consensus matches our latest → confirm and persist it.
+            backlog.on_consensus_confirmed(chain, &current_checkpoint).await;
+            return None;
+        }
 
-    // If our current height is greater than consensus height,
-    // check if we have a historical checkpoint that matches the consensus digest.
-    if current_checkpoint.block_height > checkpoint_digest.height
-        && backlog
-            .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
-            .await
-            .is_some()
-    {
-        tracing::info!(
+        // If our current height is greater than consensus height,
+        // check if we have a checkpoint in our pending set that matches
+        // the consensus digest (we're ahead but aligned).
+        if current_checkpoint.block_height > checkpoint_digest.height
+            && backlog
+                .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
+                .await
+                .is_some()
+        {
+            tracing::info!(
                 ?chain,
                 local_height = current_checkpoint.block_height,
                 consensus_height = checkpoint_digest.height,
-                "local backlog is ahead of consensus and matches past consensus checkpoint; no regression needed"
+                "local backlog is ahead of consensus and matches past consensus checkpoint; confirming"
             );
-        return None;
+            if let Some(matched) = backlog
+                .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
+                .await
+            {
+                backlog.on_consensus_confirmed(chain, &matched).await;
+            }
+            return None;
+        }
+    } else {
+        tracing::info!(
+            ?chain,
+            ?checkpoint_digest,
+            "no local checkpoint; consensus checkpoint exists, fetching..."
+        );
     }
 
     tracing::warn!(
@@ -66,6 +84,13 @@ pub(crate) async fn align_backlog_with_consensus(
     .await?;
 
     let height = fetched_checkpoint.block_height;
+
+    // Persist the recovered checkpoint as the latest consensus checkpoint
+    // before overwriting the local backlog, so the node has a fallback on restart.
+    if let Err(err) = backlog.storage.persist(&fetched_checkpoint).await {
+        tracing::warn!(?chain, %err, "failed to persist regressed checkpoint");
+    }
+
     if let Err(err) = backlog.recover_by_checkpoint(fetched_checkpoint).await {
         tracing::error!(?err, %chain, "failed to recover backlog to checkpoint");
         return None;

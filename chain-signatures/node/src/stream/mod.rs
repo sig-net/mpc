@@ -1357,7 +1357,7 @@ mod tests {
             ))
             .await;
         backlog.set_processed_block(Chain::Solana, 5).await;
-        let checkpoint = backlog.checkpoint(Chain::Solana).await;
+        let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
         let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest {
             height: 5,
@@ -1440,7 +1440,7 @@ mod tests {
             ))
             .await;
         backlog.set_processed_block(Chain::Solana, 10).await;
-        let checkpoint = backlog.checkpoint(Chain::Solana).await;
+        let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
         let digest = checkpoint.digest();
 
         let (cp_tx, cp_rx) = watch::channel(CheckpointDigest { height: 10, digest });

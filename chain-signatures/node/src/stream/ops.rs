@@ -574,7 +574,7 @@ mod tests {
                 SignKind::Sign,
             ))
             .await;
-        backlog.checkpoint(Chain::Solana).await;
+        let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
         let threshold = 1;
         let mut mesh_state = MeshState::default();
@@ -583,12 +583,6 @@ mod tests {
         let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
         wait_threshold_active(&mut mesh_rx, threshold).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
-        let checkpoint = backlog
-            .storage
-            .load_latest(Chain::Solana)
-            .await
-            .unwrap()
-            .unwrap();
         backlog.recover_by_checkpoint(checkpoint).await.unwrap();
 
         requeue_pending_sign_requests(&backlog, Chain::Solana, sign_tx).await;
@@ -883,7 +877,10 @@ mod tests {
         .unwrap();
 
         backlog.set_processed_block(tx.source_chain, 10).await;
-        backlog.checkpoint(tx.source_chain).await;
+        let checkpoint = backlog.checkpoint(tx.source_chain).await.unwrap();
+
+        // Simulate consensus confirmation so storage has the checkpoint
+        backlog.on_consensus_confirmed(tx.source_chain, &checkpoint).await;
 
         let threshold = 1;
         let mut mesh_state = MeshState::default();

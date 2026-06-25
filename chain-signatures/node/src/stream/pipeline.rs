@@ -126,17 +126,6 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                 }
             }
 
-            // Load historical checkpoints from storage
-            match self.backlog.storage.load_history(chain).await {
-                Ok(history) => {
-                    for checkpoint in history {
-                        self.backlog.remember_checkpoint(checkpoint).await;
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(?chain, %err, "failed to load historical checkpoints");
-                }
-            }
         }
 
         // Perform consensus checkpoint alignment. Returns None when no alignment is
@@ -245,8 +234,10 @@ async fn wait_detected_regression(
     }
 }
 
-/// Returns `Some(ChainStreaming::Recovery)` if a regression is detected
-/// Otherwise returns `None` in the case we are normal.
+/// Returns `Some(ChainStreaming::Recovery)` if a regression is detected.
+/// When the consensus digest matches a local checkpoint (latest or historical),
+/// the checkpoint is confirmed and persisted via `on_consensus_confirmed`.
+/// Returns `None` when the backlog is aligned (no regression).
 async fn detect_regression(
     chain: Chain,
     backlog: &Backlog,
@@ -257,26 +248,34 @@ async fn detect_regression(
         return None;
     }
 
-    let current_checkpoint = backlog.checkpoint(chain).await;
+    // Use latest_checkpoint (read-only) instead of checkpoint() to avoid
+    // creating a new checkpoint as a side-effect during regression detection.
+    let Some(current_checkpoint) = backlog.latest_checkpoint(chain).await else {
+        tracing::info!(?chain, "no local checkpoint; skipping regression check");
+        return None;
+    };
+
+    // Consensus matches our latest local checkpoint → confirm and persist.
     if current_checkpoint.digest() == checkpoint_digest.digest {
+        backlog.on_consensus_confirmed(chain, &current_checkpoint).await;
         return None;
     }
 
-    // Check if we are ahead of consensus and aligned
-    if current_checkpoint.block_height > checkpoint_digest.height
-        && backlog
-            .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
-            .await
-            .is_some()
+    // Consensus matches an older checkpoint in our history → confirm and persist.
+    if let Some(matched) = backlog
+        .find_checkpoint_by_digest(chain, checkpoint_digest.digest)
+        .await
     {
         tracing::info!(
-                ?chain,
-                local_height = current_checkpoint.block_height,
-                consensus_height = checkpoint_digest.height,
-                "local backlog is ahead of consensus and matches past consensus checkpoint; no regression needed"
-            );
+            ?chain,
+            local_height = current_checkpoint.block_height,
+            consensus_height = checkpoint_digest.height,
+            "local backlog is ahead of consensus and matches past consensus checkpoint; confirming"
+        );
+        backlog.on_consensus_confirmed(chain, &matched).await;
         return None;
     }
 
+    // No match → regression detected.
     Some(ChainStreaming::Recovery { load_local: false })
 }
