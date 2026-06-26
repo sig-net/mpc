@@ -34,16 +34,15 @@ pub struct CantonStream<S: StateManager, T: ChainTelemetry> {
 }
 
 impl<S: StateManager, T: ChainTelemetry> CantonStream<S, T> {
-    pub fn new(config: CantonConfig, state_manager: S, telemetry: T) -> Option<Self> {
+    pub fn new(config: CantonConfig, state_manager: S, telemetry: T) -> Self {
         let (events_tx, events_rx) = crate::stream::channel();
-
-        Some(CantonStream {
+        CantonStream {
             config,
             state_manager,
             telemetry,
             events_rx,
             events_tx: Some(events_tx),
-        })
+        }
     }
 }
 

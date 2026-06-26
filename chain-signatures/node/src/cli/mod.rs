@@ -585,18 +585,23 @@ async fn spawn_indexers(
 
     if let Some(sol_config) = sol {
         let sol_telemetry = PrometheusChainTelemetry::new(Chain::Solana);
-        if let Some(sol_stream) = SolanaStream::new(sol_config, backlog.clone(), sol_telemetry.clone()) {
-            tokio::spawn(run_stream(
-                sol_stream,
-                sign_tx.clone(),
-                rpc_channel.clone(),
-                backlog.clone(),
-                sol_telemetry,
-                contract_watcher.clone(),
-                mesh_state.clone(),
-                client.clone(),
-                checkpoints_rx[Chain::Solana].clone(),
-            ));
+        match SolanaStream::new(sol_config, backlog.clone(), sol_telemetry.clone()) {
+            Ok(sol_stream) => {
+                tokio::spawn(run_stream(
+                    sol_stream,
+                    sign_tx.clone(),
+                    rpc_channel.clone(),
+                    backlog.clone(),
+                    sol_telemetry,
+                    contract_watcher.clone(),
+                    mesh_state.clone(),
+                    client.clone(),
+                    checkpoints_rx[Chain::Solana].clone(),
+                ));
+            }
+            Err(err) => {
+                tracing::error!(?err, "failed to create solana indexer stream");
+            }
         }
     }
 
@@ -616,21 +621,22 @@ async fn spawn_indexers(
 
     if let Some(canton_config) = canton {
         let canton_telemetry = PrometheusChainTelemetry::new(Chain::Canton);
-        if let Some(canton_stream) =
-            indexer_canton::CantonStream::new(canton_config, backlog.clone(), canton_telemetry.clone())
-        {
-            tokio::spawn(run_stream(
-                canton_stream,
-                sign_tx,
-                rpc_channel,
-                backlog,
-                canton_telemetry,
-                contract_watcher,
-                mesh_state,
-                client,
-                checkpoints_rx[Chain::Canton].clone(),
-            ));
-        }
+        let canton_stream = indexer_canton::CantonStream::new(
+            canton_config,
+            backlog.clone(),
+            canton_telemetry.clone(),
+        );
+        tokio::spawn(run_stream(
+            canton_stream,
+            sign_tx,
+            rpc_channel,
+            backlog,
+            canton_telemetry,
+            contract_watcher,
+            mesh_state,
+            client,
+            checkpoints_rx[Chain::Canton].clone(),
+        ));
     }
 }
 
