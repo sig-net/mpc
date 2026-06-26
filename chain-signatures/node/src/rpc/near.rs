@@ -1,4 +1,4 @@
-use super::PublishAction;
+use super::{ChainPublisher, PublishAction};
 use crate::config::NetworkConfig;
 use crate::protocol::Governance;
 use crate::util::AffinePointExt as _;
@@ -11,6 +11,7 @@ use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 use near_fetch::result::ExecutionFinalResult;
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Instant;
 use url::Url;
 
@@ -165,13 +166,14 @@ impl NearClient {
         action: &PublishAction,
         timestamp: &Instant,
         signature: &Signature,
-    ) -> Result<(), near_fetch::Error> {
+    ) -> anyhow::Result<()> {
         let outcome = match &action.indexed.kind {
             SignKind::Checkpoint(checkpoint) => {
                 self.call_respond_checkpoint(checkpoint, signature).await
             }
             _ => self.call_respond(&action.indexed.id, signature).await,
         }
+        .map_err(|e| anyhow::anyhow!("near rpc error: {e}"))
         .inspect_err(|err| {
             tracing::error!(
                 sign_id = ?action.indexed.id,
@@ -180,15 +182,18 @@ impl NearClient {
             );
         })?;
 
-        let _: () = outcome.json().inspect_err(|err| {
-            tracing::error!(
-                sign_id = ?action.indexed.id,
-                big_r = signature.big_r.to_base58(),
-                s = ?signature.s,
-                ?err,
-                "smart contract threw error",
-            );
-        })?;
+        outcome
+            .json::<()>()
+            .map_err(|e| anyhow::anyhow!("contract rejected response: {e}"))
+            .inspect_err(|err| {
+                tracing::error!(
+                    sign_id = ?action.indexed.id,
+                    big_r = signature.big_r.to_base58(),
+                    s = ?signature.s,
+                    ?err,
+                    "smart contract threw error",
+                );
+            })?;
         tracing::info!(
             sign_id = ?action.indexed.id,
             big_r = signature.big_r.to_base58(),
@@ -196,6 +201,21 @@ impl NearClient {
             elapsed = ?timestamp.elapsed(),
             "published signature sucessfully",
         );
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ChainPublisher for NearClient {
+    async fn publish_action(&self, action: &PublishAction) -> anyhow::Result<()> {
+        let client = self.clone();
+        let action = action.clone();
+
+        // Spawn a new task to publish the signature asynchronously
+        tokio::spawn(async move {
+            super::execute_publish(Arc::new(client), action).await;
+        });
+
         Ok(())
     }
 }

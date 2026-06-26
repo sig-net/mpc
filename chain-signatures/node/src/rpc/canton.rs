@@ -1,4 +1,4 @@
-use super::PublishAction;
+use super::{ChainPublisher, PublishAction};
 use crate::indexer_canton::{
     contracts::{CantonSignature, EcdsaSigData},
     der_encode_signature,
@@ -11,7 +11,10 @@ use crate::indexer_canton::{
     CantonAuthProvider, CantonChainCtx, CantonConfig,
 };
 use mpc_primitives::{Chain, SignKind, Signature};
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 #[derive(Clone)]
 pub struct CantonClient {
@@ -273,6 +276,18 @@ async fn check_response(
         anyhow::bail!("{context} failed: {status} {text}");
     }
     Ok(resp)
+}
+
+#[async_trait::async_trait]
+impl ChainPublisher for CantonClient {
+    async fn publish_action(&self, action: &PublishAction) -> anyhow::Result<()> {
+        let client = self.clone();
+        let action = action.clone();
+        tokio::spawn(async move {
+            super::execute_publish(Arc::new(client), action).await;
+        });
+        Ok(())
+    }
 }
 
 #[cfg(test)]

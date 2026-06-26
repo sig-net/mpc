@@ -1,4 +1,4 @@
-use super::PublishAction;
+use super::{ChainPublisher, PublishAction};
 use crate::indexer_hydration::HydrationConfig;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use mpc_primitives::{SignId, SignKind, Signature};
@@ -8,7 +8,7 @@ use sp_runtime::{
     traits::{IdentifyAccount, Verify},
     MultiSignature as SpMultiSignature,
 };
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 use subxt::config::substrate::{
     AccountId32, BlakeTwo256, MultiSignature, SubstrateConfig, SubstrateExtrinsicParams,
     SubstrateHeader,
@@ -244,7 +244,7 @@ impl HydrationClient {
         action: &PublishAction,
         timestamp: &Instant,
         signature: &Signature,
-    ) -> Result<(), ()> {
+    ) -> anyhow::Result<()> {
         let chain = action.indexed.chain;
         let sign_id = action.indexed.id;
         let request_ids = [action.indexed.id.request_id];
@@ -261,9 +261,10 @@ impl HydrationClient {
             SignKind::Sign | SignKind::SignBidirectional(_) => {
                 self.call_respond(&action.indexed.id, signature)
                     .await
-                    .map_err(|e| {
-                        tracing::error!(?sign_id, ?e, "Hydration: failed to publish signature");
+                    .inspect_err(|e| {
+                        tracing::error!(?sign_id, ?e, "Hydration: failed to publish signature")
                     })?;
+
                 tracing::info!(
                     ?sign_id,
                     elapsed = ?timestamp.elapsed(),
@@ -281,7 +282,7 @@ impl HydrationClient {
                 let tx_hash = self
                     .call_respond_bidirectional(&action.indexed.id, serialized_output, signature)
                     .await
-                    .map_err(|e| {
+                    .inspect_err(|e| {
                         tracing::error!(
                             ?sign_id,
                             ?e,
@@ -296,14 +297,23 @@ impl HydrationClient {
                 );
             }
             SignKind::Checkpoint(_) => {
-                tracing::error!(
-                    ?sign_id,
-                    "Hydration publish signature: checkpoint signature publishing not supported on Hydration"
-                );
-                return Err(());
+                tracing::error!(?sign_id, "Hydration: checkpoint publishing not supported");
+                anyhow::bail!("checkpoint publishing not supported on Hydration");
             }
         }
 
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ChainPublisher for HydrationClient {
+    async fn publish_action(&self, action: &PublishAction) -> anyhow::Result<()> {
+        let client = self.clone();
+        let action = action.clone();
+        tokio::spawn(async move {
+            super::execute_publish(Arc::new(client), action).await;
+        });
         Ok(())
     }
 }

@@ -26,7 +26,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::rpc::PublishAction;
+use crate::rpc::{self, ChainPublisher, PublishAction};
 use crate::util::retry::{retry_rpc, RetryConfig};
 
 const MAX_SIGNATURES_FOR_FAST_CATCHUP: usize = 1000;
@@ -460,8 +460,8 @@ impl SolanaClient {
         action: &PublishAction,
         timestamp: &Instant,
         mpc_sig: &mpc_primitives::Signature,
-    ) -> Result<(), ()> {
-        let program = self.client.program(self.program_id).map_err(|_| ())?;
+    ) -> anyhow::Result<()> {
+        let program = self.client.program(self.program_id)?;
 
         let sign_id = action.indexed.id;
         let request_ids = vec![action.indexed.id.request_id];
@@ -492,7 +492,7 @@ impl SolanaClient {
                     })
                     .send()
                     .await
-                    .map_err(|err| {
+                    .inspect_err(|err| {
                         tracing::error!(
                             sign_id = ?action.indexed.id,
                             error = ?err,
@@ -529,7 +529,7 @@ impl SolanaClient {
                     })
                     .send()
                     .await
-                    .map_err(|err| {
+                    .inspect_err(|err| {
                         tracing::error!(
                             ?sign_id,
                             error = ?err,
@@ -549,10 +549,22 @@ impl SolanaClient {
                     ?sign_id,
                     "Solana publish signature: checkpoint signature publishing not supported on Solana"
                 );
-                return Err(());
+                anyhow::bail!("checkpoint publishing not supported on Solana")
             }
         }
 
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ChainPublisher for SolanaClient {
+    async fn publish_action(&self, action: &PublishAction) -> anyhow::Result<()> {
+        let client = self.clone();
+        let action = action.clone();
+        tokio::spawn(async move {
+            rpc::execute_publish(Arc::new(client), action).await;
+        });
         Ok(())
     }
 }
