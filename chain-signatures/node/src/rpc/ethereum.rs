@@ -364,7 +364,7 @@ impl EthClient {
 
 #[async_trait::async_trait]
 impl ChainPublisher for EthClient {
-    async fn publish_action(&self, action: &PublishAction) -> anyhow::Result<()> {
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
         // Push to internal batching queue
         self.batch_tx
             .send(action.clone())

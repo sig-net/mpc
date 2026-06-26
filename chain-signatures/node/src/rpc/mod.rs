@@ -9,21 +9,21 @@ use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
 use crate::util::retry::{retry_rpc, RetryConfig};
+use enum_map::EnumMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use enum_map::EnumMap;
 
 // TODO: move clients elsewhere
 pub use canton::CantonClient;
 pub use ethereum::EthClient;
 pub use hydration::HydrationClient;
 
-pub use near::NearClient;
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
-use mpc_primitives::{CheckpointDigest, Signature};
 pub use mpc_contract::primitives::{Read, View};
+use mpc_primitives::{CheckpointDigest, Signature};
+pub use near::NearClient;
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
@@ -43,12 +43,12 @@ const PUBLISH_FIXED_DELAY: Duration = Duration::from_secs(5);
 const BATCH_PUBLISH_MIN_DELAY: Duration = Duration::from_secs(1);
 const BATCH_PUBLISH_MAX_DELAY: Duration = Duration::from_secs(10);
 
-/// Trait for publishing signatures to different blockchains.
+/// Trait for publishing signatures to different blockchains (single attempt, caller handles retries).
 #[async_trait::async_trait]
 pub trait ChainPublisher: Send + Sync + 'static {
     /// Accepts a publish action. The publisher encapsulates how this is executed
     /// (e.g., immediate spawn, or pushing to an internal batching queue).
-    async fn publish_action(&self, action: &PublishAction) -> anyhow::Result<()>;
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()>;
 }
 
 #[derive(Clone)]
@@ -428,7 +428,7 @@ impl RpcExecutor {
                 continue;
             };
 
-            let _ = publisher.publish_action(&action).await;
+            let _ = publisher.publish_signature(&action).await;
         }
     }
 }
@@ -535,7 +535,7 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
             );
         },
         // Try to publish the signature
-        { publisher.publish_action(&action).await }
+        { publisher.publish_signature(&action).await }
     );
 
     // TODO: consider decoupling publishing from metric recording

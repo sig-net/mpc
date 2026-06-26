@@ -11,8 +11,6 @@ use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 use near_fetch::result::ExecutionFinalResult;
 use serde_json::json;
-use std::sync::Arc;
-use std::time::Instant;
 use url::Url;
 
 #[derive(Clone)]
@@ -160,13 +158,13 @@ impl NearClient {
             .transact()
             .await
     }
+}
 
-    pub async fn publish_signature(
-        &self,
-        action: &PublishAction,
-        timestamp: &Instant,
-        signature: &Signature,
-    ) -> anyhow::Result<()> {
+#[async_trait::async_trait]
+impl ChainPublisher for NearClient {
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
+        let timestamp = action.timestamp;
+        let signature = &action.signature;
         let outcome = match &action.indexed.kind {
             SignKind::Checkpoint(checkpoint) => {
                 self.call_respond_checkpoint(checkpoint, signature).await
@@ -201,21 +199,6 @@ impl NearClient {
             elapsed = ?timestamp.elapsed(),
             "published signature sucessfully",
         );
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl ChainPublisher for NearClient {
-    async fn publish_action(&self, action: &PublishAction) -> anyhow::Result<()> {
-        let client = self.clone();
-        let action = action.clone();
-
-        // Spawn a new task to publish the signature asynchronously
-        tokio::spawn(async move {
-            super::execute_publish(Arc::new(client), action).await;
-        });
-
         Ok(())
     }
 }

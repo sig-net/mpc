@@ -10,11 +10,8 @@ use crate::indexer_canton::{
     },
     CantonAuthProvider, CantonChainCtx, CantonConfig,
 };
-use mpc_primitives::{Chain, SignKind, Signature};
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use mpc_primitives::{Chain, SignKind};
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct CantonClient {
@@ -178,15 +175,27 @@ impl CantonClient {
             .await?;
         Ok(())
     }
+}
 
-    pub async fn publish_signature(
-        &self,
-        action: &PublishAction,
-        timestamp: &Instant,
-        signature: &Signature,
-    ) -> anyhow::Result<()> {
+async fn check_response(
+    resp: reqwest::Response,
+    context: &str,
+) -> anyhow::Result<reqwest::Response> {
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("{context} failed: {status} {text}");
+    }
+    Ok(resp)
+}
+
+#[async_trait::async_trait]
+impl ChainPublisher for CantonClient {
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
         let sign_id = action.indexed.id;
         let request_id_hex = hex::encode(action.indexed.id.request_id);
+        let timestamp = action.timestamp;
+        let signature = &action.signature;
 
         tracing::info!(
             ?sign_id,
@@ -262,30 +271,6 @@ impl CantonClient {
             "published canton {choice} successfully"
         );
 
-        Ok(())
-    }
-}
-
-async fn check_response(
-    resp: reqwest::Response,
-    context: &str,
-) -> anyhow::Result<reqwest::Response> {
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("{context} failed: {status} {text}");
-    }
-    Ok(resp)
-}
-
-#[async_trait::async_trait]
-impl ChainPublisher for CantonClient {
-    async fn publish_action(&self, action: &PublishAction) -> anyhow::Result<()> {
-        let client = self.clone();
-        let action = action.clone();
-        tokio::spawn(async move {
-            super::execute_publish(Arc::new(client), action).await;
-        });
         Ok(())
     }
 }

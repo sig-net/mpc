@@ -308,7 +308,7 @@ impl HydrationClient {
 
 #[async_trait::async_trait]
 impl ChainPublisher for HydrationClient {
-    async fn publish_action(&self, action: &PublishAction) -> anyhow::Result<()> {
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
         let client = self.clone();
         let action = action.clone();
         tokio::spawn(async move {
