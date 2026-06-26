@@ -471,7 +471,7 @@ impl SolanaClient {
         tracing::debug!(
             ?sign_id,
             request_type = ?action.indexed.kind,
-            "try_publish_sol: dispatching request"
+            "Solana publish signature: dispatching request"
         );
 
         match &action.indexed.kind {
@@ -512,7 +512,7 @@ impl SolanaClient {
                     ?sign_id,
                     request_id = ?request_ids[0],
                     serialized_output_len = respond_bidirectional_tx.output.len(),
-                    "try_publish_sol: entering RespondBidirectional arm"
+                    "Solana publish signature: entering RespondBidirectional arm"
                 );
                 let respond_bidirectional_serialized_output =
                     respond_bidirectional_tx.output.clone();
@@ -533,7 +533,7 @@ impl SolanaClient {
                         tracing::error!(
                             ?sign_id,
                             error = ?err,
-                            "failed to publish respond bidirectional solana signature"
+                            "Solana publish signature: failed to publish respond bidirectional solana signature"
                         );
                     })?;
 
@@ -547,7 +547,7 @@ impl SolanaClient {
             SignKind::Checkpoint(_) => {
                 tracing::error!(
                     ?sign_id,
-                    "try_publish_sol: checkpoint signature publishing not supported on Solana"
+                    "Solana publish signature: checkpoint signature publishing not supported on Solana"
                 );
                 return Err(());
             }

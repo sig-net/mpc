@@ -276,7 +276,7 @@ impl HydrationClient {
                     ?sign_id,
                     request_id = ?request_ids[0],
                     serialized_output_len = serialized_output.len(),
-                    "try_publish_hydration: entering RespondBidirectional arm"
+                    "Hydration publish signature: entering RespondBidirectional arm"
                 );
                 let tx_hash = self
                     .call_respond_bidirectional(&action.indexed.id, serialized_output, signature)
@@ -285,20 +285,20 @@ impl HydrationClient {
                         tracing::error!(
                             ?sign_id,
                             ?e,
-                            "Hydration: failed to publish respond bidirectional signature"
+                            "Hydration publish signature: failed to publish respond bidirectional signature"
                         );
                     })?;
                 tracing::info!(
                     ?sign_id,
                     tx_hash = ?tx_hash,
                     elapsed = ?timestamp.elapsed(),
-                    "published respond bidirectional hydration signature successfully"
+                    "Hydration publish signature: published respond bidirectional signature successfully"
                 );
             }
             SignKind::Checkpoint(_) => {
                 tracing::error!(
                     ?sign_id,
-                    "try_publish_hydration: checkpoint signature publishing not supported on Hydration"
+                    "Hydration publish signature: checkpoint signature publishing not supported on Hydration"
                 );
                 return Err(());
             }
