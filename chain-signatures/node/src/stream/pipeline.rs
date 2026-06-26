@@ -217,15 +217,19 @@ impl<I: ChainIndexer> ChainPipeline<I> {
     }
 }
 
+/// Waits for a consensus checkpoint digest change, then checks for regression.
 async fn wait_detected_regression(
     checkpoints_rx: &mut watch::Receiver<CheckpointDigest>,
     backlog: &Backlog,
     chain: Chain,
 ) -> Option<ChainStreaming> {
-    if checkpoints_rx.changed().await.is_err() {
-        std::future::pending::<()>().await;
+    if let Some(state) = detect_regression(chain, backlog, checkpoints_rx).await {
+        return Some(state);
     }
-    detect_regression(chain, backlog, checkpoints_rx).await
+    if checkpoints_rx.changed().await.is_err() {
+        return None;
+    }
+    None
 }
 
 /// Returns `Some(ChainStreaming::Recovery)` if a regression is detected.
@@ -280,6 +284,7 @@ async fn detect_regression(
 mod tests {
     use super::*;
     use crate::backlog::Backlog;
+    use std::time::Duration;
 
     fn make_digest(
         height: u64,
@@ -389,6 +394,34 @@ mod tests {
         assert!(
             result.is_none(),
             "no local checkpoint should not trigger regression"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_detects_regression_after_consumed() {
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+
+        backlog.set_processed_block(chain, 100).await;
+        backlog.checkpoint(chain).await.unwrap();
+
+        let (mut _tx, mut rx) = make_digest(200, [0xabu8; 32]);
+
+        // Simulate find_consensus_checkpoint having consumed the change event
+        let _ = rx.borrow_and_update();
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            wait_detected_regression(&mut rx, &backlog, chain),
+        )
+        .await;
+
+        let result = result
+            .expect("should not hang — upfront check catches mismatch");
+        assert_eq!(
+            result,
+            Some(ChainStreaming::Recovery { load_local: false }),
+            "should detect regression even when receiver state was consumed"
         );
     }
 }
