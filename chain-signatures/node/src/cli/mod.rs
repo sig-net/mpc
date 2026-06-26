@@ -553,72 +553,84 @@ async fn spawn_indexers(
     checkpoints_rx: EnumMap<Chain, watch::Receiver<CheckpointDigest>>,
 ) {
     tracing::info!(
-        eth_configured = eth.is_some(),
-        "initializing ethereum indexer stream"
+        ethereum = eth.is_some(),
+        solana = sol.is_some(),
+        hydration = hydration.is_some(),
+        canton = canton.is_some(),
+        "spawning chain indexers"
     );
-    let eth_telemetry = PrometheusChainTelemetry::new(Chain::Ethereum);
-    match EthereumStream::new(eth, backlog.clone(), eth_telemetry.clone()).await {
-        Ok(eth_stream) => {
-            tracing::info!("ethereum indexer stream created successfully");
+
+    if let Some(eth_config) = eth {
+        let eth_telemetry = PrometheusChainTelemetry::new(Chain::Ethereum);
+        match EthereumStream::new(eth_config, backlog.clone(), eth_telemetry.clone()).await {
+            Ok(eth_stream) => {
+                tracing::info!("ethereum indexer stream created successfully");
+                tokio::spawn(run_stream(
+                    eth_stream,
+                    sign_tx.clone(),
+                    rpc_channel.clone(),
+                    backlog.clone(),
+                    eth_telemetry,
+                    contract_watcher.clone(),
+                    mesh_state.clone(),
+                    client.clone(),
+                    checkpoints_rx[Chain::Ethereum].clone(),
+                ));
+            }
+            Err(err) => {
+                tracing::error!(?err, "failed to create ethereum indexer stream");
+            }
+        }
+    }
+
+    if let Some(sol_config) = sol {
+        let sol_telemetry = PrometheusChainTelemetry::new(Chain::Solana);
+        if let Some(sol_stream) = SolanaStream::new(sol_config, backlog.clone(), sol_telemetry.clone()) {
             tokio::spawn(run_stream(
-                eth_stream,
+                sol_stream,
                 sign_tx.clone(),
                 rpc_channel.clone(),
                 backlog.clone(),
-                eth_telemetry,
+                sol_telemetry,
                 contract_watcher.clone(),
                 mesh_state.clone(),
                 client.clone(),
-                checkpoints_rx[Chain::Ethereum].clone(),
+                checkpoints_rx[Chain::Solana].clone(),
             ));
         }
-        Err(err) => {
-            tracing::error!(?err, "failed to create ethereum indexer stream");
-        }
-    };
+    }
 
-    let solana_telemetry = PrometheusChainTelemetry::new(Chain::Solana);
-    if let Some(sol_stream) = SolanaStream::new(sol, backlog.clone(), solana_telemetry.clone()) {
-        tokio::spawn(run_stream(
-            sol_stream,
+    if let Some(hydration_config) = hydration {
+        let hydration_telemetry = PrometheusChainTelemetry::new(Chain::Hydration);
+        tokio::spawn(indexer_hydration::run(
+            hydration_config,
             sign_tx.clone(),
-            rpc_channel.clone(),
             backlog.clone(),
-            solana_telemetry,
+            hydration_telemetry,
             contract_watcher.clone(),
             mesh_state.clone(),
             client.clone(),
-            checkpoints_rx[Chain::Solana].clone(),
+            checkpoints_rx[Chain::Hydration].clone(),
         ));
     }
 
-    let hydration_telemetry = PrometheusChainTelemetry::new(Chain::Hydration);
-    tokio::spawn(indexer_hydration::run(
-        hydration,
-        sign_tx.clone(),
-        backlog.clone(),
-        hydration_telemetry,
-        contract_watcher.clone(),
-        mesh_state.clone(),
-        client.clone(),
-        checkpoints_rx[Chain::Hydration].clone(),
-    ));
-
-    let canton_telemetry = PrometheusChainTelemetry::new(Chain::Canton);
-    if let Some(canton_stream) =
-        indexer_canton::CantonStream::new(canton, backlog.clone(), canton_telemetry.clone())
-    {
-        tokio::spawn(run_stream(
-            canton_stream,
-            sign_tx,
-            rpc_channel,
-            backlog,
-            canton_telemetry,
-            contract_watcher,
-            mesh_state,
-            client,
-            checkpoints_rx[Chain::Canton].clone(),
-        ));
+    if let Some(canton_config) = canton {
+        let canton_telemetry = PrometheusChainTelemetry::new(Chain::Canton);
+        if let Some(canton_stream) =
+            indexer_canton::CantonStream::new(canton_config, backlog.clone(), canton_telemetry.clone())
+        {
+            tokio::spawn(run_stream(
+                canton_stream,
+                sign_tx,
+                rpc_channel,
+                backlog,
+                canton_telemetry,
+                contract_watcher,
+                mesh_state,
+                client,
+                checkpoints_rx[Chain::Canton].clone(),
+            ));
+        }
     }
 }
 

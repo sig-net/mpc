@@ -96,12 +96,7 @@ impl<S: StateManager, T: ChainTelemetry> Drop for SolanaStream<S, T> {
 }
 
 impl<S: StateManager, T: ChainTelemetry> SolanaStream<S, T> {
-    pub fn new(sol: Option<SolConfig>, state_manager: S, telemetry: T) -> Option<Self> {
-        let Some(sol) = sol else {
-            tracing::warn!("solana indexer is disabled");
-            return None;
-        };
-
+    pub fn new(sol: SolConfig, state_manager: S, telemetry: T) -> Option<Self> {
         let Ok(program_id) = Pubkey::from_str(&sol.program_address) else {
             tracing::error!("Failed to parse program address: {}", sol.program_address);
             return None;

@@ -34,15 +34,7 @@ pub struct CantonStream<S: StateManager, T: ChainTelemetry> {
 }
 
 impl<S: StateManager, T: ChainTelemetry> CantonStream<S, T> {
-    pub fn new(config: Option<CantonConfig>, state_manager: S, telemetry: T) -> Option<Self> {
-        let config = match config {
-            Some(c) => c,
-            None => {
-                tracing::warn!("canton indexer is disabled");
-                return None;
-            }
-        };
-
+    pub fn new(config: CantonConfig, state_manager: S, telemetry: T) -> Option<Self> {
         let (events_tx, events_rx) = crate::stream::channel();
 
         Some(CantonStream {
