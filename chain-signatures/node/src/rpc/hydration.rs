@@ -238,72 +238,74 @@ impl HydrationClient {
         let events = progress.wait_for_finalized_success().await?;
         Ok(events.extrinsic_hash())
     }
-}
 
-pub async fn try_publish_hydration(
-    hyd: &HydrationClient,
-    action: &PublishAction,
-    timestamp: &Instant,
-    signature: &Signature,
-) -> Result<(), ()> {
-    let chain = action.indexed.chain;
-    let sign_id = action.indexed.id;
-    let request_ids = [action.indexed.id.request_id];
+    pub async fn publish_signature(
+        &self,
+        action: &PublishAction,
+        timestamp: &Instant,
+        signature: &Signature,
+    ) -> Result<(), ()> {
+        let chain = action.indexed.chain;
+        let sign_id = action.indexed.id;
+        let request_ids = [action.indexed.id.request_id];
 
-    tracing::info!(
-        ?sign_id,
-        ?chain,
-        elapsed = ?timestamp.elapsed(),
-        request_id = ?request_ids[0],
-        "Hydration: publishing signature"
-    );
+        tracing::info!(
+            ?sign_id,
+            ?chain,
+            elapsed = ?timestamp.elapsed(),
+            request_id = ?request_ids[0],
+            "Hydration: publishing signature"
+        );
 
-    match &action.indexed.kind {
-        SignKind::Sign | SignKind::SignBidirectional(_) => {
-            hyd.call_respond(&action.indexed.id, signature)
-                .await
-                .map_err(|e| {
-                    tracing::error!(?sign_id, ?e, "Hydration: failed to publish signature");
-                })?;
-            tracing::info!(
-                ?sign_id,
-                elapsed = ?timestamp.elapsed(),
-                "published hydration signature successfully"
-            );
+        match &action.indexed.kind {
+            SignKind::Sign | SignKind::SignBidirectional(_) => {
+                self.call_respond(&action.indexed.id, signature)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(?sign_id, ?e, "Hydration: failed to publish signature");
+                    })?;
+                tracing::info!(
+                    ?sign_id,
+                    elapsed = ?timestamp.elapsed(),
+                    "published hydration signature successfully"
+                );
+            }
+            SignKind::RespondBidirectional(respond_bidirectional_tx) => {
+                let serialized_output = respond_bidirectional_tx.output.clone();
+                tracing::debug!(
+                    ?sign_id,
+                    request_id = ?request_ids[0],
+                    serialized_output_len = serialized_output.len(),
+                    "Hydration publish signature: entering RespondBidirectional arm"
+                );
+                let tx_hash = self
+                    .call_respond_bidirectional(&action.indexed.id, serialized_output, signature)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(
+                            ?sign_id,
+                            ?e,
+                            "Hydration publish signature: failed to publish respond bidirectional signature"
+                        );
+                    })?;
+                tracing::info!(
+                    ?sign_id,
+                    tx_hash = ?tx_hash,
+                    elapsed = ?timestamp.elapsed(),
+                    "Hydration publish signature: published respond bidirectional signature successfully"
+                );
+            }
+            SignKind::Checkpoint(_) => {
+                tracing::error!(
+                    ?sign_id,
+                    "Hydration publish signature: checkpoint signature publishing not supported on Hydration"
+                );
+                return Err(());
+            }
         }
-        SignKind::RespondBidirectional(respond_bidirectional_tx) => {
-            let serialized_output = respond_bidirectional_tx.output.clone();
-            tracing::debug!(
-                ?sign_id,
-                request_id = ?request_ids[0],
-                serialized_output_len = serialized_output.len(),
-                "try_publish_hydration: entering RespondBidirectional arm"
-            );
-            let tx_hash = hyd
-                .call_respond_bidirectional(&action.indexed.id, serialized_output, signature)
-                .await
-                .map_err(|e| {
-                    tracing::error!(
-                        ?sign_id,
-                        ?e,
-                        "Hydration: failed to publish respond bidirectional signature"
-                    );
-                })?;
-            tracing::info!(
-                ?sign_id,
-                tx_hash = ?tx_hash,
-                elapsed = ?timestamp.elapsed(),
-                "published respond bidirectional hydration signature successfully"
-            );
-        }
-        SignKind::Checkpoint(_) => {
-            tracing::error!(
-                ?sign_id,
-                "try_publish_hydration: checkpoint signature publishing not supported on Hydration"
-            );
-            return Err(());
-        }
+
+        Ok(())
     }
-
-    Ok(())
 }
+
+// TODO: add unit tests

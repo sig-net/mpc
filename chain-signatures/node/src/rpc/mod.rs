@@ -2,7 +2,6 @@ mod canton;
 mod ethereum;
 mod hydration;
 mod near;
-mod solana;
 
 use crate::config::Config;
 use crate::indexer_eth::EthConfig;
@@ -14,12 +13,11 @@ use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
 use crate::util::retry::{retry_rpc, RetryConfig};
 use std::collections::BTreeSet;
 
-pub use canton::{try_publish_canton, CantonClient};
+pub use canton::CantonClient;
 pub use ethereum::EthClient;
-pub use hydration::{try_publish_hydration, HydrationClient};
+pub use hydration::HydrationClient;
 pub use mpc_contract::primitives::{Read, View};
-pub use near::{try_publish_near, NearClient};
-pub use solana::try_publish_sol;
+pub use near::NearClient;
 
 use enum_map::EnumMap;
 
@@ -641,30 +639,26 @@ async fn execute_publish(client: ChainClient, action: PublishAction) {
         // Try to publish the signature
         {
             match &client {
-                ChainClient::Near(near) => {
-                    try_publish_near(near, &action, &action.timestamp, &action.signature)
-                        .await
-                        .map_err(|_| anyhow::anyhow!("Near publish failed"))
-                }
+                ChainClient::Near(near) => near
+                    .publish_signature(&action, &action.timestamp, &action.signature)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Near publish failed")),
                 ChainClient::Ethereum(eth) => eth
                     .publish_signature(&action, &action.timestamp, &action.signature)
                     .await
                     .map_err(|_| anyhow::anyhow!("Ethereum publish failed")),
-                ChainClient::Solana(sol) => {
-                    try_publish_sol(sol, &action, &action.timestamp, &action.signature)
-                        .await
-                        .map_err(|_| anyhow::anyhow!("Solana publish failed"))
-                }
-                ChainClient::Hydration(hyd) => {
-                    try_publish_hydration(hyd, &action, &action.timestamp, &action.signature)
-                        .await
-                        .map_err(|_| anyhow::anyhow!("Hydration publish failed"))
-                }
-                ChainClient::Canton(canton) => {
-                    try_publish_canton(canton, &action, &action.timestamp, &action.signature)
-                        .await
-                        .map_err(|_| anyhow::anyhow!("Canton publish failed"))
-                }
+                ChainClient::Solana(sol) => sol
+                    .publish_signature(&action, &action.timestamp, &action.signature)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Solana publish failed")),
+                ChainClient::Hydration(hyd) => hyd
+                    .publish_signature(&action, &action.timestamp, &action.signature)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Hydration publish failed")),
+                ChainClient::Canton(canton) => canton
+                    .publish_signature(&action, &action.timestamp, &action.signature)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("Canton publish failed")),
                 ChainClient::Err(msg) => {
                     tracing::error!(msg, "no client for chain");
                     Ok(())
