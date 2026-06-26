@@ -621,22 +621,24 @@ async fn spawn_indexers(
 
     if let Some(canton_config) = canton {
         let canton_telemetry = PrometheusChainTelemetry::new(Chain::Canton);
-        let canton_stream = indexer_canton::CantonStream::new(
-            canton_config,
-            backlog.clone(),
-            canton_telemetry.clone(),
-        );
-        tokio::spawn(run_stream(
-            canton_stream,
-            sign_tx,
-            rpc_channel,
-            backlog,
-            canton_telemetry,
-            contract_watcher,
-            mesh_state,
-            client,
-            checkpoints_rx[Chain::Canton].clone(),
-        ));
+        match indexer_canton::CantonStream::new(canton_config, backlog.clone(), canton_telemetry.clone()).await {
+            Ok(canton_stream) => {
+                tokio::spawn(run_stream(
+                    canton_stream,
+                    sign_tx,
+                    rpc_channel,
+                    backlog,
+                    canton_telemetry,
+                    contract_watcher,
+                    mesh_state,
+                    client,
+                    checkpoints_rx[Chain::Canton].clone(),
+                ));
+            }
+            Err(err) => {
+                tracing::error!(?err, "failed to create canton indexer stream");
+            }
+        }
     }
 }
 
