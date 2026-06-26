@@ -479,7 +479,13 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     seeded_backlog
         .set_processed_block(Chain::Solana, checkpoint_slot)
         .await;
-    seeded_backlog.checkpoint(Chain::Solana).await;
+    let checkpoint = seeded_backlog
+        .checkpoint(Chain::Solana)
+        .await
+        .expect("checkpoint creation should succeed");
+    seeded_backlog
+        .on_consensus_confirmed(Chain::Solana, &checkpoint)
+        .await;
 
     let recovered_backlog = Backlog::persisted(storage);
     let stream = SolanaStream::new(Some(config), recovered_backlog.clone(), NoopChainTelemetry)
