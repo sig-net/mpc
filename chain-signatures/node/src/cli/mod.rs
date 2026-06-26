@@ -19,7 +19,7 @@ use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::triple_storage::TriplePair;
 use crate::stream::run_stream;
-use crate::{indexer, indexer_canton, indexer_hydration, logs, mesh, storage, web};
+use crate::{indexer, indexer_hydration, logs, mesh, storage, web};
 pub use args::{canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, solana::SolArgs};
 
 use clap::Parser;
@@ -36,7 +36,7 @@ use sha3::Digest;
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
-use crate::indexer_canton::CantonConfig;
+use crate::indexer_canton::{CantonConfig, CantonStream};
 use crate::indexer_eth::EthConfig;
 use crate::indexer_hydration::HydrationConfig;
 use crate::indexer_sol::SolConfig;
@@ -587,6 +587,7 @@ async fn spawn_indexers(
         let sol_telemetry = PrometheusChainTelemetry::new(Chain::Solana);
         match SolanaStream::new(sol_config, backlog.clone(), sol_telemetry.clone()) {
             Ok(sol_stream) => {
+                tracing::info!("solana indexer stream created successfully");
                 tokio::spawn(run_stream(
                     sol_stream,
                     sign_tx.clone(),
@@ -621,8 +622,9 @@ async fn spawn_indexers(
 
     if let Some(canton_config) = canton {
         let canton_telemetry = PrometheusChainTelemetry::new(Chain::Canton);
-        match indexer_canton::CantonStream::new(canton_config, backlog.clone(), canton_telemetry.clone()).await {
+        match CantonStream::new(canton_config, backlog.clone(), canton_telemetry.clone()).await {
             Ok(canton_stream) => {
+                tracing::info!("canton indexer stream created successfully");
                 tokio::spawn(run_stream(
                     canton_stream,
                     sign_tx,

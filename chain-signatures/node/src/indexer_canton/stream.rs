@@ -26,7 +26,6 @@ type CantonWsRead = SplitStream<CantonWs>;
 type CantonWsWrite = SplitSink<CantonWs, Message>;
 
 pub struct CantonStream<S: StateManager, T: ChainTelemetry> {
-    config: CantonConfig,
     client: Option<CantonClient>,
     state_manager: S,
     telemetry: T,
@@ -39,7 +38,6 @@ impl<S: StateManager, T: ChainTelemetry> CantonStream<S, T> {
         let client = CantonClient::new(&config).await?;
         let (events_tx, events_rx) = crate::stream::channel();
         Ok(CantonStream {
-            config,
             client: Some(client),
             state_manager,
             telemetry,
