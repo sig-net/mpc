@@ -117,16 +117,6 @@ impl EthArgs {
         args
     }
 
-    pub fn signer_address(&self) -> Option<String> {
-        let signer: alloy_signer_local::PrivateKeySigner = self
-            .eth_account_sk
-            .as_ref()?
-            .expose_secret()
-            .parse()
-            .expect("cannot parse Eth account sk");
-        Some(format!("{}", signer.address()))
-    }
-
     pub fn into_config(self) -> Option<EthConfig> {
         #[cfg(not(feature = "helios"))]
         if self.eth_light_client {
