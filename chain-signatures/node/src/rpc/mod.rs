@@ -423,12 +423,16 @@ impl RpcExecutor {
 
             let chain = action.indexed.chain;
 
+            // Check if a publisher is configured for the chain. If not, log a warning and continue to the next action.
             let Some(publisher) = self.publishers.get(&chain) else {
                 tracing::warn!(?chain, "no publisher configured for chain");
                 continue;
             };
 
-            let _ = publisher.publish_signature(&action).await;
+            // Publish the signature and retry if it fails
+            if let Err(e) = publisher.publish_signature(&action).await {
+                tracing::error!(?chain, "failed to enqueue publish action: {e}");
+            }
         }
     }
 }
