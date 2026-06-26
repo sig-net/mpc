@@ -277,6 +277,8 @@ impl ChainPublisher for CantonClient {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
     use crate::indexer_canton::{CantonAuthConfig, CantonChainCtx};
     use k256::{AffinePoint, Scalar};
@@ -387,10 +389,7 @@ mod tests {
         };
 
         let action = mock_publish_action(SignKind::SignBidirectional(event));
-        assert!(client
-            .publish_signature(&action, &Instant::now(), &action.signature)
-            .await
-            .is_ok());
+        assert!(client.publish_signature(&action).await.is_ok());
         submit_mock.assert_async().await;
     }
 
@@ -421,10 +420,7 @@ mod tests {
         };
 
         let action = mock_publish_action(SignKind::RespondBidirectional(tx));
-        assert!(client
-            .publish_signature(&action, &Instant::now(), &action.signature)
-            .await
-            .is_ok());
+        assert!(client.publish_signature(&action).await.is_ok());
         submit_mock.assert_async().await;
     }
 
@@ -442,10 +438,7 @@ mod tests {
         };
 
         let action = mock_publish_action(SignKind::RespondBidirectional(tx));
-        let err = client
-            .publish_signature(&action, &Instant::now(), &action.signature)
-            .await
-            .unwrap_err();
+        let err = client.publish_signature(&action).await.unwrap_err();
         assert!(err.to_string().contains("missing chain_ctx"));
     }
 
@@ -474,10 +467,7 @@ mod tests {
         };
         let action = mock_publish_action(SignKind::RespondBidirectional(tx));
 
-        let err = client
-            .publish_signature(&action, &Instant::now(), &action.signature)
-            .await
-            .unwrap_err();
+        let err = client.publish_signature(&action).await.unwrap_err();
         assert!(err.to_string().contains("500"));
         submit_mock.assert_async().await;
     }
