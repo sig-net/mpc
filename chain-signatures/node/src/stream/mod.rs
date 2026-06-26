@@ -1499,11 +1499,13 @@ mod tests {
         });
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
         let indexer = E2EIndexer;
+        let (sign_tx, _sign_rx) = mpsc::channel(1);
 
         let (pipeline, mut state_rx) = ChainPipeline::new(
             indexer,
             cp_rx,
             backlog,
+            sign_tx,
             mesh_rx,
             NodeClient::new(&Default::default()),
             0,
