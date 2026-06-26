@@ -87,16 +87,6 @@ impl CheckpointStorage {
             CheckpointStorage::InMemory { latest } => Ok(latest.read().await.get(&chain).cloned()),
         }
     }
-
-    /// Load the latest consensus checkpoint for the given chain.
-    /// Returns a single-element vec if one exists, empty vec otherwise.
-    pub async fn load_history(&self, chain: Chain) -> anyhow::Result<Vec<Checkpoint>> {
-        match self.load_latest(chain).await {
-            Ok(Some(cp)) => Ok(vec![cp]),
-            Ok(None) => Ok(Vec::new()),
-            Err(e) => Err(e),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -108,9 +98,8 @@ mod tests {
     async fn test_in_memory_checkpoint_storage() -> anyhow::Result<()> {
         let storage = CheckpointStorage::in_memory();
 
-        // 1. Clean storage returns None / empty history
+        // 1. Clean storage returns None
         assert!(storage.load_latest(Chain::Solana).await?.is_none());
-        assert!(storage.load_history(Chain::Solana).await?.is_empty());
 
         // 2. Persist first checkpoint
         let cp1 = Checkpoint {
@@ -120,12 +109,9 @@ mod tests {
         };
         storage.persist(&cp1).await?;
 
-        // 3. Verify latest and history (history returns latest in vec)
+        // 3. Verify latest
         let latest = storage.load_latest(Chain::Solana).await?.unwrap();
         assert_eq!(latest.block_height, 10);
-        let history = storage.load_history(Chain::Solana).await?;
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].block_height, 10);
 
         // 4. Persist second checkpoint at higher height
         let cp2 = Checkpoint {
@@ -135,12 +121,9 @@ mod tests {
         };
         storage.persist(&cp2).await?;
 
-        // 5. Verify latest is updated and history returns only latest
+        // 5. Verify latest is updated
         let latest = storage.load_latest(Chain::Solana).await?.unwrap();
         assert_eq!(latest.block_height, 20);
-        let history = storage.load_history(Chain::Solana).await?;
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].block_height, 20);
 
         Ok(())
     }
