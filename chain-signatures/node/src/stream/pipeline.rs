@@ -229,7 +229,7 @@ async fn wait_detected_regression(
     if checkpoints_rx.changed().await.is_err() {
         return None;
     }
-    None
+    detect_regression(chain, backlog, checkpoints_rx).await
 }
 
 /// Returns `Some(ChainStreaming::Recovery)` if a regression is detected.
@@ -416,12 +416,46 @@ mod tests {
         )
         .await;
 
-        let result = result
-            .expect("should not hang — upfront check catches mismatch");
+        let result = result.expect("should not hang — upfront check catches mismatch");
         assert_eq!(
             result,
             Some(ChainStreaming::Recovery { load_local: false }),
             "should detect regression even when receiver state was consumed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_detects_regression_after_change() {
+        // Normal path: matching digest, then a mismatched digest arrives.
+        // The upfront check passes; changed() catches the new value;
+        // the post-change detect returns Some(Recovery).
+        let backlog = Backlog::new();
+        let chain = Chain::Ethereum;
+
+        backlog.set_processed_block(chain, 100).await;
+        let cp = backlog.checkpoint(chain).await.unwrap();
+        let matching_digest = cp.digest();
+
+        let (tx, mut rx) = make_digest(100, matching_digest);
+
+        let handle =
+            tokio::spawn(async move { wait_detected_regression(&mut rx, &backlog, chain).await });
+
+        tx.send(CheckpointDigest {
+            height: 200,
+            digest: [0xabu8; 32],
+        })
+        .unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("timeout")
+            .expect("task should not panic");
+
+        assert_eq!(
+            result,
+            Some(ChainStreaming::Recovery { load_local: false }),
+            "should detect regression after new mismatched value"
         );
     }
 }
