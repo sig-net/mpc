@@ -2,6 +2,7 @@ use anyhow::{Context as _, Result};
 use integration_tests::canton::{
     test_evm_type2_anvil_cases, test_sign_request_event, CantonSandbox,
 };
+use mpc_indexer_core::{ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager};
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
 use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
@@ -9,10 +10,9 @@ use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest};
 use mpc_node::sign_bidirectional::{hash_rlp_data, SignBidirectionalEventExt};
-use mpc_node::stream::{ChainPipeline, ChainStream, ChainStreaming};
+use mpc_node::stream::{ChainPipeline, ChainStreaming};
 use mpc_primitives::{
-    ChainEvent, ChainTelemetry, CheckpointDigest, NoopChainTelemetry, ScalarExt, SignKind,
-    Signature, StateManager, LATEST_MPC_KEY_VERSION,
+    ChainEvent, CheckpointDigest, ScalarExt, SignKind, Signature, LATEST_MPC_KEY_VERSION,
 };
 use serde_json::json;
 use serial_test::serial;

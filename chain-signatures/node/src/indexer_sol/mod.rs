@@ -3,7 +3,6 @@ mod config;
 
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::stream::{ChainIndexer, ChainStream};
 use crate::util::ethabi_request_id;
 pub use client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
 pub use config::SolConfig;
@@ -25,9 +24,9 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
+use mpc_indexer_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
 use mpc_primitives::{
-    ChainEvent, ChainTelemetry, IndexedSignRequest, SignArgs, SignId, StateManager,
-    LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+    ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
 use serde::{Deserialize, Serialize};
 use signet_program::{
@@ -962,7 +961,7 @@ mod tests {
     use crate::backlog::Backlog;
 
     use super::*;
-    use mpc_primitives::NoopChainTelemetry;
+    use mpc_indexer_core::NoopChainTelemetry;
     use solana_sdk::commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
     use solana_transaction_status::{
