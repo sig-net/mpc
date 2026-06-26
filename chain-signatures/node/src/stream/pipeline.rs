@@ -175,13 +175,20 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                         tokio::time::sleep(I::RETRY_DELAY).await;
                     }
                 }
-                Some(new_state) = wait_detected_regression(
+                result = wait_detected_regression(
                     &mut self.checkpoints_rx,
                     &self.backlog,
                     chain,
                 ) => {
-                    let _ = self.state_tx.send(new_state);
-                    return Some(new_state);
+                    match result {
+                        RegressionOutcome::Recovery => {
+                            let new_state = ChainStreaming::Recovery { load_local: false };
+                            let _ = self.state_tx.send(new_state);
+                            return Some(new_state);
+                        }
+                        RegressionOutcome::Aligned => {}
+                        RegressionOutcome::Shutdown => return None,
+                    }
                 }
             }
         }
@@ -204,17 +211,34 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                         return None; // shutdown
                     }
                 }
-                Some(new_state) = wait_detected_regression(
+                result = wait_detected_regression(
                     &mut self.checkpoints_rx,
                     &self.backlog,
                     chain,
                 ) => {
-                    let _ = self.state_tx.send(new_state);
-                    return Some(new_state);
+                    match result {
+                        RegressionOutcome::Recovery => {
+                            let new_state = ChainStreaming::Recovery { load_local: false };
+                            let _ = self.state_tx.send(new_state);
+                            return Some(new_state);
+                        }
+                        RegressionOutcome::Aligned => {}
+                        RegressionOutcome::Shutdown => return None,
+                    }
                 }
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegressionOutcome {
+    /// Consensus digest mismatches local backlog — transition to Recovery.
+    Recovery,
+    /// Local backlog is aligned with consensus, continue current state.
+    Aligned,
+    /// Consensus checkpoint feed shut down — pipeline should stop.
+    Shutdown,
 }
 
 /// Waits for a consensus checkpoint digest change, then checks for regression.
@@ -222,14 +246,23 @@ async fn wait_detected_regression(
     checkpoints_rx: &mut watch::Receiver<CheckpointDigest>,
     backlog: &Backlog,
     chain: Chain,
-) -> Option<ChainStreaming> {
-    if let Some(state) = detect_regression(chain, backlog, checkpoints_rx).await {
-        return Some(state);
+) -> RegressionOutcome {
+    if detect_regression(chain, backlog, checkpoints_rx)
+        .await
+        .is_some()
+    {
+        return RegressionOutcome::Recovery;
     }
     if checkpoints_rx.changed().await.is_err() {
-        return None;
+        return RegressionOutcome::Shutdown;
     }
-    detect_regression(chain, backlog, checkpoints_rx).await
+    if detect_regression(chain, backlog, checkpoints_rx)
+        .await
+        .is_some()
+    {
+        return RegressionOutcome::Recovery;
+    }
+    RegressionOutcome::Aligned
 }
 
 /// Returns `Some(ChainStreaming::Recovery)` if a regression is detected.
@@ -419,7 +452,7 @@ mod tests {
         let result = result.expect("should not hang — upfront check catches mismatch");
         assert_eq!(
             result,
-            Some(ChainStreaming::Recovery { load_local: false }),
+            RegressionOutcome::Recovery,
             "should detect regression even when receiver state was consumed"
         );
     }
@@ -428,7 +461,7 @@ mod tests {
     async fn test_wait_detects_regression_after_change() {
         // Normal path: matching digest, then a mismatched digest arrives.
         // The upfront check passes; changed() catches the new value;
-        // the post-change detect returns Some(Recovery).
+        // the post-change detect returns Recovery.
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
 
@@ -454,7 +487,7 @@ mod tests {
 
         assert_eq!(
             result,
-            Some(ChainStreaming::Recovery { load_local: false }),
+            RegressionOutcome::Recovery,
             "should detect regression after new mismatched value"
         );
     }
