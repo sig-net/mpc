@@ -1,11 +1,20 @@
 use super::SolConfig;
 use futures_util::StreamExt;
+use k256::elliptic_curve::sec1::ToEncodedPoint;
+use mpc_primitives::SignKind;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use signet_program::accounts::{
+    Respond as SolanaRespondAccount, RespondBidirectional as SolanaRespondBidirectionalAccount,
+};
+use signet_program::instruction::{
+    Respond as SolanaRespond, RespondBidirectional as SolanaRespondBidirectional,
+};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
 use solana_client::rpc_config::RpcBlockConfig;
 use solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature;
+use solana_sdk::signature::Signer as SolanaSigner;
 use solana_sdk::signer::keypair::Keypair;
 use solana_sdk::{commitment_config::CommitmentConfig, pubkey::Pubkey, signature::Signature};
 use solana_transaction_status::{
@@ -15,8 +24,9 @@ use solana_transaction_status::{
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use crate::rpc::PublishAction;
 use crate::util::retry::{retry_rpc, RetryConfig};
 
 const MAX_SIGNATURES_FOR_FAST_CATCHUP: usize = 1000;
@@ -444,6 +454,107 @@ impl SolanaClient {
 
         blocks_by_height
     }
+
+    pub async fn publish_signature(
+        &self,
+        action: &PublishAction,
+        timestamp: &Instant,
+        mpc_sig: &mpc_primitives::Signature,
+    ) -> Result<(), ()> {
+        let program = self.client.program(self.program_id).map_err(|_| ())?;
+
+        let sign_id = action.indexed.id;
+        let request_ids = vec![action.indexed.id.request_id];
+        let big_r = mpc_sig.big_r.to_encoded_point(false);
+        let signature = crate::util::mpc_to_sol_signature(mpc_sig, big_r);
+
+        tracing::debug!(
+            ?sign_id,
+            request_type = ?action.indexed.kind,
+            "Solana publish signature: dispatching request"
+        );
+
+        match &action.indexed.kind {
+            SignKind::Sign | SignKind::SignBidirectional(_) => {
+                let (event_authority, _) =
+                    Pubkey::find_program_address(&[b"__event_authority"], &self.program_id);
+                let tx = program
+                    .request()
+                    .signer(self.payer.clone())
+                    .accounts(SolanaRespondAccount {
+                        responder: self.payer.pubkey(),
+                        event_authority,
+                        program: self.program_id,
+                    })
+                    .args(SolanaRespond {
+                        request_ids,
+                        signatures: vec![signature.clone()],
+                    })
+                    .send()
+                    .await
+                    .map_err(|err| {
+                        tracing::error!(
+                            sign_id = ?action.indexed.id,
+                            error = ?err,
+                            "failed to publish solana signature"
+                        );
+                    })?;
+
+                tracing::info!(
+                    ?sign_id,
+                    tx_hash = ?tx,
+                    elapsed = ?timestamp.elapsed(),
+                    "published solana signature successfully"
+                );
+            }
+            SignKind::RespondBidirectional(respond_bidirectional_tx) => {
+                tracing::debug!(
+                    ?sign_id,
+                    request_id = ?request_ids[0],
+                    serialized_output_len = respond_bidirectional_tx.output.len(),
+                    "Solana publish signature: entering RespondBidirectional arm"
+                );
+                let respond_bidirectional_serialized_output =
+                    respond_bidirectional_tx.output.clone();
+                let tx = program
+                    .request()
+                    .signer(self.payer.clone())
+                    .accounts(SolanaRespondBidirectionalAccount {
+                        responder: self.payer.clone().try_pubkey().unwrap(),
+                    })
+                    .args(SolanaRespondBidirectional {
+                        request_id: request_ids[0],
+                        serialized_output: respond_bidirectional_serialized_output.clone(),
+                        signature: signature.clone(),
+                    })
+                    .send()
+                    .await
+                    .map_err(|err| {
+                        tracing::error!(
+                            ?sign_id,
+                            error = ?err,
+                            "Solana publish signature: failed to publish respond bidirectional solana signature"
+                        );
+                    })?;
+
+                tracing::info!(
+                    ?sign_id,
+                    tx_hash = ?tx,
+                    elapsed = ?timestamp.elapsed(),
+                    "published respond bidirectional solana signature successfully"
+                );
+            }
+            SignKind::Checkpoint(_) => {
+                tracing::error!(
+                    ?sign_id,
+                    "Solana publish signature: checkpoint signature publishing not supported on Solana"
+                );
+                return Err(());
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -573,10 +684,102 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_blocks_returns_blocks_on_200() {
+    async fn get_tx_returns_transaction_on_200() {
         let mut server = mockito::Server::new_async().await;
-        let body = serde_json::json!([make_block_response(0, 100), make_block_response(1, 101),])
-            .to_string();
+        let sig = Signature::new_unique();
+
+        // JSON that mimics EncodedConfirmedTransactionWithStatusMeta
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "slot": 42,
+                "transaction": {
+                    "signatures": ["1111111111111111111111111111111111111111111111111111111111111111"],
+                    "message": {
+                        "accountKeys": [],
+                        "instructions": [],
+                        "recentBlockhash": "11111111111111111111111111111111"
+                    }
+                },
+                "meta": { "err": null, "fee": 5000, "preBalances": [], "postBalances": [], "status": {"Ok": null} }
+            }
+        });
+
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response.to_string())
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let tx = client.get_tx(&sig).await.unwrap();
+        assert_eq!(tx.slot, 42);
+    }
+
+    #[tokio::test]
+    async fn get_tx_retries_on_failure() {
+        let mut server = mockito::Server::new_async().await;
+        let sig = Signature::new_unique();
+
+        let _mock_fail = server
+            .mock("POST", "/")
+            .with_status(500)
+            .expect(2) // Allow to fail completely to verify retry loop execution
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        // Should error out.
+        assert!(client.get_tx(&sig).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_block_returns_block_on_200() {
+        let mut server = mockito::Server::new_async().await;
+        const HEIGHT: u64 = 100;
+        const TIME: i64 = 1234567890;
+
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "blockHeight": HEIGHT,
+                "blockTime": TIME,
+                "blockhash": "11111111111111111111111111111111",
+                "parentSlot": 99,
+                "previousBlockhash": "11111111111111111111111111111111",
+                "transactions": [],
+                "rewards": []
+            }
+        });
+
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response.to_string())
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let block = client.get_block(HEIGHT).await.unwrap();
+        assert_eq!(block.block_height, Some(HEIGHT));
+        assert_eq!(block.block_time, Some(TIME));
+    }
+
+    #[tokio::test]
+    async fn fetch_blocks_returns_blocks_on_200() {
+        const HEIGHT_1: u64 = 100;
+        const HEIGHT_2: u64 = 101;
+        let mut server = mockito::Server::new_async().await;
+        let body = serde_json::json!([
+            make_block_response(0, HEIGHT_1),
+            make_block_response(1, HEIGHT_2),
+        ])
+        .to_string();
 
         let _mock = server
             .mock("POST", "/")
@@ -587,11 +790,11 @@ mod tests {
             .await;
 
         let client = test_client(&server.url());
-        let result = client.fetch_blocks(&[100, 101]).await;
+        let result = client.fetch_blocks(&[HEIGHT_1, HEIGHT_2]).await;
 
         assert_eq!(result.len(), 2);
-        assert!(result.contains_key(&100));
-        assert!(result.contains_key(&101));
+        assert!(result.contains_key(&HEIGHT_1));
+        assert!(result.contains_key(&HEIGHT_2));
     }
 
     #[tokio::test]
@@ -605,11 +808,13 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_blocks_skips_skipped_slots() {
+        const HEIGHT_1: u64 = 100;
+        const HEIGHT_2: u64 = 101;
         let mut server = mockito::Server::new_async().await;
 
         // Slot 101 is skipped (error code -32007), slot 100 is present
         let body = serde_json::json!([
-            make_block_response(0, 100),
+            make_block_response(0, HEIGHT_1),
             { "id": 1, "result": null, "error": { "code": -32007, "message": "Slot was skipped" } }
         ])
         .to_string();
@@ -623,11 +828,11 @@ mod tests {
             .await;
 
         let client = test_client(&server.url());
-        let result = client.fetch_blocks(&[100, 101]).await;
+        let result = client.fetch_blocks(&[HEIGHT_1, HEIGHT_2]).await;
 
         assert_eq!(result.len(), 1);
-        assert!(result.contains_key(&100));
-        assert!(!result.contains_key(&101));
+        assert!(result.contains_key(&HEIGHT_1));
+        assert!(!result.contains_key(&HEIGHT_2));
     }
 
     #[tokio::test]
@@ -647,6 +852,76 @@ mod tests {
         let result = client.fetch_blocks(&[100, 101]).await;
 
         assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_blocks_for_slots_chunks_requests_and_handles_missing() {
+        let mut server = mockito::Server::new_async().await;
+
+        // Returning an empty array
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .expect_at_least(3) // 110 slots / 50 chunk size = 3 chunks
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+
+        // Request 110 slots
+        let slots: std::collections::BTreeSet<u64> = (1..=110).collect();
+        let result = client.fetch_blocks_for_slots(slots).await;
+
+        assert_eq!(result.len(), 110);
+        // Because the mock returned an empty array, all 110 requests should map to Missing
+        assert!(matches!(
+            result.get(&1).unwrap(),
+            SolanaCatchupBlock::Missing
+        ));
+        assert!(matches!(
+            result.get(&110).unwrap(),
+            SolanaCatchupBlock::Missing
+        ));
+    }
+
+    #[tokio::test]
+    async fn fetch_signatures_from_latest_returns_signatures() {
+        const SLOT: u64 = 42;
+        let mut server = mockito::Server::new_async().await;
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": [
+                {
+                    "signature": "sig1",
+                    "slot": SLOT,
+                    "err": null,
+                    "memo": null,
+                    "blockTime": null,
+                    "confirmationStatus": "confirmed"
+                }
+            ]
+        });
+
+        let _mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response.to_string())
+            .create_async()
+            .await;
+
+        let client = test_client(&server.url());
+        let sigs = client
+            .fetch_signatures_from_latest(&Pubkey::new_unique(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(sigs.len(), 1);
+        assert_eq!(sigs[0].signature, "sig1");
+        assert_eq!(sigs[0].slot, SLOT);
     }
 
     #[tokio::test]

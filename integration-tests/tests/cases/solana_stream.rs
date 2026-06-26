@@ -60,10 +60,12 @@ async fn stream_solana_with_backlog(
     // Start from Recovery so that handle_recovery() calls livestream(), which
     // spawns the live event subscription and initializes the live_rx channel.
     // Starting in Live would skip this initialization and produce no events.
+    let (sign_tx, _sign_rx) = mpsc::channel(1);
     let (pipeline, mut state_rx) = ChainPipeline::new(
         indexer,
         cp_rx,
         backlog,
+        sign_tx,
         mesh_rx,
         node_client,
         0,

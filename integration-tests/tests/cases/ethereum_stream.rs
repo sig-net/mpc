@@ -386,10 +386,12 @@ async fn stream_ethereum(
     let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
     let node_client = NodeClient::new(&Default::default());
+    let (sign_tx, _sign_rx) = tokio::sync::mpsc::channel(1);
     let (pipeline, mut state_rx) = ChainPipeline::new(
         indexer,
         cp_rx,
         backlog,
+        sign_tx,
         mesh_rx,
         node_client,
         0,
