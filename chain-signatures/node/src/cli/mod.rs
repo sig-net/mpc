@@ -36,6 +36,17 @@ use sha3::Digest;
 use tokio::sync::{mpsc, watch};
 use url::Url;
 
+use crate::indexer_canton::CantonConfig;
+use crate::indexer_eth::EthConfig;
+use crate::indexer_hydration::HydrationConfig;
+use crate::indexer_sol::SolConfig;
+use crate::mesh::MeshState;
+use crate::protocol::signature::Sign;
+use crate::rpc::RpcChannel;
+use crate::storage::presignature_storage::PresignatureStorage;
+use crate::storage::secret_storage::SecretNodeStorageVariant;
+use crate::storage::triple_storage::TripleStorage;
+
 const DEFAULT_WEB_PORT: u16 = 3000;
 
 #[derive(Parser, Debug)]
@@ -230,16 +241,12 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let (sign_tx, sign_rx) = mpsc::channel(16384);
 
-            let gcp_service = GcpService::init(&account_id, &storage_options).await?;
-            let key_storage =
-                storage::secret_storage::init(Some(&gcp_service), &storage_options, &account_id);
-
-            let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
-
-            let redis_cfg = deadpool_redis::Config::from_url(redis_url);
-            let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-            let triple_storage = TriplePair::storage(&redis_pool, &account_id);
-            let presignature_storage = Presignature::storage(&redis_pool, &account_id);
+            let StorageHandles {
+                key_storage,
+                triple_storage,
+                presignature_storage,
+                backlog,
+            } = setup_storage(&account_id, &storage_options).await?;
 
             let mut rpc_client = near_fetch::Client::new(&near_rpc);
             if let Some(referer_param) = client_header_referer {
@@ -247,11 +254,6 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 client_headers.insert(http::header::REFERER, referer_param.parse().unwrap());
             }
             tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
-
-            let backlog = Backlog::persisted(CheckpointStorage::Redis(
-                redis_pool.clone(),
-                account_id.clone(),
-            ));
 
             // NEAR Indexer is only used for integration tests
             // TODO: Remove this once we have integration tests built on other chains
@@ -412,76 +414,20 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 backlog.clone(),
             ));
 
-            tracing::info!(
-                eth_configured = eth.is_some(),
-                "initializing ethereum indexer stream"
-            );
-            let eth_telemetry = PrometheusChainTelemetry::new(Chain::Ethereum);
-            match EthereumStream::new(eth, backlog.clone(), eth_telemetry.clone()).await {
-                Ok(eth_stream) => {
-                    tracing::info!("ethereum indexer stream created successfully");
-                    tokio::spawn(run_stream(
-                        eth_stream,
-                        sign_tx.clone(),
-                        rpc_channel.clone(),
-                        backlog.clone(),
-                        eth_telemetry,
-                        contract_watcher.clone(),
-                        mesh_state.clone(),
-                        client.clone(),
-                        checkpoints_rx[Chain::Ethereum].clone(),
-                    ));
-                }
-                Err(err) => {
-                    tracing::error!(?err, "failed to create ethereum indexer stream");
-                }
-            };
-
-            let solana_telemetry = PrometheusChainTelemetry::new(Chain::Solana);
-            if let Some(sol_stream) =
-                SolanaStream::new(sol.clone(), backlog.clone(), solana_telemetry.clone())
-            {
-                tokio::spawn(run_stream(
-                    sol_stream,
-                    sign_tx.clone(),
-                    rpc_channel.clone(),
-                    backlog.clone(),
-                    solana_telemetry,
-                    contract_watcher.clone(),
-                    mesh_state.clone(),
-                    client.clone(),
-                    checkpoints_rx[Chain::Solana].clone(),
-                ));
-            }
-
-            let hydration_telemetry = PrometheusChainTelemetry::new(Chain::Hydration);
-            tokio::spawn(indexer_hydration::run(
+            spawn_indexers(
+                eth,
+                sol,
                 hydration,
-                sign_tx.clone(),
+                canton,
+                sign_tx,
+                rpc_channel.clone(),
                 backlog.clone(),
-                hydration_telemetry,
                 contract_watcher.clone(),
                 mesh_state.clone(),
                 client.clone(),
-                checkpoints_rx[Chain::Hydration].clone(),
-            ));
-
-            let canton_telemetry = PrometheusChainTelemetry::new(Chain::Canton);
-            if let Some(canton_stream) =
-                indexer_canton::CantonStream::new(canton, backlog.clone(), canton_telemetry.clone())
-            {
-                tokio::spawn(run_stream(
-                    canton_stream,
-                    sign_tx.clone(),
-                    rpc_channel.clone(),
-                    backlog.clone(),
-                    canton_telemetry,
-                    contract_watcher.clone(),
-                    mesh_state.clone(),
-                    client.clone(),
-                    checkpoints_rx[Chain::Canton].clone(),
-                ));
-            }
+                checkpoints_rx,
+            )
+            .await;
             tracing::info!("protocol http server spawned");
             protocol_handle.await?;
             web_handle.await?;
@@ -559,6 +505,121 @@ fn checkpoint_watchers() -> (
     let checkpoints_tx = EnumMap::from_fn(|chain| channels[chain].0.clone());
     let checkpoints_rx = EnumMap::from_fn(|chain| channels[chain].1.clone());
     (checkpoints_tx, checkpoints_rx)
+}
+
+struct StorageHandles {
+    key_storage: SecretNodeStorageVariant,
+    triple_storage: TripleStorage,
+    presignature_storage: PresignatureStorage,
+    backlog: Backlog,
+}
+
+async fn setup_storage(
+    account_id: &AccountId,
+    storage_options: &storage::Options,
+) -> anyhow::Result<StorageHandles> {
+    let gcp_service = GcpService::init(account_id, storage_options).await?;
+    let key_storage =
+        storage::secret_storage::init(Some(&gcp_service), storage_options, account_id);
+    let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
+    let redis_cfg = deadpool_redis::Config::from_url(redis_url);
+    let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+    let triple_storage = TriplePair::storage(&redis_pool, account_id);
+    let presignature_storage = Presignature::storage(&redis_pool, account_id);
+    let backlog = Backlog::persisted(CheckpointStorage::Redis(
+        redis_pool.clone(),
+        account_id.clone(),
+    ));
+    Ok(StorageHandles {
+        key_storage,
+        triple_storage,
+        presignature_storage,
+        backlog,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn spawn_indexers(
+    eth: Option<EthConfig>,
+    sol: Option<SolConfig>,
+    hydration: Option<HydrationConfig>,
+    canton: Option<CantonConfig>,
+    sign_tx: mpsc::Sender<Sign>,
+    rpc_channel: RpcChannel,
+    backlog: Backlog,
+    contract_watcher: ContractStateWatcher,
+    mesh_state: watch::Receiver<MeshState>,
+    client: NodeClient,
+    checkpoints_rx: EnumMap<Chain, watch::Receiver<CheckpointDigest>>,
+) {
+    tracing::info!(
+        eth_configured = eth.is_some(),
+        "initializing ethereum indexer stream"
+    );
+    let eth_telemetry = PrometheusChainTelemetry::new(Chain::Ethereum);
+    match EthereumStream::new(eth, backlog.clone(), eth_telemetry.clone()).await {
+        Ok(eth_stream) => {
+            tracing::info!("ethereum indexer stream created successfully");
+            tokio::spawn(run_stream(
+                eth_stream,
+                sign_tx.clone(),
+                rpc_channel.clone(),
+                backlog.clone(),
+                eth_telemetry,
+                contract_watcher.clone(),
+                mesh_state.clone(),
+                client.clone(),
+                checkpoints_rx[Chain::Ethereum].clone(),
+            ));
+        }
+        Err(err) => {
+            tracing::error!(?err, "failed to create ethereum indexer stream");
+        }
+    };
+
+    let solana_telemetry = PrometheusChainTelemetry::new(Chain::Solana);
+    if let Some(sol_stream) = SolanaStream::new(sol, backlog.clone(), solana_telemetry.clone()) {
+        tokio::spawn(run_stream(
+            sol_stream,
+            sign_tx.clone(),
+            rpc_channel.clone(),
+            backlog.clone(),
+            solana_telemetry,
+            contract_watcher.clone(),
+            mesh_state.clone(),
+            client.clone(),
+            checkpoints_rx[Chain::Solana].clone(),
+        ));
+    }
+
+    let hydration_telemetry = PrometheusChainTelemetry::new(Chain::Hydration);
+    tokio::spawn(indexer_hydration::run(
+        hydration,
+        sign_tx.clone(),
+        backlog.clone(),
+        hydration_telemetry,
+        contract_watcher.clone(),
+        mesh_state.clone(),
+        client.clone(),
+        checkpoints_rx[Chain::Hydration].clone(),
+    ));
+
+    let canton_telemetry = PrometheusChainTelemetry::new(Chain::Canton);
+    if let Some(canton_stream) =
+        indexer_canton::CantonStream::new(canton, backlog.clone(), canton_telemetry.clone())
+    {
+        tokio::spawn(run_stream(
+            canton_stream,
+            sign_tx,
+            rpc_channel,
+            backlog,
+            canton_telemetry,
+            contract_watcher,
+            mesh_state,
+            client,
+            checkpoints_rx[Chain::Canton].clone(),
+        ));
+    }
 }
 
 #[cfg(test)]
