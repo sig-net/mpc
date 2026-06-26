@@ -11,7 +11,7 @@ use crate::node_client::{self, NodeClient};
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
 use crate::protocol::signature::SignatureSpawnerTask;
-use crate::protocol::state::Node;
+use crate::protocol::state::{Node, NodeStateWatcher};
 use crate::protocol::sync::SyncTask;
 use crate::protocol::Chain;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
@@ -31,7 +31,6 @@ use mpc_keys::hpke;
 use mpc_primitives::CheckpointDigest;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
-use secrecy::ExposeSecret;
 use sha3::Digest;
 use tokio::sync::{mpsc, watch};
 use url::Url;
@@ -287,31 +286,9 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let mesh_state = mesh.watch();
             let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(&account_id);
 
-            let eth_account_address = eth.eth_account_sk.as_ref().map(|sk| {
-                let signer: alloy_signer_local::PrivateKeySigner = sk
-                    .expose_secret()
-                    .parse()
-                    .expect("cannot parse Eth account sk");
-                format!("{}", signer.address())
-            });
-            let sol_payer_address = sol.sol_account_sk.as_ref().map(|sk| {
-                use solana_sdk::signer::Signer;
-                solana_sdk::signer::keypair::Keypair::from_base58_string(sk)
-                    .pubkey()
-                    .to_string()
-            });
-            let hydration_signer_address = hydration.signer_uri.as_ref().and_then(|uri| {
-                use sp_core::sr25519;
-                use sp_core::Pair as _;
-                use sp_runtime::traits::{IdentifyAccount, Verify};
-                use sp_runtime::MultiSignature as SpMultiSignature;
-                use subxt::config::substrate::AccountId32;
-
-                let pair = sr25519::Pair::from_string(uri, None).ok()?;
-                let account_id =
-                    <SpMultiSignature as Verify>::Signer::from(pair.public()).into_account();
-                Some(AccountId32(account_id.into()).to_string())
-            });
+            let eth_account_address = eth.signer_address();
+            let sol_payer_address = sol.signer_address();
+            let hydration_signer_address = hydration.signer_address();
             let eth = eth.into_config();
             let sol = sol.into_config();
             let hydration = hydration.into_config();
@@ -353,42 +330,29 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 "starting node",
             );
 
-            let config = Config::new(LocalConfig {
-                over: override_config.unwrap_or_else(Default::default),
+            let ProtocolHandles {
+                protocol,
+                msg_channel,
+                node,
+                node_watcher,
+                config_tx,
+                checkpoints_tx,
+                checkpoints_rx,
+            } = setup_protocol(
+                &account_id,
+                override_config,
                 network,
-            });
-            let (config_tx, config_rx) = watch::channel(config);
-            let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
-            let node = Node::new();
-            let node_watcher = node.watch();
-
-            let msg_channel =
-                MessageChannel::spawn(client.clone(), config_rx.clone(), contract_watcher.clone())
-                    .await;
-            let sign_task = SignatureSpawnerTask::run(
-                account_id.clone(),
                 sign_rx,
-                contract_watcher.clone(),
-                config_rx.clone(),
+                &client,
+                &contract_watcher,
+                key_storage,
+                triple_storage.clone(),
                 presignature_storage.clone(),
                 mesh_state.clone(),
-                msg_channel.clone(),
                 rpc_channel.clone(),
                 backlog.clone(),
-            );
-            let protocol = MpcSignProtocol {
-                my_account_id: account_id.clone(),
-                msg_channel: msg_channel.clone(),
-                generating: msg_channel.subscribe_generation().await,
-                resharing: msg_channel.subscribe_resharing().await,
-                ready: msg_channel.subscribe_ready().await,
-                sign_task,
-                secret_storage: key_storage,
-                triple_storage: triple_storage.clone(),
-                presignature_storage: presignature_storage.clone(),
-                config: config_rx,
-                mesh_state: mesh_state.clone(),
-            };
+            )
+            .await;
 
             tracing::info!("protocol initialized");
             tokio::spawn(sync.run());
@@ -536,6 +500,78 @@ async fn setup_storage(
         presignature_storage,
         backlog,
     })
+}
+
+struct ProtocolHandles {
+    protocol: MpcSignProtocol,
+    msg_channel: MessageChannel,
+    node: Node,
+    node_watcher: NodeStateWatcher,
+    config_tx: watch::Sender<Config>,
+    checkpoints_tx: EnumMap<Chain, watch::Sender<CheckpointDigest>>,
+    checkpoints_rx: EnumMap<Chain, watch::Receiver<CheckpointDigest>>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn setup_protocol(
+    account_id: &AccountId,
+    override_config: Option<OverrideConfig>,
+    network: NetworkConfig,
+    sign_rx: mpsc::Receiver<Sign>,
+    client: &NodeClient,
+    contract_watcher: &ContractStateWatcher,
+    key_storage: SecretNodeStorageVariant,
+    triple_storage: TripleStorage,
+    presignature_storage: PresignatureStorage,
+    mesh_state: watch::Receiver<MeshState>,
+    rpc_channel: RpcChannel,
+    backlog: Backlog,
+) -> ProtocolHandles {
+    let config = Config::new(LocalConfig {
+        over: override_config.unwrap_or_else(Default::default),
+        network,
+    });
+    let (config_tx, config_rx) = watch::channel(config);
+    let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
+    let node = Node::new();
+    let node_watcher = node.watch();
+
+    let msg_channel =
+        MessageChannel::spawn(client.clone(), config_rx.clone(), contract_watcher.clone()).await;
+    let sign_task = SignatureSpawnerTask::run(
+        account_id.clone(),
+        sign_rx,
+        contract_watcher.clone(),
+        config_rx.clone(),
+        presignature_storage.clone(),
+        mesh_state.clone(),
+        msg_channel.clone(),
+        rpc_channel,
+        backlog,
+    );
+    let protocol = MpcSignProtocol {
+        my_account_id: account_id.clone(),
+        msg_channel: msg_channel.clone(),
+        generating: msg_channel.subscribe_generation().await,
+        resharing: msg_channel.subscribe_resharing().await,
+        ready: msg_channel.subscribe_ready().await,
+        sign_task,
+        secret_storage: key_storage,
+        triple_storage,
+        presignature_storage,
+        config: config_rx,
+        mesh_state,
+    };
+
+    ProtocolHandles {
+        protocol,
+        msg_channel,
+        node,
+        node_watcher,
+        config_tx,
+        checkpoints_tx,
+        checkpoints_rx,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

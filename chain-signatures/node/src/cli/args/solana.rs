@@ -36,6 +36,15 @@ impl SolArgs {
         args
     }
 
+    pub fn signer_address(&self) -> Option<String> {
+        use solana_sdk::signer::Signer;
+        Some(
+            solana_sdk::signer::keypair::Keypair::from_base58_string(self.sol_account_sk.as_ref()?)
+                .pubkey()
+                .to_string(),
+        )
+    }
+
     pub fn into_config(self) -> Option<SolConfig> {
         Some(SolConfig {
             account_sk: self.sol_account_sk?,
