@@ -8,7 +8,6 @@ use sp_runtime::{
     traits::{IdentifyAccount, Verify},
     MultiSignature as SpMultiSignature,
 };
-use std::{sync::Arc, time::Instant};
 use subxt::config::substrate::{
     AccountId32, BlakeTwo256, MultiSignature, SubstrateConfig, SubstrateExtrinsicParams,
     SubstrateHeader,
@@ -238,13 +237,13 @@ impl HydrationClient {
         let events = progress.wait_for_finalized_success().await?;
         Ok(events.extrinsic_hash())
     }
+}
 
-    pub async fn publish_signature(
-        &self,
-        action: &PublishAction,
-        timestamp: &Instant,
-        signature: &Signature,
-    ) -> anyhow::Result<()> {
+#[async_trait::async_trait]
+impl ChainPublisher for HydrationClient {
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
+        let timestamp = action.timestamp;
+        let signature = &action.signature;
         let chain = action.indexed.chain;
         let sign_id = action.indexed.id;
         let request_ids = [action.indexed.id.request_id];
@@ -302,18 +301,6 @@ impl HydrationClient {
             }
         }
 
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl ChainPublisher for HydrationClient {
-    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        let client = self.clone();
-        let action = action.clone();
-        tokio::spawn(async move {
-            super::execute_publish(Arc::new(client), action).await;
-        });
         Ok(())
     }
 }
