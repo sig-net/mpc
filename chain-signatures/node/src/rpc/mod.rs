@@ -399,7 +399,7 @@ impl RpcExecutor {
         config: watch::Sender<Config>,
         checkpoints: EnumMap<Chain, watch::Sender<CheckpointDigest>>,
     ) {
-        // spin up update task for updating contract state, config and checkpoints
+        // Spin up update task for updating contract state, config and checkpoints
         let near = self.near.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(UPDATE_INTERVAL);
@@ -414,9 +414,16 @@ impl RpcExecutor {
             }
         });
 
-        // process incoming actions related to RPC
+        Self::dispatch_loop(&self.publishers, &mut self.action_rx).await;
+    }
+
+    /// Dispatches incoming RPC actions to the appropriate chain publishers.
+    async fn dispatch_loop(
+        publishers: &HashMap<Chain, Arc<dyn ChainPublisher>>,
+        action_rx: &mut mpsc::Receiver<RpcAction>,
+    ) {
         loop {
-            let Some(RpcAction::Publish(action)) = self.action_rx.recv().await else {
+            let Some(RpcAction::Publish(action)) = action_rx.recv().await else {
                 tracing::error!("rpc channel closed unexpectedly");
                 return;
             };
@@ -424,14 +431,13 @@ impl RpcExecutor {
             let chain = action.indexed.chain;
 
             // Check if a publisher is configured for the chain. If not, log a warning and continue to the next action.
-            let Some(publisher) = self.publishers.get(&chain) else {
+            let Some(publisher) = publishers.get(&chain) else {
                 tracing::warn!(?chain, "no publisher configured for chain");
                 continue;
             };
 
             // Spawn a task to execute the publish action.
             let publisher = publisher.clone();
-            let action = action.clone();
             tokio::spawn(async move {
                 execute_publish(publisher, action).await;
             });
@@ -575,6 +581,8 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
@@ -584,6 +592,29 @@ mod tests {
     use k256::elliptic_curve::point::DecompressPoint;
     use mpc_crypto::kdf::derive_secret_key;
     use mpc_primitives::{SignId, SignKind};
+
+    /// A publisher that counts the number of times it has been called.
+    struct CountingPublisher {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChainPublisher for CountingPublisher {
+        async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// A publisher that always fails to publish a signature.
+    struct FailingPublisher;
+
+    #[async_trait::async_trait]
+    impl ChainPublisher for FailingPublisher {
+        async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
+            anyhow::bail!("publisher failed")
+        }
+    }
 
     fn scalar(bytes: &[u8; 32]) -> k256::Scalar {
         <k256::Scalar as Reduce<<Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(
@@ -613,7 +644,11 @@ mod tests {
         }
     }
 
-    fn make_indexed(epsilon: k256::Scalar, payload: k256::Scalar) -> IndexedSignRequest {
+    fn make_indexed(
+        chain: Chain,
+        epsilon: k256::Scalar,
+        payload: k256::Scalar,
+    ) -> IndexedSignRequest {
         IndexedSignRequest {
             id: SignId::new([0u8; 32]),
             args: mpc_primitives::SignArgs {
@@ -623,10 +658,22 @@ mod tests {
                 path: "test".into(),
                 key_version: 0,
             },
-            chain: Chain::NEAR,
+            chain,
             unix_timestamp_indexed: 0,
             kind: SignKind::Sign,
         }
+    }
+
+    /// Creates a `PublishAction` with a valid signature for the given chain.
+    fn make_publish_action(chain: Chain) -> PublishAction {
+        let sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let pk: AffinePoint = sk.public_key().into();
+        let epsilon = scalar(&[1u8; 32]);
+        let payload = scalar(&[42u8; 32]);
+        let output = make_signature(&sk, epsilon, payload);
+        let indexed = make_indexed(chain, epsilon, payload);
+        PublishAction::new(pk, indexed, output, vec![])
+            .expect("valid signature should produce a publish action")
     }
 
     fn test_participants() -> Participants {
@@ -700,7 +747,7 @@ mod tests {
         let payload = scalar(&[42u8; 32]);
 
         let output = make_signature(&sk, epsilon, payload);
-        let indexed = make_indexed(epsilon, payload);
+        let indexed = make_indexed(Chain::NEAR, epsilon, payload);
 
         assert!(PublishAction::new(pk, indexed, output, vec![]).is_some());
     }
@@ -714,8 +761,146 @@ mod tests {
 
         let mut output = make_signature(&sk, epsilon, payload);
         output.s += k256::Scalar::ONE;
-        let indexed = make_indexed(epsilon, payload);
+        let indexed = make_indexed(Chain::NEAR, epsilon, payload);
 
         assert!(PublishAction::new(pk, indexed, output, vec![]).is_none());
+    }
+
+    #[tokio::test]
+    async fn executor_dispatches_to_configured_publisher() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        // Create a publisher for Ethereum that counts the number of times it has been called.
+        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+        publishers.insert(
+            Chain::Ethereum,
+            Arc::new(CountingPublisher {
+                call_count: call_count.clone(),
+            }),
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+        // Send a publish action to the executor.
+        tx.send(RpcAction::Publish(make_publish_action(Chain::Ethereum)))
+            .await
+            .unwrap();
+
+        // Closing the channel will cause dispatch_loop to return
+        drop(tx);
+
+        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+
+        // Give spawned tasks a chance to complete
+        tokio::task::yield_now().await;
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn executor_ignores_action_for_unconfigured_chain() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        // Create a publisher for Canton
+        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+        publishers.insert(
+            Chain::Canton,
+            Arc::new(CountingPublisher {
+                call_count: call_count.clone(),
+            }),
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+
+        // Send a publish action for Ethereum (not configured)
+        tx.send(RpcAction::Publish(make_publish_action(Chain::Ethereum)))
+            .await
+            .unwrap();
+
+        drop(tx);
+
+        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn executor_continues_after_publisher_error() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        // Create a publisher for NEAR that always fails, and a publisher for Solana that counts calls.
+        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+        publishers.insert(Chain::NEAR, Arc::new(FailingPublisher));
+        publishers.insert(
+            Chain::Solana,
+            Arc::new(CountingPublisher {
+                call_count: call_count.clone(),
+            }),
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+
+        // Send a publish action for NEAR (which will fail) and then for Solana (which should succeed)
+        tx.send(RpcAction::Publish(make_publish_action(Chain::NEAR)))
+            .await
+            .unwrap();
+        tx.send(RpcAction::Publish(make_publish_action(Chain::Solana)))
+            .await
+            .unwrap();
+
+        drop(tx);
+
+        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn executor_dispatches_to_correct_publishers() {
+        const NEAR_ACTION_COUNT: usize = 3;
+        const SOL_ACTION_COUNT: usize = 2;
+
+        let near_count = Arc::new(AtomicUsize::new(0));
+        let sol_count = Arc::new(AtomicUsize::new(0));
+
+        // Create publishers for NEAR and Solana that count the number of times they have been called.
+        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+
+        publishers.insert(
+            Chain::NEAR,
+            Arc::new(CountingPublisher {
+                call_count: near_count.clone(),
+            }),
+        );
+        publishers.insert(
+            Chain::Solana,
+            Arc::new(CountingPublisher {
+                call_count: sol_count.clone(),
+            }),
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+
+        // Send multiple publish actions for NEAR and Solana
+        for _ in 0..NEAR_ACTION_COUNT {
+            tx.send(RpcAction::Publish(make_publish_action(Chain::NEAR)))
+                .await
+                .unwrap();
+        }
+
+        for _ in 0..SOL_ACTION_COUNT {
+            tx.send(RpcAction::Publish(make_publish_action(Chain::Solana)))
+                .await
+                .unwrap();
+        }
+
+        drop(tx);
+
+        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(near_count.load(Ordering::SeqCst), NEAR_ACTION_COUNT);
+        assert_eq!(sol_count.load(Ordering::SeqCst), SOL_ACTION_COUNT);
     }
 }
