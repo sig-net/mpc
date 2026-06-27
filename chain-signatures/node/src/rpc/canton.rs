@@ -279,21 +279,12 @@ impl ChainPublisher for CantonClient {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
     use super::*;
     use crate::indexer_canton::{CantonAuthConfig, CantonChainCtx};
-    use k256::{AffinePoint, Scalar};
+    use crate::rpc::test_utils::make_publish_action;
     use mockito::{Matcher, Server, ServerGuard};
-    use mpc_primitives::{
-        Chain, IndexedSignRequest, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent,
-        SignId, SignKind, Signature,
-    };
+    use mpc_primitives::{Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignKind};
     use serde_json::json;
-
-    fn create_test_signature() -> Signature {
-        Signature::new(AffinePoint::GENERATOR, Scalar::from(42u64), 1)
-    }
 
     fn mock_canton_config(url: &str) -> CantonConfig {
         CantonConfig {
@@ -310,31 +301,6 @@ mod tests {
             party_id: "test-party".to_string(),
             signer_contract_id: "test-contract-id".to_string(),
             signer_template_id: "test-template-id".to_string(),
-        }
-    }
-
-    fn mock_publish_action(kind: SignKind) -> PublishAction {
-        let sign_id = SignId::new([8u8; 32]);
-        let indexed = IndexedSignRequest::new(
-            sign_id,
-            SignArgs {
-                entropy: [0; 32],
-                epsilon: Scalar::ONE,
-                payload: Scalar::ONE,
-                path: "test".to_string(),
-                key_version: 1,
-            },
-            Chain::Canton,
-            0,
-            kind,
-        );
-
-        PublishAction {
-            public_key: AffinePoint::GENERATOR,
-            indexed,
-            signature: create_test_signature(),
-            participants: vec![],
-            timestamp: Instant::now(),
         }
     }
 
@@ -390,7 +356,7 @@ mod tests {
             chain_ctx: Some(chain_ctx),
         };
 
-        let action = mock_publish_action(SignKind::SignBidirectional(event));
+        let action = make_publish_action(Chain::Canton, SignKind::SignBidirectional(event));
         assert!(client.publish_signature(&action).await.is_ok());
         submit_mock.assert_async().await;
     }
@@ -421,7 +387,7 @@ mod tests {
             chain_ctx: Some(chain_ctx),
         };
 
-        let action = mock_publish_action(SignKind::RespondBidirectional(tx));
+        let action = make_publish_action(Chain::Canton, SignKind::RespondBidirectional(tx));
         assert!(client.publish_signature(&action).await.is_ok());
         submit_mock.assert_async().await;
     }
@@ -439,7 +405,7 @@ mod tests {
             chain_ctx: None, // Missing
         };
 
-        let action = mock_publish_action(SignKind::RespondBidirectional(tx));
+        let action = make_publish_action(Chain::Canton, SignKind::RespondBidirectional(tx));
         let err = client.publish_signature(&action).await.unwrap_err();
         assert!(err.to_string().contains("missing chain_ctx"));
     }
@@ -467,7 +433,7 @@ mod tests {
             output: vec![],
             chain_ctx: Some(chain_ctx),
         };
-        let action = mock_publish_action(SignKind::RespondBidirectional(tx));
+        let action = make_publish_action(Chain::Canton, SignKind::RespondBidirectional(tx));
 
         let err = client.publish_signature(&action).await.unwrap_err();
         assert!(err.to_string().contains("500"));

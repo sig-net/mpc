@@ -2,6 +2,8 @@ mod canton;
 mod ethereum;
 mod hydration;
 mod near;
+#[cfg(test)]
+mod test_utils;
 
 use crate::config::Config;
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
@@ -587,15 +589,13 @@ pub fn record_publish_metrics(action: &PublishAction) {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use super::test_utils::{make_indexed, make_publish_action, make_signature, scalar};
     use super::*;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
     use crate::protocol::ProtocolState;
     use cait_sith::protocol::Participant;
-    use k256::elliptic_curve::ops::Reduce;
-    use k256::elliptic_curve::point::DecompressPoint;
-    use mpc_crypto::kdf::derive_secret_key;
-    use mpc_primitives::{SignId, SignKind};
+    use mpc_primitives::SignKind;
 
     /// A publisher that counts the number of times it has been called.
     struct CountingPublisher {
@@ -618,67 +618,6 @@ mod tests {
         async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
             anyhow::bail!("publisher failed")
         }
-    }
-
-    fn scalar(bytes: &[u8; 32]) -> k256::Scalar {
-        <k256::Scalar as Reduce<<Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(
-            bytes.into(),
-        )
-    }
-
-    fn make_signature(
-        sk: &k256::SecretKey,
-        epsilon: k256::Scalar,
-        payload: k256::Scalar,
-    ) -> FullSignature<Secp256k1> {
-        let signing_key = k256::ecdsa::SigningKey::from(&derive_secret_key(sk, epsilon));
-        let (ecdsa_sig, _): (k256::ecdsa::Signature, _) =
-            <k256::ecdsa::SigningKey as k256::ecdsa::signature::hazmat::PrehashSigner<_>>::sign_prehash(
-                &signing_key,
-                &payload.to_bytes(),
-            )
-            .expect("signing should succeed");
-        let (r_bytes, _) = ecdsa_sig.split_bytes();
-        let big_r =
-            AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
-                .unwrap();
-        FullSignature {
-            big_r,
-            s: *ecdsa_sig.s().as_ref(),
-        }
-    }
-
-    fn make_indexed(
-        chain: Chain,
-        epsilon: k256::Scalar,
-        payload: k256::Scalar,
-    ) -> IndexedSignRequest {
-        IndexedSignRequest {
-            id: SignId::new([0u8; 32]),
-            args: mpc_primitives::SignArgs {
-                entropy: [0u8; 32],
-                epsilon,
-                payload,
-                path: "test".into(),
-                key_version: 0,
-            },
-            chain,
-            unix_timestamp_indexed: 0,
-            kind: SignKind::Sign,
-        }
-    }
-
-    // TODO: should be re-used across tests in submodules
-    /// Creates a `PublishAction` with a valid signature for the given chain.
-    fn make_publish_action(chain: Chain) -> PublishAction {
-        let sk = k256::SecretKey::random(&mut rand::thread_rng());
-        let pk: AffinePoint = sk.public_key().into();
-        let epsilon = scalar(&[1u8; 32]);
-        let payload = scalar(&[42u8; 32]);
-        let output = make_signature(&sk, epsilon, payload);
-        let indexed = make_indexed(chain, epsilon, payload);
-        PublishAction::new(pk, indexed, output, vec![])
-            .expect("valid signature should produce a publish action")
     }
 
     fn test_participants() -> Participants {
@@ -786,9 +725,12 @@ mod tests {
 
         let (tx, mut rx) = mpsc::channel(16);
         // Send a publish action to the executor.
-        tx.send(RpcAction::Publish(make_publish_action(Chain::Ethereum)))
-            .await
-            .unwrap();
+        tx.send(RpcAction::Publish(make_publish_action(
+            Chain::Ethereum,
+            SignKind::Sign,
+        )))
+        .await
+        .unwrap();
 
         // Closing the channel will cause dispatch_loop to return
         drop(tx);
@@ -817,9 +759,12 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
 
         // Send a publish action for Ethereum (not configured)
-        tx.send(RpcAction::Publish(make_publish_action(Chain::Ethereum)))
-            .await
-            .unwrap();
+        tx.send(RpcAction::Publish(make_publish_action(
+            Chain::Ethereum,
+            SignKind::Sign,
+        )))
+        .await
+        .unwrap();
 
         drop(tx);
 
@@ -846,12 +791,18 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(16);
 
         // Send a publish action for NEAR (which will fail) and then for Solana (which should succeed)
-        tx.send(RpcAction::Publish(make_publish_action(Chain::NEAR)))
-            .await
-            .unwrap();
-        tx.send(RpcAction::Publish(make_publish_action(Chain::Solana)))
-            .await
-            .unwrap();
+        tx.send(RpcAction::Publish(make_publish_action(
+            Chain::NEAR,
+            SignKind::Sign,
+        )))
+        .await
+        .unwrap();
+        tx.send(RpcAction::Publish(make_publish_action(
+            Chain::Solana,
+            SignKind::Sign,
+        )))
+        .await
+        .unwrap();
 
         drop(tx);
 
@@ -889,15 +840,21 @@ mod tests {
 
         // Send multiple publish actions for NEAR and Solana
         for _ in 0..NEAR_ACTION_COUNT {
-            tx.send(RpcAction::Publish(make_publish_action(Chain::NEAR)))
-                .await
-                .unwrap();
+            tx.send(RpcAction::Publish(make_publish_action(
+                Chain::NEAR,
+                SignKind::Sign,
+            )))
+            .await
+            .unwrap();
         }
 
         for _ in 0..SOL_ACTION_COUNT {
-            tx.send(RpcAction::Publish(make_publish_action(Chain::Solana)))
-                .await
-                .unwrap();
+            tx.send(RpcAction::Publish(make_publish_action(
+                Chain::Solana,
+                SignKind::Sign,
+            )))
+            .await
+            .unwrap();
         }
 
         drop(tx);
