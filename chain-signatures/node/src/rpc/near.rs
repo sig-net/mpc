@@ -13,6 +13,13 @@ use near_fetch::result::ExecutionFinalResult;
 use serde_json::json;
 use url::Url;
 
+/// Base delay in milliseconds between NEAR RPC retries
+const NEAR_RETRY_BASE_DELAY_MS: u64 = 10;
+/// Maximum number of retry attempts for NEAR RPC calls
+const NEAR_RESPOND_MAX_RETRIES: usize = 3;
+/// Maximum number of retry attempts for NEAR governance calls (vote, join)
+const NEAR_GOVERNANCE_MAX_RETRIES: usize = 5;
+
 #[derive(Clone)]
 pub struct NearClient {
     client: near_fetch::Client,
@@ -68,7 +75,7 @@ impl NearClient {
                 "public_key": public_key
             }))
             .max_gas()
-            .retry_exponential(10, 5)
+            .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_GOVERNANCE_MAX_RETRIES)
             .transact()
             .await
             .inspect_err(|err| {
@@ -88,7 +95,7 @@ impl NearClient {
                 "epoch": epoch
             }))
             .max_gas()
-            .retry_exponential(10, 5)
+            .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_GOVERNANCE_MAX_RETRIES)
             .transact()
             .await
             .inspect_err(|err| {
@@ -109,7 +116,7 @@ impl NearClient {
                 "sign_pk": self.sign_pk,
             }))
             .max_gas()
-            .retry_exponential(10, 3)
+            .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_GOVERNANCE_MAX_RETRIES)
             .transact()
             .await?
             .into_result()?;
@@ -129,6 +136,7 @@ impl NearClient {
                 "signature": response,
             }))
             .max_gas()
+            .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_RESPOND_MAX_RETRIES)
             .transact()
             .await
     }
@@ -155,6 +163,7 @@ impl NearClient {
                 "signature": signature,
             }))
             .max_gas()
+            .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_RESPOND_MAX_RETRIES)
             .transact()
             .await
     }
