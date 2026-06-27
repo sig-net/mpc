@@ -307,26 +307,6 @@ impl EthClient {
         Ok(())
     }
 
-    // TODO: should probably remove this
-    async fn _publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        let timestamp = action.timestamp;
-        let mpc_sig = &action.signature;
-        let response = ChainSignatures::Response {
-            requestId: action.indexed.id.request_id.into(),
-            signature: mpc_sig.into(),
-        };
-
-        self.execute_publish(
-            vec![response],
-            ETH_BASE_GAS_LIMIT,
-            std::slice::from_ref(&action.indexed.id),
-        )
-        .await?;
-
-        tracing::info!(elapsed = ?timestamp.elapsed(), "single publish complete");
-        Ok(())
-    }
-
     pub async fn batch_publish_signatures(
         &self,
         actions: &[PublishAction],
