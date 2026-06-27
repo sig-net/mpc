@@ -32,15 +32,12 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 
-/// The maximum amount of times to retry publishing a signature.
-const MAX_PUBLISH_RETRY: usize = 6;
 /// The maximum number of concurrent RPC requests the system can make
 const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 /// The update interval to fetch and update the contract's state
 const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 
 // Publish retry constants
-const PUBLISH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
 const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(5);
 const PUBLISH_MAX_DELAY: Duration = Duration::from_secs(60); // Cap to 1 min so backoff doesn't get too long for infinite retries
 const BATCH_PUBLISH_MIN_DELAY: Duration = Duration::from_secs(1);
