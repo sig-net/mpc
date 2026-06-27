@@ -514,7 +514,7 @@ async fn update_contract_data(
     }
 }
 
-/// Publish the signature and retry if it fails
+/// Publish the signature and retry if it fails, logging the error and retry attempt. Shared by all chain publishers.
 pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: PublishAction) {
     let chain = action.indexed.chain;
     let sign_id = action.indexed.id;
@@ -550,33 +550,37 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
         { publisher.publish_signature(&action).await }
     );
 
-    // TODO: consider decoupling publishing from metric recording
-    if publish_res.is_ok() {
-        let elapsed_secs =
-            crate::util::unix_elapsed(action.indexed.unix_timestamp_indexed).as_secs();
-        if elapsed_secs <= chain.expected_response_time_secs() {
-            record_request_latency_since(
-                chain,
-                SignRequestStep::Total,
-                "in_time",
-                action.indexed.unix_timestamp_indexed,
-            );
-        } else {
-            record_request_latency_since(
-                chain,
-                SignRequestStep::Total,
-                "expired",
-                action.indexed.unix_timestamp_indexed,
-            );
-        }
-        record_request_latency_since(chain, SignRequestStep::Responding, "ok", action.timestamp);
-    } else {
-        tracing::info!(
+    // Log error if the publish failed after all retries
+    if publish_res.is_err() {
+        tracing::error!(
             ?sign_id,
             elapsed = ?action.timestamp.elapsed(),
             "exceeded max retries, trashing publish request"
         );
     }
+}
+
+/// Helper to record metrics when a signature is successfully published to a chain.
+pub fn record_publish_metrics(action: &PublishAction) {
+    let chain = action.indexed.chain;
+    let elapsed_secs = crate::util::unix_elapsed(action.indexed.unix_timestamp_indexed).as_secs();
+
+    if elapsed_secs <= chain.expected_response_time_secs() {
+        record_request_latency_since(
+            chain,
+            SignRequestStep::Total,
+            "in_time",
+            action.indexed.unix_timestamp_indexed,
+        );
+    } else {
+        record_request_latency_since(
+            chain,
+            SignRequestStep::Total,
+            "expired",
+            action.indexed.unix_timestamp_indexed,
+        );
+    }
+    record_request_latency_since(chain, SignRequestStep::Responding, "ok", action.timestamp);
 }
 
 #[cfg(test)]
@@ -664,6 +668,7 @@ mod tests {
         }
     }
 
+    // TODO: should be re-used across tests in submodules
     /// Creates a `PublishAction` with a valid signature for the given chain.
     fn make_publish_action(chain: Chain) -> PublishAction {
         let sk = k256::SecretKey::random(&mut rand::thread_rng());

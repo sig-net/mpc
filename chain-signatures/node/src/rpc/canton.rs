@@ -271,6 +271,8 @@ impl ChainPublisher for CantonClient {
             "published canton {choice} successfully"
         );
 
+        super::record_publish_metrics(action);
+
         Ok(())
     }
 }

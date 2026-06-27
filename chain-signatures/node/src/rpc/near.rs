@@ -14,7 +14,7 @@ use serde_json::json;
 use url::Url;
 
 /// Base delay in milliseconds between NEAR RPC retries
-const NEAR_RETRY_BASE_DELAY_MS: u64 = 10;
+const NEAR_RETRY_BASE_DELAY_MS: u64 = 10; // TODO: 10 ms could be too small, consider increasing
 /// Maximum number of retry attempts for NEAR RPC calls
 const NEAR_RESPOND_MAX_RETRIES: usize = 3;
 /// Maximum number of retry attempts for NEAR governance calls (vote, join)
@@ -201,6 +201,7 @@ impl ChainPublisher for NearClient {
                     "smart contract threw error",
                 );
             })?;
+
         tracing::info!(
             sign_id = ?action.indexed.id,
             big_r = signature.big_r.to_base58(),
@@ -208,6 +209,9 @@ impl ChainPublisher for NearClient {
             elapsed = ?timestamp.elapsed(),
             "published signature sucessfully",
         );
+
+        super::record_publish_metrics(action);
+
         Ok(())
     }
 }

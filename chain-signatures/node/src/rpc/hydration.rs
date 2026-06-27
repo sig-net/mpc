@@ -269,6 +269,8 @@ impl ChainPublisher for HydrationClient {
                     elapsed = ?timestamp.elapsed(),
                     "published hydration signature successfully"
                 );
+
+                super::record_publish_metrics(action);
             }
             SignKind::RespondBidirectional(respond_bidirectional_tx) => {
                 let serialized_output = respond_bidirectional_tx.output.clone();
@@ -288,12 +290,15 @@ impl ChainPublisher for HydrationClient {
                             "Hydration publish signature: failed to publish respond bidirectional signature"
                         );
                     })?;
+
                 tracing::info!(
                     ?sign_id,
                     tx_hash = ?tx_hash,
                     elapsed = ?timestamp.elapsed(),
                     "Hydration publish signature: published respond bidirectional signature successfully"
                 );
+
+                super::record_publish_metrics(action);
             }
             SignKind::Checkpoint(_) => {
                 tracing::error!(?sign_id, "Hydration: checkpoint publishing not supported");

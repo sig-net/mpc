@@ -153,34 +153,13 @@ impl EthClient {
             { self.batch_publish_signatures(actions, &signatures).await }
         );
 
+        // Log metrics for successful publishes, or log an error if all retries failed
         if res.is_ok() {
             for action in actions.iter() {
-                let chain = action.indexed.chain;
-                let elapsed = crate::util::unix_elapsed(action.indexed.unix_timestamp_indexed);
-                if elapsed.as_secs() <= chain.expected_response_time_secs() {
-                    crate::metrics::requests::record_request_latency_since(
-                        chain,
-                        crate::metrics::requests::SignRequestStep::Total,
-                        "in_time",
-                        action.indexed.unix_timestamp_indexed,
-                    );
-                } else {
-                    crate::metrics::requests::record_request_latency_since(
-                        chain,
-                        crate::metrics::requests::SignRequestStep::Total,
-                        "expired",
-                        action.indexed.unix_timestamp_indexed,
-                    );
-                }
-                crate::metrics::requests::record_request_latency_since(
-                    chain,
-                    crate::metrics::requests::SignRequestStep::Responding,
-                    "ok",
-                    action.timestamp,
-                );
+                super::record_publish_metrics(action);
             }
         } else {
-            tracing::info!("exceeded max retries, trashing publish request");
+            tracing::error!("exceeded max retries, trashing publish request");
         }
 
         actions.clear();
