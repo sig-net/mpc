@@ -808,7 +808,12 @@ mod tests {
         drop(tx);
 
         RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
-        tokio::task::yield_now().await;
+
+        // Yield enough times to let both spawned tasks complete.
+        // Each task calls publish_signature once and returns immediately.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
 
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
