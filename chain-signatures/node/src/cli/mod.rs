@@ -320,13 +320,13 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
 
+            // TODO: Centralize publishers and indexers creation: collect all chain args first, then create publishers and indexers in one place.
             // Build publishers registry
             let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
 
             // Add NEAR publisher unconditionally
             publishers.insert(Chain::NEAR, Arc::new(near_client.clone()));
 
-            // TODO: think about better way
             // Add other publishers based on the provided configurations
             if let Some(eth_cfg) = &eth {
                 publishers.insert(Chain::Ethereum, Arc::new(rpc::EthClient::new(eth_cfg)));
