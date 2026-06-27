@@ -429,10 +429,12 @@ impl RpcExecutor {
                 continue;
             };
 
-            // Publish the signature and retry if it fails
-            if let Err(e) = publisher.publish_signature(&action).await {
-                tracing::error!(?chain, "failed to enqueue publish action: {e}");
-            }
+            // Spawn a task to execute the publish action.
+            let publisher = publisher.clone();
+            let action = action.clone();
+            tokio::spawn(async move {
+                execute_publish(publisher, action).await;
+            });
         }
     }
 }
