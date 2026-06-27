@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use crate::protocol::{Chain, IndexedSignRequest};
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
@@ -39,6 +41,7 @@ pub fn make_indexed(
     chain: Chain,
     epsilon: k256::Scalar,
     payload: k256::Scalar,
+    kind: SignKind,
 ) -> IndexedSignRequest {
     IndexedSignRequest {
         id: SignId::new([0u8; 32]),
@@ -51,7 +54,7 @@ pub fn make_indexed(
         },
         chain,
         unix_timestamp_indexed: 0,
-        kind: SignKind::Sign,
+        kind,
     }
 }
 
@@ -61,8 +64,7 @@ pub fn make_publish_action(chain: Chain, kind: SignKind) -> PublishAction {
     let epsilon = scalar(&[1u8; 32]);
     let payload = scalar(&[42u8; 32]);
     let output = make_signature(&sk, epsilon, payload);
-    let mut indexed = make_indexed(chain, epsilon, payload);
-    indexed.kind = kind;
+    let indexed = make_indexed(chain, epsilon, payload, kind);
     PublishAction::new(pk, indexed, output, vec![])
         .expect("valid signature should produce a publish action")
 }

@@ -552,6 +552,7 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
         { publisher.publish_signature(&action).await }
     );
 
+    // TODO: Consider adding a metric update for failed publish attempts here, if needed.
     // Log error if the publish failed after all retries
     if publish_res.is_err() {
         tracing::error!(
@@ -691,7 +692,7 @@ mod tests {
         let payload = scalar(&[42u8; 32]);
 
         let output = make_signature(&sk, epsilon, payload);
-        let indexed = make_indexed(Chain::NEAR, epsilon, payload);
+        let indexed = make_indexed(Chain::NEAR, epsilon, payload, SignKind::Sign);
 
         assert!(PublishAction::new(pk, indexed, output, vec![]).is_some());
     }
@@ -705,7 +706,7 @@ mod tests {
 
         let mut output = make_signature(&sk, epsilon, payload);
         output.s += k256::Scalar::ONE;
-        let indexed = make_indexed(Chain::NEAR, epsilon, payload);
+        let indexed = make_indexed(Chain::NEAR, epsilon, payload, SignKind::Sign);
 
         assert!(PublishAction::new(pk, indexed, output, vec![]).is_none());
     }
