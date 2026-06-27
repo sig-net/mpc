@@ -24,9 +24,9 @@ use solana_transaction_status::{
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crate::rpc::{self, ChainPublisher, PublishAction};
+use crate::rpc::{ChainPublisher, PublishAction};
 use crate::util::retry::{retry_rpc, RetryConfig};
 
 const MAX_SIGNATURES_FOR_FAST_CATCHUP: usize = 1000;
@@ -103,6 +103,7 @@ pub struct SolanaClient {
 }
 
 impl SolanaClient {
+    // TODO: reduce duplication between from_config and for_indexer
     pub fn from_config(sol: &SolConfig) -> Self {
         let keypair = Keypair::from_base58_string(&sol.account_sk);
         let payer = Arc::new(keypair);
@@ -247,6 +248,7 @@ impl SolanaClient {
         )
     }
 
+    // TODO: consider returning a Result instead of swallowing errors and returning an empty map. This would allow the caller to handle errors more explicitly.
     pub async fn fetch_blocks(&self, slots: &[u64]) -> HashMap<u64, UiConfirmedBlock> {
         if slots.is_empty() {
             return HashMap::new();
@@ -454,13 +456,13 @@ impl SolanaClient {
 
         blocks_by_height
     }
+}
 
-    pub async fn publish_signature(
-        &self,
-        action: &PublishAction,
-        timestamp: &Instant,
-        mpc_sig: &mpc_primitives::Signature,
-    ) -> anyhow::Result<()> {
+#[async_trait::async_trait]
+impl ChainPublisher for SolanaClient {
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
+        let timestamp = action.timestamp;
+        let mpc_sig = &action.signature;
         let program = self.client.program(self.program_id)?;
 
         let sign_id = action.indexed.id;
@@ -520,11 +522,11 @@ impl SolanaClient {
                     .request()
                     .signer(self.payer.clone())
                     .accounts(SolanaRespondBidirectionalAccount {
-                        responder: self.payer.clone().try_pubkey().unwrap(),
+                        responder: self.payer.pubkey(),
                     })
                     .args(SolanaRespondBidirectional {
                         request_id: request_ids[0],
-                        serialized_output: respond_bidirectional_serialized_output.clone(),
+                        serialized_output: respond_bidirectional_serialized_output,
                         signature: signature.clone(),
                     })
                     .send()
@@ -553,18 +555,6 @@ impl SolanaClient {
             }
         }
 
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl ChainPublisher for SolanaClient {
-    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        let client = self.clone();
-        let action = action.clone();
-        tokio::spawn(async move {
-            rpc::execute_publish(Arc::new(client), action).await;
-        });
         Ok(())
     }
 }
