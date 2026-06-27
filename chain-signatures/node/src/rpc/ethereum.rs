@@ -136,14 +136,14 @@ impl EthClient {
             .collect();
 
         let retry_config = RetryConfig {
-            max_times: super::MAX_PUBLISH_RETRY,
+            max_times: usize::MAX,
             min_delay: super::BATCH_PUBLISH_MIN_DELAY,
             max_delay: super::BATCH_PUBLISH_MAX_DELAY,
             jitter: true,
         };
 
         let res = retry_rpc!(
-            super::PUBLISH_ATTEMPT_TIMEOUT,
+            Duration::MAX, // Prevent from timing out
             retry_config,
             |attempt, err, sleep| {
                 tracing::warn!(

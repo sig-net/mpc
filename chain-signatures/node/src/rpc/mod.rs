@@ -41,7 +41,8 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 
 // Publish retry constants
 const PUBLISH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
-const PUBLISH_FIXED_DELAY: Duration = Duration::from_secs(5);
+const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(5);
+const PUBLISH_MAX_DELAY: Duration = Duration::from_secs(60); // Cap to 1 min so backoff doesn't get too long for infinite retries
 const BATCH_PUBLISH_MIN_DELAY: Duration = Duration::from_secs(1);
 const BATCH_PUBLISH_MAX_DELAY: Duration = Duration::from_secs(10);
 
@@ -529,14 +530,14 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
     );
 
     let retry_config = RetryConfig {
-        max_times: MAX_PUBLISH_RETRY,
-        min_delay: PUBLISH_FIXED_DELAY,
-        max_delay: PUBLISH_FIXED_DELAY,
+        max_times: usize::MAX,
+        min_delay: PUBLISH_MIN_DELAY,
+        max_delay: PUBLISH_MAX_DELAY,
         jitter: true,
     };
 
     let publish_res = retry_rpc!(
-        PUBLISH_ATTEMPT_TIMEOUT,
+        Duration::MAX, // Prevent from timing out
         retry_config,
         // Log the error and retry attempt
         |attempt, err, sleep| {

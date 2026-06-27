@@ -14,7 +14,7 @@ use serde_json::json;
 use url::Url;
 
 /// Base delay in milliseconds between NEAR RPC retries
-const NEAR_RETRY_BASE_DELAY_MS: u64 = 10; // TODO: 10 ms could be too small, consider increasing
+const NEAR_RETRY_BASE_DELAY_MS: u64 = 500;
 /// Maximum number of retry attempts for NEAR RPC calls
 const NEAR_RESPOND_MAX_RETRIES: usize = 3;
 /// Maximum number of retry attempts for NEAR governance calls (vote, join)
