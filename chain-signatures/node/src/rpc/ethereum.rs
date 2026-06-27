@@ -307,7 +307,8 @@ impl EthClient {
         Ok(())
     }
 
-    pub async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
+    // TODO: should probably remove this
+    async fn _publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
         let timestamp = action.timestamp;
         let mpc_sig = &action.signature;
         let response = ChainSignatures::Response {
