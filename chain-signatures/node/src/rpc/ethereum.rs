@@ -348,6 +348,7 @@ impl EthClient {
             })
             .collect();
 
+        // TODO: Consider using a more accurate dynamic gas estimation 
         let gas = std::cmp::max(
             ETH_BASE_GAS_LIMIT,
             ETH_BATCH_GAS_PER_REQUEST * num_requests as u64,
