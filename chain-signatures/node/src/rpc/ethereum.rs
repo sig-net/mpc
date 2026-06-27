@@ -307,12 +307,9 @@ impl EthClient {
         Ok(())
     }
 
-    pub async fn publish_signature(
-        &self,
-        action: &PublishAction,
-        timestamp: &Instant,
-        mpc_sig: &mpc_primitives::Signature,
-    ) -> anyhow::Result<()> {
+    pub async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
+        let timestamp = action.timestamp;
+        let mpc_sig = &action.signature;
         let response = ChainSignatures::Response {
             requestId: action.indexed.id.request_id.into(),
             signature: mpc_sig.into(),
