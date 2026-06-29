@@ -5,7 +5,7 @@ use alloy::primitives::keccak256;
 use async_trait::async_trait;
 use futures_util::stream::{self, SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use mpc_indexer_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
+use mpc_indexer_core::{ChainIndexer, ChainStream, ChainTelemetry, LiveStreamStatus, StateManager};
 use mpc_primitives::{
     ChainEvent, RespondBidirectionalEvent, ScalarExt, Signature, SignatureRespondedEvent,
 };
@@ -386,9 +386,9 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for CantonIndexer<S, T> {
         Ok(())
     }
 
-    async fn process_next_block(&mut self) -> bool {
+    async fn process_next_block(&mut self) -> LiveStreamStatus {
         let Some(update) = self.next_update().await else {
-            return false;
+            return LiveStreamStatus::Shutdown;
         };
 
         while let Err(err) = self.process_update(&update).await {
@@ -396,7 +396,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for CantonIndexer<S, T> {
             tokio::time::sleep(Self::RETRY_DELAY).await;
         }
 
-        true
+        LiveStreamStatus::Continue
     }
 }
 

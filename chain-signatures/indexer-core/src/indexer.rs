@@ -3,6 +3,13 @@ use std::time::Duration;
 use futures_util::Stream;
 use mpc_primitives::{Chain, ChainEvent};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveStreamStatus {
+    Continue,
+    Reconnect,
+    Shutdown,
+}
+
 // TODO: Consider removing default implementations from the trait and force to implement (also removes dependency for `tokio` and `tracing` in this crate)
 /// Interface for a chain indexer that can catch up and livestream events from a specific chain.
 #[async_trait::async_trait]
@@ -37,17 +44,16 @@ pub trait ChainIndexer: Send + 'static {
         Ok(())
     }
 
-    /// Process the next block, return true for success, false for shutdown.
-    async fn process_next_block(&mut self) -> bool {
+    async fn process_next_block(&mut self) -> LiveStreamStatus {
         let Some(block) = self.next().await else {
-            return false;
+            return LiveStreamStatus::Shutdown;
         };
 
         while let Err(err) = self.process(&block).await {
             tracing::warn!(?err, "live block processing failed; retrying");
             tokio::time::sleep(Self::RETRY_DELAY).await;
         }
-        true
+        LiveStreamStatus::Continue
     }
 }
 

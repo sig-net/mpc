@@ -24,6 +24,7 @@ pub enum ChainStreaming {
     Recovery { load_local: bool },
     Catchup { anchor_height: u64 },
     Live,
+    Reconnect,
 }
 
 pub fn channel() -> (mpsc::Sender<ChainEvent>, mpsc::Receiver<ChainEvent>) {
@@ -1461,5 +1462,223 @@ mod tests {
         .expect("should transition back to Recovery state upon regression");
 
         task_handle.abort();
+    }
+
+    // --- Reconnect tests ---
+
+    use mpc_indexer_core::LiveStreamStatus;
+    use tokio::sync::Notify;
+
+    struct ReconnectIndexer {
+        tx: mpsc::Sender<ChainEvent>,
+        live_call_count: Arc<Mutex<u32>>,
+        livestream_results: Arc<Mutex<Vec<anyhow::Result<Option<u64>>>>>,
+        livestream_barrier: Arc<Mutex<Option<Arc<Notify>>>>,
+        reconnects_remaining: Arc<Mutex<usize>>,
+        persisted_height: Option<u64>,
+    }
+
+    #[async_trait]
+    impl ChainIndexer for ReconnectIndexer {
+        const CHAIN: Chain = Chain::Solana;
+        type Block = u64;
+        type Iter = futures_util::stream::Iter<std::vec::IntoIter<Self::Block>>;
+        const RETRY_DELAY: Duration = Duration::from_millis(1);
+
+        async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
+            let barrier = {
+                let mut barrier = self.livestream_barrier.lock().unwrap();
+                barrier.take()
+            };
+
+            if let Some(barrier) = barrier {
+                barrier.notified().await;
+            }
+
+            {
+                let mut count = self.live_call_count.lock().unwrap();
+                *count += 1;
+            }
+
+            let mut results = self.livestream_results.lock().unwrap();
+            if results.is_empty() {
+                Ok(None)
+            } else {
+                results.remove(0)
+            }
+        }
+
+        async fn process_next_block(&mut self) -> LiveStreamStatus {
+            let should_reconnect = {
+                let mut remaining = self.reconnects_remaining.lock().unwrap();
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    true
+                } else {
+                    false
+                }
+            };
+            if should_reconnect {
+                LiveStreamStatus::Reconnect
+            } else {
+                std::future::pending().await
+            }
+        }
+
+        async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
+            let start = self
+                .persisted_height
+                .map(|h| h + 1)
+                .unwrap_or(anchor_height);
+            let items: Vec<u64> = (start..anchor_height).collect();
+            futures_util::stream::iter(items.into_iter())
+        }
+
+        async fn process_catchup(&mut self, &height: &Self::Block) -> anyhow::Result<()> {
+            self.tx.send(ChainEvent::Block(height)).await?;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_live_reconnect_transitions_through_catchup() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let live_call_count = Arc::new(Mutex::new(0u32));
+        let barrier = Arc::new(Notify::new());
+
+        let indexer = ReconnectIndexer {
+            tx,
+            live_call_count: live_call_count.clone(),
+            livestream_results: Arc::new(Mutex::new(vec![Ok(Some(200))])),
+            livestream_barrier: Arc::new(Mutex::new(Some(barrier.clone()))),
+            reconnects_remaining: Arc::new(Mutex::new(1)),
+            persisted_height: Some(198),
+        };
+
+        let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+        let (_m_tx, m_rx) = watch::channel(MeshState::default());
+        let (_stx, _srx) = mpsc::channel(1);
+        let (pipeline, mut state_rx) = ChainPipeline::from_state(
+            ChainStreaming::Live,
+            indexer,
+            cp_rx,
+            Backlog::new(),
+            _stx,
+            m_rx,
+            NodeClient::new(&Default::default()),
+            0,
+            "test.near".parse().unwrap(),
+        );
+
+        let task_handle = tokio::spawn(pipeline.run());
+
+        // Pipeline: Live → process_next_block returns Reconnect → sends Reconnect state
+        // handle_reconnect calls livestream() which blocks on barrier
+        timeout(Duration::from_secs(2), async {
+            loop {
+                state_rx.changed().await.unwrap();
+                if matches!(*state_rx.borrow_and_update(), ChainStreaming::Reconnect) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("should reach Reconnect state");
+
+        // Release barrier so livestream() returns Ok(Some(200)); reconnect catchup
+        // should then process the gap block 199.
+        barrier.notify_one();
+
+        // Verify catchup emitted the gap block (199)
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let event = rx.recv().await.expect("event channel closed");
+                if matches!(event, ChainEvent::Block(199)) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("catchup should have emitted Block(199)");
+
+        assert_eq!(*live_call_count.lock().unwrap(), 1);
+        task_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_reconnect_retries_livestream_on_failure() {
+        let (tx, mut rx) = mpsc::channel(64);
+        let live_call_count = Arc::new(Mutex::new(0u32));
+
+        let indexer = ReconnectIndexer {
+            tx,
+            live_call_count: live_call_count.clone(),
+            livestream_results: Arc::new(Mutex::new(vec![
+                Err(anyhow::anyhow!("ws connect failed")),
+                Err(anyhow::anyhow!("ws connect failed again")),
+                Ok(Some(300)),
+            ])),
+            livestream_barrier: Arc::new(Mutex::new(None)),
+            reconnects_remaining: Arc::new(Mutex::new(1)),
+            persisted_height: Some(298),
+        };
+
+        let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+        let (_m_tx, m_rx) = watch::channel(MeshState::default());
+        let (_stx, _srx) = mpsc::channel(1);
+        let (pipeline, _) = ChainPipeline::from_state(
+            ChainStreaming::Live,
+            indexer,
+            cp_rx,
+            Backlog::new(),
+            _stx,
+            m_rx,
+            NodeClient::new(&Default::default()),
+            0,
+            "test.near".parse().unwrap(),
+        );
+
+        let task_handle = tokio::spawn(pipeline.run());
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let event = rx.recv().await.expect("event channel closed");
+                if matches!(event, ChainEvent::Block(299)) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("should process reconnect catchup gap block");
+
+        assert_eq!(*live_call_count.lock().unwrap(), 3);
+        task_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_solana_channel_close_returns_reconnect() {
+        use crate::indexer_sol::{SolanaClient, SolanaIndexer};
+
+        let (tx, rx) = mpsc::channel(16);
+        let (events_tx, _events_rx) = mpsc::channel(16);
+
+        let mut indexer = SolanaIndexer {
+            program_id: solana_sdk::pubkey::Pubkey::new_unique(),
+            client: SolanaClient::for_indexer(
+                "http://localhost:8899".to_string(),
+                "ws://localhost:8900".to_string(),
+                solana_sdk::pubkey::Pubkey::new_unique(),
+            ),
+            events_tx,
+            state_manager: Backlog::new(),
+            telemetry: NoopChainTelemetry,
+            live_rx: Some(rx),
+        };
+
+        drop(tx);
+
+        let status = indexer.process_next_block().await;
+        assert_eq!(status, LiveStreamStatus::Reconnect);
+        assert!(indexer.live_rx.is_none());
     }
 }

@@ -5,7 +5,7 @@ use crate::node_client::NodeClient;
 use crate::protocol::signature::Sign;
 use crate::protocol::Chain;
 use futures_util::StreamExt;
-use mpc_indexer_core::ChainIndexer;
+use mpc_indexer_core::{ChainIndexer, LiveStreamStatus};
 use mpc_primitives::CheckpointDigest;
 use near_account_id::AccountId;
 use tokio::sync::{mpsc, watch};
@@ -99,6 +99,13 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                 }
                 ChainStreaming::Live => {
                     if let Some(next_state) = self.handle_live().await {
+                        current_state = next_state;
+                    } else {
+                        break;
+                    }
+                }
+                ChainStreaming::Reconnect => {
+                    if let Some(next_state) = self.handle_reconnect().await {
                         current_state = next_state;
                     } else {
                         break;
@@ -224,11 +231,50 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         let chain = I::CHAIN;
         loop {
             tokio::select! {
-                alive = self.indexer.process_next_block() => {
-                    if !alive {
-                        return None; // shutdown
+                status = self.indexer.process_next_block() => {
+                    match status {
+                        LiveStreamStatus::Continue => {}
+                        LiveStreamStatus::Reconnect => {
+                            let next_state = ChainStreaming::Reconnect;
+                            let _ = self.state_tx.send(next_state);
+                            return Some(next_state);
+                        }
+                        LiveStreamStatus::Shutdown => return None,
                     }
                 }
+                new_state = wait_detected_regression(
+                    &mut self.checkpoints_rx,
+                    &self.state_tx,
+                    &self.backlog,
+                    chain,
+                ) => {
+                    return Some(new_state);
+                }
+            }
+        }
+    }
+
+    async fn handle_reconnect(&mut self) -> Option<ChainStreaming> {
+        let chain = I::CHAIN;
+        tracing::warn!(%chain, "livestream disconnected; reconnecting");
+
+        loop {
+            match self.indexer.livestream().await {
+                Ok(anchor_height) => {
+                    let next_state = match anchor_height {
+                        Some(anchor_height) => ChainStreaming::Catchup { anchor_height },
+                        None => ChainStreaming::Live,
+                    };
+                    let _ = self.state_tx.send(next_state);
+                    return Some(next_state);
+                }
+                Err(err) => {
+                    tracing::error!(?err, %chain, "failed to reconnect livestream; retrying");
+                }
+            }
+
+            tokio::select! {
+                _ = tokio::time::sleep(I::RETRY_DELAY) => {}
                 new_state = wait_detected_regression(
                     &mut self.checkpoints_rx,
                     &self.state_tx,

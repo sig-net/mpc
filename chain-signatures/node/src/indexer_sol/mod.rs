@@ -24,7 +24,7 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
-use mpc_indexer_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
+use mpc_indexer_core::{ChainIndexer, ChainStream, ChainTelemetry, LiveStreamStatus, StateManager};
 use mpc_primitives::{
     ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
@@ -249,18 +249,20 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
         }
     }
 
-    async fn process_next_block(&mut self) -> bool {
+    async fn process_next_block(&mut self) -> LiveStreamStatus {
         let Some(rx) = self.live_rx.as_mut() else {
-            return false;
+            return LiveStreamStatus::Shutdown;
         };
         let Some(event) = rx.recv().await else {
-            return false;
+            tracing::warn!("solana livestream channel closed; reconnecting");
+            self.live_rx = None;
+            return LiveStreamStatus::Reconnect;
         };
         if let Err(err) = self.events_tx.send(event).await {
             tracing::warn!(?err, "failed to forward live solana event");
-            return false;
+            return LiveStreamStatus::Shutdown;
         }
-        true
+        LiveStreamStatus::Continue
     }
 
     async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
@@ -456,25 +458,13 @@ async fn subscribe_and_buffer_live_events<T: ChainTelemetry>(
     telemetry: T,
 ) {
     let mut anchor_tx = Some(anchor_tx);
-    loop {
-        // TODO: if solana ever fails and needs to retry, we actually need to do catchup
-        // again. This requires potentially complicating the coordination we have on the
-        // high level of run_stream. Issue: https://github.com/sig-net/mpc/issues/811
-        let result = subscribe_to_program_events(
-            program_id,
-            &client,
-            live_tx.clone(),
-            &mut anchor_tx,
-            telemetry.clone(),
-        )
-        .await;
-
-        if let Err(err) = result {
-            tracing::warn!("Live solana subscription failed: {:?}", err);
-        }
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
+    if let Err(err) =
+        subscribe_to_program_events(program_id, &client, live_tx, &mut anchor_tx, telemetry).await
+    {
+        tracing::warn!("Live solana subscription failed: {:?}", err);
     }
+    // live_tx is dropped here, causing process_next_block to see channel close
+    // and return LiveStreamStatus::Reconnect
 }
 
 fn parse_cpi_events(
