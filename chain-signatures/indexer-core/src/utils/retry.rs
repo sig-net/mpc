@@ -2,6 +2,9 @@ use std::time::Duration;
 
 use backon::ExponentialBuilder;
 
+// Re-export the retry_rpc macro
+pub use crate::retry_rpc;
+
 /// Configuration for retrying RPC calls with exponential backoff.
 #[derive(Clone, Copy)]
 pub struct RetryConfig {
@@ -113,7 +116,7 @@ macro_rules! retry_rpc {
                 Err(_) => Err(anyhow::anyhow!("Operation timed out after {:?}", $timeout)),
             }
         };
-        use backon::Retryable;
+        use $crate::backon::Retryable as _;
         op.retry(&$strategy.build())
             // Retry only if the error is retryable (e.g., not a 4xx client error)
             .when(|e: &anyhow::Error| $crate::utils::retry::is_retryable(e))
@@ -143,7 +146,7 @@ macro_rules! retry_rpc {
                 Err(_) => Err(anyhow::anyhow!("Operation timed out after {:?}", $timeout)),
             }
         };
-        use backon::Retryable;
+        use $crate::backon::Retryable as _;
         op.retry(&$strategy.build())
             // Retry only if the error is retryable (e.g., not a 4xx client error)
             .when(|e: &anyhow::Error| $crate::utils::retry::is_retryable(e))
@@ -157,6 +160,3 @@ macro_rules! retry_rpc {
             .map_err(|e| anyhow::anyhow!("{e} (exhausted after {} attempts)", attempt_counter + 1))
     }};
 }
-
-// Re-export the retry_rpc macro
-pub use crate::retry_rpc;
