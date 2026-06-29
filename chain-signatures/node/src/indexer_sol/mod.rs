@@ -3,7 +3,6 @@ mod config;
 
 use crate::protocol::Chain;
 use crate::sign_bidirectional::hash_rlp_data;
-use crate::util::ethabi_request_id;
 pub use client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
 pub use config::SolConfig;
 
@@ -24,7 +23,9 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
-use mpc_indexer_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
+use mpc_indexer_core::{
+    compute_request_id, ChainIndexer, ChainStream, ChainTelemetry, StateManager,
+};
 use mpc_primitives::{
     ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
@@ -342,9 +343,9 @@ impl SolanaSignEvent {
 
     pub fn generate_request_id(&self) -> [u8; 32] {
         match self {
-            SolanaSignEvent::SignatureRequested(ev) => ethabi_request_id(
+            SolanaSignEvent::SignatureRequested(ev) => compute_request_id(
                 &ev.sender.to_string(),
-                ev.payload,
+                &ev.payload,
                 &ev.path,
                 ev.key_version,
                 &ev.chain_id,

@@ -8,13 +8,12 @@ use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
 pub use config::HydrationConfig;
 
-use crate::util::ethabi_request_id;
 use alloy_sol_types::SolValue;
 use anyhow::{anyhow, Result};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
-use mpc_indexer_core::ChainTelemetry;
+use mpc_indexer_core::{ChainTelemetry, compute_request_id};
 use mpc_primitives::{
     CheckpointDigest, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
     SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
@@ -49,9 +48,9 @@ pub struct HydrationSignatureRequestedEvent {
 
 impl HydrationSignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
-        ethabi_request_id(
+        compute_request_id(
             &self.sender_string(),
-            self.payload,
+            &self.payload,
             &self.path,
             self.key_version,
             &self.chain_id,
