@@ -19,6 +19,7 @@ use serial_test::serial;
 use std::collections::HashSet;
 use std::time::Duration;
 use test_log::test;
+use tokio::sync::watch;
 use tokio::time::timeout;
 
 /// Create a CantonStream from the sandbox config with an externally-provided Backlog.
@@ -26,12 +27,15 @@ use tokio::time::timeout;
 async fn stream_canton(
     sandbox: &CantonSandbox,
     backlog: Backlog,
-) -> Result<CantonStream<impl StateManager, impl ChainTelemetry>> {
+) -> Result<(
+    CantonStream<impl StateManager, impl ChainTelemetry>,
+    watch::Sender<CheckpointDigest>,
+)> {
     let config = sandbox.get_config();
     let mut stream = CantonStream::new(Some(config), backlog.clone(), NoopChainTelemetry)
         .context("failed to create CantonStream")?;
     let indexer = ChainStream::start(&mut stream).await?;
-    let (_cp_tx, cp_rx) = tokio::sync::watch::channel(CheckpointDigest::default());
+    let (cp_tx, cp_rx) = tokio::sync::watch::channel(CheckpointDigest::default());
     let (_mesh_tx, mesh_rx) = tokio::sync::watch::channel(MeshState::default());
     let node_client = NodeClient::new(&Default::default());
     let (sign_tx, _sign_rx) = tokio::sync::mpsc::channel(1);
@@ -61,7 +65,7 @@ async fn stream_canton(
     })
     .await
     .context("timed out waiting for pipeline to reach Live state")??;
-    Ok(stream)
+    Ok((stream, cp_tx))
 }
 
 /// Poll stream for a SignRequest event with timeout.
@@ -89,7 +93,7 @@ async fn wait_for_sign_request(
 async fn test_canton_stream_parse_sign_event() -> Result<()> {
     let sandbox = CantonSandbox::run().await?;
     let backlog = Backlog::new();
-    let mut stream = stream_canton(&sandbox, backlog).await?;
+    let (mut stream, _cp_tx) = stream_canton(&sandbox, backlog).await?;
 
     let expected_case = test_evm_type2_anvil_cases()[0].clone();
     let expected_event = test_sign_request_event(&sandbox, &expected_case);
@@ -138,7 +142,7 @@ async fn test_canton_stream_parse_sign_event() -> Result<()> {
 async fn test_canton_stream_emits_blocks() -> Result<()> {
     let sandbox = CantonSandbox::run().await?;
     let backlog = Backlog::new();
-    let mut stream = stream_canton(&sandbox, backlog).await?;
+    let (mut stream, _cp_tx) = stream_canton(&sandbox, backlog).await?;
 
     sandbox.submit_sign_request(None).await?;
 
@@ -169,7 +173,7 @@ async fn test_canton_stream_emits_blocks() -> Result<()> {
 async fn test_canton_stream_concurrent_events() -> Result<()> {
     let sandbox = CantonSandbox::run().await?;
     let backlog = Backlog::new();
-    let mut stream = stream_canton(&sandbox, backlog).await?;
+    let (mut stream, _cp_tx) = stream_canton(&sandbox, backlog).await?;
 
     // Distinct EVM nonces produce distinct request_ids, which is what this
     // test exercises — the Canton stream must deliver each as a separate event.
@@ -207,7 +211,7 @@ async fn test_canton_stream_catchup_linear() -> Result<()> {
 
     // Phase 1: stream1 sees events
     let backlog1 = Backlog::new();
-    let mut stream1 = stream_canton(&sandbox, backlog1).await?;
+    let (mut stream1, _cp_tx1) = stream_canton(&sandbox, backlog1).await?;
 
     sandbox.submit_sign_request(None).await?;
 
@@ -233,7 +237,7 @@ async fn test_canton_stream_catchup_linear() -> Result<()> {
 
     // Phase 2: stream2 should catch up and see new events
     let backlog2 = Backlog::new();
-    let mut stream2 = stream_canton(&sandbox, backlog2).await?;
+    let (mut stream2, _cp_tx2) = stream_canton(&sandbox, backlog2).await?;
 
     sandbox.submit_sign_request(None).await?;
 
@@ -268,7 +272,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
 
     let sandbox = CantonSandbox::run().await?;
     let backlog = Backlog::new();
-    let mut stream = stream_canton(&sandbox, backlog.clone()).await?;
+    let (mut stream, _cp_tx) = stream_canton(&sandbox, backlog.clone()).await?;
 
     sandbox.submit_sign_request(None).await?;
 
@@ -325,7 +329,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
     // differs from phase 1, letting us prove no replay occurred. We verify:
     // (a) the first Block event is >= checkpoint_height
     // (b) exactly 1 SignRequest arrives (the new one, not a replay of phase 1)
-    let mut stream2 = stream_canton(&sandbox, backlog.clone()).await?;
+    let (mut stream2, _cp_tx2) = stream_canton(&sandbox, backlog.clone()).await?;
 
     sandbox.submit_sign_request(Some(1)).await?;
 
@@ -393,7 +397,7 @@ async fn test_canton_stream_checkpoint_persistence() -> Result<()> {
 async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
     let sandbox = CantonSandbox::run().await?;
     let backlog = Backlog::new();
-    let mut stream = stream_canton(&sandbox, backlog).await?;
+    let (mut stream, _cp_tx) = stream_canton(&sandbox, backlog).await?;
 
     sandbox.submit_sign_request(None).await?;
     let sign_event = wait_for_sign_request(&mut stream, 30).await?;
@@ -472,7 +476,7 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
 async fn test_canton_stream_parse_sign_bidirectional_fields() -> Result<()> {
     let sandbox = CantonSandbox::run().await?;
     let backlog = Backlog::new();
-    let mut stream = stream_canton(&sandbox, backlog).await?;
+    let (mut stream, _cp_tx) = stream_canton(&sandbox, backlog).await?;
 
     let expected_case = test_evm_type2_anvil_cases()[0].clone();
     let expected_event = test_sign_request_event(&sandbox, &expected_case);

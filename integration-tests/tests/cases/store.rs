@@ -316,11 +316,10 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     let account_id: AccountId = "party0.near".parse().unwrap();
     let storage = CheckpointStorage::Redis(pool.clone(), account_id);
 
-    // 1. Clean storage returns None / empty history
+    // 1. Clean storage returns None
     assert!(storage.load_latest(Chain::Solana).await?.is_none());
-    assert!(storage.load_history(Chain::Solana).await?.is_empty());
 
-    // 2. Persist first checkpoint
+    // 2. Persist first checkpoint (simulates consensus confirmation)
     let tx1 = mpc_primitives::PendingTx {
         sign_id: mpc_primitives::SignId::new([1u8; 32]),
         transaction: vec![1, 2, 3],
@@ -332,17 +331,13 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     };
     storage.persist(&cp1).await?;
 
-    // 3. Verify latest and history
+    // 3. Verify latest
     let latest = storage.load_latest(Chain::Solana).await?.unwrap();
     assert_eq!(latest.block_height, 10);
     assert_eq!(latest.pending_requests.len(), 1);
     assert_eq!(latest.pending_requests[0].transaction, vec![1, 2, 3]);
-    let history = storage.load_history(Chain::Solana).await?;
-    assert_eq!(history.len(), 1);
-    assert_eq!(history[0].block_height, 10);
-    assert_eq!(history[0].pending_requests.len(), 1);
 
-    // 4. Persist second checkpoint at higher height
+    // 4. Persist second checkpoint at higher height (newer consensus checkpoint)
     let tx2 = mpc_primitives::PendingTx {
         sign_id: mpc_primitives::SignId::new([2u8; 32]),
         transaction: vec![4, 5, 6],
@@ -354,31 +349,11 @@ async fn test_checkpoint_persistence() -> anyhow::Result<()> {
     };
     storage.persist(&cp2).await?;
 
-    // 5. Verify latest is updated and history has both
+    // 5. Verify latest is updated
     let latest = storage.load_latest(Chain::Solana).await?.unwrap();
     assert_eq!(latest.block_height, 20);
     assert_eq!(latest.pending_requests.len(), 1);
     assert_eq!(latest.pending_requests[0].transaction, vec![4, 5, 6]);
-    let history = storage.load_history(Chain::Solana).await?;
-    assert_eq!(history.len(), 2);
-    let mut heights: Vec<u64> = history.iter().map(|cp| cp.block_height).collect();
-    heights.sort();
-    assert_eq!(heights, vec![10, 20]);
-
-    // 6. Test pruning: persist more checkpoints to exceed limit
-    for i in 1..=31 {
-        let cp = Checkpoint {
-            chain: Chain::Solana,
-            block_height: 20 + i * 10,
-            pending_requests: vec![],
-        };
-        storage.persist(&cp).await?;
-    }
-
-    // 7. Verify oldest (height 10) is pruned, keeping MAX_RECENT_CHECKPOINTS (32)
-    let history = storage.load_history(Chain::Solana).await?;
-    assert_eq!(history.len(), 32);
-    assert_eq!(history[0].block_height, 20);
 
     Ok(())
 }
