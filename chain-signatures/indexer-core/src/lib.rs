@@ -3,9 +3,8 @@
 mod indexer;
 mod state;
 mod telemetry;
-mod utils;
+pub mod utils;
 
 pub use indexer::{ChainIndexer, ChainStream};
 pub use state::StateManager;
 pub use telemetry::{ChainTelemetry, NoopChainTelemetry};
-pub use utils::{compute_request_id, hash_payload};

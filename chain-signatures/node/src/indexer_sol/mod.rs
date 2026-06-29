@@ -22,12 +22,12 @@ use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
 use mpc_indexer_core::{
-    hash_payload,
-    compute_request_id, ChainIndexer, ChainStream, ChainTelemetry, StateManager,
+    utils::hashing::{compute_request_id, hash_payload},
+    ChainIndexer, ChainStream, ChainTelemetry, StateManager,
 };
 use mpc_primitives::{
-    Chain, 
-    ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION,
+    MAX_SECP256K1_SCALAR,
 };
 use serde::{Deserialize, Serialize};
 use signet_program::{

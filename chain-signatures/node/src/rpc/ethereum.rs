@@ -1,7 +1,6 @@
 use super::{ChainPublisher, PublishAction};
 use crate::indexer_eth::abi::ChainSignatures;
 use crate::indexer_eth::EthConfig;
-use crate::util::retry::{retry_rpc, RetryConfig};
 use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::{
@@ -14,6 +13,7 @@ use alloy::rpc::types::TransactionReceipt;
 use alloy_signer_local::PrivateKeySigner;
 use k256::elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint};
 use mpc_primitives::{SignId, Signature};
+use mpc_indexer_core::utils::retry::{RetryConfig, retry_rpc};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::{Duration, Instant};

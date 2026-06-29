@@ -17,7 +17,7 @@ pub use config::CantonConfig;
 use contracts::TxParams as CantonTxParams;
 use k256::Scalar;
 use mpc_primitives::{IndexedSignRequest, Chain, ScalarExt, SignArgs, SignBidirectionalEvent, SignId, LATEST_MPC_KEY_VERSION};
-use mpc_indexer_core::hash_payload;
+use mpc_indexer_core::utils::hashing::hash_payload;
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 #[borsh(crate = "borsh")]

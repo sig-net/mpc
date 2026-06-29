@@ -12,7 +12,7 @@ use anyhow::{anyhow, Result};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
-use mpc_indexer_core::{ChainTelemetry, compute_request_id, hash_payload};
+use mpc_indexer_core::{ChainTelemetry, utils::hashing::{compute_request_id, hash_payload}};
 use mpc_primitives::{
     Chain, 
     CheckpointDigest, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,

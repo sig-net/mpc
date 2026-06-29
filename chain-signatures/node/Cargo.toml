@@ -49,7 +49,6 @@ alloy.workspace = true
 alloy-sol-types.workspace = true
 anyhow.workspace = true
 enum-map.workspace = true
-backon.workspace = true
 borsh.workspace = true
 borsh_sol = { package = "borsh", version = "0.10.4" } # solana anchor requires borsh 0.10
 cait-sith.workspace = true
