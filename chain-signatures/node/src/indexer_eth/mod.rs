@@ -9,8 +9,8 @@ pub mod test_utils;
 
 use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
 use crate::protocol::Chain;
-use crate::respond_bidirectional::CompletedTx;
 
+use alloy::consensus::Transaction;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
@@ -133,6 +133,11 @@ pub struct EthSignRequest {
     pub payload: [u8; 32],
     pub path: String,
     pub key_version: u32,
+}
+
+/// Whether a transaction's calldata represents a contract call.
+fn is_contract_call(input: &Bytes) -> bool {
+    input.len() > 2 && input != &Bytes::from("0x")
 }
 
 fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
@@ -546,6 +551,43 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         ))
     }
 
+    /// Extract the output of a successful transaction, either from the trace or from the receipt.
+    async fn extract_success_tx_output(
+        &self,
+        tx_id: alloy::primitives::B256,
+        tx: &BidirectionalTx,
+    ) -> anyhow::Result<Vec<u8>> {
+        let Some(tx_info) = self.client.get_transaction_by_hash(tx_id).await? else {
+            anyhow::bail!("Failed to fetch transaction {tx_id:?}");
+        };
+
+        if tx_info.inner.to().is_none() {
+            anyhow::bail!("unsupported contract deployment (CREATE): {tx_id:?}");
+        }
+
+        let data = tx_info.inner.input().clone();
+        let is_contract_call = is_contract_call(&data);
+
+        let trace_output = if is_contract_call {
+            tracing::info!(
+                ?tx_id,
+                "Extracting transaction output via debug_traceTransaction"
+            );
+            Some(self.client.trace_transaction_output(tx_id).await?)
+        } else {
+            None
+        };
+
+        crate::respond_bidirectional::build_serialized_output(
+            is_contract_call,
+            &tx.output_deserialization_schema,
+            trace_output.as_ref(),
+            tx.source_chain.respond_serialization_format(),
+            &tx.respond_serialization_schema,
+        )
+    }
+
+    /// Construct a `ChainEvent::ExecutionConfirmed` for a mined transaction, if possible.
     async fn execution_confirmed_event(
         &self,
         tx_id: BidirectionalTxId,
@@ -564,8 +606,10 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         );
 
         let result = if receipt_succeeded {
-            let completed_tx = CompletedTx::new(pending_tx.clone());
-            match completed_tx.extract_success_tx_output(&self.client).await {
+            match self
+                .extract_success_tx_output(tx_id.0.into(), pending_tx)
+                .await
+            {
                 Ok(serialized_output) => {
                     tracing::info!(
                         ?tx_id,
@@ -577,18 +621,11 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                     }
                 }
                 Err(err) => {
-                    // Return `None` to retry on the next block; fabricating
-                    // `Success { output: vec![] }` here would silently sign a
-                    // wrong response. The caller tracks observed-but-unresolved
-                    // watchers so the staleness check below skips them.
                     tracing::error!(
                         ?tx_id,
                         ?sign_id,
                         ?err,
-                        "Failed to extract transaction output for bidirectional \
-                         tx; leaving watcher pending for retry. Common causes: \
-                         trace RPC unavailable, malformed trace response, or \
-                         invalid output/response serialization schema."
+                        "Failed to extract transaction output"
                     );
                     return None;
                 }
@@ -1558,5 +1595,16 @@ mod tests {
             }
             other => panic!("expected ExecutionConfirmed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn is_contract_call_detects_calldata() {
+        use super::is_contract_call;
+        use alloy::primitives::Bytes;
+        assert!(!is_contract_call(&Bytes::new()));
+        assert!(!is_contract_call(&Bytes::from(vec![0u8; 2])));
+        assert!(is_contract_call(&Bytes::from(vec![
+            0xa9, 0x05, 0x9c, 0xbb, 0x00
+        ])));
     }
 }
