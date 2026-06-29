@@ -200,14 +200,8 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     &self.backlog,
                     chain,
                 ) => {
-                    match result {
-                        RegressionOutcome::Recovery => {
-                            let new_state = ChainStreaming::Recovery { load_local: false };
-                            let _ = self.state_tx.send(new_state);
-                            return Some(new_state);
-                        }
-                        RegressionOutcome::Aligned => {}
-                        RegressionOutcome::Shutdown => return None,
+                    if let Some(next) = self.handle_regression_outcome(result) {
+                        return next;
                     }
                 }
             }
@@ -242,14 +236,8 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     &self.backlog,
                     chain,
                 ) => {
-                    match result {
-                        RegressionOutcome::Recovery => {
-                            let new_state = ChainStreaming::Recovery { load_local: false };
-                            let _ = self.state_tx.send(new_state);
-                            return Some(new_state);
-                        }
-                        RegressionOutcome::Aligned => {}
-                        RegressionOutcome::Shutdown => return None,
+                    if let Some(next) = self.handle_regression_outcome(result) {
+                        return next;
                     }
                 }
             }
@@ -261,31 +249,66 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         tracing::warn!(%chain, "livestream disconnected; reconnecting");
 
         loop {
-            match self.indexer.livestream().await {
-                Ok(anchor_height) => {
-                    let next_state = match anchor_height {
-                        Some(anchor_height) => ChainStreaming::Catchup { anchor_height },
-                        None => ChainStreaming::Live,
-                    };
-                    let _ = self.state_tx.send(next_state);
-                    return Some(next_state);
+            let wait_before_retry = tokio::select! {
+                result = self.indexer.livestream() => {
+                    match result {
+                        Ok(anchor_height) => {
+                            let next_state = match anchor_height {
+                                Some(anchor_height) => ChainStreaming::Catchup { anchor_height },
+                                None => ChainStreaming::Live,
+                            };
+                            let _ = self.state_tx.send(next_state);
+                            return Some(next_state);
+                        }
+                        Err(err) => {
+                            tracing::error!(?err, %chain, "failed to reconnect livestream; retrying");
+                            true
+                        }
+                    }
                 }
-                Err(err) => {
-                    tracing::error!(?err, %chain, "failed to reconnect livestream; retrying");
+                result = wait_detected_regression(
+                    &mut self.checkpoints_rx,
+                    &self.backlog,
+                    chain,
+                ) => {
+                    match self.handle_regression_outcome(result) {
+                        Some(next) => return next,
+                        None => false, // Aligned: retry immediately, don't sleep as if connect failed.
+                    }
                 }
+            };
+
+            if !wait_before_retry {
+                continue;
             }
 
             tokio::select! {
                 _ = tokio::time::sleep(I::RETRY_DELAY) => {}
-                new_state = wait_detected_regression(
+                result = wait_detected_regression(
                     &mut self.checkpoints_rx,
-                    &self.state_tx,
                     &self.backlog,
                     chain,
                 ) => {
-                    return Some(new_state);
+                    if let Some(next) = self.handle_regression_outcome(result) {
+                        return next;
+                    }
                 }
             }
+        }
+    }
+
+    fn handle_regression_outcome(
+        &self,
+        outcome: RegressionOutcome,
+    ) -> Option<Option<ChainStreaming>> {
+        match outcome {
+            RegressionOutcome::Recovery => {
+                let new_state = ChainStreaming::Recovery { load_local: false };
+                let _ = self.state_tx.send(new_state);
+                Some(Some(new_state))
+            }
+            RegressionOutcome::Aligned => None,
+            RegressionOutcome::Shutdown => Some(None),
         }
     }
 }

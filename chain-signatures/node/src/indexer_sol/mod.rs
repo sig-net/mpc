@@ -76,7 +76,27 @@ pub struct SolanaIndexer<S: StateManager, T: ChainTelemetry> {
     pub state_manager: S,
     pub telemetry: T,
     pub live_rx: Option<mpsc::Receiver<ChainEvent>>,
-    live_task: Option<tokio::task::JoinHandle<()>>,
+    pub live_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl AbortOnDrop {
+    fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self(Some(handle))
+    }
+
+    fn into_inner(mut self) -> tokio::task::JoinHandle<()> {
+        self.0.take().expect("join handle already taken")
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
 }
 
 struct SolanaStreamStartState<S: StateManager, T: ChainTelemetry> {
@@ -174,23 +194,26 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
         }
 
         let (live_tx, live_rx) = crate::stream::channel();
-        self.live_rx = Some(live_rx);
+        let (anchor_tx, anchor_rx) = oneshot::channel();
 
-        let program_id = self.program_id;
-
-        // Oneshot to receive the first observed slot from the live subscription.
-        let (anchor_tx, anchor_rx) = oneshot::channel::<u64>();
-
-        self.live_task = Some(tokio::spawn(subscribe_and_buffer_live_events(
-            program_id,
+        let handle = tokio::spawn(subscribe_and_buffer_live_events(
+            self.program_id,
             self.client.clone(),
             live_tx,
             anchor_tx,
             self.telemetry.clone(),
-        )));
+        ));
 
-        // Wait for the first slot observed on the live feed to use as anchor.
-        Ok(Some(anchor_rx.await?))
+        // From here until anchor_rx resolves, livestream() may be cancelled by
+        // handle_reconnect's select!. If that happens, abort the spawned task.
+        let guard = AbortOnDrop::new(handle);
+
+        let anchor_height = anchor_rx.await?;
+
+        self.live_rx = Some(live_rx);
+        self.live_task = Some(guard.into_inner());
+
+        Ok(Some(anchor_height))
     }
 
     async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {

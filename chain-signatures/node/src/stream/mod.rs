@@ -1501,9 +1501,18 @@ mod tests {
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
         let indexer = E2EIndexer;
         let (sign_tx, _sign_rx) = mpsc::channel(1);
+        let node_client = NodeClient::new(&Default::default());
 
-        let (pipeline, mut state_rx) =
-            ChainPipeline::new(indexer, cp_rx, backlog, sign_tx, mesh_rx);
+        let (pipeline, mut state_rx) = ChainPipeline::new(
+            indexer,
+            cp_rx,
+            backlog,
+            sign_tx,
+            mesh_rx,
+            node_client,
+            0,
+            "test.near".parse().unwrap(),
+        );
         let handle = tokio::spawn(pipeline.run());
 
         // 1st cycle: Recovery (load_local: true) → Catchup → Live
@@ -1757,23 +1766,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_solana_channel_close_returns_reconnect() {
+    async fn test_solana_devnet_channel_close_returns_reconnect() {
         use crate::indexer_sol::{SolanaClient, SolanaIndexer};
+        use solana_sdk::pubkey::Pubkey;
+        use std::str::FromStr;
 
         let (tx, rx) = mpsc::channel(16);
-        let (events_tx, _events_rx) = mpsc::channel(16);
+        let live_rx = Some(rx);
+        let _ = tracing_subscriber::fmt::try_init();
+
+        let api_key = match std::env::var("MPC_TEST_API_KEY") {
+            Ok(key) if !key.is_empty() => key,
+            _ => {
+                tracing::debug!("Skipping devnet test: MPC_TEST_API_KEY not set");
+                return;
+            }
+        };
+
+        let sol_addr = std::env::var("MPC_TEST_SOL_ADDR")
+            .unwrap_or_else(|_| "SigDuEPNeDjh3oJv7MUraPN7zaTFomS6ZWfpXwjUg4B".to_string());
+
+        let http_url = format!("https://solana-devnet.g.alchemy.com/v2/{api_key}");
+        let ws_url = format!("wss://solana-devnet.g.alchemy.com/v2/{api_key}");
+
+        let state_manager = Backlog::new();
+        let (events_tx, _) = mpsc::channel(1_000_000);
+
+        let client = SolanaClient::for_indexer(
+            http_url.clone(),
+            ws_url.clone(),
+            Pubkey::from_str(&sol_addr).unwrap(),
+        );
 
         let mut indexer = SolanaIndexer {
-            program_id: solana_sdk::pubkey::Pubkey::new_unique(),
-            client: SolanaClient::for_indexer(
-                "http://localhost:8899".to_string(),
-                "ws://localhost:8900".to_string(),
-                solana_sdk::pubkey::Pubkey::new_unique(),
-            ),
+            program_id: Pubkey::from_str(&sol_addr).unwrap(),
+            client,
             events_tx,
-            state_manager: Backlog::new(),
+            state_manager,
             telemetry: NoopChainTelemetry,
-            live_rx: Some(rx),
+            live_rx,
+            live_task: None,
         };
 
         drop(tx);
