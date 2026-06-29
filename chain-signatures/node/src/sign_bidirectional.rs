@@ -12,7 +12,6 @@ use mpc_primitives::{
 };
 use rlp::{Rlp, RlpStream};
 use serde_json::Value;
-use sha3::{Digest, Keccak256};
 
 use std::collections::HashMap;
 use std::io::Write;

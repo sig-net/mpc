@@ -1,13 +1,12 @@
 use crate::indexer_eth::EthereumClient;
-use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::{BidirectionalTxExt, TransactionOutput};
 use alloy::consensus::Transaction;
 use alloy::primitives::Bytes;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::{
-    BidirectionalTx, RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat,
-    SignArgs, SignId,
+    BidirectionalTx, Chain, IndexedSignRequest, RespondBidirectionalSerializedOutput,
+    RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId,
 };
 use std::sync::Arc;
 

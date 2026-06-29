@@ -1,7 +1,6 @@
 mod client;
 mod config;
 
-use crate::protocol::Chain;
 pub use client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
 pub use config::SolConfig;
 
@@ -27,6 +26,7 @@ use mpc_indexer_core::{
     compute_request_id, ChainIndexer, ChainStream, ChainTelemetry, StateManager,
 };
 use mpc_primitives::{
+    Chain, 
     ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
 use serde::{Deserialize, Serialize};
@@ -897,7 +897,7 @@ async fn emit_events(
                         mpc_primitives::RespondBidirectionalEvent {
                             request_id: ev.request_id,
                             signature,
-                            chain: crate::protocol::Chain::Solana,
+                            chain: Chain::Solana,
                         },
                     ))
                     .await;

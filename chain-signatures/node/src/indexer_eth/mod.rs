@@ -8,7 +8,6 @@ pub mod indexer_eth_helios;
 pub mod test_utils;
 
 use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
-use crate::protocol::Chain;
 use crate::respond_bidirectional::CompletedTx;
 
 use alloy::eips::BlockNumberOrTag;
@@ -26,8 +25,8 @@ use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_indexer_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, IndexedSignRequest, SignArgs,
-    SignId, Signature as MpcSignature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
+    BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, IndexedSignRequest,
+    SignArgs, SignId, Signature as MpcSignature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
 };
 use serde::{Deserialize, Serialize};
@@ -1068,13 +1067,13 @@ mod tests {
     use crate::backlog::Backlog;
     #[cfg(feature = "helios")]
     use crate::indexer_eth::indexer_eth_helios;
-    use crate::protocol::Chain;
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{address, b256, Address};
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
     use mpc_indexer_core::{ChainIndexer, NoopChainTelemetry};
     use mpc_primitives::{
+        Chain,
         BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, SignId,
         LATEST_MPC_KEY_VERSION,
     };

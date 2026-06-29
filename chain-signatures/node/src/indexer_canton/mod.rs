@@ -11,13 +11,12 @@ pub use request_id::compute_request_id;
 pub use signature::der_encode_signature;
 pub use stream::{parse_canton_signature, CantonStream};
 
-use crate::protocol::Chain;
 use alloy::consensus::{SignableTransaction, TxEip1559};
 use borsh::{BorshDeserialize, BorshSerialize};
 pub use config::CantonConfig;
 use contracts::TxParams as CantonTxParams;
 use k256::Scalar;
-use mpc_primitives::{ScalarExt, SignArgs, SignBidirectionalEvent, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_primitives::{IndexedSignRequest, Chain, ScalarExt, SignArgs, SignBidirectionalEvent, SignId, LATEST_MPC_KEY_VERSION};
 use mpc_indexer_core::hash_payload;
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
@@ -92,7 +91,7 @@ impl CantonSignBidirectionalRequestedEvent {
     pub fn generate_sign_request(
         &self,
         entropy: [u8; 32],
-    ) -> anyhow::Result<crate::protocol::IndexedSignRequest> {
+    ) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("found canton event: {:?}", self);
 
         if self.key_version > LATEST_MPC_KEY_VERSION {
@@ -123,7 +122,7 @@ impl CantonSignBidirectionalRequestedEvent {
         let chain_ctx =
             Some(borsh::to_vec(&ctx).expect("CantonChainCtx Borsh serialization is infallible"));
 
-        Ok(crate::protocol::IndexedSignRequest::sign_bidirectional(
+        Ok(IndexedSignRequest::sign_bidirectional(
             sign_id,
             SignArgs {
                 entropy,

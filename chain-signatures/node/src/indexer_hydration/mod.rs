@@ -3,7 +3,7 @@ mod config;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::{Chain, Sign};
+use crate::protocol::{Sign};
 use crate::rpc::ContractStateWatcher;
 pub use config::HydrationConfig;
 
@@ -14,6 +14,7 @@ use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
 use mpc_indexer_core::{ChainTelemetry, compute_request_id, hash_payload};
 use mpc_primitives::{
+    Chain, 
     CheckpointDigest, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
     SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
@@ -579,7 +580,7 @@ pub async fn run<T: ChainTelemetry>(
                     RespondBidirectionalEvent {
                         request_id,
                         signature,
-                        chain: crate::protocol::Chain::Hydration,
+                        chain: Chain::Hydration,
                     },
                     sign_tx.clone(),
                     root_pk,

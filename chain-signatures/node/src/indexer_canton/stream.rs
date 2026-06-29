@@ -1,4 +1,3 @@
-use crate::protocol::Chain;
 use crate::rpc::CantonClient;
 
 use alloy::primitives::keccak256;
@@ -7,7 +6,7 @@ use futures_util::stream::{self, SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use mpc_indexer_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
 use mpc_primitives::{
-    ChainEvent, RespondBidirectionalEvent, ScalarExt, Signature, SignatureRespondedEvent,
+    Chain, ChainEvent, RespondBidirectionalEvent, ScalarExt, Signature, SignatureRespondedEvent,
 };
 use std::collections::HashSet;
 use std::ops::Range;
@@ -502,7 +501,7 @@ async fn process_canton_event(
                             RespondBidirectionalEvent {
                                 request_id,
                                 signature,
-                                chain: crate::protocol::Chain::Canton,
+                                chain: Chain::Canton,
                             },
                         ))
                         .await
