@@ -7351,6 +7351,8 @@ dependencies = [
 name = "mpc-indexer-core"
 version = "1.16.4"
 dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
  "anyhow",
  "async-trait",
  "futures-util",
