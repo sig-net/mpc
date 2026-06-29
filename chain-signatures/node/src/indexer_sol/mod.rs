@@ -276,6 +276,14 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
     }
 }
 
+impl<S: StateManager, T: ChainTelemetry> Drop for SolanaIndexer<S, T> {
+    fn drop(&mut self) {
+        if let Some(task) = self.live_task.take() {
+            task.abort();
+        }
+    }
+}
+
 impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
     async fn process_block(&mut self, height: u64, block: &UiConfirmedBlock) -> anyhow::Result<()> {
         // Update indexed block metrics
