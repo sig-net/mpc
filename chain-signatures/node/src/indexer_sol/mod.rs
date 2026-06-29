@@ -2,7 +2,6 @@ mod client;
 mod config;
 
 use crate::protocol::Chain;
-use crate::sign_bidirectional::hash_rlp_data;
 pub use client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
 pub use config::SolConfig;
 
@@ -24,6 +23,7 @@ use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
 use mpc_indexer_core::{
+    hash_payload,
     compute_request_id, ChainIndexer, ChainStream, ChainTelemetry, StateManager,
 };
 use mpc_primitives::{
@@ -411,7 +411,7 @@ impl SolanaSignEvent {
             SolanaSignEvent::SignBidirectional(ev) => {
                 let epsilon = derive_epsilon_sol(ev.key_version, &ev.sender.to_string(), &ev.path);
                 tracing::info!(?sign_id, "solana bidirectional signature requested");
-                let unsigned_tx_hash = hash_rlp_data(&ev.serialized_transaction);
+                let unsigned_tx_hash = hash_payload(&ev.serialized_transaction);
                 let payload = Scalar::from_bytes(unsigned_tx_hash)?;
 
                 if payload > *MAX_SECP256K1_SCALAR {

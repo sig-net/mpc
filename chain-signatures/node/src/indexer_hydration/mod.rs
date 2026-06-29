@@ -5,7 +5,6 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::{Chain, Sign};
 use crate::rpc::ContractStateWatcher;
-use crate::sign_bidirectional::hash_rlp_data;
 pub use config::HydrationConfig;
 
 use alloy_sol_types::SolValue;
@@ -13,7 +12,7 @@ use anyhow::{anyhow, Result};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
-use mpc_indexer_core::{ChainTelemetry, compute_request_id};
+use mpc_indexer_core::{ChainTelemetry, compute_request_id, hash_payload};
 use mpc_primitives::{
     CheckpointDigest, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
     SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
@@ -209,7 +208,7 @@ impl HydrationSignBidirectionalRequestedEvent {
 
         let sign_id = SignId::new(request_id);
         tracing::info!(?sign_id, "hydration signature requested");
-        let unsigned_tx_hash = hash_rlp_data(&self.serialized_transaction);
+        let unsigned_tx_hash = hash_payload(&self.serialized_transaction);
         let payload = Scalar::from_bytes(unsigned_tx_hash).or_else(|| {
             tracing::warn!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
             None
