@@ -16,8 +16,11 @@ use borsh::{BorshDeserialize, BorshSerialize};
 pub use config::CantonConfig;
 use contracts::TxParams as CantonTxParams;
 use k256::Scalar;
-use mpc_primitives::{IndexedSignRequest, Chain, ScalarExt, SignArgs, SignBidirectionalEvent, SignId, LATEST_MPC_KEY_VERSION};
 use mpc_indexer_core::utils::hashing::hash_payload;
+use mpc_primitives::{
+    Chain, IndexedSignRequest, ScalarExt, SignArgs, SignBidirectionalEvent, SignId,
+    LATEST_MPC_KEY_VERSION,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 #[borsh(crate = "borsh")]
@@ -88,10 +91,7 @@ impl CantonSignBidirectionalRequestedEvent {
         self.request_id
     }
 
-    pub fn generate_sign_request(
-        &self,
-        entropy: [u8; 32],
-    ) -> anyhow::Result<IndexedSignRequest> {
+    pub fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("found canton event: {:?}", self);
 
         if self.key_version > LATEST_MPC_KEY_VERSION {

@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::rpc::{ChainPublisher, PublishAction};
-use mpc_indexer_core::utils::retry::{RetryConfig, retry_rpc};
+use mpc_indexer_core::utils::retry::{retry_rpc, RetryConfig};
 
 const MAX_SIGNATURES_FOR_FAST_CATCHUP: usize = 1000;
 

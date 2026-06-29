@@ -1110,8 +1110,7 @@ mod tests {
     use mockito::{Matcher, Server};
     use mpc_indexer_core::{ChainIndexer, NoopChainTelemetry};
     use mpc_primitives::{
-        Chain,
-        BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, SignId,
+        BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
         LATEST_MPC_KEY_VERSION,
     };
     use serde_json::json;

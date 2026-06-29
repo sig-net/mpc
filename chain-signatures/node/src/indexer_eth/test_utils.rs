@@ -1,6 +1,6 @@
 use super::{EthConfig, EthereumClient};
+use mpc_indexer_core::utils::retry::RetryConfig;
 use std::time::Duration;
-use mpc_indexer_core::utils::retry::{RetryConfig};
 
 /// Creates a test Ethereum client with a small retry strategy for testing purposes.
 pub async fn create_test_ethereum_client(url: &str) -> EthereumClient {

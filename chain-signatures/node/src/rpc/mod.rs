@@ -23,8 +23,8 @@ use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
 pub use mpc_contract::primitives::{Read, View};
+use mpc_indexer_core::utils::retry::{retry_rpc, RetryConfig};
 use mpc_primitives::{CheckpointDigest, Signature};
-use mpc_indexer_core::utils::retry::{RetryConfig, retry_rpc};
 pub use near::NearClient;
 
 use near_account_id::AccountId;
