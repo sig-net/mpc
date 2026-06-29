@@ -195,15 +195,6 @@ mod tests {
         Bytes::from(buf.to_vec())
     }
 
-    // #[test]
-    // fn is_contract_call_detects_calldata() {
-    //     assert!(!is_contract_call(&Bytes::new()));
-    //     assert!(!is_contract_call(&Bytes::from(vec![0u8; 2])));
-    //     assert!(is_contract_call(&Bytes::from(vec![
-    //         0xa9, 0x05, 0x9c, 0xbb, 0x00
-    //     ])));
-    // }
-
     #[test]
     fn build_serialized_output_decodes_contract_call() {
         // A contract-call tx whose function returned `uint256` 12345; `trace`
