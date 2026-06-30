@@ -10,6 +10,7 @@ use integration_tests::eth::{self, ChainSignatures, SignRequest};
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager};
+use mpc_crypto::kdf::valid_signature;
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
@@ -308,8 +309,6 @@ fn test_sign_args(seed: u8) -> SignArgs {
         key_version: LATEST_MPC_KEY_VERSION,
     }
 }
-
-use mpc_node::kdf::valid_signature;
 
 fn test_bidirectional_event() -> NodeSignBidirectionalEvent {
     let mut rlp_s = rlp::RlpStream::new_list(9);

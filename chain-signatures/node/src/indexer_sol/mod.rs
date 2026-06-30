@@ -3,10 +3,12 @@ mod config;
 
 pub use client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
 pub use config::SolConfig;
+use mpc_chain_integration_core::NoopPublisherTelemetry;
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::pin::Pin;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alloy_sol_types::SolValue;
@@ -136,6 +138,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainStream for SolanaStream<S, T> {
             start_state.rpc_http_url.clone(),
             start_state.rpc_ws_url.clone(),
             start_state.program_id,
+            Arc::new(NoopPublisherTelemetry), // Indexer does not publish
         );
 
         let indexer = SolanaIndexer {
@@ -1141,6 +1144,7 @@ mod tests {
             http_url.clone(),
             ws_url.clone(),
             Pubkey::from_str(&sol_addr).unwrap(),
+            Arc::new(NoopPublisherTelemetry),
         );
 
         let mut indexer = SolanaIndexer {

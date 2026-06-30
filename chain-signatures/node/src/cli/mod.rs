@@ -10,7 +10,7 @@ use crate::indexer_eth::{EthConfig, EthereumStream};
 use crate::indexer_hydration::{self, HydrationConfig};
 use crate::indexer_sol::{SolConfig, SolanaClient, SolanaStream};
 use crate::mesh::{self, Mesh, MeshState};
-use crate::metrics::indexers::PrometheusChainTelemetry;
+use crate::metrics::telemetry::NodeTelemetry;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::contract::ProtocolState;
 use crate::protocol::message::MessageChannel;
@@ -477,13 +477,18 @@ impl ChainConfigs {
         publishers.insert(Chain::NEAR, Arc::new(near));
 
         if let Some(eth) = &self.eth {
-            publishers.insert(Chain::Ethereum, Arc::new(rpc::EthClient::new(eth)));
+            let telemetry = Arc::new(NodeTelemetry::new(Chain::Ethereum));
+            let client = Arc::new(rpc::EthClient::new(eth, telemetry));
+            publishers.insert(Chain::Ethereum, client);
         }
         if let Some(sol) = &self.sol {
-            publishers.insert(Chain::Solana, Arc::new(SolanaClient::from_config(sol)));
+            let telemetry = Arc::new(NodeTelemetry::new(Chain::Solana));
+            let client = Arc::new(SolanaClient::from_config(sol, telemetry));
+            publishers.insert(Chain::Solana, client);
         }
         if let Some(hydration) = &self.hydration {
-            match rpc::HydrationClient::new(hydration).await {
+            let telemetry = Arc::new(NodeTelemetry::new(Chain::Hydration));
+            match rpc::HydrationClient::new(hydration, telemetry).await {
                 Ok(client) => {
                     publishers.insert(Chain::Hydration, Arc::new(client));
                 }
@@ -491,7 +496,8 @@ impl ChainConfigs {
             }
         }
         if let Some(canton) = &self.canton {
-            match rpc::CantonClient::new(canton).await {
+            let telemetry = Arc::new(NodeTelemetry::new(Chain::Canton));
+            match rpc::CantonClient::new(canton, telemetry).await {
                 Ok(client) => {
                     publishers.insert(Chain::Canton, Arc::new(client));
                 }
@@ -603,8 +609,15 @@ impl RpcHandles {
         signer: InMemorySigner,
         chains: &ChainConfigs,
     ) -> Self {
-        let near_client =
-            NearClient::new(near_rpc_url, my_address, network, mpc_contract_id, signer);
+        let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
+        let near_client = NearClient::new(
+            near_rpc_url,
+            my_address,
+            network,
+            mpc_contract_id,
+            signer,
+            publisher_telemetry,
+        );
         let publishers = chains.publishers(near_client.clone()).await;
         let (rpc_channel, rpc_executor) = RpcExecutor::new(near_client.clone(), publishers).await;
         Self {
@@ -753,7 +766,7 @@ async fn spawn_indexers(
     );
 
     if let Some(eth_config) = eth {
-        let eth_telemetry = PrometheusChainTelemetry::new(Chain::Ethereum);
+        let eth_telemetry = NodeTelemetry::new(Chain::Ethereum);
         match EthereumStream::new(eth_config, backlog.clone(), eth_telemetry.clone()).await {
             Ok(eth_stream) => {
                 tracing::info!("ethereum indexer stream created successfully");
@@ -776,7 +789,7 @@ async fn spawn_indexers(
     }
 
     if let Some(sol_config) = sol {
-        let sol_telemetry = PrometheusChainTelemetry::new(Chain::Solana);
+        let sol_telemetry = NodeTelemetry::new(Chain::Solana);
         match SolanaStream::new(sol_config, backlog.clone(), sol_telemetry.clone()) {
             Ok(sol_stream) => {
                 tracing::info!("solana indexer stream created successfully");
@@ -799,7 +812,7 @@ async fn spawn_indexers(
     }
 
     if let Some(hydration_config) = hydration {
-        let hydration_telemetry = PrometheusChainTelemetry::new(Chain::Hydration);
+        let hydration_telemetry = NodeTelemetry::new(Chain::Hydration);
         tokio::spawn(indexer_hydration::run(
             hydration_config,
             sign_tx.clone(),
@@ -813,7 +826,7 @@ async fn spawn_indexers(
     }
 
     if let Some(canton_config) = canton {
-        let canton_telemetry = PrometheusChainTelemetry::new(Chain::Canton);
+        let canton_telemetry = NodeTelemetry::new(Chain::Canton);
         match CantonStream::new(canton_config, backlog.clone(), canton_telemetry.clone()).await {
             Ok(canton_stream) => {
                 tracing::info!("canton indexer stream created successfully");

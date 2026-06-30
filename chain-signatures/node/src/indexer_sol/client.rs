@@ -1,6 +1,10 @@
 use super::SolConfig;
 use futures_util::StreamExt;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
+use mpc_chain_integration_core::{
+    utils::retry::{retry_rpc, RetryConfig},
+    ChainPublisher, PublishAction, PublisherTelemetry,
+};
 use mpc_primitives::SignKind;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -25,13 +29,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-
-// TODO: should be replaced
-use crate::rpc::record_publish_metrics;
-use mpc_chain_integration_core::{
-    utils::retry::{retry_rpc, RetryConfig},
-    ChainPublisher, PublishAction,
-};
 
 const MAX_SIGNATURES_FOR_FAST_CATCHUP: usize = 1000;
 
@@ -104,11 +101,12 @@ pub struct SolanaClient {
     pub http_client: reqwest::Client,
     pub program_id: Pubkey,
     pub payer: Arc<Keypair>,
+    pub telemetry: Arc<dyn PublisherTelemetry>,
 }
 
 impl SolanaClient {
     // TODO: reduce duplication between from_config and for_indexer
-    pub fn from_config(sol: &SolConfig) -> Self {
+    pub fn from_config(sol: &SolConfig, telemetry: Arc<dyn PublisherTelemetry>) -> Self {
         let keypair = Keypair::from_base58_string(&sol.account_sk);
         let payer = Arc::new(keypair);
         let cluster =
@@ -131,10 +129,16 @@ impl SolanaClient {
             http_client: reqwest::Client::new(),
             program_id,
             payer,
+            telemetry,
         }
     }
 
-    pub fn for_indexer(rpc_http_url: String, rpc_ws_url: String, program_address: Pubkey) -> Self {
+    pub fn for_indexer(
+        rpc_http_url: String,
+        rpc_ws_url: String,
+        program_address: Pubkey,
+        telemetry: Arc<dyn PublisherTelemetry>,
+    ) -> Self {
         // TODO: we need to move solana client further up the creation stack into cli eventually
         // so we can reuse the same SolanaClient for both indexer and RPC.
         let keypair = Keypair::new(); // Dummy keypair for indexer mode
@@ -156,6 +160,7 @@ impl SolanaClient {
             http_client: reqwest::Client::new(),
             program_id: program_address,
             payer,
+            telemetry,
         }
     }
 
@@ -559,7 +564,7 @@ impl ChainPublisher for SolanaClient {
             }
         }
 
-        record_publish_metrics(action);
+        self.telemetry.record_publish_metrics(action);
 
         Ok(())
     }
@@ -568,6 +573,7 @@ impl ChainPublisher for SolanaClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mpc_chain_integration_core::NoopPublisherTelemetry;
     use solana_sdk::pubkey::Pubkey;
     use solana_sdk::signature::Signature;
 
@@ -577,6 +583,7 @@ mod tests {
             url.to_string(),
             url.replace("http", "ws"),
             Pubkey::new_unique(),
+            Arc::new(NoopPublisherTelemetry),
         )
         .with_fast_retry()
     }

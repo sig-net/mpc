@@ -9,15 +9,16 @@ use crate::indexer_canton::{
     },
     CantonAuthProvider, CantonChainCtx, CantonConfig,
 };
-use mpc_chain_integration_core::{ChainPublisher, PublishAction};
+use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 #[derive(Clone)]
 pub struct CantonClient {
     pub(crate) config: CantonConfig,
     http_client: reqwest::Client,
     auth_provider: CantonAuthProvider,
+    telemetry: Arc<dyn PublisherTelemetry>,
 }
 
 impl std::fmt::Debug for CantonClient {
@@ -30,7 +31,10 @@ impl std::fmt::Debug for CantonClient {
 }
 
 impl CantonClient {
-    pub async fn new(config: &CantonConfig) -> anyhow::Result<Self> {
+    pub async fn new(
+        config: &CantonConfig,
+        telemetry: Arc<dyn PublisherTelemetry>,
+    ) -> anyhow::Result<Self> {
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()?;
@@ -49,6 +53,7 @@ impl CantonClient {
             config: config.clone(),
             http_client,
             auth_provider,
+            telemetry,
         })
     }
 
@@ -271,7 +276,7 @@ impl ChainPublisher for CantonClient {
             "published canton {choice} successfully"
         );
 
-        super::record_publish_metrics(action);
+        self.telemetry.record_publish_metrics(action);
 
         Ok(())
     }
@@ -283,6 +288,7 @@ mod tests {
     use crate::indexer_canton::{CantonAuthConfig, CantonChainCtx};
     use crate::rpc::test_utils::make_publish_action;
     use mockito::{Matcher, Server, ServerGuard};
+    use mpc_chain_integration_core::NoopPublisherTelemetry;
     use mpc_primitives::{Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignKind};
     use serde_json::json;
 
@@ -332,9 +338,12 @@ mod tests {
             .create_async()
             .await;
 
-        let client = CantonClient::new(&mock_canton_config(&server.url()))
-            .await
-            .unwrap();
+        let client = CantonClient::new(
+            &mock_canton_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        )
+        .await
+        .unwrap();
         let chain_ctx = borsh::to_vec(&CantonChainCtx {
             sign_event_contract_id: "cid".to_string(),
         })
@@ -373,9 +382,12 @@ mod tests {
             .create_async()
             .await;
 
-        let client = CantonClient::new(&mock_canton_config(&server.url()))
-            .await
-            .unwrap();
+        let client = CantonClient::new(
+            &mock_canton_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        )
+        .await
+        .unwrap();
         let chain_ctx = borsh::to_vec(&CantonChainCtx {
             sign_event_contract_id: "cid".to_string(),
         })
@@ -395,9 +407,12 @@ mod tests {
     #[tokio::test]
     async fn test_publish_canton_missing_chain_ctx_fails() {
         let server = setup_mock_server_with_auth().await;
-        let client = CantonClient::new(&mock_canton_config(&server.url()))
-            .await
-            .unwrap();
+        let client = CantonClient::new(
+            &mock_canton_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        )
+        .await
+        .unwrap();
 
         let tx = RespondBidirectionalTx {
             tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
@@ -421,9 +436,12 @@ mod tests {
             .create_async()
             .await;
 
-        let client = CantonClient::new(&mock_canton_config(&server.url()))
-            .await
-            .unwrap();
+        let client = CantonClient::new(
+            &mock_canton_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        )
+        .await
+        .unwrap();
         let chain_ctx = borsh::to_vec(&CantonChainCtx {
             sign_event_contract_id: "cid".to_string(),
         })

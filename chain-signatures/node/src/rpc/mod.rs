@@ -2,7 +2,6 @@ mod canton;
 mod ethereum;
 mod hydration;
 mod near;
-mod telemetry;
 #[cfg(test)]
 mod test_utils;
 
@@ -14,7 +13,7 @@ use enum_map::EnumMap;
 use mpc_chain_integration_core::{ChainPublisher, PublishAction};
 use std::collections::BTreeSet;
 use std::sync::Arc;
-pub use telemetry::NodePublisherTelemetry;
+
 // TODO: move clients elsewhere
 pub use canton::CantonClient;
 pub use ethereum::EthClient;

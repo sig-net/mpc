@@ -13,11 +13,12 @@ use alloy_signer_local::PrivateKeySigner;
 use k256::elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint};
 use mpc_chain_integration_core::{
     utils::retry::{retry_rpc, RetryConfig},
-    ChainPublisher, PublishAction,
+    ChainPublisher, PublishAction, PublisherTelemetry,
 };
 use mpc_primitives::{SignId, Signature};
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -72,14 +73,16 @@ impl From<&Signature> for ChainSignatures::Signature {
 /// TODO: this should probably get merged with the client used by indexer
 #[derive(Clone)]
 pub struct EthClient {
-    // The contract instance for interacting with the ChainSignatures contract
+    /// The contract instance for interacting with the ChainSignatures contract
     contract: ChainSignatures::ChainSignaturesInstance<EthContractFillProvider>,
-    // Channel used to send actions to the background batching task
+    /// Channel used to send actions to the background batching task
     batch_tx: mpsc::Sender<PublishAction>,
+    /// Telemetry interface for recording metrics related to publishing signatures
+    telemetry: Arc<dyn PublisherTelemetry>,
 }
 
 impl EthClient {
-    pub fn new(eth: &EthConfig) -> Self {
+    pub fn new(eth: &EthConfig, telemetry: Arc<dyn PublisherTelemetry>) -> Self {
         let signer: PrivateKeySigner = eth
             .account_sk
             .parse()
@@ -95,7 +98,11 @@ impl EthClient {
 
         let (batch_tx, batch_rx) = mpsc::channel(super::MAX_CONCURRENT_RPC_REQUESTS);
 
-        let client = Self { contract, batch_tx };
+        let client = Self {
+            contract,
+            batch_tx,
+            telemetry,
+        };
 
         // Spawn the background batching loop
         let client_clone = client.clone();
@@ -158,7 +165,7 @@ impl EthClient {
         // Log metrics for successful publishes, or log an error if all retries failed
         if res.is_ok() {
             for action in actions.iter() {
-                super::record_publish_metrics(action);
+                self.telemetry.record_publish_metrics(action);
             }
         } else {
             tracing::error!("exceeded max retries, trashing publish request");
@@ -339,6 +346,7 @@ mod tests {
     use alloy::primitives::{B256, U256};
     use k256::{AffinePoint, Scalar};
     use mockito::{Matcher, Server};
+    use mpc_chain_integration_core::NoopPublisherTelemetry;
     use serde_json::json;
 
     fn create_test_signature() -> mpc_primitives::Signature {
@@ -502,7 +510,10 @@ mod tests {
             .create_async()
             .await;
 
-        let client = EthClient::new(&mock_config(&server.url()));
+        let client = EthClient::new(
+            &mock_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        );
         let receipt = client
             .wait_for_transaction_receipt(tx_hash, &[SignId::new([2u8; 32])])
             .await
@@ -538,7 +549,10 @@ mod tests {
             .expect_at_least(2)
             .create_async().await;
 
-        let client = EthClient::new(&mock_config(&server.url()));
+        let client = EthClient::new(
+            &mock_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        );
 
         // Attempt to send
         let result = client
@@ -599,7 +613,10 @@ mod tests {
             .create_async()
             .await;
 
-        let client = EthClient::new(&mock_config(&server.url()));
+        let client = EthClient::new(
+            &mock_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        );
 
         // Execute the full publish pipeline
         let result = client
@@ -655,7 +672,10 @@ mod tests {
             .create_async()
             .await;
 
-        let client = EthClient::new(&mock_config(&server.url()));
+        let client = EthClient::new(
+            &mock_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        );
 
         let result = client
             .execute_publish(vec![], 21000, &[SignId::new([5u8; 32])])

@@ -4,12 +4,15 @@ use alloy::primitives::keccak256;
 use async_trait::async_trait;
 use futures_util::stream::{self, SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use mpc_chain_integration_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
+use mpc_chain_integration_core::{
+    ChainIndexer, ChainStream, ChainTelemetry, NoopPublisherTelemetry, StateManager,
+};
 use mpc_primitives::{
     Chain, ChainEvent, RespondBidirectionalEvent, ScalarExt, Signature, SignatureRespondedEvent,
 };
 use std::collections::HashSet;
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -34,7 +37,7 @@ pub struct CantonStream<S: StateManager, T: ChainTelemetry> {
 
 impl<S: StateManager, T: ChainTelemetry> CantonStream<S, T> {
     pub async fn new(config: CantonConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
-        let client = CantonClient::new(&config).await?;
+        let client = CantonClient::new(&config, Arc::new(NoopPublisherTelemetry)).await?; // Indexer does not publish
         let (events_tx, events_rx) = crate::stream::channel();
         Ok(CantonStream {
             client: Some(client),

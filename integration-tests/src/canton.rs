@@ -4,6 +4,7 @@ use crate::canton_auth::{
 use alloy::primitives::keccak256;
 use anyhow::{Context as _, Result};
 use async_process::{Child, Command};
+use mpc_chain_integration_core::NoopPublisherTelemetry;
 use mpc_node::indexer_canton::contracts::{
     EvmAccessListEntry, EvmType2TransactionParams, SignBidirectionalRequestedEvent, TxParams,
 };
@@ -18,6 +19,7 @@ use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 const CANTON_JSON_API_PORT: u16 = 7575;
@@ -655,7 +657,7 @@ pub struct CantonTestClient {
 impl CantonTestClient {
     pub async fn new(config: CantonConfig) -> Result<Self> {
         Ok(Self {
-            ledger_client: CantonClient::new(&config).await?,
+            ledger_client: CantonClient::new(&config, Arc::new(NoopPublisherTelemetry)).await?,
         })
     }
 
