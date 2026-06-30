@@ -109,6 +109,10 @@ async fn wait_for_sign_request<S: StateManager, T: ChainTelemetry>(
                 tracing::info!("received CatchupCompleted event while waiting for SignRequest");
                 continue;
             }
+            Ok(Some(ChainEvent::NotCaughtUp)) => {
+                tracing::info!("received NotCaughtUp event while waiting for SignRequest");
+                continue;
+            }
             Ok(Some(other)) => anyhow::bail!("Expected SignRequest, got {:?}", other),
             Ok(None) => anyhow::bail!("stream returned None"),
             Err(_) => anyhow::bail!("timeout waiting for SignRequest event"),

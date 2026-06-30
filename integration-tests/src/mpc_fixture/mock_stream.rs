@@ -3,6 +3,7 @@ use mpc_indexer_core::{ChainIndexer, ChainStream};
 use mpc_node::protocol::IndexedSignRequest;
 use mpc_node::rpc::RpcAction;
 use mpc_primitives::{Chain, ChainEvent, SignKind};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -22,6 +23,8 @@ pub struct InnerMockStream {
     block_height: u64,
     /// Events for blocks >= `block_height`, not ready to be published, yet.
     future_blocks: Vec<Vec<ChainEvent>>,
+    /// Ordered control events that must not be overtaken by later block events.
+    control_events: VecDeque<ChainEvent>,
     /// Events already produced < `block_height` but not yet consumed by
     /// `next_event()`.
     pending_events: Vec<ChainEvent>,
@@ -45,8 +48,8 @@ impl ChainIndexer for MockIndexer {
         self.inner
             .lock()
             .await
-            .pending_events
-            .push(ChainEvent::CatchupCompleted);
+            .control_events
+            .push_back(ChainEvent::CatchupCompleted);
         Ok(())
     }
 
@@ -54,8 +57,8 @@ impl ChainIndexer for MockIndexer {
         self.inner
             .lock()
             .await
-            .pending_events
-            .push(ChainEvent::NotCaughtUp);
+            .control_events
+            .push_back(ChainEvent::NotCaughtUp);
         Ok(())
     }
 }
@@ -73,6 +76,10 @@ impl ChainStream for MockStream {
     async fn next_event(&mut self) -> Option<ChainEvent> {
         loop {
             let mut guard = self.inner.lock().await;
+            let out = guard.control_events.pop_front();
+            if out.is_some() {
+                return out;
+            }
             let out = guard.pending_events.pop();
             if out.is_some() {
                 return out;
@@ -92,6 +99,7 @@ impl MockStream {
         let cloned = InnerMockStream {
             block_height: guard.block_height,
             future_blocks: guard.future_blocks.clone(),
+            control_events: guard.control_events.clone(),
             pending_events: guard.pending_events.clone(),
         };
         Self {
