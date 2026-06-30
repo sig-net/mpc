@@ -26,7 +26,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::rpc::{ChainPublisher, PublishAction};
+use crate::rpc::{record_publish_metrics, ChainPublisher, PublishAction};
 use mpc_indexer_core::utils::retry::{retry_rpc, RetryConfig};
 
 const MAX_SIGNATURES_FOR_FAST_CATCHUP: usize = 1000;
@@ -554,6 +554,8 @@ impl ChainPublisher for SolanaClient {
                 anyhow::bail!("checkpoint publishing not supported on Solana")
             }
         }
+
+        record_publish_metrics(action);
 
         Ok(())
     }
