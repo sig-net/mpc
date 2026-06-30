@@ -497,12 +497,15 @@ async fn update_contract_data(
     }
 
     if let Some(signed_checkpoints) = checkpoints_view {
-        for (chain, sc) in signed_checkpoints {
-            let new_digest = CheckpointDigest {
-                height: sc.checkpoint.height,
-                digest: sc.checkpoint.digest,
+        for (chain, tx) in &checkpoints {
+            let new_digest = if let Some(sc) = signed_checkpoints.get(&chain) {
+                CheckpointDigest {
+                    height: sc.checkpoint.height,
+                    digest: sc.checkpoint.digest,
+                }
+            } else {
+                CheckpointDigest::default()
             };
-            let tx = &checkpoints[chain];
             tx.send_if_modified(|old| {
                 if *old == new_digest {
                     return false;
