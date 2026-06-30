@@ -200,8 +200,10 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     &self.backlog,
                     chain,
                 ) => {
-                    if let Some(next) = self.handle_regression_outcome(result) {
-                        return next;
+                    match self.handle_regression_outcome(result) {
+                        PipelineAction::Continue => {}
+                        PipelineAction::Transition(state) => return Some(state),
+                        PipelineAction::Shutdown => return None,
                     }
                 }
             }
@@ -236,8 +238,10 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     &self.backlog,
                     chain,
                 ) => {
-                    if let Some(next) = self.handle_regression_outcome(result) {
-                        return next;
+                    match self.handle_regression_outcome(result) {
+                        PipelineAction::Continue => {}
+                        PipelineAction::Transition(state) => return Some(state),
+                        PipelineAction::Shutdown => return None,
                     }
                 }
             }
@@ -250,8 +254,8 @@ impl<I: ChainIndexer> ChainPipeline<I> {
 
         loop {
             let wait_before_retry = tokio::select! {
-                result = self.indexer.livestream() => {
-                    match result {
+                livestream_result = self.indexer.livestream() => {
+                    match livestream_result {
                         Ok(anchor_height) => {
                             let next_state = match anchor_height {
                                 Some(anchor_height) => ChainStreaming::Catchup { anchor_height },
@@ -266,14 +270,16 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                         }
                     }
                 }
-                result = wait_detected_regression(
+
+                regression_outcome = wait_detected_regression(
                     &mut self.checkpoints_rx,
                     &self.backlog,
                     chain,
                 ) => {
-                    match self.handle_regression_outcome(result) {
-                        Some(next) => return next,
-                        None => false, // Aligned: retry immediately, don't sleep as if connect failed.
+                    match self.handle_regression_outcome(regression_outcome) {
+                        PipelineAction::Continue => false,
+                        PipelineAction::Transition(state) => return Some(state),
+                        PipelineAction::Shutdown => return None,
                     }
                 }
             };
@@ -284,33 +290,39 @@ impl<I: ChainIndexer> ChainPipeline<I> {
 
             tokio::select! {
                 _ = tokio::time::sleep(I::RETRY_DELAY) => {}
-                result = wait_detected_regression(
+                regression_outcome = wait_detected_regression(
                     &mut self.checkpoints_rx,
                     &self.backlog,
                     chain,
                 ) => {
-                    if let Some(next) = self.handle_regression_outcome(result) {
-                        return next;
+                    match self.handle_regression_outcome(regression_outcome) {
+                        PipelineAction::Continue => {}
+                        PipelineAction::Transition(state) => return Some(state),
+                        PipelineAction::Shutdown => return None,
                     }
                 }
             }
         }
     }
 
-    fn handle_regression_outcome(
-        &self,
-        outcome: RegressionOutcome,
-    ) -> Option<Option<ChainStreaming>> {
+    fn handle_regression_outcome(&self, outcome: RegressionOutcome) -> PipelineAction {
         match outcome {
             RegressionOutcome::Recovery => {
                 let new_state = ChainStreaming::Recovery { load_local: false };
                 let _ = self.state_tx.send(new_state);
-                Some(Some(new_state))
+                PipelineAction::Transition(new_state)
             }
-            RegressionOutcome::Aligned => None,
-            RegressionOutcome::Shutdown => Some(None),
+            RegressionOutcome::Aligned => PipelineAction::Continue,
+            RegressionOutcome::Shutdown => PipelineAction::Shutdown,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipelineAction {
+    Continue,
+    Transition(ChainStreaming),
+    Shutdown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -86,7 +86,7 @@ impl AbortOnDrop {
         Self(Some(handle))
     }
 
-    fn into_inner(mut self) -> tokio::task::JoinHandle<()> {
+    fn into_handle(mut self) -> tokio::task::JoinHandle<()> {
         self.0.take().expect("join handle already taken")
     }
 }
@@ -192,6 +192,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
             tracing::info!("aborting previous solana live subscription task");
             prev.abort();
         }
+        self.live_rx = None;
 
         let (live_tx, live_rx) = crate::stream::channel();
         let (anchor_tx, anchor_rx) = oneshot::channel();
@@ -211,7 +212,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
         let anchor_height = anchor_rx.await?;
 
         self.live_rx = Some(live_rx);
-        self.live_task = Some(guard.into_inner());
+        self.live_task = Some(guard.into_handle());
 
         Ok(Some(anchor_height))
     }
