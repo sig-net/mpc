@@ -1,9 +1,6 @@
 mod client;
 mod config;
 
-use crate::protocol::Chain;
-use crate::sign_bidirectional::hash_rlp_data;
-use crate::util::ethabi_request_id;
 pub use client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
 pub use config::SolConfig;
 
@@ -24,9 +21,13 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
-use mpc_indexer_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
+use mpc_indexer_core::{
+    utils::hashing::{compute_request_id, hash_payload},
+    ChainIndexer, ChainStream, ChainTelemetry, StateManager,
+};
 use mpc_primitives::{
-    ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION,
+    MAX_SECP256K1_SCALAR,
 };
 use serde::{Deserialize, Serialize};
 use signet_program::{
@@ -76,6 +77,7 @@ pub struct SolanaIndexer<S: StateManager, T: ChainTelemetry> {
     pub state_manager: S,
     pub telemetry: T,
     pub live_rx: Option<mpsc::Receiver<ChainEvent>>,
+    live_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 struct SolanaStreamStartState<S: StateManager, T: ChainTelemetry> {
@@ -143,6 +145,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainStream for SolanaStream<S, T> {
             state_manager: start_state.state_manager,
             telemetry: start_state.telemetry,
             live_rx: None,
+            live_task: None,
         };
 
         Ok(indexer)
@@ -163,6 +166,11 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
     type Iter = Pin<Box<dyn Stream<Item = Self::Block> + Send + 'static>>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
+        if let Some(prev) = self.live_task.take() {
+            tracing::info!("aborting previous solana live subscription task");
+            prev.abort();
+        }
+
         let (live_tx, live_rx) = crate::stream::channel();
         self.live_rx = Some(live_rx);
 
@@ -171,13 +179,13 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
         // Oneshot to receive the first observed slot from the live subscription.
         let (anchor_tx, anchor_rx) = oneshot::channel::<u64>();
 
-        tokio::spawn(subscribe_and_buffer_live_events(
+        self.live_task = Some(tokio::spawn(subscribe_and_buffer_live_events(
             program_id,
             self.client.clone(),
             live_tx,
             anchor_tx,
             self.telemetry.clone(),
-        ));
+        )));
 
         // Wait for the first slot observed on the live feed to use as anchor.
         Ok(Some(anchor_rx.await?))
@@ -266,6 +274,14 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
     }
 }
 
+impl<S: StateManager, T: ChainTelemetry> Drop for SolanaIndexer<S, T> {
+    fn drop(&mut self) {
+        if let Some(task) = self.live_task.take() {
+            task.abort();
+        }
+    }
+}
+
 impl<S: StateManager, T: ChainTelemetry> SolanaIndexer<S, T> {
     async fn process_block(&mut self, height: u64, block: &UiConfirmedBlock) -> anyhow::Result<()> {
         // Update indexed block metrics
@@ -324,9 +340,9 @@ impl SolanaSignEvent {
 
     pub fn generate_request_id(&self) -> [u8; 32] {
         match self {
-            SolanaSignEvent::SignatureRequested(ev) => ethabi_request_id(
+            SolanaSignEvent::SignatureRequested(ev) => compute_request_id(
                 &ev.sender.to_string(),
-                ev.payload,
+                &ev.payload,
                 &ev.path,
                 ev.key_version,
                 &ev.chain_id,
@@ -392,7 +408,7 @@ impl SolanaSignEvent {
             SolanaSignEvent::SignBidirectional(ev) => {
                 let epsilon = derive_epsilon_sol(ev.key_version, &ev.sender.to_string(), &ev.path);
                 tracing::info!(?sign_id, "solana bidirectional signature requested");
-                let unsigned_tx_hash = hash_rlp_data(&ev.serialized_transaction);
+                let unsigned_tx_hash = hash_payload(&ev.serialized_transaction);
                 let payload = Scalar::from_bytes(unsigned_tx_hash)?;
 
                 if payload > *MAX_SECP256K1_SCALAR {
@@ -878,7 +894,7 @@ async fn emit_events(
                         mpc_primitives::RespondBidirectionalEvent {
                             request_id: ev.request_id,
                             signature,
-                            chain: crate::protocol::Chain::Solana,
+                            chain: Chain::Solana,
                         },
                     ))
                     .await;
@@ -955,6 +971,7 @@ pub fn to_mpc_signature(
 mod tests {
     use std::collections::BTreeMap;
 
+    // TODO: test should rely on StateManager mock instead of Backlog
     use crate::backlog::Backlog;
 
     use super::*;
@@ -1133,6 +1150,7 @@ mod tests {
             state_manager,
             telemetry: NoopChainTelemetry,
             live_rx: None,
+            live_task: None,
         };
 
         // Initialize livestream (resolves anchor slot via get_slot and starts WS)

@@ -1,12 +1,14 @@
 mod args;
 
+use std::{collections::HashMap, sync::Arc};
+
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
 use crate::indexer_canton::{CantonConfig, CantonStream};
 use crate::indexer_eth::{EthConfig, EthereumStream};
 use crate::indexer_hydration::{self, HydrationConfig};
-use crate::indexer_sol::{SolConfig, SolanaStream};
+use crate::indexer_sol::{SolConfig, SolanaClient, SolanaStream};
 use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::indexers::PrometheusChainTelemetry;
 use crate::node_client::{self, NodeClient};
@@ -17,7 +19,7 @@ use crate::protocol::signature::{Sign, SignatureSpawnerTask};
 use crate::protocol::state::{Node, NodeStateWatcher};
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, Chain, MpcSignProtocol};
-use crate::rpc::{ContractStateWatcher, NearClient, RpcChannel, RpcExecutor};
+use crate::rpc::{self, ChainPublisher, ContractStateWatcher, NearClient, RpcChannel, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
@@ -465,6 +467,39 @@ impl ChainConfigs {
             canton: canton.into_config(),
         }
     }
+
+    /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
+    /// each other chain is added only when configured. A client that fails to build is
+    /// logged and skipped rather than aborting startup.
+    async fn publishers(&self, near: NearClient) -> HashMap<Chain, Arc<dyn ChainPublisher>> {
+        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+        publishers.insert(Chain::NEAR, Arc::new(near));
+
+        if let Some(eth) = &self.eth {
+            publishers.insert(Chain::Ethereum, Arc::new(rpc::EthClient::new(eth)));
+        }
+        if let Some(sol) = &self.sol {
+            publishers.insert(Chain::Solana, Arc::new(SolanaClient::from_config(sol)));
+        }
+        if let Some(hydration) = &self.hydration {
+            match rpc::HydrationClient::new(hydration).await {
+                Ok(client) => {
+                    publishers.insert(Chain::Hydration, Arc::new(client));
+                }
+                Err(e) => tracing::error!(%e, "failed to create hydration client"),
+            }
+        }
+        if let Some(canton) = &self.canton {
+            match rpc::CantonClient::new(canton).await {
+                Ok(client) => {
+                    publishers.insert(Chain::Canton, Arc::new(client));
+                }
+                Err(e) => tracing::error!(%e, "failed to create canton client"),
+            }
+        }
+
+        publishers
+    }
 }
 
 /// Emit the single structured "starting node" banner describing this node's identity
@@ -569,14 +604,8 @@ impl RpcHandles {
     ) -> Self {
         let near_client =
             NearClient::new(near_rpc_url, my_address, network, mpc_contract_id, signer);
-        let (rpc_channel, rpc_executor) = RpcExecutor::new(
-            &near_client,
-            &chains.eth,
-            &chains.sol,
-            &chains.hydration,
-            &chains.canton,
-        )
-        .await;
+        let publishers = chains.publishers(near_client.clone()).await;
+        let (rpc_channel, rpc_executor) = RpcExecutor::new(near_client.clone(), publishers).await;
         Self {
             near_client,
             rpc_channel,
