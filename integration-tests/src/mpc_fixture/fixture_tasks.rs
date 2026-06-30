@@ -112,7 +112,7 @@ pub(super) fn start_mock_stream_tasks(
     backlog: Backlog,
     contract_watcher: ContractStateWatcher,
     mesh_state: &watch::Receiver<MeshState>,
-    checkpoints_rx: watch::Receiver<CheckpointDigest>,
+    checkpoints_rx: mpc_node::types::CheckpointWatcher,
 ) {
     for stream in mock_streams {
         tokio::spawn(run_stream(

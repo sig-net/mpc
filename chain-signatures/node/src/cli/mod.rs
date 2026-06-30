@@ -583,6 +583,7 @@ fn calculate_digest(
     i64::from_le_bytes(bytes)
 }
 
+#[allow(clippy::type_complexity)]
 fn checkpoint_watchers() -> (
     EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
     EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
