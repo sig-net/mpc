@@ -11,14 +11,16 @@ pub use request_id::compute_request_id;
 pub use signature::der_encode_signature;
 pub use stream::{parse_canton_signature, CantonStream};
 
-use crate::protocol::Chain;
-use crate::sign_bidirectional::hash_rlp_data;
 use alloy::consensus::{SignableTransaction, TxEip1559};
 use borsh::{BorshDeserialize, BorshSerialize};
 pub use config::CantonConfig;
 use contracts::TxParams as CantonTxParams;
 use k256::Scalar;
-use mpc_primitives::{ScalarExt, SignArgs, SignBidirectionalEvent, SignId, LATEST_MPC_KEY_VERSION};
+use mpc_indexer_core::utils::hashing::hash_payload;
+use mpc_primitives::{
+    Chain, IndexedSignRequest, ScalarExt, SignArgs, SignBidirectionalEvent, SignId,
+    LATEST_MPC_KEY_VERSION,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 #[borsh(crate = "borsh")]
@@ -89,10 +91,7 @@ impl CantonSignBidirectionalRequestedEvent {
         self.request_id
     }
 
-    pub fn generate_sign_request(
-        &self,
-        entropy: [u8; 32],
-    ) -> anyhow::Result<crate::protocol::IndexedSignRequest> {
+    pub fn generate_sign_request(&self, entropy: [u8; 32]) -> anyhow::Result<IndexedSignRequest> {
         tracing::info!("found canton event: {:?}", self);
 
         if self.key_version > LATEST_MPC_KEY_VERSION {
@@ -108,7 +107,7 @@ impl CantonSignBidirectionalRequestedEvent {
             &self.path,
         );
 
-        let unsigned_tx_hash = hash_rlp_data(&self.serialized_transaction);
+        let unsigned_tx_hash = hash_payload(&self.serialized_transaction);
 
         let Some(payload) = Scalar::from_bytes(unsigned_tx_hash) else {
             anyhow::bail!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
@@ -123,7 +122,7 @@ impl CantonSignBidirectionalRequestedEvent {
         let chain_ctx =
             Some(borsh::to_vec(&ctx).expect("CantonChainCtx Borsh serialization is infallible"));
 
-        Ok(crate::protocol::IndexedSignRequest::sign_bidirectional(
+        Ok(IndexedSignRequest::sign_bidirectional(
             sign_id,
             SignArgs {
                 entropy,

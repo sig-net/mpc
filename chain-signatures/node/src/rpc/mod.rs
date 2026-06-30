@@ -10,7 +10,6 @@ use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
-use crate::util::retry::{retry_rpc, RetryConfig};
 use enum_map::EnumMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -24,6 +23,7 @@ use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
 pub use mpc_contract::primitives::{Read, View};
+use mpc_indexer_core::utils::retry::{retry_rpc, RetryConfig};
 use mpc_primitives::{CheckpointDigest, Signature};
 pub use near::NearClient;
 

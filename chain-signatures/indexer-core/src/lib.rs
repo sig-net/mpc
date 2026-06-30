@@ -3,7 +3,12 @@
 mod indexer;
 mod state;
 mod telemetry;
+pub mod utils;
 
 pub use indexer::{ChainIndexer, ChainStream};
 pub use state::StateManager;
 pub use telemetry::{ChainTelemetry, NoopChainTelemetry};
+
+// Re-export backon because `retry_rpc!` uses `Retryable` trait internally
+#[doc(hidden)]
+pub use ::backon;

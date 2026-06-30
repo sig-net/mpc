@@ -1,11 +1,10 @@
-use crate::protocol::{Chain, IndexedSignRequest};
 use crate::sign_bidirectional::{BidirectionalTxExt, TransactionOutput};
 use alloy::primitives::Bytes;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
 use mpc_primitives::{
-    BidirectionalTx, RespondBidirectionalSerializedOutput, RespondBidirectionalTx, SerDeserFormat,
-    SignArgs, SignId,
+    BidirectionalTx, Chain, IndexedSignRequest, RespondBidirectionalSerializedOutput,
+    RespondBidirectionalTx, SerDeserFormat, SignArgs, SignId,
 };
 
 const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];

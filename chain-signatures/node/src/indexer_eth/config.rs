@@ -22,6 +22,17 @@ pub struct EthConfig {
     pub light_client: bool,
 }
 
+impl EthConfig {
+    /// Ethereum address derived from the configured account secret key.
+    pub fn signer_address(&self) -> String {
+        let signer: alloy_signer_local::PrivateKeySigner = self
+            .account_sk
+            .parse()
+            .expect("cannot parse Eth account sk");
+        signer.address().to_string()
+    }
+}
+
 impl fmt::Debug for EthConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EthConfig")

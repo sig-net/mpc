@@ -8,8 +8,6 @@ pub mod indexer_eth_helios;
 pub mod test_utils;
 
 use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
-use crate::protocol::Chain;
-
 use alloy::consensus::Transaction;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
@@ -26,8 +24,8 @@ use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_indexer_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, IndexedSignRequest, SignArgs,
-    SignId, Signature as MpcSignature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
+    BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, IndexedSignRequest,
+    SignArgs, SignId, Signature as MpcSignature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
 };
 use serde::{Deserialize, Serialize};
@@ -1055,26 +1053,10 @@ pub struct EthereumStream<S: StateManager, T: ChainTelemetry> {
 }
 
 impl<S: StateManager, T: ChainTelemetry> EthereumStream<S, T> {
-    pub async fn new(
-        eth: Option<EthConfig>,
-        state_manager: S,
-        telemetry: T,
-    ) -> anyhow::Result<Self> {
-        let Some(eth) = eth else {
-            tracing::warn!(
-                "ethereum indexer is disabled: no EthConfig provided \
-                 (check that all --eth-* CLI flags were supplied)"
-            );
-            anyhow::bail!("ethereum indexer is disabled: no EthConfig provided");
-        };
-        tracing::info!(
-            eth_config = ?eth,
-            "creating ethereum indexer stream"
-        );
-
+    pub async fn new(eth: EthConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
+        tracing::info!(eth_config = ?eth, "creating ethereum indexer stream");
         let (events_tx, events_rx) = crate::stream::channel();
         let indexer = EthereumIndexer::new(eth, state_manager, telemetry, events_tx).await?;
-
         Ok(Self {
             events_rx: Some(events_rx),
             start_state: Some(indexer),
@@ -1102,17 +1084,17 @@ impl<S: StateManager, T: ChainTelemetry> ChainStream for EthereumStream<S, T> {
 #[cfg(test)]
 mod tests {
     use super::{test_utils, CatchupIter, EthConfig, EthereumClient, EthereumIndexer, MaybeBlock};
+    // TODO: test should rely on StateManager mock instead of Backlog
     use crate::backlog::Backlog;
     #[cfg(feature = "helios")]
     use crate::indexer_eth::indexer_eth_helios;
-    use crate::protocol::Chain;
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{address, b256, Address};
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
     use mpc_indexer_core::{ChainIndexer, NoopChainTelemetry};
     use mpc_primitives::{
-        BidirectionalTx, BidirectionalTxId, ChainEvent, ExecutionOutcome, SignId,
+        BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
         LATEST_MPC_KEY_VERSION,
     };
     use serde_json::json;

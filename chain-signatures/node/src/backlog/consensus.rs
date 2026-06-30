@@ -2,11 +2,10 @@ use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::ParticipantInfo;
-use crate::protocol::Chain;
 use crate::types::CheckpointWatcher;
 
 use cait_sith::protocol::Participant;
-use mpc_primitives::Checkpoint;
+use mpc_primitives::{Chain, Checkpoint};
 use near_account_id::AccountId;
 use rand::seq::SliceRandom;
 use rand::thread_rng;

@@ -3,11 +3,9 @@ mod config;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::{Chain, Sign};
+use crate::protocol::Sign;
 use crate::rpc::ContractStateWatcher;
-use crate::sign_bidirectional::hash_rlp_data;
 use crate::types::CheckpointWatcher;
-use crate::util::ethabi_request_id;
 
 pub use config::HydrationConfig;
 
@@ -16,9 +14,12 @@ use anyhow::{anyhow, Result};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
-use mpc_indexer_core::ChainTelemetry;
+use mpc_indexer_core::{
+    utils::hashing::{compute_request_id, hash_payload},
+    ChainTelemetry,
+};
 use mpc_primitives::{
-    IndexedSignRequest, RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignId,
+    Chain, IndexedSignRequest, RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignId,
     Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
@@ -50,9 +51,9 @@ pub struct HydrationSignatureRequestedEvent {
 
 impl HydrationSignatureRequestedEvent {
     fn generate_request_id(&self) -> [u8; 32] {
-        ethabi_request_id(
+        compute_request_id(
             &self.sender_string(),
-            self.payload,
+            &self.payload,
             &self.path,
             self.key_version,
             &self.chain_id,
@@ -211,7 +212,7 @@ impl HydrationSignBidirectionalRequestedEvent {
 
         let sign_id = SignId::new(request_id);
         tracing::info!(?sign_id, "hydration signature requested");
-        let unsigned_tx_hash = hash_rlp_data(&self.serialized_transaction);
+        let unsigned_tx_hash = hash_payload(&self.serialized_transaction);
         let payload = Scalar::from_bytes(unsigned_tx_hash).or_else(|| {
             tracing::warn!("failed to convert unsigned_tx_hash to scalar: {unsigned_tx_hash:?}");
             None
@@ -311,7 +312,7 @@ pub(crate) fn ss58_address_from_account32(sender: [u8; 32]) -> String {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run<T: ChainTelemetry>(
-    hydration: Option<HydrationConfig>,
+    hydration: HydrationConfig,
     sign_tx: mpsc::Sender<Sign>,
     backlog: Backlog,
     telemetry: T,
@@ -320,11 +321,6 @@ pub async fn run<T: ChainTelemetry>(
     node_client: NodeClient,
     mut checkpoints_rx: CheckpointWatcher,
 ) {
-    let Some(hydration) = hydration else {
-        tracing::warn!("hydration indexer is disabled");
-        return;
-    };
-
     let ws_url: &str = hydration.rpc_ws_url.as_str();
 
     tracing::info!("connecting to hydration rpc at {}", ws_url);
@@ -582,7 +578,7 @@ pub async fn run<T: ChainTelemetry>(
                     RespondBidirectionalEvent {
                         request_id,
                         signature,
-                        chain: crate::protocol::Chain::Hydration,
+                        chain: Chain::Hydration,
                     },
                     sign_tx.clone(),
                     root_pk,

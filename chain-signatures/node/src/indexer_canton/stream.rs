@@ -1,4 +1,3 @@
-use crate::protocol::Chain;
 use crate::rpc::CantonClient;
 
 use alloy::primitives::keccak256;
@@ -7,7 +6,7 @@ use futures_util::stream::{self, SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use mpc_indexer_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
 use mpc_primitives::{
-    ChainEvent, RespondBidirectionalEvent, ScalarExt, Signature, SignatureRespondedEvent,
+    Chain, ChainEvent, RespondBidirectionalEvent, ScalarExt, Signature, SignatureRespondedEvent,
 };
 use std::collections::HashSet;
 use std::ops::Range;
@@ -26,7 +25,7 @@ type CantonWsRead = SplitStream<CantonWs>;
 type CantonWsWrite = SplitSink<CantonWs, Message>;
 
 pub struct CantonStream<S: StateManager, T: ChainTelemetry> {
-    config: CantonConfig,
+    client: Option<CantonClient>,
     state_manager: S,
     telemetry: T,
     events_rx: mpsc::Receiver<ChainEvent>,
@@ -34,19 +33,11 @@ pub struct CantonStream<S: StateManager, T: ChainTelemetry> {
 }
 
 impl<S: StateManager, T: ChainTelemetry> CantonStream<S, T> {
-    pub fn new(config: Option<CantonConfig>, state_manager: S, telemetry: T) -> Option<Self> {
-        let config = match config {
-            Some(c) => c,
-            None => {
-                tracing::warn!("canton indexer is disabled");
-                return None;
-            }
-        };
-
+    pub async fn new(config: CantonConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
+        let client = CantonClient::new(&config).await?;
         let (events_tx, events_rx) = crate::stream::channel();
-
-        Some(CantonStream {
-            config,
+        Ok(CantonStream {
+            client: Some(client),
             state_manager,
             telemetry,
             events_rx,
@@ -60,11 +51,10 @@ impl<S: StateManager, T: ChainTelemetry> ChainStream for CantonStream<S, T> {
     type Indexer = CantonIndexer<S, T>;
 
     async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-        let Some(events_tx) = self.events_tx.take() else {
+        let (Some(events_tx), Some(client)) = (self.events_tx.take(), self.client.take()) else {
             anyhow::bail!("canton stream already started");
         };
 
-        let client = CantonClient::new(&self.config).await?;
         Ok(Self::Indexer::new(
             client,
             self.state_manager.clone(),
@@ -502,7 +492,7 @@ async fn process_canton_event(
                             RespondBidirectionalEvent {
                                 request_id,
                                 signature,
-                                chain: crate::protocol::Chain::Canton,
+                                chain: Chain::Canton,
                             },
                         ))
                         .await

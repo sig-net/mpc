@@ -5,25 +5,30 @@ use std::{collections::HashMap, sync::Arc};
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
-use crate::indexer_eth::EthereumStream;
-use crate::indexer_sol::{SolanaClient, SolanaStream};
-use crate::mesh::Mesh;
+use crate::indexer_canton::{CantonConfig, CantonStream};
+use crate::indexer_eth::{EthConfig, EthereumStream};
+use crate::indexer_hydration::{self, HydrationConfig};
+use crate::indexer_sol::{SolConfig, SolanaClient, SolanaStream};
+use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::indexers::PrometheusChainTelemetry;
 use crate::node_client::{self, NodeClient};
+use crate::protocol::contract::ProtocolState;
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
-use crate::protocol::signature::SignatureSpawnerTask;
-use crate::protocol::state::Node;
+use crate::protocol::signature::{Sign, SignatureSpawnerTask};
+use crate::protocol::state::{Node, NodeStateWatcher};
 use crate::protocol::sync::SyncTask;
-use crate::protocol::Chain;
-use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
-use crate::rpc::{self, ChainPublisher, ContractStateWatcher, NearClient, RpcExecutor};
+use crate::protocol::{spawn_system_metrics, Chain, MpcSignProtocol};
+use crate::rpc::{self, ChainPublisher, ContractStateWatcher, NearClient, RpcChannel, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
-use crate::storage::triple_storage::TriplePair;
+use crate::storage::presignature_storage::PresignatureStorage;
+use crate::storage::secret_storage::SecretNodeStorageVariant;
+use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::stream::run_stream;
-use crate::{indexer, indexer_canton, indexer_hydration, logs, mesh, storage, web};
+use crate::{indexer, logs, storage, web};
 pub use args::{canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, solana::SolArgs};
 
+use cait_sith::protocol::Participant;
 use clap::Parser;
 use deadpool_redis::Runtime;
 use enum_map::EnumMap;
@@ -33,7 +38,6 @@ use mpc_keys::hpke;
 use mpc_primitives::CheckpointDigest;
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
-use secrecy::ExposeSecret;
 use sha3::Digest;
 use tokio::sync::{mpsc, watch};
 use url::Url;
@@ -232,129 +236,64 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let (sign_tx, sign_rx) = mpsc::channel(16384);
 
-            let gcp_service = GcpService::init(&account_id, &storage_options).await?;
-            let key_storage =
-                storage::secret_storage::init(Some(&gcp_service), &storage_options, &account_id);
+            let StorageHandles {
+                key_storage,
+                triple_storage,
+                presignature_storage,
+                backlog,
+            } = StorageHandles::new(&account_id, &storage_options).await?;
 
-            let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
-
-            let redis_cfg = deadpool_redis::Config::from_url(redis_url);
-            let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-            let triple_storage = TriplePair::storage(&redis_pool, &account_id);
-            let presignature_storage = Presignature::storage(&redis_pool, &account_id);
-
-            let mut rpc_client = near_fetch::Client::new(&near_rpc);
-            if let Some(referer_param) = client_header_referer {
-                let client_headers = rpc_client.inner_mut().headers_mut();
-                client_headers.insert(http::header::REFERER, referer_param.parse().unwrap());
-            }
-            tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
-
-            let backlog = Backlog::persisted(CheckpointStorage::Redis(
-                redis_pool.clone(),
-                account_id.clone(),
-            ));
+            let web_port = web_port.unwrap_or(DEFAULT_WEB_PORT);
+            let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
+            let my_address = my_address.unwrap_or_else(|| {
+                let my_ip = local_ip().unwrap();
+                Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
+            });
+            tracing::info!(%my_address, "address detected");
 
             // NEAR Indexer is only used for integration tests
             // TODO: Remove this once we have integration tests built on other chains
             if storage_options.env == "integration-tests" {
+                let rpc_client = setup_rpc_client(&near_rpc, client_header_referer);
                 indexer::run(
                     &indexer_options,
                     &mpc_contract_id,
                     &account_id,
                     sign_tx.clone(),
-                    rpc_client.clone(),
+                    rpc_client,
                     backlog.clone(),
                 )?;
             }
 
-            let web_port = web_port.unwrap_or(DEFAULT_WEB_PORT);
+            let MeshHandles {
+                node_client,
+                mesh,
+                mesh_state,
+                contract_watcher,
+                contract_state_tx,
+                synced_peer_tx,
+            } = MeshHandles::new(message_options, mesh_options, &account_id);
 
-            let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
-            let my_address = my_address.unwrap_or_else(|| {
-                // this is only used for integration tests
-                // mainnet, testnet and dev nodes should have MPC_LOCAL_ADDRESS set in their env var
-                let my_ip = local_ip().unwrap();
-                Url::parse(&format!("http://{my_ip}:{web_port}")).unwrap()
-            });
-
-            tracing::info!(%my_address, "address detected");
-
-            let client = NodeClient::new(&message_options);
-            let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
-            let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
-            let mesh = Mesh::new(&client, mesh_options, &account_id, synced_peer_rx);
-            let mesh_state = mesh.watch();
-            let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(&account_id);
-
-            let eth_account_address = eth.eth_account_sk.as_ref().map(|sk| {
-                let signer: alloy_signer_local::PrivateKeySigner = sk
-                    .expose_secret()
-                    .parse()
-                    .expect("cannot parse Eth account sk");
-                format!("{}", signer.address())
-            });
-            let sol_payer_address = sol.sol_account_sk.as_ref().map(|sk| {
-                use solana_sdk::signer::Signer;
-                solana_sdk::signer::keypair::Keypair::from_base58_string(sk)
-                    .pubkey()
-                    .to_string()
-            });
-            let hydration_signer_address = hydration.signer_uri.as_ref().and_then(|uri| {
-                use sp_core::sr25519;
-                use sp_core::Pair as _;
-                use sp_runtime::traits::{IdentifyAccount, Verify};
-                use sp_runtime::MultiSignature as SpMultiSignature;
-                use subxt::config::substrate::AccountId32;
-
-                let pair = sr25519::Pair::from_string(uri, None).ok()?;
-                let account_id =
-                    <SpMultiSignature as Verify>::Signer::from(pair.public()).into_account();
-                Some(AccountId32(account_id.into()).to_string())
-            });
-            let eth = eth.into_config();
-            let sol = sol.into_config();
-            let hydration = hydration.into_config();
-            let canton = canton.into_config();
+            let chains = ChainConfigs::from_args(eth, sol, hydration, canton);
             let network = NetworkConfig { cipher_sk, sign_sk };
-            let near_client =
-                NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
+            let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
 
-            // TODO: Centralize publishers and indexers creation: collect all chain args first, then create publishers and indexers in one place.
-            // Build publishers registry
-            let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+            let RpcHandles {
+                near_client,
+                rpc_channel,
+                rpc_executor,
+            } = RpcHandles::new(
+                &near_rpc,
+                &my_address,
+                &network,
+                &mpc_contract_id,
+                signer,
+                &chains,
+            )
+            .await;
 
-            // Add NEAR publisher unconditionally
-            publishers.insert(Chain::NEAR, Arc::new(near_client.clone()));
-
-            // Add other publishers based on the provided configurations
-            if let Some(eth_cfg) = &eth {
-                publishers.insert(Chain::Ethereum, Arc::new(rpc::EthClient::new(eth_cfg)));
-            }
-            if let Some(sol_cfg) = &sol {
-                publishers.insert(Chain::Solana, Arc::new(SolanaClient::from_config(sol_cfg)));
-            }
-            if let Some(hyd_cfg) = &hydration {
-                match rpc::HydrationClient::new(hyd_cfg).await {
-                    Ok(client) => {
-                        publishers.insert(Chain::Hydration, Arc::new(client));
-                    }
-                    Err(e) => tracing::error!(%e, "failed to create hydration client"),
-                }
-            }
-            if let Some(canton_cfg) = &canton {
-                match rpc::CantonClient::new(canton_cfg).await {
-                    Ok(client) => {
-                        publishers.insert(Chain::Canton, Arc::new(client));
-                    }
-                    Err(e) => tracing::error!(%e, "failed to create canton client"),
-                }
-            }
-
-            let (rpc_channel, rpc) = RpcExecutor::new(near_client.clone(), publishers).await;
-
-            let (sync_channel, sync) = SyncTask::new(
-                &client,
+            let (sync_channel, sync_task) = SyncTask::new(
+                &node_client,
                 triple_storage.clone(),
                 presignature_storage.clone(),
                 mesh_state.clone(),
@@ -362,67 +301,44 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 synced_peer_tx,
             );
 
-            tracing::info!(
-                %digest,
-                %mpc_contract_id,
-                %account_id,
-                %my_address,
-                %cipher_pk_hex,
-                version = %crate::metrics::version(),
-                git_commit_hash = %crate::metrics::git_commit_hash(),
-                sign_pk = %network.sign_sk.public_key(),
-                near_rpc_url = %near_client.rpc_addr(),
-                eth_contract_address = %eth.as_ref().map(|eth| eth.contract_address.as_str()).unwrap_or("None"),
-                eth_signer_address = %eth_account_address.as_deref().unwrap_or("None"),
-                sol_program_address = %sol.as_ref().map(|sol| sol.program_address.as_str()).unwrap_or("None"),
-                sol_rpc_url = %sol.as_ref().map(|sol| sol.rpc_http_url.as_str()).unwrap_or("None"),
-                sol_signer_address = %sol_payer_address.as_deref().unwrap_or("None"),
-                hydration_rpc_url = %hydration.as_ref().map(|h| h.rpc_ws_url.as_str()).unwrap_or("None"),
-                hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
-                canton_json_api_url = %canton.as_ref().map(|c| c.json_api_url.as_str()).unwrap_or("None"),
-                "starting node",
+            log_startup(
+                digest,
+                &mpc_contract_id,
+                &account_id,
+                &my_address,
+                &cipher_pk_hex,
+                &network,
+                &near_client,
+                &chains,
             );
 
-            let config = Config::new(LocalConfig {
-                over: override_config.unwrap_or_else(Default::default),
+            let ProtocolHandles {
+                protocol,
+                message_channel,
+                node,
+                node_watcher,
+                config_tx,
+                checkpoints_tx,
+                checkpoints_rx,
+            } = ProtocolHandles::new(
+                &account_id,
+                override_config,
                 network,
-            });
-            let (config_tx, config_rx) = watch::channel(config);
-            let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
-            let node = Node::new();
-            let node_watcher = node.watch();
-
-            let msg_channel =
-                MessageChannel::spawn(client.clone(), config_rx.clone(), contract_watcher.clone())
-                    .await;
-            let sign_task = SignatureSpawnerTask::run(
-                account_id.clone(),
                 sign_rx,
-                contract_watcher.clone(),
-                config_rx.clone(),
+                &node_client,
+                &contract_watcher,
+                key_storage,
+                triple_storage.clone(),
                 presignature_storage.clone(),
                 mesh_state.clone(),
-                msg_channel.clone(),
                 rpc_channel.clone(),
                 backlog.clone(),
-            );
-            let protocol = MpcSignProtocol {
-                my_account_id: account_id.clone(),
-                msg_channel: msg_channel.clone(),
-                generating: msg_channel.subscribe_generation().await,
-                resharing: msg_channel.subscribe_resharing().await,
-                ready: msg_channel.subscribe_ready().await,
-                sign_task,
-                secret_storage: key_storage,
-                triple_storage: triple_storage.clone(),
-                presignature_storage: presignature_storage.clone(),
-                config: config_rx,
-                mesh_state: mesh_state.clone(),
-            };
+            )
+            .await;
 
             tracing::info!("protocol initialized");
-            tokio::spawn(sync.run());
-            tokio::spawn(rpc.run(contract_state_tx, config_tx.clone(), checkpoints_tx));
+            tokio::spawn(sync_task.run());
+            tokio::spawn(rpc_executor.run(contract_state_tx, config_tx.clone(), checkpoints_tx));
 
             tokio::spawn(mesh.run(contract_watcher.clone()));
             let system_handle = spawn_system_metrics().await;
@@ -435,7 +351,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             tracing::info!("protocol thread spawned");
             let web_handle = tokio::spawn(web::run(
                 web_port,
-                msg_channel,
+                message_channel,
                 node_watcher,
                 triple_storage,
                 presignature_storage,
@@ -444,76 +360,17 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 backlog.clone(),
             ));
 
-            tracing::info!(
-                eth_configured = eth.is_some(),
-                "initializing ethereum indexer stream"
-            );
-            let eth_telemetry = PrometheusChainTelemetry::new(Chain::Ethereum);
-            match EthereumStream::new(eth, backlog.clone(), eth_telemetry.clone()).await {
-                Ok(eth_stream) => {
-                    tracing::info!("ethereum indexer stream created successfully");
-                    tokio::spawn(run_stream(
-                        eth_stream,
-                        sign_tx.clone(),
-                        rpc_channel.clone(),
-                        backlog.clone(),
-                        eth_telemetry,
-                        contract_watcher.clone(),
-                        mesh_state.clone(),
-                        client.clone(),
-                        checkpoints_rx[Chain::Ethereum].clone(),
-                    ));
-                }
-                Err(err) => {
-                    tracing::error!(?err, "failed to create ethereum indexer stream");
-                }
-            };
-
-            let solana_telemetry = PrometheusChainTelemetry::new(Chain::Solana);
-            if let Some(sol_stream) =
-                SolanaStream::new(sol.clone(), backlog.clone(), solana_telemetry.clone())
-            {
-                tokio::spawn(run_stream(
-                    sol_stream,
-                    sign_tx.clone(),
-                    rpc_channel.clone(),
-                    backlog.clone(),
-                    solana_telemetry,
-                    contract_watcher.clone(),
-                    mesh_state.clone(),
-                    client.clone(),
-                    checkpoints_rx[Chain::Solana].clone(),
-                ));
-            }
-
-            let hydration_telemetry = PrometheusChainTelemetry::new(Chain::Hydration);
-            tokio::spawn(indexer_hydration::run(
-                hydration,
-                sign_tx.clone(),
+            spawn_indexers(
+                chains,
+                sign_tx,
+                rpc_channel.clone(),
                 backlog.clone(),
-                hydration_telemetry,
                 contract_watcher.clone(),
                 mesh_state.clone(),
-                client.clone(),
-                checkpoints_rx[Chain::Hydration].clone(),
-            ));
-
-            let canton_telemetry = PrometheusChainTelemetry::new(Chain::Canton);
-            if let Some(canton_stream) =
-                indexer_canton::CantonStream::new(canton, backlog.clone(), canton_telemetry.clone())
-            {
-                tokio::spawn(run_stream(
-                    canton_stream,
-                    sign_tx.clone(),
-                    rpc_channel.clone(),
-                    backlog.clone(),
-                    canton_telemetry,
-                    contract_watcher.clone(),
-                    mesh_state.clone(),
-                    client.clone(),
-                    checkpoints_rx[Chain::Canton].clone(),
-                ));
-            }
+                node_client.clone(),
+                checkpoints_rx,
+            )
+            .await;
             tracing::info!("protocol http server spawned");
             protocol_handle.await?;
             web_handle.await?;
@@ -592,6 +449,391 @@ fn checkpoint_watchers() -> (
     let checkpoints_tx = EnumMap::from_fn(|chain| channels[chain].0.clone());
     let checkpoints_rx = EnumMap::from_fn(|chain| channels[chain].1.clone());
     (checkpoints_tx, checkpoints_rx)
+}
+
+/// Validated per-chain indexer configs. A `None` entry means the chain is not configured.
+struct ChainConfigs {
+    eth: Option<EthConfig>,
+    sol: Option<SolConfig>,
+    hydration: Option<HydrationConfig>,
+    canton: Option<CantonConfig>,
+}
+
+impl ChainConfigs {
+    fn from_args(eth: EthArgs, sol: SolArgs, hydration: HydrationArgs, canton: CantonArgs) -> Self {
+        Self {
+            eth: eth.into_config(),
+            sol: sol.into_config(),
+            hydration: hydration.into_config(),
+            canton: canton.into_config(),
+        }
+    }
+
+    /// Build the registry of chain publishers, keyed by chain. NEAR is always present;
+    /// each other chain is added only when configured. A client that fails to build is
+    /// logged and skipped rather than aborting startup.
+    async fn publishers(&self, near: NearClient) -> HashMap<Chain, Arc<dyn ChainPublisher>> {
+        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+        publishers.insert(Chain::NEAR, Arc::new(near));
+
+        if let Some(eth) = &self.eth {
+            publishers.insert(Chain::Ethereum, Arc::new(rpc::EthClient::new(eth)));
+        }
+        if let Some(sol) = &self.sol {
+            publishers.insert(Chain::Solana, Arc::new(SolanaClient::from_config(sol)));
+        }
+        if let Some(hydration) = &self.hydration {
+            match rpc::HydrationClient::new(hydration).await {
+                Ok(client) => {
+                    publishers.insert(Chain::Hydration, Arc::new(client));
+                }
+                Err(e) => tracing::error!(%e, "failed to create hydration client"),
+            }
+        }
+        if let Some(canton) = &self.canton {
+            match rpc::CantonClient::new(canton).await {
+                Ok(client) => {
+                    publishers.insert(Chain::Canton, Arc::new(client));
+                }
+                Err(e) => tracing::error!(%e, "failed to create canton client"),
+            }
+        }
+
+        publishers
+    }
+}
+
+/// Emit the single structured "starting node" banner describing this node's identity
+/// and which chains it is configured to index.
+#[allow(clippy::too_many_arguments)]
+fn log_startup(
+    digest: i64,
+    mpc_contract_id: &AccountId,
+    account_id: &AccountId,
+    my_address: &Url,
+    cipher_pk_hex: &str,
+    network: &NetworkConfig,
+    near_client: &NearClient,
+    chains: &ChainConfigs,
+) {
+    let eth_signer_address = chains.eth.as_ref().map(|c| c.signer_address());
+    let sol_signer_address = chains.sol.as_ref().map(|c| c.signer_address());
+    let hydration_signer_address = chains.hydration.as_ref().and_then(|c| c.signer_address());
+
+    tracing::info!(
+        %digest,
+        %mpc_contract_id,
+        %account_id,
+        %my_address,
+        cipher_pk_hex = %cipher_pk_hex,
+        version = %crate::metrics::version(),
+        git_commit_hash = %crate::metrics::git_commit_hash(),
+        sign_pk = %network.sign_sk.public_key(),
+        near_rpc_url = %near_client.rpc_addr(),
+        eth_contract_address = %chains.eth.as_ref().map(|c| c.contract_address.as_str()).unwrap_or("None"),
+        eth_signer_address = %eth_signer_address.as_deref().unwrap_or("None"),
+        sol_program_address = %chains.sol.as_ref().map(|c| c.program_address.as_str()).unwrap_or("None"),
+        sol_rpc_url = %chains.sol.as_ref().map(|c| c.rpc_http_url.as_str()).unwrap_or("None"),
+        sol_signer_address = %sol_signer_address.as_deref().unwrap_or("None"),
+        hydration_rpc_url = %chains.hydration.as_ref().map(|c| c.rpc_ws_url.as_str()).unwrap_or("None"),
+        hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
+        canton_json_api_url = %chains.canton.as_ref().map(|c| c.json_api_url.as_str()).unwrap_or("None"),
+        "starting node",
+    );
+}
+
+fn setup_rpc_client(
+    near_rpc_url: &str,
+    client_header_referer: Option<String>,
+) -> near_fetch::Client {
+    let mut rpc_client = near_fetch::Client::new(near_rpc_url);
+    if let Some(referer) = client_header_referer {
+        rpc_client
+            .inner_mut()
+            .headers_mut()
+            .insert(http::header::REFERER, referer.parse().unwrap());
+    }
+    tracing::info!(rpc_addr = rpc_client.rpc_addr(), "rpc client initialized");
+    rpc_client
+}
+
+struct MeshHandles {
+    node_client: NodeClient,
+    mesh: Mesh,
+    mesh_state: watch::Receiver<MeshState>,
+    contract_watcher: ContractStateWatcher,
+    contract_state_tx: watch::Sender<Option<ProtocolState>>,
+    synced_peer_tx: mpsc::Sender<Participant>,
+}
+
+impl MeshHandles {
+    fn new(
+        message_options: node_client::Options,
+        mesh_options: mesh::Options,
+        account_id: &AccountId,
+    ) -> Self {
+        let node_client = NodeClient::new(&message_options);
+        let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
+        let mesh = Mesh::new(&node_client, mesh_options, account_id, synced_peer_rx);
+        let mesh_state = mesh.watch();
+        let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(account_id);
+        Self {
+            node_client,
+            mesh,
+            mesh_state,
+            contract_watcher,
+            contract_state_tx,
+            synced_peer_tx,
+        }
+    }
+}
+
+struct RpcHandles {
+    near_client: NearClient,
+    rpc_channel: RpcChannel,
+    rpc_executor: RpcExecutor,
+}
+
+impl RpcHandles {
+    async fn new(
+        near_rpc_url: &str,
+        my_address: &Url,
+        network: &NetworkConfig,
+        mpc_contract_id: &AccountId,
+        signer: InMemorySigner,
+        chains: &ChainConfigs,
+    ) -> Self {
+        let near_client =
+            NearClient::new(near_rpc_url, my_address, network, mpc_contract_id, signer);
+        let publishers = chains.publishers(near_client.clone()).await;
+        let (rpc_channel, rpc_executor) = RpcExecutor::new(near_client.clone(), publishers).await;
+        Self {
+            near_client,
+            rpc_channel,
+            rpc_executor,
+        }
+    }
+}
+
+struct StorageHandles {
+    key_storage: SecretNodeStorageVariant,
+    triple_storage: TripleStorage,
+    presignature_storage: PresignatureStorage,
+    backlog: Backlog,
+}
+
+impl StorageHandles {
+    async fn new(
+        account_id: &AccountId,
+        storage_options: &storage::Options,
+    ) -> anyhow::Result<Self> {
+        let gcp_service = GcpService::init(account_id, storage_options).await?;
+        let key_storage =
+            storage::secret_storage::init(Some(&gcp_service), storage_options, account_id);
+        let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
+        let redis_cfg = deadpool_redis::Config::from_url(redis_url);
+        let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let triple_storage = TriplePair::storage(&redis_pool, account_id);
+        let presignature_storage = Presignature::storage(&redis_pool, account_id);
+        let backlog = Backlog::persisted(CheckpointStorage::Redis(
+            redis_pool.clone(),
+            account_id.clone(),
+        ));
+        Ok(Self {
+            key_storage,
+            triple_storage,
+            presignature_storage,
+            backlog,
+        })
+    }
+}
+
+struct ProtocolHandles {
+    protocol: MpcSignProtocol,
+    message_channel: MessageChannel,
+    node: Node,
+    node_watcher: NodeStateWatcher,
+    config_tx: watch::Sender<Config>,
+    checkpoints_tx: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
+    checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
+}
+
+impl ProtocolHandles {
+    #[allow(clippy::too_many_arguments)]
+    async fn new(
+        account_id: &AccountId,
+        override_config: Option<OverrideConfig>,
+        network: NetworkConfig,
+        sign_rx: mpsc::Receiver<Sign>,
+        node_client: &NodeClient,
+        contract_watcher: &ContractStateWatcher,
+        key_storage: SecretNodeStorageVariant,
+        triple_storage: TripleStorage,
+        presignature_storage: PresignatureStorage,
+        mesh_state: watch::Receiver<MeshState>,
+        rpc_channel: RpcChannel,
+        backlog: Backlog,
+    ) -> Self {
+        let config = Config::new(LocalConfig {
+            over: override_config.unwrap_or_default(),
+            network,
+        });
+        let (config_tx, config_rx) = watch::channel(config);
+        let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
+        let node = Node::new();
+        let node_watcher = node.watch();
+
+        let message_channel = MessageChannel::spawn(
+            node_client.clone(),
+            config_rx.clone(),
+            contract_watcher.clone(),
+        )
+        .await;
+        let sign_task = SignatureSpawnerTask::run(
+            account_id.clone(),
+            sign_rx,
+            contract_watcher.clone(),
+            config_rx.clone(),
+            presignature_storage.clone(),
+            mesh_state.clone(),
+            message_channel.clone(),
+            rpc_channel,
+            backlog,
+        );
+        let protocol = MpcSignProtocol {
+            my_account_id: account_id.clone(),
+            msg_channel: message_channel.clone(),
+            generating: message_channel.subscribe_generation().await,
+            resharing: message_channel.subscribe_resharing().await,
+            ready: message_channel.subscribe_ready().await,
+            sign_task,
+            secret_storage: key_storage,
+            triple_storage,
+            presignature_storage,
+            config: config_rx,
+            mesh_state,
+        };
+
+        Self {
+            protocol,
+            message_channel,
+            node,
+            node_watcher,
+            config_tx,
+            checkpoints_tx,
+            checkpoints_rx,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn spawn_indexers(
+    chains: ChainConfigs,
+    sign_tx: mpsc::Sender<Sign>,
+    rpc_channel: RpcChannel,
+    backlog: Backlog,
+    contract_watcher: ContractStateWatcher,
+    mesh_state: watch::Receiver<MeshState>,
+    node_client: NodeClient,
+    checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
+) {
+    let ChainConfigs {
+        eth,
+        sol,
+        hydration,
+        canton,
+    } = chains;
+
+    tracing::info!(
+        ethereum = eth.is_some(),
+        solana = sol.is_some(),
+        hydration = hydration.is_some(),
+        canton = canton.is_some(),
+        "spawning chain indexers"
+    );
+
+    if let Some(eth_config) = eth {
+        let eth_telemetry = PrometheusChainTelemetry::new(Chain::Ethereum);
+        match EthereumStream::new(eth_config, backlog.clone(), eth_telemetry.clone()).await {
+            Ok(eth_stream) => {
+                tracing::info!("ethereum indexer stream created successfully");
+                tokio::spawn(run_stream(
+                    eth_stream,
+                    sign_tx.clone(),
+                    rpc_channel.clone(),
+                    backlog.clone(),
+                    eth_telemetry,
+                    contract_watcher.clone(),
+                    mesh_state.clone(),
+                    node_client.clone(),
+                    checkpoints_rx[Chain::Ethereum].clone(),
+                ));
+            }
+            Err(err) => {
+                tracing::error!(?err, "failed to create ethereum indexer stream");
+            }
+        }
+    }
+
+    if let Some(sol_config) = sol {
+        let sol_telemetry = PrometheusChainTelemetry::new(Chain::Solana);
+        match SolanaStream::new(sol_config, backlog.clone(), sol_telemetry.clone()) {
+            Ok(sol_stream) => {
+                tracing::info!("solana indexer stream created successfully");
+                tokio::spawn(run_stream(
+                    sol_stream,
+                    sign_tx.clone(),
+                    rpc_channel.clone(),
+                    backlog.clone(),
+                    sol_telemetry,
+                    contract_watcher.clone(),
+                    mesh_state.clone(),
+                    node_client.clone(),
+                    checkpoints_rx[Chain::Solana].clone(),
+                ));
+            }
+            Err(err) => {
+                tracing::error!(?err, "failed to create solana indexer stream");
+            }
+        }
+    }
+
+    if let Some(hydration_config) = hydration {
+        let hydration_telemetry = PrometheusChainTelemetry::new(Chain::Hydration);
+        tokio::spawn(indexer_hydration::run(
+            hydration_config,
+            sign_tx.clone(),
+            backlog.clone(),
+            hydration_telemetry,
+            contract_watcher.clone(),
+            mesh_state.clone(),
+            node_client.clone(),
+            checkpoints_rx[Chain::Hydration].clone(),
+        ));
+    }
+
+    if let Some(canton_config) = canton {
+        let canton_telemetry = PrometheusChainTelemetry::new(Chain::Canton);
+        match CantonStream::new(canton_config, backlog.clone(), canton_telemetry.clone()).await {
+            Ok(canton_stream) => {
+                tracing::info!("canton indexer stream created successfully");
+                tokio::spawn(run_stream(
+                    canton_stream,
+                    sign_tx,
+                    rpc_channel,
+                    backlog,
+                    canton_telemetry,
+                    contract_watcher,
+                    mesh_state,
+                    node_client,
+                    checkpoints_rx[Chain::Canton].clone(),
+                ));
+            }
+            Err(err) => {
+                tracing::error!(?err, "failed to create canton indexer stream");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

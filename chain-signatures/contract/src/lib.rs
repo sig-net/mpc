@@ -676,19 +676,28 @@ impl VersionedMpcContract {
         threshold: usize,
         public_key: PublicKey,
         config: Option<Config>,
+        checkpoints: Option<BTreeMap<Chain, SignedCheckpoint>>,
     ) -> Result<Self, Error> {
         log!(
-            "init_running: signer={}, epoch={}, participants={}, threshold={}, public_key={:?}, config={:?}",
+            "init_running: signer={}, epoch={}, participants={}, threshold={}, public_key={:?}, config={:?}, checkpoints={:?}",
             env::signer_account_id(),
             epoch,
             serde_json::to_string(&participants).unwrap(),
             threshold,
             public_key,
             config,
+            checkpoints,
         );
 
         if threshold > participants.len() {
             return Err(InitError::ThresholdTooHigh.into());
+        }
+
+        let mut latest_checkpoints = IterableMap::new(StorageKey::LatestCheckpoints);
+        if let Some(checkpoints) = checkpoints {
+            for (chain, checkpoint) in checkpoints {
+                latest_checkpoints.insert(chain, checkpoint);
+            }
         }
 
         Ok(Self::V0(MpcContract {
@@ -704,7 +713,7 @@ impl VersionedMpcContract {
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
             proposed_updates: ProposedUpdates::default(),
             config: config.unwrap_or_default(),
-            latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpoints),
+            latest_checkpoints,
         }))
     }
 
@@ -790,8 +799,8 @@ impl VersionedMpcContract {
         }
     }
 
-    pub fn latest_checkpoint(&self, chain: Chain) -> Option<SignedCheckpoint> {
-        self.checkpoints().get(&chain).cloned()
+    pub fn latest_checkpoint(&self, chain: Chain) -> Option<&SignedCheckpoint> {
+        self.checkpoints().get(&chain)
     }
 
     pub fn read(&self, reads: Vec<Read>) -> Vec<View> {
@@ -852,13 +861,13 @@ impl VersionedMpcContract {
             }
         }
 
-        self.mutable_checkpoints().insert(
+        self.update_checkpoint(vec![(
             checkpoint.chain,
             SignedCheckpoint {
                 checkpoint,
                 signature,
             },
-        );
+        )]);
         Ok(())
     }
 
@@ -1089,6 +1098,20 @@ impl VersionedMpcContract {
     fn mutable_checkpoints(&mut self) -> &mut IterableMap<Chain, SignedCheckpoint> {
         match self {
             Self::V0(mpc_contract) => &mut mpc_contract.latest_checkpoints,
+        }
+    }
+
+    #[private]
+    pub fn update_checkpoint(&mut self, checkpoints: Vec<(Chain, SignedCheckpoint)>) {
+        for (chain, signed_checkpoint) in checkpoints {
+            self.mutable_checkpoints().insert(chain, signed_checkpoint);
+        }
+    }
+
+    #[private]
+    pub fn reset_checkpoint(&mut self, chains: Vec<Chain>) {
+        for chain in chains {
+            self.mutable_checkpoints().remove(&chain);
         }
     }
 }

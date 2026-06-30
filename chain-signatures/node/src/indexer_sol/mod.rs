@@ -1,9 +1,6 @@
 mod client;
 mod config;
 
-use crate::protocol::Chain;
-use crate::sign_bidirectional::hash_rlp_data;
-use crate::util::ethabi_request_id;
 pub use client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
 pub use config::SolConfig;
 
@@ -24,9 +21,13 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::kdf::derive_epsilon_sol;
 use mpc_crypto::ScalarExt as _;
-use mpc_indexer_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
+use mpc_indexer_core::{
+    utils::hashing::{compute_request_id, hash_payload},
+    ChainIndexer, ChainStream, ChainTelemetry, StateManager,
+};
 use mpc_primitives::{
-    ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+    Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION,
+    MAX_SECP256K1_SCALAR,
 };
 use serde::{Deserialize, Serialize};
 use signet_program::{
@@ -97,20 +98,17 @@ impl<S: StateManager, T: ChainTelemetry> Drop for SolanaStream<S, T> {
 }
 
 impl<S: StateManager, T: ChainTelemetry> SolanaStream<S, T> {
-    pub fn new(sol: Option<SolConfig>, state_manager: S, telemetry: T) -> Option<Self> {
-        let Some(sol) = sol else {
-            tracing::warn!("solana indexer is disabled");
-            return None;
-        };
-
-        let Ok(program_id) = Pubkey::from_str(&sol.program_address) else {
-            tracing::error!("Failed to parse program address: {}", sol.program_address);
-            return None;
-        };
+    pub fn new(sol: SolConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
+        let program_id = Pubkey::from_str(&sol.program_address).with_context(|| {
+            format!(
+                "failed to parse solana program address: {}",
+                sol.program_address
+            )
+        })?;
 
         let (tx, rx) = crate::stream::channel();
 
-        Some(SolanaStream {
+        Ok(SolanaStream {
             rx: Some(rx),
             start_state: Some(SolanaStreamStartState {
                 program_id,
@@ -342,9 +340,9 @@ impl SolanaSignEvent {
 
     pub fn generate_request_id(&self) -> [u8; 32] {
         match self {
-            SolanaSignEvent::SignatureRequested(ev) => ethabi_request_id(
+            SolanaSignEvent::SignatureRequested(ev) => compute_request_id(
                 &ev.sender.to_string(),
-                ev.payload,
+                &ev.payload,
                 &ev.path,
                 ev.key_version,
                 &ev.chain_id,
@@ -410,7 +408,7 @@ impl SolanaSignEvent {
             SolanaSignEvent::SignBidirectional(ev) => {
                 let epsilon = derive_epsilon_sol(ev.key_version, &ev.sender.to_string(), &ev.path);
                 tracing::info!(?sign_id, "solana bidirectional signature requested");
-                let unsigned_tx_hash = hash_rlp_data(&ev.serialized_transaction);
+                let unsigned_tx_hash = hash_payload(&ev.serialized_transaction);
                 let payload = Scalar::from_bytes(unsigned_tx_hash)?;
 
                 if payload > *MAX_SECP256K1_SCALAR {
@@ -896,7 +894,7 @@ async fn emit_events(
                         mpc_primitives::RespondBidirectionalEvent {
                             request_id: ev.request_id,
                             signature,
-                            chain: crate::protocol::Chain::Solana,
+                            chain: Chain::Solana,
                         },
                     ))
                     .await;
@@ -973,6 +971,7 @@ pub fn to_mpc_signature(
 mod tests {
     use std::collections::BTreeMap;
 
+    // TODO: test should rely on StateManager mock instead of Backlog
     use crate::backlog::Backlog;
 
     use super::*;
