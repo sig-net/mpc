@@ -3,26 +3,30 @@ mod args;
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
-use crate::indexer_eth::EthereumStream;
-use crate::indexer_sol::SolanaStream;
-use crate::mesh::Mesh;
+use crate::indexer_canton::{CantonConfig, CantonStream};
+use crate::indexer_eth::{EthConfig, EthereumStream};
+use crate::indexer_hydration::{self, HydrationConfig};
+use crate::indexer_sol::{SolConfig, SolanaStream};
+use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::indexers::PrometheusChainTelemetry;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::contract::ProtocolState;
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
-use crate::protocol::signature::SignatureSpawnerTask;
+use crate::protocol::signature::{Sign, SignatureSpawnerTask};
 use crate::protocol::state::{Node, NodeStateWatcher};
 use crate::protocol::sync::SyncTask;
-use crate::protocol::Chain;
-use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
+use crate::protocol::{spawn_system_metrics, Chain, MpcSignProtocol};
 use crate::rpc::{ContractStateWatcher, NearClient, RpcChannel, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
-use crate::storage::triple_storage::TriplePair;
+use crate::storage::presignature_storage::PresignatureStorage;
+use crate::storage::secret_storage::SecretNodeStorageVariant;
+use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::stream::run_stream;
-use crate::{indexer, indexer_hydration, logs, mesh, storage, web};
+use crate::{indexer, logs, storage, web};
 pub use args::{canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, solana::SolArgs};
 
+use cait_sith::protocol::Participant;
 use clap::Parser;
 use deadpool_redis::Runtime;
 use enum_map::EnumMap;
@@ -35,17 +39,6 @@ use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
 use tokio::sync::{mpsc, watch};
 use url::Url;
-
-use crate::indexer_canton::{CantonConfig, CantonStream};
-use crate::indexer_eth::EthConfig;
-use crate::indexer_hydration::HydrationConfig;
-use crate::indexer_sol::SolConfig;
-use crate::mesh::MeshState;
-use crate::protocol::signature::Sign;
-use crate::storage::presignature_storage::PresignatureStorage;
-use crate::storage::secret_storage::SecretNodeStorageVariant;
-use crate::storage::triple_storage::TripleStorage;
-use cait_sith::protocol::Participant;
 
 const DEFAULT_WEB_PORT: u16 = 3000;
 
@@ -246,7 +239,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 triple_storage,
                 presignature_storage,
                 backlog,
-            } = setup_storage(&account_id, &storage_options).await?;
+            } = StorageHandles::new(&account_id, &storage_options).await?;
 
             let web_port = web_port.unwrap_or(DEFAULT_WEB_PORT);
             let sign_sk = sign_sk.unwrap_or_else(|| account_sk.clone());
@@ -277,7 +270,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 contract_watcher,
                 contract_state_tx,
                 synced_peer_tx,
-            } = setup_mesh(message_options, mesh_options, &account_id);
+            } = MeshHandles::new(message_options, mesh_options, &account_id);
 
             let chains = ChainConfigs::from_args(eth, sol, hydration, canton);
             let network = NetworkConfig { cipher_sk, sign_sk };
@@ -287,7 +280,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 near_client,
                 rpc_channel,
                 rpc_executor,
-            } = setup_rpc(
+            } = RpcHandles::new(
                 &near_rpc,
                 &my_address,
                 &network,
@@ -325,7 +318,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 config_tx,
                 checkpoints_tx,
                 checkpoints_rx,
-            } = setup_protocol(
+            } = ProtocolHandles::new(
                 &account_id,
                 override_config,
                 network,
@@ -537,23 +530,25 @@ struct MeshHandles {
     synced_peer_tx: mpsc::Sender<Participant>,
 }
 
-fn setup_mesh(
-    message_options: node_client::Options,
-    mesh_options: mesh::Options,
-    account_id: &AccountId,
-) -> MeshHandles {
-    let node_client = NodeClient::new(&message_options);
-    let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
-    let mesh = Mesh::new(&node_client, mesh_options, account_id, synced_peer_rx);
-    let mesh_state = mesh.watch();
-    let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(account_id);
-    MeshHandles {
-        node_client,
-        mesh,
-        mesh_state,
-        contract_watcher,
-        contract_state_tx,
-        synced_peer_tx,
+impl MeshHandles {
+    fn new(
+        message_options: node_client::Options,
+        mesh_options: mesh::Options,
+        account_id: &AccountId,
+    ) -> Self {
+        let node_client = NodeClient::new(&message_options);
+        let (synced_peer_tx, synced_peer_rx) = SyncTask::synced_nodes_channel();
+        let mesh = Mesh::new(&node_client, mesh_options, account_id, synced_peer_rx);
+        let mesh_state = mesh.watch();
+        let (contract_watcher, contract_state_tx) = ContractStateWatcher::new(account_id);
+        Self {
+            node_client,
+            mesh,
+            mesh_state,
+            contract_watcher,
+            contract_state_tx,
+            synced_peer_tx,
+        }
     }
 }
 
@@ -563,27 +558,30 @@ struct RpcHandles {
     rpc_executor: RpcExecutor,
 }
 
-async fn setup_rpc(
-    near_rpc_url: &str,
-    my_address: &Url,
-    network: &NetworkConfig,
-    mpc_contract_id: &AccountId,
-    signer: InMemorySigner,
-    chains: &ChainConfigs,
-) -> RpcHandles {
-    let near_client = NearClient::new(near_rpc_url, my_address, network, mpc_contract_id, signer);
-    let (rpc_channel, rpc_executor) = RpcExecutor::new(
-        &near_client,
-        &chains.eth,
-        &chains.sol,
-        &chains.hydration,
-        &chains.canton,
-    )
-    .await;
-    RpcHandles {
-        near_client,
-        rpc_channel,
-        rpc_executor,
+impl RpcHandles {
+    async fn new(
+        near_rpc_url: &str,
+        my_address: &Url,
+        network: &NetworkConfig,
+        mpc_contract_id: &AccountId,
+        signer: InMemorySigner,
+        chains: &ChainConfigs,
+    ) -> Self {
+        let near_client =
+            NearClient::new(near_rpc_url, my_address, network, mpc_contract_id, signer);
+        let (rpc_channel, rpc_executor) = RpcExecutor::new(
+            &near_client,
+            &chains.eth,
+            &chains.sol,
+            &chains.hydration,
+            &chains.canton,
+        )
+        .await;
+        Self {
+            near_client,
+            rpc_channel,
+            rpc_executor,
+        }
     }
 }
 
@@ -594,28 +592,30 @@ struct StorageHandles {
     backlog: Backlog,
 }
 
-async fn setup_storage(
-    account_id: &AccountId,
-    storage_options: &storage::Options,
-) -> anyhow::Result<StorageHandles> {
-    let gcp_service = GcpService::init(account_id, storage_options).await?;
-    let key_storage =
-        storage::secret_storage::init(Some(&gcp_service), storage_options, account_id);
-    let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
-    let redis_cfg = deadpool_redis::Config::from_url(redis_url);
-    let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
-    let triple_storage = TriplePair::storage(&redis_pool, account_id);
-    let presignature_storage = Presignature::storage(&redis_pool, account_id);
-    let backlog = Backlog::persisted(CheckpointStorage::Redis(
-        redis_pool.clone(),
-        account_id.clone(),
-    ));
-    Ok(StorageHandles {
-        key_storage,
-        triple_storage,
-        presignature_storage,
-        backlog,
-    })
+impl StorageHandles {
+    async fn new(
+        account_id: &AccountId,
+        storage_options: &storage::Options,
+    ) -> anyhow::Result<Self> {
+        let gcp_service = GcpService::init(account_id, storage_options).await?;
+        let key_storage =
+            storage::secret_storage::init(Some(&gcp_service), storage_options, account_id);
+        let redis_url: Url = Url::parse(storage_options.redis_url.as_str())?;
+        let redis_cfg = deadpool_redis::Config::from_url(redis_url);
+        let redis_pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let triple_storage = TriplePair::storage(&redis_pool, account_id);
+        let presignature_storage = Presignature::storage(&redis_pool, account_id);
+        let backlog = Backlog::persisted(CheckpointStorage::Redis(
+            redis_pool.clone(),
+            account_id.clone(),
+        ));
+        Ok(Self {
+            key_storage,
+            triple_storage,
+            presignature_storage,
+            backlog,
+        })
+    }
 }
 
 struct ProtocolHandles {
@@ -628,69 +628,71 @@ struct ProtocolHandles {
     checkpoints_rx: EnumMap<Chain, watch::Receiver<CheckpointDigest>>,
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn setup_protocol(
-    account_id: &AccountId,
-    override_config: Option<OverrideConfig>,
-    network: NetworkConfig,
-    sign_rx: mpsc::Receiver<Sign>,
-    node_client: &NodeClient,
-    contract_watcher: &ContractStateWatcher,
-    key_storage: SecretNodeStorageVariant,
-    triple_storage: TripleStorage,
-    presignature_storage: PresignatureStorage,
-    mesh_state: watch::Receiver<MeshState>,
-    rpc_channel: RpcChannel,
-    backlog: Backlog,
-) -> ProtocolHandles {
-    let config = Config::new(LocalConfig {
-        over: override_config.unwrap_or_default(),
-        network,
-    });
-    let (config_tx, config_rx) = watch::channel(config);
-    let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
-    let node = Node::new();
-    let node_watcher = node.watch();
+impl ProtocolHandles {
+    #[allow(clippy::too_many_arguments)]
+    async fn new(
+        account_id: &AccountId,
+        override_config: Option<OverrideConfig>,
+        network: NetworkConfig,
+        sign_rx: mpsc::Receiver<Sign>,
+        node_client: &NodeClient,
+        contract_watcher: &ContractStateWatcher,
+        key_storage: SecretNodeStorageVariant,
+        triple_storage: TripleStorage,
+        presignature_storage: PresignatureStorage,
+        mesh_state: watch::Receiver<MeshState>,
+        rpc_channel: RpcChannel,
+        backlog: Backlog,
+    ) -> Self {
+        let config = Config::new(LocalConfig {
+            over: override_config.unwrap_or_default(),
+            network,
+        });
+        let (config_tx, config_rx) = watch::channel(config);
+        let (checkpoints_tx, checkpoints_rx) = checkpoint_watchers();
+        let node = Node::new();
+        let node_watcher = node.watch();
 
-    let message_channel = MessageChannel::spawn(
-        node_client.clone(),
-        config_rx.clone(),
-        contract_watcher.clone(),
-    )
-    .await;
-    let sign_task = SignatureSpawnerTask::run(
-        account_id.clone(),
-        sign_rx,
-        contract_watcher.clone(),
-        config_rx.clone(),
-        presignature_storage.clone(),
-        mesh_state.clone(),
-        message_channel.clone(),
-        rpc_channel,
-        backlog,
-    );
-    let protocol = MpcSignProtocol {
-        my_account_id: account_id.clone(),
-        msg_channel: message_channel.clone(),
-        generating: message_channel.subscribe_generation().await,
-        resharing: message_channel.subscribe_resharing().await,
-        ready: message_channel.subscribe_ready().await,
-        sign_task,
-        secret_storage: key_storage,
-        triple_storage,
-        presignature_storage,
-        config: config_rx,
-        mesh_state,
-    };
+        let message_channel = MessageChannel::spawn(
+            node_client.clone(),
+            config_rx.clone(),
+            contract_watcher.clone(),
+        )
+        .await;
+        let sign_task = SignatureSpawnerTask::run(
+            account_id.clone(),
+            sign_rx,
+            contract_watcher.clone(),
+            config_rx.clone(),
+            presignature_storage.clone(),
+            mesh_state.clone(),
+            message_channel.clone(),
+            rpc_channel,
+            backlog,
+        );
+        let protocol = MpcSignProtocol {
+            my_account_id: account_id.clone(),
+            msg_channel: message_channel.clone(),
+            generating: message_channel.subscribe_generation().await,
+            resharing: message_channel.subscribe_resharing().await,
+            ready: message_channel.subscribe_ready().await,
+            sign_task,
+            secret_storage: key_storage,
+            triple_storage,
+            presignature_storage,
+            config: config_rx,
+            mesh_state,
+        };
 
-    ProtocolHandles {
-        protocol,
-        message_channel,
-        node,
-        node_watcher,
-        config_tx,
-        checkpoints_tx,
-        checkpoints_rx,
+        Self {
+            protocol,
+            message_channel,
+            node,
+            node_watcher,
+            config_tx,
+            checkpoints_tx,
+            checkpoints_rx,
+        }
     }
 }
 
