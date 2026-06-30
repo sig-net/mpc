@@ -1,8 +1,9 @@
-// TODO: this should be moved somewhere so that it can be re-used by both indexer crates and the node crate
-
 use std::time::Duration;
 
 use backon::ExponentialBuilder;
+
+// Re-export the retry_rpc macro
+pub use crate::retry_rpc;
 
 /// Configuration for retrying RPC calls with exponential backoff.
 #[derive(Clone, Copy)]
@@ -102,6 +103,7 @@ pub fn is_retryable(e: &anyhow::Error) -> bool {
 ///     }
 /// )?;
 /// ```
+#[macro_export]
 macro_rules! retry_rpc {
     // Standard form: op_name string, default structured logging
     ($timeout:expr, $strategy:expr, $op_name:literal, { $($code:tt)* }) => {{
@@ -114,10 +116,10 @@ macro_rules! retry_rpc {
                 Err(_) => Err(anyhow::anyhow!("Operation timed out after {:?}", $timeout)),
             }
         };
-        use backon::Retryable;
+        use $crate::backon::Retryable as _;
         op.retry(&$strategy.build())
             // Retry only if the error is retryable (e.g., not a 4xx client error)
-            .when(|e: &anyhow::Error| crate::util::retry::is_retryable(e))
+            .when(|e: &anyhow::Error| $crate::utils::retry::is_retryable(e))
             // Log each retry attempt with structured tracing
             .notify(|err: &anyhow::Error, sleep: std::time::Duration| {
                 attempt_counter += 1;
@@ -144,10 +146,10 @@ macro_rules! retry_rpc {
                 Err(_) => Err(anyhow::anyhow!("Operation timed out after {:?}", $timeout)),
             }
         };
-        use backon::Retryable;
+        use $crate::backon::Retryable as _;
         op.retry(&$strategy.build())
             // Retry only if the error is retryable (e.g., not a 4xx client error)
-            .when(|e: &anyhow::Error| crate::util::retry::is_retryable(e))
+            .when(|e: &anyhow::Error| $crate::utils::retry::is_retryable(e))
             // Log each retry attempt with the user-provided notify closure
             .notify(|$err: &anyhow::Error, $sleep: std::time::Duration| {
                 attempt_counter += 1;
@@ -158,5 +160,3 @@ macro_rules! retry_rpc {
             .map_err(|e| anyhow::anyhow!("{e} (exhausted after {} attempts)", attempt_counter + 1))
     }};
 }
-
-pub(crate) use retry_rpc;

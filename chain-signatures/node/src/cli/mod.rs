@@ -1,10 +1,12 @@
 mod args;
 
+use std::{collections::HashMap, sync::Arc};
+
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
 use crate::indexer_eth::EthereumStream;
-use crate::indexer_sol::SolanaStream;
+use crate::indexer_sol::{SolanaClient, SolanaStream};
 use crate::mesh::Mesh;
 use crate::metrics::indexers::PrometheusChainTelemetry;
 use crate::node_client::{self, NodeClient};
@@ -15,7 +17,7 @@ use crate::protocol::state::Node;
 use crate::protocol::sync::SyncTask;
 use crate::protocol::Chain;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
-use crate::rpc::{ContractStateWatcher, NearClient, RpcExecutor};
+use crate::rpc::{self, ChainPublisher, ContractStateWatcher, NearClient, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::triple_storage::TriplePair;
 use crate::stream::run_stream;
@@ -318,8 +320,38 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let near_client =
                 NearClient::new(&near_rpc, &my_address, &network, &mpc_contract_id, signer);
 
-            let (rpc_channel, rpc) =
-                RpcExecutor::new(&near_client, &eth, &sol, &hydration, &canton).await;
+            // TODO: Centralize publishers and indexers creation: collect all chain args first, then create publishers and indexers in one place.
+            // Build publishers registry
+            let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+
+            // Add NEAR publisher unconditionally
+            publishers.insert(Chain::NEAR, Arc::new(near_client.clone()));
+
+            // Add other publishers based on the provided configurations
+            if let Some(eth_cfg) = &eth {
+                publishers.insert(Chain::Ethereum, Arc::new(rpc::EthClient::new(eth_cfg)));
+            }
+            if let Some(sol_cfg) = &sol {
+                publishers.insert(Chain::Solana, Arc::new(SolanaClient::from_config(sol_cfg)));
+            }
+            if let Some(hyd_cfg) = &hydration {
+                match rpc::HydrationClient::new(hyd_cfg).await {
+                    Ok(client) => {
+                        publishers.insert(Chain::Hydration, Arc::new(client));
+                    }
+                    Err(e) => tracing::error!(%e, "failed to create hydration client"),
+                }
+            }
+            if let Some(canton_cfg) = &canton {
+                match rpc::CantonClient::new(canton_cfg).await {
+                    Ok(client) => {
+                        publishers.insert(Chain::Canton, Arc::new(client));
+                    }
+                    Err(e) => tracing::error!(%e, "failed to create canton client"),
+                }
+            }
+
+            let (rpc_channel, rpc) = RpcExecutor::new(near_client.clone(), publishers).await;
 
             let (sync_channel, sync) = SyncTask::new(
                 &client,

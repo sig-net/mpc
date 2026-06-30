@@ -12,7 +12,6 @@ use mpc_primitives::{
 };
 use rlp::{Rlp, RlpStream};
 use serde_json::Value;
-use sha3::{Digest, Keccak256};
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -286,12 +285,6 @@ impl TransactionOutput {
             },
         })
     }
-}
-
-pub fn hash_rlp_data(rlp_data: &[u8]) -> [u8; 32] {
-    let mut hasher = Keccak256::new();
-    hasher.update(rlp_data);
-    hasher.finalize().into()
 }
 
 pub fn decode_rlp(rlp_data: Vec<u8>, is_eip1559: bool) -> anyhow::Result<Vec<Bytes>> {

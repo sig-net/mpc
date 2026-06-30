@@ -1,4 +1,4 @@
-use super::PublishAction;
+use super::{ChainPublisher, PublishAction};
 use crate::config::NetworkConfig;
 use crate::protocol::Governance;
 use crate::util::AffinePointExt as _;
@@ -11,8 +11,14 @@ use near_account_id::AccountId;
 use near_crypto::InMemorySigner;
 use near_fetch::result::ExecutionFinalResult;
 use serde_json::json;
-use std::time::Instant;
 use url::Url;
+
+/// Base delay in milliseconds between NEAR RPC retries
+const NEAR_RETRY_BASE_DELAY_MS: u64 = 500;
+/// Maximum number of retry attempts for NEAR RPC calls
+const NEAR_RESPOND_MAX_RETRIES: usize = 3;
+/// Maximum number of retry attempts for NEAR governance calls (vote, join)
+const NEAR_GOVERNANCE_MAX_RETRIES: usize = 5;
 
 #[derive(Clone)]
 pub struct NearClient {
@@ -69,7 +75,7 @@ impl NearClient {
                 "public_key": public_key
             }))
             .max_gas()
-            .retry_exponential(10, 5)
+            .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_GOVERNANCE_MAX_RETRIES)
             .transact()
             .await
             .inspect_err(|err| {
@@ -89,7 +95,7 @@ impl NearClient {
                 "epoch": epoch
             }))
             .max_gas()
-            .retry_exponential(10, 5)
+            .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_GOVERNANCE_MAX_RETRIES)
             .transact()
             .await
             .inspect_err(|err| {
@@ -110,7 +116,7 @@ impl NearClient {
                 "sign_pk": self.sign_pk,
             }))
             .max_gas()
-            .retry_exponential(10, 3)
+            .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_GOVERNANCE_MAX_RETRIES)
             .transact()
             .await?
             .into_result()?;
@@ -130,6 +136,7 @@ impl NearClient {
                 "signature": response,
             }))
             .max_gas()
+            .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_RESPOND_MAX_RETRIES)
             .transact()
             .await
     }
@@ -156,22 +163,24 @@ impl NearClient {
                 "signature": signature,
             }))
             .max_gas()
+            .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_RESPOND_MAX_RETRIES)
             .transact()
             .await
     }
+}
 
-    pub async fn publish_signature(
-        &self,
-        action: &PublishAction,
-        timestamp: &Instant,
-        signature: &Signature,
-    ) -> Result<(), near_fetch::Error> {
+#[async_trait::async_trait]
+impl ChainPublisher for NearClient {
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
+        let timestamp = action.timestamp;
+        let signature = &action.signature;
         let outcome = match &action.indexed.kind {
             SignKind::Checkpoint(checkpoint) => {
                 self.call_respond_checkpoint(checkpoint, signature).await
             }
             _ => self.call_respond(&action.indexed.id, signature).await,
         }
+        .map_err(|e| anyhow::anyhow!("near rpc error: {e}"))
         .inspect_err(|err| {
             tracing::error!(
                 sign_id = ?action.indexed.id,
@@ -180,15 +189,19 @@ impl NearClient {
             );
         })?;
 
-        let _: () = outcome.json().inspect_err(|err| {
-            tracing::error!(
-                sign_id = ?action.indexed.id,
-                big_r = signature.big_r.to_base58(),
-                s = ?signature.s,
-                ?err,
-                "smart contract threw error",
-            );
-        })?;
+        outcome
+            .json::<()>()
+            .map_err(|e| anyhow::anyhow!("contract rejected response: {e}"))
+            .inspect_err(|err| {
+                tracing::error!(
+                    sign_id = ?action.indexed.id,
+                    big_r = signature.big_r.to_base58(),
+                    s = ?signature.s,
+                    ?err,
+                    "smart contract threw error",
+                );
+            })?;
+
         tracing::info!(
             sign_id = ?action.indexed.id,
             big_r = signature.big_r.to_base58(),
@@ -196,6 +209,9 @@ impl NearClient {
             elapsed = ?timestamp.elapsed(),
             "published signature sucessfully",
         );
+
+        super::record_publish_metrics(action);
+
         Ok(())
     }
 }

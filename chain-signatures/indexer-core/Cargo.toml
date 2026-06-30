@@ -5,6 +5,9 @@ version.workspace = true
 description = "Core traits and types for the MPC indexers"
 
 [dependencies]
+alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
+backon.workspace = true
 # TODO: replace anyhow with thiserror
 anyhow.workspace = true
 async-trait.workspace = true

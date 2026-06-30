@@ -7351,8 +7351,11 @@ dependencies = [
 name = "mpc-indexer-core"
 version = "1.16.4"
 dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
  "anyhow",
  "async-trait",
+ "backon",
  "futures-util",
  "mpc-primitives",
  "tokio",
@@ -7386,7 +7389,6 @@ dependencies = [
  "async-trait",
  "axum",
  "axum-extra",
- "backon",
  "borsh 0.10.4",
  "borsh 1.5.7",
  "cait-sith",
