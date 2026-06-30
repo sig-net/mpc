@@ -14,12 +14,18 @@ pub trait ChainPublisher: Send + Sync + 'static {
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()>;
 }
 
+/// Represents a signature that is ready to be published to a blockchain.
 #[derive(Clone)]
 pub struct PublishAction {
+    /// The public key associated with the signature.
     pub public_key: PublicKey,
+    /// The indexed sign request that this signature corresponds to.
     pub indexed: IndexedSignRequest,
+    /// The actual signature to be published.
     pub signature: Signature,
+    /// The participants involved in the signing process.
     pub participants: Vec<Participant>,
+    /// The timestamp when the publish action was created.
     pub timestamp: Instant,
 }
 
