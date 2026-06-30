@@ -1,3 +1,5 @@
+use super::PublishAction;
+
 /// Interface for the Indexer to report telemetry data.
 pub trait ChainTelemetry: Send + Sync + Clone + 'static {
     /// Records that a block was parsed at the live tip
@@ -26,4 +28,18 @@ impl ChainTelemetry for NoopChainTelemetry {
     fn checkpoint_created(&self, _block_number: u64) {}
     fn request_indexed_at(&self, _block_timestamp: u64) {}
     fn request_indexed(&self) {}
+}
+
+/// Interface for the chain clients to record telemetry data during publishing signatures to the chain.
+pub trait PublisherTelemetry: Send + Sync + Clone + 'static {
+    /// Records metrics related to publishing a signature to the chain.
+    fn record_publish_metrics(&self, action: &PublishAction);
+}
+
+/// No-op implementation for tests
+#[derive(Clone, Default)]
+pub struct NoopPublisherTelemetry;
+
+impl PublisherTelemetry for NoopPublisherTelemetry {
+    fn record_publish_metrics(&self, _action: &PublishAction) {}
 }

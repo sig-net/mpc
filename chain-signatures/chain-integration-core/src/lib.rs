@@ -9,7 +9,9 @@ pub mod utils;
 pub use indexer::{ChainIndexer, ChainStream};
 pub use publish::{ChainPublisher, PublishAction};
 pub use state::StateManager;
-pub use telemetry::{ChainTelemetry, NoopChainTelemetry};
+pub use telemetry::{
+    ChainTelemetry, NoopChainTelemetry, NoopPublisherTelemetry, PublisherTelemetry,
+};
 
 // Re-export backon because `retry_rpc!` uses `Retryable` trait internally
 #[doc(hidden)]

@@ -2,11 +2,11 @@ mod canton;
 mod ethereum;
 mod hydration;
 mod near;
+mod telemetry;
 #[cfg(test)]
 mod test_utils;
 
 use crate::config::Config;
-use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
@@ -14,7 +14,7 @@ use enum_map::EnumMap;
 use mpc_chain_integration_core::{ChainPublisher, PublishAction};
 use std::collections::BTreeSet;
 use std::sync::Arc;
-
+pub use telemetry::NodePublisherTelemetry;
 // TODO: move clients elsewhere
 pub use canton::CantonClient;
 pub use ethereum::EthClient;
@@ -518,29 +518,6 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
             "exceeded max retries, trashing publish request"
         );
     }
-}
-
-/// Helper to record metrics when a signature is successfully published to a chain.
-pub fn record_publish_metrics(action: &PublishAction) {
-    let chain = action.indexed.chain;
-    let elapsed_secs = crate::util::unix_elapsed(action.indexed.unix_timestamp_indexed).as_secs();
-
-    if elapsed_secs <= chain.expected_response_time_secs() {
-        record_request_latency_since(
-            chain,
-            SignRequestStep::Total,
-            "in_time",
-            action.indexed.unix_timestamp_indexed,
-        );
-    } else {
-        record_request_latency_since(
-            chain,
-            SignRequestStep::Total,
-            "expired",
-            action.indexed.unix_timestamp_indexed,
-        );
-    }
-    record_request_latency_since(chain, SignRequestStep::Responding, "ok", action.timestamp);
 }
 
 #[cfg(test)]
