@@ -155,7 +155,7 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
             }
             _ = state_rx.changed() => {
                 let state = *state_rx.borrow_and_update();
-                if matches!(state, ChainStreaming::Recovery { .. } | ChainStreaming::Catchup { .. }) {
+                if matches!(state, ChainStreaming::Recovery { .. } | ChainStreaming::Catchup { .. } | ChainStreaming::Reconnect) {
                     caught_up = false;
                 }
             }
