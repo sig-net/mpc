@@ -584,10 +584,10 @@ fn calculate_digest(
 }
 
 fn checkpoint_watchers() -> (
-    EnumMap<Chain, watch::Sender<CheckpointDigest>>,
-    EnumMap<Chain, watch::Receiver<CheckpointDigest>>,
+    EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
+    EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
 ) {
-    let channels = EnumMap::from_fn(|_| watch::channel(CheckpointDigest::default()));
+    let channels = EnumMap::from_fn(|_| watch::channel(None));
     let checkpoints_tx = EnumMap::from_fn(|chain| channels[chain].0.clone());
     let checkpoints_rx = EnumMap::from_fn(|chain| channels[chain].1.clone());
     (checkpoints_tx, checkpoints_rx)

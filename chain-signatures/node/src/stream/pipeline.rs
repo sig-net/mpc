@@ -4,9 +4,10 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::signature::Sign;
 use crate::protocol::Chain;
+use crate::types::CheckpointWatcher;
+
 use futures_util::StreamExt;
 use mpc_indexer_core::ChainIndexer;
-use mpc_primitives::CheckpointDigest;
 use near_account_id::AccountId;
 use tokio::sync::{mpsc, watch};
 
@@ -14,7 +15,7 @@ pub struct ChainPipeline<I: ChainIndexer> {
     indexer: I,
     state_tx: watch::Sender<ChainStreaming>,
     state_rx: watch::Receiver<ChainStreaming>,
-    checkpoints_rx: watch::Receiver<CheckpointDigest>,
+    checkpoints_rx: CheckpointWatcher,
     backlog: Backlog,
     sign_tx: mpsc::Sender<Sign>,
     mesh_state: watch::Receiver<MeshState>,
@@ -27,7 +28,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         indexer: I,
-        checkpoints_rx: watch::Receiver<CheckpointDigest>,
+        checkpoints_rx: CheckpointWatcher,
         backlog: Backlog,
         sign_tx: mpsc::Sender<Sign>,
         mesh_state: watch::Receiver<MeshState>,
@@ -52,7 +53,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
     pub fn from_state(
         state: ChainStreaming,
         indexer: I,
-        checkpoints_rx: watch::Receiver<CheckpointDigest>,
+        checkpoints_rx: CheckpointWatcher,
         backlog: Backlog,
         sign_tx: mpsc::Sender<Sign>,
         mesh_state: watch::Receiver<MeshState>,
@@ -256,7 +257,7 @@ enum RegressionOutcome {
 
 /// Waits for a consensus checkpoint digest change, then checks for regression.
 async fn wait_detected_regression(
-    checkpoints_rx: &mut watch::Receiver<CheckpointDigest>,
+    checkpoints_rx: &mut CheckpointWatcher,
     backlog: &Backlog,
     chain: Chain,
 ) -> RegressionOutcome {
@@ -285,12 +286,9 @@ async fn wait_detected_regression(
 async fn detect_regression(
     chain: Chain,
     backlog: &Backlog,
-    checkpoints_rx: &mut watch::Receiver<CheckpointDigest>,
+    checkpoints_rx: &mut CheckpointWatcher,
 ) -> Option<ChainStreaming> {
-    let checkpoint_digest = checkpoints_rx.borrow_and_update().clone();
-    if checkpoint_digest.digest == [0u8; 32] {
-        return None;
-    }
+    let checkpoint_digest = checkpoints_rx.borrow_and_update().as_ref()?.clone();
 
     // Use latest_checkpoint (read-only) instead of checkpoint() to avoid
     // creating a new checkpoint as a side-effect during regression detection.
@@ -330,28 +328,29 @@ async fn detect_regression(
 mod tests {
     use super::*;
     use crate::backlog::Backlog;
+    use mpc_primitives::CheckpointDigest;
     use std::time::Duration;
 
     fn make_digest(
         height: u64,
         digest: [u8; 32],
     ) -> (
-        watch::Sender<CheckpointDigest>,
-        watch::Receiver<CheckpointDigest>,
+        watch::Sender<Option<CheckpointDigest>>,
+        watch::Receiver<Option<CheckpointDigest>>,
     ) {
-        watch::channel(CheckpointDigest { height, digest })
+        watch::channel(Some(CheckpointDigest { height, digest }))
     }
 
     #[tokio::test]
-    async fn test_zero_digest_returns_none() {
+    async fn test_empty_digest_returns_none() {
         let backlog = Backlog::new();
         let chain = Chain::Ethereum;
-        let (_tx, mut rx) = make_digest(0, [0u8; 32]);
+        let (_tx, mut rx) = watch::channel(None);
 
         let result = detect_regression(chain, &backlog, &mut rx).await;
         assert!(
             result.is_none(),
-            "zero digest should not trigger regression"
+            "empty digest should not trigger regression"
         );
     }
 
@@ -487,10 +486,10 @@ mod tests {
         let handle =
             tokio::spawn(async move { wait_detected_regression(&mut rx, &backlog, chain).await });
 
-        tx.send(CheckpointDigest {
+        tx.send(Some(CheckpointDigest {
             height: 200,
             digest: [0xabu8; 32],
-        })
+        }))
         .unwrap();
 
         let result = tokio::time::timeout(Duration::from_secs(1), handle)

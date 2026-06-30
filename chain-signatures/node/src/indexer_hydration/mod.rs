@@ -6,9 +6,11 @@ use crate::node_client::NodeClient;
 use crate::protocol::{Chain, Sign};
 use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::hash_rlp_data;
+use crate::types::CheckpointWatcher;
+use crate::util::ethabi_request_id;
+
 pub use config::HydrationConfig;
 
-use crate::util::ethabi_request_id;
 use alloy_sol_types::SolValue;
 use anyhow::{anyhow, Result};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
@@ -16,9 +18,8 @@ use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
 use mpc_indexer_core::ChainTelemetry;
 use mpc_primitives::{
-    CheckpointDigest, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
-    SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
-    MAX_SECP256K1_SCALAR,
+    IndexedSignRequest, RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignId,
+    Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{twox_128, H256};
@@ -317,7 +318,7 @@ pub async fn run<T: ChainTelemetry>(
     mut contract_watcher: ContractStateWatcher,
     mut mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
-    mut checkpoints_rx: watch::Receiver<CheckpointDigest>,
+    mut checkpoints_rx: CheckpointWatcher,
 ) {
     let Some(hydration) = hydration else {
         tracing::warn!("hydration indexer is disabled");
