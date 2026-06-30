@@ -1,15 +1,15 @@
 use crate::types::{Address, KeyVersion, Path, Purpose};
 use crate::{PublicKey, ScalarExt};
 use anyhow::Context;
+use hkdf::Hkdf;
 use k256::{
     ecdsa::{RecoveryId, Signature, VerifyingKey},
     elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint, CurveArithmetic},
-    Scalar, Secp256k1, SecretKey, AffinePoint
+    AffinePoint, Scalar, Secp256k1, SecretKey,
 };
 use mpc_primitives::{Chain, Signature as MpcSignature};
 use near_account_id::AccountId;
 use sha3::{Digest, Keccak256, Sha3_256};
-use hkdf::Hkdf;
 // TODO: replace with smaller crate
 use near_primitives::hash::CryptoHash;
 
@@ -316,7 +316,6 @@ pub fn valid_signature(root_sk: &k256::SecretKey, args: &mpc_primitives::SignArg
     into_signature(&expected_public_key, &big_r, &s, args.payload)
         .expect("signature should validate")
 }
-
 
 #[cfg(test)]
 mod tests {
