@@ -2,55 +2,54 @@ mod canton;
 mod ethereum;
 mod hydration;
 mod near;
+#[cfg(test)]
+mod test_utils;
 
 use crate::config::Config;
-use crate::indexer_eth::EthConfig;
-use crate::indexer_sol::SolConfig;
 use crate::metrics::requests::{record_request_latency_since, SignRequestStep};
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
 use crate::util::retry::{retry_rpc, RetryConfig};
+use enum_map::EnumMap;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
+// TODO: move clients elsewhere
 pub use canton::CantonClient;
 pub use ethereum::EthClient;
 pub use hydration::HydrationClient;
-pub use mpc_contract::primitives::{Read, View};
-pub use near::NearClient;
-
-use enum_map::EnumMap;
 
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
-use mpc_primitives::{CheckpointDigest, SignId, Signature};
-
-use crate::indexer_canton::CantonConfig;
-use crate::indexer_hydration::HydrationConfig;
-use crate::indexer_sol::SolanaClient;
+pub use mpc_contract::primitives::{Read, View};
+use mpc_primitives::{CheckpointDigest, Signature};
+pub use near::NearClient;
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 
-/// The maximum amount of times to retry publishing a signature.
-const MAX_PUBLISH_RETRY: usize = 6;
 /// The maximum number of concurrent RPC requests the system can make
 const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
 /// The update interval to fetch and update the contract's state
 const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
-/// The interval to batch send Ethereum responses
-pub const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
-/// The batch size for Ethereum responses
-pub const ETH_RESPOND_BATCH_SIZE: usize = 10;
 
 // Publish retry constants
-const PUBLISH_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(120);
-const PUBLISH_FIXED_DELAY: Duration = Duration::from_secs(5);
+const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(5);
+const PUBLISH_MAX_DELAY: Duration = Duration::from_secs(60); // Cap to 1 min so backoff doesn't get too long for infinite retries
 const BATCH_PUBLISH_MIN_DELAY: Duration = Duration::from_secs(1);
 const BATCH_PUBLISH_MAX_DELAY: Duration = Duration::from_secs(10);
+
+/// Trait for publishing signatures to different blockchains (single attempt, caller handles retries).
+#[async_trait::async_trait]
+pub trait ChainPublisher: Send + Sync + 'static {
+    /// Accepts a publish action. The publisher encapsulates how this is executed
+    /// (e.g., immediate spawn, or pushing to an internal batching queue).
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()>;
+}
 
 #[derive(Clone)]
 pub struct PublishAction {
@@ -370,54 +369,26 @@ impl ContractStateWatcher {
 }
 
 pub struct RpcExecutor {
+    /// The NEAR client used to fetch contract state and config.
     near: NearClient,
-    eth: Option<EthClient>,
-    solana: Option<SolanaClient>,
-    hydration: Option<HydrationClient>,
-    canton: Option<CantonClient>,
+    /// The publishers for each chain.
+    publishers: HashMap<Chain, Arc<dyn ChainPublisher>>,
+    /// The receiver for incoming RPC actions.
     action_rx: mpsc::Receiver<RpcAction>,
 }
 
 impl RpcExecutor {
     pub async fn new(
-        near: &NearClient,
-        eth: &Option<EthConfig>,
-        solana: &Option<SolConfig>,
-        hydration: &Option<HydrationConfig>,
-        canton: &Option<CantonConfig>,
+        near: NearClient,
+        publishers: HashMap<Chain, Arc<dyn ChainPublisher>>,
     ) -> (RpcChannel, Self) {
-        let eth = eth.as_ref().map(EthClient::new);
-        let solana = solana.as_ref().map(SolanaClient::from_config);
-        let hydration = match hydration {
-            Some(h) => match HydrationClient::new(h).await {
-                Ok(client) => Some(client),
-                Err(e) => {
-                    tracing::error!(%e, "failed to create hydration client");
-                    None
-                }
-            },
-            None => None,
-        };
-        let canton = match canton {
-            Some(c) => match CantonClient::new(c).await {
-                Ok(client) => Some(client),
-                Err(e) => {
-                    tracing::error!(%e, "failed to create canton client");
-                    None
-                }
-            },
-            None => None,
-        };
-        let (tx, rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
+        let (tx, action_rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
         (
             RpcChannel { tx },
             Self {
-                near: near.clone(),
-                eth,
-                solana,
-                hydration,
-                canton,
-                action_rx: rx,
+                near,
+                publishers,
+                action_rx,
             },
         )
     }
@@ -428,7 +399,7 @@ impl RpcExecutor {
         config: watch::Sender<Config>,
         checkpoints: EnumMap<Chain, watch::Sender<CheckpointDigest>>,
     ) {
-        // spin up update task for updating contract state, config and checkpoints
+        // Spin up update task for updating contract state, config and checkpoints
         let near = self.near.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(UPDATE_INTERVAL);
@@ -443,96 +414,35 @@ impl RpcExecutor {
             }
         });
 
-        let eth_client = self.client(&Chain::Ethereum);
-        let (eth_rpc_tx, eth_rpc_rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
-        // spin up update task for batch sending eth responses
-        tokio::spawn({
-            run_batch_respond(
-                eth_client,
-                eth_rpc_rx,
-                ETH_RESPOND_BATCH_INTERVAL,
-                ETH_RESPOND_BATCH_SIZE,
-            )
-        });
+        Self::dispatch_loop(&self.publishers, &mut self.action_rx).await;
+    }
 
-        // process incoming actions related to RPC
+    /// Dispatches incoming RPC actions to the appropriate chain publishers.
+    async fn dispatch_loop(
+        publishers: &HashMap<Chain, Arc<dyn ChainPublisher>>,
+        action_rx: &mut mpsc::Receiver<RpcAction>,
+    ) {
         loop {
-            let Some(RpcAction::Publish(action)) = self.action_rx.recv().await else {
+            let Some(RpcAction::Publish(action)) = action_rx.recv().await else {
                 tracing::error!("rpc channel closed unexpectedly");
                 return;
             };
 
             let chain = action.indexed.chain;
-            let client = self.client(&chain);
-            let eth_rpc_tx = eth_rpc_tx.clone(); // clone for task use
 
+            // Check if a publisher is configured for the chain. If not, log a warning and continue to the next action.
+            let Some(publisher) = publishers.get(&chain) else {
+                tracing::warn!(?chain, "no publisher configured for chain");
+                continue;
+            };
+
+            // Spawn a task to execute the publish action.
+            let publisher = publisher.clone();
             tokio::spawn(async move {
-                match chain {
-                    Chain::NEAR | Chain::Solana | Chain::Hydration | Chain::Canton => {
-                        execute_publish(client, action).await;
-                    }
-                    Chain::Ethereum => {
-                        if let Err(err) = eth_rpc_tx.send(action).await {
-                            tracing::error!(%err, "eth: failed to send publish action");
-                        }
-                    }
-                    Chain::Bitcoin => {
-                        tracing::warn!(
-                            ?chain,
-                            "publish not supported for Bitcoin yet, dropping action"
-                        );
-                    }
-                }
+                execute_publish(publisher, action).await;
             });
         }
     }
-
-    /// Get the client for the given chain
-    fn client(&self, chain: &Chain) -> ChainClient {
-        match chain {
-            Chain::NEAR => ChainClient::Near(self.near.clone()),
-            Chain::Ethereum => {
-                if let Some(eth) = &self.eth {
-                    ChainClient::Ethereum(eth.clone())
-                } else {
-                    ChainClient::Err("no eth client available for node")
-                }
-            }
-            Chain::Solana => {
-                if let Some(sol) = &self.solana {
-                    ChainClient::Solana(sol.clone())
-                } else {
-                    ChainClient::Err("no solana client available for node")
-                }
-            }
-            Chain::Hydration => {
-                if let Some(hydration) = &self.hydration {
-                    ChainClient::Hydration(hydration.clone())
-                } else {
-                    ChainClient::Err("no hydration client available for node")
-                }
-            }
-            Chain::Canton => {
-                if let Some(canton) = &self.canton {
-                    ChainClient::Canton(canton.clone())
-                } else {
-                    ChainClient::Err("no canton client available for node")
-                }
-            }
-            Chain::Bitcoin => ChainClient::Err("no bitcoin client available for node"),
-        }
-    }
-}
-
-/// Client related to a specific chain
-#[allow(clippy::large_enum_variant)]
-pub enum ChainClient {
-    Err(&'static str),
-    Near(NearClient),
-    Ethereum(EthClient),
-    Solana(SolanaClient),
-    Hydration(HydrationClient),
-    Canton(CantonClient),
 }
 
 async fn update_contract_data(
@@ -604,8 +514,8 @@ async fn update_contract_data(
     }
 }
 
-/// Publish the signature and retry if it fails
-async fn execute_publish(client: ChainClient, action: PublishAction) {
+/// Publish the signature and retry if it fails, logging the error and retry attempt. Shared by all chain publishers.
+pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: PublishAction) {
     let chain = action.indexed.chain;
     let sign_id = action.indexed.id;
 
@@ -617,14 +527,14 @@ async fn execute_publish(client: ChainClient, action: PublishAction) {
     );
 
     let retry_config = RetryConfig {
-        max_times: MAX_PUBLISH_RETRY,
-        min_delay: PUBLISH_FIXED_DELAY,
-        max_delay: PUBLISH_FIXED_DELAY,
+        max_times: usize::MAX,
+        min_delay: PUBLISH_MIN_DELAY,
+        max_delay: PUBLISH_MAX_DELAY,
         jitter: true,
     };
 
     let publish_res = retry_rpc!(
-        PUBLISH_ATTEMPT_TIMEOUT,
+        Duration::MAX, // Prevent from timing out
         retry_config,
         // Log the error and retry attempt
         |attempt, err, sleep| {
@@ -637,57 +547,13 @@ async fn execute_publish(client: ChainClient, action: PublishAction) {
             );
         },
         // Try to publish the signature
-        {
-            match &client {
-                ChainClient::Near(near) => near
-                    .publish_signature(&action, &action.timestamp, &action.signature)
-                    .await
-                    .map_err(|_| anyhow::anyhow!("Near publish failed")),
-                ChainClient::Ethereum(eth) => eth
-                    .publish_signature(&action, &action.timestamp, &action.signature)
-                    .await
-                    .map_err(|_| anyhow::anyhow!("Ethereum publish failed")),
-                ChainClient::Solana(sol) => sol
-                    .publish_signature(&action, &action.timestamp, &action.signature)
-                    .await
-                    .map_err(|_| anyhow::anyhow!("Solana publish failed")),
-                ChainClient::Hydration(hyd) => hyd
-                    .publish_signature(&action, &action.timestamp, &action.signature)
-                    .await
-                    .map_err(|_| anyhow::anyhow!("Hydration publish failed")),
-                ChainClient::Canton(canton) => canton
-                    .publish_signature(&action, &action.timestamp, &action.signature)
-                    .await
-                    .map_err(|_| anyhow::anyhow!("Canton publish failed")),
-                ChainClient::Err(msg) => {
-                    tracing::error!(msg, "no client for chain");
-                    Ok(())
-                }
-            }
-        }
+        { publisher.publish_signature(&action).await }
     );
 
-    if publish_res.is_ok() {
-        let elapsed_secs =
-            crate::util::unix_elapsed(action.indexed.unix_timestamp_indexed).as_secs();
-        if elapsed_secs <= chain.expected_response_time_secs() {
-            record_request_latency_since(
-                chain,
-                SignRequestStep::Total,
-                "in_time",
-                action.indexed.unix_timestamp_indexed,
-            );
-        } else {
-            record_request_latency_since(
-                chain,
-                SignRequestStep::Total,
-                "expired",
-                action.indexed.unix_timestamp_indexed,
-            );
-        }
-        record_request_latency_since(chain, SignRequestStep::Responding, "ok", action.timestamp);
-    } else {
-        tracing::info!(
+    // TODO: Consider adding a metric update for failed publish attempts here, if needed.
+    // Log error if the publish failed after all retries
+    if publish_res.is_err() {
+        tracing::error!(
             ?sign_id,
             elapsed = ?action.timestamp.elapsed(),
             "exceeded max retries, trashing publish request"
@@ -695,172 +561,61 @@ async fn execute_publish(client: ChainClient, action: PublishAction) {
     }
 }
 
-async fn run_batch_respond(
-    client: ChainClient,
-    mut actions_rx: mpsc::Receiver<PublishAction>,
-    batch_interval: Duration,
-    batch_size: usize,
-) {
-    let mut start = Instant::now();
-    let mut actions_batch: Vec<PublishAction> = vec![];
-    let mut interval = tokio::time::interval(Duration::from_millis(100));
-    loop {
-        interval.tick().await;
-        if (start.elapsed() > batch_interval || actions_batch.len() >= batch_size)
-            && !actions_batch.is_empty()
-        {
-            tracing::info!(
-                num_requests = actions_batch.len(),
-                "publishing batch of signatures",
-            );
-            execute_batch_publish(&client, &mut actions_batch).await;
-            start = Instant::now();
-        }
-        if let Ok(action) = actions_rx.try_recv() {
-            actions_batch.push(action);
-        }
-    }
-}
+/// Helper to record metrics when a signature is successfully published to a chain.
+pub fn record_publish_metrics(action: &PublishAction) {
+    let chain = action.indexed.chain;
+    let elapsed_secs = crate::util::unix_elapsed(action.indexed.unix_timestamp_indexed).as_secs();
 
-async fn execute_batch_publish(client: &ChainClient, actions: &mut Vec<PublishAction>) {
-    let signatures: HashMap<SignId, Signature> = actions
-        .iter()
-        .map(|action| (action.indexed.id, action.signature))
-        .collect();
-
-    let retry_config = RetryConfig {
-        max_times: MAX_PUBLISH_RETRY,
-        min_delay: BATCH_PUBLISH_MIN_DELAY,
-        max_delay: BATCH_PUBLISH_MAX_DELAY,
-        jitter: true,
-    };
-
-    let res = retry_rpc!(
-        PUBLISH_ATTEMPT_TIMEOUT,
-        retry_config,
-        // Log the error and retry attempt
-        |attempt, err, sleep| {
-            tracing::warn!(
-                "batch publish failed (attempt {attempt}): {err}, retrying in {sleep:?}"
-            );
-        },
-        // Try to publish the signatures in batch
-        {
-            match client {
-                ChainClient::Ethereum(eth) => eth
-                    .batch_publish_signatures(actions, &signatures)
-                    .await
-                    .map_err(|_| anyhow::anyhow!("Eth batch publish failed")),
-                ChainClient::Near(_) => {
-                    tracing::error!("Near has no batch publish");
-                    Ok(())
-                }
-                ChainClient::Solana(_) => {
-                    tracing::error!("Solana has no batch publish");
-                    Ok(())
-                }
-                ChainClient::Hydration(_) => {
-                    tracing::error!("Hydration has no batch publish");
-                    Ok(())
-                }
-                ChainClient::Canton(_) => {
-                    tracing::error!("Canton has no batch publish");
-                    Ok(())
-                }
-                ChainClient::Err(msg) => {
-                    tracing::error!(msg, "no client for chain");
-                    Ok(())
-                }
-            }
-        }
-    );
-
-    if res.is_ok() {
-        for action in actions.iter() {
-            let chain = action.indexed.chain;
-            let elapsed = crate::util::unix_elapsed(action.indexed.unix_timestamp_indexed);
-            if elapsed.as_secs() <= chain.expected_response_time_secs() {
-                record_request_latency_since(
-                    chain,
-                    SignRequestStep::Total,
-                    "in_time",
-                    action.indexed.unix_timestamp_indexed,
-                );
-            } else {
-                record_request_latency_since(
-                    chain,
-                    SignRequestStep::Total,
-                    "expired",
-                    action.indexed.unix_timestamp_indexed,
-                );
-            }
-            record_request_latency_since(
-                chain,
-                SignRequestStep::Responding,
-                "ok",
-                action.timestamp,
-            );
-        }
+    if elapsed_secs <= chain.expected_response_time_secs() {
+        record_request_latency_since(
+            chain,
+            SignRequestStep::Total,
+            "in_time",
+            action.indexed.unix_timestamp_indexed,
+        );
     } else {
-        tracing::info!("exceeded max retries, trashing publish request");
+        record_request_latency_since(
+            chain,
+            SignRequestStep::Total,
+            "expired",
+            action.indexed.unix_timestamp_indexed,
+        );
     }
-
-    actions.clear();
+    record_request_latency_since(chain, SignRequestStep::Responding, "ok", action.timestamp);
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::test_utils::{make_indexed, make_publish_action, make_signature, scalar};
     use super::*;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
     use crate::protocol::ProtocolState;
     use cait_sith::protocol::Participant;
-    use k256::elliptic_curve::ops::Reduce;
-    use k256::elliptic_curve::point::DecompressPoint;
-    use mpc_crypto::kdf::derive_secret_key;
     use mpc_primitives::SignKind;
 
-    fn scalar(bytes: &[u8; 32]) -> k256::Scalar {
-        <k256::Scalar as Reduce<<Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(
-            bytes.into(),
-        )
+    /// A publisher that counts the number of times it has been called.
+    struct CountingPublisher {
+        call_count: Arc<AtomicUsize>,
     }
 
-    fn make_signature(
-        sk: &k256::SecretKey,
-        epsilon: k256::Scalar,
-        payload: k256::Scalar,
-    ) -> FullSignature<Secp256k1> {
-        let signing_key = k256::ecdsa::SigningKey::from(&derive_secret_key(sk, epsilon));
-        let (ecdsa_sig, _): (k256::ecdsa::Signature, _) =
-            <k256::ecdsa::SigningKey as k256::ecdsa::signature::hazmat::PrehashSigner<_>>::sign_prehash(
-                &signing_key,
-                &payload.to_bytes(),
-            )
-            .expect("signing should succeed");
-        let (r_bytes, _) = ecdsa_sig.split_bytes();
-        let big_r =
-            AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
-                .unwrap();
-        FullSignature {
-            big_r,
-            s: *ecdsa_sig.s().as_ref(),
+    #[async_trait::async_trait]
+    impl ChainPublisher for CountingPublisher {
+        async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
     }
 
-    fn make_indexed(epsilon: k256::Scalar, payload: k256::Scalar) -> IndexedSignRequest {
-        IndexedSignRequest {
-            id: SignId::new([0u8; 32]),
-            args: mpc_primitives::SignArgs {
-                entropy: [0u8; 32],
-                epsilon,
-                payload,
-                path: "test".into(),
-                key_version: 0,
-            },
-            chain: Chain::NEAR,
-            unix_timestamp_indexed: 0,
-            kind: SignKind::Sign,
+    /// A publisher that always fails to publish a signature.
+    struct FailingPublisher;
+
+    #[async_trait::async_trait]
+    impl ChainPublisher for FailingPublisher {
+        async fn publish_signature(&self, _action: &PublishAction) -> anyhow::Result<()> {
+            anyhow::bail!("publisher failed")
         }
     }
 
@@ -935,7 +690,7 @@ mod tests {
         let payload = scalar(&[42u8; 32]);
 
         let output = make_signature(&sk, epsilon, payload);
-        let indexed = make_indexed(epsilon, payload);
+        let indexed = make_indexed(Chain::NEAR, epsilon, payload, SignKind::Sign);
 
         assert!(PublishAction::new(pk, indexed, output, vec![]).is_some());
     }
@@ -949,8 +704,169 @@ mod tests {
 
         let mut output = make_signature(&sk, epsilon, payload);
         output.s += k256::Scalar::ONE;
-        let indexed = make_indexed(epsilon, payload);
+        let indexed = make_indexed(Chain::NEAR, epsilon, payload, SignKind::Sign);
 
         assert!(PublishAction::new(pk, indexed, output, vec![]).is_none());
+    }
+
+    #[tokio::test]
+    async fn executor_dispatches_to_configured_publisher() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        // Create a publisher for Ethereum that counts the number of times it has been called.
+        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+        publishers.insert(
+            Chain::Ethereum,
+            Arc::new(CountingPublisher {
+                call_count: call_count.clone(),
+            }),
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+        // Send a publish action to the executor.
+        tx.send(RpcAction::Publish(make_publish_action(
+            Chain::Ethereum,
+            SignKind::Sign,
+        )))
+        .await
+        .unwrap();
+
+        // Closing the channel will cause dispatch_loop to return
+        drop(tx);
+
+        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+
+        // Give spawned tasks a chance to complete
+        tokio::task::yield_now().await;
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn executor_ignores_action_for_unconfigured_chain() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        // Create a publisher for Canton
+        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+        publishers.insert(
+            Chain::Canton,
+            Arc::new(CountingPublisher {
+                call_count: call_count.clone(),
+            }),
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+
+        // Send a publish action for Ethereum (not configured)
+        tx.send(RpcAction::Publish(make_publish_action(
+            Chain::Ethereum,
+            SignKind::Sign,
+        )))
+        .await
+        .unwrap();
+
+        drop(tx);
+
+        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn executor_continues_after_publisher_error() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        // Create a publisher for NEAR that always fails, and a publisher for Solana that counts calls.
+        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+        publishers.insert(Chain::NEAR, Arc::new(FailingPublisher));
+        publishers.insert(
+            Chain::Solana,
+            Arc::new(CountingPublisher {
+                call_count: call_count.clone(),
+            }),
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+
+        // Send a publish action for NEAR (which will fail) and then for Solana (which should succeed)
+        tx.send(RpcAction::Publish(make_publish_action(
+            Chain::NEAR,
+            SignKind::Sign,
+        )))
+        .await
+        .unwrap();
+        tx.send(RpcAction::Publish(make_publish_action(
+            Chain::Solana,
+            SignKind::Sign,
+        )))
+        .await
+        .unwrap();
+
+        drop(tx);
+
+        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+
+        // Yield enough times to let both spawned tasks complete.
+        // Each task calls publish_signature once and returns immediately.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn executor_dispatches_to_correct_publishers() {
+        const NEAR_ACTION_COUNT: usize = 3;
+        const SOL_ACTION_COUNT: usize = 2;
+
+        let near_count = Arc::new(AtomicUsize::new(0));
+        let sol_count = Arc::new(AtomicUsize::new(0));
+
+        // Create publishers for NEAR and Solana that count the number of times they have been called.
+        let mut publishers: HashMap<Chain, Arc<dyn ChainPublisher>> = HashMap::new();
+
+        publishers.insert(
+            Chain::NEAR,
+            Arc::new(CountingPublisher {
+                call_count: near_count.clone(),
+            }),
+        );
+        publishers.insert(
+            Chain::Solana,
+            Arc::new(CountingPublisher {
+                call_count: sol_count.clone(),
+            }),
+        );
+
+        let (tx, mut rx) = mpsc::channel(16);
+
+        // Send multiple publish actions for NEAR and Solana
+        for _ in 0..NEAR_ACTION_COUNT {
+            tx.send(RpcAction::Publish(make_publish_action(
+                Chain::NEAR,
+                SignKind::Sign,
+            )))
+            .await
+            .unwrap();
+        }
+
+        for _ in 0..SOL_ACTION_COUNT {
+            tx.send(RpcAction::Publish(make_publish_action(
+                Chain::Solana,
+                SignKind::Sign,
+            )))
+            .await
+            .unwrap();
+        }
+
+        drop(tx);
+
+        RpcExecutor::dispatch_loop(&publishers, &mut rx).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(near_count.load(Ordering::SeqCst), NEAR_ACTION_COUNT);
+        assert_eq!(sol_count.load(Ordering::SeqCst), SOL_ACTION_COUNT);
     }
 }

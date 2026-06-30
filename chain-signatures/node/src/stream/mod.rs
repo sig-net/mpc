@@ -1326,7 +1326,7 @@ mod tests {
             ))
             .await;
         backlog.set_processed_block(Chain::Solana, 5).await;
-        let checkpoint = backlog.checkpoint(Chain::Solana).await;
+        let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
         let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest {
             height: 5,
@@ -1411,7 +1411,7 @@ mod tests {
             ))
             .await;
         backlog.set_processed_block(Chain::Solana, 10).await;
-        let checkpoint = backlog.checkpoint(Chain::Solana).await;
+        let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
         let digest = checkpoint.digest();
 
         let (cp_tx, cp_rx) = watch::channel(CheckpointDigest { height: 10, digest });
@@ -1461,5 +1461,115 @@ mod tests {
         .expect("should transition back to Recovery state upon regression");
 
         task_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_regression_triggers_full_recovery_cycle() {
+        struct E2EIndexer;
+
+        #[async_trait]
+        impl ChainIndexer for E2EIndexer {
+            const CHAIN: Chain = Chain::Ethereum;
+            type Block = u64;
+            type Iter = futures_util::stream::Empty<Self::Block>;
+            const RETRY_DELAY: Duration = Duration::from_millis(1);
+
+            async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
+                Ok(Some(10))
+            }
+
+            async fn next(&mut self) -> Option<Self::Block> {
+                std::future::pending::<Option<Self::Block>>().await
+            }
+
+            async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
+                futures_util::stream::empty()
+            }
+        }
+
+        let chain = Chain::Ethereum;
+        let backlog = Backlog::new();
+        backlog.set_processed_block(chain, 10).await;
+        let cp = backlog.checkpoint(chain).await.unwrap();
+        let matching_digest = cp.digest();
+
+        let (cp_tx, cp_rx) = watch::channel(CheckpointDigest {
+            height: 10,
+            digest: matching_digest,
+        });
+        let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
+        let indexer = E2EIndexer;
+        let (sign_tx, _sign_rx) = mpsc::channel(1);
+
+        let (pipeline, mut state_rx) = ChainPipeline::new(
+            indexer,
+            cp_rx,
+            backlog,
+            sign_tx,
+            mesh_rx,
+            NodeClient::new(&Default::default()),
+            0,
+            "test.near".parse().unwrap(),
+        );
+
+        let handle = tokio::spawn(pipeline.run());
+
+        // 1st cycle: Recovery (load_local: true) → Catchup → Live
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if *state_rx.borrow() == ChainStreaming::Live {
+                    break;
+                }
+                let _ = state_rx.changed().await;
+            }
+        })
+        .await
+        .expect("should reach Live after 1st Recovery → Catchup");
+
+        // Trigger regression: send a digest that doesn't match local.
+        // This causes wait_detected_regression → Recovery { load_local: false }.
+        cp_tx
+            .send(CheckpointDigest {
+                height: 5,
+                digest: [99u8; 32],
+            })
+            .unwrap();
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let s = *state_rx.borrow_and_update();
+                if matches!(s, ChainStreaming::Recovery { load_local: false }) {
+                    break;
+                }
+                let _ = state_rx.changed().await;
+            }
+        })
+        .await
+        .expect("should transition to Recovery { load_local: false } upon regression");
+
+        // Restore matching digest so the 2nd Recovery passes alignment.
+        // If align_backlog_with_consensus already read the mismatched value,
+        // find_consensus_checkpoint will abort via consensus_rx.changed() when
+        // it sees the digest change (may take ~3s due to no-peer retry sleep).
+        cp_tx
+            .send(CheckpointDigest {
+                height: 10,
+                digest: matching_digest,
+            })
+            .unwrap();
+
+        // 2nd cycle: Recovery (load_local: false) → Catchup → Live
+        timeout(Duration::from_secs(6), async {
+            loop {
+                if *state_rx.borrow() == ChainStreaming::Live {
+                    break;
+                }
+                let _ = state_rx.changed().await;
+            }
+        })
+        .await
+        .expect("should reach Live after 2nd Recovery → Catchup (load_local: false)");
+
+        handle.abort();
     }
 }

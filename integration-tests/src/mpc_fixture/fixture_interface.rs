@@ -313,12 +313,12 @@ impl MpcFixtureNode {
             .expect("remove_holder_and_prune presignatures failed");
     }
 
-    pub async fn start_web_interface(&mut self, account_id: AccountId) {
+    pub async fn start_web_interface(&mut self, account_id: AccountId) -> Option<u16> {
         let web_port = match crate::utils::pick_unused_port().await {
             Ok(port) => port,
             Err(err) => {
                 tracing::error!(?err, "failed to allocate fixture web port");
-                return;
+                return None;
             }
         };
 
@@ -328,12 +328,12 @@ impl MpcFixtureNode {
             self.state.clone(),
             self.triple_storage.clone(),
             self.presignature_storage.clone(),
-            // unused but needed to call the web interface
             SyncChannel::new().1,
             account_id,
             self.backlog.clone(),
         );
         self.web_handle = Some(tokio::spawn(task));
+        Some(web_port)
     }
 }
 

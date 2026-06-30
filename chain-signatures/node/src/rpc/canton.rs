@@ -1,4 +1,4 @@
-use super::PublishAction;
+use super::{ChainPublisher, PublishAction};
 use crate::indexer_canton::{
     contracts::{CantonSignature, EcdsaSigData},
     der_encode_signature,
@@ -10,8 +10,8 @@ use crate::indexer_canton::{
     },
     CantonAuthProvider, CantonChainCtx, CantonConfig,
 };
-use mpc_primitives::{Chain, SignKind, Signature};
-use std::time::{Duration, Instant};
+use mpc_primitives::{Chain, SignKind};
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct CantonClient {
@@ -175,15 +175,27 @@ impl CantonClient {
             .await?;
         Ok(())
     }
+}
 
-    pub async fn publish_signature(
-        &self,
-        action: &PublishAction,
-        timestamp: &Instant,
-        signature: &Signature,
-    ) -> anyhow::Result<()> {
+async fn check_response(
+    resp: reqwest::Response,
+    context: &str,
+) -> anyhow::Result<reqwest::Response> {
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("{context} failed: {status} {text}");
+    }
+    Ok(resp)
+}
+
+#[async_trait::async_trait]
+impl ChainPublisher for CantonClient {
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
         let sign_id = action.indexed.id;
         let request_id_hex = hex::encode(action.indexed.id.request_id);
+        let timestamp = action.timestamp;
+        let signature = &action.signature;
 
         tracing::info!(
             ?sign_id,
@@ -259,37 +271,20 @@ impl CantonClient {
             "published canton {choice} successfully"
         );
 
+        super::record_publish_metrics(action);
+
         Ok(())
     }
-}
-
-async fn check_response(
-    resp: reqwest::Response,
-    context: &str,
-) -> anyhow::Result<reqwest::Response> {
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("{context} failed: {status} {text}");
-    }
-    Ok(resp)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::indexer_canton::{CantonAuthConfig, CantonChainCtx};
-    use k256::{AffinePoint, Scalar};
+    use crate::rpc::test_utils::make_publish_action;
     use mockito::{Matcher, Server, ServerGuard};
-    use mpc_primitives::{
-        Chain, IndexedSignRequest, RespondBidirectionalTx, SignArgs, SignBidirectionalEvent,
-        SignId, SignKind, Signature,
-    };
+    use mpc_primitives::{Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignKind};
     use serde_json::json;
-
-    fn create_test_signature() -> Signature {
-        Signature::new(AffinePoint::GENERATOR, Scalar::from(42u64), 1)
-    }
 
     fn mock_canton_config(url: &str) -> CantonConfig {
         CantonConfig {
@@ -306,31 +301,6 @@ mod tests {
             party_id: "test-party".to_string(),
             signer_contract_id: "test-contract-id".to_string(),
             signer_template_id: "test-template-id".to_string(),
-        }
-    }
-
-    fn mock_publish_action(kind: SignKind) -> PublishAction {
-        let sign_id = SignId::new([8u8; 32]);
-        let indexed = IndexedSignRequest::new(
-            sign_id,
-            SignArgs {
-                entropy: [0; 32],
-                epsilon: Scalar::ONE,
-                payload: Scalar::ONE,
-                path: "test".to_string(),
-                key_version: 1,
-            },
-            Chain::Canton,
-            0,
-            kind,
-        );
-
-        PublishAction {
-            public_key: AffinePoint::GENERATOR,
-            indexed,
-            signature: create_test_signature(),
-            participants: vec![],
-            timestamp: Instant::now(),
         }
     }
 
@@ -386,11 +356,8 @@ mod tests {
             chain_ctx: Some(chain_ctx),
         };
 
-        let action = mock_publish_action(SignKind::SignBidirectional(event));
-        assert!(client
-            .publish_signature(&action, &Instant::now(), &action.signature)
-            .await
-            .is_ok());
+        let action = make_publish_action(Chain::Canton, SignKind::SignBidirectional(event));
+        assert!(client.publish_signature(&action).await.is_ok());
         submit_mock.assert_async().await;
     }
 
@@ -420,11 +387,8 @@ mod tests {
             chain_ctx: Some(chain_ctx),
         };
 
-        let action = mock_publish_action(SignKind::RespondBidirectional(tx));
-        assert!(client
-            .publish_signature(&action, &Instant::now(), &action.signature)
-            .await
-            .is_ok());
+        let action = make_publish_action(Chain::Canton, SignKind::RespondBidirectional(tx));
+        assert!(client.publish_signature(&action).await.is_ok());
         submit_mock.assert_async().await;
     }
 
@@ -441,11 +405,8 @@ mod tests {
             chain_ctx: None, // Missing
         };
 
-        let action = mock_publish_action(SignKind::RespondBidirectional(tx));
-        let err = client
-            .publish_signature(&action, &Instant::now(), &action.signature)
-            .await
-            .unwrap_err();
+        let action = make_publish_action(Chain::Canton, SignKind::RespondBidirectional(tx));
+        let err = client.publish_signature(&action).await.unwrap_err();
         assert!(err.to_string().contains("missing chain_ctx"));
     }
 
@@ -472,12 +433,9 @@ mod tests {
             output: vec![],
             chain_ctx: Some(chain_ctx),
         };
-        let action = mock_publish_action(SignKind::RespondBidirectional(tx));
+        let action = make_publish_action(Chain::Canton, SignKind::RespondBidirectional(tx));
 
-        let err = client
-            .publish_signature(&action, &Instant::now(), &action.signature)
-            .await
-            .unwrap_err();
+        let err = client.publish_signature(&action).await.unwrap_err();
         assert!(err.to_string().contains("500"));
         submit_mock.assert_async().await;
     }

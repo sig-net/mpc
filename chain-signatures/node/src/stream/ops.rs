@@ -385,6 +385,12 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
     telemetry: &T,
 ) {
     telemetry.block_finalized(block);
+
+    // should not create checkpoint for blocks that are not caught up, as that would
+    // try to create signatures for checkpoints where we are not live.
+    if !caught_up {
+        return;
+    }
     let Some(checkpoint) = backlog.set_processed_block(chain, block).await else {
         return;
     };
@@ -392,20 +398,18 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
     telemetry.checkpoint_created(checkpoint.block_height);
 
     tracing::info!(block, ?checkpoint, %chain, "created checkpoint");
-    if caught_up {
-        let digest = checkpoint.digest();
-        let epsilon = mpc_crypto::derive_epsilon_checkpoint(chain, checkpoint.block_height);
-        let sign = Sign::Checkpoint(IndexedSignRequest::checkpoint(
-            mpc_primitives::ConsensusCheckpointDigest {
-                chain,
-                height: checkpoint.block_height,
-                digest,
-            },
-            epsilon,
-        ));
-        if let Err(err) = sign_tx.send(sign).await {
-            tracing::error!(?err, %chain, "failed to enqueue checkpoint sign request");
-        }
+    let digest = checkpoint.digest();
+    let epsilon = mpc_crypto::derive_epsilon_checkpoint(chain, checkpoint.block_height);
+    let sign = Sign::Checkpoint(IndexedSignRequest::checkpoint(
+        mpc_primitives::ConsensusCheckpointDigest {
+            chain,
+            height: checkpoint.block_height,
+            digest,
+        },
+        epsilon,
+    ));
+    if let Err(err) = sign_tx.send(sign).await {
+        tracing::error!(?err, %chain, "failed to enqueue checkpoint sign request");
     }
 }
 
@@ -439,7 +443,7 @@ mod tests {
     use alloy::primitives::{Address, B256};
     use cait_sith::protocol::Participant;
     use k256::{ProjectivePoint, Scalar};
-    use mpc_indexer_core::StateManager;
+    use mpc_indexer_core::{NoopChainTelemetry, StateManager};
     use mpc_primitives::{RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind};
     use near_primitives::types::AccountId;
     use solana_sdk::pubkey::Pubkey;
@@ -568,7 +572,7 @@ mod tests {
                 SignKind::Sign,
             ))
             .await;
-        backlog.checkpoint(Chain::Solana).await;
+        let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
         let threshold = 1;
         let mut mesh_state = MeshState::default();
@@ -577,12 +581,6 @@ mod tests {
         let (_mesh_tx, mut mesh_rx) = watch::channel(mesh_state);
         wait_threshold_active(&mut mesh_rx, threshold).await;
         let (sign_tx, mut sign_rx) = mpsc::channel(4);
-        let checkpoint = backlog
-            .storage
-            .load_latest(Chain::Solana)
-            .await
-            .unwrap()
-            .unwrap();
         backlog.recover_by_checkpoint(checkpoint).await.unwrap();
 
         requeue_pending_sign_requests(&backlog, Chain::Solana, sign_tx).await;
@@ -877,7 +875,12 @@ mod tests {
         .unwrap();
 
         backlog.set_processed_block(tx.source_chain, 10).await;
-        backlog.checkpoint(tx.source_chain).await;
+        let checkpoint = backlog.checkpoint(tx.source_chain).await.unwrap();
+
+        // Simulate consensus confirmation so storage has the checkpoint
+        backlog
+            .on_consensus_confirmed(tx.source_chain, &checkpoint)
+            .await;
 
         let threshold = 1;
         let mut mesh_state = MeshState::default();
@@ -1625,5 +1628,37 @@ mod tests {
             signature,
             chain: Chain::Solana,
         }
+    }
+
+    #[tokio::test]
+    async fn catchup_blocks_do_not_consume_checkpoint_slots() {
+        // During catchup, process_block_event should NOT create checkpoints
+        // (which consume slots). If it did, 33 checkpoint intervals worth of
+        // blocks would fill the 32-slot cap and stall catchup forever.
+        let chain = Chain::Ethereum;
+        let backlog = Backlog::new();
+        let (sign_tx, _sign_rx) = mpsc::channel(4);
+        let telemetry = NoopChainTelemetry;
+
+        // Process 33 checkpoint intervals at caught_up=false
+        let interval = chain.checkpoint_interval().unwrap(); // 100 for Ethereum
+        for i in 1..=33 {
+            process_block_event(
+                chain,
+                i * interval,
+                &backlog,
+                &sign_tx,
+                false, // caught_up
+                &telemetry,
+            )
+            .await;
+        }
+
+        // Slots should still be available — no pending checkpoints created
+        assert!(
+            backlog.has_checkpoint_slot(chain).await,
+            "catchup should not consume checkpoint slots; 33 intervals without caught_up \
+             would fill the 32-slot cap and cause a permanent stall"
+        );
     }
 }

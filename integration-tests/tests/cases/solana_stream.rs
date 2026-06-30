@@ -42,7 +42,10 @@ fn test_dependencies() -> (Backlog, watch::Receiver<MeshState>, NodeClient) {
 
 async fn stream_solana(
     config: SolConfig,
-) -> Result<SolanaStream<impl StateManager, impl ChainTelemetry>> {
+) -> Result<(
+    SolanaStream<impl StateManager, impl ChainTelemetry>,
+    watch::Sender<CheckpointDigest>,
+)> {
     let (backlog, _, _) = test_dependencies();
     stream_solana_with_backlog(config, backlog).await
 }
@@ -50,11 +53,14 @@ async fn stream_solana(
 async fn stream_solana_with_backlog(
     config: SolConfig,
     backlog: Backlog,
-) -> Result<SolanaStream<impl StateManager, impl ChainTelemetry>> {
+) -> Result<(
+    SolanaStream<impl StateManager, impl ChainTelemetry>,
+    watch::Sender<CheckpointDigest>,
+)> {
     let mut stream = SolanaStream::new(Some(config), backlog.clone(), NoopChainTelemetry)
         .context("failed to create SolanaStream")?;
     let indexer = ChainStream::start(&mut stream).await?;
-    let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+    let (cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
     let node_client = NodeClient::new(&Default::default());
     // Start from Recovery so that handle_recovery() calls livestream(), which
@@ -88,7 +94,7 @@ async fn stream_solana_with_backlog(
     .await
     .context("timed out waiting for pipeline to reach Live state")??;
 
-    Ok(stream)
+    Ok((stream, cp_tx))
 }
 
 /// Helper to wait for a specific event type, skipping block events
@@ -122,7 +128,7 @@ async fn test_solana_stream_parse_sign_event() -> Result<()> {
     let solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
     let config = solana.get_config(program_address);
-    let mut stream = stream_solana(config).await?;
+    let (mut stream, _cp_tx) = stream_solana(config).await?;
 
     // Submit sign request
     let payload = [1u8; 32];
@@ -151,7 +157,7 @@ async fn test_solana_stream_emits_blocks() -> Result<()> {
     let program_address = solana.program_keypair.pubkey().to_string();
 
     let config = solana.get_config(program_address);
-    let mut stream = stream_solana(config).await?;
+    let (mut stream, _cp_tx) = stream_solana(config).await?;
 
     // Submit a transaction to generate activity
     let payload = [2u8; 32];
@@ -182,7 +188,7 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
 
     // Create first client and process some events
     let config = solana.get_config(program_address.clone());
-    let mut stream1 = stream_solana(config.clone()).await?;
+    let (mut stream1, _cp_tx) = stream_solana(config.clone()).await?;
 
     // Submit requests while client is running
     for i in 0..3 {
@@ -211,7 +217,7 @@ async fn test_solana_stream_catchup_linear() -> Result<()> {
     drop(stream1);
 
     // Create new client immediately (before more events) - should start processing from now
-    let mut stream2 = stream_solana(config).await?;
+    let (mut stream2, _cp_tx2) = stream_solana(config).await?;
 
     // Submit new requests while second client is running
     for i in 3..6 {
@@ -259,7 +265,7 @@ async fn test_solana_stream_parse_sign_bidirectional() -> Result<()> {
     let solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
     let config = solana.get_config(program_address);
-    let mut stream = stream_solana(config).await?;
+    let (mut stream, _cp_tx) = stream_solana(config).await?;
 
     // Submit bidirectional sign request
     let serialized_tx = vec![1, 2, 3, 4];
@@ -299,7 +305,7 @@ async fn test_solana_stream_concurrent_events() -> Result<()> {
     let solana = solana_sandbox().await?;
     let program_address = solana.program_keypair.pubkey().to_string();
     let config = solana.get_config(program_address);
-    let mut stream = stream_solana(config).await?;
+    let (mut stream, _cp_tx) = stream_solana(config).await?;
 
     // Submit multiple concurrent sign requests
     let num_requests = 5;
@@ -353,8 +359,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
     let program_address = solana.program_keypair.pubkey().to_string();
     let (backlog, _, _) = test_dependencies();
     let config = solana.get_config(program_address.clone());
-    let mut stream1 = stream_solana_with_backlog(config.clone(), backlog.clone()).await?;
-
+    let (mut stream1, _cp_tx) = stream_solana_with_backlog(config.clone(), backlog.clone()).await?;
     // Submit request and wait for a block marker
     solana
         .sign(
@@ -393,7 +398,7 @@ async fn test_solana_stream_checkpoint_persistence() -> Result<()> {
     drop(stream1);
 
     // Create new client with same backlog - should resume from checkpoint
-    let mut stream2 = stream_solana_with_backlog(config, backlog.clone()).await?;
+    let (mut stream2, _cp_tx2) = stream_solana_with_backlog(config, backlog.clone()).await?;
 
     // Verify the backlog was persisted
     let persisted_block = backlog.get_processed_block(Chain::Solana).await;
@@ -476,7 +481,13 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     seeded_backlog
         .set_processed_block(Chain::Solana, checkpoint_slot)
         .await;
-    seeded_backlog.checkpoint(Chain::Solana).await;
+    let checkpoint = seeded_backlog
+        .checkpoint(Chain::Solana)
+        .await
+        .expect("checkpoint creation should succeed");
+    seeded_backlog
+        .on_consensus_confirmed(Chain::Solana, &checkpoint)
+        .await;
 
     let recovered_backlog = Backlog::persisted(storage);
     let stream = SolanaStream::new(Some(config), recovered_backlog.clone(), NoopChainTelemetry)
@@ -503,7 +514,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let node_client = NodeClient::new(&Default::default());
 
-    let (_, checkpoints_rx) = watch::channel(CheckpointDigest::default());
+    let (_cp_tx, checkpoints_rx) = watch::channel(CheckpointDigest::default());
     let run_handle = tokio::spawn(async move {
         run_stream(
             stream,

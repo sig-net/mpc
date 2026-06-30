@@ -371,18 +371,6 @@ pub async fn run<T: ChainTelemetry>(
         }
     }
 
-    // Load historical checkpoints from storage
-    match backlog.storage.load_history(Chain::Hydration).await {
-        Ok(history) => {
-            for checkpoint in history {
-                backlog.remember_checkpoint(checkpoint).await;
-            }
-        }
-        Err(err) => {
-            tracing::warn!(chain = ?Chain::Hydration, %err, "failed to load historical checkpoints");
-        }
-    }
-
     // Align with consensus
     crate::backlog::consensus::align_backlog_with_consensus(
         Chain::Hydration,

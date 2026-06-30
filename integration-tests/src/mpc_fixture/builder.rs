@@ -586,7 +586,7 @@ impl MpcFixtureNodeBuilder {
         let backlog = Backlog::new();
 
         let flat_mock_streams = self.mock_streams.values().cloned().collect::<Vec<_>>();
-        let (_, checkpoints_rx) = watch::channel(CheckpointDigest::default());
+        let (_cp_tx, checkpoints_rx) = watch::channel(CheckpointDigest::default());
         fixture_tasks::start_mock_stream_tasks(
             &flat_mock_streams,
             sign_tx.clone(),
@@ -637,7 +637,8 @@ impl MpcFixtureNodeBuilder {
             web_handle: None,
         };
 
-        node.start_web_interface(self.participant_info.account_id)
+        let _ = node
+            .start_web_interface(self.participant_info.account_id)
             .await;
 
         node

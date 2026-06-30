@@ -19,6 +19,7 @@ use test_log::test;
 pub mod canton;
 pub mod canton_stream;
 pub mod chains;
+pub mod checkpoint;
 pub mod compat;
 pub mod ethereum;
 pub mod ethereum_stream;

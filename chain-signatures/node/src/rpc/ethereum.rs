@@ -1,4 +1,4 @@
-use super::PublishAction;
+use super::{ChainPublisher, PublishAction};
 use crate::indexer_eth::abi::ChainSignatures;
 use crate::indexer_eth::EthConfig;
 use crate::util::retry::{retry_rpc, RetryConfig};
@@ -17,6 +17,7 @@ use mpc_primitives::{SignId, Signature};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
 type EthContractFillProvider = FillProvider<
     JoinFill<
@@ -47,6 +48,11 @@ const ETH_BATCH_GAS_PER_REQUEST: u64 = 20_000;
 /// The maximum number of attempts to fetch eth tx and its receipt
 const ETH_TX_RECEIPT_MAX_ATTEMPTS: usize = 6;
 
+/// The interval to batch send Ethereum responses
+const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
+/// The batch size for Ethereum responses
+const ETH_RESPOND_BATCH_SIZE: usize = 10;
+
 /// Convert MPC Signature to ChainSignatures::Signature
 impl From<&Signature> for ChainSignatures::Signature {
     fn from(mpc_sig: &Signature) -> Self {
@@ -61,9 +67,13 @@ impl From<&Signature> for ChainSignatures::Signature {
     }
 }
 
+/// TODO: this should probably get merged with the client used by indexer
 #[derive(Clone)]
 pub struct EthClient {
+    // The contract instance for interacting with the ChainSignatures contract
     contract: ChainSignatures::ChainSignaturesInstance<EthContractFillProvider>,
+    // Channel used to send actions to the background batching task
+    batch_tx: mpsc::Sender<PublishAction>,
 }
 
 impl EthClient {
@@ -81,15 +91,86 @@ impl EthClient {
         let address = Address::from_str(&format!("0x{}", eth.contract_address)).unwrap();
         let contract = ChainSignatures::new(address, provider);
 
-        Self { contract }
+        let (batch_tx, batch_rx) = mpsc::channel(super::MAX_CONCURRENT_RPC_REQUESTS);
+
+        let client = Self { contract, batch_tx };
+
+        // Spawn the background batching loop
+        let client_clone = client.clone();
+        tokio::spawn(async move {
+            client_clone.run_batch_respond(batch_rx).await;
+        });
+
+        client
     }
 
-    // Wait for transaction receipt with max_attempts and exponential delay backoff starting at 5s
+    /// Run the background batching loop that collects publish actions and sends them in batches to the Ethereum contract.
+    async fn run_batch_respond(self, mut actions_rx: mpsc::Receiver<PublishAction>) {
+        let mut start = Instant::now();
+        let mut actions_batch: Vec<PublishAction> = vec![];
+        let mut interval = tokio::time::interval(Duration::from_millis(100));
+        loop {
+            interval.tick().await;
+            if (start.elapsed() > ETH_RESPOND_BATCH_INTERVAL
+                || actions_batch.len() >= ETH_RESPOND_BATCH_SIZE)
+                && !actions_batch.is_empty()
+            {
+                tracing::info!(
+                    num_requests = actions_batch.len(),
+                    "publishing batch of ethereum signatures",
+                );
+                self.execute_batch_publish(&mut actions_batch).await;
+                start = Instant::now();
+            }
+            if let Ok(action) = actions_rx.try_recv() {
+                actions_batch.push(action);
+            }
+        }
+    }
+
+    /// Execute a batch publish of signatures to the Ethereum contract, with retry logic.
+    async fn execute_batch_publish(&self, actions: &mut Vec<PublishAction>) {
+        let signatures: HashMap<SignId, Signature> = actions
+            .iter()
+            .map(|action| (action.indexed.id, action.signature))
+            .collect();
+
+        let retry_config = RetryConfig {
+            max_times: usize::MAX,
+            min_delay: super::BATCH_PUBLISH_MIN_DELAY,
+            max_delay: super::BATCH_PUBLISH_MAX_DELAY,
+            jitter: true,
+        };
+
+        let res = retry_rpc!(
+            Duration::MAX, // Prevent from timing out
+            retry_config,
+            |attempt, err, sleep| {
+                tracing::warn!(
+                    "batch publish failed (attempt {attempt}): {err}, retrying in {sleep:?}"
+                );
+            },
+            { self.batch_publish_signatures(actions, &signatures).await }
+        );
+
+        // Log metrics for successful publishes, or log an error if all retries failed
+        if res.is_ok() {
+            for action in actions.iter() {
+                super::record_publish_metrics(action);
+            }
+        } else {
+            tracing::error!("exceeded max retries, trashing publish request");
+        }
+
+        actions.clear();
+    }
+
+    /// Wait for transaction receipt with max_attempts and exponential delay backoff starting at 5s
     async fn wait_for_transaction_receipt(
         &self,
         tx_hash: B256,
         sign_ids: &[SignId],
-    ) -> Result<TransactionReceipt, ()> {
+    ) -> anyhow::Result<TransactionReceipt> {
         let retry_config = RetryConfig {
             max_times: ETH_TX_RECEIPT_MAX_ATTEMPTS,
             min_delay: ETH_RECEIPT_MIN_DELAY,
@@ -110,16 +191,24 @@ impl EthClient {
             },
             // Try to get the transaction receipt
             {
-                match self.contract.provider().get_transaction_receipt(tx_hash).await {
+                match self
+                    .contract
+                    .provider()
+                    .get_transaction_receipt(tx_hash)
+                    .await
+                {
                     Ok(Some(receipt)) => {
-                        tracing::info!(?sign_ids, "eth signature respond transaction receipt found");
+                        tracing::info!(
+                            ?sign_ids,
+                            "eth signature respond transaction receipt found"
+                        );
                         Ok(receipt)
                     }
                     Ok(None) => Err(anyhow::anyhow!("Receipt not ready yet")),
                     Err(e) => Err(anyhow::anyhow!("RPC Error: {e}")),
                 }
             }
-        ).map_err(|_| ())
+        )
     }
 
     async fn send_responses(
@@ -127,7 +216,7 @@ impl EthClient {
         responses: Vec<ChainSignatures::Response>,
         gas: u64,
         sign_ids: &[SignId],
-    ) -> Result<alloy::primitives::B256, ()> {
+    ) -> anyhow::Result<B256> {
         let send_retry = RetryConfig {
             max_times: ETH_SEND_MAX_ATTEMPTS,
             min_delay: ETH_SEND_MIN_DELAY,
@@ -172,13 +261,6 @@ impl EthClient {
                     .map_err(|e| anyhow::anyhow!("RPC Error: {e}"))
             }
         )
-        .map_err(|err| {
-            tracing::error!(
-                ?sign_ids,
-                ?err,
-                "failed to send ethereum signature transaction: retry attempts exhausted"
-            );
-        })
     }
 
     /// Shared logic to send the transaction, wait for the receipt, and verify success.
@@ -187,13 +269,13 @@ impl EthClient {
         responses: Vec<ChainSignatures::Response>,
         gas: u64,
         sign_ids: &[SignId],
-    ) -> Result<(), ()> {
+    ) -> anyhow::Result<()> {
         let tx_hash = self.send_responses(responses, gas, sign_ids).await?;
         let receipt = self.wait_for_transaction_receipt(tx_hash, sign_ids).await?;
 
         if !receipt.status() {
             tracing::error!(?sign_ids, ?tx_hash, "ethereum transaction failed");
-            return Err(());
+            anyhow::bail!("Ethereum transaction reverted");
         }
 
         tracing::info!(
@@ -204,33 +286,11 @@ impl EthClient {
         Ok(())
     }
 
-    pub async fn publish_signature(
-        &self,
-        action: &PublishAction,
-        timestamp: &Instant,
-        mpc_sig: &mpc_primitives::Signature,
-    ) -> Result<(), ()> {
-        let response = ChainSignatures::Response {
-            requestId: action.indexed.id.request_id.into(),
-            signature: mpc_sig.into(),
-        };
-
-        self.execute_publish(
-            vec![response],
-            ETH_BASE_GAS_LIMIT,
-            std::slice::from_ref(&action.indexed.id),
-        )
-        .await?;
-
-        tracing::info!(elapsed = ?timestamp.elapsed(), "single publish complete");
-        Ok(())
-    }
-
     pub async fn batch_publish_signatures(
         &self,
         actions: &[PublishAction],
         signatures: &HashMap<SignId, Signature>,
-    ) -> Result<(), ()> {
+    ) -> anyhow::Result<()> {
         let num_requests = actions.len();
         let sign_ids: Vec<_> = actions.iter().map(|a| a.indexed.id).collect();
 
@@ -247,6 +307,7 @@ impl EthClient {
             })
             .collect();
 
+        // TODO: Consider using a more accurate dynamic gas estimation
         let gas = std::cmp::max(
             ETH_BASE_GAS_LIMIT,
             ETH_BATCH_GAS_PER_REQUEST * num_requests as u64,
@@ -256,6 +317,17 @@ impl EthClient {
 
         tracing::info!(num_requests, "batch publish complete");
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ChainPublisher for EthClient {
+    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
+        // Push to internal batching queue
+        self.batch_tx
+            .send(action.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("eth: batch channel closed: {e}"))
     }
 }
 

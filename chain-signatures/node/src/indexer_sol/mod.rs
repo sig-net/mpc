@@ -76,6 +76,7 @@ pub struct SolanaIndexer<S: StateManager, T: ChainTelemetry> {
     pub state_manager: S,
     pub telemetry: T,
     pub live_rx: Option<mpsc::Receiver<ChainEvent>>,
+    live_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 struct SolanaStreamStartState<S: StateManager, T: ChainTelemetry> {
@@ -146,6 +147,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainStream for SolanaStream<S, T> {
             state_manager: start_state.state_manager,
             telemetry: start_state.telemetry,
             live_rx: None,
+            live_task: None,
         };
 
         Ok(indexer)
@@ -166,6 +168,11 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
     type Iter = Pin<Box<dyn Stream<Item = Self::Block> + Send + 'static>>;
 
     async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
+        if let Some(prev) = self.live_task.take() {
+            tracing::info!("aborting previous solana live subscription task");
+            prev.abort();
+        }
+
         let (live_tx, live_rx) = crate::stream::channel();
         self.live_rx = Some(live_rx);
 
@@ -174,13 +181,13 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
         // Oneshot to receive the first observed slot from the live subscription.
         let (anchor_tx, anchor_rx) = oneshot::channel::<u64>();
 
-        tokio::spawn(subscribe_and_buffer_live_events(
+        self.live_task = Some(tokio::spawn(subscribe_and_buffer_live_events(
             program_id,
             self.client.clone(),
             live_tx,
             anchor_tx,
             self.telemetry.clone(),
-        ));
+        )));
 
         // Wait for the first slot observed on the live feed to use as anchor.
         Ok(Some(anchor_rx.await?))
@@ -266,6 +273,14 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
     async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
         self.events_tx.send(ChainEvent::CatchupCompleted).await?;
         Ok(())
+    }
+}
+
+impl<S: StateManager, T: ChainTelemetry> Drop for SolanaIndexer<S, T> {
+    fn drop(&mut self) {
+        if let Some(task) = self.live_task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -1136,6 +1151,7 @@ mod tests {
             state_manager,
             telemetry: NoopChainTelemetry,
             live_rx: None,
+            live_task: None,
         };
 
         // Initialize livestream (resolves anchor slot via get_slot and starts WS)
