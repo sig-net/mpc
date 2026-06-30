@@ -27,6 +27,7 @@ ciborium = "0.2.2"
 clap = { version = "4.5.4", features = ["derive", "env"] }
 deadpool-redis = "0.18.0"
 hex = "0.4.3"
+hkdf = "0.12.4"
 hyper = { version = "0.14", features = ["full"] }
 k256 = { version = "0.13.1", features = [
     "sha256",

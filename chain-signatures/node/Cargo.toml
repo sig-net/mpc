@@ -14,7 +14,7 @@ axum-extra = "0.9.6"
 chrono = "0.4.24"
 google-datastore1 = "=5.0.4"
 google-secretmanager1 = "5"
-hkdf = "0.12.4"
+hkdf.workspace = true
 highway = "1.1.0"
 http = "1.1.0"
 hyper-rustls = { version = "=0.24", features = ["http2"] }

@@ -11,7 +11,10 @@ backon.workspace = true
 # TODO: replace anyhow with thiserror
 anyhow.workspace = true
 async-trait.workspace = true
+cait-sith.workspace = true
 futures-util.workspace = true
+k256.workspace = true
+mpc-crypto.workspace = true
 mpc-primitives.workspace = true
 tracing.workspace = true
 tokio.workspace = true

@@ -3,6 +3,7 @@
 mod indexer;
 mod state;
 mod telemetry;
+mod publish;
 pub mod utils;
 
 pub use indexer::{ChainIndexer, ChainStream};
