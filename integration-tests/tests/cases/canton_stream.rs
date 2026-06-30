@@ -2,7 +2,7 @@ use anyhow::{Context as _, Result};
 use integration_tests::canton::{
     test_evm_type2_anvil_cases, test_sign_request_event, CantonSandbox,
 };
-use mpc_indexer_core::{
+use mpc_chain_integration_core::{
     utils::hashing::hash_payload, ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager,
 };
 use mpc_node::backlog::Backlog;

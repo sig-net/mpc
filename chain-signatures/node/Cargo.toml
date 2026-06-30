@@ -89,7 +89,7 @@ oauth2.workspace = true
 
 mpc-contract.workspace = true
 mpc-crypto.workspace = true
-mpc-indexer-core.workspace = true
+mpc-chain-integration-core.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true
 signet-program.workspace = true

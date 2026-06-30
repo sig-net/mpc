@@ -6021,9 +6021,9 @@ dependencies = [
  "hex",
  "hyper 0.14.32",
  "k256",
+ "mpc-chain-integration-core",
  "mpc-contract",
  "mpc-crypto",
- "mpc-indexer-core",
  "mpc-keys",
  "mpc-node",
  "mpc-primitives",
@@ -7312,6 +7312,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fafa6961cabd9c63bcd77a45d7e3b7f3b552b70417831fb0f56db717e72407e"
 
 [[package]]
+name = "mpc-chain-integration-core"
+version = "1.16.4"
+dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "anyhow",
+ "async-trait",
+ "backon",
+ "futures-util",
+ "mpc-primitives",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "mpc-contract"
 version = "1.16.4"
 dependencies = [
@@ -7345,21 +7360,6 @@ dependencies = [
  "near-account-id",
  "near-sdk",
  "sha3",
-]
-
-[[package]]
-name = "mpc-indexer-core"
-version = "1.16.4"
-dependencies = [
- "alloy-primitives",
- "alloy-sol-types",
- "anyhow",
- "async-trait",
- "backon",
- "futures-util",
- "mpc-primitives",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -7414,9 +7414,9 @@ dependencies = [
  "maud",
  "mime",
  "mockito",
+ "mpc-chain-integration-core",
  "mpc-contract",
  "mpc-crypto",
- "mpc-indexer-core",
  "mpc-keys",
  "mpc-primitives",
  "near-account-id",

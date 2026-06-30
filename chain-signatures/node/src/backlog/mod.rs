@@ -4,7 +4,7 @@ use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt, SignSta
 use crate::storage::checkpoint_storage::CheckpointStorage;
 
 use anyhow::Context;
-use mpc_indexer_core::StateManager;
+use mpc_chain_integration_core::StateManager;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, PendingTx, SignId, SignKind,
 };

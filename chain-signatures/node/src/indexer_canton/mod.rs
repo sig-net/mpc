@@ -16,7 +16,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 pub use config::CantonConfig;
 use contracts::TxParams as CantonTxParams;
 use k256::Scalar;
-use mpc_indexer_core::utils::hashing::hash_payload;
+use mpc_chain_integration_core::utils::hashing::hash_payload;
 use mpc_primitives::{
     Chain, IndexedSignRequest, ScalarExt, SignArgs, SignBidirectionalEvent, SignId,
     LATEST_MPC_KEY_VERSION,

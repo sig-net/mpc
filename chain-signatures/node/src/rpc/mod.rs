@@ -22,8 +22,8 @@ pub use hydration::HydrationClient;
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
+use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
 pub use mpc_contract::primitives::{Read, View};
-use mpc_indexer_core::utils::retry::{retry_rpc, RetryConfig};
 use mpc_primitives::{CheckpointDigest, Signature};
 pub use near::NearClient;
 

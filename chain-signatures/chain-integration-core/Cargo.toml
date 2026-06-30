@@ -1,8 +1,8 @@
 [package]
-name = "mpc-indexer-core"
+name = "mpc-chain-integration-core"
 edition = "2021"
 version.workspace = true
-description = "Core traits and types for the MPC indexers"
+description = "Core traits and types for the MPC chain integration including signature publishing and indexing."
 
 [dependencies]
 alloy-primitives.workspace = true

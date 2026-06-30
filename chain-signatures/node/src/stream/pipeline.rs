@@ -5,7 +5,7 @@ use crate::node_client::NodeClient;
 use crate::protocol::signature::Sign;
 use crate::protocol::Chain;
 use futures_util::StreamExt;
-use mpc_indexer_core::ChainIndexer;
+use mpc_chain_integration_core::ChainIndexer;
 use mpc_primitives::CheckpointDigest;
 use near_account_id::AccountId;
 use tokio::sync::{mpsc, watch};

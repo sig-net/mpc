@@ -11,11 +11,11 @@ use alloy_sol_types::SolValue;
 use anyhow::{anyhow, Result};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
-use mpc_crypto::ScalarExt as _;
-use mpc_indexer_core::{
+use mpc_chain_integration_core::{
     utils::hashing::{compute_request_id, hash_payload},
     ChainTelemetry,
 };
+use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
     Chain, CheckpointDigest, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
     SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,

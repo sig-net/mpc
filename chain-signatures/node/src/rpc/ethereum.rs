@@ -12,7 +12,7 @@ use alloy::providers::{
 use alloy::rpc::types::TransactionReceipt;
 use alloy_signer_local::PrivateKeySigner;
 use k256::elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint};
-use mpc_indexer_core::utils::retry::{retry_rpc, RetryConfig};
+use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
 use mpc_primitives::{SignId, Signature};
 use std::collections::HashMap;
 use std::str::FromStr;

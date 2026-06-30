@@ -13,7 +13,7 @@ use crate::stream::ops::{
 };
 pub use crate::stream::pipeline::ChainPipeline;
 
-use mpc_indexer_core::{ChainIndexer, ChainStream, ChainTelemetry};
+use mpc_chain_integration_core::{ChainIndexer, ChainStream, ChainTelemetry};
 use mpc_primitives::{ChainEvent, CheckpointDigest};
 use tokio::sync::{mpsc, watch};
 
@@ -178,7 +178,7 @@ mod tests {
     use async_trait::async_trait;
     use k256::{AffinePoint, Scalar};
     use mockito::Server;
-    use mpc_indexer_core::{ChainIndexer, ChainStream, NoopChainTelemetry, StateManager};
+    use mpc_chain_integration_core::{ChainIndexer, ChainStream, NoopChainTelemetry, StateManager};
     use mpc_primitives::{
         Chain, CheckpointDigest, IndexedSignRequest, SignArgs, SignId, Signature,
         SignatureRespondedEvent,

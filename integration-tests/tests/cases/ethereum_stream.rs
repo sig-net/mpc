@@ -9,7 +9,7 @@ use integration_tests::containers::EthereumSandbox;
 use integration_tests::eth::{self, ChainSignatures, SignRequest};
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
-use mpc_indexer_core::{ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager};
+use mpc_chain_integration_core::{ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager};
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::mesh::{connection::NodeStatus, MeshState};

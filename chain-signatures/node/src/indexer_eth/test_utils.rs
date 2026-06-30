@@ -1,5 +1,5 @@
 use super::{EthConfig, EthereumClient};
-use mpc_indexer_core::utils::retry::RetryConfig;
+use mpc_chain_integration_core::utils::retry::RetryConfig;
 use std::time::Duration;
 
 /// Creates a test Ethereum client with a small retry strategy for testing purposes.
