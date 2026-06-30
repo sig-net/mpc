@@ -57,7 +57,7 @@ async fn stream_solana_with_backlog(
     SolanaStream<impl StateManager, impl ChainTelemetry>,
     watch::Sender<CheckpointDigest>,
 )> {
-    let mut stream = SolanaStream::new(Some(config), backlog.clone(), NoopChainTelemetry)
+    let mut stream = SolanaStream::new(config, backlog.clone(), NoopChainTelemetry)
         .context("failed to create SolanaStream")?;
     let indexer = ChainStream::start(&mut stream).await?;
     let (cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
@@ -490,7 +490,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         .await;
 
     let recovered_backlog = Backlog::persisted(storage);
-    let stream = SolanaStream::new(Some(config), recovered_backlog.clone(), NoopChainTelemetry)
+    let stream = SolanaStream::new(config, recovered_backlog.clone(), NoopChainTelemetry)
         .context("failed to create SolanaStream")?;
 
     let (sign_tx, mut sign_rx) = mpsc::channel::<Sign>(4);

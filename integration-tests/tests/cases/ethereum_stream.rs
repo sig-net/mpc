@@ -382,7 +382,7 @@ async fn stream_ethereum(
     backlog: Backlog,
 ) -> Result<StartedEthereumStream<impl StateManager, NoopChainTelemetry>> {
     let mut stream =
-        EthereumStream::new(Some(ctx.config(true)), backlog.clone(), NoopChainTelemetry).await?;
+        EthereumStream::new(ctx.config(true), backlog.clone(), NoopChainTelemetry).await?;
     let indexer = stream.start().await?;
     let (cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
@@ -452,8 +452,7 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     }
 
     let backlog = Backlog::persisted(storage);
-    let stream =
-        EthereumStream::new(Some(ctx.config(true)), backlog.clone(), NoopChainTelemetry).await?;
+    let stream = EthereumStream::new(ctx.config(true), backlog.clone(), NoopChainTelemetry).await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
@@ -634,8 +633,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let catchup_payload = [0x55; 32];
     submit_sign_request(&ctx, catchup_payload, "catchup-linear-path").await?;
 
-    let stream =
-        EthereumStream::new(Some(ctx.config(true)), backlog.clone(), NoopChainTelemetry).await?;
+    let stream = EthereumStream::new(ctx.config(true), backlog.clone(), NoopChainTelemetry).await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
@@ -823,8 +821,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         ))
         .await;
 
-    let stream =
-        EthereumStream::new(Some(ctx.config(true)), backlog.clone(), NoopChainTelemetry).await?;
+    let stream = EthereumStream::new(ctx.config(true), backlog.clone(), NoopChainTelemetry).await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),

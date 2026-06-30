@@ -26,6 +26,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+// TODO: should be replaced
+use crate::rpc::record_publish_metrics;
 use mpc_chain_integration_core::{
     utils::retry::{retry_rpc, RetryConfig},
     ChainPublisher, PublishAction,
@@ -556,6 +558,8 @@ impl ChainPublisher for SolanaClient {
                 anyhow::bail!("checkpoint publishing not supported on Solana")
             }
         }
+
+        record_publish_metrics(action);
 
         Ok(())
     }

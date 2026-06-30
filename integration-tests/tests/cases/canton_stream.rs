@@ -34,7 +34,8 @@ async fn stream_canton(
     watch::Sender<CheckpointDigest>,
 )> {
     let config = sandbox.get_config();
-    let mut stream = CantonStream::new(Some(config), backlog.clone(), NoopChainTelemetry)
+    let mut stream = CantonStream::new(config, backlog.clone(), NoopChainTelemetry)
+        .await
         .context("failed to create CantonStream")?;
     let indexer = ChainStream::start(&mut stream).await?;
     let (cp_tx, cp_rx) = tokio::sync::watch::channel(CheckpointDigest::default());

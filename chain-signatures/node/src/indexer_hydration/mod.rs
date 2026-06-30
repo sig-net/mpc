@@ -311,7 +311,7 @@ pub(crate) fn ss58_address_from_account32(sender: [u8; 32]) -> String {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run<T: ChainTelemetry>(
-    hydration: Option<HydrationConfig>,
+    hydration: HydrationConfig,
     sign_tx: mpsc::Sender<Sign>,
     backlog: Backlog,
     telemetry: T,
@@ -320,11 +320,6 @@ pub async fn run<T: ChainTelemetry>(
     node_client: NodeClient,
     mut checkpoints_rx: watch::Receiver<CheckpointDigest>,
 ) {
-    let Some(hydration) = hydration else {
-        tracing::warn!("hydration indexer is disabled");
-        return;
-    };
-
     let ws_url: &str = hydration.rpc_ws_url.as_str();
 
     tracing::info!("connecting to hydration rpc at {}", ws_url);

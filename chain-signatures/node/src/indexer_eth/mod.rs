@@ -1053,26 +1053,10 @@ pub struct EthereumStream<S: StateManager, T: ChainTelemetry> {
 }
 
 impl<S: StateManager, T: ChainTelemetry> EthereumStream<S, T> {
-    pub async fn new(
-        eth: Option<EthConfig>,
-        state_manager: S,
-        telemetry: T,
-    ) -> anyhow::Result<Self> {
-        let Some(eth) = eth else {
-            tracing::warn!(
-                "ethereum indexer is disabled: no EthConfig provided \
-                 (check that all --eth-* CLI flags were supplied)"
-            );
-            anyhow::bail!("ethereum indexer is disabled: no EthConfig provided");
-        };
-        tracing::info!(
-            eth_config = ?eth,
-            "creating ethereum indexer stream"
-        );
-
+    pub async fn new(eth: EthConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
+        tracing::info!(eth_config = ?eth, "creating ethereum indexer stream");
         let (events_tx, events_rx) = crate::stream::channel();
         let indexer = EthereumIndexer::new(eth, state_manager, telemetry, events_tx).await?;
-
         Ok(Self {
             events_rx: Some(events_rx),
             start_state: Some(indexer),

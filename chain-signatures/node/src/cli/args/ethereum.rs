@@ -67,7 +67,7 @@ pub struct EthArgs {
         env("MPC_ETH_REFRESH_FINALIZED_INTERVAL"),
         default_value = "10000"
     )]
-    pub eth_refresh_finalized_interval: Option<u64>,
+    pub eth_refresh_finalized_interval: u64,
     /// Enable the indexer to just send requests optimistically instead waiting for final.
     /// Useful for testing where we do not want to reach finality due to how long it takes.
     #[clap(long, env("MPC_ETH_OPTIMISTIC_REQUESTS"), default_value = "false")]
@@ -104,12 +104,10 @@ impl EthArgs {
         if let Some(eth_helios_data_path) = self.eth_helios_data_path {
             args.extend(["--eth-helios-data-path".to_string(), eth_helios_data_path]);
         }
-        if let Some(eth_refresh_finalized_interval) = self.eth_refresh_finalized_interval {
-            args.extend([
-                "--eth-refresh-finalized-interval".to_string(),
-                eth_refresh_finalized_interval.to_string(),
-            ]);
-        }
+        args.extend([
+            "--eth-refresh-finalized-interval".to_string(),
+            self.eth_refresh_finalized_interval.to_string(),
+        ]);
         if self.eth_optimistic_requests {
             args.push("--eth-optimistic-requests".to_string());
         }
@@ -130,11 +128,11 @@ impl EthArgs {
         Some(EthConfig {
             account_sk: self.eth_account_sk?.expose_secret().to_string(), // this is safe because  EthConfig has custom Debug implementation that redacts the account_sk field
             consensus_rpc_http_url: self.eth_consensus_rpc_http_url.unwrap_or_default(),
-            execution_rpc_http_url: self.eth_execution_rpc_http_url.unwrap(),
-            contract_address: self.eth_contract_address.unwrap(),
+            execution_rpc_http_url: self.eth_execution_rpc_http_url?,
+            contract_address: self.eth_contract_address?,
             network: self.eth_network.unwrap_or_default(),
             helios_data_path: self.eth_helios_data_path.unwrap_or_default(),
-            refresh_finalized_interval: self.eth_refresh_finalized_interval.unwrap(),
+            refresh_finalized_interval: self.eth_refresh_finalized_interval,
             optimistic_requests: self.eth_optimistic_requests,
             #[cfg(feature = "helios")]
             light_client: self.eth_light_client,
@@ -152,7 +150,7 @@ impl EthArgs {
                 eth_contract_address: Some(config.contract_address),
                 eth_network: Some(config.network),
                 eth_helios_data_path: Some(config.helios_data_path),
-                eth_refresh_finalized_interval: Some(config.refresh_finalized_interval),
+                eth_refresh_finalized_interval: config.refresh_finalized_interval,
                 eth_optimistic_requests: config.optimistic_requests,
                 eth_light_client: config.light_client,
             },
@@ -163,7 +161,7 @@ impl EthArgs {
                 eth_contract_address: None,
                 eth_network: None,
                 eth_helios_data_path: None,
-                eth_refresh_finalized_interval: None,
+                eth_refresh_finalized_interval: 0,
                 eth_optimistic_requests: false,
                 eth_light_client: false,
             },
