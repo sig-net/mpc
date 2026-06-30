@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 use crate::protocol::{Chain, IndexedSignRequest};
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};

@@ -172,11 +172,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             }
         };
 
-        let next_state = ChainStreaming::Catchup {
-            anchor_height: anchor_height.unwrap_or(0),
-        };
-        let _ = self.state_tx.send(next_state);
-        Some(next_state)
+        self.transition_to_catchup(anchor_height.unwrap_or(0)).await
     }
 
     async fn handle_catchup(&mut self, anchor_height: u64) -> Option<ChainStreaming> {
@@ -257,12 +253,32 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                 livestream_result = self.indexer.livestream() => {
                     match livestream_result {
                         Ok(anchor_height) => {
-                            let next_state = match anchor_height {
-                                Some(anchor_height) => ChainStreaming::Catchup { anchor_height },
-                                None => ChainStreaming::Live,
+                            return match anchor_height {
+                                Some(anchor_height) => self.transition_to_catchup(anchor_height).await,
+                                None => {
+                                    if let Err(err) = self.indexer.notify_not_caught_up().await {
+                                        tracing::warn!(
+                                            ?err,
+                                            %chain,
+                                            "failed to send not-caught-up marker after reconnect; stopping stream pipeline"
+                                        );
+                                        return None;
+                                    }
+
+                                    if let Err(err) = self.indexer.notify_catchup_completed().await {
+                                        tracing::warn!(
+                                            ?err,
+                                            %chain,
+                                            "failed to restore caught-up marker after reconnect; stopping stream pipeline"
+                                        );
+                                        return None;
+                                    }
+
+                                    let next_state = ChainStreaming::Live;
+                                    let _ = self.state_tx.send(next_state);
+                                    Some(next_state)
+                                }
                             };
-                            let _ = self.state_tx.send(next_state);
-                            return Some(next_state);
                         }
                         Err(err) => {
                             tracing::error!(?err, %chain, "failed to reconnect livestream; retrying");
@@ -315,6 +331,23 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             RegressionOutcome::Aligned => PipelineAction::Continue,
             RegressionOutcome::Shutdown => PipelineAction::Shutdown,
         }
+    }
+
+    async fn transition_to_catchup(&mut self, anchor_height: u64) -> Option<ChainStreaming> {
+        let chain = I::CHAIN;
+        if let Err(err) = self.indexer.notify_not_caught_up().await {
+            tracing::warn!(
+                ?err,
+                %chain,
+                anchor_height,
+                "failed to send not-caught-up marker; stopping stream pipeline"
+            );
+            return None;
+        }
+
+        let next_state = ChainStreaming::Catchup { anchor_height };
+        let _ = self.state_tx.send(next_state);
+        Some(next_state)
     }
 }
 

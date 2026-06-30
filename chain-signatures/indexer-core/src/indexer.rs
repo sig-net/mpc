@@ -28,6 +28,9 @@ pub trait ChainIndexer: Send + 'static {
         Ok(())
     }
 
+    /// Emit an ordered marker on the same event stream used by catchup replay.
+    async fn notify_not_caught_up(&mut self) -> anyhow::Result<()>;
+
     async fn catchup_range(&self, anchor_height: u64) -> Self::Iter;
 
     async fn process_catchup(&mut self, item: &Self::Block) -> anyhow::Result<()> {

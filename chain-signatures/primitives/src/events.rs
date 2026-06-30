@@ -19,6 +19,10 @@ pub enum ChainEvent {
     /// Catchup has completed and live events may be forwarded to the signer.
     CatchupCompleted,
 
+    /// The stream is entering catchup/replay; events after this marker are not live
+    /// until a subsequent `CatchupCompleted`.
+    NotCaughtUp,
+
     /// Block height indicating the client has observed/processed up to `u64` (slot/block)
     Block(u64),
 
@@ -57,6 +61,7 @@ impl std::fmt::Debug for ChainEvent {
                 .field(&ev.chain.as_str())
                 .finish(),
             ChainEvent::CatchupCompleted => write!(f, "CatchupCompleted"),
+            ChainEvent::NotCaughtUp => write!(f, "NotCaughtUp"),
             ChainEvent::Block(b) => write!(f, "Block({b})"),
             ChainEvent::ExecutionConfirmed {
                 tx_id,
