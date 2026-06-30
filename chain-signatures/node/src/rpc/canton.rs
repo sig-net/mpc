@@ -1,4 +1,3 @@
-use super::{ChainPublisher, PublishAction};
 use crate::indexer_canton::{
     contracts::{CantonSignature, EcdsaSigData},
     der_encode_signature,
@@ -10,6 +9,7 @@ use crate::indexer_canton::{
     },
     CantonAuthProvider, CantonChainCtx, CantonConfig,
 };
+use mpc_chain_integration_core::{ChainPublisher, PublishAction};
 use mpc_primitives::{Chain, SignKind};
 use std::time::Duration;
 

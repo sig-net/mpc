@@ -1,6 +1,6 @@
-use super::{ChainPublisher, PublishAction};
 use crate::indexer_hydration::HydrationConfig;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
+use mpc_chain_integration_core::{ChainPublisher, PublishAction};
 use mpc_primitives::{SignId, SignKind, Signature};
 use parity_scale_codec::{Decode, Encode};
 use sp_core::{sr25519, Pair as _};

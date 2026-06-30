@@ -11,6 +11,7 @@ use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
 use enum_map::EnumMap;
+use mpc_chain_integration_core::{ChainPublisher, PublishAction};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -42,48 +43,6 @@ const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(5);
 const PUBLISH_MAX_DELAY: Duration = Duration::from_secs(60); // Cap to 1 min so backoff doesn't get too long for infinite retries
 const BATCH_PUBLISH_MIN_DELAY: Duration = Duration::from_secs(1);
 const BATCH_PUBLISH_MAX_DELAY: Duration = Duration::from_secs(10);
-
-/// Trait for publishing signatures to different blockchains (single attempt, caller handles retries).
-#[async_trait::async_trait]
-pub trait ChainPublisher: Send + Sync + 'static {
-    /// Accepts a publish action. The publisher encapsulates how this is executed
-    /// (e.g., immediate spawn, or pushing to an internal batching queue).
-    async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()>;
-}
-
-#[derive(Clone)]
-pub struct PublishAction {
-    pub public_key: mpc_crypto::PublicKey,
-    pub indexed: IndexedSignRequest,
-    pub signature: Signature,
-    pub participants: Vec<Participant>,
-    pub timestamp: Instant,
-}
-
-impl PublishAction {
-    pub fn new(
-        public_key: mpc_crypto::PublicKey,
-        indexed: IndexedSignRequest,
-        output: FullSignature<Secp256k1>,
-        participants: Vec<Participant>,
-    ) -> Option<Self> {
-        let expected_public_key = mpc_crypto::derive_key(public_key, indexed.args.epsilon);
-        let signature = crate::kdf::into_signature(
-            &expected_public_key,
-            &output.big_r,
-            &output.s,
-            indexed.args.payload,
-        )
-        .ok()?;
-        Some(Self {
-            public_key,
-            indexed,
-            signature,
-            participants,
-            timestamp: Instant::now(),
-        })
-    }
-}
 
 pub enum RpcAction {
     Publish(PublishAction),

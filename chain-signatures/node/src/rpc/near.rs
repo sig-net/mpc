@@ -1,9 +1,9 @@
-use super::{ChainPublisher, PublishAction};
 use crate::config::NetworkConfig;
 use crate::protocol::Governance;
 use crate::util::AffinePointExt as _;
 pub use mpc_contract::primitives::{Read, View};
 
+use mpc_chain_integration_core::{ChainPublisher, PublishAction};
 use mpc_keys::hpke;
 use mpc_primitives::{ConsensusCheckpointDigest, SignId, SignKind, Signature};
 
