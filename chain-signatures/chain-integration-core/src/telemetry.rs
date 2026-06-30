@@ -31,7 +31,7 @@ impl ChainTelemetry for NoopChainTelemetry {
 }
 
 /// Interface for the chain clients to record telemetry data during publishing signatures to the chain.
-pub trait PublisherTelemetry: Send + Sync + Clone + 'static {
+pub trait PublisherTelemetry: Send + Sync + 'static {
     /// Records metrics related to publishing a signature to the chain.
     fn record_publish_metrics(&self, action: &PublishAction);
 }
