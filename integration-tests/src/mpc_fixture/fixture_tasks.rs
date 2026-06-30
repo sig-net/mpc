@@ -15,7 +15,6 @@ use mpc_node::protocol::message::{MessageOutbox, SendMessage, SignedMessage};
 use mpc_node::protocol::Sign;
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::stream::run_stream;
-use mpc_primitives::CheckpointDigest;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, Receiver, Sender};

@@ -257,9 +257,7 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
 
     // Let the fetch loop start, then change the consensus digest to zero (abort signal).
     tokio::time::sleep(Duration::from_secs(1)).await;
-    cp_tx
-        .send(None)
-        .unwrap();
+    cp_tx.send(None).unwrap();
 
     // The function should see the changed digest and return None.
     let result = tokio::time::timeout(Duration::from_secs(10), handle)
