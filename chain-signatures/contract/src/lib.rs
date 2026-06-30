@@ -790,8 +790,8 @@ impl VersionedMpcContract {
         }
     }
 
-    pub fn latest_checkpoint(&self, chain: Chain) -> Option<SignedCheckpoint> {
-        self.checkpoints().get(&chain).cloned()
+    pub fn latest_checkpoint(&self, chain: Chain) -> Option<&SignedCheckpoint> {
+        self.checkpoints().get(&chain)
     }
 
     pub fn read(&self, reads: Vec<Read>) -> Vec<View> {
@@ -852,13 +852,13 @@ impl VersionedMpcContract {
             }
         }
 
-        self.mutable_checkpoints().insert(
+        self.update_checkpoint(&[(
             checkpoint.chain,
             SignedCheckpoint {
                 checkpoint,
                 signature,
             },
-        );
+        )]);
         Ok(())
     }
 
@@ -1089,6 +1089,21 @@ impl VersionedMpcContract {
     fn mutable_checkpoints(&mut self) -> &mut IterableMap<Chain, SignedCheckpoint> {
         match self {
             Self::V0(mpc_contract) => &mut mpc_contract.latest_checkpoints,
+        }
+    }
+
+    #[private]
+    pub fn update_checkpoint(&mut self, checkpoints: &[(Chain, SignedCheckpoint)]) {
+        for (chain, signed_checkpoint) in checkpoints {
+            self.mutable_checkpoints()
+                .insert(*chain, signed_checkpoint.clone());
+        }
+    }
+
+    #[private]
+    pub fn reset_checkpoint(&mut self, chains: &[Chain]) {
+        for chain in chains {
+            self.mutable_checkpoints().remove(chain);
         }
     }
 }
