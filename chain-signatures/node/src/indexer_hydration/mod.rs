@@ -5,6 +5,8 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::Sign;
 use crate::rpc::ContractStateWatcher;
+use crate::types::CheckpointWatcher;
+
 pub use config::HydrationConfig;
 
 use alloy_sol_types::SolValue;
@@ -17,9 +19,8 @@ use mpc_chain_integration_core::{
 };
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
-    Chain, CheckpointDigest, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
-    SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
-    MAX_SECP256K1_SCALAR,
+    Chain, IndexedSignRequest, RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignId,
+    Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{twox_128, H256};
@@ -318,7 +319,7 @@ pub async fn run<T: ChainTelemetry>(
     mut contract_watcher: ContractStateWatcher,
     mut mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
-    mut checkpoints_rx: watch::Receiver<CheckpointDigest>,
+    mut checkpoints_rx: CheckpointWatcher,
 ) {
     let ws_url: &str = hydration.rpc_ws_url.as_str();
 

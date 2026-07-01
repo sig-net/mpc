@@ -441,11 +441,12 @@ fn calculate_digest(
     i64::from_le_bytes(bytes)
 }
 
+#[allow(clippy::type_complexity)]
 fn checkpoint_watchers() -> (
-    EnumMap<Chain, watch::Sender<CheckpointDigest>>,
-    EnumMap<Chain, watch::Receiver<CheckpointDigest>>,
+    EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
+    EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
 ) {
-    let channels = EnumMap::from_fn(|_| watch::channel(CheckpointDigest::default()));
+    let channels = EnumMap::from_fn(|_| watch::channel(None));
     let checkpoints_tx = EnumMap::from_fn(|chain| channels[chain].0.clone());
     let checkpoints_rx = EnumMap::from_fn(|chain| channels[chain].1.clone());
     (checkpoints_tx, checkpoints_rx)
@@ -667,8 +668,8 @@ struct ProtocolHandles {
     node: Node,
     node_watcher: NodeStateWatcher,
     config_tx: watch::Sender<Config>,
-    checkpoints_tx: EnumMap<Chain, watch::Sender<CheckpointDigest>>,
-    checkpoints_rx: EnumMap<Chain, watch::Receiver<CheckpointDigest>>,
+    checkpoints_tx: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
+    checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
 }
 
 impl ProtocolHandles {
@@ -748,7 +749,7 @@ async fn spawn_indexers(
     contract_watcher: ContractStateWatcher,
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
-    checkpoints_rx: EnumMap<Chain, watch::Receiver<CheckpointDigest>>,
+    checkpoints_rx: EnumMap<Chain, watch::Receiver<Option<CheckpointDigest>>>,
 ) {
     let ChainConfigs {
         eth,

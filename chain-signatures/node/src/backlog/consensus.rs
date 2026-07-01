@@ -2,9 +2,10 @@ use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::contract::primitives::ParticipantInfo;
+use crate::types::CheckpointWatcher;
 
 use cait_sith::protocol::Participant;
-use mpc_primitives::{Chain, Checkpoint, CheckpointDigest};
+use mpc_primitives::{Chain, Checkpoint};
 use near_account_id::AccountId;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
@@ -15,16 +16,12 @@ use tokio::sync::watch;
 pub async fn align_backlog_with_consensus(
     chain: Chain,
     backlog: &Backlog,
-    checkpoints_rx: &mut watch::Receiver<CheckpointDigest>,
+    checkpoints_rx: &mut CheckpointWatcher,
     mesh_state: &mut watch::Receiver<MeshState>,
     node_client: &NodeClient,
     my_account_id: &AccountId,
 ) -> Option<u64> {
-    let checkpoint_digest = checkpoints_rx.borrow_and_update().clone();
-    // Ignore the default zero-digest (no consensus checkpoint observed yet).
-    if checkpoint_digest.digest == [0u8; 32] {
-        return None;
-    }
+    let checkpoint_digest = checkpoints_rx.borrow_and_update().as_ref()?.clone();
 
     // If we can find the consensus checkpoint locally, confirm it and return.
     if let Some(matched) = backlog
@@ -131,7 +128,7 @@ pub(crate) async fn find_consensus_checkpoint(
     node_client: &NodeClient,
     chain: Chain,
     target_digest: [u8; 32],
-    consensus_rx: &mut watch::Receiver<CheckpointDigest>,
+    consensus_rx: &mut CheckpointWatcher,
     my_account_id: &AccountId,
 ) -> Option<Checkpoint> {
     let mut peers: Vec<_> = mesh_state
@@ -154,9 +151,17 @@ pub(crate) async fn find_consensus_checkpoint(
                     return None;
                 }
                 let checkpoint_digest = consensus_rx.borrow_and_update();
-                if checkpoint_digest.digest != target_digest {
-                    tracing::info!(?chain, "consensus digest changed during wait, aborting...");
-                    return None;
+                match &*checkpoint_digest {
+                    None => {
+                        tracing::info!(?chain, "consensus digest is empty, aborting...");
+                        return None;
+                    }
+                    Some(cp) => {
+                        if cp.digest != target_digest {
+                            tracing::info!(?chain, "consensus digest changed during wait, aborting...");
+                            return None;
+                        }
+                    }
                 }
             }
             changed = mesh_state.changed() => {
@@ -199,14 +204,14 @@ mod tests {
     use crate::mesh::connection::NodeStatus;
     use crate::node_client::Options as NodeClientOptions;
 
-    use mpc_primitives::{IndexedSignRequest, PendingTx, SignArgs, SignId};
+    use mpc_primitives::{CheckpointDigest, IndexedSignRequest, PendingTx, SignArgs, SignId};
     use std::collections::HashMap;
 
     struct AlignFixture {
         chain: Chain,
         backlog: Backlog,
-        checkpoints_tx: watch::Sender<CheckpointDigest>,
-        checkpoints_rx: watch::Receiver<CheckpointDigest>,
+        checkpoints_tx: watch::Sender<Option<CheckpointDigest>>,
+        checkpoints_rx: watch::Receiver<Option<CheckpointDigest>>,
         mesh_tx: watch::Sender<MeshState>,
         mesh_rx: watch::Receiver<MeshState>,
         node_client: NodeClient,
@@ -214,7 +219,7 @@ mod tests {
     }
 
     impl AlignFixture {
-        fn new(digest: CheckpointDigest) -> Self {
+        fn new(digest: Option<CheckpointDigest>) -> Self {
             let chain = Chain::Ethereum;
             let backlog = Backlog::new();
             let (checkpoints_tx, checkpoints_rx) = watch::channel(digest);
@@ -350,7 +355,7 @@ mod tests {
         let chain = Chain::Ethereum;
 
         for case in cases {
-            let mut fixture = AlignFixture::new(CheckpointDigest::default());
+            let mut fixture = AlignFixture::new(None);
 
             // 1. Setup local checkpoints
             let mut local_digests = Vec::new();
@@ -427,20 +432,19 @@ mod tests {
             }
 
             // 3. Setup remote consensus
-            let mut remote_digest = [0u8; 32];
+            let mut remote_digest = None;
             if let Some(idx) = case.remote_use_local_digest_idx {
-                remote_digest = local_digests[idx];
+                remote_digest = Some(local_digests[idx]);
             } else if case.remote_use_peer_digest {
-                remote_digest = peer_digest;
+                remote_digest = Some(peer_digest);
             }
 
-            fixture
-                .checkpoints_tx
-                .send(CheckpointDigest {
-                    height: case.remote_height,
-                    digest: remote_digest,
-                })
-                .unwrap();
+            let msg = remote_digest.map(|digest| CheckpointDigest {
+                height: case.remote_height,
+                digest,
+            });
+
+            fixture.checkpoints_tx.send(msg).unwrap();
 
             // 4. Run consensus alignment
             let result = fixture.run().await;
@@ -469,7 +473,7 @@ mod tests {
                 if case.remote_use_peer_digest {
                     let latest = fixture.backlog.latest_checkpoint(chain).await.unwrap();
                     assert_eq!(
-                        latest.digest(), remote_digest,
+                        latest.digest(), remote_digest.unwrap(),
                         "Test case failed: {}, expected local backlog latest checkpoint digest to match consensus digest",
                         case.name
                     );
@@ -502,10 +506,10 @@ mod tests {
     #[tokio::test]
     async fn test_align_mismatch_abort_on_consensus_change() {
         let chain = Chain::Ethereum;
-        let fixture = AlignFixture::new(CheckpointDigest {
+        let fixture = AlignFixture::new(Some(CheckpointDigest {
             height: 100,
             digest: [0xabu8; 32],
-        });
+        }));
 
         // Create a local checkpoint at 100
         fixture.backlog.set_processed_block(chain, 100).await;
@@ -531,13 +535,7 @@ mod tests {
 
         // Let it run and start querying, then update digest to zero to abort
         tokio::time::sleep(Duration::from_millis(50)).await;
-        fixture
-            .checkpoints_tx
-            .send(CheckpointDigest {
-                height: 0,
-                digest: [0u8; 32],
-            })
-            .unwrap();
+        fixture.checkpoints_tx.send(None).unwrap();
 
         let result = handle.await.unwrap();
         assert!(result.is_none(), "aborted align should return None");

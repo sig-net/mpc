@@ -2,6 +2,8 @@ use cait_sith::protocol::{Action, InitializationError, MessageData, Participant,
 use cait_sith::{protocol::Protocol, KeygenOutput};
 use cait_sith::{FullSignature, PresignOutput};
 use k256::{elliptic_curve::CurveArithmetic, Secp256k1};
+use mpc_primitives::CheckpointDigest;
+use tokio::sync::watch;
 
 use crate::protocol::contract::ResharingContractState;
 
@@ -19,6 +21,8 @@ pub type PresignatureProtocol = Box<dyn Protocol<Output = PresignOutput<Secp256k
 pub type SignatureProtocol = Box<dyn Protocol<Output = FullSignature<Secp256k1>> + Send + Sync>;
 
 pub type Epoch = u64;
+
+pub type CheckpointWatcher = watch::Receiver<Option<CheckpointDigest>>;
 
 pub struct KeygenProtocol {
     me: Participant,

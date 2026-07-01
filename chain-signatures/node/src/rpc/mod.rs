@@ -355,7 +355,7 @@ impl RpcExecutor {
         mut self,
         contract: watch::Sender<Option<ProtocolState>>,
         config: watch::Sender<Config>,
-        checkpoints: EnumMap<Chain, watch::Sender<CheckpointDigest>>,
+        checkpoints: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
     ) {
         // Spin up update task for updating contract state, config and checkpoints
         let near = self.near.clone();
@@ -407,7 +407,7 @@ async fn update_contract_data(
     near: NearClient,
     contract: watch::Sender<Option<ProtocolState>>,
     config: watch::Sender<Config>,
-    checkpoints: EnumMap<Chain, watch::Sender<CheckpointDigest>>,
+    checkpoints: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
 ) {
     let reads = vec![Read::State, Read::Config, Read::Checkpoints];
     let views = match near.read(reads).await {
@@ -455,12 +455,11 @@ async fn update_contract_data(
     }
 
     if let Some(signed_checkpoints) = checkpoints_view {
-        for (chain, sc) in signed_checkpoints {
-            let new_digest = CheckpointDigest {
+        for (chain, tx) in &checkpoints {
+            let new_digest = signed_checkpoints.get(&chain).map(|sc| CheckpointDigest {
                 height: sc.checkpoint.height,
                 digest: sc.checkpoint.digest,
-            };
-            let tx = &checkpoints[chain];
+            });
             tx.send_if_modified(|old| {
                 if *old == new_digest {
                     return false;

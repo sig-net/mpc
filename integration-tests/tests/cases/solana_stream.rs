@@ -44,7 +44,7 @@ async fn stream_solana(
     config: SolConfig,
 ) -> Result<(
     SolanaStream<impl StateManager, impl ChainTelemetry>,
-    watch::Sender<CheckpointDigest>,
+    watch::Sender<Option<CheckpointDigest>>,
 )> {
     let (backlog, _, _) = test_dependencies();
     stream_solana_with_backlog(config, backlog).await
@@ -55,12 +55,12 @@ async fn stream_solana_with_backlog(
     backlog: Backlog,
 ) -> Result<(
     SolanaStream<impl StateManager, impl ChainTelemetry>,
-    watch::Sender<CheckpointDigest>,
+    watch::Sender<Option<CheckpointDigest>>,
 )> {
     let mut stream = SolanaStream::new(config, backlog.clone(), NoopChainTelemetry)
         .context("failed to create SolanaStream")?;
     let indexer = ChainStream::start(&mut stream).await?;
-    let (cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+    let (cp_tx, cp_rx) = watch::channel(None);
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
     let node_client = NodeClient::new(&Default::default());
     // Start from Recovery so that handle_recovery() calls livestream(), which
@@ -514,7 +514,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let node_client = NodeClient::new(&Default::default());
 
-    let (_cp_tx, checkpoints_rx) = watch::channel(CheckpointDigest::default());
+    let (_cp_tx, checkpoints_rx) = watch::channel(None);
     let run_handle = tokio::spawn(async move {
         run_stream(
             stream,
