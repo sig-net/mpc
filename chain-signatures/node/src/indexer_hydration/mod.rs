@@ -634,6 +634,7 @@ pub async fn run<T: ChainTelemetry>(
             telemetry.block_indexed(number.into());
         }
 
+        // TODO: backfill blocks missed during the disconnect window before resuming live streaming.
         tracing::info!("reconnecting to hydration rpc in {RECONNECT_DELAY:?}");
         tokio::time::sleep(RECONNECT_DELAY).await;
     }
