@@ -450,8 +450,15 @@ async fn test_stress_c3_queue_backpressure_ci() -> anyhow::Result<()> {
     assert_eq!(batch.label, "queue-backpressure");
     assert_eq!(batch.summary.timeout + batch.summary.dropped + batch.summary.errors, 0);
 
+    let mut requests_by_sequence = report.requests.clone();
+    requests_by_sequence.sort_by_key(|outcome| {
+        outcome
+            .request_sequence
+            .expect("queue-backpressure requests should expose contract sequence")
+    });
+
     let mut previous_completion_order = 0usize;
-    for (idx, outcome) in report.requests.iter().enumerate() {
+    for (idx, outcome) in requests_by_sequence.iter().enumerate() {
         if idx > 0 {
             assert!(
                 previous_completion_order <= outcome.completion_order,

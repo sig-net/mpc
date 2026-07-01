@@ -29,6 +29,7 @@ pub struct YieldIndex {
 #[borsh(crate = "near_sdk::borsh")]
 pub struct PendingRequest {
     pub index: Option<YieldIndex>,
+    pub sequence_number: u64,
     #[borsh(
         serialize_with = "borsh_scalar::serialize",
         deserialize_with = "borsh_scalar::deserialize_reader"

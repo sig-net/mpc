@@ -70,15 +70,19 @@ impl Default for VersionedMpcContract {
 pub struct MpcContract {
     protocol_state: ProtocolContractState,
     pending_requests: IterableMap<SignId, PendingRequest>,
+    next_request_sequence: u64,
     proposed_updates: ProposedUpdates,
     config: Config,
 }
 
 impl MpcContract {
     fn lock_request(&mut self, sign_id: SignId, payload: Scalar, epsilon: Scalar) {
+        let sequence_number = self.next_request_sequence;
+        self.next_request_sequence += 1;
         self.pending_requests.insert(
             sign_id,
             PendingRequest {
+                sequence_number,
                 payload,
                 epsilon,
                 index: None,
@@ -110,6 +114,7 @@ impl MpcContract {
                 pk_votes: PkVotes::new(),
             }),
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            next_request_sequence: 0,
             proposed_updates: ProposedUpdates::default(),
             config: config.unwrap_or_default(),
         }
@@ -265,6 +270,7 @@ impl VersionedMpcContract {
             payload,
             epsilon,
             index: Some(index),
+            ..
         }) = self.get_request(&sign_id)
         else {
             return Err(InvalidParameters::RequestNotFound.into());
@@ -700,6 +706,7 @@ impl VersionedMpcContract {
                 leave_votes: Votes::new(),
             }),
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
+            next_request_sequence: 0,
             proposed_updates: ProposedUpdates::default(),
             config: config.unwrap_or_default(),
         }))

@@ -18,9 +18,9 @@ use elliptic_curve::sec1::FromEncodedPoint;
 use futures::StreamExt;
 use generic_array::GenericArray;
 use k256::Secp256k1;
-use mpc_contract::primitives::SignRequest;
+use mpc_contract::primitives::{PendingRequest, SignRequest};
 use mpc_crypto::ScalarExt as _;
-use mpc_primitives::LATEST_MPC_KEY_VERSION;
+use mpc_primitives::{SignId, LATEST_MPC_KEY_VERSION};
 use near_crypto::InMemorySigner;
 use near_fetch::ops::AsyncTransactionStatus;
 use near_workspaces::types::{Gas, NearToken};
@@ -109,6 +109,8 @@ pub struct SignOutcome {
     /// The account that signed the payload.
     pub account: Account,
 
+    pub sign_id: SignId,
+    pub request_sequence: u64,
     pub payload: [u8; 32],
     pub payload_hash: [u8; 32],
     pub signature: FullSignature<Secp256k1>,
@@ -118,6 +120,8 @@ impl fmt::Debug for SignOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SignOutcome")
             .field("account", &self.account)
+            .field("sign_id", &self.sign_id)
+            .field("request_sequence", &self.request_sequence)
             .field("payload", &self.payload)
             .field("payload_hash", &self.payload_hash)
             .field("signature_big_r", &self.signature.big_r)
@@ -856,7 +860,9 @@ impl SignAction<'_> {
         let account = self.account_or_new().await;
         let payload = self.payload_or_random();
         let payload_hash = self.compute_payload_hash();
+        let sign_id = SignId::from_parts(account.id(), &payload_hash, &self.path, self.key_version);
         let status = self.transact_sign(&account, payload_hash).await?;
+        let request_sequence = self.wait_for_request_sequence(sign_id).await?;
 
         let signature = wait_for::signature_responded(status).await?;
         let mut mpc_pk_bytes = vec![0x04];
@@ -875,10 +881,34 @@ impl SignAction<'_> {
 
         Ok(SignOutcome {
             account,
+            sign_id,
+            request_sequence,
             signature,
             payload,
             payload_hash,
         })
+    }
+
+    async fn wait_for_request_sequence(&self, sign_id: SignId) -> anyhow::Result<u64> {
+        for _ in 0..40 {
+            let pending_requests: Vec<(SignId, PendingRequest)> = self
+                .nodes
+                .contract()
+                .view("pending_requests_data")
+                .await?
+                .json()?;
+
+            if let Some((_, pending_request)) = pending_requests
+                .into_iter()
+                .find(|(pending_sign_id, _)| *pending_sign_id == sign_id)
+            {
+                return Ok(pending_request.sequence_number);
+            }
+
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        anyhow::bail!("request sequence was not observable before completion")
     }
 
     pub async fn account_or_new(&self) -> Account {

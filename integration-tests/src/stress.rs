@@ -171,6 +171,7 @@ pub enum StressRequestStatus {
 pub struct StressRequestOutcome {
     pub batch_label: Option<String>,
     pub request_index: usize,
+    pub request_sequence: Option<u64>,
     pub completion_order: usize,
     pub latency_ms: u128,
     pub status: StressRequestStatus,
@@ -1293,11 +1294,15 @@ impl StressHarness {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        let mut csv = String::from("batch_label,request_index,completion_order,latency_ms,status,reason_code,detail\n");
+        let mut csv = String::from("batch_label,request_index,request_sequence,completion_order,latency_ms,status,reason_code,detail\n");
         for outcome in &report.requests {
             csv.push_str(&csv_escape(outcome.batch_label.as_deref().unwrap_or("")));
             csv.push(',');
             csv.push_str(&outcome.request_index.to_string());
+            csv.push(',');
+            if let Some(request_sequence) = outcome.request_sequence {
+                csv.push_str(&request_sequence.to_string());
+            }
             csv.push(',');
             csv.push_str(&outcome.completion_order.to_string());
             csv.push(',');
@@ -1434,19 +1439,30 @@ async fn run_sign_request(
     request_index: usize,
 ) -> StressRequestOutcome {
     let started = Instant::now();
-    let (status, reason_code, detail) = match tokio::time::timeout(timeout, cluster.sign()).await {
-        Ok(Ok(_)) => (StressRequestStatus::Success, None, None),
-        Ok(Err(err)) => classify_request_error(&err.to_string()),
+    let (status, request_sequence, reason_code, detail) =
+        match tokio::time::timeout(timeout, cluster.sign()).await {
+            Ok(Ok(outcome)) => (
+                StressRequestStatus::Success,
+                Some(outcome.request_sequence),
+                None,
+                None,
+            ),
+            Ok(Err(err)) => {
+                let (status, reason_code, detail) = classify_request_error(&err.to_string());
+                (status, None, reason_code, detail)
+            }
         Err(_) => (
             StressRequestStatus::Timeout,
+            None,
             Some("local_timeout".to_string()),
             Some(format!("local timeout after {timeout:?}")),
         ),
-    };
+        };
 
     StressRequestOutcome {
         batch_label: None,
         request_index,
+        request_sequence,
         completion_order: 0,
         latency_ms: started.elapsed().as_millis(),
         status,
