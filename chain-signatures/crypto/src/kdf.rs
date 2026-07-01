@@ -232,7 +232,6 @@ pub fn recover(
     .context("Failed to parse returned key")
 }
 
-// TODO: add unit tests
 // try to get the correct recovery id for this signature by brute force.
 pub fn into_signature(
     public_key: &k256::AffinePoint,
@@ -293,6 +292,8 @@ pub fn valid_signature(root_sk: &k256::SecretKey, args: &mpc_primitives::SignArg
 mod tests {
     use super::*;
     use crate::near_public_key_to_affine_point;
+    use k256::ecdsa::signature::hazmat::PrehashSigner as _;
+    use k256::elliptic_curve::point::DecompressPoint as _;
     use std::str::FromStr;
 
     #[test]
@@ -622,5 +623,102 @@ mod tests {
                 .unwrap();
 
         assert_eq!(address, expected_address);
+    }
+
+    #[test]
+    fn test_into_signature_success() {
+        let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let public_key: k256::AffinePoint = sk.public_key().into();
+        let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
+
+        // Generate a valid signature
+        let (ecdsa_sig, expected_rec_id): (k256::ecdsa::Signature, _) =
+            k256::ecdsa::SigningKey::from(&sk)
+                .sign_prehash(&msg_hash.to_bytes())
+                .unwrap();
+
+        // Extract components
+        let (r_bytes, _) = ecdsa_sig.split_bytes();
+        let big_r =
+            k256::AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
+                .unwrap();
+        let s = *ecdsa_sig.s().as_ref();
+
+        let mpc_sig = into_signature(&public_key, &big_r, &s, msg_hash).unwrap();
+        assert_eq!(mpc_sig.big_r, big_r);
+        assert_eq!(mpc_sig.s, s);
+        assert_eq!(mpc_sig.recovery_id, expected_rec_id.to_byte());
+    }
+
+    #[test]
+    fn test_into_signature_wrong_public_key() {
+        let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        // Generate a different secret key to simulate a wrong public key
+        let wrong_sk = SecretKey::from_bytes((&[0x99; 32]).into()).unwrap();
+        let wrong_public_key: k256::AffinePoint = wrong_sk.public_key().into();
+
+        let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
+
+        // Generate a valid signature with the original secret key
+        let (ecdsa_sig, _): (k256::ecdsa::Signature, _) = k256::ecdsa::SigningKey::from(&sk)
+            .sign_prehash(&msg_hash.to_bytes())
+            .unwrap();
+
+        let (r_bytes, _) = ecdsa_sig.split_bytes();
+        let big_r =
+            k256::AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
+                .unwrap();
+        let s = *ecdsa_sig.s().as_ref();
+
+        // Attempt to create an MPC signature with the wrong public key
+        let err = into_signature(&wrong_public_key, &big_r, &s, msg_hash).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "cannot use either recovery id (0 or 1) to recover pubic key"
+        );
+    }
+
+    #[test]
+    fn test_into_signature_wrong_payload() {
+        let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let public_key: k256::AffinePoint = sk.public_key().into();
+
+        let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
+        // Use a different message hash to simulate a wrong payload
+        let wrong_msg_hash = Scalar::from_bytes([0x33; 32]).unwrap();
+
+        let (ecdsa_sig, _): (k256::ecdsa::Signature, _) = k256::ecdsa::SigningKey::from(&sk)
+            .sign_prehash(&msg_hash.to_bytes())
+            .unwrap();
+
+        let (r_bytes, _) = ecdsa_sig.split_bytes();
+        let big_r =
+            k256::AffinePoint::decompress(&r_bytes, k256::elliptic_curve::subtle::Choice::from(0))
+                .unwrap();
+        let s = *ecdsa_sig.s().as_ref();
+
+        // Attempt to create an MPC signature with the wrong message hash
+        let err = into_signature(&public_key, &big_r, &s, wrong_msg_hash).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "cannot use either recovery id (0 or 1) to recover pubic key"
+        );
+    }
+
+    #[test]
+    fn test_into_signature_invalid_s_scalar() {
+        let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let public_key: k256::AffinePoint = sk.public_key().into();
+        let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
+
+        // use the public key as a dummy point for big_r
+        let dummy_big_r = public_key;
+        let invalid_s = Scalar::ZERO; // 0 is always an invalid 's' in ECDSA
+
+        // Attempt to create an MPC signature with an invalid 's' scalar
+        let err = into_signature(&public_key, &dummy_big_r, &invalid_s, msg_hash).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("cannot create signature from cait_sith signature"));
     }
 }
