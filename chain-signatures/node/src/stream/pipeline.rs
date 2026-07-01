@@ -8,7 +8,6 @@ use crate::types::CheckpointWatcher;
 
 use futures_util::StreamExt;
 use mpc_indexer_core::{ChainIndexer, LiveStreamStatus};
-use mpc_primitives::CheckpointDigest;
 use near_account_id::AccountId;
 use tokio::sync::{mpsc, watch};
 

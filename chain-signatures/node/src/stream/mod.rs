@@ -626,7 +626,7 @@ mod tests {
             Default::default(),
         );
         let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
-        let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+        let (_cp_tx, cp_rx) = watch::channel(None::<CheckpointDigest>);
         let node_client = NodeClient::new(&Default::default());
         let (rpc, _rpc_rx) = test_rpc_channel(4);
 
@@ -1764,7 +1764,7 @@ mod tests {
             persisted_height: Some(198),
         };
 
-        let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+        let (_cp_tx, cp_rx) = watch::channel(None::<CheckpointDigest>);
         let (_m_tx, m_rx) = watch::channel(MeshState::default());
         let (_stx, _srx) = mpsc::channel(1);
         let (pipeline, mut state_rx) = ChainPipeline::from_state(
@@ -1836,7 +1836,7 @@ mod tests {
             persisted_height: Some(298),
         };
 
-        let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+        let (_cp_tx, cp_rx) = watch::channel(None::<CheckpointDigest>);
         let (_m_tx, m_rx) = watch::channel(MeshState::default());
         let (_stx, _srx) = mpsc::channel(1);
         let (pipeline, _) = ChainPipeline::from_state(
@@ -1885,7 +1885,7 @@ mod tests {
             persisted_height: Some(298),
         };
 
-        let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+        let (_cp_tx, cp_rx) = watch::channel(None::<CheckpointDigest>);
         let (_m_tx, m_rx) = watch::channel(MeshState::default());
         let (_stx, _srx) = mpsc::channel(1);
         let (pipeline, mut state_rx) = ChainPipeline::from_state(
