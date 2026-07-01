@@ -1324,13 +1324,7 @@ impl SignatureSpawner {
     }
 
     fn handle_completion(&mut self, sign_id: SignId) {
-        self.mark_dead(sign_id);
-        self.task_chains.remove(&sign_id);
-        if let Some(inbox) = self.inboxes.remove(&sign_id) {
-            inbox.clear_capacity_global();
-        }
-        set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
-        self.abort_delayed_watcher(sign_id, "completion");
+        self.retire_task(sign_id, "completion");
         if self.tasks.abort(sign_id) {
             tracing::info!(?sign_id, "aborting signature task due to completion event");
         } else {
@@ -1344,23 +1338,11 @@ impl SignatureSpawner {
             Ok(outcome) => outcome,
             Err(sign_id) => {
                 tracing::warn!(?sign_id, "signature task interrupted");
-                self.mark_dead(sign_id);
-                self.task_chains.remove(&sign_id);
-                if let Some(inbox) = self.inboxes.remove(&sign_id) {
-                    inbox.clear_capacity_global();
-                }
-                set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
-                self.abort_delayed_watcher(sign_id, "interruption");
+                self.retire_task(sign_id, "interruption");
                 return;
             }
         };
-        self.mark_dead(sign_id);
-        self.task_chains.remove(&sign_id);
-        if let Some(inbox) = self.inboxes.remove(&sign_id) {
-            inbox.clear_capacity_global();
-        }
-        set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
-        self.abort_delayed_watcher(sign_id, "task completion");
+        self.retire_task(sign_id, "task completion");
         match result {
             Ok(()) => {
                 tracing::info!(?sign_id, "signature task completed successfully");
@@ -1385,6 +1367,18 @@ impl SignatureSpawner {
         } else {
             tracing::debug!(?sign_id, reason = %reason, "no delayed watcher to abort");
         }
+    }
+
+    /// Common teardown when a sign task ends: forget the id, drop its inbox and
+    /// its delayed watcher. Does not touch `tasks` (aborting varies per caller).
+    fn retire_task(&mut self, sign_id: SignId, reason: &str) {
+        self.mark_dead(sign_id);
+        self.task_chains.remove(&sign_id);
+        if let Some(inbox) = self.inboxes.remove(&sign_id) {
+            inbox.clear_capacity_global();
+        }
+        set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
+        self.abort_delayed_watcher(sign_id, reason);
     }
 
     fn handle_request(&mut self, governance: &GovernanceInfo, sign: Sign, cfg: &ProtocolConfig) {
@@ -1425,15 +1419,9 @@ impl SignatureSpawner {
                     .map(|(id, _)| *id)
                     .collect();
                 for sign_id in to_abort {
-                    self.mark_dead(sign_id);
-                    self.task_chains.remove(&sign_id);
-                    if let Some(inbox) = self.inboxes.remove(&sign_id) {
-                        inbox.clear_capacity_global();
-                    }
-                    self.abort_delayed_watcher(sign_id, "chain aborted");
+                    self.retire_task(sign_id, "chain aborted");
                     self.tasks.abort(sign_id);
                 }
-                set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
             }
         }
 
