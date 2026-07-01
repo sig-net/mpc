@@ -2,8 +2,12 @@ use crate::types::{Address, KeyVersion, Path, Purpose};
 use crate::{PublicKey, ScalarExt};
 use anyhow::Context;
 use k256::{
-    ecdsa::{RecoveryId, Signature, VerifyingKey},
-    elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint, CurveArithmetic},
+    ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, VerifyingKey},
+    elliptic_curve::{
+        point::{AffineCoordinates, DecompressPoint},
+        sec1::ToEncodedPoint,
+        CurveArithmetic,
+    },
     Scalar, Secp256k1, SecretKey,
 };
 use mpc_primitives::{Chain, Signature as MpcSignature};
@@ -267,11 +271,7 @@ pub fn into_signature(
     anyhow::bail!("cannot use either recovery id (0 or 1) to recover pubic key")
 }
 
-// TODO: add unit tests
 pub fn valid_signature(root_sk: &k256::SecretKey, args: &mpc_primitives::SignArgs) -> MpcSignature {
-    use k256::ecdsa::signature::hazmat::PrehashSigner as _;
-    use k256::elliptic_curve::point::DecompressPoint as _;
-
     let derived_secret_key = derive_secret_key(root_sk, args.epsilon);
     let signing_key = k256::ecdsa::SigningKey::from(&derived_secret_key);
     let (ecdsa_sig, _): (k256::ecdsa::Signature, _) = signing_key
@@ -292,8 +292,6 @@ pub fn valid_signature(root_sk: &k256::SecretKey, args: &mpc_primitives::SignArg
 mod tests {
     use super::*;
     use crate::near_public_key_to_affine_point;
-    use k256::ecdsa::signature::hazmat::PrehashSigner as _;
-    use k256::elliptic_curve::point::DecompressPoint as _;
     use std::str::FromStr;
 
     #[test]
@@ -720,5 +718,55 @@ mod tests {
         assert!(err
             .to_string()
             .contains("cannot create signature from cait_sith signature"));
+    }
+
+    #[test]
+    fn test_valid_signature_produces_verifiable_signature() {
+        let root_sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let root_public_key: PublicKey = root_sk.public_key().into();
+
+        let epsilon = Scalar::from_bytes([0x22; 32]).unwrap();
+        let payload = Scalar::from_bytes([0x33; 32]).unwrap();
+
+        let args = mpc_primitives::SignArgs {
+            entropy: [0x44; 32],
+            epsilon,
+            payload,
+            path: "test/path".to_string(),
+            key_version: 0,
+        };
+
+        let mpc_sig = valid_signature(&root_sk, &args);
+
+        // Verify the produced signature is mathematically correct against the derived public key
+        let is_valid = verify_signature(root_public_key, epsilon, payload, &mpc_sig);
+        assert!(
+            is_valid.is_ok(),
+            "valid_signature should produce a mathematically valid signature"
+        );
+    }
+
+    #[test]
+    fn test_valid_signature_is_deterministic() {
+        let root_sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
+        let epsilon = Scalar::from_bytes([0x22; 32]).unwrap();
+        let payload = Scalar::from_bytes([0x33; 32]).unwrap();
+
+        let args = mpc_primitives::SignArgs {
+            entropy: [0x44; 32],
+            epsilon,
+            payload,
+            path: "test/path".to_string(),
+            key_version: 0,
+        };
+
+        // Because k256 PrehashSigner uses RFC6979 by default, ECDSA signatures
+        // with the same key and payload should be completely deterministic.
+        let sig1 = valid_signature(&root_sk, &args);
+        let sig2 = valid_signature(&root_sk, &args);
+
+        assert_eq!(sig1.big_r, sig2.big_r);
+        assert_eq!(sig1.s, sig2.s);
+        assert_eq!(sig1.recovery_id, sig2.recovery_id);
     }
 }
