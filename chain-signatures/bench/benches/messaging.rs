@@ -59,7 +59,9 @@ async fn start_node(
     );
     
     let config = Config::new(LocalConfig {
-        over: OverrideConfig::default(),
+        over: OverrideConfig::new(serde_json::json!({
+            "message_timeout": 600000
+        })),
         network: NetworkConfig {
             sign_sk: sign_sk.clone(),
             cipher_sk,

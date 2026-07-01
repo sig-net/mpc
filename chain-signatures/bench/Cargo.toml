@@ -19,4 +19,5 @@ criterion = "0.5.1"
 mpc-keys = { path = "../keys" }
 mpc-node = { path = "../node", default-features = false, features = ["test-feature", "bench"] }
 near-crypto = "0.26.0"
+serde_json = { workspace = true }
 tokio = { version = "1.45.1", features = ["full"] }

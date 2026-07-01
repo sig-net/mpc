@@ -70,9 +70,12 @@ impl QuicConnectionPool {
         .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
         .with_no_client_auth();
 
-        let client_config = quinn::ClientConfig::new(Arc::new(
+        let mut client_config = quinn::ClientConfig::new(Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)?,
         ));
+        let mut transport_config = quinn::TransportConfig::default();
+        transport_config.max_concurrent_uni_streams(10_000u32.into());
+        client_config.transport_config(Arc::new(transport_config));
 
         let mut endpoint = quinn::Endpoint::client(SocketAddr::from(([0, 0, 0, 0], 0)))?;
         endpoint.set_default_client_config(client_config);
@@ -148,6 +151,7 @@ pub fn start_quic_server(
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(std::time::Duration::from_secs(30).try_into().unwrap()));
     transport_config.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
+    transport_config.max_concurrent_uni_streams(10_000u32.into());
     server_config.transport_config(Arc::new(transport_config));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));

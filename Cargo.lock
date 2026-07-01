@@ -7322,6 +7322,7 @@ dependencies = [
  "mpc-keys",
  "mpc-node",
  "near-crypto 0.26.0",
+ "serde_json",
  "tokio",
 ]
 
