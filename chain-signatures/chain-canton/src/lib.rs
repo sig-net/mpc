@@ -9,7 +9,6 @@ pub mod signing;
 
 pub use client::CantonClient;
 pub use config::{CantonAuthConfig, CantonConfig};
-pub use events::current_unix_timestamp;
 pub use indexer::CantonStream;
 pub use signing::{
     compute_request_id, der_encode_signature, parse_canton_signature, CantonChainCtx,
