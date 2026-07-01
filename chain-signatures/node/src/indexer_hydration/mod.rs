@@ -362,6 +362,9 @@ pub async fn run<T: ChainTelemetry>(
     const RECONNECT_DELAY: Duration = Duration::from_secs(5);
     let mut runtime_updater_handle: Option<tokio::task::JoinHandle<()>> = None;
 
+    // stall watchdog
+    let stall_timeout = Duration::from_secs(60);
+
     loop {
         if let Some(handle) = runtime_updater_handle.take() {
             handle.abort();
@@ -405,7 +408,30 @@ pub async fn run<T: ChainTelemetry>(
 
         runtime_updater_handle = Some(spawn_runtime_updater(hydration_api.clone()));
 
-        while let Some(block_res) = blocks.next().await {
+        let mut last_block_time = std::time::Instant::now();
+        let mut watchdog = tokio::time::interval(Duration::from_secs(5));
+
+        loop {
+            let block_res = tokio::select! {
+                maybe = blocks.next() => {
+                    match maybe {
+                        Some(block_res) => block_res,
+                        None => {
+                            tracing::warn!("hydration block stream ended; reconnecting");
+                            break;
+                        }
+                    }
+                }
+                _ = watchdog.tick() => {
+                    if last_block_time.elapsed() > stall_timeout {
+                        tracing::warn!(
+                            "hydration block subscription stalled: no block for {stall_timeout:?}; reconnecting"
+                        );
+                        break;
+                    }
+                    continue;
+                }
+            };
             let block = match block_res {
                 Ok(block) => block,
                 Err(e) => {
@@ -413,6 +439,7 @@ pub async fn run<T: ChainTelemetry>(
                     break;
                 }
             };
+            last_block_time = std::time::Instant::now();
             let number = block.number();
             let hash = block.hash();
             let header = block.header().clone();
@@ -607,7 +634,7 @@ pub async fn run<T: ChainTelemetry>(
             telemetry.block_indexed(number.into());
         }
 
-        tracing::warn!("hydration block subscription ended; reconnecting in {RECONNECT_DELAY:?}");
+        tracing::info!("reconnecting to hydration rpc in {RECONNECT_DELAY:?}");
         tokio::time::sleep(RECONNECT_DELAY).await;
     }
 }
