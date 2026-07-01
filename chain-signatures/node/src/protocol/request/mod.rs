@@ -1,5 +1,6 @@
-use super::generation::{GenerateCtx, PendingPresignature, SignGenerator};
-use super::{SignError, SignTaskMessage};
+use crate::protocol::signature::{
+    GenerateCtx, PendingPresignature, SignError, SignGenerator, SignTaskMessage,
+};
 
 use crate::backlog::Backlog;
 use crate::config::Config;

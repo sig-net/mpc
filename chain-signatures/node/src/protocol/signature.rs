@@ -2,7 +2,6 @@
 //! Runs the cait-sith signing protocol once a posit round has agreed on a
 //! presignature and participant set.
 
-use super::{SignError, SignTaskMessage};
 use crate::backlog::Backlog;
 use crate::kdf;
 use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId, SignatureMessage};
@@ -25,9 +24,28 @@ use mpc_primitives::{IndexedSignRequest, SignKind};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+/// Outcome of a signature task. Produced here on a protocol/abort error, and by
+/// the `request` layer when organizing cannot proceed.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum SignError {
+    Aborted,
+}
+
+/// Posit messages routed to a running signature task. Driven by the `request`
+/// layer; the generator also consumes them to reject late `Propose`s while
+/// generating.
+pub(crate) enum SignTaskMessage {
+    PositMessage {
+        presignature_id: PresignatureId,
+        round: usize,
+        from: Participant,
+        action: PositAction,
+    },
+}
+
 /// The subset of `SignTask` the generator needs, so it never sees the
 /// request-fulfillment machinery (limiter, organizer, posit state).
-pub(super) struct GenerateCtx {
+pub(crate) struct GenerateCtx {
     pub governance: GovernanceInfo,
     pub msg: MessageChannel,
     pub rpc: RpcChannel,
@@ -38,7 +56,7 @@ pub(super) struct GenerateCtx {
 }
 
 /// An ongoing signature generator.
-pub(super) struct SignGenerator {
+pub(crate) struct SignGenerator {
     protocol: SignatureProtocol,
     dropper: PresignatureTakenDropper,
     participants: Vec<Participant>,
@@ -54,7 +72,7 @@ pub(super) struct SignGenerator {
 }
 
 impl SignGenerator {
-    pub(super) async fn new(
+    pub(crate) async fn new(
         ctx: &GenerateCtx,
         proposer: Participant,
         indexed: IndexedSignRequest,
@@ -136,7 +154,7 @@ impl SignGenerator {
         }
     }
 
-    pub(super) async fn run(
+    pub(crate) async fn run(
         mut self,
         ctx: &GenerateCtx,
         task_rx: &mut mpsc::Receiver<SignTaskMessage>,
@@ -382,7 +400,7 @@ impl Drop for SignGenerator {
         });
     }
 }
-pub(super) enum PendingPresignature {
+pub(crate) enum PendingPresignature {
     Available(Box<PresignatureTaken>),
     InStorage(PresignatureId, Participant, PresignatureStorage),
 }

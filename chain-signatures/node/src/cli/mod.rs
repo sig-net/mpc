@@ -15,7 +15,7 @@ use crate::node_client::{self, NodeClient};
 use crate::protocol::contract::ProtocolState;
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
-use crate::protocol::signature::{Sign, SignatureSpawnerTask};
+use crate::protocol::request::{Sign, SignatureSpawnerTask};
 use crate::protocol::state::{Node, NodeStateWatcher};
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};

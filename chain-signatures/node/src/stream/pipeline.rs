@@ -2,7 +2,7 @@ use super::ChainStreaming;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::signature::Sign;
+use crate::protocol::request::Sign;
 use crate::protocol::Chain;
 use crate::types::CheckpointWatcher;
 
