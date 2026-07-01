@@ -1,4 +1,4 @@
-//! Raw Daml payload wire types (structs + serde only, no logic).
+//! Typed structs for Daml contract payloads.
 //!
 //! These represent the JSON payloads inside `CreatedEvent.payload` for specific
 //! Daml templates from `signet-signer-v1`. Derived from the `.daml` source files in
@@ -66,6 +66,19 @@ pub struct SignBidirectionalRequestedEvent {
     pub output_deserialization_schema: String,
     pub respond_serialization_schema: String,
 }
+
+// Signature types
+// ---------------------------------------------------------------------------
+//
+// Why DER encoding?
+// Daml lacks byte-manipulation libraries, so we can't convert between signature
+// formats on-ledger. The built-in `secp256k1WithEcdsaOnly` function requires
+// DER-encoded signatures, so we use DER throughout the Canton ↔ MPC interface.
+//
+// Why a union type?
+// Future-proofs for EdDSA (Solana, Sui) and Schnorr (Bitcoin Taproot) without
+// changing the wire format. Each variant carries algorithm-specific data.
+// ---------------------------------------------------------------------------
 
 /// ECDSA signature with DER encoding and recovery ID.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

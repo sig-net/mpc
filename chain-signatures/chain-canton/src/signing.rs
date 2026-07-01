@@ -34,6 +34,15 @@ pub fn der_encode_signature(signature: &Signature) -> anyhow::Result<Vec<u8>> {
 }
 
 /// Node-facing Canton sign event.
+///
+/// The raw Daml payload uses Canton-native shapes such as `Text` schemas and
+/// transaction params. This type is created at the indexer boundary and carries
+/// the byte fields expected by the shared bidirectional signing flow.
+///
+/// `RequestSignature` charges the Canton Coin fee atomically on-ledger (fail-closed),
+/// so the indexer only sees already-charged requests. The fee never enters the event
+/// payload, request id, KDF epsilon, or signed tx — the MPC neither sees nor verifies
+/// it — so the bidirectional flow carries no Canton deposit (deposit = zero).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CantonSignBidirectionalRequestedEvent {
     pub sign_event_contract_id: String,
