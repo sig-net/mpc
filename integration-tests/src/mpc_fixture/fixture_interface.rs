@@ -72,6 +72,7 @@ impl MpcFixture {
             old_participants: running.participants.clone(),
             new_participants: running.participants.clone(),
             threshold: running.threshold,
+            new_threshold: running.threshold,
             public_key: running.public_key,
             finished_votes: Default::default(),
             cancel_votes: Default::default(),

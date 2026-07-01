@@ -56,7 +56,10 @@ pub struct ResharingContractState {
     pub old_epoch: u64,
     pub old_participants: Participants,
     pub new_participants: Participants,
+    /// Threshold of the current shares held by `old_participants`.
     pub threshold: usize,
+    /// Threshold baked into the reshared shares for `new_participants`.
+    pub new_threshold: usize,
     pub public_key: PublicKey,
     pub finished_votes: HashSet<AccountId>,
     pub cancel_votes: HashSet<AccountId>,
@@ -69,6 +72,7 @@ impl From<mpc_contract::ResharingContractState> for ResharingContractState {
             old_participants: contract_state.old_participants.into(),
             new_participants: contract_state.new_participants.into(),
             threshold: contract_state.threshold,
+            new_threshold: contract_state.new_threshold,
             public_key: contract_state.public_key.into_affine_point(),
             finished_votes: contract_state
                 .finished_votes
@@ -120,7 +124,7 @@ impl ProtocolState {
             }),
             ProtocolState::Resharing(state) => Some(GovernanceInfo {
                 me: *state.new_participants.find_participant(account_id)?,
-                threshold: state.threshold,
+                threshold: state.new_threshold,
                 epoch: state.old_epoch + 1,
                 public_key: state.public_key,
                 participants: state.new_participants.keys().copied().collect(),

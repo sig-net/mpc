@@ -455,19 +455,9 @@ async fn test_vote_reshare() -> anyhow::Result<()> {
         .await?;
     assert!(execution.is_failure());
 
+    // Completion is gated by the old threshold (2), so the second old-participant
+    // vote finishes resharing even though the new committee has 4 participants.
     let execution = accounts[1]
-        .call(contract.id(), "vote_reshared")
-        .args_json(json!({
-            "epoch": 1
-        }))
-        .transact()
-        .await?;
-    assert!(execution.is_success());
-    let vote_pass: bool = execution.json().unwrap();
-    assert!(!vote_pass);
-
-    // the third vote reaches the threshold and completes resharing
-    let execution = accounts[2]
         .call(contract.id(), "vote_reshared")
         .args_json(json!({
             "epoch": 1
@@ -484,6 +474,9 @@ async fn test_vote_reshare() -> anyhow::Result<()> {
         mpc_contract::ProtocolContractState::Running(r) => {
             assert!(r.epoch == 1);
             assert!(r.participants.contains_key(alice.id()));
+            // The reshared key adopts the new threshold for 4 participants.
+            assert_eq!(r.threshold, mpc_contract::utils::compute_threshold(4));
+            assert_eq!(r.threshold, 3);
         }
         _ => panic!("should be in running state"),
     };
@@ -551,18 +544,9 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
     let cancel_pass: bool = execution.json().unwrap();
     assert!(!cancel_pass);
 
-    // With 4 participants during resharing the threshold is compute_threshold(4) = 3,
-    // so cancelling requires a third vote.
+    // Cancellation is gated by the old threshold (2), so the second vote reverts
+    // the network to running.
     let execution = accounts[1]
-        .call(contract.id(), "vote_cancel_resharing")
-        .args_json(json!({}))
-        .transact()
-        .await?;
-    assert!(execution.is_success());
-    let cancel_pass: bool = execution.json().unwrap();
-    assert!(!cancel_pass);
-
-    let execution = accounts[2]
         .call(contract.id(), "vote_cancel_resharing")
         .args_json(json!({}))
         .transact()
@@ -576,13 +560,9 @@ async fn test_cancel_resharing() -> anyhow::Result<()> {
     match state {
         mpc_contract::ProtocolContractState::Running(running_state) => {
             assert_eq!(running_state.epoch, initial_state.epoch);
-            // Threshold is recomputed for the restored participant set.
-            assert_eq!(
-                running_state.threshold,
-                mpc_contract::utils::compute_threshold(
-                    running_state.participants.participants.len()
-                )
-            );
+            // Cancelling leaves the key shares untouched, so the threshold is the
+            // exact original value.
+            assert_eq!(running_state.threshold, initial_state.threshold);
             assert_eq!(running_state.public_key, initial_state.public_key);
             assert_eq!(
                 running_state.participants.participants,
@@ -647,8 +627,9 @@ async fn test_threshold_changes_with_participants() -> anyhow::Result<()> {
         assert!(execution.is_success());
     }
 
-    // Resharing completes once compute_threshold(4) = 3 old participants vote.
-    for (i, voter) in accounts.iter().enumerate() {
+    // Completion is gated by the old threshold (2), so the 2nd old-participant
+    // vote finishes resharing.
+    for (i, voter) in accounts.iter().enumerate().take(2) {
         let execution = voter
             .call(contract.id(), "vote_reshared")
             .args_json(json!({ "epoch": 1 }))
@@ -656,7 +637,11 @@ async fn test_threshold_changes_with_participants() -> anyhow::Result<()> {
             .await?;
         assert!(execution.is_success());
         let pass: bool = execution.json().unwrap();
-        assert_eq!(pass, i == 2, "reshare should complete only on the 3rd vote");
+        assert_eq!(
+            pass,
+            i == 1,
+            "reshare should complete on the 2nd vote (old threshold 2)"
+        );
     }
 
     let state = running(&contract).await;
@@ -686,8 +671,9 @@ async fn test_threshold_changes_with_participants() -> anyhow::Result<()> {
         );
     }
 
-    // Resharing back down completes once compute_threshold(3) = 2 old participants vote.
-    for (i, voter) in accounts.iter().enumerate().take(2) {
+    // The old committee had 4 participants (old threshold 3), so completion is
+    // gated by 3 votes even though the new committee shrinks to 3.
+    for (i, voter) in accounts.iter().enumerate() {
         let execution = voter
             .call(contract.id(), "vote_reshared")
             .args_json(json!({ "epoch": 2 }))
@@ -695,7 +681,11 @@ async fn test_threshold_changes_with_participants() -> anyhow::Result<()> {
             .await?;
         assert!(execution.is_success());
         let pass: bool = execution.json().unwrap();
-        assert_eq!(pass, i == 1, "reshare should complete only on the 2nd vote");
+        assert_eq!(
+            pass,
+            i == 2,
+            "reshare should complete on the 3rd vote (old threshold 3)"
+        );
     }
 
     let state = running(&contract).await;

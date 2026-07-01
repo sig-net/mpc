@@ -393,7 +393,8 @@ impl VersionedMpcContract {
                     *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
                         old_epoch: *epoch,
                         old_participants: participants.clone(),
-                        threshold: compute_threshold(new_participants.len()),
+                        threshold: *threshold,
+                        new_threshold: compute_threshold(new_participants.len()),
                         new_participants,
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
@@ -440,7 +441,8 @@ impl VersionedMpcContract {
                     *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
                         old_epoch: *epoch,
                         old_participants: participants.clone(),
-                        threshold: compute_threshold(new_participants.len()),
+                        threshold: *threshold,
+                        new_threshold: compute_threshold(new_participants.len()),
                         new_participants,
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
@@ -507,6 +509,7 @@ impl VersionedMpcContract {
                 old_epoch,
                 new_participants,
                 threshold,
+                new_threshold,
                 public_key,
                 finished_votes,
                 ..
@@ -515,11 +518,13 @@ impl VersionedMpcContract {
                     return Err(InvalidState::EpochMismatch.into());
                 }
                 finished_votes.insert(voter);
+                // Completion is attested by the old participants, so it is gated by
+                // the old threshold. The reshared key adopts the new threshold.
                 if finished_votes.len() >= *threshold {
                     *protocol_state = ProtocolContractState::Running(RunningContractState {
                         epoch: *old_epoch + 1,
                         participants: new_participants.clone(),
-                        threshold: *threshold,
+                        threshold: *new_threshold,
                         public_key: public_key.clone(),
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
@@ -559,8 +564,8 @@ impl VersionedMpcContract {
                 if cancel_votes.len() >= *threshold {
                     *protocol_state = ProtocolContractState::Running(RunningContractState {
                         epoch: *old_epoch,
-                        threshold: compute_threshold(old_participants.len()),
                         participants: old_participants.clone(),
+                        threshold: *threshold,
                         public_key: public_key.clone(),
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
