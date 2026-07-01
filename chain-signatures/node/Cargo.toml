@@ -77,14 +77,12 @@ solana-transaction-status.workspace = true
 solana-client.workspace = true
 futures-util.workspace = true
 parity-scale-codec.workspace = true
-tokio-tungstenite.workspace = true
 
 near-account-id.workspace = true
 near-crypto.workspace = true
 near-fetch.workspace = true
 near-primitives.workspace = true
 near-sdk.workspace = true
-oauth2.workspace = true
 
 mpc-contract.workspace = true
 mpc-crypto.workspace = true
