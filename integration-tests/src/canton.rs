@@ -4,17 +4,18 @@ use crate::canton_auth::{
 use alloy::primitives::keccak256;
 use anyhow::{Context as _, Result};
 use async_process::{Child, Command};
+use mpc_chain_canton::{
+    contracts::{
+        EvmAccessListEntry, EvmType2TransactionParams, SignBidirectionalRequestedEvent, TxParams,
+    },
+    ledger_api::{
+        self, AllocatePartyRequest, AllocatePartyResponse, ContractEntry, CreateUserRequest,
+        DisclosedContract, JsCommands, SubmitAndWaitForTransactionResponse, UserInfo,
+    },
+    CantonAuthConfig, CantonClient, CantonConfig,
+};
 use mpc_chain_integration_core::NoopPublisherTelemetry;
-use mpc_node::indexer_canton::contracts::{
-    EvmAccessListEntry, EvmType2TransactionParams, SignBidirectionalRequestedEvent, TxParams,
-};
-use mpc_node::indexer_canton::ledger_api::{
-    self, AllocatePartyRequest, AllocatePartyResponse, ContractEntry, CreateUserRequest,
-    DisclosedContract, JsCommands, SubmitAndWaitForTransactionResponse, UserInfo,
-};
-use mpc_node::indexer_canton::{CantonAuthConfig, CantonConfig};
 use mpc_node::protocol::Chain;
-use mpc_node::rpc::CantonClient;
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};

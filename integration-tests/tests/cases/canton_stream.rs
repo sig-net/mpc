@@ -2,12 +2,14 @@ use anyhow::{Context as _, Result};
 use integration_tests::canton::{
     test_evm_type2_anvil_cases, test_sign_request_event, CantonSandbox,
 };
+use mpc_chain_canton::{
+    contracts::{CantonSignature, EcdsaSigData},
+    der_encode_signature, CantonChainCtx, CantonStream,
+};
 use mpc_chain_integration_core::{
     utils::hashing::hash_payload, ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager,
 };
 use mpc_node::backlog::Backlog;
-use mpc_node::indexer_canton::contracts::{CantonSignature, EcdsaSigData};
-use mpc_node::indexer_canton::{der_encode_signature, CantonStream};
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::{Chain, IndexedSignRequest};
@@ -412,7 +414,7 @@ async fn test_canton_stream_sign_and_respond_flow() -> Result<()> {
                 .chain_ctx
                 .as_deref()
                 .expect("missing chain_ctx on Canton sign request");
-            let ctx: mpc_node::indexer_canton::CantonChainCtx =
+            let ctx: CantonChainCtx =
                 borsh::from_slice(chain_ctx_bytes).expect("failed to deserialize CantonChainCtx");
             ctx.sign_event_contract_id.clone()
         }
