@@ -11,7 +11,7 @@ use integration_tests::canton::{
 use integration_tests::cluster;
 use mpc_chain_canton::{
     compute_request_id,
-    contracts::{
+    daml::{
         EvmType2TransactionParams, RespondBidirectionalEventPayload, SignatureRespondedEventPayload,
     },
     parse_canton_signature,

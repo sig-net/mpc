@@ -3,7 +3,7 @@ use integration_tests::canton::{
     test_evm_type2_anvil_cases, test_sign_request_event, CantonSandbox,
 };
 use mpc_chain_canton::{
-    contracts::{CantonSignature, EcdsaSigData},
+    daml::{CantonSignature, EcdsaSigData},
     der_encode_signature, CantonChainCtx, CantonStream,
 };
 use mpc_chain_integration_core::{

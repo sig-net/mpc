@@ -1,15 +1,14 @@
 mod auth;
 mod client;
 mod config;
-mod context;
-pub mod contracts;
+pub mod daml;
+pub mod events;
 mod indexer;
 pub mod ledger_api;
-mod signature;
+pub mod signing;
 
-pub use auth::CantonAuthConfig;
 pub use client::CantonClient;
-pub use config::CantonConfig;
-pub use context::CantonChainCtx;
-pub use indexer::{compute_request_id, parse_canton_signature, CantonStream};
-pub use signature::der_encode_signature;
+pub use config::{CantonAuthConfig, CantonConfig};
+pub use events::current_unix_timestamp;
+pub use indexer::CantonStream;
+pub use signing::{compute_request_id, der_encode_signature, parse_canton_signature, CantonChainCtx};

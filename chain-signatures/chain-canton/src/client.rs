@@ -1,15 +1,15 @@
 use crate::{
     auth::CantonAuthProvider,
     config::CantonConfig,
-    context::CantonChainCtx,
-    contracts::{CantonSignature, EcdsaSigData},
+    daml::{CantonSignature, EcdsaSigData},
     ledger_api::{
         ActiveContractEntry, Command, CumulativeFilter, EventFormat, GetActiveContractsRequest,
         IdentifierFilter, JsCommands, LedgerEndResponse, PartyFilter,
         SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse,
         TemplateFilterValue,
     },
-    signature::der_encode_signature,
+    signing::der_encode_signature,
+    CantonChainCtx,
 };
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind};
@@ -286,7 +286,7 @@ impl ChainPublisher for CantonClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{auth::CantonAuthConfig, config::CantonConfig};
+    use crate::config::{CantonAuthConfig, CantonConfig};
     use mockito::{Matcher, Server, ServerGuard};
     use mpc_chain_integration_core::{utils::test::make_publish_action, NoopPublisherTelemetry};
     use mpc_primitives::{Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignKind};

@@ -5,7 +5,7 @@ use alloy::primitives::keccak256;
 use anyhow::{Context as _, Result};
 use async_process::{Child, Command};
 use mpc_chain_canton::{
-    contracts::{
+    daml::{
         EvmAccessListEntry, EvmType2TransactionParams, SignBidirectionalRequestedEvent, TxParams,
     },
     ledger_api::{
