@@ -359,18 +359,23 @@ pub async fn run<T: ChainTelemetry>(
     let root_pk = contract_watcher.wait_public_key().await;
 
     let ws_url: &str = hydration.rpc_ws_url.as_str();
-    let mut backoff = Duration::from_secs(1);
-    const MAX_BACKOFF: Duration = Duration::from_secs(60);
+    const RECONNECT_DELAY: Duration = Duration::from_secs(5);
+    let mut runtime_updater_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     loop {
+        if let Some(handle) = runtime_updater_handle.take() {
+            handle.abort();
+        }
+
         tracing::info!("connecting to hydration rpc at {ws_url}");
 
         let hydration_api = match OnlineClient::<SubstrateConfig>::from_url(ws_url).await {
             Ok(api) => api,
             Err(e) => {
-                tracing::error!("failed to connect to hydration rpc: {e}; retrying in {backoff:?}");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(MAX_BACKOFF);
+                tracing::error!(
+                    "failed to connect to hydration rpc: {e}; retrying in {RECONNECT_DELAY:?}"
+                );
+                tokio::time::sleep(RECONNECT_DELAY).await;
                 continue;
             }
         };
@@ -379,38 +384,33 @@ pub async fn run<T: ChainTelemetry>(
             Ok(client) => client,
             Err(e) => {
                 tracing::error!(
-                    "failed to connect to hydration rpc client: {e}; retrying in {backoff:?}"
+                    "failed to connect to hydration rpc client: {e}; retrying in {RECONNECT_DELAY:?}"
                 );
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(MAX_BACKOFF);
+                tokio::time::sleep(RECONNECT_DELAY).await;
                 continue;
             }
         };
         let legacy_rpc = LegacyRpcMethods::<SubstrateConfig>::new(rpc_client);
 
-        spawn_runtime_updater(hydration_api.clone());
-
         let mut blocks = match hydration_api.blocks().subscribe_finalized().await {
             Ok(blocks) => blocks,
             Err(e) => {
                 tracing::error!(
-                    "failed to subscribe to finalized blocks: {e}; retrying in {backoff:?}"
+                    "failed to subscribe to finalized blocks: {e}; retrying in {RECONNECT_DELAY:?}"
                 );
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(MAX_BACKOFF);
+                tokio::time::sleep(RECONNECT_DELAY).await;
                 continue;
             }
         };
 
-        // Reset backoff after a successful connection + subscription.
-        backoff = Duration::from_secs(1);
+        runtime_updater_handle = Some(spawn_runtime_updater(hydration_api.clone()));
 
         while let Some(block_res) = blocks.next().await {
             let block = match block_res {
                 Ok(block) => block,
                 Err(e) => {
-                    tracing::error!("failed to get block: {e}");
-                    continue;
+                    tracing::warn!("failed to get block: {e}; reconnecting");
+                    break;
                 }
             };
             let number = block.number();
@@ -450,6 +450,7 @@ pub async fn run<T: ChainTelemetry>(
 
             let sign_tx = sign_tx.clone();
             let backlog = backlog.clone();
+            let root_pk = contract_watcher.public_key().await.unwrap_or(root_pk);
 
             for ev in events.iter() {
                 let ev = match ev {
@@ -606,9 +607,8 @@ pub async fn run<T: ChainTelemetry>(
             telemetry.block_indexed(number.into());
         }
 
-        tracing::warn!("hydration block subscription ended; reconnecting in {backoff:?}");
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(MAX_BACKOFF);
+        tracing::warn!("hydration block subscription ended; reconnecting in {RECONNECT_DELAY:?}");
+        tokio::time::sleep(RECONNECT_DELAY).await;
     }
 }
 
@@ -618,13 +618,13 @@ const EVENT_SIGNATURE_RESPONDED: &str = "SignatureResponded";
 const EVENT_SIGN_BIDIRECTIONAL_REQUESTED: &str = "SignBidirectionalRequested";
 const EVENT_RESPOND_BIDIRECTIONAL: &str = "RespondBidirectionalEvent";
 
-pub fn spawn_runtime_updater(api: OnlineClient<SubstrateConfig>) {
+pub fn spawn_runtime_updater(api: OnlineClient<SubstrateConfig>) -> tokio::task::JoinHandle<()> {
     let updater = api.updater();
     tokio::spawn(async move {
         if let Err(e) = updater.perform_runtime_updates().await {
             tracing::error!("runtime updater stopped: {e}");
         }
-    });
+    })
 }
 
 fn decode_signature_requested(
