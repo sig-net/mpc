@@ -180,7 +180,7 @@ mod tests {
     use async_trait::async_trait;
     use k256::{AffinePoint, Scalar};
     use mockito::Server;
-    use mpc_chain_integration_core::{ChainIndexer, ChainStream, NoopChainTelemetry, StateManager};
+    use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
     use mpc_primitives::{
         Chain, CheckpointDigest, IndexedSignRequest, SignArgs, SignId, Signature,
         SignatureRespondedEvent,
@@ -513,7 +513,7 @@ mod tests {
         let root_pk = root_sk.public_key().to_projective().to_affine();
 
         // Prepare a respond event that matches the sign id
-        let mpc_sig = mpc_crypto::valid_signature(&root_sk, &args);
+        let mpc_sig = mpc_crypto::generate_signature(&root_sk, &args);
         let sig_responded = SignatureRespondedEvent {
             request_id: sign_id.request_id,
             signature: mpc_sig,
@@ -741,7 +741,7 @@ mod tests {
             _ => panic!("expected sign request"),
         }
 
-        let mpc_sig = mpc_crypto::valid_signature(&root_sk, &args);
+        let mpc_sig = mpc_crypto::generate_signature(&root_sk, &args);
 
         backlog
             .set_status(
@@ -861,7 +861,7 @@ mod tests {
         // Fetch the updated request from the backlog to get the new epsilon and payload
         let entry = backlog.get(Chain::Solana, &sign_id).await.unwrap();
         let new_args = &entry.request.args;
-        let new_mpc_sig = mpc_crypto::valid_signature(&root_sk, new_args);
+        let new_mpc_sig = mpc_crypto::generate_signature(&root_sk, new_args);
 
         // now send a RespondBidirectional event to complete the request
         // RespondBidirectional should also carry a valid signature
@@ -927,7 +927,7 @@ mod tests {
 
         let root_sk = k256::SecretKey::random(&mut rand::thread_rng());
         let root_pk = root_sk.public_key().to_projective().to_affine();
-        let mpc_sig = mpc_crypto::valid_signature(&root_sk, &args);
+        let mpc_sig = mpc_crypto::generate_signature(&root_sk, &args);
 
         let respond = SignatureRespondedEvent {
             request_id: sign_id.request_id,

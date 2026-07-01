@@ -236,8 +236,8 @@ pub fn recover(
     .context("Failed to parse returned key")
 }
 
-// try to get the correct recovery id for this signature by brute force.
-pub fn into_signature(
+/// Reconstructs a signature from its components and verifies that it matches the expected public key.
+pub fn reconstruct_signature(
     public_key: &k256::AffinePoint,
     big_r: &k256::AffinePoint,
     s: &k256::Scalar,
@@ -271,7 +271,11 @@ pub fn into_signature(
     anyhow::bail!("cannot use either recovery id (0 or 1) to recover pubic key")
 }
 
-pub fn valid_signature(root_sk: &k256::SecretKey, args: &mpc_primitives::SignArgs) -> MpcSignature {
+/// Generates a signature for the given payload using the provided root secret key and sign arguments.
+pub fn generate_signature(
+    root_sk: &k256::SecretKey,
+    args: &mpc_primitives::SignArgs,
+) -> MpcSignature {
     let derived_secret_key = derive_secret_key(root_sk, args.epsilon);
     let signing_key = k256::ecdsa::SigningKey::from(&derived_secret_key);
     let (ecdsa_sig, _): (k256::ecdsa::Signature, _) = signing_key
@@ -284,7 +288,7 @@ pub fn valid_signature(root_sk: &k256::SecretKey, args: &mpc_primitives::SignArg
     let s = *ecdsa_sig.s().as_ref();
     let expected_public_key = derive_key(root_sk.public_key().into(), args.epsilon);
 
-    into_signature(&expected_public_key, &big_r, &s, args.payload)
+    reconstruct_signature(&expected_public_key, &big_r, &s, args.payload)
         .expect("signature should validate")
 }
 
@@ -624,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn test_into_signature_success() {
+    fn test_reconstruct_signature_success() {
         let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
         let public_key: k256::AffinePoint = sk.public_key().into();
         let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
@@ -642,14 +646,14 @@ mod tests {
                 .unwrap();
         let s = *ecdsa_sig.s().as_ref();
 
-        let mpc_sig = into_signature(&public_key, &big_r, &s, msg_hash).unwrap();
+        let mpc_sig = reconstruct_signature(&public_key, &big_r, &s, msg_hash).unwrap();
         assert_eq!(mpc_sig.big_r, big_r);
         assert_eq!(mpc_sig.s, s);
         assert_eq!(mpc_sig.recovery_id, expected_rec_id.to_byte());
     }
 
     #[test]
-    fn test_into_signature_wrong_public_key() {
+    fn test_reconstruct_signature_wrong_public_key() {
         let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
         // Generate a different secret key to simulate a wrong public key
         let wrong_sk = SecretKey::from_bytes((&[0x99; 32]).into()).unwrap();
@@ -669,7 +673,7 @@ mod tests {
         let s = *ecdsa_sig.s().as_ref();
 
         // Attempt to create an MPC signature with the wrong public key
-        let err = into_signature(&wrong_public_key, &big_r, &s, msg_hash).unwrap_err();
+        let err = reconstruct_signature(&wrong_public_key, &big_r, &s, msg_hash).unwrap_err();
         assert_eq!(
             err.to_string(),
             "cannot use either recovery id (0 or 1) to recover pubic key"
@@ -677,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn test_into_signature_wrong_payload() {
+    fn test_reconstruct_signature_wrong_payload() {
         let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
         let public_key: k256::AffinePoint = sk.public_key().into();
 
@@ -696,7 +700,7 @@ mod tests {
         let s = *ecdsa_sig.s().as_ref();
 
         // Attempt to create an MPC signature with the wrong message hash
-        let err = into_signature(&public_key, &big_r, &s, wrong_msg_hash).unwrap_err();
+        let err = reconstruct_signature(&public_key, &big_r, &s, wrong_msg_hash).unwrap_err();
         assert_eq!(
             err.to_string(),
             "cannot use either recovery id (0 or 1) to recover pubic key"
@@ -704,7 +708,7 @@ mod tests {
     }
 
     #[test]
-    fn test_into_signature_invalid_s_scalar() {
+    fn test_reconstruct_signature_invalid_s_scalar() {
         let sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
         let public_key: k256::AffinePoint = sk.public_key().into();
         let msg_hash = Scalar::from_bytes([0x22; 32]).unwrap();
@@ -714,14 +718,15 @@ mod tests {
         let invalid_s = Scalar::ZERO; // 0 is always an invalid 's' in ECDSA
 
         // Attempt to create an MPC signature with an invalid 's' scalar
-        let err = into_signature(&public_key, &dummy_big_r, &invalid_s, msg_hash).unwrap_err();
+        let err =
+            reconstruct_signature(&public_key, &dummy_big_r, &invalid_s, msg_hash).unwrap_err();
         assert!(err
             .to_string()
             .contains("cannot create signature from cait_sith signature"));
     }
 
     #[test]
-    fn test_valid_signature_produces_verifiable_signature() {
+    fn test_generate_signature_produces_verifiable_signature() {
         let root_sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
         let root_public_key: PublicKey = root_sk.public_key().into();
 
@@ -736,18 +741,18 @@ mod tests {
             key_version: 0,
         };
 
-        let mpc_sig = valid_signature(&root_sk, &args);
+        let mpc_sig = generate_signature(&root_sk, &args);
 
         // Verify the produced signature is mathematically correct against the derived public key
         let is_valid = verify_signature(root_public_key, epsilon, payload, &mpc_sig);
         assert!(
             is_valid.is_ok(),
-            "valid_signature should produce a mathematically valid signature"
+            "generate_signature should produce a mathematically valid signature"
         );
     }
 
     #[test]
-    fn test_valid_signature_is_deterministic() {
+    fn test_generate_signature_is_deterministic() {
         let root_sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
         let epsilon = Scalar::from_bytes([0x22; 32]).unwrap();
         let payload = Scalar::from_bytes([0x33; 32]).unwrap();
@@ -760,10 +765,9 @@ mod tests {
             key_version: 0,
         };
 
-        // Because k256 PrehashSigner uses RFC6979 by default, ECDSA signatures
-        // with the same key and payload should be completely deterministic.
-        let sig1 = valid_signature(&root_sk, &args);
-        let sig2 = valid_signature(&root_sk, &args);
+        // ECDSA signatures with the same key and payload should be completely deterministic.
+        let sig1 = generate_signature(&root_sk, &args);
+        let sig2 = generate_signature(&root_sk, &args);
 
         assert_eq!(sig1.big_r, sig2.big_r);
         assert_eq!(sig1.s, sig2.s);

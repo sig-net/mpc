@@ -37,7 +37,7 @@ impl PublishAction {
         participants: Vec<Participant>,
     ) -> Option<Self> {
         let expected_public_key = mpc_crypto::derive_key(public_key, indexed.args.epsilon);
-        let signature = mpc_crypto::into_signature(
+        let signature = mpc_crypto::reconstruct_signature(
             &expected_public_key,
             &output.big_r,
             &output.s,

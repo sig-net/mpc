@@ -10,7 +10,7 @@ use integration_tests::eth::{self, ChainSignatures, SignRequest};
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager};
-use mpc_crypto::kdf::valid_signature;
+use mpc_crypto::kdf::generate_signature;
 use mpc_node::backlog::Backlog;
 use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
@@ -620,7 +620,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let root_pk = root_sk.public_key().to_projective().to_affine();
 
     let resolved_args = test_sign_args(0x11);
-    let resolved_sig = valid_signature(&root_sk, &resolved_args);
+    let resolved_sig = generate_signature(&root_sk, &resolved_args);
 
     submit_respond_for_request_id(
         responder_contract,
