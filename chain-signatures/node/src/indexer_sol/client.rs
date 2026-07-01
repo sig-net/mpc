@@ -139,8 +139,6 @@ impl SolanaClient {
         program_address: Pubkey,
         telemetry: Arc<dyn PublisherTelemetry>,
     ) -> Self {
-        // TODO: we need to move solana client further up the creation stack into cli eventually
-        // so we can reuse the same SolanaClient for both indexer and RPC.
         let keypair = Keypair::new(); // Dummy keypair for indexer mode
         let payer = Arc::new(keypair);
         let cluster = anchor_client::Cluster::Custom(rpc_http_url.clone(), rpc_ws_url.clone());
