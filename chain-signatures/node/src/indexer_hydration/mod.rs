@@ -28,6 +28,7 @@ use sp_runtime::traits::BlakeTwo256;
 use sp_state_machine::read_proof_check;
 use sp_trie::StorageProof;
 use std::convert::TryInto;
+use std::time::Duration;
 use subxt::backend::{legacy::LegacyRpcMethods, rpc::RpcClient};
 use subxt::config::HashFor;
 use subxt::events::EventDetails;
@@ -321,30 +322,6 @@ pub async fn run<T: ChainTelemetry>(
     node_client: NodeClient,
     mut checkpoints_rx: CheckpointWatcher,
 ) {
-    let ws_url: &str = hydration.rpc_ws_url.as_str();
-
-    tracing::info!("connecting to hydration rpc at {}", ws_url);
-
-    // High‑level Subxt client for blocks + events.
-    let hydration_api = OnlineClient::<SubstrateConfig>::from_url(ws_url).await;
-    let hydration_api = match hydration_api {
-        Ok(api) => api,
-        Err(e) => {
-            tracing::error!("failed to connect to hydration rpc: {e}");
-            return;
-        }
-    };
-    // Low‑level RPC client for legacy methods like state_get_read_proof.
-    let rpc_client = RpcClient::from_url(ws_url).await;
-    let rpc_client = match rpc_client {
-        Ok(client) => client,
-        Err(e) => {
-            tracing::error!("failed to connect to hydration rpc: {e}");
-            return;
-        }
-    };
-    let legacy_rpc = LegacyRpcMethods::<SubstrateConfig>::new(rpc_client);
-
     let threshold = contract_watcher.wait_threshold().await;
     crate::mesh::wait_threshold_active(&mut mesh_state, threshold).await;
 
@@ -379,221 +356,259 @@ pub async fn run<T: ChainTelemetry>(
     )
     .await;
 
-    spawn_runtime_updater(hydration_api.clone());
-
     let root_pk = contract_watcher.wait_public_key().await;
 
-    // Subscribe to finalized Hydration blocks.
-    let mut blocks = match hydration_api.blocks().subscribe_finalized().await {
-        Ok(blocks) => blocks,
-        Err(e) => {
-            tracing::error!("failed to subscribe to finalized blocks: {e}");
-            return;
-        }
-    };
+    let ws_url: &str = hydration.rpc_ws_url.as_str();
+    let mut backoff = Duration::from_secs(1);
+    const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
-    while let Some(block_res) = blocks.next().await {
-        let block = match block_res {
-            Ok(block) => block,
+    loop {
+        tracing::info!("connecting to hydration rpc at {ws_url}");
+
+        let hydration_api = match OnlineClient::<SubstrateConfig>::from_url(ws_url).await {
+            Ok(api) => api,
             Err(e) => {
-                tracing::error!("failed to get block: {e}");
+                tracing::error!("failed to connect to hydration rpc: {e}; retrying in {backoff:?}");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
                 continue;
             }
         };
-        let number = block.number();
-        let hash = block.hash();
-        let header = block.header().clone();
-        tracing::info!("received block from hydration rpc: block number {number}, hash {hash:?}");
 
-        // Subxt's Substrate header uses H256 as state root (BlakeTwo256 hash).
-        let state_root: H256 = header.state_root;
-
-        // Events as decoded by Subxt (unproven bytes).
-        let events = match block.events().await {
-            Ok(events) => events,
+        let rpc_client = match RpcClient::from_url(ws_url).await {
+            Ok(client) => client,
             Err(e) => {
-                tracing::error!("failed to get events: {e}");
+                tracing::error!(
+                    "failed to connect to hydration rpc client: {e}; retrying in {backoff:?}"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
                 continue;
             }
         };
-        // Raw SCALE bytes for `System::Events` that Subxt decoded.
-        let events_bytes_unproven = events.bytes().to_vec();
+        let legacy_rpc = LegacyRpcMethods::<SubstrateConfig>::new(rpc_client);
 
-        // Events bytes proven via storage proof under state_root.
-        let events_bytes_proven =
-            match fetch_proven_system_events_bytes(&legacy_rpc, state_root, hash).await {
-                Ok(events_bytes_proven) => events_bytes_proven,
+        spawn_runtime_updater(hydration_api.clone());
+
+        let mut blocks = match hydration_api.blocks().subscribe_finalized().await {
+            Ok(blocks) => blocks,
+            Err(e) => {
+                tracing::error!(
+                    "failed to subscribe to finalized blocks: {e}; retrying in {backoff:?}"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue;
+            }
+        };
+
+        // Reset backoff after a successful connection + subscription.
+        backoff = Duration::from_secs(1);
+
+        while let Some(block_res) = blocks.next().await {
+            let block = match block_res {
+                Ok(block) => block,
                 Err(e) => {
-                    tracing::error!("failed to fetch proven system events bytes: {e}");
+                    tracing::error!("failed to get block: {e}");
                     continue;
                 }
             };
-
-        // Sanity check: bytes that Subxt decoded must match the Merkle‑proven bytes.
-        if events_bytes_unproven != events_bytes_proven {
-            tracing::error!(
-                "Mismatch between RPC events and Merkle‑proven System::Events \
-                 in block #{number} ({hash:?})"
+            let number = block.number();
+            let hash = block.hash();
+            let header = block.header().clone();
+            tracing::info!(
+                "received block from hydration rpc: block number {number}, hash {hash:?}"
             );
-            continue;
-        }
 
-        // At this point:
-        //  - Block is finalized (subscribe_finalized)
-        //  - System::Events is Merkle‑proven under state_root
-        //  - The bytes Subxt decoded match the proven bytes
-        //
-        // → Safe to trust individual decoded events.
+            let state_root: H256 = header.state_root;
 
-        let sign_tx = sign_tx.clone();
-        let backlog = backlog.clone();
-
-        for ev in events.iter() {
-            let ev = match ev {
-                Ok(ev) => ev,
+            let events = match block.events().await {
+                Ok(events) => events,
                 Err(e) => {
-                    tracing::error!("failed to get event: {e}");
+                    tracing::error!("failed to get events: {e}");
                     continue;
                 }
             };
+            let events_bytes_unproven = events.bytes().to_vec();
 
-            // SignatureRequested
-            if ev.pallet_name() == PALLET_SIGNET && ev.variant_name() == EVENT_SIGNATURE_REQUESTED {
-                let event = match decode_signature_requested(&ev) {
-                    Ok(event) => event,
+            let events_bytes_proven =
+                match fetch_proven_system_events_bytes(&legacy_rpc, state_root, hash).await {
+                    Ok(events_bytes_proven) => events_bytes_proven,
                     Err(e) => {
-                        tracing::error!("failed to decode signature requested event: {e}");
+                        tracing::error!("failed to fetch proven system events bytes: {e}");
                         continue;
                     }
                 };
-                tracing::info!(
-                    "Hydration::Signet::SignatureRequested in block #{number} ({hash:?}): {:?}",
-                    event
+
+            if events_bytes_unproven != events_bytes_proven {
+                tracing::error!(
+                    "Mismatch between RPC events and Merkle‑proven System::Events \
+                     in block #{number} ({hash:?})"
                 );
-
-                let entropy = sp_core::hashing::blake2_256(ev.bytes());
-
-                let Some(sign_request) = event.generate_sign_request(entropy) else {
-                    continue;
-                };
-
-                if let Err(e) = crate::stream::ops::process_sign_request(
-                    sign_request,
-                    sign_tx.clone(),
-                    backlog.clone(),
-                    true,
-                )
-                .await
-                {
-                    tracing::error!("failed to process sign event: {e}");
-                }
-            }
-            // SignatureResponded
-            if ev.pallet_name() == PALLET_SIGNET && ev.variant_name() == EVENT_SIGNATURE_RESPONDED {
-                let event = match decode_signature_responded(&ev) {
-                    Ok(event) => event,
-                    Err(e) => {
-                        tracing::error!("failed to decode signature responded event: {e}");
-                        continue;
-                    }
-                };
-                tracing::info!(
-                    "Hydration::Signet::SignatureResponded in block #{number} ({hash:?})"
-                );
-                if let Err(e) = crate::stream::ops::process_respond_event(
-                    event,
-                    sign_tx.clone(),
-                    root_pk,
-                    &backlog,
-                    true,
-                )
-                .await
-                {
-                    tracing::error!("failed to process respond event: {e}");
-                }
+                continue;
             }
 
-            // Bidirectional request
-            if ev.pallet_name() == PALLET_SIGNET
-                && ev.variant_name() == EVENT_SIGN_BIDIRECTIONAL_REQUESTED
-            {
-                let event = match decode_sign_bidirectional_requested(&ev) {
-                    Ok(event) => event,
+            let sign_tx = sign_tx.clone();
+            let backlog = backlog.clone();
+
+            for ev in events.iter() {
+                let ev = match ev {
+                    Ok(ev) => ev,
                     Err(e) => {
-                        tracing::error!("failed to decode sign bidirectional requested event: {e}");
+                        tracing::error!("failed to get event: {e}");
                         continue;
                     }
                 };
-                tracing::info!(
-                    "Hydration::Signet::SignBidirectionalRequested in block #{number} ({hash:?}): {:?}",
-                event
-                );
 
-                let entropy = sp_core::hashing::blake2_256(ev.bytes());
-
-                let Some(sign_request) = event.generate_sign_request(entropy) else {
-                    continue;
-                };
-
-                if let Err(e) = crate::stream::ops::process_sign_request(
-                    sign_request,
-                    sign_tx.clone(),
-                    backlog.clone(),
-                    true,
-                )
-                .await
+                // SignatureRequested
+                if ev.pallet_name() == PALLET_SIGNET
+                    && ev.variant_name() == EVENT_SIGNATURE_REQUESTED
                 {
-                    tracing::error!("failed to process sign event: {e}");
+                    let event = match decode_signature_requested(&ev) {
+                        Ok(event) => event,
+                        Err(e) => {
+                            tracing::error!("failed to decode signature requested event: {e}");
+                            continue;
+                        }
+                    };
+                    tracing::info!(
+                        "Hydration::Signet::SignatureRequested in block #{number} ({hash:?}): {:?}",
+                        event
+                    );
+
+                    let entropy = sp_core::hashing::blake2_256(ev.bytes());
+
+                    let Some(sign_request) = event.generate_sign_request(entropy) else {
+                        continue;
+                    };
+
+                    if let Err(e) = crate::stream::ops::process_sign_request(
+                        sign_request,
+                        sign_tx.clone(),
+                        backlog.clone(),
+                        true,
+                    )
+                    .await
+                    {
+                        tracing::error!("failed to process sign event: {e}");
+                    }
+                }
+                // SignatureResponded
+                if ev.pallet_name() == PALLET_SIGNET
+                    && ev.variant_name() == EVENT_SIGNATURE_RESPONDED
+                {
+                    let event = match decode_signature_responded(&ev) {
+                        Ok(event) => event,
+                        Err(e) => {
+                            tracing::error!("failed to decode signature responded event: {e}");
+                            continue;
+                        }
+                    };
+                    tracing::info!(
+                        "Hydration::Signet::SignatureResponded in block #{number} ({hash:?})"
+                    );
+                    if let Err(e) = crate::stream::ops::process_respond_event(
+                        event,
+                        sign_tx.clone(),
+                        root_pk,
+                        &backlog,
+                        true,
+                    )
+                    .await
+                    {
+                        tracing::error!("failed to process respond event: {e}");
+                    }
+                }
+
+                // Bidirectional request
+                if ev.pallet_name() == PALLET_SIGNET
+                    && ev.variant_name() == EVENT_SIGN_BIDIRECTIONAL_REQUESTED
+                {
+                    let event = match decode_sign_bidirectional_requested(&ev) {
+                        Ok(event) => event,
+                        Err(e) => {
+                            tracing::error!(
+                                "failed to decode sign bidirectional requested event: {e}"
+                            );
+                            continue;
+                        }
+                    };
+                    tracing::info!(
+                        "Hydration::Signet::SignBidirectionalRequested in block #{number} ({hash:?}): {:?}",
+                        event
+                    );
+
+                    let entropy = sp_core::hashing::blake2_256(ev.bytes());
+
+                    let Some(sign_request) = event.generate_sign_request(entropy) else {
+                        continue;
+                    };
+
+                    if let Err(e) = crate::stream::ops::process_sign_request(
+                        sign_request,
+                        sign_tx.clone(),
+                        backlog.clone(),
+                        true,
+                    )
+                    .await
+                    {
+                        tracing::error!("failed to process sign event: {e}");
+                    }
+                }
+
+                // Bidirectional response
+                if ev.pallet_name() == PALLET_SIGNET
+                    && ev.variant_name() == EVENT_RESPOND_BIDIRECTIONAL
+                {
+                    let fields = match ev.field_values() {
+                        Ok(f) => f,
+                        Err(e) => {
+                            tracing::error!("failed to get fields for respond bidirectional: {e}");
+                            continue;
+                        }
+                    };
+                    let request_id = match get_named_bytes32(&fields, "request_id") {
+                        Ok(id) => id,
+                        Err(e) => {
+                            tracing::error!("failed to get request_id: {e}");
+                            continue;
+                        }
+                    };
+                    let signature = match get_named(&fields, "signature").and_then(parse_signature)
+                    {
+                        Ok(sig) => sig,
+                        Err(e) => {
+                            tracing::error!(?e, "failed to parse signature");
+                            continue;
+                        }
+                    };
+                    tracing::info!(
+                        "Hydration::Signet::RespondBidirectionalEvent in block #{number} ({hash:?})"
+                    );
+                    if let Err(e) = crate::stream::ops::process_respond_bidirectional_event(
+                        RespondBidirectionalEvent {
+                            request_id,
+                            signature,
+                            chain: Chain::Hydration,
+                        },
+                        sign_tx.clone(),
+                        root_pk,
+                        &backlog,
+                        true,
+                    )
+                    .await
+                    {
+                        tracing::error!("failed to process respond bidirectional event: {e}");
+                    }
                 }
             }
 
-            // Bidirectional response
-            if ev.pallet_name() == PALLET_SIGNET && ev.variant_name() == EVENT_RESPOND_BIDIRECTIONAL
-            {
-                let fields = match ev.field_values() {
-                    Ok(f) => f,
-                    Err(e) => {
-                        tracing::error!("failed to get fields for respond bidirectional: {e}");
-                        continue;
-                    }
-                };
-                let request_id = match get_named_bytes32(&fields, "request_id") {
-                    Ok(id) => id,
-                    Err(e) => {
-                        tracing::error!("failed to get request_id: {e}");
-                        continue;
-                    }
-                };
-                let signature = match get_named(&fields, "signature").and_then(parse_signature) {
-                    Ok(sig) => sig,
-                    Err(e) => {
-                        tracing::error!(?e, "failed to parse signature");
-                        continue;
-                    }
-                };
-                tracing::info!(
-                    "Hydration::Signet::RespondBidirectionalEvent in block #{number} ({hash:?})"
-                );
-                if let Err(e) = crate::stream::ops::process_respond_bidirectional_event(
-                    RespondBidirectionalEvent {
-                        request_id,
-                        signature,
-                        chain: Chain::Hydration,
-                    },
-                    sign_tx.clone(),
-                    root_pk,
-                    &backlog,
-                    true,
-                )
-                .await
-                {
-                    tracing::error!("failed to process respond bidirectional event: {e}");
-                }
-            }
+            telemetry.block_indexed(number.into());
         }
 
-        // Update Prometheus metrics
-        telemetry.block_indexed(number.into());
+        tracing::warn!("hydration block subscription ended; reconnecting in {backoff:?}");
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
 
