@@ -1581,14 +1581,18 @@ impl SignatureSpawner {
             .inboxes
             .entry(sign_id)
             .or_insert_with(|| Subscriber::unsubscribed(SIGN_POSIT_INBOX_LABEL));
-        let _ = inbox
-            .send(SignTaskMessage::PositMessage {
-                presignature_id,
-                round,
-                from,
-                action,
-            })
-            .await;
+        let message = SignTaskMessage::PositMessage {
+            presignature_id,
+            round,
+            from,
+            action,
+        };
+
+        if inbox.is_subscribed() {
+            let _ = inbox.send(message).await;
+        } else if let Err(err) = inbox.try_send(message) {
+            tracing::warn!(?sign_id, ?err, "dropping stale or pre-request signature posit")
+        }
         inbox.report_capacity();
     }
 
@@ -1823,6 +1827,40 @@ mod tests {
     use cait_sith::protocol::Participant;
     use deadpool_redis::Runtime;
 
+    fn test_signature_spawner() -> SignatureSpawner {
+        let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
+        let mut participants = Participants::default();
+        participants.insert(&Participant::from(0), ParticipantInfo::new(0));
+
+        let redis_cfg = deadpool_redis::Config::from_url("redis://127.0.0.1/");
+        let pool = redis_cfg.create_pool(Some(Runtime::Tokio1)).unwrap();
+        let presignatures = Presignature::storage(&pool, &account_id);
+        let (_mesh_state_tx, mesh_state) = watch::channel(MeshState::default());
+        let (_inbox, _outbox, msg) = MessageChannel::new();
+        let (rpc_tx, _rpc_rx) = mpsc::channel(1);
+        let rpc = RpcChannel { tx: rpc_tx };
+        let (contract, _tx) = ContractStateWatcher::with_running(
+            &account_id,
+            k256::AffinePoint::default(),
+            1,
+            participants,
+        );
+
+        SignatureSpawner {
+            contract,
+            presignatures,
+            tasks: JoinMap::new(),
+            inboxes: HashMap::new(),
+            delayed_watchers: HashMap::new(),
+            mesh_state,
+            limiter: SignLimiter::new(MAX_CONCURRENT_PROPOSERS),
+            msg,
+            rpc,
+            backlog: Backlog::new(),
+            node_account_id: account_id,
+        }
+    }
+
     #[test]
     fn sign_task_refreshes_and_pauses_on_resharing() {
         let account_id: near_account_id::AccountId = "p-0".parse().unwrap();
@@ -2006,5 +2044,60 @@ mod tests {
 
         let fourth = semaphore.acquire(Duration::from_millis(10)).await;
         assert!(fourth.is_ok());
+    }
+
+    #[tokio::test]
+    async fn stale_unsubscribed_signature_inbox_drops_extra_posits_without_blocking() {
+        let mut spawner = test_signature_spawner();
+        let sign_id = SignId::new([7u8; 32]);
+        let me = Participant::from(0);
+        let from = Participant::from(1);
+
+        spawner.inboxes.insert(
+            sign_id,
+            Subscriber::unsubscribed_with_capacity(SIGN_POSIT_INBOX_LABEL, 1),
+        );
+
+        spawner
+            .handle_posit(me, sign_id, 9, 0, from, PositAction::Accept)
+            .await;
+        assert_eq!(spawner.inboxes[&sign_id].estimated_len(), 1);
+
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            spawner.handle_posit(me, sign_id, 9, 1, from, PositAction::Reject),
+        )
+        .await
+        .expect("full unsubscribed inbox must not block signature spawner");
+
+        assert_eq!(spawner.inboxes[&sign_id].estimated_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unsubscribed_signature_inbox_preserves_first_buffered_posit() {
+        let mut spawner = test_signature_spawner();
+        let sign_id = SignId::new([8u8; 32]);
+        let me = Participant::from(0);
+        let from = Participant::from(1);
+
+        spawner
+            .handle_posit(me, sign_id, 11, 3, from, PositAction::Accept)
+            .await;
+
+        let mut rx = spawner.inboxes.get_mut(&sign_id).unwrap().subscribe();
+        let message = tokio::time::timeout(Duration::from_millis(50), rx.recv())
+            .await
+            .expect("buffered posit should be delivered after subscription")
+            .expect("buffered posit should remain queued");
+
+        assert!(matches!(
+            message,
+            SignTaskMessage::PositMessage {
+                presignature_id: 11,
+                round: 3,
+                from: sender,
+                action: PositAction::Accept,
+            } if sender == from
+        ));
     }
 }

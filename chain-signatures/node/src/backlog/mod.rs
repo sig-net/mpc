@@ -244,6 +244,11 @@ impl Backlog {
         };
 
         self.observe_backlog_size(chain, len);
+
+        if removed.is_some() {
+            self.checkpoint(chain).await;
+        }
+
         removed
     }
 
@@ -1424,6 +1429,49 @@ mod tests {
             recovered_entry.request.kind,
             SignKind::SignBidirectional(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_remove_persists_without_waiting_for_next_block_checkpoint() {
+        let storage = CheckpointStorage::in_memory();
+        let backlog = Backlog::persisted(storage.clone());
+        let tx = create_test_tx(77);
+        let sign_id = SignId::new(tx.request_id);
+
+        insert_bidirectional_with_status(
+            &backlog,
+            Chain::Solana,
+            tx,
+            SignStatus::AwaitingResponse,
+            "ethereum",
+        )
+        .await;
+        backlog
+            .set_processed_block_interval(Chain::Solana, 10, u64::MAX)
+            .await;
+        backlog.checkpoint(Chain::Solana).await;
+
+        backlog
+            .remove(Chain::Solana, &sign_id)
+            .await
+            .expect("request should exist before removal");
+
+        let checkpoint = storage
+            .load_latest(Chain::Solana)
+            .await
+            .expect("checkpoint load should succeed")
+            .expect("checkpoint should exist after removal");
+
+        let recovered = Backlog::persisted(storage);
+        recovered
+            .recover_by_checkpoint(checkpoint)
+            .await
+            .expect("failed to recover from persisted checkpoint");
+
+        assert!(
+            recovered.get(Chain::Solana, &sign_id).await.is_none(),
+            "removed request must stay removed after restart recovery"
+        );
     }
 
     #[tokio::test]
