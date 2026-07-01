@@ -11,10 +11,12 @@ use crate::stream::ops::{
     process_respond_event, process_sign_request, requeue_pending_sign_requests,
     resume_pending_publish_requests,
 };
+use crate::types::CheckpointWatcher;
+
 pub use crate::stream::pipeline::ChainPipeline;
 
 use mpc_indexer_core::{ChainIndexer, ChainStream, ChainTelemetry};
-use mpc_primitives::{ChainEvent, CheckpointDigest};
+use mpc_primitives::ChainEvent;
 use tokio::sync::{mpsc, watch};
 
 pub const CHAIN_EVENT_STREAM_SIZE: usize = 16384;
@@ -42,7 +44,7 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
     mut contract_watcher: ContractStateWatcher,
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
-    checkpoints_rx: watch::Receiver<CheckpointDigest>,
+    checkpoints_rx: CheckpointWatcher,
 ) {
     let chain = S::Indexer::CHAIN;
     tracing::info!(%chain, "starting stream");
@@ -433,7 +435,7 @@ mod tests {
         let mut stream = TestLinearStream::new(TestLinearControl::new(Some(1), vec![4, 5]));
         let mut indexer = stream.start().await.unwrap();
         indexer.livestream().await.unwrap();
-        let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+        let (_cp_tx, cp_rx) = watch::channel(None);
         let (_m_tx, m_rx) = watch::channel(MeshState::default());
         let (_sign_tx, _sign_rx) = mpsc::channel(1);
         let (pipeline, _state_rx) = ChainPipeline::from_state(
@@ -474,7 +476,7 @@ mod tests {
         );
         let mut indexer = stream.start().await.unwrap();
         indexer.livestream().await.unwrap();
-        let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+        let (_cp_tx, cp_rx) = watch::channel(None);
         let (_m_tx, m_rx) = watch::channel(MeshState::default());
         let (_stx, _srx) = mpsc::channel(1);
         let (pipeline, _state_rx) = ChainPipeline::from_state(
@@ -555,7 +557,7 @@ mod tests {
             Default::default(),
         );
         let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
-        let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+        let (_cp_tx, cp_rx) = watch::channel(None);
         let node_client = NodeClient::new(&Default::default());
         let (rpc, _rpc_rx) = test_rpc_channel(4);
 
@@ -727,7 +729,7 @@ mod tests {
             Default::default(),
         );
         let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
-        let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+        let (_cp_tx, cp_rx) = watch::channel(None);
         let node_client = NodeClient::new(&Default::default());
         let (rpc, _rpc_rx) = test_rpc_channel(8);
 
@@ -1056,7 +1058,7 @@ mod tests {
             );
         }
         let (_mesh_state_tx, mesh_state_rx) = watch::channel(mesh_state);
-        let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+        let (_cp_tx, cp_rx) = watch::channel(None);
         let node_client = NodeClient::new(&Default::default());
         let (rpc, _rpc_rx) = test_rpc_channel(8);
 
@@ -1158,7 +1160,7 @@ mod tests {
             );
         }
         let (_mesh_state_tx, mesh_state_rx) = watch::channel(mesh_state);
-        let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+        let (_cp_tx, cp_rx) = watch::channel(None);
         let node_client = NodeClient::new(&Default::default());
         let (rpc, _rpc_rx) = test_rpc_channel(8);
 
@@ -1240,7 +1242,7 @@ mod tests {
             Default::default(),
         );
         let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
-        let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+        let (_cp_tx, cp_rx) = watch::channel(None);
         let node_client = NodeClient::new(&Default::default());
 
         let run_handle = tokio::spawn(async move {
@@ -1324,7 +1326,7 @@ mod tests {
             Default::default(),
         );
         let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
-        let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+        let (_cp_tx, cp_rx) = watch::channel(None);
         let node_client = NodeClient::new(&Default::default());
 
         let run_handle = tokio::spawn(async move {
@@ -1408,10 +1410,10 @@ mod tests {
         backlog.set_processed_block(Chain::Solana, 5).await;
         let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
 
-        let (_cp_tx, cp_rx) = watch::channel(CheckpointDigest {
-            height: 5,
+        let (_cp_tx, cp_rx) = watch::channel(Some(CheckpointDigest {
+            height: checkpoint.block_height,
             digest: checkpoint.digest(),
-        });
+        }));
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
 
         let (_stx, _srx) = mpsc::channel(1);
@@ -1498,7 +1500,7 @@ mod tests {
         let checkpoint = backlog.checkpoint(Chain::Solana).await.unwrap();
         let digest = checkpoint.digest();
 
-        let (cp_tx, cp_rx) = watch::channel(CheckpointDigest { height: 10, digest });
+        let (cp_tx, cp_rx) = watch::channel(Some(CheckpointDigest { height: 10, digest }));
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
         let (next_called_tx, next_called_rx) = oneshot::channel();
         let (_stx, _srx) = mpsc::channel(1);
@@ -1526,10 +1528,10 @@ mod tests {
 
         let mismatched_digest = [99u8; 32];
         cp_tx
-            .send(CheckpointDigest {
+            .send(Some(CheckpointDigest {
                 height: 8,
                 digest: mismatched_digest,
-            })
+            }))
             .unwrap();
 
         timeout(Duration::from_secs(1), async {
@@ -1581,10 +1583,10 @@ mod tests {
         let cp = backlog.checkpoint(chain).await.unwrap();
         let matching_digest = cp.digest();
 
-        let (cp_tx, cp_rx) = watch::channel(CheckpointDigest {
+        let (cp_tx, cp_rx) = watch::channel(Some(CheckpointDigest {
             height: 10,
             digest: matching_digest,
-        });
+        }));
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
         let indexer = E2EIndexer;
         let (sign_tx, _sign_rx) = mpsc::channel(1);
@@ -1617,10 +1619,10 @@ mod tests {
         // Trigger regression: send a digest that doesn't match local.
         // This causes wait_detected_regression → Recovery { load_local: false }.
         cp_tx
-            .send(CheckpointDigest {
-                height: 5,
+            .send(Some(CheckpointDigest {
+                height: 100,
                 digest: [99u8; 32],
-            })
+            }))
             .unwrap();
 
         timeout(Duration::from_secs(5), async {
@@ -1640,10 +1642,10 @@ mod tests {
         // find_consensus_checkpoint will abort via consensus_rx.changed() when
         // it sees the digest change (may take ~3s due to no-peer retry sleep).
         cp_tx
-            .send(CheckpointDigest {
+            .send(Some(CheckpointDigest {
                 height: 10,
                 digest: matching_digest,
-            })
+            }))
             .unwrap();
 
         // 2nd cycle: Recovery (load_local: false) → Catchup → Live

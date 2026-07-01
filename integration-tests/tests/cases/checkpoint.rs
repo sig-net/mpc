@@ -146,10 +146,10 @@ async fn test_consensus_alignment_peer_fetch() {
         info,
     );
 
-    let (_cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(CheckpointDigest {
+    let (_cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(CheckpointDigest {
         height: expected_height,
         digest,
-    });
+    }));
     let (_mesh_tx, mut mesh_rx) = tokio::sync::watch::channel(mesh_state);
 
     // Fresh persisted backlog (simulates a node that just started)
@@ -229,10 +229,10 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
     );
 
     // Start with a non-matching digest; we'll change it to zero to abort the fetch loop.
-    let (cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(CheckpointDigest {
+    let (cp_tx, mut checkpoints_rx) = tokio::sync::watch::channel(Some(CheckpointDigest {
         height: 9999,
         digest: [0xabu8; 32],
-    });
+    }));
     let (_mesh_tx, mut mesh_rx) = tokio::sync::watch::channel(mesh_state);
 
     let fresh_storage = CheckpointStorage::in_memory();
@@ -257,12 +257,7 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
 
     // Let the fetch loop start, then change the consensus digest to zero (abort signal).
     tokio::time::sleep(Duration::from_secs(1)).await;
-    cp_tx
-        .send(CheckpointDigest {
-            height: 0,
-            digest: [0u8; 32],
-        })
-        .unwrap();
+    cp_tx.send(None).unwrap();
 
     // The function should see the changed digest and return None.
     let result = tokio::time::timeout(Duration::from_secs(10), handle)
@@ -272,7 +267,7 @@ async fn test_consensus_alignment_consensus_changes_while_fetching() {
 
     assert!(
         result.is_none(),
-        "should return None when consensus digest changes to zero"
+        "should return None when consensus digest changes to None"
     );
 
     assert!(fresh_backlog.latest_checkpoint(chain).await.is_none());

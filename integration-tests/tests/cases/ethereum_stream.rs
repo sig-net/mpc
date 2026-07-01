@@ -343,7 +343,7 @@ fn test_bidirectional_event() -> NodeSignBidirectionalEvent {
 struct StartedEthereumStream<S: StateManager, T: ChainTelemetry> {
     stream: EthereumStream<S, T>,
     _indexer_task: tokio::task::JoinHandle<()>,
-    _cp_tx: watch::Sender<CheckpointDigest>,
+    _cp_tx: watch::Sender<Option<CheckpointDigest>>,
 }
 
 impl<S: StateManager, T: ChainTelemetry> std::ops::Deref for StartedEthereumStream<S, T> {
@@ -382,9 +382,9 @@ async fn stream_ethereum(
     backlog: Backlog,
 ) -> Result<StartedEthereumStream<impl StateManager, NoopChainTelemetry>> {
     let mut stream =
-        EthereumStream::new(Some(ctx.config(true)), backlog.clone(), NoopChainTelemetry).await?;
+        EthereumStream::new(ctx.config(true), backlog.clone(), NoopChainTelemetry).await?;
     let indexer = stream.start().await?;
-    let (cp_tx, cp_rx) = watch::channel(CheckpointDigest::default());
+    let (cp_tx, cp_rx) = watch::channel(None);
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
     let node_client = NodeClient::new(&Default::default());
     let (sign_tx, _sign_rx) = tokio::sync::mpsc::channel(1);
@@ -452,8 +452,7 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     }
 
     let backlog = Backlog::persisted(storage);
-    let stream =
-        EthereumStream::new(Some(ctx.config(true)), backlog.clone(), NoopChainTelemetry).await?;
+    let stream = EthereumStream::new(ctx.config(true), backlog.clone(), NoopChainTelemetry).await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
@@ -469,7 +468,7 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
-    let (_cp_tx, checkpoints_rx) = watch::channel(CheckpointDigest::default());
+    let (_cp_tx, checkpoints_rx) = watch::channel(None);
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
@@ -634,8 +633,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let catchup_payload = [0x55; 32];
     submit_sign_request(&ctx, catchup_payload, "catchup-linear-path").await?;
 
-    let stream =
-        EthereumStream::new(Some(ctx.config(true)), backlog.clone(), NoopChainTelemetry).await?;
+    let stream = EthereumStream::new(ctx.config(true), backlog.clone(), NoopChainTelemetry).await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
@@ -651,7 +649,7 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
-    let (_cp_tx, checkpoints_rx) = watch::channel(CheckpointDigest::default());
+    let (_cp_tx, checkpoints_rx) = watch::channel(None);
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,
@@ -823,8 +821,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
         ))
         .await;
 
-    let stream =
-        EthereumStream::new(Some(ctx.config(true)), backlog.clone(), NoopChainTelemetry).await?;
+    let stream = EthereumStream::new(ctx.config(true), backlog.clone(), NoopChainTelemetry).await?;
     let (sign_tx, mut sign_rx) = mpsc::channel(16);
     let (contract_watcher, _contract_tx) = ContractStateWatcher::with_running(
         &"test.near".parse::<AccountId>().unwrap(),
@@ -840,7 +837,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     let (_mesh_tx, mesh_rx) = watch::channel(mesh_state);
     let (rpc, _rpc_rx) = test_rpc_channel(16);
 
-    let (_cp_tx, checkpoints_rx) = watch::channel(CheckpointDigest::default());
+    let (_cp_tx, checkpoints_rx) = watch::channel(None);
     let run_handle = tokio::spawn(run_stream(
         stream,
         sign_tx,

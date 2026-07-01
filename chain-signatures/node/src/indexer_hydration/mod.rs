@@ -5,6 +5,8 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::Sign;
 use crate::rpc::ContractStateWatcher;
+use crate::types::CheckpointWatcher;
+
 pub use config::HydrationConfig;
 
 use alloy_sol_types::SolValue;
@@ -17,9 +19,8 @@ use mpc_indexer_core::{
     ChainTelemetry,
 };
 use mpc_primitives::{
-    Chain, CheckpointDigest, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
-    SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
-    MAX_SECP256K1_SCALAR,
+    Chain, IndexedSignRequest, RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent, SignId,
+    Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
 };
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{twox_128, H256};
@@ -311,20 +312,15 @@ pub(crate) fn ss58_address_from_account32(sender: [u8; 32]) -> String {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run<T: ChainTelemetry>(
-    hydration: Option<HydrationConfig>,
+    hydration: HydrationConfig,
     sign_tx: mpsc::Sender<Sign>,
     backlog: Backlog,
     telemetry: T,
     mut contract_watcher: ContractStateWatcher,
     mut mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
-    mut checkpoints_rx: watch::Receiver<CheckpointDigest>,
+    mut checkpoints_rx: CheckpointWatcher,
 ) {
-    let Some(hydration) = hydration else {
-        tracing::warn!("hydration indexer is disabled");
-        return;
-    };
-
     let ws_url: &str = hydration.rpc_ws_url.as_str();
 
     tracing::info!("connecting to hydration rpc at {}", ws_url);

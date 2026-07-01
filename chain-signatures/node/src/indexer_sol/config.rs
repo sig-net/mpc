@@ -12,6 +12,16 @@ pub struct SolConfig {
     pub program_address: String,
 }
 
+impl SolConfig {
+    /// Solana payer address derived from the configured account secret key.
+    pub fn signer_address(&self) -> String {
+        use solana_sdk::signer::Signer;
+        solana_sdk::signer::keypair::Keypair::from_base58_string(&self.account_sk)
+            .pubkey()
+            .to_string()
+    }
+}
+
 impl fmt::Debug for SolConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SolConfig")
