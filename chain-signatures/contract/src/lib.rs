@@ -3,6 +3,7 @@ pub mod errors;
 pub mod primitives;
 pub mod state;
 pub mod update;
+pub mod utils;
 
 use errors::{
     CheckpointError, ConversionError, InitError, InvalidParameters, InvalidState, JoinError,
@@ -32,6 +33,7 @@ use std::collections::{BTreeMap, HashSet};
 use crate::config::Config;
 use crate::errors::Error;
 use crate::update::{ProposeUpdateArgs, ProposedUpdates, UpdateId};
+use crate::utils::compute_threshold;
 
 pub use state::{
     InitializingContractState, ProtocolContractState, ResharingContractState, RunningContractState,
@@ -391,8 +393,8 @@ impl VersionedMpcContract {
                     *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
                         old_epoch: *epoch,
                         old_participants: participants.clone(),
+                        threshold: compute_threshold(new_participants.len()),
                         new_participants,
-                        threshold: *threshold,
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
                         cancel_votes: HashSet::new(),
@@ -438,8 +440,8 @@ impl VersionedMpcContract {
                     *protocol_state = ProtocolContractState::Resharing(ResharingContractState {
                         old_epoch: *epoch,
                         old_participants: participants.clone(),
+                        threshold: compute_threshold(new_participants.len()),
                         new_participants,
-                        threshold: *threshold,
                         public_key: public_key.clone(),
                         finished_votes: HashSet::new(),
                         cancel_votes: HashSet::new(),
@@ -557,8 +559,8 @@ impl VersionedMpcContract {
                 if cancel_votes.len() >= *threshold {
                     *protocol_state = ProtocolContractState::Running(RunningContractState {
                         epoch: *old_epoch,
+                        threshold: compute_threshold(old_participants.len()),
                         participants: old_participants.clone(),
-                        threshold: *threshold,
                         public_key: public_key.clone(),
                         candidates: Candidates::new(),
                         join_votes: Votes::new(),
