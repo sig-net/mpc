@@ -1,5 +1,6 @@
 use crate::backlog::Backlog;
 use crate::config::Config;
+use crate::kdf;
 use crate::mesh::MeshState;
 use crate::metrics::messaging::set_inbox_count;
 use crate::metrics::requests::{
@@ -1077,7 +1078,7 @@ impl SignGenerator {
 
         let (presignature, dropper) = taken.take();
         let PresignOutput { big_r, k, sigma } = presignature.output;
-        let delta = mpc_crypto::derive_delta(indexed.id.request_id, indexed.args.entropy, big_r);
+        let delta = kdf::derive_delta(indexed.id.request_id, indexed.args.entropy, big_r);
         // TODO: Check whether it is okay to use invert_vartime instead
         let output: PresignOutput<Secp256k1> = PresignOutput {
             big_r: (big_r * delta).to_affine(),

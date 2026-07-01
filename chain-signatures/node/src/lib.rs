@@ -10,6 +10,7 @@ pub mod indexer_canton;
 pub mod indexer_eth;
 pub mod indexer_hydration;
 pub mod indexer_sol;
+pub mod kdf;
 pub mod logs;
 pub mod mesh;
 pub mod metrics;

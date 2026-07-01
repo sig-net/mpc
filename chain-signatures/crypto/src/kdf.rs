@@ -1,17 +1,14 @@
 use crate::types::{Address, KeyVersion, Path, Purpose};
 use crate::{PublicKey, ScalarExt};
 use anyhow::Context;
-use hkdf::Hkdf;
 use k256::{
     ecdsa::{RecoveryId, Signature, VerifyingKey},
     elliptic_curve::{point::AffineCoordinates, sec1::ToEncodedPoint, CurveArithmetic},
-    AffinePoint, Scalar, Secp256k1, SecretKey,
+    Scalar, Secp256k1, SecretKey,
 };
 use mpc_primitives::{Chain, Signature as MpcSignature};
 use near_account_id::AccountId;
 use sha3::{Digest, Keccak256, Sha3_256};
-// TODO: replace with smaller crate
-use near_primitives::hash::CryptoHash;
 
 // Constant prefix that ensures epsilon derivation values are used specifically for
 // Sig.Network with key derivation protocol vX.Y.Z.
@@ -234,31 +231,6 @@ pub fn recover(
     ))
     .context("Failed to parse returned key")
 }
-
-// TODO: add unit tests
-// In case there are multiple requests in the same block (hence same entropy), we need to ensure
-// that we generate different random scalars as delta tweaks.
-// Receipt ID should be unique inside of a block, so it serves us as the request identifier.
-pub fn derive_delta(
-    request_id: [u8; 32],
-    entropy: [u8; 32],
-    presignature_big_r: AffinePoint,
-) -> Scalar {
-    let hk = Hkdf::<Sha3_256>::new(None, &entropy);
-    let info = format!("{DELTA_DERIVATION_PREFIX}:{}", CryptoHash(request_id));
-    let mut okm = [0u8; 32];
-    hk.expand(info.as_bytes(), &mut okm).unwrap();
-    hk.expand(
-        presignature_big_r.to_encoded_point(true).as_bytes(),
-        &mut okm,
-    )
-    .unwrap();
-    Scalar::from_non_biased(okm)
-}
-
-// Constant prefix that ensures delta derivation values are used specifically for
-// near-mpc-recovery with key derivation protocol vX.Y.Z.
-const DELTA_DERIVATION_PREFIX: &str = "near-mpc-recovery v0.1.0 delta derivation:";
 
 // TODO: add unit tests
 // try to get the correct recovery id for this signature by brute force.

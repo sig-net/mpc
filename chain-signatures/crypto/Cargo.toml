@@ -8,9 +8,7 @@ k256.workspace = true
 anyhow.workspace = true
 near-account-id.workspace = true
 near-sdk.workspace = true
-near-primitives.workspace = true
 sha3.workspace = true
-hkdf.workspace = true
 
 mpc-primitives.workspace = true
 
