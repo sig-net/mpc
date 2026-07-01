@@ -1,9 +1,16 @@
-use crate::rpc::CantonClient;
+use crate::client::CantonClient;
+use crate::config::CantonConfig;
+use crate::contracts::{
+    CantonSignature, RespondBidirectionalEventPayload, SignBidirectionalRequestedEvent,
+    SignatureRespondedEventPayload,
+};
+use crate::ledger_api;
 
 use alloy::primitives::keccak256;
 use async_trait::async_trait;
 use futures_util::stream::{self, SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{
     ChainIndexer, ChainStream, ChainTelemetry, NoopPublisherTelemetry, StateManager,
 };
@@ -21,7 +28,7 @@ use tokio_tungstenite::tungstenite::http::header;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-use super::{contracts, ledger_api, CantonConfig, CantonSignBidirectionalRequestedEvent};
+use super::CantonSignBidirectionalRequestedEvent;
 
 type CantonWs = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type CantonWsRead = SplitStream<CantonWs>;
@@ -38,7 +45,7 @@ pub struct CantonStream<S: StateManager, T: ChainTelemetry> {
 impl<S: StateManager, T: ChainTelemetry> CantonStream<S, T> {
     pub async fn new(config: CantonConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
         let client = CantonClient::new(&config, Arc::new(NoopPublisherTelemetry)).await?; // Indexer does not publish
-        let (events_tx, events_rx) = crate::stream::channel();
+        let (events_tx, events_rx) = chain_event_channel();
         Ok(CantonStream {
             client: Some(client),
             state_manager,
@@ -414,9 +421,7 @@ async fn process_canton_event(
         template_id,
         ledger_api::templates::SIGN_BIDIRECTIONAL_EVENT,
     ) {
-        match serde_json::from_value::<contracts::SignBidirectionalRequestedEvent>(
-            created.payload.clone(),
-        ) {
+        match serde_json::from_value::<SignBidirectionalRequestedEvent>(created.payload.clone()) {
             Ok(raw) => {
                 if let Err(e) = verify_sign_event(&raw, created, tx_events, signer_contract_id) {
                     tracing::warn!(%e, "canton SignBidirectionalEvent failed verification — dropping");
@@ -475,9 +480,7 @@ async fn process_canton_event(
         template_id,
         ledger_api::templates::RESPOND_BIDIRECTIONAL_EVENT,
     ) {
-        match serde_json::from_value::<contracts::RespondBidirectionalEventPayload>(
-            created.payload.clone(),
-        ) {
+        match serde_json::from_value::<RespondBidirectionalEventPayload>(created.payload.clone()) {
             Ok(payload) => {
                 let mut request_id = [0u8; 32];
                 if let Err(e) = hex::decode_to_slice(&payload.request_id, &mut request_id) {
@@ -521,7 +524,7 @@ async fn process_canton_event(
 ///    exist in the same transaction — proves the event was created through the
 ///    correct Daml code path, not fabricated
 fn verify_sign_event(
-    event: &contracts::SignBidirectionalRequestedEvent,
+    event: &SignBidirectionalRequestedEvent,
     created: &ledger_api::CreatedEvent,
     tx_events: &[ledger_api::Event],
     signer_contract_id: &str,
@@ -570,8 +573,7 @@ fn verify_sign_event(
 fn parse_signature_responded_event(
     created: &ledger_api::CreatedEvent,
 ) -> anyhow::Result<SignatureRespondedEvent> {
-    let payload: contracts::SignatureRespondedEventPayload =
-        serde_json::from_value(created.payload.clone())?;
+    let payload: SignatureRespondedEventPayload = serde_json::from_value(created.payload.clone())?;
     let mut request_id = [0u8; 32];
     hex::decode_to_slice(&payload.request_id, &mut request_id)
         .map_err(|e| anyhow::anyhow!("invalid request_id hex: {e}"))?;
@@ -584,9 +586,9 @@ fn parse_signature_responded_event(
 }
 
 /// Parse a CantonSignature (union type) into an MPC Signature.
-pub fn parse_canton_signature(sig: &contracts::CantonSignature) -> anyhow::Result<Signature> {
+pub fn parse_canton_signature(sig: &CantonSignature) -> anyhow::Result<Signature> {
     match sig {
-        contracts::CantonSignature::EcdsaSig(data) => {
+        CantonSignature::EcdsaSig(data) => {
             parse_der_signature_with_recovery(&data.der, data.recovery_id)
         }
     }
@@ -621,12 +623,15 @@ pub fn parse_der_signature_with_recovery(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer_canton::der_encode_signature;
+    use crate::{
+        contracts::{EcdsaSigData, EvmType2TransactionParams, TxParams},
+        signature::der_encode_signature,
+    };
     use k256::AffinePoint;
     use serde_json::json;
 
-    fn sample_tx_params() -> contracts::TxParams {
-        contracts::TxParams::EvmType2TxParams(contracts::EvmType2TransactionParams {
+    fn sample_tx_params() -> TxParams {
+        TxParams::EvmType2TxParams(EvmType2TransactionParams {
             chain_id: format!("{:064x}", 1u64),
             nonce: format!("{:064x}", 0u64),
             max_priority_fee_per_gas: format!("{:064x}", 1u64),
@@ -639,8 +644,8 @@ mod tests {
         })
     }
 
-    fn sample_sign_event() -> contracts::SignBidirectionalRequestedEvent {
-        contracts::SignBidirectionalRequestedEvent {
+    fn sample_sign_event() -> SignBidirectionalRequestedEvent {
+        SignBidirectionalRequestedEvent {
             operators: vec!["operator-1".to_string()],
             sender: hex::encode([7u8; 32]),
             requester: "requester-1".to_string(),
@@ -683,10 +688,10 @@ mod tests {
         })
     }
 
-    fn sample_canton_signature() -> contracts::CantonSignature {
+    fn sample_canton_signature() -> CantonSignature {
         let signature = Signature::new(AffinePoint::GENERATOR, k256::Scalar::from(9u64), 0);
         let der = hex::encode(der_encode_signature(&signature).expect("signature should encode"));
-        contracts::CantonSignature::EcdsaSig(contracts::EcdsaSigData {
+        CantonSignature::EcdsaSig(EcdsaSigData {
             der,
             recovery_id: 0,
         })
@@ -794,7 +799,7 @@ mod tests {
             package_name: None,
         };
 
-        let payload: contracts::RespondBidirectionalEventPayload =
+        let payload: RespondBidirectionalEventPayload =
             serde_json::from_value(created.payload.clone()).expect("payload should parse");
         let mut request_id = [0u8; 32];
         hex::decode_to_slice(&payload.request_id, &mut request_id).unwrap();
@@ -822,7 +827,7 @@ mod tests {
             node_id: None,
             package_name: None,
         };
-        let (events_tx, mut events_rx) = crate::stream::channel();
+        let (events_tx, mut events_rx) = chain_event_channel();
 
         process_canton_event(
             &ledger_api::Event::CreatedEvent(created),

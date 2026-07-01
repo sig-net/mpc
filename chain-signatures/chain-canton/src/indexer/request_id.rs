@@ -1,4 +1,4 @@
-use super::contracts::{
+use crate::contracts::{
     EvmAccessListEntry, EvmType2TransactionParams as CantonEvmType2TransactionParams,
     SignBidirectionalRequestedEvent, TxParams,
 };

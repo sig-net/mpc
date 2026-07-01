@@ -443,6 +443,7 @@ mod tests {
     use alloy::primitives::{Address, B256};
     use cait_sith::protocol::Participant;
     use k256::{ProjectivePoint, Scalar};
+    use mpc_chain_canton::CantonChainCtx;
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
     use mpc_primitives::{RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind};
     use near_primitives::types::AccountId;
@@ -497,7 +498,7 @@ mod tests {
         sign_id: SignId,
         sign_event_contract_id: &str,
     ) -> IndexedSignRequest {
-        let ctx = crate::indexer_canton::CantonChainCtx {
+        let ctx = CantonChainCtx {
             sign_event_contract_id: sign_event_contract_id.to_string(),
         };
         let chain_ctx =
@@ -1524,8 +1525,7 @@ mod tests {
 
         let assert_canton_ctx = |ctx_bytes: Option<&[u8]>| {
             let bytes = ctx_bytes.expect("chain_ctx present");
-            let decoded: crate::indexer_canton::CantonChainCtx =
-                borsh::from_slice(bytes).expect("CantonChainCtx decodes");
+            let decoded: CantonChainCtx = borsh::from_slice(bytes).expect("CantonChainCtx decodes");
             assert_eq!(decoded.sign_event_contract_id, sign_event_contract_id);
         };
 

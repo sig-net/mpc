@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::indexer_canton::CantonAuthConfig;
+use crate::auth::CantonAuthConfig;
 
 /// Canton JSON Ledger API configuration.
 #[derive(Clone)]

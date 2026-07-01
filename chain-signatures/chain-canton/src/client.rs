@@ -1,13 +1,15 @@
-use crate::indexer_canton::{
+use crate::{
+    auth::CantonAuthProvider,
+    config::CantonConfig,
+    context::CantonChainCtx,
     contracts::{CantonSignature, EcdsaSigData},
-    der_encode_signature,
     ledger_api::{
-        ActiveContractEntry, CumulativeFilter, EventFormat, GetActiveContractsRequest,
+        ActiveContractEntry, Command, CumulativeFilter, EventFormat, GetActiveContractsRequest,
         IdentifierFilter, JsCommands, LedgerEndResponse, PartyFilter,
         SubmitAndWaitForTransactionRequest, SubmitAndWaitForTransactionResponse,
         TemplateFilterValue,
     },
-    CantonAuthProvider, CantonChainCtx, CantonConfig,
+    signature::der_encode_signature,
 };
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind};
@@ -162,7 +164,6 @@ impl CantonClient {
         choice: &str,
         choice_argument: serde_json::Value,
     ) -> anyhow::Result<()> {
-        use crate::indexer_canton::ledger_api::{Command, JsCommands};
         let commands = JsCommands {
             command_id: command_id.to_string(),
             user_id: self.config.ledger_api_user.clone(),
@@ -285,10 +286,9 @@ impl ChainPublisher for CantonClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer_canton::{CantonAuthConfig, CantonChainCtx};
-    use crate::rpc::test_utils::make_publish_action;
+    use crate::{auth::CantonAuthConfig, config::CantonConfig};
     use mockito::{Matcher, Server, ServerGuard};
-    use mpc_chain_integration_core::NoopPublisherTelemetry;
+    use mpc_chain_integration_core::{utils::test::make_publish_action, NoopPublisherTelemetry};
     use mpc_primitives::{Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignKind};
     use serde_json::json;
 

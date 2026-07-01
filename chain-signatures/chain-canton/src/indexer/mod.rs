@@ -1,31 +1,27 @@
-mod auth;
-mod config;
-pub mod contracts;
-pub mod ledger_api;
 mod request_id;
-mod signature;
 mod stream;
 
-pub use auth::{CantonAuthConfig, CantonAuthProvider};
-pub use request_id::compute_request_id;
-pub use signature::der_encode_signature;
-pub use stream::{parse_canton_signature, CantonStream};
-
+use crate::{
+    context::CantonChainCtx,
+    contracts::{SignBidirectionalRequestedEvent, TxParams as CantonTxParams},
+};
 use alloy::consensus::{SignableTransaction, TxEip1559};
-use borsh::{BorshDeserialize, BorshSerialize};
-pub use config::CantonConfig;
-use contracts::TxParams as CantonTxParams;
 use k256::Scalar;
 use mpc_chain_integration_core::utils::hashing::hash_payload;
 use mpc_primitives::{
     Chain, IndexedSignRequest, ScalarExt, SignArgs, SignBidirectionalEvent, SignId,
     LATEST_MPC_KEY_VERSION,
 };
+pub use request_id::compute_request_id;
+use std::time::{SystemTime, UNIX_EPOCH};
+pub use stream::{parse_canton_signature, CantonStream};
 
-#[derive(Clone, Debug, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-#[borsh(crate = "borsh")]
-pub struct CantonChainCtx {
-    pub sign_event_contract_id: String,
+// TODO: this is a duplicate of the same function in node/src/util/mod.rs
+pub fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs()
 }
 
 /// Node-facing Canton sign event.
@@ -57,7 +53,7 @@ pub struct CantonSignBidirectionalRequestedEvent {
 impl CantonSignBidirectionalRequestedEvent {
     pub fn from_created(
         contract_id: String,
-        raw: contracts::SignBidirectionalRequestedEvent,
+        raw: SignBidirectionalRequestedEvent,
     ) -> anyhow::Result<Self> {
         let request_id = compute_request_id(&raw)?;
         let serialized_transaction = match &raw.tx_params {
@@ -132,7 +128,7 @@ impl CantonSignBidirectionalRequestedEvent {
                 key_version: self.key_version,
             },
             Chain::Canton,
-            crate::util::current_unix_timestamp(),
+            current_unix_timestamp(),
             SignBidirectionalEvent {
                 sender: self.sender,
                 serialized_transaction: self.serialized_transaction.clone(),
@@ -149,10 +145,6 @@ impl CantonSignBidirectionalRequestedEvent {
                 chain_ctx,
             },
         ))
-    }
-
-    pub fn source_chain(&self) -> Chain {
-        Chain::Canton
     }
 
     pub fn sender_string(&self) -> String {
