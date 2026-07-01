@@ -167,6 +167,24 @@ mod tests {
 
     const PING_INTERVAL: Duration = Duration::from_millis(10);
 
+    async fn wait_for_state<F>(mesh_state: &mut watch::Receiver<MeshState>, f: F)
+    where
+        F: Fn(&MeshState) -> bool,
+    {
+        let mut interval = tokio::time::interval(Duration::from_millis(5));
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(2) {
+            if f(&*mesh_state.borrow()) {
+                return;
+            }
+            tokio::select! {
+                _ = mesh_state.changed() => {}
+                _ = interval.tick() => {}
+            }
+        }
+        panic!("timeout waiting for mesh state: {:?}", *mesh_state.borrow());
+    }
+
     async fn expect_status(
         watcher: &mut connection::ConnectionWatcher,
         participant: Participant,
@@ -195,40 +213,18 @@ mod tests {
         let mut watcher = pool.watch();
         pool.connect_nodes(&participants, &mut HashSet::new()).await;
 
-        // We do not sync with ourselves, so only expect 1..num_nodes
-        tokio::time::sleep(PING_INTERVAL * 3).await;
-        let mut syncing = HashSet::new();
+        // We do not sync with ourselves, so only expect 1..num_nodes to transition to Syncing
         for i in 1..num_nodes {
-            match tokio::time::timeout(Duration::from_millis(100), watcher.next()).await {
-                Ok((participant, status, _info)) => {
-                    tracing::info!(?participant, ?status, "got connection update for syncing");
-                    if matches!(status, NodeStatus::Syncing) {
-                        syncing.insert(participant);
-                    }
-                }
-                Err(_) => {
-                    panic!("timed out waiting for syncing nodes idx={i}");
-                }
-            }
+            expect_status(&mut watcher, servers[i].id(), NodeStatus::Syncing).await;
         }
+
         for i in 1..num_nodes {
             pool.report_node_synced(servers[i].id()).await;
         }
 
-        // Same with active. We only expect 1..num_nodes for new statuses
-        tokio::time::sleep(PING_INTERVAL * 3).await;
+        // We only expect 1..num_nodes to transition to Active
         for i in 1..num_nodes {
-            match tokio::time::timeout(Duration::from_millis(100), watcher.next()).await {
-                Ok((participant, status, _info)) => {
-                    tracing::info!(?participant, ?status, "got connection update for active");
-                    if matches!(status, NodeStatus::Active) {
-                        syncing.insert(participant);
-                    }
-                }
-                Err(_) => {
-                    panic!("timed out waiting for active nodes idx={i}");
-                }
-            }
+            expect_status(&mut watcher, servers[i].id(), NodeStatus::Active).await;
         }
     }
 
@@ -266,18 +262,15 @@ mod tests {
 
         // check that the mesh state is updated.
         {
-            tokio::time::sleep(PING_INTERVAL * 3).await;
-            let state = mesh_state.borrow();
-            assert!(state.active().contains_key(&me));
-            drop(state);
+            wait_for_state(&mut mesh_state, |state| state.active().contains_key(&me)).await;
+            wait_for_state(&mut mesh_state, |state| state.need_sync().len() == num_nodes - 1).await;
 
             for idx in 0..num_nodes {
                 sync_tx.send(servers[idx].id()).await.unwrap();
             }
-            tokio::time::sleep(PING_INTERVAL * 3).await;
+            wait_for_state(&mut mesh_state, |state| state.active().len() == num_nodes).await;
 
             let state = mesh_state.borrow();
-            assert_eq!(state.active().len(), num_nodes);
             assert_eq!(state.active(), &expected_participants);
             assert!(state.need_sync().is_empty());
             for idx in 0..num_nodes {
@@ -289,10 +282,9 @@ mod tests {
         // check that the mesh state is updated when a participant goes offline
         {
             servers[1].make_offline().await;
-            tokio::time::sleep(PING_INTERVAL * 3).await;
+            wait_for_state(&mut mesh_state, |state| state.active().len() == num_nodes - 1).await;
 
             let state = mesh_state.borrow();
-            assert_eq!(state.active().len(), num_nodes - 1);
             assert!(state.active().contains_key(&me));
             assert!(state.active().contains_key(&servers[0].id()));
             assert!(!state.active().contains_key(&servers[1].id()));
@@ -302,19 +294,17 @@ mod tests {
         // check that the mesh state is updated when a participant goes back online.
         {
             servers[1].make_online().await;
-            tokio::time::sleep(PING_INTERVAL * 3).await;
+            wait_for_state(&mut mesh_state, |state| state.need_sync().contains_key(&servers[1].id())).await;
 
             // Node is now syncing: should be in need_sync but not in active yet.
             let state = mesh_state.borrow_and_update().clone();
             assert_eq!(state.active().len(), num_nodes - 1);
             assert!(!state.active().contains_key(&servers[1].id()));
-            assert!(state.need_sync().contains_key(&servers[1].id()));
 
             sync_tx.send(servers[1].id()).await.unwrap();
-            tokio::time::sleep(PING_INTERVAL).await;
+            wait_for_state(&mut mesh_state, |state| state.active().len() == num_nodes).await;
 
             let state = mesh_state.borrow_and_update().clone();
-            assert_eq!(state.active().len(), num_nodes);
             assert!(state.need_sync().is_empty());
             for idx in 0..num_nodes {
                 assert!(state.active().contains_key(&servers[idx].id()));
@@ -348,7 +338,7 @@ mod tests {
             &node_id,
             synced_peer_rx,
         );
-        let mesh_state = mesh.watch();
+        let mut mesh_state = mesh.watch();
         let mesh_task = tokio::spawn(mesh.run(contract_watcher));
 
         // check on node creation with contract change.
@@ -368,15 +358,14 @@ mod tests {
 
             // Wait for the mesh to process the contract update and connect the new participant
             let expected_participants = servers.participants();
-            tokio::time::sleep(PING_INTERVAL * 3).await;
+            wait_for_state(&mut mesh_state, |state| state.need_sync().len() == num_nodes - 1).await;
             for i in 0..num_nodes {
                 sync_tx.send(servers[i].id()).await.unwrap();
             }
 
-            tokio::time::sleep(PING_INTERVAL * 3).await;
+            wait_for_state(&mut mesh_state, |state| state.active().len() == num_nodes).await;
             let state = mesh_state.borrow();
 
-            assert!(state.active().len() == num_nodes);
             assert!(state.need_sync().is_empty());
             for i in 0..num_nodes {
                 assert!(
@@ -402,11 +391,10 @@ mod tests {
 
             // Wait for the mesh to process the contract update and remove the participant
             let expected_participants = servers.participants();
-            tokio::time::sleep(PING_INTERVAL * 3).await;
+            wait_for_state(&mut mesh_state, |state| state.active().len() == num_nodes).await;
             let state = mesh_state.borrow();
 
             assert!(state.need_sync().is_empty());
-            assert!(state.active().len() == num_nodes);
             for i in 0..num_nodes {
                 assert!(
                     state.active().contains_key(&servers[i].id()),

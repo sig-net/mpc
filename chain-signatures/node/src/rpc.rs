@@ -361,6 +361,31 @@ impl ContractStateWatcher {
         }
     }
 
+    pub async fn wait_info(&mut self) -> (usize, Participant) {
+        loop {
+            let state = self.contract_state.borrow_and_update().clone();
+            if let Some(state) = state {
+                let info = match state {
+                    ProtocolState::Initializing(_) => None,
+                    ProtocolState::Running(state) => {
+                        state.participants
+                            .find_participant(&self.account_id)
+                            .map(|p| (state.threshold, *p))
+                    }
+                    ProtocolState::Resharing(state) => {
+                        state.new_participants
+                            .find_participant(&self.account_id)
+                            .map(|p| (state.threshold, *p))
+                    }
+                };
+                if let Some(info) = info {
+                    return info;
+                }
+            }
+            let _ = self.contract_state.changed().await;
+        }
+    }
+
     pub async fn participant_map(&self) -> ParticipantMap {
         let Some(state) = self.state().clone() else {
             return ParticipantMap::Zero;

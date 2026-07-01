@@ -1,10 +1,10 @@
-use std::sync::Arc;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use cait_sith::protocol::Participant;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::JoinSet;
 
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
@@ -158,67 +158,78 @@ impl SyncTask {
 
     pub async fn run(mut self) {
         tracing::info!("sync task has been started");
-        // Polling loop for participant info from contract state
-        let mut watcher_interval = tokio::time::interval(Duration::from_millis(500));
-        // Trigger sync broadcasts to peers in need_sync state
-        let mut sync_interval = tokio::time::interval(Duration::from_millis(200));
 
         // Do NOT start until we have our own participant info
-        let (threshold, me) = loop {
-            watcher_interval.tick().await;
-            if let Some(info) = self.contract.info().await {
-                break info;
-            }
-        };
+        let (threshold, me) = self.contract.wait_info().await;
         tracing::info!(?me, "starting sync loop...");
 
-        let mut broadcast = Option::<(Instant, JoinHandle<_>)>::None;
+        let mut active_syncs = HashSet::<Participant>::new();
+        let mut sync_tasks = JoinSet::new();
+        let (retry_tx, mut retry_rx) = mpsc::channel::<Participant>(64);
+
         loop {
             tokio::select! {
-                // find nodes that need syncing and initiate it
-                _ = sync_interval.tick() => {
-                    if broadcast.is_some() {
-                        // another broadcast task is still ongoing, skip.
-                        continue;
-                    }
+                // check mesh state for nodes needing sync
+                _ = self.mesh_state.changed() => {
+                    let need_sync = self.mesh_state.borrow_and_update().need_sync().clone();
+                    for (peer, info) in need_sync {
+                        if active_syncs.contains(&peer) {
+                            continue;
+                        }
 
-                    let need_sync = self.mesh_state.borrow().need_sync().clone();
-                    if need_sync.is_empty() {
-                        continue;
-                    }
+                        let Some(update) = self.new_update(me).await else {
+                            continue;
+                        };
 
-                    let Some(update) = self.new_update(me).await else {
-                        continue;
-                    };
-                    let start = Instant::now();
-                    let receivers = need_sync
-                        .iter()
-                        .map(|(p, info)|(*p, info.clone()))
-                        .collect::<Vec<_>>();
-                    let task = tokio::spawn(broadcast_sync(
-                        self.client.clone(),
-                        update,
-                        receivers.into_iter(),
-                        me,
-                    ));
-                    broadcast = Some((start, task));
+                        active_syncs.insert(peer);
+                        let start = Instant::now();
+                        let client = self.client.clone();
+                        sync_tasks.spawn(async move {
+                            let response = sync_peer(client, update, peer, info, me).await;
+                            (peer, start, response)
+                        });
+                    }
                 }
-                // wait for the ongoing broadcast task to finish if active
-                (start, resp) = async {
-                    let (start, handle) = broadcast.as_mut().unwrap();
-                    (*start, handle.await)
-                }, if broadcast.is_some() => {
-                    broadcast = None;
-                    match resp {
-                        Ok(responses) => {
-                            // Process sync responses: update artifact participants based on not_found data
-                            if let Err(err) = self.process_sync_responses(responses, threshold).await {
-                                tracing::warn!(?err, "failed to process sync responses");
+                // handle retrying of failed syncs
+                Some(peer) = retry_rx.recv() => {
+                    let need_sync = self.mesh_state.borrow().need_sync().clone();
+                    if need_sync.contains_key(&peer) && !active_syncs.contains(&peer) {
+                        if let Some(update) = self.new_update(me).await {
+                            if let Some(info) = need_sync.get(&peer) {
+                                let info = info.clone();
+                                active_syncs.insert(peer);
+                                let start = Instant::now();
+                                let client = self.client.clone();
+                                sync_tasks.spawn(async move {
+                                    let response = sync_peer(client, update, peer, info, me).await;
+                                    (peer, start, response)
+                                });
                             }
-                            tracing::debug!(elapsed = ?start.elapsed(), "processed broadcast");
+                        }
+                    }
+                }
+                // wait for any sync task to finish
+                Some(res) = sync_tasks.join_next(), if !sync_tasks.is_empty() => {
+                    match res {
+                        Ok((peer, start, response)) => {
+                            active_syncs.remove(&peer);
+                            let is_failed = matches!(response, SyncPeerResponse::Failed(_));
+                            let responses = vec![(peer, response)];
+                            if let Err(err) = self.process_sync_responses(responses, threshold).await {
+                                tracing::warn!(?err, "failed to process sync response");
+                            }
+                            tracing::debug!(elapsed = ?start.elapsed(), ?peer, "processed sync response");
+
+                            if is_failed {
+                                let retry_tx = retry_tx.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(Duration::from_secs(5)).await;
+                                    let _ = retry_tx.send(peer).await;
+                                });
+                            }
                         }
                         Err(err) => {
-                            tracing::warn!(?err, "broadcast task failed");
+                            tracing::warn!(?err, "sync peer task panicked");
                         }
                     }
                 }
@@ -341,63 +352,23 @@ impl SyncTask {
 /// Broadcast an update to all participants specified by `receivers`.
 /// Returns results for all peers that complete within BROADCAST_TIMEOUT.
 /// Peers that don't respond are not included in results and will be retried later.
-async fn broadcast_sync(
+/// Sync update with a single participant.
+async fn sync_peer(
     client: NodeClient,
     update: SyncUpdate,
-    receivers: impl Iterator<Item = (Participant, ParticipantInfo)>,
+    peer: Participant,
+    info: ParticipantInfo,
     me: Participant,
-) -> Vec<(Participant, SyncPeerResponse)> {
-    let mut tasks = JoinSet::new();
-    let update = Arc::new(update);
-
-    for (p, info) in receivers {
-        let client = client.clone();
-        let update = update.clone();
-        let url = info.url;
-        tasks.spawn(async move {
-            let sync_result = if p != me {
-                match client.sync(&url, &update).await {
-                    Ok(response) => SyncPeerResponse::Success(response),
-                    Err(err) => SyncPeerResponse::Failed(err.to_string()),
-                }
-            } else {
-                SyncPeerResponse::SelfPeer
-            };
-            (p, sync_result)
-        });
+) -> SyncPeerResponse {
+    if peer == me {
+        return SyncPeerResponse::SelfPeer;
     }
-
-    let deadline = Instant::now() + BROADCAST_TIMEOUT;
-    let mut results = Vec::new();
-    while !tasks.is_empty() {
-        let now = Instant::now();
-        if now >= deadline {
-            break;
-        }
-
-        tokio::select! {
-            res = tasks.join_next() => {
-                match res {
-                    Some(Ok((p, sync_result))) => {
-                        results.push((p, sync_result));
-                    }
-                    Some(Err(err)) => {
-                        tracing::warn!(?err, "sync task failed");
-                    }
-                    None => break,
-                }
-            }
-            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                break;
-            }
-        }
+    let sync_result = tokio::time::timeout(BROADCAST_TIMEOUT, client.sync(&info.url, &update)).await;
+    match sync_result {
+        Ok(Ok(response)) => SyncPeerResponse::Success(response),
+        Ok(Err(err)) => SyncPeerResponse::Failed(err.to_string()),
+        Err(_) => SyncPeerResponse::Failed("timeout".to_string()),
     }
-
-    if !tasks.is_empty() {
-        tasks.abort_all();
-    }
-
-    results
 }
 
 #[derive(Clone)]
