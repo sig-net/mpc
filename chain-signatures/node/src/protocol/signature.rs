@@ -7,6 +7,7 @@ use crate::kdf;
 use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId, SignatureMessage};
 use crate::protocol::posit::{PositAction, PositRejectReason};
 use crate::protocol::presignature::PresignatureId;
+use crate::protocol::request::SignPositWorkQueue;
 use crate::rpc::{GovernanceInfo, RpcChannel};
 use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt};
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
@@ -157,7 +158,7 @@ impl SignGenerator {
     pub(crate) async fn run(
         mut self,
         ctx: &GenerateCtx,
-        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
+        posit_queue: &SignPositWorkQueue,
     ) -> Result<(), SignError> {
         let me = ctx.governance.me;
         let epoch = ctx.governance.epoch;
@@ -210,7 +211,7 @@ impl SignGenerator {
                             })?;
                             self.protocol.message(msg.from, msg.data);
                         }
-                        Some(task_msg) = task_rx.recv() => {
+                        task_msg = posit_queue.recv() => {
                             let SignTaskMessage::PositMessage {
                                 presignature_id: posit_presig_id,
                                 round: posit_round,
