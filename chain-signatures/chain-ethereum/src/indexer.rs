@@ -1093,11 +1093,14 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::{mpsc, Notify, RwLock};
 
+    /// Type alias to make clippy happy
+    type Watchers =
+        Arc<RwLock<HashMap<Chain, HashMap<BidirectionalTxId, (SignId, BidirectionalTx)>>>>;
+
     #[derive(Clone, Default)]
     struct MockStateManager {
         processed_blocks: Arc<RwLock<HashMap<Chain, u64>>>,
-        watchers:
-            Arc<RwLock<HashMap<Chain, HashMap<BidirectionalTxId, (SignId, BidirectionalTx)>>>>,
+        watchers: Watchers,
     }
 
     #[async_trait::async_trait]
