@@ -316,9 +316,14 @@ pub fn derive_delta(
     let hk = Hkdf::<Sha3_256>::new(None, &entropy);
     let info = format!("{DELTA_DERIVATION_PREFIX}:{}", CryptoHash(request_id));
     let mut okm = [0u8; 32];
-    hk.expand(info.as_bytes(), &mut okm).unwrap();
-    hk.expand(
-        presignature_big_r.to_encoded_point(true).as_bytes(),
+    // Both the request identifier (`info`) and the presignature's `big_r` must feed the
+    // derivation. A single `expand` per input would overwrite the buffer each time, so we
+    // pass them together via `expand_multi_info`, which concatenates them into one HKDF call.
+    hk.expand_multi_info(
+        &[
+            info.as_bytes(),
+            presignature_big_r.to_encoded_point(true).as_bytes(),
+        ],
         &mut okm,
     )
     .unwrap();
@@ -782,6 +787,31 @@ mod tests {
             is_valid.is_ok(),
             "generate_signature should produce a mathematically valid signature"
         );
+    }
+
+    // Within a single block every request shares the same entropy, so `derive_delta`
+    // must rely on the unique per-request `request_id` to produce distinct deltas.
+    // Otherwise all presignatures in that block would be tweaked identically.
+    #[test]
+    fn test_derive_delta_differs_by_request_id_within_same_block() {
+        let big_r: k256::AffinePoint = SecretKey::from_bytes((&[0x11; 32]).into())
+            .unwrap()
+            .public_key()
+            .into();
+
+        // Same block => same entropy and same presignature `big_r`.
+        let entropy = [0x44; 32];
+
+        let delta_a = derive_delta([0x01; 32], entropy, big_r);
+        let delta_b = derive_delta([0x02; 32], entropy, big_r);
+
+        assert_ne!(
+            delta_a, delta_b,
+            "distinct request_ids must yield distinct deltas even with identical entropy and big_r"
+        );
+
+        // Sanity: derivation is deterministic for identical inputs.
+        assert_eq!(delta_a, derive_delta([0x01; 32], entropy, big_r));
     }
 
     #[test]
