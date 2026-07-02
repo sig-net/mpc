@@ -125,12 +125,7 @@ pub struct SignTask {
     pub presignatures: PresignatureStorage,
     pub msg: MessageChannel,
     pub rpc: RpcChannel,
-
-    // TODO: will be used in the future when we move requests channels
-    // into the backlog.
-    #[allow(dead_code)]
     pub backlog: Backlog,
-
     pub cfg: ProtocolConfig,
     pub contract: ContractStateWatcher,
     pub is_proposer: Arc<AtomicBool>,

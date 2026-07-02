@@ -432,10 +432,9 @@ impl SignatureSpawnerTask {
     }
 
     pub fn abort(&self) {
-        // NOTE: since dropping the handle here, PresignatureSpawner will drop their JoinSet/JoinMap
-        // which will also abort all ongoing presignature generation tasks. This is important to note
-        // since we do not want to leak any presignature generation tasks when we are resharing, and
-        // potentially wasting compute.
+        // Aborting the loop drops the SignatureSpawner, whose JoinMap aborts every
+        // in-flight sign task. Important on resharing so we don't leak tasks and
+        // waste compute.
         self.handle.abort();
     }
 }
