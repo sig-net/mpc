@@ -132,7 +132,6 @@ pub fn calculate_respond_bidirectional_hash_message(
 mod tests {
     use super::*;
     use alloy::primitives::{Address, B256};
-    use mpc_chain_ethereum::respond_bidirectional::build_serialized_output;
     use mpc_primitives::{BidirectionalTxId, SignKind};
 
     const UINT256_SCHEMA: &[u8] = br#"[{"name":"amount","type":"uint256"}]"#;
@@ -158,58 +157,6 @@ mod tests {
             from_address: **Address::ZERO,
             nonce: 0,
         }
-    }
-
-    /// ABI-encoded `uint256` (32-byte big-endian).
-    fn abi_uint256(value: u64) -> Bytes {
-        let mut buf = [0u8; 32];
-        buf[24..].copy_from_slice(&value.to_be_bytes());
-        Bytes::from(buf.to_vec())
-    }
-
-    #[test]
-    fn build_serialized_output_decodes_contract_call() {
-        // A contract-call tx whose function returned `uint256` 12345; `trace`
-        // is that ABI-encoded return value from debug_traceTransaction.
-        let trace = abi_uint256(12_345);
-        let out = build_serialized_output(
-            true,
-            UINT256_SCHEMA,
-            Some(&trace),
-            SerDeserFormat::Abi,
-            UINT256_SCHEMA,
-        )
-        .unwrap();
-        assert_eq!(out, trace.to_vec());
-    }
-
-    #[test]
-    fn build_serialized_output_non_contract_call_uses_defaults() {
-        // `default_output_for_non_contract_call` only supports `bool`/`string`.
-        let bool_schema: &[u8] = br#"[{"name":"ok","type":"bool"}]"#;
-        let out =
-            build_serialized_output(false, bool_schema, None, SerDeserFormat::Abi, bool_schema)
-                .unwrap();
-        // A plain transfer synthesizes a default: bool -> true, ABI-encoded as
-        // a 32-byte word.
-        let mut expected = vec![0u8; 32];
-        expected[31] = 1;
-        assert_eq!(out, expected);
-    }
-
-    #[test]
-    fn build_serialized_output_requires_trace_for_contract_call() {
-        let err = build_serialized_output(
-            true,
-            UINT256_SCHEMA,
-            None,
-            SerDeserFormat::Abi,
-            UINT256_SCHEMA,
-        );
-        assert!(
-            err.is_err(),
-            "contract call without trace output must error"
-        );
     }
 
     #[tokio::test]

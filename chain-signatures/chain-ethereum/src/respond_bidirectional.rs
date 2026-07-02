@@ -57,6 +57,8 @@ impl Output {
 
 #[derive(Debug)]
 pub struct TransactionOutput {
+    // TODO: consider if we need this field or use Output alone
+    #[allow(dead_code)]
     pub success: bool,
     pub output: Output,
 }
@@ -278,4 +280,63 @@ fn default_output_for_non_contract_call(schema: &[AbiField]) -> anyhow::Result<O
         fields: data,
         from_contract_call: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const UINT256_SCHEMA: &[u8] = br#"[{"name":"amount","type":"uint256"}]"#;
+
+    /// ABI-encoded `uint256` (32-byte big-endian).
+    fn abi_uint256(value: u64) -> Bytes {
+        let mut buf = [0u8; 32];
+        buf[24..].copy_from_slice(&value.to_be_bytes());
+        Bytes::from(buf.to_vec())
+    }
+
+    #[test]
+    fn build_serialized_output_decodes_contract_call() {
+        // A contract-call tx whose function returned `uint256` 12345; `trace`
+        // is that ABI-encoded return value from debug_traceTransaction.
+        let trace = abi_uint256(12_345);
+        let out = build_serialized_output(
+            true,
+            UINT256_SCHEMA,
+            Some(&trace),
+            SerDeserFormat::Abi,
+            UINT256_SCHEMA,
+        )
+        .unwrap();
+        assert_eq!(out, trace.to_vec());
+    }
+
+    #[test]
+    fn build_serialized_output_non_contract_call_uses_defaults() {
+        // `default_output_for_non_contract_call` only supports `bool`/`string`.
+        let bool_schema: &[u8] = br#"[{"name":"ok","type":"bool"}]"#;
+        let out =
+            build_serialized_output(false, bool_schema, None, SerDeserFormat::Abi, bool_schema)
+                .unwrap();
+        // A plain transfer synthesizes a default: bool -> true, ABI-encoded as
+        // a 32-byte word.
+        let mut expected = vec![0u8; 32];
+        expected[31] = 1;
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn build_serialized_output_requires_trace_for_contract_call() {
+        let err = build_serialized_output(
+            true,
+            UINT256_SCHEMA,
+            None,
+            SerDeserFormat::Abi,
+            UINT256_SCHEMA,
+        );
+        assert!(
+            err.is_err(),
+            "contract call without trace output must error"
+        );
+    }
 }
