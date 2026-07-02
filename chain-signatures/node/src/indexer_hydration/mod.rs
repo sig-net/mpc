@@ -360,10 +360,8 @@ pub async fn run<T: ChainTelemetry>(
 
     let ws_url: &str = hydration.rpc_ws_url.as_str();
     const RECONNECT_DELAY: Duration = Duration::from_secs(5);
+    const STALL_TIMEOUT: Duration = Duration::from_secs(60);
     let mut runtime_updater_handle: Option<tokio::task::JoinHandle<()>> = None;
-
-    // stall watchdog
-    let stall_timeout = Duration::from_secs(60);
 
     loop {
         if let Some(handle) = runtime_updater_handle.take() {
@@ -423,9 +421,9 @@ pub async fn run<T: ChainTelemetry>(
                     }
                 }
                 _ = watchdog.tick() => {
-                    if last_block_time.elapsed() > stall_timeout {
+                    if last_block_time.elapsed() > STALL_TIMEOUT {
                         tracing::warn!(
-                            "hydration block subscription stalled: no block for {stall_timeout:?}; reconnecting"
+                            "hydration block subscription stalled: no block for {STALL_TIMEOUT:?}; reconnecting"
                         );
                         break;
                     }
