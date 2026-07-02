@@ -1,10 +1,11 @@
-use crate::indexer_eth::MaybeBlock;
+use crate::indexer::MaybeBlock;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, B256};
 use alloy::rpc::types::{Block, BlockId, Transaction, TransactionReceipt};
 use serde::de::DeserializeOwned;
 use serde_json::json;
+use anyhow::Context as _;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -80,7 +81,9 @@ impl RpcEthereumClient {
 
         let response = self.http.post(&self.url).json(&payload).send().await?;
         let value: serde_json::Value = response.json().await?;
-        let serde_json::Value::Array(items) = value else {
+        let items = if let serde_json::Value::Array(items) = value {
+            items
+        } else {
             anyhow::bail!("batch rpc response was not an array: {value}");
         };
 
@@ -99,7 +102,9 @@ impl RpcEthereumClient {
                 anyhow::bail!("batch rpc call failed for id {}: {error}", response.id);
             }
 
-            let Some(block_id) = requested_blocks.get(&response.id).copied() else {
+            let block_id = if let Some(block_id) = requested_blocks.get(&response.id).copied() {
+                block_id
+            } else {
                 anyhow::bail!("batch rpc response contained unknown id {}", response.id);
             };
 
@@ -391,7 +396,7 @@ fn to_hex_block_id(block_id: BlockId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer_eth::MaybeBlock;
+    use crate::indexer::MaybeBlock;
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::B256;
     use alloy::rpc::types::BlockId;

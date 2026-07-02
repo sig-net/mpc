@@ -4,7 +4,9 @@ use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::{Address, Bytes};
 use alloy::rpc::types::{Block, BlockId};
 
-use super::{indexer_eth_direct_rpc, BlockNumber, EthConfig, MaybeBlock};
+use crate::indexer::{BlockNumber, MaybeBlock};
+use crate::EthConfig;
+use crate::indexer_eth_direct_rpc;
 use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
 
 #[cfg(feature = "helios")]
@@ -305,7 +307,7 @@ impl EthereumClient {
 
 #[cfg(test)]
 mod tests {
-    use crate::indexer_eth::test_utils;
+    use crate::test_utils;
 
     use super::*;
 

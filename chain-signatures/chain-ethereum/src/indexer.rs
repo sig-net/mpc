@@ -1,13 +1,6 @@
-pub mod abi;
-mod client;
-mod config;
-pub mod indexer_eth_direct_rpc;
-#[cfg(feature = "helios")]
-pub mod indexer_eth_helios;
-#[cfg(test)]
-pub mod test_utils;
-
-use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
+use crate::EthConfig;
+use crate::abi::{ChainSignatures, SignatureRequestedEncoding};
+use crate::client::EthereumClient;
 use alloy::consensus::Transaction;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
@@ -16,8 +9,6 @@ use alloy::rpc::types::{Block, BlockId, Log};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
-pub use client::EthereumClient;
-pub use config::EthConfig;
 use futures_util::stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
@@ -43,7 +34,7 @@ fn live_blocks_channel() -> (mpsc::Sender<MaybeBlock>, mpsc::Receiver<MaybeBlock
     mpsc::channel(MAX_LIVE_BLOCK_BUFFER)
 }
 
-type BlockNumber = u64;
+pub type BlockNumber = u64;
 
 pub struct CatchupIter {
     client: Arc<EthereumClient>,
@@ -1084,11 +1075,12 @@ impl<S: StateManager, T: ChainTelemetry> ChainStream for EthereumStream<S, T> {
 }
 #[cfg(test)]
 mod tests {
-    use super::{test_utils, CatchupIter, EthConfig, EthereumClient, EthereumIndexer, MaybeBlock};
+    use super::{CatchupIter, EthConfig, EthereumClient, EthereumIndexer, MaybeBlock};
     // TODO: test should rely on StateManager mock instead of Backlog
     use crate::backlog::Backlog;
     #[cfg(feature = "helios")]
     use crate::indexer_eth::indexer_eth_helios;
+    use crate::test_utils;
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{address, b256, Address};
     use alloy::rpc::types::BlockId;
