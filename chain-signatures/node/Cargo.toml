@@ -112,3 +112,5 @@ bench = []
 test-feature = []
 # Show a debug page
 debug-page = ["maud"]
+# Enable Helios light client for Ethereum
+helios = ["mpc-chain-ethereum/helios"]
