@@ -5,9 +5,7 @@ use k256::elliptic_curve::point::AffineCoordinates;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
 use mpc_crypto::derive_key;
-use mpc_primitives::{
-    BidirectionalTx, ChainFromError, SignBidirectionalEvent, Signature,
-};
+use mpc_primitives::{BidirectionalTx, ChainFromError, SignBidirectionalEvent, Signature};
 use rlp::{Rlp, RlpStream};
 
 pub type RequestId = [u8; 32];

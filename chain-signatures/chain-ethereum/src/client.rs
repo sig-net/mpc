@@ -278,9 +278,9 @@ impl EthereumClient {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::test_utils;
     use alloy::eips::BlockNumberOrTag;
-    use super::*;
 
     // TODO: add more tests for non HTTP-related functionality, e.g. clamp_oldest_supported_with
 
