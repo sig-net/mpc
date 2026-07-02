@@ -292,6 +292,39 @@ pub fn generate_signature(
         .expect("signature should validate")
 }
 
+/// Derives the delta tweak used to randomize a presignature for a specific request.
+///
+/// Only used off-chain by the node, so it (and its `hkdf`/`near-primitives`
+/// dependencies) is excluded from the wasm contract build.
+///
+/// In case there are multiple requests in the same block (hence same entropy), we need to ensure
+/// that we generate different random scalars as delta tweaks.
+/// Receipt ID should be unique inside of a block, so it serves us as the request identifier.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn derive_delta(
+    request_id: [u8; 32],
+    entropy: [u8; 32],
+    presignature_big_r: k256::AffinePoint,
+) -> Scalar {
+    use hkdf::Hkdf;
+    use near_primitives::hash::CryptoHash;
+
+    // Constant prefix that ensures delta derivation values are used specifically for
+    // near-mpc-recovery with key derivation protocol vX.Y.Z.
+    const DELTA_DERIVATION_PREFIX: &str = "near-mpc-recovery v0.1.0 delta derivation:";
+
+    let hk = Hkdf::<Sha3_256>::new(None, &entropy);
+    let info = format!("{DELTA_DERIVATION_PREFIX}:{}", CryptoHash(request_id));
+    let mut okm = [0u8; 32];
+    hk.expand(info.as_bytes(), &mut okm).unwrap();
+    hk.expand(
+        presignature_big_r.to_encoded_point(true).as_bytes(),
+        &mut okm,
+    )
+    .unwrap();
+    Scalar::from_non_biased(okm)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

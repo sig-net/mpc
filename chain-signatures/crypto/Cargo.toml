@@ -16,5 +16,10 @@ mpc-primitives.workspace = true
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2.12", features = ["custom"] }
 
+# `derive_delta` is only used off-chain by the node, never in the wasm contract.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+hkdf.workspace = true
+near-primitives.workspace = true
+
 [dev-dependencies]
 alloy.workspace = true

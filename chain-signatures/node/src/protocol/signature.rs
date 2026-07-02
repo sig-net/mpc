@@ -3,7 +3,6 @@
 //! presignature and participant set.
 
 use crate::backlog::Backlog;
-use crate::kdf;
 use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId, SignatureMessage};
 use crate::protocol::posit::{PositAction, PositRejectReason};
 use crate::protocol::presignature::PresignatureId;
@@ -99,7 +98,8 @@ impl SignGenerator {
 
         let (presignature, dropper) = taken.take();
         let PresignOutput { big_r, k, sigma } = presignature.output;
-        let delta = kdf::derive_delta(indexed.id.request_id, indexed.args.entropy, big_r);
+        let delta =
+            mpc_crypto::kdf::derive_delta(indexed.id.request_id, indexed.args.entropy, big_r);
         // TODO: Check whether it is okay to use invert_vartime instead
         let output: PresignOutput<Secp256k1> = PresignOutput {
             big_r: (big_r * delta).to_affine(),
