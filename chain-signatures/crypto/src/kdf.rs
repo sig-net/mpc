@@ -815,6 +815,59 @@ mod tests {
     }
 
     #[test]
+    fn test_derive_delta_stays_the_same() {
+        let big_r: k256::AffinePoint = SecretKey::from_bytes((&[0x11; 32]).into())
+            .unwrap()
+            .public_key()
+            .into();
+
+        let delta = derive_delta([0x01; 32], [0x44; 32], big_r);
+
+        let expected = [
+            201, 189, 221, 160, 229, 175, 219, 17, 168, 142, 248, 183, 27, 177, 126, 76, 212, 79,
+            213, 149, 121, 44, 193, 110, 192, 228, 97, 9, 64, 180, 196, 28,
+        ];
+        assert_eq!(delta.to_bytes().as_slice(), &expected);
+    }
+
+    #[test]
+    fn test_derive_delta_differs_by_big_r() {
+        let big_r_a: k256::AffinePoint = SecretKey::from_bytes((&[0x11; 32]).into())
+            .unwrap()
+            .public_key()
+            .into();
+        let big_r_b: k256::AffinePoint = SecretKey::from_bytes((&[0x22; 32]).into())
+            .unwrap()
+            .public_key()
+            .into();
+
+        let request_id = [0x01; 32];
+        let entropy = [0x44; 32];
+
+        assert_ne!(
+            derive_delta(request_id, entropy, big_r_a),
+            derive_delta(request_id, entropy, big_r_b),
+            "distinct presignature big_r must yield distinct deltas"
+        );
+    }
+
+    #[test]
+    fn test_derive_delta_differs_by_entropy() {
+        let big_r: k256::AffinePoint = SecretKey::from_bytes((&[0x11; 32]).into())
+            .unwrap()
+            .public_key()
+            .into();
+
+        let request_id = [0x01; 32];
+
+        assert_ne!(
+            derive_delta(request_id, [0x44; 32], big_r),
+            derive_delta(request_id, [0x55; 32], big_r),
+            "distinct entropy must yield distinct deltas"
+        );
+    }
+
+    #[test]
     fn test_generate_signature_is_deterministic() {
         let root_sk = SecretKey::from_bytes((&[0x11; 32]).into()).unwrap();
         let epsilon = Scalar::from_bytes([0x22; 32]).unwrap();
