@@ -6,24 +6,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
+use crate::config::CantonAuthConfig;
+
 const DEFAULT_TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TOKEN_REFRESH_SKEW: Duration = Duration::from_secs(60);
 const UNUSED_CLIENT_CREDENTIALS_AUTH_URL: &str = "http://localhost/unused-canton-oauth-auth-url";
-
-#[derive(Clone)]
-pub struct CantonAuthConfig {
-    pub token_url: String,
-    pub client_id: String,
-    pub client_secret: String,
-    pub audience: String,
-    pub scope: Option<String>,
-}
-
-impl CantonAuthConfig {
-    pub fn kind(&self) -> &'static str {
-        "oidc-client-credentials"
-    }
-}
 
 #[derive(Clone)]
 pub struct CantonAuthProvider {

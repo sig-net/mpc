@@ -3,6 +3,7 @@ mod config;
 
 pub use client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
 pub use config::SolConfig;
+use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::NoopPublisherTelemetry;
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
@@ -108,7 +109,7 @@ impl<S: StateManager, T: ChainTelemetry> SolanaStream<S, T> {
             )
         })?;
 
-        let (tx, rx) = crate::stream::channel();
+        let (tx, rx) = chain_event_channel();
 
         Ok(SolanaStream {
             rx: Some(rx),
@@ -174,7 +175,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
             prev.abort();
         }
 
-        let (live_tx, live_rx) = crate::stream::channel();
+        let (live_tx, live_rx) = chain_event_channel();
         self.live_rx = Some(live_rx);
 
         let program_id = self.program_id;

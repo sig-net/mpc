@@ -19,17 +19,11 @@ use mpc_chain_integration_core::{ChainIndexer, ChainStream, ChainTelemetry};
 use mpc_primitives::ChainEvent;
 use tokio::sync::{mpsc, watch};
 
-pub const CHAIN_EVENT_STREAM_SIZE: usize = 16384;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChainStreaming {
     Recovery { load_local: bool },
     Catchup { anchor_height: u64 },
     Live,
-}
-
-pub fn channel() -> (mpsc::Sender<ChainEvent>, mpsc::Receiver<ChainEvent>) {
-    mpsc::channel(CHAIN_EVENT_STREAM_SIZE)
 }
 
 /// Shared indexer loop: recovers backlog then processes events from the stream

@@ -6021,6 +6021,7 @@ dependencies = [
  "hex",
  "hyper 0.14.32",
  "k256",
+ "mpc-chain-canton",
  "mpc-chain-integration-core",
  "mpc-contract",
  "mpc-crypto",
@@ -7312,6 +7313,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fafa6961cabd9c63bcd77a45d7e3b7f3b552b70417831fb0f56db717e72407e"
 
 [[package]]
+name = "mpc-chain-canton"
+version = "1.16.4"
+dependencies = [
+ "alloy",
+ "alloy-sol-types",
+ "anyhow",
+ "async-trait",
+ "borsh 1.5.7",
+ "futures-util",
+ "hex",
+ "k256",
+ "mockito",
+ "mpc-chain-integration-core",
+ "mpc-crypto",
+ "mpc-primitives",
+ "oauth2",
+ "reqwest 0.11.27",
+ "serde",
+ "serde-aux",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tracing",
+]
+
+[[package]]
 name = "mpc-chain-integration-core"
 version = "1.16.4"
 dependencies = [
@@ -7325,6 +7352,7 @@ dependencies = [
  "k256",
  "mpc-crypto",
  "mpc-primitives",
+ "rand 0.8.5",
  "tokio",
  "tracing",
 ]
@@ -7358,9 +7386,11 @@ dependencies = [
  "alloy",
  "anyhow",
  "getrandom 0.2.16",
+ "hkdf",
  "k256",
  "mpc-primitives",
  "near-account-id",
+ "near-primitives",
  "near-sdk",
  "sha3",
 ]
@@ -7407,7 +7437,6 @@ dependencies = [
  "helios",
  "hex",
  "highway",
- "hkdf",
  "http 1.3.1",
  "hyper 0.14.32",
  "hyper-rustls 0.24.2",
@@ -7417,6 +7446,7 @@ dependencies = [
  "maud",
  "mime",
  "mockito",
+ "mpc-chain-canton",
  "mpc-chain-integration-core",
  "mpc-contract",
  "mpc-crypto",
@@ -7427,7 +7457,6 @@ dependencies = [
  "near-fetch",
  "near-primitives",
  "near-sdk",
- "oauth2",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
@@ -7441,7 +7470,6 @@ dependencies = [
  "secrecy 0.10.3",
  "semver 1.0.26",
  "serde",
- "serde-aux",
  "serde_bytes",
  "serde_json",
  "sha3",
@@ -7460,7 +7488,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
- "tokio-tungstenite 0.29.0",
  "tracing",
  "tracing-opentelemetry",
  "tracing-stackdriver",

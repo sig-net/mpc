@@ -14,7 +14,6 @@ axum-extra = "0.9.6"
 chrono = "0.4.24"
 google-datastore1 = "=5.0.4"
 google-secretmanager1 = "5"
-hkdf.workspace = true
 highway = "1.1.0"
 http = "1.1.0"
 hyper-rustls = { version = "=0.24", features = ["http2"] }
@@ -62,7 +61,6 @@ rand.workspace = true
 reqwest.workspace = true
 semver.workspace = true
 serde.workspace = true
-serde-aux = { version = "4", default-features = false }
 serde_bytes.workspace = true
 serde_json.workspace = true
 sha3.workspace = true
@@ -78,18 +76,17 @@ solana-transaction-status.workspace = true
 solana-client.workspace = true
 futures-util.workspace = true
 parity-scale-codec.workspace = true
-tokio-tungstenite.workspace = true
 
 near-account-id.workspace = true
 near-crypto.workspace = true
 near-fetch.workspace = true
 near-primitives.workspace = true
 near-sdk.workspace = true
-oauth2.workspace = true
 
 mpc-contract.workspace = true
 mpc-crypto.workspace = true
 mpc-chain-integration-core.workspace = true
+mpc-chain-canton.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true
 signet-program.workspace = true

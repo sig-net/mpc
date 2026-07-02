@@ -21,6 +21,7 @@ pub use config::EthConfig;
 use futures_util::stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
+use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{
@@ -1055,7 +1056,7 @@ pub struct EthereumStream<S: StateManager, T: ChainTelemetry> {
 impl<S: StateManager, T: ChainTelemetry> EthereumStream<S, T> {
     pub async fn new(eth: EthConfig, state_manager: S, telemetry: T) -> anyhow::Result<Self> {
         tracing::info!(eth_config = ?eth, "creating ethereum indexer stream");
-        let (events_tx, events_rx) = crate::stream::channel();
+        let (events_tx, events_rx) = chain_event_channel();
         let indexer = EthereumIndexer::new(eth, state_manager, telemetry, events_tx).await?;
         Ok(Self {
             events_rx: Some(events_rx),

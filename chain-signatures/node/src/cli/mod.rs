@@ -5,7 +5,6 @@ use std::{collections::HashMap, sync::Arc};
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
-use crate::indexer_canton::{CantonConfig, CantonStream};
 use crate::indexer_eth::{EthConfig, EthereumStream};
 use crate::indexer_hydration::{self, HydrationConfig};
 use crate::indexer_sol::{SolConfig, SolanaClient, SolanaStream};
@@ -15,7 +14,7 @@ use crate::node_client::{self, NodeClient};
 use crate::protocol::contract::ProtocolState;
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
-use crate::protocol::signature::{Sign, SignatureSpawnerTask};
+use crate::protocol::request::{Sign, SignatureSpawnerTask};
 use crate::protocol::state::{Node, NodeStateWatcher};
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
@@ -34,6 +33,7 @@ use deadpool_redis::Runtime;
 use enum_map::EnumMap;
 use k256::sha2::Sha256;
 use local_ip_address::local_ip;
+use mpc_chain_canton::{CantonClient, CantonConfig, CantonStream};
 use mpc_chain_integration_core::ChainPublisher;
 use mpc_keys::hpke;
 use mpc_primitives::{Chain, CheckpointDigest};
@@ -498,7 +498,7 @@ impl ChainConfigs {
         }
         if let Some(canton) = &self.canton {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Canton));
-            match rpc::CantonClient::new(canton, telemetry).await {
+            match CantonClient::new(canton, telemetry).await {
                 Ok(client) => {
                     publishers.insert(Chain::Canton, Arc::new(client));
                 }

@@ -53,3 +53,38 @@ impl PublishAction {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::test::{make_indexed, make_signature, scalar};
+    use k256::AffinePoint;
+    use mpc_primitives::{Chain, SignKind};
+
+    #[test]
+    fn publish_action_accepts_valid_signature() {
+        let sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let pk: AffinePoint = sk.public_key().into();
+        let epsilon = scalar(&[1u8; 32]);
+        let payload = scalar(&[42u8; 32]);
+
+        let output = make_signature(&sk, epsilon, payload);
+        let indexed = make_indexed(Chain::NEAR, epsilon, payload, SignKind::Sign);
+
+        assert!(PublishAction::new(pk, indexed, output, vec![]).is_some());
+    }
+
+    #[test]
+    fn publish_action_rejects_invalid_signature() {
+        let sk = k256::SecretKey::random(&mut rand::thread_rng());
+        let pk: AffinePoint = sk.public_key().into();
+        let epsilon = scalar(&[1u8; 32]);
+        let payload = scalar(&[42u8; 32]);
+
+        let mut output = make_signature(&sk, epsilon, payload);
+        output.s += k256::Scalar::ONE;
+        let indexed = make_indexed(Chain::NEAR, epsilon, payload, SignKind::Sign);
+
+        assert!(PublishAction::new(pk, indexed, output, vec![]).is_none());
+    }
+}
