@@ -162,7 +162,7 @@ async fn test_channel_contention_multiple_blocks_at_once() {
 #[test(tokio::test(flavor = "multi_thread"))]
 async fn test_channel_contention_multiple_blocks_at_once_delayed() {
     // TODO: delay should be > ORGANIZE_POSIT_TIMEOUT but right now the system can't handle it
-    let delay = mpc_node::protocol::signature::organize_posit_timeout() / 2;
+    let delay = mpc_node::protocol::request::organize_posit_timeout() / 2;
     check_channel_contention(5, 10, 50, Some(delay)).await;
 }
 

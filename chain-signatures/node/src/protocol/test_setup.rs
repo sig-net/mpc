@@ -1,7 +1,7 @@
 use crate::backlog::Backlog;
 use crate::config::Config;
 use crate::mesh::MeshState;
-use crate::protocol::signature::SignatureSpawnerTask;
+use crate::protocol::request::SignatureSpawnerTask;
 use crate::protocol::{MessageChannel, MpcSignProtocol, Sign};
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::storage::secret_storage::SecretNodeStorageVariant;
