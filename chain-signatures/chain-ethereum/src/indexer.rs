@@ -20,7 +20,6 @@ use mpc_primitives::{
     SignArgs, SignId, Signature as MpcSignature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -116,13 +115,6 @@ impl BlockAndRequests {
             execution_events,
         }
     }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct EthSignRequest {
-    pub payload: [u8; 32],
-    pub path: String,
-    pub key_version: u32,
 }
 
 /// Whether a transaction's calldata represents a contract call.

@@ -180,28 +180,6 @@ impl RpcEthereumClient {
         trace_output_to_bytes(tx_hash, &call_frame)
     }
 
-    pub async fn call(
-        &self,
-        from: Address,
-        to: Address,
-        data: Bytes,
-        block_number: u64,
-    ) -> anyhow::Result<Bytes> {
-        let params = json!({
-            "from": format_address(from),
-            "to": format_address(to),
-            "data": format_bytes(&data),
-        });
-        let block = json!(to_hex_u64(block_number));
-        let result: String = self.rpc_call("eth_call", vec![params, block]).await?;
-        let stripped = result.trim_start_matches("0x");
-        if stripped.is_empty() {
-            return Ok(Bytes::default());
-        }
-        let decoded = hex::decode(stripped)?;
-        Ok(Bytes::from(decoded))
-    }
-
     fn next_id(&self) -> u64 {
         self.id.fetch_add(1, Ordering::Relaxed)
     }
@@ -357,14 +335,6 @@ fn trace_output_to_bytes(
 
 fn format_address(address: Address) -> String {
     format!("0x{}", address.encode_hex())
-}
-
-fn format_bytes(data: &Bytes) -> String {
-    if data.is_empty() {
-        "0x".to_string()
-    } else {
-        format!("0x{}", hex::encode(data))
-    }
 }
 
 fn to_hex_u64(value: u64) -> String {
