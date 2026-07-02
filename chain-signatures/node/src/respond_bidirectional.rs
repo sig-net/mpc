@@ -11,6 +11,7 @@ const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
 const HYDRATION_RESPOND_BIDIRECTIONAL_PATH: &str = "hydration response key";
 pub const CANTON_RESPOND_BIDIRECTIONAL_PATH: &str = "canton response key";
+pub const ETHEREUM_RESPOND_BIDIRECTIONAL_PATH: &str = "ethereum response key";
 // Use Abi as this is what we are using for ethereum
 pub(crate) const OUTPUT_DESERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Abi;
 
@@ -94,6 +95,7 @@ impl CompletedTx {
             Chain::Solana => SOLANA_RESPOND_BIDIRECTIONAL_PATH.to_string(),
             Chain::Hydration => HYDRATION_RESPOND_BIDIRECTIONAL_PATH.to_string(),
             Chain::Canton => CANTON_RESPOND_BIDIRECTIONAL_PATH.to_string(),
+            Chain::Ethereum => ETHEREUM_RESPOND_BIDIRECTIONAL_PATH.to_string(),
             _ => anyhow::bail!("Unsupported chain: {}", chain),
         };
         let epsilon = self.tx.epsilon(&path)?;
@@ -261,6 +263,34 @@ mod tests {
         let SignKind::RespondBidirectional(respond) = abi.kind else {
             panic!("expected RespondBidirectional kind");
         };
+        let mut expected = MAGIC_ERROR_PREFIX.to_vec();
+        expected.extend_from_slice(&[0u8; 32]);
+        *expected.last_mut().unwrap() = 1;
+        assert_eq!(respond.output, expected);
+    }
+
+    #[tokio::test]
+    async fn create_failed_sign_request_ethereum_uses_abi_and_response_path() {
+        let mut tx = sample_bidirectional_tx();
+        tx.source_chain = Chain::Ethereum;
+        let mut sender = [0u8; 32];
+        sender[12..].copy_from_slice(
+            alloy::primitives::address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266").as_slice(),
+        );
+        tx.sender = sender;
+        let completed = CompletedTx::new(tx);
+
+        let request = completed
+            .create_failed_sign_request(Chain::Ethereum, None)
+            .await
+            .unwrap();
+
+        assert_eq!(request.args.path, ETHEREUM_RESPOND_BIDIRECTIONAL_PATH);
+        assert_eq!(request.chain, Chain::Ethereum);
+        let SignKind::RespondBidirectional(respond) = request.kind else {
+            panic!("expected RespondBidirectional kind");
+        };
+        // ABI failure encoding: 0xdeadbeef ++ 32-byte ABI bool true.
         let mut expected = MAGIC_ERROR_PREFIX.to_vec();
         expected.extend_from_slice(&[0u8; 32]);
         *expected.last_mut().unwrap() = 1;

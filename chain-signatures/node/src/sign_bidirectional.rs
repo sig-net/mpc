@@ -121,6 +121,11 @@ impl SignBidirectionalEventExt for SignBidirectionalEvent {
                 &self.sender_string()?,
                 &self.path,
             )),
+            Chain::Ethereum => Ok(mpc_crypto::kdf::derive_epsilon_eth(
+                self.key_version,
+                &self.sender_string()?,
+                &self.path,
+            )),
             _ => anyhow::bail!("Unsupported chain for epsilon derivation: {:?}", self.chain),
         }
     }
@@ -157,6 +162,11 @@ impl BidirectionalTxExt for BidirectionalTx {
                 path,
             )),
             Chain::Canton => Ok(mpc_crypto::kdf::derive_epsilon_canton(
+                self.key_version,
+                &self.sender_string()?,
+                path,
+            )),
+            Chain::Ethereum => Ok(mpc_crypto::kdf::derive_epsilon_eth(
                 self.key_version,
                 &self.sender_string()?,
                 path,
@@ -520,6 +530,72 @@ mod derive_tests {
             .unwrap();
 
         assert_eq!(derive_user_address(mpc_pk, derivation_epsilon), expected);
+    }
+}
+
+#[cfg(test)]
+mod ethereum_epsilon_tests {
+    use super::{BidirectionalTxExt, SignBidirectionalEventExt};
+    use mpc_primitives::{BidirectionalTx, BidirectionalTxId, Chain, SignBidirectionalEvent};
+
+    const ETH_SENDER: &str = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266";
+
+    fn eth_sender_word() -> [u8; 32] {
+        let address = alloy::primitives::address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+        let mut sender = [0u8; 32];
+        sender[12..].copy_from_slice(address.as_slice());
+        sender
+    }
+
+    #[test]
+    fn sign_bidirectional_event_derives_ethereum_epsilon() {
+        let event = SignBidirectionalEvent {
+            sender: eth_sender_word(),
+            serialized_transaction: vec![1, 2, 3],
+            caip2_id: "eip155:1".to_string(),
+            key_version: 1,
+            deposit: 1,
+            path: "test-bidirectional-path".to_string(),
+            algo: "secp256k1".to_string(),
+            dest: "ethereum".to_string(),
+            params: "{}".to_string(),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+            chain: Chain::Ethereum,
+            chain_ctx: None,
+        };
+
+        assert_eq!(event.sender_string().unwrap(), ETH_SENDER);
+        let expected =
+            mpc_crypto::kdf::derive_epsilon_eth(1, ETH_SENDER, "test-bidirectional-path");
+        assert_eq!(event.epsilon().unwrap(), expected);
+    }
+
+    #[test]
+    fn bidirectional_tx_derives_ethereum_epsilon() {
+        let tx = BidirectionalTx {
+            id: BidirectionalTxId([0xab; 32]),
+            sender: eth_sender_word(),
+            serialized_transaction: Vec::new(),
+            source_chain: Chain::Ethereum,
+            target_chain: Chain::Ethereum,
+            caip2_id: "eip155:1".to_string(),
+            key_version: 1,
+            deposit: 0,
+            path: "unused-request-path".to_string(),
+            algo: String::new(),
+            dest: String::new(),
+            params: String::new(),
+            output_deserialization_schema: vec![],
+            respond_serialization_schema: vec![],
+            request_id: [0x22; 32],
+            from_address: [0u8; 20],
+            nonce: 0,
+        };
+
+        assert_eq!(tx.sender_string().unwrap(), ETH_SENDER);
+        let expected = mpc_crypto::kdf::derive_epsilon_eth(1, ETH_SENDER, "ethereum response key");
+        assert_eq!(tx.epsilon("ethereum response key").unwrap(), expected);
     }
 }
 

@@ -141,7 +141,8 @@ impl Chain {
 
     pub fn respond_serialization_format(&self) -> SerDeserFormat {
         match self {
-            Chain::Canton => SerDeserFormat::Abi,
+            // Canton and Ethereum contracts consume ABI-encoded bidirectional responses.
+            Chain::Canton | Chain::Ethereum => SerDeserFormat::Abi,
             // Solana and Hydration use Borsh for bidirectional responses.
             _ => SerDeserFormat::Borsh,
         }
@@ -174,5 +175,30 @@ impl FromStr for Chain {
             "canton" | "ctn" => Ok(Chain::Canton),
             other => Err(format!("unknown or unsupported chain {other}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn respond_serialization_format_is_abi_for_evm_and_canton() {
+        assert_eq!(
+            Chain::Ethereum.respond_serialization_format(),
+            SerDeserFormat::Abi
+        );
+        assert_eq!(
+            Chain::Canton.respond_serialization_format(),
+            SerDeserFormat::Abi
+        );
+        assert_eq!(
+            Chain::Solana.respond_serialization_format(),
+            SerDeserFormat::Borsh
+        );
+        assert_eq!(
+            Chain::Hydration.respond_serialization_format(),
+            SerDeserFormat::Borsh
+        );
     }
 }

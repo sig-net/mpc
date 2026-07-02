@@ -1,18 +1,27 @@
+use alloy::consensus::{SignableTransaction, TxEip1559};
+use alloy::eips::eip2718::Encodable2718;
 use alloy::network::{Ethereum, TransactionBuilder};
-use alloy::primitives::U256;
-use alloy::providers::Provider;
+use alloy::primitives::{Bytes, FixedBytes, TxKind, B256, U256};
+use alloy::providers::ext::AnvilApi;
+use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::request::TransactionRequest;
 use alloy::rpc::types::Filter;
-use alloy::sol_types::SolEvent;
+use alloy::sol_types::{SolEvent, SolValue};
 use anyhow::{anyhow, Context, Result};
 use integration_tests::cluster::Cluster;
 use integration_tests::{actions, cluster, eth};
 use k256::ecdsa::VerifyingKey;
+use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
-use k256::{AffinePoint, EncodedPoint, FieldBytes, PublicKey as K256PublicKey};
+use k256::{AffinePoint, EncodedPoint, FieldBytes, PublicKey as K256PublicKey, Secp256k1};
 use mpc_crypto::derive_key;
-use mpc_crypto::kdf::derive_epsilon_eth;
-use mpc_node::sign_bidirectional::public_key_to_address;
+use mpc_crypto::kdf::{check_ec_signature, derive_epsilon_eth};
+use mpc_node::respond_bidirectional::{
+    calculate_respond_bidirectional_hash_message, ETHEREUM_RESPOND_BIDIRECTIONAL_PATH,
+};
+use mpc_node::sign_bidirectional::{
+    derive_user_address, public_key_to_address, sign_and_hash_transaction,
+};
 use mpc_primitives::{Chain, Checkpoint, LATEST_MPC_KEY_VERSION};
 use test_log::test;
 use tokio::time::Duration;
@@ -154,6 +163,282 @@ async fn test_signature_ethereum() -> Result<()> {
         recovered_address == expected_address,
         "signature recovered address mismatch: expected {expected_address:?}, got {recovered_address:?}"
     );
+
+    Ok(())
+}
+
+/// End-to-end bidirectional flow with Ethereum as BOTH source and target chain:
+/// `signBidirectional` on the contract -> MPC responds via `respond` -> the test
+/// broadcasts the signed destination tx -> the indexer observes execution -> MPC
+/// publishes via `respondBidirectional` -> the test verifies the output and the
+/// outcome signature against the "ethereum response key" child key.
+#[test(tokio::test)]
+async fn test_ethereum_eth_bidirectional_flow() -> Result<()> {
+    let key_version = LATEST_MPC_KEY_VERSION;
+    let cluster = cluster::spawn().ethereum().await?;
+    cluster.wait().signable().await?;
+
+    let ctx = cluster.nodes.ctx();
+    let eth_ctx = ctx
+        .ethereum
+        .as_ref()
+        .context("ethereum sandbox not initialized")?;
+    let endpoint = eth_ctx.sandbox.external_http_endpoint.clone();
+    let secret_key = eth_ctx.sandbox.secret_key.clone();
+    let chain_id = eth_ctx.sandbox.chain_id;
+    let contract_address = eth_ctx.contract_address;
+
+    let (client, requester) = eth::client(&endpoint, &secret_key, chain_id)?;
+    let contract = eth::ChainSignatures::new(contract_address, client.clone());
+    let anvil = ProviderBuilder::new().connect_http(endpoint.parse()?);
+
+    let path = "ethereum::ethereum::bridge";
+    let algo = "secp256k1";
+    let dest = "ethereum";
+    let params = "{}";
+
+    // Derive the MPC child account that will broadcast on the target chain.
+    let network_public_key = cluster.root_public_key().await?;
+    let mut network_pk = vec![0x04];
+    network_pk.extend_from_slice(&network_public_key.as_bytes()[1..]);
+    let encoded_network_pk =
+        EncodedPoint::from_bytes(&network_pk).context("invalid network public key encoding")?;
+    let root_pk = AffinePoint::from_encoded_point(&encoded_network_pk)
+        .into_option()
+        .ok_or_else(|| anyhow!("invalid network public key"))?;
+
+    let sender_hex = format!("0x{}", hex::encode(requester));
+    let sign_epsilon = derive_epsilon_eth(key_version, &sender_hex, path);
+    let user_address = derive_user_address(root_pk, sign_epsilon);
+    anvil
+        .anvil_set_balance(user_address, U256::from(10_000_000_000_000_000_000u128))
+        .await?;
+
+    // Destination-chain tx: a plain transfer (non-contract-call output path).
+    let user_nonce = client.get_transaction_count(user_address).pending().await?;
+    let destination_tx = TxEip1559 {
+        chain_id,
+        nonce: user_nonce,
+        gas_limit: 21_000,
+        max_fee_per_gas: 20_000_000_000,
+        max_priority_fee_per_gas: 1_000_000_000,
+        to: TxKind::Call(alloy::primitives::Address::ZERO),
+        value: U256::ZERO,
+        access_list: Default::default(),
+        input: Bytes::new(),
+    };
+    let unsigned_bytes = destination_tx.encoded_for_signing();
+
+    // Submit the bidirectional request on the source contract.
+    let request = eth::ChainSignatures::SignBidirectionalRequest {
+        serializedTransaction: unsigned_bytes.clone().into(),
+        caip2Id: Chain::Ethereum.caip2_chain_id().to_string(),
+        keyVersion: key_version,
+        path: path.to_string(),
+        algo: algo.to_string(),
+        dest: dest.to_string(),
+        params: params.to_string(),
+        outputDeserializationSchema: Bytes::new(),
+        respondSerializationSchema: br#"[{"name":"output","type":"bool"}]"#.to_vec().into(),
+    };
+    let pending = contract
+        .signBidirectional(request)
+        .value(U256::from(1_u64))
+        .send()
+        .await?;
+    let receipt = pending.get_receipt().await?;
+    let from_block = receipt
+        .block_number
+        .context("missing block number in receipt")?;
+
+    // Expected request id: packed scheme from signet-evm-program.
+    let encoded = (
+        requester,
+        unsigned_bytes.clone(),
+        Chain::Ethereum.caip2_chain_id().to_string(),
+        key_version,
+        path.to_string(),
+        algo.to_string(),
+        dest.to_string(),
+        params.to_string(),
+    )
+        .abi_encode_packed();
+    let expected_request_id = alloy::primitives::keccak256(&encoded);
+
+    // 1. Wait for the MPC to respond with the destination tx signature.
+    let signature_responded_topic = alloy::primitives::keccak256(
+        "SignatureResponded(bytes32,address,((uint256,uint256),uint256,uint8))",
+    );
+    let mut matching_event = None;
+    for _ in 0..60 {
+        let latest_block = client.get_block_number().await?;
+        let filter = Filter::new()
+            .address(contract_address)
+            .from_block(from_block)
+            .to_block(latest_block)
+            .event_signature(signature_responded_topic);
+        let events = client.get_logs(&filter).await?;
+        if let Some(found) = events.into_iter().find_map(|log| {
+            alloy::primitives::Log::new(
+                log.address(),
+                log.topics().to_vec(),
+                log.data().data.clone(),
+            )
+            .and_then(|prim_log| {
+                eth::SignatureResponded::decode_log(&prim_log)
+                    .ok()
+                    .filter(|event| event.requestId == expected_request_id)
+            })
+        }) {
+            matching_event = Some(found);
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    let event = matching_event
+        .ok_or_else(|| anyhow!("did not observe signature response for bidirectional request"))?;
+
+    // Rebuild the MPC signature and verify it against the derived child key.
+    let mut x_bytes = [0u8; 32];
+    x_bytes.copy_from_slice(&event.signature.bigR.x.to_be_bytes::<32>());
+    let mut y_bytes = [0u8; 32];
+    y_bytes.copy_from_slice(&event.signature.bigR.y.to_be_bytes::<32>());
+    let encoded_r = EncodedPoint::from_affine_coordinates(
+        FieldBytes::from_slice(&x_bytes),
+        FieldBytes::from_slice(&y_bytes),
+        false,
+    );
+    let big_r = AffinePoint::from_encoded_point(&encoded_r)
+        .into_option()
+        .ok_or_else(|| anyhow!("invalid R component in signature"))?;
+    let s_scalar =
+        <k256::Scalar as Reduce<<Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(
+            FieldBytes::from_slice(&event.signature.s.to_be_bytes::<32>()),
+        );
+    let mpc_signature = mpc_primitives::Signature::new(big_r, s_scalar, event.signature.recoveryId);
+
+    let user_pk = derive_key(root_pk, sign_epsilon);
+    let signing_hash: [u8; 32] = alloy::primitives::keccak256(&unsigned_bytes).into();
+    let payload_scalar = <k256::Scalar as Reduce<
+        <Secp256k1 as k256::elliptic_curve::Curve>::Uint,
+    >>::reduce_bytes((&signing_hash).into());
+    check_ec_signature(
+        &user_pk,
+        &mpc_signature.big_r,
+        &mpc_signature.s,
+        payload_scalar,
+        mpc_signature.recovery_id,
+    )
+    .map_err(|err| anyhow!("mpc signature did not verify against derived user key: {err:?}"))?;
+
+    // 2. Broadcast the signed destination transaction (the MPC does not broadcast).
+    let y_parity = mpc_signature.recovery_id == 1;
+    let r_bytes: [u8; 32] = mpc_crypto::x_coordinate(&mpc_signature.big_r)
+        .to_bytes()
+        .into();
+    let s_bytes: [u8; 32] = mpc_signature.s.to_bytes().into();
+    let signed_bytes = destination_tx
+        .clone()
+        .into_signed(alloy::primitives::Signature::from_scalars_and_parity(
+            FixedBytes::from_slice(&r_bytes),
+            FixedBytes::from_slice(&s_bytes),
+            y_parity,
+        ))
+        .encoded_2718();
+    let (watched_tx_hash, _) = sign_and_hash_transaction(&unsigned_bytes, mpc_signature)?;
+
+    let pending_tx = anvil.send_raw_transaction(&signed_bytes).await?;
+    let tx_hash = *pending_tx.tx_hash();
+    assert_eq!(
+        tx_hash,
+        B256::from(watched_tx_hash),
+        "MPC watcher tx hash mismatch"
+    );
+    let broadcast_receipt = pending_tx.get_receipt().await?;
+    anyhow::ensure!(
+        broadcast_receipt.status(),
+        "destination transaction reverted"
+    );
+
+    // 3. Wait for the MPC to publish respondBidirectional back on the source contract.
+    let respond_topic = alloy::primitives::keccak256(
+        "RespondBidirectional(bytes32,address,bytes,((uint256,uint256),uint256,uint8))",
+    );
+    let mut respond_event = None;
+    for _ in 0..90 {
+        let latest_block = client.get_block_number().await?;
+        let filter = Filter::new()
+            .address(contract_address)
+            .from_block(from_block)
+            .to_block(latest_block)
+            .event_signature(respond_topic);
+        let events = client.get_logs(&filter).await?;
+        if let Some(found) = events.into_iter().find_map(|log| {
+            alloy::primitives::Log::new(
+                log.address(),
+                log.topics().to_vec(),
+                log.data().data.clone(),
+            )
+            .and_then(|prim_log| {
+                eth::ChainSignatures::RespondBidirectional::decode_log(&prim_log)
+                    .ok()
+                    .filter(|event| event.requestId == expected_request_id)
+            })
+        }) {
+            respond_event = Some(found);
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    let respond_event = respond_event
+        .ok_or_else(|| anyhow!("did not observe RespondBidirectional event on ethereum"))?;
+
+    // Plain transfers serialize to the ABI default: bool true in one 32-byte word.
+    let mut expected_output = vec![0u8; 32];
+    *expected_output.last_mut().unwrap() = 1;
+    assert_eq!(respond_event.serializedOutput.to_vec(), expected_output);
+
+    // 4. Verify the outcome signature against the "ethereum response key" child key.
+    let mut x_bytes = [0u8; 32];
+    x_bytes.copy_from_slice(&respond_event.signature.bigR.x.to_be_bytes::<32>());
+    let mut y_bytes = [0u8; 32];
+    y_bytes.copy_from_slice(&respond_event.signature.bigR.y.to_be_bytes::<32>());
+    let encoded_r = EncodedPoint::from_affine_coordinates(
+        FieldBytes::from_slice(&x_bytes),
+        FieldBytes::from_slice(&y_bytes),
+        false,
+    );
+    let respond_big_r = AffinePoint::from_encoded_point(&encoded_r)
+        .into_option()
+        .ok_or_else(|| anyhow!("invalid R component in respond signature"))?;
+    let respond_s =
+        <k256::Scalar as Reduce<<Secp256k1 as k256::elliptic_curve::Curve>::Uint>>::reduce_bytes(
+            FieldBytes::from_slice(&respond_event.signature.s.to_be_bytes::<32>()),
+        );
+
+    let respond_hash = calculate_respond_bidirectional_hash_message(
+        expected_request_id.as_slice(),
+        &respond_event.serializedOutput,
+    );
+    let respond_payload_scalar = <k256::Scalar as Reduce<
+        <Secp256k1 as k256::elliptic_curve::Curve>::Uint,
+    >>::reduce_bytes((&respond_hash).into());
+    let respond_epsilon = derive_epsilon_eth(
+        key_version,
+        &sender_hex,
+        ETHEREUM_RESPOND_BIDIRECTIONAL_PATH,
+    );
+    let respond_pk = derive_key(root_pk, respond_epsilon);
+    check_ec_signature(
+        &respond_pk,
+        &respond_big_r,
+        &respond_s,
+        respond_payload_scalar,
+        respond_event.signature.recoveryId,
+    )
+    .map_err(|err| {
+        anyhow!("respond signature did not verify against ethereum response key: {err:?}")
+    })?;
 
     Ok(())
 }

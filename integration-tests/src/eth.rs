@@ -56,9 +56,10 @@ pub async fn deploy_chain_signatures<P>(
 where
     P: Provider + Clone + 'static,
 {
-    let artifact: Value = serde_json::from_slice(include_bytes!(
-        "../../chain-signatures/contract-eth/artifacts/contracts/ChainSignatures.sol/ChainSignatures.json"
-    ))?;
+    // Prebuilt fixture from the signet-evm-program repo (the contract's source
+    // of truth) — see integration-tests/fixtures/eth/README.md to regenerate.
+    let artifact: Value =
+        serde_json::from_slice(include_bytes!("../fixtures/eth/ChainSignatures.json"))?;
 
     let bytecode = artifact
         .get("bytecode")

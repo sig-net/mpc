@@ -424,6 +424,10 @@ pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Re
         Chain::Hydration => Ok(crate::indexer_hydration::ss58_address_from_account32(
             sender,
         )),
+        // The Ethereum sender word is the ABI-encoded address: 12 zero bytes
+        // followed by the 20-byte address. Lowercase hex matches the KDF input
+        // used by `derive_epsilon_eth` everywhere else.
+        Chain::Ethereum => Ok(format!("0x{}", hex::encode(&sender[12..]))),
         _ => anyhow::bail!("Unsupported chain: {source_chain}"),
     }
 }
@@ -544,6 +548,17 @@ mod tests {
         assert_eq!(sig.s, s_scalar);
         assert_eq!(sig.big_r, big_r);
         assert_eq!(event.chain, Chain::Ethereum);
+    }
+
+    #[test]
+    fn sender_string_formats_ethereum_address() {
+        let address = alloy::primitives::address!("f39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+        let mut sender = [0u8; 32];
+        sender[12..].copy_from_slice(address.as_slice());
+        assert_eq!(
+            sender_string(sender, Chain::Ethereum).unwrap(),
+            "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+        );
     }
 
     #[tokio::test]

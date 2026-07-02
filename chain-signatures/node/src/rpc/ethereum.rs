@@ -15,7 +15,7 @@ use mpc_chain_integration_core::{
     utils::retry::{retry_rpc, RetryConfig},
     ChainPublisher, PublishAction, PublisherTelemetry,
 };
-use mpc_primitives::{SignId, Signature};
+use mpc_primitives::{SignId, SignKind, Signature};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -327,16 +327,108 @@ impl EthClient {
         tracing::info!(num_requests, "batch publish complete");
         Ok(())
     }
+
+    /// Publish a bidirectional execution result via `respondBidirectional`.
+    /// Single logical attempt (short send retries only); the caller
+    /// (`rpc::execute_publish`) handles infinite retries.
+    async fn call_respond_bidirectional(
+        &self,
+        id: &SignId,
+        serialized_output: Vec<u8>,
+        signature: &Signature,
+    ) -> anyhow::Result<B256> {
+        let sign_ids = [*id];
+        let send_retry = RetryConfig {
+            max_times: ETH_SEND_MAX_ATTEMPTS,
+            min_delay: ETH_SEND_MIN_DELAY,
+            max_delay: ETH_SEND_MAX_DELAY,
+            jitter: true,
+        };
+
+        let abi_signature: ChainSignatures::Signature = signature.into();
+        let request_id: B256 = id.request_id.into();
+        let output: alloy::primitives::Bytes = serialized_output.into();
+
+        let tx_hash = retry_rpc!(
+            ETH_SEND_TIMEOUT,
+            send_retry,
+            |attempt, err, sleep| {
+                tracing::warn!(
+                    ?sign_ids,
+                    attempt,
+                    "send eth respondBidirectional tx failed: {err}, retrying in {sleep:?}"
+                );
+            },
+            {
+                // Fetch nonce inside the retry loop, otherwise we may reuse a stale nonce.
+                let nonce = self
+                    .contract
+                    .provider()
+                    .get_transaction_count(self.contract.provider().default_signer_address())
+                    .pending()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to fetch nonce: {e}"))?;
+
+                self.contract
+                    .respondBidirectional(request_id, output.clone(), abi_signature.clone())
+                    .nonce(nonce)
+                    .send()
+                    .await
+                    .map(|pending| *pending.tx_hash())
+                    .map_err(|e| anyhow::anyhow!("RPC Error: {e}"))
+            }
+        )?;
+
+        let receipt = self
+            .wait_for_transaction_receipt(tx_hash, &sign_ids)
+            .await?;
+        if !receipt.status() {
+            tracing::error!(
+                ?sign_ids,
+                ?tx_hash,
+                "ethereum respondBidirectional transaction failed"
+            );
+            anyhow::bail!("Ethereum respondBidirectional transaction reverted");
+        }
+
+        tracing::info!(
+            ?sign_ids,
+            ?tx_hash,
+            "ethereum respondBidirectional published successfully"
+        );
+        Ok(tx_hash)
+    }
 }
 
 #[async_trait::async_trait]
 impl ChainPublisher for EthClient {
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        // Push to internal batching queue
-        self.batch_tx
-            .send(action.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!("eth: batch channel closed: {e}"))
+        match &action.indexed.kind {
+            SignKind::Sign | SignKind::SignBidirectional(_) => {
+                // Push to internal batching queue
+                self.batch_tx
+                    .send(action.clone())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("eth: batch channel closed: {e}"))
+            }
+            SignKind::RespondBidirectional(respond_bidirectional_tx) => {
+                self.call_respond_bidirectional(
+                    &action.indexed.id,
+                    respond_bidirectional_tx.output.clone(),
+                    &action.signature,
+                )
+                .await?;
+                self.telemetry.record_publish_metrics(action);
+                Ok(())
+            }
+            SignKind::Checkpoint(_) => {
+                tracing::error!(
+                    sign_id = ?action.indexed.id,
+                    "eth: checkpoint publishing not supported"
+                );
+                anyhow::bail!("checkpoint publishing not supported on Ethereum");
+            }
+        }
     }
 }
 
@@ -685,6 +777,156 @@ mod tests {
         assert!(
             result.is_ok(),
             "The happy path should complete successfully"
+        );
+    }
+
+    fn respond_bidirectional_action() -> PublishAction {
+        use mpc_primitives::{BidirectionalTxId, RespondBidirectionalTx, SignArgs, SignId};
+
+        let indexed = mpc_primitives::IndexedSignRequest::respond_bidirectional(
+            SignId::new([9u8; 32]),
+            SignArgs {
+                entropy: [0u8; 32],
+                epsilon: k256::Scalar::ONE,
+                payload: k256::Scalar::ONE,
+                path: "ethereum response key".to_string(),
+                key_version: 1,
+            },
+            mpc_primitives::Chain::Ethereum,
+            0,
+            RespondBidirectionalTx {
+                tx_id: BidirectionalTxId([1u8; 32]),
+                output: {
+                    let mut out = vec![0u8; 32];
+                    *out.last_mut().unwrap() = 1;
+                    out
+                },
+                chain_ctx: None,
+            },
+        );
+
+        PublishAction {
+            public_key: AffinePoint::GENERATOR,
+            indexed,
+            signature: create_test_signature(),
+            participants: vec![],
+            timestamp: std::time::Instant::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_publish_respond_bidirectional_success() {
+        let mut server = Server::new_async().await;
+        let tx_hash = B256::repeat_byte(0x66);
+        mock_alloy_background_rpcs(&mut server).await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionCount"}),
+            ))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+            .create_async()
+            .await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({"jsonrpc": "2.0", "id": 1, "result": format!("{tx_hash:#x}")}).to_string(),
+            )
+            .create_async()
+            .await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": mock_receipt_json(tx_hash, "0x1")
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = EthClient::new(
+            &mock_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        );
+
+        let result = client
+            .publish_signature(&respond_bidirectional_action())
+            .await;
+        assert!(
+            result.is_ok(),
+            "respondBidirectional publish should succeed: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_publish_respond_bidirectional_fails_on_reverted_tx() {
+        let mut server = Server::new_async().await;
+        let tx_hash = B256::repeat_byte(0x67);
+        mock_alloy_background_rpcs(&mut server).await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionCount"}),
+            ))
+            .with_status(200)
+            .with_body(json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}).to_string())
+            .create_async()
+            .await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({"jsonrpc": "2.0", "id": 1, "result": format!("{tx_hash:#x}")}).to_string(),
+            )
+            .create_async()
+            .await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": mock_receipt_json(tx_hash, "0x0")
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = EthClient::new(
+            &mock_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        );
+
+        let result = client
+            .publish_signature(&respond_bidirectional_action())
+            .await;
+        assert!(
+            result.is_err(),
+            "reverted respondBidirectional must error for outer retry"
         );
     }
 }

@@ -1,0 +1,877 @@
+{
+  "_format": "hh3-artifact-1",
+  "contractName": "ChainSignatures",
+  "sourceName": "contracts/ChainSignatures.sol",
+  "abi": [
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "_admin",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "_signatureDeposit",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable",
+      "type": "constructor"
+    },
+    {
+      "inputs": [],
+      "name": "AccessControlBadConfirmation",
+      "type": "error"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "account",
+          "type": "address"
+        },
+        {
+          "internalType": "bytes32",
+          "name": "neededRole",
+          "type": "bytes32"
+        }
+      ],
+      "name": "AccessControlUnauthorizedAccount",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "InsufficientDeposit",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "InsufficientFunds",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "InvalidRecipient",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "InvalidTransaction",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "TransferFailed",
+      "type": "error"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "oldDeposit",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "newDeposit",
+          "type": "uint256"
+        }
+      ],
+      "name": "DepositUpdated",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "amount",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "address",
+          "name": "recipient",
+          "type": "address"
+        }
+      ],
+      "name": "FundsWithdrawn",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "requestId",
+          "type": "bytes32"
+        },
+        {
+          "indexed": false,
+          "internalType": "address",
+          "name": "responder",
+          "type": "address"
+        },
+        {
+          "indexed": false,
+          "internalType": "bytes",
+          "name": "serializedOutput",
+          "type": "bytes"
+        },
+        {
+          "components": [
+            {
+              "components": [
+                {
+                  "internalType": "uint256",
+                  "name": "x",
+                  "type": "uint256"
+                },
+                {
+                  "internalType": "uint256",
+                  "name": "y",
+                  "type": "uint256"
+                }
+              ],
+              "internalType": "struct ChainSignatures.AffinePoint",
+              "name": "bigR",
+              "type": "tuple"
+            },
+            {
+              "internalType": "uint256",
+              "name": "s",
+              "type": "uint256"
+            },
+            {
+              "internalType": "uint8",
+              "name": "recoveryId",
+              "type": "uint8"
+            }
+          ],
+          "indexed": false,
+          "internalType": "struct ChainSignatures.Signature",
+          "name": "signature",
+          "type": "tuple"
+        }
+      ],
+      "name": "RespondBidirectional",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "role",
+          "type": "bytes32"
+        },
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "previousAdminRole",
+          "type": "bytes32"
+        },
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "newAdminRole",
+          "type": "bytes32"
+        }
+      ],
+      "name": "RoleAdminChanged",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "role",
+          "type": "bytes32"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "account",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "sender",
+          "type": "address"
+        }
+      ],
+      "name": "RoleGranted",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "role",
+          "type": "bytes32"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "account",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "sender",
+          "type": "address"
+        }
+      ],
+      "name": "RoleRevoked",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": false,
+          "internalType": "address",
+          "name": "sender",
+          "type": "address"
+        },
+        {
+          "indexed": false,
+          "internalType": "bytes",
+          "name": "serializedTransaction",
+          "type": "bytes"
+        },
+        {
+          "indexed": false,
+          "internalType": "string",
+          "name": "caip2Id",
+          "type": "string"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint32",
+          "name": "keyVersion",
+          "type": "uint32"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "deposit",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "chainId",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "string",
+          "name": "path",
+          "type": "string"
+        },
+        {
+          "indexed": false,
+          "internalType": "string",
+          "name": "algo",
+          "type": "string"
+        },
+        {
+          "indexed": false,
+          "internalType": "string",
+          "name": "dest",
+          "type": "string"
+        },
+        {
+          "indexed": false,
+          "internalType": "string",
+          "name": "params",
+          "type": "string"
+        },
+        {
+          "indexed": false,
+          "internalType": "bytes",
+          "name": "outputDeserializationSchema",
+          "type": "bytes"
+        },
+        {
+          "indexed": false,
+          "internalType": "bytes",
+          "name": "respondSerializationSchema",
+          "type": "bytes"
+        }
+      ],
+      "name": "SignBidirectional",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "requestId",
+          "type": "bytes32"
+        },
+        {
+          "indexed": false,
+          "internalType": "address",
+          "name": "responder",
+          "type": "address"
+        },
+        {
+          "indexed": false,
+          "internalType": "string",
+          "name": "errorMessage",
+          "type": "string"
+        }
+      ],
+      "name": "SignatureError",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": false,
+          "internalType": "address",
+          "name": "sender",
+          "type": "address"
+        },
+        {
+          "indexed": false,
+          "internalType": "bytes32",
+          "name": "payload",
+          "type": "bytes32"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint32",
+          "name": "keyVersion",
+          "type": "uint32"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "deposit",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "chainId",
+          "type": "uint256"
+        },
+        {
+          "indexed": false,
+          "internalType": "string",
+          "name": "path",
+          "type": "string"
+        },
+        {
+          "indexed": false,
+          "internalType": "string",
+          "name": "algo",
+          "type": "string"
+        },
+        {
+          "indexed": false,
+          "internalType": "string",
+          "name": "dest",
+          "type": "string"
+        },
+        {
+          "indexed": false,
+          "internalType": "string",
+          "name": "params",
+          "type": "string"
+        }
+      ],
+      "name": "SignatureRequested",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "requestId",
+          "type": "bytes32"
+        },
+        {
+          "indexed": false,
+          "internalType": "address",
+          "name": "responder",
+          "type": "address"
+        },
+        {
+          "components": [
+            {
+              "components": [
+                {
+                  "internalType": "uint256",
+                  "name": "x",
+                  "type": "uint256"
+                },
+                {
+                  "internalType": "uint256",
+                  "name": "y",
+                  "type": "uint256"
+                }
+              ],
+              "internalType": "struct ChainSignatures.AffinePoint",
+              "name": "bigR",
+              "type": "tuple"
+            },
+            {
+              "internalType": "uint256",
+              "name": "s",
+              "type": "uint256"
+            },
+            {
+              "internalType": "uint8",
+              "name": "recoveryId",
+              "type": "uint8"
+            }
+          ],
+          "indexed": false,
+          "internalType": "struct ChainSignatures.Signature",
+          "name": "signature",
+          "type": "tuple"
+        }
+      ],
+      "name": "SignatureResponded",
+      "type": "event"
+    },
+    {
+      "inputs": [],
+      "name": "DEFAULT_ADMIN_ROLE",
+      "outputs": [
+        {
+          "internalType": "bytes32",
+          "name": "",
+          "type": "bytes32"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "role",
+          "type": "bytes32"
+        }
+      ],
+      "name": "getRoleAdmin",
+      "outputs": [
+        {
+          "internalType": "bytes32",
+          "name": "",
+          "type": "bytes32"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "getSignatureDeposit",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "role",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "address",
+          "name": "account",
+          "type": "address"
+        }
+      ],
+      "name": "grantRole",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "role",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "address",
+          "name": "account",
+          "type": "address"
+        }
+      ],
+      "name": "hasRole",
+      "outputs": [
+        {
+          "internalType": "bool",
+          "name": "",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "role",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "address",
+          "name": "callerConfirmation",
+          "type": "address"
+        }
+      ],
+      "name": "renounceRole",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "components": [
+            {
+              "internalType": "bytes32",
+              "name": "requestId",
+              "type": "bytes32"
+            },
+            {
+              "components": [
+                {
+                  "components": [
+                    {
+                      "internalType": "uint256",
+                      "name": "x",
+                      "type": "uint256"
+                    },
+                    {
+                      "internalType": "uint256",
+                      "name": "y",
+                      "type": "uint256"
+                    }
+                  ],
+                  "internalType": "struct ChainSignatures.AffinePoint",
+                  "name": "bigR",
+                  "type": "tuple"
+                },
+                {
+                  "internalType": "uint256",
+                  "name": "s",
+                  "type": "uint256"
+                },
+                {
+                  "internalType": "uint8",
+                  "name": "recoveryId",
+                  "type": "uint8"
+                }
+              ],
+              "internalType": "struct ChainSignatures.Signature",
+              "name": "signature",
+              "type": "tuple"
+            }
+          ],
+          "internalType": "struct ChainSignatures.Response[]",
+          "name": "_responses",
+          "type": "tuple[]"
+        }
+      ],
+      "name": "respond",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "_requestId",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "bytes",
+          "name": "_serializedOutput",
+          "type": "bytes"
+        },
+        {
+          "components": [
+            {
+              "components": [
+                {
+                  "internalType": "uint256",
+                  "name": "x",
+                  "type": "uint256"
+                },
+                {
+                  "internalType": "uint256",
+                  "name": "y",
+                  "type": "uint256"
+                }
+              ],
+              "internalType": "struct ChainSignatures.AffinePoint",
+              "name": "bigR",
+              "type": "tuple"
+            },
+            {
+              "internalType": "uint256",
+              "name": "s",
+              "type": "uint256"
+            },
+            {
+              "internalType": "uint8",
+              "name": "recoveryId",
+              "type": "uint8"
+            }
+          ],
+          "internalType": "struct ChainSignatures.Signature",
+          "name": "_signature",
+          "type": "tuple"
+        }
+      ],
+      "name": "respondBidirectional",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "components": [
+            {
+              "internalType": "bytes32",
+              "name": "requestId",
+              "type": "bytes32"
+            },
+            {
+              "internalType": "string",
+              "name": "errorMessage",
+              "type": "string"
+            }
+          ],
+          "internalType": "struct ChainSignatures.ErrorResponse[]",
+          "name": "_errors",
+          "type": "tuple[]"
+        }
+      ],
+      "name": "respondError",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "role",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "address",
+          "name": "account",
+          "type": "address"
+        }
+      ],
+      "name": "revokeRole",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "_amount",
+          "type": "uint256"
+        }
+      ],
+      "name": "setSignatureDeposit",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "components": [
+            {
+              "internalType": "bytes32",
+              "name": "payload",
+              "type": "bytes32"
+            },
+            {
+              "internalType": "string",
+              "name": "path",
+              "type": "string"
+            },
+            {
+              "internalType": "uint32",
+              "name": "keyVersion",
+              "type": "uint32"
+            },
+            {
+              "internalType": "string",
+              "name": "algo",
+              "type": "string"
+            },
+            {
+              "internalType": "string",
+              "name": "dest",
+              "type": "string"
+            },
+            {
+              "internalType": "string",
+              "name": "params",
+              "type": "string"
+            }
+          ],
+          "internalType": "struct ChainSignatures.SignRequest",
+          "name": "_request",
+          "type": "tuple"
+        }
+      ],
+      "name": "sign",
+      "outputs": [],
+      "stateMutability": "payable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "components": [
+            {
+              "internalType": "bytes",
+              "name": "serializedTransaction",
+              "type": "bytes"
+            },
+            {
+              "internalType": "string",
+              "name": "caip2Id",
+              "type": "string"
+            },
+            {
+              "internalType": "uint32",
+              "name": "keyVersion",
+              "type": "uint32"
+            },
+            {
+              "internalType": "string",
+              "name": "path",
+              "type": "string"
+            },
+            {
+              "internalType": "string",
+              "name": "algo",
+              "type": "string"
+            },
+            {
+              "internalType": "string",
+              "name": "dest",
+              "type": "string"
+            },
+            {
+              "internalType": "string",
+              "name": "params",
+              "type": "string"
+            },
+            {
+              "internalType": "bytes",
+              "name": "outputDeserializationSchema",
+              "type": "bytes"
+            },
+            {
+              "internalType": "bytes",
+              "name": "respondSerializationSchema",
+              "type": "bytes"
+            }
+          ],
+          "internalType": "struct ChainSignatures.SignBidirectionalRequest",
+          "name": "_request",
+          "type": "tuple"
+        }
+      ],
+      "name": "signBidirectional",
+      "outputs": [],
+      "stateMutability": "payable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes4",
+          "name": "interfaceId",
+          "type": "bytes4"
+        }
+      ],
+      "name": "supportsInterface",
+      "outputs": [
+        {
+          "internalType": "bool",
+          "name": "",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "_amount",
+          "type": "uint256"
+        },
+        {
+          "internalType": "address",
+          "name": "_receiver",
+          "type": "address"
+        }
+      ],
+      "name": "withdraw",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    }
+  ],
+  "bytecode": "0x608060405234801561000f575f5ffd5b506040516112b93803806112b983398101604081905261002e916100eb565b6100385f83610042565b5060015550610122565b5f828152602081815260408083206001600160a01b038516845290915281205460ff166100e2575f838152602081815260408083206001600160a01b03861684529091529020805460ff1916600117905561009a3390565b6001600160a01b0316826001600160a01b0316847f2f8788117e7eff1d82e926ec794901d17c78024a50270940304540a733656f0d60405160405180910390a45060016100e5565b505f5b92915050565b5f5f604083850312156100fc575f5ffd5b82516001600160a01b0381168114610112575f5ffd5b6020939093015192949293505050565b61118a8061012f5f395ff3fe6080604052600436106100e3575f3560e01c80635f45af8811610087578063ae650b9511610057578063ae650b9514610258578063d547741f1461026c578063dfb4366b1461028b578063fb0dc1261461029e575f5ffd5b80635f45af88146101f457806391d1485414610213578063a03b5c3b14610232578063a217fddf14610245575f5ffd5b806328dd39d4116100c257806328dd39d4146101785780632f2ff15d1461019757806336568abe146101b657806343ec0d4c146101d5575f5ffd5b8062f714ce146100e757806301ffc9a714610108578063248a9ca31461013c575b5f5ffd5b3480156100f2575f5ffd5b506101066101013660046108f3565b6102bd565b005b348015610113575f5ffd5b5061012761012236600461091d565b6103c6565b60405190151581526020015b60405180910390f35b348015610147575f5ffd5b5061016a61015636600461094b565b5f9081526020819052604090206001015490565b604051908152602001610133565b348015610183575f5ffd5b50610106610192366004610962565b6103fc565b3480156101a2575f5ffd5b506101066101b13660046108f3565b610440565b3480156101c1575f5ffd5b506101066101d03660046108f3565b61046a565b3480156101e0575f5ffd5b506101066101ef3660046109f1565b6104a2565b3480156101ff575f5ffd5b5061010661020e36600461094b565b610544565b34801561021e575f5ffd5b5061012761022d3660046108f3565b610594565b610106610240366004610b61565b6105bc565b348015610250575f5ffd5b5061016a5f81565b348015610263575f5ffd5b5060015461016a565b348015610277575f5ffd5b506101066102863660046108f3565b610640565b610106610299366004610c64565b610664565b3480156102a9575f5ffd5b506101066102b8366004610e08565b610712565b5f6102c781610792565b6001600160a01b0382166102ee57604051634e46966960e11b815260040160405180910390fd5b4783111561030f5760405163356680b760e01b815260040160405180910390fd5b5f826001600160a01b0316846040515f6040518083038185875af1925050503d805f8114610358576040519150601f19603f3d011682016040523d82523d5f602084013e61035d565b606091505b505090508061037f576040516312171d8360e31b815260040160405180910390fd5b604080518581526001600160a01b03851660208201527f6141b54b56b8a52a8c6f5cd2a857f6117b18ffbf4d46bd3106f300a839cbf5ea910160405180910390a150505050565b5f6001600160e01b03198216637965db0b60e01b14806103f657506301ffc9a760e01b6001600160e01b03198316145b92915050565b837f23a9a92895272f15b4a10136e9902bae33c369c40c448b2d184f9a06e33fc3df338585856040516104329493929190610ec7565b60405180910390a250505050565b5f8281526020819052604090206001015461045a81610792565b610464838361079f565b50505050565b6001600160a01b03811633146104935760405163334bd91960e11b815260040160405180910390fd5b61049d828261082e565b505050565b5f5b8181101561049d578282828181106104be576104be610f03565b90506020028101906104d09190610f17565b357f3a8c98eb820de2bc0f92e6c44a3bc0245111e8d203e7aa5e8f2cb783b61ca1243385858581811061050557610505610f03565b90506020028101906105179190610f17565b610525906020810190610f35565b60405161053493929190610f7e565b60405180910390a26001016104a4565b5f61054e81610792565b600180549083905560408051828152602081018590527f4c0c144abc1788db200c21df3378b55ee4ab0980465c120061c995a62f7626d8910160405180910390a1505050565b5f918252602082815260408084206001600160a01b0393909316845291905290205460ff1690565b6001543410156105df5760405163070f6eed60e11b815260040160405180910390fd5b7f6c77c4e5e031dca0c4944909e0d4d343c9c5b16eda4ef1d4be0762693e02672233825f0151836040015134468660200151876060015188608001518960a0015160405161063599989796959493929190610fd0565b60405180910390a150565b5f8281526020819052604090206001015461065a81610792565b610464838361082e565b6001543410156106875760405163070f6eed60e11b815260040160405180910390fd5b8051515f036106a95760405163280503e760e11b815260040160405180910390fd5b7f27f9d88f0144f82d39d07d3e314ac47018991ad27af3fb62129dd7cd725846e833825f0151836020015184604001513446876060015188608001518960a001518a60c001518b60e001518c61010001516040516106359c9b9a9998979695949392919061105b565b5f5b8181101561049d5782828281811061072e5761072e610f03565b905060a002015f01357f8fefda2f6c146df62efa1de95f8ff0b9c29ae07b9846e61fbce6e618897397ff3385858581811061076b5761076b610f03565b905060a00201602001604051610782929190611137565b60405180910390a2600101610714565b61079c8133610897565b50565b5f6107aa8383610594565b610827575f838152602081815260408083206001600160a01b03861684529091529020805460ff191660011790556107df3390565b6001600160a01b0316826001600160a01b0316847f2f8788117e7eff1d82e926ec794901d17c78024a50270940304540a733656f0d60405160405180910390a45060016103f6565b505f6103f6565b5f6108398383610594565b15610827575f838152602081815260408083206001600160a01b0386168085529252808320805460ff1916905551339286917ff6391f5c32d9c69d2a47ea670b442974b53935d1edc7fd64eb21e047a839171b9190a45060016103f6565b6108a18282610594565b6108d45760405163e2517d3f60e01b81526001600160a01b03821660048201526024810183905260440160405180910390fd5b5050565b80356001600160a01b03811681146108ee575f5ffd5b919050565b5f5f60408385031215610904575f5ffd5b82359150610914602084016108d8565b90509250929050565b5f6020828403121561092d575f5ffd5b81356001600160e01b031981168114610944575f5ffd5b9392505050565b5f6020828403121561095b575f5ffd5b5035919050565b5f5f5f5f84860360c0811215610976575f5ffd5b8535945060208601356001600160401b03811115610992575f5ffd5b8601601f810188136109a2575f5ffd5b80356001600160401b038111156109b7575f5ffd5b8860208284010111156109c8575f5ffd5b602091909101945092506080603f19820112156109e3575f5ffd5b509295919450926040019150565b5f5f60208385031215610a02575f5ffd5b82356001600160401b03811115610a17575f5ffd5b8301601f81018513610a27575f5ffd5b80356001600160401b03811115610a3c575f5ffd5b8560208260051b8401011115610a50575f5ffd5b6020919091019590945092505050565b634e487b7160e01b5f52604160045260245ffd5b60405160c081016001600160401b0381118282101715610a9657610a96610a60565b60405290565b60405161012081016001600160401b0381118282101715610a9657610a96610a60565b5f82601f830112610ace575f5ffd5b8135602083015f5f6001600160401b03841115610aed57610aed610a60565b50604051601f19601f85018116603f011681018181106001600160401b0382111715610b1b57610b1b610a60565b604052838152905080828401871015610b32575f5ffd5b838360208301375f602085830101528094505050505092915050565b803563ffffffff811681146108ee575f5ffd5b5f60208284031215610b71575f5ffd5b81356001600160401b03811115610b86575f5ffd5b820160c08185031215610b97575f5ffd5b610b9f610a74565b8135815260208201356001600160401b03811115610bbb575f5ffd5b610bc786828501610abf565b602083015250610bd960408301610b4e565b604082015260608201356001600160401b03811115610bf6575f5ffd5b610c0286828501610abf565b60608301525060808201356001600160401b03811115610c20575f5ffd5b610c2c86828501610abf565b60808301525060a08201356001600160401b03811115610c4a575f5ffd5b610c5686828501610abf565b60a083015250949350505050565b5f60208284031215610c74575f5ffd5b81356001600160401b03811115610c89575f5ffd5b82016101208185031215610c9b575f5ffd5b610ca3610a9c565b81356001600160401b03811115610cb8575f5ffd5b610cc486828501610abf565b82525060208201356001600160401b03811115610cdf575f5ffd5b610ceb86828501610abf565b602083015250610cfd60408301610b4e565b604082015260608201356001600160401b03811115610d1a575f5ffd5b610d2686828501610abf565b60608301525060808201356001600160401b03811115610d44575f5ffd5b610d5086828501610abf565b60808301525060a08201356001600160401b03811115610d6e575f5ffd5b610d7a86828501610abf565b60a08301525060c08201356001600160401b03811115610d98575f5ffd5b610da486828501610abf565b60c08301525060e08201356001600160401b03811115610dc2575f5ffd5b610dce86828501610abf565b60e0830152506101008201356001600160401b03811115610ded575f5ffd5b610df986828501610abf565b61010083015250949350505050565b5f5f60208385031215610e19575f5ffd5b82356001600160401b03811115610e2e575f5ffd5b8301601f81018513610e3e575f5ffd5b80356001600160401b03811115610e53575f5ffd5b85602060a083028401011115610a50575f5ffd5b81835281816020850137505f828201602090810191909152601f909101601f19169091010190565b803582526020808201359083015260408082013590830152606081013560ff8116808214610ebb575f5ffd5b80606085015250505050565b6001600160a01b038516815260c0602082018190525f90610eeb9083018587610e67565b9050610efa6040830184610e8f565b95945050505050565b634e487b7160e01b5f52603260045260245ffd5b5f8235603e19833603018112610f2b575f5ffd5b9190910192915050565b5f5f8335601e19843603018112610f4a575f5ffd5b8301803591506001600160401b03821115610f63575f5ffd5b602001915036819003821315610f77575f5ffd5b9250929050565b6001600160a01b03841681526040602082018190525f90610efa9083018486610e67565b5f81518084528060208401602086015e5f602082860101526020601f19601f83011685010191505092915050565b60018060a01b038a16815288602082015263ffffffff8816604082015286606082015285608082015261012060a08201525f611010610120830187610fa2565b82810360c08401526110228187610fa2565b905082810360e08401526110368186610fa2565b905082810361010084015261104b8185610fa2565b9c9b505050505050505050505050565b6001600160a01b038d16815261018060208201525f61107e61018083018e610fa2565b8281036040840152611090818e610fa2565b63ffffffff8d16606085015290508a60808401528960a084015282810360c08401526110bc818a610fa2565b905082810360e08401526110d08189610fa2565b90508281036101008401526110e58188610fa2565b90508281036101208401526110fa8187610fa2565b905082810361014084015261110f8186610fa2565b90508281036101608401526111248185610fa2565b9f9e505050505050505050505050505050565b6001600160a01b038316815260a081016109446020830184610e8f56fea26469706673582212200c5616b037a1ff32a0127a22a32179636d90fb0b9f83fd4565124837ee62c64664736f6c63430008230033",
+  "deployedBytecode": "0x6080604052600436106100e3575f3560e01c80635f45af8811610087578063ae650b9511610057578063ae650b9514610258578063d547741f1461026c578063dfb4366b1461028b578063fb0dc1261461029e575f5ffd5b80635f45af88146101f457806391d1485414610213578063a03b5c3b14610232578063a217fddf14610245575f5ffd5b806328dd39d4116100c257806328dd39d4146101785780632f2ff15d1461019757806336568abe146101b657806343ec0d4c146101d5575f5ffd5b8062f714ce146100e757806301ffc9a714610108578063248a9ca31461013c575b5f5ffd5b3480156100f2575f5ffd5b506101066101013660046108f3565b6102bd565b005b348015610113575f5ffd5b5061012761012236600461091d565b6103c6565b60405190151581526020015b60405180910390f35b348015610147575f5ffd5b5061016a61015636600461094b565b5f9081526020819052604090206001015490565b604051908152602001610133565b348015610183575f5ffd5b50610106610192366004610962565b6103fc565b3480156101a2575f5ffd5b506101066101b13660046108f3565b610440565b3480156101c1575f5ffd5b506101066101d03660046108f3565b61046a565b3480156101e0575f5ffd5b506101066101ef3660046109f1565b6104a2565b3480156101ff575f5ffd5b5061010661020e36600461094b565b610544565b34801561021e575f5ffd5b5061012761022d3660046108f3565b610594565b610106610240366004610b61565b6105bc565b348015610250575f5ffd5b5061016a5f81565b348015610263575f5ffd5b5060015461016a565b348015610277575f5ffd5b506101066102863660046108f3565b610640565b610106610299366004610c64565b610664565b3480156102a9575f5ffd5b506101066102b8366004610e08565b610712565b5f6102c781610792565b6001600160a01b0382166102ee57604051634e46966960e11b815260040160405180910390fd5b4783111561030f5760405163356680b760e01b815260040160405180910390fd5b5f826001600160a01b0316846040515f6040518083038185875af1925050503d805f8114610358576040519150601f19603f3d011682016040523d82523d5f602084013e61035d565b606091505b505090508061037f576040516312171d8360e31b815260040160405180910390fd5b604080518581526001600160a01b03851660208201527f6141b54b56b8a52a8c6f5cd2a857f6117b18ffbf4d46bd3106f300a839cbf5ea910160405180910390a150505050565b5f6001600160e01b03198216637965db0b60e01b14806103f657506301ffc9a760e01b6001600160e01b03198316145b92915050565b837f23a9a92895272f15b4a10136e9902bae33c369c40c448b2d184f9a06e33fc3df338585856040516104329493929190610ec7565b60405180910390a250505050565b5f8281526020819052604090206001015461045a81610792565b610464838361079f565b50505050565b6001600160a01b03811633146104935760405163334bd91960e11b815260040160405180910390fd5b61049d828261082e565b505050565b5f5b8181101561049d578282828181106104be576104be610f03565b90506020028101906104d09190610f17565b357f3a8c98eb820de2bc0f92e6c44a3bc0245111e8d203e7aa5e8f2cb783b61ca1243385858581811061050557610505610f03565b90506020028101906105179190610f17565b610525906020810190610f35565b60405161053493929190610f7e565b60405180910390a26001016104a4565b5f61054e81610792565b600180549083905560408051828152602081018590527f4c0c144abc1788db200c21df3378b55ee4ab0980465c120061c995a62f7626d8910160405180910390a1505050565b5f918252602082815260408084206001600160a01b0393909316845291905290205460ff1690565b6001543410156105df5760405163070f6eed60e11b815260040160405180910390fd5b7f6c77c4e5e031dca0c4944909e0d4d343c9c5b16eda4ef1d4be0762693e02672233825f0151836040015134468660200151876060015188608001518960a0015160405161063599989796959493929190610fd0565b60405180910390a150565b5f8281526020819052604090206001015461065a81610792565b610464838361082e565b6001543410156106875760405163070f6eed60e11b815260040160405180910390fd5b8051515f036106a95760405163280503e760e11b815260040160405180910390fd5b7f27f9d88f0144f82d39d07d3e314ac47018991ad27af3fb62129dd7cd725846e833825f0151836020015184604001513446876060015188608001518960a001518a60c001518b60e001518c61010001516040516106359c9b9a9998979695949392919061105b565b5f5b8181101561049d5782828281811061072e5761072e610f03565b905060a002015f01357f8fefda2f6c146df62efa1de95f8ff0b9c29ae07b9846e61fbce6e618897397ff3385858581811061076b5761076b610f03565b905060a00201602001604051610782929190611137565b60405180910390a2600101610714565b61079c8133610897565b50565b5f6107aa8383610594565b610827575f838152602081815260408083206001600160a01b03861684529091529020805460ff191660011790556107df3390565b6001600160a01b0316826001600160a01b0316847f2f8788117e7eff1d82e926ec794901d17c78024a50270940304540a733656f0d60405160405180910390a45060016103f6565b505f6103f6565b5f6108398383610594565b15610827575f838152602081815260408083206001600160a01b0386168085529252808320805460ff1916905551339286917ff6391f5c32d9c69d2a47ea670b442974b53935d1edc7fd64eb21e047a839171b9190a45060016103f6565b6108a18282610594565b6108d45760405163e2517d3f60e01b81526001600160a01b03821660048201526024810183905260440160405180910390fd5b5050565b80356001600160a01b03811681146108ee575f5ffd5b919050565b5f5f60408385031215610904575f5ffd5b82359150610914602084016108d8565b90509250929050565b5f6020828403121561092d575f5ffd5b81356001600160e01b031981168114610944575f5ffd5b9392505050565b5f6020828403121561095b575f5ffd5b5035919050565b5f5f5f5f84860360c0811215610976575f5ffd5b8535945060208601356001600160401b03811115610992575f5ffd5b8601601f810188136109a2575f5ffd5b80356001600160401b038111156109b7575f5ffd5b8860208284010111156109c8575f5ffd5b602091909101945092506080603f19820112156109e3575f5ffd5b509295919450926040019150565b5f5f60208385031215610a02575f5ffd5b82356001600160401b03811115610a17575f5ffd5b8301601f81018513610a27575f5ffd5b80356001600160401b03811115610a3c575f5ffd5b8560208260051b8401011115610a50575f5ffd5b6020919091019590945092505050565b634e487b7160e01b5f52604160045260245ffd5b60405160c081016001600160401b0381118282101715610a9657610a96610a60565b60405290565b60405161012081016001600160401b0381118282101715610a9657610a96610a60565b5f82601f830112610ace575f5ffd5b8135602083015f5f6001600160401b03841115610aed57610aed610a60565b50604051601f19601f85018116603f011681018181106001600160401b0382111715610b1b57610b1b610a60565b604052838152905080828401871015610b32575f5ffd5b838360208301375f602085830101528094505050505092915050565b803563ffffffff811681146108ee575f5ffd5b5f60208284031215610b71575f5ffd5b81356001600160401b03811115610b86575f5ffd5b820160c08185031215610b97575f5ffd5b610b9f610a74565b8135815260208201356001600160401b03811115610bbb575f5ffd5b610bc786828501610abf565b602083015250610bd960408301610b4e565b604082015260608201356001600160401b03811115610bf6575f5ffd5b610c0286828501610abf565b60608301525060808201356001600160401b03811115610c20575f5ffd5b610c2c86828501610abf565b60808301525060a08201356001600160401b03811115610c4a575f5ffd5b610c5686828501610abf565b60a083015250949350505050565b5f60208284031215610c74575f5ffd5b81356001600160401b03811115610c89575f5ffd5b82016101208185031215610c9b575f5ffd5b610ca3610a9c565b81356001600160401b03811115610cb8575f5ffd5b610cc486828501610abf565b82525060208201356001600160401b03811115610cdf575f5ffd5b610ceb86828501610abf565b602083015250610cfd60408301610b4e565b604082015260608201356001600160401b03811115610d1a575f5ffd5b610d2686828501610abf565b60608301525060808201356001600160401b03811115610d44575f5ffd5b610d5086828501610abf565b60808301525060a08201356001600160401b03811115610d6e575f5ffd5b610d7a86828501610abf565b60a08301525060c08201356001600160401b03811115610d98575f5ffd5b610da486828501610abf565b60c08301525060e08201356001600160401b03811115610dc2575f5ffd5b610dce86828501610abf565b60e0830152506101008201356001600160401b03811115610ded575f5ffd5b610df986828501610abf565b61010083015250949350505050565b5f5f60208385031215610e19575f5ffd5b82356001600160401b03811115610e2e575f5ffd5b8301601f81018513610e3e575f5ffd5b80356001600160401b03811115610e53575f5ffd5b85602060a083028401011115610a50575f5ffd5b81835281816020850137505f828201602090810191909152601f909101601f19169091010190565b803582526020808201359083015260408082013590830152606081013560ff8116808214610ebb575f5ffd5b80606085015250505050565b6001600160a01b038516815260c0602082018190525f90610eeb9083018587610e67565b9050610efa6040830184610e8f565b95945050505050565b634e487b7160e01b5f52603260045260245ffd5b5f8235603e19833603018112610f2b575f5ffd5b9190910192915050565b5f5f8335601e19843603018112610f4a575f5ffd5b8301803591506001600160401b03821115610f63575f5ffd5b602001915036819003821315610f77575f5ffd5b9250929050565b6001600160a01b03841681526040602082018190525f90610efa9083018486610e67565b5f81518084528060208401602086015e5f602082860101526020601f19601f83011685010191505092915050565b60018060a01b038a16815288602082015263ffffffff8816604082015286606082015285608082015261012060a08201525f611010610120830187610fa2565b82810360c08401526110228187610fa2565b905082810360e08401526110368186610fa2565b905082810361010084015261104b8185610fa2565b9c9b505050505050505050505050565b6001600160a01b038d16815261018060208201525f61107e61018083018e610fa2565b8281036040840152611090818e610fa2565b63ffffffff8d16606085015290508a60808401528960a084015282810360c08401526110bc818a610fa2565b905082810360e08401526110d08189610fa2565b90508281036101008401526110e58188610fa2565b90508281036101208401526110fa8187610fa2565b905082810361014084015261110f8186610fa2565b90508281036101608401526111248185610fa2565b9f9e505050505050505050505050505050565b6001600160a01b038316815260a081016109446020830184610e8f56fea26469706673582212200c5616b037a1ff32a0127a22a32179636d90fb0b9f83fd4565124837ee62c64664736f6c63430008230033",
+  "linkReferences": {},
+  "deployedLinkReferences": {},
+  "immutableReferences": {},
+  "inputSourceName": "project/contracts/ChainSignatures.sol",
+  "buildInfoId": "solc-0_8_35-9e0c68c577f77ebffa2ce1be3a1ec4f181b78621"
+}

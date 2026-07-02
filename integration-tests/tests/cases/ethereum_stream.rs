@@ -2,6 +2,7 @@ use alloy::network::{Ethereum, TransactionBuilder};
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::request::TransactionRequest;
+use alloy::sol_types::SolValue;
 use anyhow::{Context, Result};
 use cait_sith::protocol::Participant;
 use integration_tests::cluster::spawner::ClusterSpawner;
@@ -224,6 +225,49 @@ async fn submit_sign_request_with_block(
             .block_number
             .context("sign transaction missing block number")?,
     ))
+}
+
+async fn submit_sign_bidirectional_request(
+    ctx: &EthereumTestEnvironment,
+    serialized_transaction: Vec<u8>,
+    path: &str,
+) -> Result<B256> {
+    let contract = ctx.contract();
+    let request = ChainSignatures::SignBidirectionalRequest {
+        serializedTransaction: serialized_transaction.into(),
+        caip2Id: Chain::Ethereum.caip2_chain_id().to_string(),
+        keyVersion: LATEST_MPC_KEY_VERSION,
+        path: path.to_string(),
+        algo: "secp256k1".to_string(),
+        dest: "ethereum".to_string(),
+        params: "{}".to_string(),
+        outputDeserializationSchema: alloy::primitives::Bytes::new(),
+        respondSerializationSchema: br#"[{"name":"output","type":"bool"}]"#.to_vec().into(),
+    };
+
+    let call = contract
+        .signBidirectional(request)
+        .value(signature_deposit());
+    let pending_tx = call.send().await?;
+    let receipt = pending_tx
+        .get_receipt()
+        .await
+        .context("failed to mine signBidirectional transaction")?;
+    Ok(receipt.transaction_hash)
+}
+
+fn unsigned_legacy_transfer_rlp() -> Vec<u8> {
+    let mut rlp_s = rlp::RlpStream::new_list(9);
+    rlp_s.append(&0u64);
+    rlp_s.append(&0u64);
+    rlp_s.append(&0u64);
+    rlp_s.append(&Vec::<u8>::new());
+    rlp_s.append(&0u64);
+    rlp_s.append(&Vec::<u8>::new());
+    rlp_s.append(&1u64);
+    rlp_s.append(&0u64);
+    rlp_s.append(&0u64);
+    rlp_s.out().to_vec()
 }
 
 async fn submit_eth_transfer(ctx: &EthereumTestEnvironment) -> Result<B256> {
@@ -1188,5 +1232,127 @@ async fn test_ethereum_stream_sign_and_respond_flow() -> Result<()> {
     }
 
     assert!(saw_respond, "did not receive SignatureResponded event");
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_ethereum_stream_parse_sign_bidirectional() -> Result<()> {
+    let ctx = EthereumTestEnvironment::new().await?;
+    let backlog = ctx.backlog();
+    let mut stream = stream_ethereum(&ctx, backlog).await?;
+
+    let serialized_transaction = unsigned_legacy_transfer_rlp();
+    let path = "eth-bidirectional-path";
+    submit_sign_bidirectional_request(&ctx, serialized_transaction.clone(), path).await?;
+
+    let req = loop {
+        match next_event_within(&mut stream, Duration::from_secs(10)).await? {
+            ChainEvent::SignRequest { request, .. }
+                if matches!(request.kind, SignKind::SignBidirectional(_)) =>
+            {
+                break request;
+            }
+            _ => continue,
+        }
+    };
+
+    assert_eq!(req.chain, Chain::Ethereum);
+    assert_eq!(req.args.path, path);
+    assert_eq!(req.args.key_version, LATEST_MPC_KEY_VERSION);
+
+    // Request id must follow the packed scheme from signet-evm-program.
+    let encoded = (
+        ctx.wallet,
+        serialized_transaction.clone(),
+        Chain::Ethereum.caip2_chain_id().to_string(),
+        LATEST_MPC_KEY_VERSION,
+        path.to_string(),
+        "secp256k1".to_string(),
+        "ethereum".to_string(),
+        "{}".to_string(),
+    )
+        .abi_encode_packed();
+    let expected_request_id: [u8; 32] = alloy::primitives::keccak256(&encoded).into();
+    assert_eq!(req.id.request_id, expected_request_id);
+
+    // Payload is keccak256 of the serialized destination transaction.
+    let expected_payload: [u8; 32] = alloy::primitives::keccak256(&serialized_transaction).into();
+    assert_eq!(req.args.payload.to_bytes(), expected_payload.into());
+
+    let expected_epsilon = mpc_crypto::kdf::derive_epsilon_eth(
+        LATEST_MPC_KEY_VERSION,
+        &format!("0x{}", hex::encode(ctx.wallet.as_slice())),
+        path,
+    );
+    assert_eq!(req.args.epsilon, expected_epsilon);
+
+    let SignKind::SignBidirectional(event) = req.kind else {
+        panic!("expected SignBidirectional kind");
+    };
+    assert_eq!(event.chain, Chain::Ethereum);
+    assert_eq!(event.chain_ctx, None);
+    assert_eq!(event.serialized_transaction, serialized_transaction);
+    assert_eq!(event.caip2_id, Chain::Ethereum.caip2_chain_id());
+    assert_eq!(event.sender[..12], [0u8; 12]);
+    assert_eq!(&event.sender[12..], ctx.wallet.as_slice());
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn test_ethereum_stream_parse_respond_bidirectional() -> Result<()> {
+    let ctx = EthereumTestEnvironment::new().await?;
+    let backlog = ctx.backlog();
+    let mut stream = stream_ethereum(&ctx, backlog).await?;
+
+    let request_id = [0x5a; 32];
+    let serialized_output: Vec<u8> = {
+        let mut out = vec![0u8; 32];
+        *out.last_mut().unwrap() = 1;
+        out
+    };
+
+    let expected_big_r = k256::ProjectivePoint::GENERATOR.to_affine();
+    let expected_s = k256::Scalar::from(11u64);
+    let expected_recovery_id: u8 = 1;
+
+    let enc = k256::ProjectivePoint::GENERATOR.to_encoded_point(false);
+    let signature = ChainSignatures::Signature {
+        bigR: ChainSignatures::AffinePoint {
+            x: U256::from_be_slice(enc.x().expect("generator must have x coordinate")),
+            y: U256::from_be_slice(enc.y().expect("generator must have y coordinate")),
+        },
+        s: U256::from_be_bytes(expected_s.to_bytes().into()),
+        recoveryId: expected_recovery_id,
+    };
+
+    let contract = ctx.contract();
+    let call = contract.respondBidirectional(
+        request_id.into(),
+        serialized_output.clone().into(),
+        signature,
+    );
+    let pending_tx = call.send().await?;
+    pending_tx
+        .get_receipt()
+        .await
+        .context("respondBidirectional transaction execution failed")?;
+
+    let mut saw_respond = false;
+    for _ in 0..8 {
+        match next_event_within(&mut stream, Duration::from_secs(10)).await? {
+            ChainEvent::RespondBidirectional(ev) => {
+                assert_eq!(ev.chain, mpc_primitives::Chain::Ethereum);
+                assert_eq!(ev.request_id, request_id);
+                assert_eq!(ev.signature.big_r, expected_big_r);
+                assert_eq!(ev.signature.s, expected_s);
+                assert_eq!(ev.signature.recovery_id, expected_recovery_id);
+                saw_respond = true;
+                break;
+            }
+            _ => continue,
+        }
+    }
+
+    assert!(saw_respond, "did not receive RespondBidirectional event");
     Ok(())
 }
