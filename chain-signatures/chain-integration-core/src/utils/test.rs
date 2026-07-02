@@ -1,12 +1,9 @@
-#![cfg(test)]
-
-use crate::protocol::{Chain, IndexedSignRequest};
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
 use mpc_crypto::kdf::derive_secret_key;
-use mpc_primitives::{SignArgs, SignId, SignKind};
+use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignId, SignKind};
 
-use super::PublishAction;
+use crate::PublishAction;
 
 pub fn scalar(bytes: &[u8; 32]) -> k256::Scalar {
     use k256::elliptic_curve::ops::Reduce;

@@ -69,6 +69,7 @@ near-workspaces = "0.16.0"
 mpc-crypto.workspace = true
 mpc-contract.workspace = true
 mpc-chain-integration-core.workspace = true
+mpc-chain-canton.workspace = true
 mpc-keys.workspace = true
 mpc-node = { path = "../chain-signatures/node", default-features = false, features = [
     "test-feature",

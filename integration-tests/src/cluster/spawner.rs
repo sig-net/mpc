@@ -1,4 +1,5 @@
 use cait_sith::protocol::Participant;
+use mpc_chain_canton::{CantonAuthConfig, CantonConfig};
 use mpc_contract::config::ProtocolConfig;
 use mpc_node::protocol::state::NodeKeyInfo;
 use near_account_id::AccountId;
@@ -339,10 +340,10 @@ impl ClusterSpawner {
 
     pub fn canton(mut self) -> Self {
         if self.cfg.canton.is_none() {
-            self.cfg.canton = Some(mpc_node::indexer_canton::CantonConfig {
+            self.cfg.canton = Some(CantonConfig {
                 json_api_url: String::new(),
                 json_api_ws_url: String::new(),
-                auth: mpc_node::indexer_canton::CantonAuthConfig {
+                auth: CantonAuthConfig {
                     token_url: String::new(),
                     client_id: String::new(),
                     client_secret: String::new(),

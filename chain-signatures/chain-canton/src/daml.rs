@@ -4,10 +4,7 @@
 //! Daml templates from `signet-signer-v1`. Derived from the `.daml` source files in
 //! the `sig-net/canton` repository (`daml-packages/signet-signer-v1/daml/`).
 
-use alloy::consensus::TxEip1559;
-use alloy::eips::eip2930::{AccessList, AccessListItem};
-use alloy::primitives::{Address, Bytes, TxKind, B256, U256};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use serde_aux::field_attributes::deserialize_number_from_string;
 
 /// EIP-2930/EIP-1559 access-list entry from the Signer contract.
@@ -35,87 +32,6 @@ pub struct EvmType2TransactionParams {
     pub calldata: String,
     #[serde(default)]
     pub access_list: Vec<EvmAccessListEntry>,
-}
-
-fn parse_u256_hex(value: &str, field: &str) -> anyhow::Result<U256> {
-    U256::from_str_radix(value, 16)
-        .map_err(|e| anyhow::anyhow!("invalid hex uint256 in {field}: {e}"))
-}
-
-fn parse_u64_hex(value: &str, field: &str) -> anyhow::Result<u64> {
-    u64::try_from(parse_u256_hex(value, field)?)
-        .map_err(|_| anyhow::anyhow!("hex uint256 in {field} exceeds u64"))
-}
-
-fn parse_u128_hex(value: &str, field: &str) -> anyhow::Result<u128> {
-    u128::try_from(parse_u256_hex(value, field)?)
-        .map_err(|_| anyhow::anyhow!("hex uint256 in {field} exceeds u128"))
-}
-
-fn decode_fixed_hex<const N: usize>(value: &str, field: &str) -> anyhow::Result<[u8; N]> {
-    let mut out = [0u8; N];
-    hex::decode_to_slice(value, &mut out)
-        .map_err(|e| anyhow::anyhow!("invalid {N}-byte hex value in {field}: {e}"))?;
-    Ok(out)
-}
-
-fn serialize_number_to_string<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
-where
-    T: std::fmt::Display,
-    S: Serializer,
-{
-    serializer.serialize_str(&value.to_string())
-}
-
-fn parse_access_list(entries: &[EvmAccessListEntry]) -> anyhow::Result<AccessList> {
-    entries
-        .iter()
-        .map(|entry| {
-            Ok(AccessListItem {
-                address: Address::from(decode_fixed_hex::<20>(
-                    &entry.address,
-                    "accessList.address",
-                )?),
-                storage_keys: entry
-                    .storage_keys
-                    .iter()
-                    .map(|key| {
-                        Ok(B256::from(decode_fixed_hex::<32>(
-                            key,
-                            "accessList.storageKeys",
-                        )?))
-                    })
-                    .collect::<anyhow::Result<Vec<_>>>()?,
-            })
-        })
-        .collect::<anyhow::Result<Vec<_>>>()
-        .map(AccessList)
-}
-
-impl TryFrom<&EvmType2TransactionParams> for TxEip1559 {
-    type Error = anyhow::Error;
-
-    fn try_from(params: &EvmType2TransactionParams) -> anyhow::Result<Self> {
-        let to = match params.to.as_deref() {
-            Some(to) => TxKind::Call(Address::from(decode_fixed_hex::<20>(to, "to")?)),
-            None => TxKind::Create,
-        };
-
-        Ok(Self {
-            chain_id: parse_u64_hex(&params.chain_id, "chainId")?,
-            nonce: parse_u64_hex(&params.nonce, "nonce")?,
-            gas_limit: parse_u64_hex(&params.gas_limit, "gasLimit")?,
-            max_fee_per_gas: parse_u128_hex(&params.max_fee_per_gas, "maxFeePerGas")?,
-            max_priority_fee_per_gas: parse_u128_hex(
-                &params.max_priority_fee_per_gas,
-                "maxPriorityFeePerGas",
-            )?,
-            to,
-            value: parse_u256_hex(&params.value, "value")?,
-            access_list: parse_access_list(&params.access_list)?,
-            input: Bytes::from(hex::decode(&params.calldata)?),
-        })
-    }
 }
 
 /// Daml variant: `data TxParams = EvmType2TxParams EvmType2TransactionParams`
@@ -151,7 +67,6 @@ pub struct SignBidirectionalRequestedEvent {
     pub respond_serialization_schema: String,
 }
 
-// ---------------------------------------------------------------------------
 // Signature types
 // ---------------------------------------------------------------------------
 //
@@ -185,7 +100,6 @@ pub struct EcdsaSigData {
 #[serde(tag = "tag", content = "value")]
 pub enum CantonSignature {
     EcdsaSig(EcdsaSigData),
-    // Future: EddsaSig(EddsaSigData), SchnorrSig(SchnorrSigData)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,4 +117,12 @@ pub struct RespondBidirectionalEventPayload {
     pub responder: String,
     pub serialized_output: String,
     pub signature: CantonSignature,
+}
+
+fn serialize_number_to_string<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
+where
+    T: std::fmt::Display,
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&value.to_string())
 }

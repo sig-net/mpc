@@ -1,9 +1,6 @@
-mod canton;
 mod ethereum;
 mod hydration;
 mod near;
-#[cfg(test)]
-mod test_utils;
 
 use crate::config::Config;
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
@@ -15,7 +12,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 // TODO: move clients elsewhere
-pub use canton::CantonClient;
 pub use ethereum::EthClient;
 pub use hydration::HydrationClient;
 
@@ -522,12 +518,12 @@ pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: Publish
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::test_utils::{make_indexed, make_publish_action, make_signature, scalar};
     use super::*;
     use crate::protocol::contract::primitives::{ParticipantInfo, Participants};
     use crate::protocol::contract::{ResharingContractState, RunningContractState};
     use crate::protocol::ProtocolState;
     use cait_sith::protocol::Participant;
+    use mpc_chain_integration_core::utils::test::make_publish_action;
     use mpc_primitives::SignKind;
 
     /// A publisher that counts the number of times it has been called.
@@ -614,33 +610,6 @@ mod tests {
         assert_eq!(resumed.epoch, 1);
         assert_eq!(resumed.threshold, 2);
         assert_eq!(resumed.me, Participant::from(0));
-    }
-
-    #[test]
-    fn publish_action_accepts_valid_signature() {
-        let sk = k256::SecretKey::random(&mut rand::thread_rng());
-        let pk: AffinePoint = sk.public_key().into();
-        let epsilon = scalar(&[1u8; 32]);
-        let payload = scalar(&[42u8; 32]);
-
-        let output = make_signature(&sk, epsilon, payload);
-        let indexed = make_indexed(Chain::NEAR, epsilon, payload, SignKind::Sign);
-
-        assert!(PublishAction::new(pk, indexed, output, vec![]).is_some());
-    }
-
-    #[test]
-    fn publish_action_rejects_invalid_signature() {
-        let sk = k256::SecretKey::random(&mut rand::thread_rng());
-        let pk: AffinePoint = sk.public_key().into();
-        let epsilon = scalar(&[1u8; 32]);
-        let payload = scalar(&[42u8; 32]);
-
-        let mut output = make_signature(&sk, epsilon, payload);
-        output.s += k256::Scalar::ONE;
-        let indexed = make_indexed(Chain::NEAR, epsilon, payload, SignKind::Sign);
-
-        assert!(PublishAction::new(pk, indexed, output, vec![]).is_none());
     }
 
     #[tokio::test]

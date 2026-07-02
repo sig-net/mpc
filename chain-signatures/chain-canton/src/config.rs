@@ -1,6 +1,20 @@
 use std::fmt;
 
-use crate::indexer_canton::CantonAuthConfig;
+/// Canton OIDC client-credentials authentication configuration.
+#[derive(Clone)]
+pub struct CantonAuthConfig {
+    pub token_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub audience: String,
+    pub scope: Option<String>,
+}
+
+impl CantonAuthConfig {
+    pub fn kind(&self) -> &'static str {
+        "oidc-client-credentials"
+    }
+}
 
 /// Canton JSON Ledger API configuration.
 #[derive(Clone)]
