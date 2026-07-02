@@ -5,7 +5,6 @@ use alloy::primitives::{Address, Bytes, B256};
 use alloy::rpc::types::{Block, BlockId, Transaction, TransactionReceipt};
 use serde::de::DeserializeOwned;
 use serde_json::json;
-use anyhow::Context as _;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

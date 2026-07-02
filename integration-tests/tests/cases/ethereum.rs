@@ -10,6 +10,7 @@ use integration_tests::{actions, cluster, eth};
 use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, PublicKey as K256PublicKey};
+use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest, SignatureResponded};
 use mpc_crypto::derive_key;
 use mpc_crypto::kdf::derive_epsilon_eth;
 use mpc_node::sign_bidirectional::public_key_to_address;
@@ -33,7 +34,7 @@ async fn test_signature_ethereum() -> Result<()> {
     let contract_address = eth_ctx.contract_address;
 
     let (client, requester) = eth::client(&endpoint, &secret_key, chain_id)?;
-    let contract = eth::ChainSignatures::new(contract_address, client.clone());
+    let contract = ChainSignatures::new(contract_address, client.clone());
 
     let payload = [7u8; 32];
     let path = "test";
@@ -41,7 +42,7 @@ async fn test_signature_ethereum() -> Result<()> {
     let dest = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
     let params = "{}";
 
-    let request = eth::SignRequest {
+    let request = SignRequest {
         payload: payload.into(),
         path: path.to_string(),
         keyVersion: LATEST_MPC_KEY_VERSION,
@@ -92,7 +93,7 @@ async fn test_signature_ethereum() -> Result<()> {
                 log.data().data.clone(),
             )
             .and_then(|prim_log| {
-                eth::SignatureResponded::decode_log(&prim_log)
+                SignatureResponded::decode_log(&prim_log)
                     .ok()
                     .filter(|event| {
                         event.requestId == expected_request_id && event.responder == requester
@@ -179,7 +180,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     let contract_address = eth_ctx.contract_address;
 
     let (client, requester) = eth::client(&endpoint, &secret_key, chain_id)?;
-    let contract = eth::ChainSignatures::new(contract_address, client.clone());
+    let contract = ChainSignatures::new(contract_address, client.clone());
 
     // Get initial checkpoint state
     let node_idx = 0;
@@ -197,7 +198,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
     let dest = "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1";
     let params = "{}";
 
-    let request = eth::SignRequest {
+    let request = SignRequest {
         payload: payload.into(),
         path: path.to_string(),
         keyVersion: LATEST_MPC_KEY_VERSION,
@@ -272,7 +273,7 @@ async fn test_proper_indexer_checkpoint() -> Result<()> {
                 log.data().data.clone(),
             )
             .and_then(|prim_log| {
-                eth::SignatureResponded::decode_log(&prim_log)
+                SignatureResponded::decode_log(&prim_log)
                     .ok()
                     .filter(|event| {
                         event.requestId == expected_request_id && event.responder == requester
@@ -344,7 +345,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
         &eth_ctx.sandbox.secret_key,
         eth_ctx.sandbox.chain_id,
     )?;
-    let eth_contract = eth::ChainSignatures::new(eth_ctx.contract_address, eth_client.clone());
+    let eth_contract = ChainSignatures::new(eth_ctx.contract_address, eth_client.clone());
 
     // Produce a few sign requests up front so nodes create initial checkpoints
     for i in 0..5 {

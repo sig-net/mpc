@@ -7344,10 +7344,12 @@ name = "mpc-chain-ethereum"
 version = "1.16.4"
 dependencies = [
  "alloy",
+ "alloy-dyn-abi",
  "alloy-signer-local",
  "alloy-sol-types",
  "anyhow",
  "async-trait",
+ "borsh 1.5.7",
  "futures-util",
  "helios",
  "hex",

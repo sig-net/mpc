@@ -5,11 +5,13 @@ version.workspace = true
 
 [dependencies]
 alloy.workspace = true
+alloy-dyn-abi.workspace = true
 alloy-sol-types.workspace = true
 alloy-signer-local = "1.0.38"
 # TODO: replace with thiserror
 anyhow.workspace = true
 async-trait.workspace = true
+borsh.workspace = true
 futures-util.workspace = true
 helios = { git = "https://github.com/a16z/helios", rev = "e1f9a50f73d7af6f6ae4acf2b663d04aab6adb19", optional = true }
 hex.workspace = true

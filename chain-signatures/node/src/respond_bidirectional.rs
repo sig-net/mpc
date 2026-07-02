@@ -1,4 +1,4 @@
-use crate::sign_bidirectional::{BidirectionalTxExt, TransactionOutput};
+use crate::sign_bidirectional::BidirectionalTxExt;
 use alloy::primitives::Bytes;
 use k256::Scalar;
 use mpc_crypto::ScalarExt;
@@ -11,8 +11,6 @@ const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
 const HYDRATION_RESPOND_BIDIRECTIONAL_PATH: &str = "hydration response key";
 pub const CANTON_RESPOND_BIDIRECTIONAL_PATH: &str = "canton response key";
-// Use Abi as this is what we are using for ethereum
-pub(crate) const OUTPUT_DESERIALIZATION_FORMAT: SerDeserFormat = SerDeserFormat::Abi;
 
 pub struct CompletedTx {
     tx: BidirectionalTx,
@@ -118,32 +116,6 @@ impl CompletedTx {
     }
 }
 
-/// Decode a transaction's output and re-serialize it for the respond chain.
-///
-/// `trace_output` is the `debug_traceTransaction` return data, required when
-/// `is_contract_call` is true.
-pub fn build_serialized_output(
-    is_contract_call: bool,
-    output_deserialization_schema: &[u8],
-    trace_output: Option<&Bytes>,
-    respond_serialization_format: SerDeserFormat,
-    respond_serialization_schema: &[u8],
-) -> anyhow::Result<RespondBidirectionalSerializedOutput> {
-    let transaction_output = match OUTPUT_DESERIALIZATION_FORMAT {
-        SerDeserFormat::Abi if is_contract_call => {
-            let trace_output = trace_output.ok_or_else(|| {
-                anyhow::anyhow!("contract-call output extraction requires trace output")
-            })?;
-            TransactionOutput::from_call_result(output_deserialization_schema, trace_output)?
-        }
-        _ => TransactionOutput::non_contract_call_output(),
-    };
-
-    transaction_output
-        .output
-        .serialize(respond_serialization_format, respond_serialization_schema)
-}
-
 pub fn calculate_respond_bidirectional_hash_message(
     request_id: &[u8],
     serialized_output: &[u8],
@@ -160,6 +132,7 @@ pub fn calculate_respond_bidirectional_hash_message(
 mod tests {
     use super::*;
     use alloy::primitives::{Address, B256};
+    use mpc_chain_ethereum::respond_bidirectional::build_serialized_output;
     use mpc_primitives::{BidirectionalTxId, SignKind};
 
     const UINT256_SCHEMA: &[u8] = br#"[{"name":"amount","type":"uint256"}]"#;

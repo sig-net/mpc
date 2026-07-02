@@ -5,8 +5,8 @@ use alloy::primitives::{Address, Bytes};
 use alloy::rpc::types::{Block, BlockId};
 
 use crate::indexer::{BlockNumber, MaybeBlock};
-use crate::EthConfig;
 use crate::indexer_eth_direct_rpc;
+use crate::EthConfig;
 use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
 
 #[cfg(feature = "helios")]
