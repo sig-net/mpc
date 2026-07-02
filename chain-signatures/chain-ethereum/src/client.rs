@@ -1,7 +1,6 @@
 use std::time::Duration;
 
-use alloy::eips::BlockNumberOrTag;
-use alloy::primitives::{Address, Bytes};
+use alloy::primitives::Address;
 use alloy::rpc::types::{Block, BlockId};
 
 use crate::indexer::{BlockNumber, MaybeBlock};
@@ -191,14 +190,6 @@ impl EthereumClient {
         })
     }
 
-    pub fn block_number_from_id(block_id: BlockId) -> BlockNumber {
-        match block_id {
-            BlockId::Number(BlockNumberOrTag::Number(block_number)) => block_number,
-            BlockId::Number(tag) => panic!("expected numbered block id, got {tag:?}"),
-            BlockId::Hash(hash) => panic!("expected numbered block id, got hash {hash:?}"),
-        }
-    }
-
     pub async fn get_transaction_by_hash(
         &self,
         tx_hash: alloy::primitives::B256,
@@ -242,26 +233,6 @@ impl EthereumClient {
                 }
             }
         )
-    }
-
-    pub async fn call(
-        &self,
-        from: Address,
-        to: Address,
-        data: Bytes,
-        block_number: u64,
-    ) -> anyhow::Result<Bytes> {
-        retry_rpc!(ETH_RPC_TIMEOUT, self.retry_strategy, "call", {
-            match &self.inner {
-                #[cfg(feature = "helios")]
-                EthereumClientInner::Helios(client) => {
-                    client.call(from, to, data.clone(), block_number).await
-                }
-                EthereumClientInner::DirectRpc(client) => {
-                    client.call(from, to, data.clone(), block_number).await
-                }
-            }
-        })
     }
 
     pub async fn get_latest_block_number(&self) -> Option<u64> {
@@ -308,7 +279,7 @@ impl EthereumClient {
 #[cfg(test)]
 mod tests {
     use crate::test_utils;
-
+    use alloy::eips::BlockNumberOrTag;
     use super::*;
 
     // TODO: add more tests for non HTTP-related functionality, e.g. clamp_oldest_supported_with
