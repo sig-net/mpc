@@ -1298,7 +1298,7 @@ mod tests {
                 optimistic_requests: false,
                 light_client: false,
             },
-            state_manager: Backlog::new(),
+            state_manager: MockStateManager::new(),
             telemetry: NoopChainTelemetry,
             client: Arc::new(test_utils::create_test_ethereum_client(&server.url()).await),
             events_tx,
