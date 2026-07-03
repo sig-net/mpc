@@ -712,11 +712,13 @@ impl StateManager for Backlog {
         self.pending(&chain).read().await.processed_block_height()
     }
 
-    
     async fn set_processed_block(&self, chain: Chain, height: u64) {
-        self.pending(&chain).write().await.set_processed_block(height);
+        self.pending(&chain)
+            .write()
+            .await
+            .set_processed_block(height);
     }
-    
+
     async fn get_execution_watchers(
         &self,
         chain: Chain,
