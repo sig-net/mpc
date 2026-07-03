@@ -175,6 +175,7 @@ mod tests {
     use k256::{AffinePoint, Scalar};
     use mockito::Server;
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
+    use mpc_chain_solana::Pubkey;
     use mpc_primitives::{
         Chain, CheckpointDigest, IndexedSignRequest, SignArgs, SignId, Signature,
         SignatureRespondedEvent,
@@ -676,7 +677,7 @@ mod tests {
             path: "test".to_string(),
             key_version: 1,
         };
-        let program_id = solana_sdk::pubkey::Pubkey::new_unique();
+        let program_id = Pubkey::new_unique();
         // Minimal legacy unsigned Ethereum tx encoded as RLP so sign_and_hash can parse it
         let mut rlp_s = rlp::RlpStream::new_list(9);
         rlp_s.append(&0u64); // nonce

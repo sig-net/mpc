@@ -3,8 +3,8 @@ use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::{SignBidirectionalEventExt, SignStatus};
-use anchor_lang::prelude::Pubkey;
 use mpc_chain_integration_core::ChainTelemetry;
+use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, ExecutionOutcome, RespondBidirectionalEvent, SignId,
     SignKind, Signature, SignatureRespondedEvent,
@@ -447,7 +447,6 @@ mod tests {
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
     use mpc_primitives::{RespondBidirectionalTx, SignArgs, SignBidirectionalEvent, SignKind};
     use near_primitives::types::AccountId;
-    use solana_sdk::pubkey::Pubkey;
     use std::time::Duration;
     use tokio::sync::{mpsc, watch};
     use tokio::time::timeout;

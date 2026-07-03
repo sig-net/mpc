@@ -7,7 +7,6 @@ pub mod gcp;
 pub mod indexer;
 
 pub mod indexer_hydration;
-pub mod indexer_sol;
 pub mod logs;
 pub mod mesh;
 pub mod metrics;
