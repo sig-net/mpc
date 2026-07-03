@@ -1,4 +1,4 @@
-use crate::indexer_eth::MaybeBlock;
+use crate::indexer::MaybeBlock;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, B256};
@@ -80,7 +80,9 @@ impl RpcEthereumClient {
 
         let response = self.http.post(&self.url).json(&payload).send().await?;
         let value: serde_json::Value = response.json().await?;
-        let serde_json::Value::Array(items) = value else {
+        let items = if let serde_json::Value::Array(items) = value {
+            items
+        } else {
             anyhow::bail!("batch rpc response was not an array: {value}");
         };
 
@@ -99,7 +101,9 @@ impl RpcEthereumClient {
                 anyhow::bail!("batch rpc call failed for id {}: {error}", response.id);
             }
 
-            let Some(block_id) = requested_blocks.get(&response.id).copied() else {
+            let block_id = if let Some(block_id) = requested_blocks.get(&response.id).copied() {
+                block_id
+            } else {
                 anyhow::bail!("batch rpc response contained unknown id {}", response.id);
             };
 
@@ -174,28 +178,6 @@ impl RpcEthereumClient {
             .await?;
 
         trace_output_to_bytes(tx_hash, &call_frame)
-    }
-
-    pub async fn call(
-        &self,
-        from: Address,
-        to: Address,
-        data: Bytes,
-        block_number: u64,
-    ) -> anyhow::Result<Bytes> {
-        let params = json!({
-            "from": format_address(from),
-            "to": format_address(to),
-            "data": format_bytes(&data),
-        });
-        let block = json!(to_hex_u64(block_number));
-        let result: String = self.rpc_call("eth_call", vec![params, block]).await?;
-        let stripped = result.trim_start_matches("0x");
-        if stripped.is_empty() {
-            return Ok(Bytes::default());
-        }
-        let decoded = hex::decode(stripped)?;
-        Ok(Bytes::from(decoded))
     }
 
     fn next_id(&self) -> u64 {
@@ -355,14 +337,6 @@ fn format_address(address: Address) -> String {
     format!("0x{}", address.encode_hex())
 }
 
-fn format_bytes(data: &Bytes) -> String {
-    if data.is_empty() {
-        "0x".to_string()
-    } else {
-        format!("0x{}", hex::encode(data))
-    }
-}
-
 fn to_hex_u64(value: u64) -> String {
     format!("0x{:x}", value)
 }
@@ -391,7 +365,7 @@ fn to_hex_block_id(block_id: BlockId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer_eth::MaybeBlock;
+    use crate::indexer::MaybeBlock;
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::B256;
     use alloy::rpc::types::BlockId;

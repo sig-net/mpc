@@ -5,7 +5,6 @@ use std::{collections::HashMap, sync::Arc};
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
-use crate::indexer_eth::{EthConfig, EthereumStream};
 use crate::indexer_hydration::{self, HydrationConfig};
 use crate::mesh::{self, Mesh, MeshState};
 use crate::metrics::telemetry::NodeTelemetry;
@@ -33,6 +32,7 @@ use enum_map::EnumMap;
 use k256::sha2::Sha256;
 use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonStream};
+use mpc_chain_ethereum::{publisher, EthConfig, EthereumStream};
 use mpc_chain_integration_core::ChainPublisher;
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaStream};
 use mpc_keys::hpke;
@@ -479,7 +479,7 @@ impl ChainConfigs {
 
         if let Some(eth) = &self.eth {
             let telemetry = Arc::new(NodeTelemetry::new(Chain::Ethereum));
-            let client = Arc::new(rpc::EthClient::new(eth, telemetry));
+            let client = Arc::new(publisher::EthClient::new(eth, telemetry));
             publishers.insert(Chain::Ethereum, client);
         }
         if let Some(sol) = &self.sol {

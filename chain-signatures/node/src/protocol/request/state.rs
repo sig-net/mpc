@@ -17,8 +17,8 @@ pub struct SignState {
     /// would not have sent a posit message before the proposer proposes.
     ///
     /// INVARIANT: All messages stored here are for `highest_seen_round`. Must
-    /// be cleared when `highest_seen_round` changes.
-    pub buffered_messages: VecDeque<SignTaskMessage>,
+    /// be cleared when `highest_seen_round` changes. One slot per sender.
+    pub buffered_messages: HashMap<Participant, SignTaskMessage>,
     /// When Some, another group is already generating this signature.
     /// The timestamp is when proposing can be resumed.
     pub pause_proposing: Option<std::time::Instant>,
@@ -33,7 +33,7 @@ impl SignState {
             budget: TimeoutBudget::new(ORGANIZE_POSIT_TIMEOUT),
             permit: None,
             highest_seen_round: 0,
-            buffered_messages: VecDeque::new(),
+            buffered_messages: HashMap::new(),
             pause_proposing: None,
         }
     }
@@ -55,7 +55,9 @@ impl SignState {
     /// that round is reached.
     pub fn store_future_posit_message(&mut self, msg: SignTaskMessage) {
         let SignTaskMessage::PositMessage {
-            round: peer_round, ..
+            round: peer_round,
+            from,
+            ..
         } = msg;
 
         if peer_round < self.highest_seen_round {
@@ -65,14 +67,16 @@ impl SignState {
             self.highest_seen_round = peer_round;
             self.buffered_messages.clear();
         }
-        self.buffered_messages.push_back(msg);
+        // One slot per sender, keep only the latest round.
+        self.buffered_messages.insert(from, msg);
     }
 
     /// Remove a buffered message for processing, if there is one for the
     /// current round.
     pub fn take_buffered_posit_message(&mut self) -> Option<SignTaskMessage> {
         if self.highest_seen_round == self.round {
-            self.buffered_messages.pop_front()
+            let key = self.buffered_messages.keys().next().copied()?;
+            self.buffered_messages.remove(&key)
         } else {
             None
         }

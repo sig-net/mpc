@@ -1,6 +1,7 @@
 use super::organize::SignOrganizer;
 use super::state::SignState;
 use super::task::{SignGenerating, SignPhase};
+use super::work_queue::SignPositWorkQueue;
 use super::*;
 
 pub struct SignPositor {
@@ -15,7 +16,7 @@ impl SignPositor {
     async fn wait_propose(
         ctx: &mut SignTask,
         state: &mut SignState,
-        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
+        posit_queue: &SignPositWorkQueue,
         proposer: Participant,
     ) -> Result<PresignatureId, SignPhase> {
         let sign_id = ctx.sign_id;
@@ -26,12 +27,7 @@ impl SignPositor {
                 // Prioritize buffered messages, if any for the current round
                 let task_msg = match state.take_buffered_posit_message() {
                     Some(buffered) => buffered,
-                    None => {
-                        let Some(task_msg) = task_rx.recv().await else {
-                            continue;
-                        };
-                        task_msg
-                    }
+                    None => posit_queue.recv().await,
                 };
 
                 let SignTaskMessage::PositMessage {
@@ -194,7 +190,7 @@ impl SignPositor {
         &mut self,
         ctx: &mut SignTask,
         state: &mut SignState,
-        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
+        posit_queue: &SignPositWorkQueue,
     ) -> SignPhase {
         let proposer = self.proposer;
         let active = self.active.clone();
@@ -222,7 +218,7 @@ impl SignPositor {
                 "deliberator waiting for Propose"
             );
 
-            presignature_id = match Self::wait_propose(ctx, state, task_rx, proposer).await {
+            presignature_id = match Self::wait_propose(ctx, state, posit_queue, proposer).await {
                 Ok(id) => id,
                 Err(phase) => return phase,
             }
@@ -251,7 +247,7 @@ impl SignPositor {
 
         let accepted_participants = loop {
             tokio::select! {
-                Some(task_msg) = task_rx.recv() => {
+                task_msg = posit_queue.recv() => {
                     let SignTaskMessage::PositMessage { round: peer_round , ..} = task_msg;
 
                     // Ignore messages for older rounds

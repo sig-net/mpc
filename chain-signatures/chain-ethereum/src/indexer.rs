@@ -1,13 +1,6 @@
-pub mod abi;
-mod client;
-mod config;
-pub mod indexer_eth_direct_rpc;
-#[cfg(feature = "helios")]
-pub mod indexer_eth_helios;
-#[cfg(test)]
-pub mod test_utils;
-
-use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
+use crate::abi::{ChainSignatures, SignatureRequestedEncoding};
+use crate::client::EthereumClient;
+use crate::EthConfig;
 use alloy::consensus::Transaction;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
@@ -16,8 +9,6 @@ use alloy::rpc::types::{Block, BlockId, Log};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
-pub use client::EthereumClient;
-pub use config::EthConfig;
 use futures_util::stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
@@ -29,7 +20,6 @@ use mpc_primitives::{
     SignArgs, SignId, Signature as MpcSignature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -38,12 +28,14 @@ use tokio::time::Duration;
 
 const MAX_LIVE_BLOCK_BUFFER: usize = 16384;
 const CATCHUP_BLOCK_BATCH_SIZE: u64 = 32;
+/// Limit of consecutive `get_block(Finalized)` total failures allowed before `wait_for_finalized_block` gives up.
+const MAX_FINALIZED_FAILURES: u32 = 20;
 
 fn live_blocks_channel() -> (mpsc::Sender<MaybeBlock>, mpsc::Receiver<MaybeBlock>) {
     mpsc::channel(MAX_LIVE_BLOCK_BUFFER)
 }
 
-type BlockNumber = u64;
+pub type BlockNumber = u64;
 
 pub struct CatchupIter {
     client: Arc<EthereumClient>,
@@ -125,13 +117,6 @@ impl BlockAndRequests {
             execution_events,
         }
     }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct EthSignRequest {
-    pub payload: [u8; 32],
-    pub path: String,
-    pub key_version: u32,
 }
 
 /// Whether a transaction's calldata represents a contract call.
@@ -886,9 +871,11 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         Ok(())
     }
 
+    /// Blocks until the specified block number has been finalized on the Ethereum chain.
     async fn wait_for_finalized_block(&self, block_number: BlockNumber) -> anyhow::Result<()> {
         let retry_interval = Duration::from_millis(self.eth.refresh_finalized_interval);
         let mut last_final_block_number: Option<BlockNumber> = None;
+        let mut consecutive_failures = 0u32;
 
         loop {
             let Some(finalized_block) = self
@@ -897,11 +884,23 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 .get_block(BlockId::Number(BlockNumberOrTag::Finalized))
                 .await
             else {
-                tracing::warn!(block_number, "finalized ethereum block not found; retrying");
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_FINALIZED_FAILURES {
+                    // Propagate error to the outer ChainIndexer loop to catch it,
+                    // sleep for RETRY_DELAY, and attempt the entire block process again.
+                    anyhow::bail!(
+                        "get_block(Finalized) failed {MAX_FINALIZED_FAILURES} times consecutively; aborting wait"
+                    );
+                }
+                tracing::warn!(
+                    block_number,
+                    "finalized ethereum block not found (failure {consecutive_failures}/{MAX_FINALIZED_FAILURES}); retrying"
+                );
                 tokio::time::sleep(retry_interval).await;
                 continue;
             };
 
+            consecutive_failures = 0;
             let new_final_block_number = finalized_block.header.number;
             let prev_final_block_number = last_final_block_number.replace(new_final_block_number);
 
@@ -1084,23 +1083,67 @@ impl<S: StateManager, T: ChainTelemetry> ChainStream for EthereumStream<S, T> {
 }
 #[cfg(test)]
 mod tests {
-    use super::{test_utils, CatchupIter, EthConfig, EthereumClient, EthereumIndexer, MaybeBlock};
-    // TODO: test should rely on StateManager mock instead of Backlog
-    use crate::backlog::Backlog;
+    use super::{CatchupIter, EthConfig, EthereumClient, EthereumIndexer, MaybeBlock};
     #[cfg(feature = "helios")]
     use crate::indexer_eth::indexer_eth_helios;
+    use crate::test_utils;
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{address, b256, Address};
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
-    use mpc_chain_integration_core::{ChainIndexer, NoopChainTelemetry};
+    use mpc_chain_integration_core::{ChainIndexer, NoopChainTelemetry, StateManager};
     use mpc_primitives::{
         BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
         LATEST_MPC_KEY_VERSION,
     };
     use serde_json::json;
+    use std::collections::HashMap;
     use std::sync::Arc;
-    use tokio::sync::{mpsc, Notify};
+    use tokio::sync::{mpsc, Notify, RwLock};
+
+    /// Type alias to make clippy happy
+    type Watchers =
+        Arc<RwLock<HashMap<Chain, HashMap<BidirectionalTxId, (SignId, BidirectionalTx)>>>>;
+
+    #[derive(Clone, Default)]
+    struct MockStateManager {
+        processed_blocks: Arc<RwLock<HashMap<Chain, u64>>>,
+        watchers: Watchers,
+    }
+
+    #[async_trait::async_trait]
+    impl StateManager for MockStateManager {
+        async fn get_processed_block(&self, chain: Chain) -> Option<u64> {
+            self.processed_blocks.read().await.get(&chain).cloned()
+        }
+
+        async fn get_execution_watchers(
+            &self,
+            chain: Chain,
+        ) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)> {
+            self.watchers
+                .read()
+                .await
+                .get(&chain)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    impl MockStateManager {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        async fn watch_execution(&self, chain: Chain, sign_id: SignId, tx: BidirectionalTx) {
+            self.watchers
+                .write()
+                .await
+                .entry(chain)
+                .or_default()
+                .insert(tx.id, (sign_id, tx));
+        }
+    }
 
     fn missing_block_response(request_id: u64) -> serde_json::Value {
         json!({
@@ -1126,7 +1169,7 @@ mod tests {
     #[tokio::test]
     async fn missing_catchup_block_is_refetched() {
         let mut server = Server::new_async().await;
-        let state_manager = Backlog::new();
+        let state_manager = MockStateManager::new();
         let (events_tx, mut events_rx) = mpsc::channel(1);
 
         server
@@ -1189,7 +1232,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_catchup_block_returns_error_when_refetch_fails() {
-        let state_manager = Backlog::new();
+        let state_manager = MockStateManager::new();
         let (events_tx, mut events_rx) = mpsc::channel(1);
         let mut indexer = EthereumIndexer {
             eth: EthConfig {
@@ -1221,6 +1264,55 @@ mod tests {
 
         assert!(events_rx.try_recv().is_err());
         assert!(err.to_string().contains("still unavailable after refetch"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_finalized_block_fails_after_budget_exhaustion() {
+        let mut server = Server::new_async().await;
+        let (events_tx, _events_rx) = mpsc::channel(1);
+
+        // Mock eth_getBlockByNumber(finalized) to always return null (simulating repeated 429/failure)
+        // Should be called MAX_FINALIZED_FAILURES times
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": ["finalized", false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(missing_block_response(1).to_string())
+            .expect(super::MAX_FINALIZED_FAILURES as usize)
+            .create_async()
+            .await;
+
+        let indexer = EthereumIndexer {
+            eth: EthConfig {
+                account_sk: String::new(),
+                consensus_rpc_http_url: server.url(),
+                execution_rpc_http_url: server.url(),
+                contract_address: format!("{:x}", Address::ZERO),
+                network: "sepolia".to_string(),
+                helios_data_path: "/tmp/helios-test".to_string(),
+                refresh_finalized_interval: 1, // fast retry for test
+                optimistic_requests: false,
+                light_client: false,
+            },
+            state_manager: MockStateManager::new(),
+            telemetry: NoopChainTelemetry,
+            client: Arc::new(test_utils::create_test_ethereum_client(&server.url()).await),
+            events_tx,
+            contract_address: Address::ZERO,
+            catchup_complete: Arc::new(Notify::new()),
+            live_blocks_rx: None,
+        };
+
+        let err = indexer
+            .wait_for_finalized_block(100)
+            .await
+            .expect_err("should fail after budget exhaustion");
+
+        assert!(err.to_string().contains("failed 20 times consecutively"));
     }
 
     #[tokio::test]
@@ -1509,7 +1601,7 @@ mod tests {
             .create_async()
             .await;
 
-        let state_manager = Backlog::new();
+        let state_manager = MockStateManager::new();
         let sign_id = SignId::new([0x55; 32]);
         let tx = BidirectionalTx {
             id: BidirectionalTxId(tx_hash.0),
