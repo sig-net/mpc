@@ -12,6 +12,19 @@ pub enum SignKind {
     Checkpoint(ConsensusCheckpointDigest),
 }
 
+/// Messages sent into the node's sign-request processing queue.
+///
+/// This lives in `mpc-primitives` so that chain-integration crates can feed the node's
+/// sign queue directly without depending on the node itself.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub enum Sign {
+    Request(IndexedSignRequest),
+    Completion(SignId),
+    Checkpoint(IndexedSignRequest),
+    AbortChain(Chain),
+}
+
 /// All relevant info pertaining to an indexed sign request.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct IndexedSignRequest {

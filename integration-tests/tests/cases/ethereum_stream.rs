@@ -16,15 +16,15 @@ use mpc_crypto::kdf::generate_signature;
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
-use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign};
+use mpc_node::protocol::ParticipantInfo;
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{run_stream, ChainPipeline, ChainStreaming};
 use mpc_node::util::current_unix_timestamp;
 use mpc_primitives::{
-    ChainEvent, CheckpointDigest, SignArgs, SignBidirectionalEvent as NodeSignBidirectionalEvent,
-    SignId, SignKind, LATEST_MPC_KEY_VERSION,
+    Chain, ChainEvent, CheckpointDigest, IndexedSignRequest, Sign, SignArgs,
+    SignBidirectionalEvent as NodeSignBidirectionalEvent, SignId, SignKind, LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
 use std::time::Duration;

@@ -4,5 +4,5 @@ mod indexer;
 mod publisher;
 mod util;
 
-pub use indexer::{run, NearIndexer, NearSignEvent, Options};
+pub use indexer::{run, NearIndexer, Options};
 pub use publisher::NearClient;

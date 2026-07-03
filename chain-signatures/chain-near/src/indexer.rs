@@ -1,9 +1,10 @@
 use mpc_chain_integration_core::StateManager;
 use mpc_contract::primitives::PendingRequest;
-use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignId};
+use mpc_primitives::{Chain, IndexedSignRequest, Sign, SignArgs, SignId};
 use near_account_id::AccountId;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::util::current_unix_timestamp;
@@ -24,17 +25,6 @@ impl Options {
             self.running_threshold.to_string(),
         ]
     }
-}
-
-/// Events emitted by the NEAR indexer for the node to translate into its internal
-/// sign-queue messages.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone)]
-pub enum NearSignEvent {
-    /// A new sign request was observed on the MPC contract.
-    Request(IndexedSignRequest),
-    /// A previously-seen sign request is no longer pending on the contract.
-    Completion(SignId),
 }
 
 pub struct NearIndexer {
@@ -143,24 +133,15 @@ impl NearIndexer {
     }
 }
 
-struct Context<S: StateManager, F, Fut>
-where
-    F: Fn(NearSignEvent) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
-{
+struct Context<S: StateManager> {
     mpc_contract_id: AccountId,
-    on_event: F,
+    sign_tx: mpsc::Sender<Sign>,
     indexer: NearIndexer,
     rpc_client: near_fetch::Client,
     state_manager: S,
 }
 
-async fn poll_pending_requests<S, F, Fut>(ctx: &mut Context<S, F, Fut>) -> anyhow::Result<()>
-where
-    S: StateManager,
-    F: Fn(NearSignEvent) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
-{
+async fn poll_pending_requests<S: StateManager>(ctx: &mut Context<S>) -> anyhow::Result<()> {
     let latest_block = ctx.rpc_client.view_block().await?;
     let latest_height = latest_block.header.height;
 
@@ -207,12 +188,20 @@ where
             sign_id = ?request.id,
             "sending new sign request to processing queue"
         );
-        (ctx.on_event)(NearSignEvent::Request(request)).await;
+        if let Err(err) = ctx.sign_tx.send(Sign::Request(request)).await {
+            tracing::error!(?err, "failed to send the sign request into sign queue");
+        }
     }
 
     for sign_id in completed_requests {
         tracing::info!(?sign_id, "detected completed NEAR sign request");
-        (ctx.on_event)(NearSignEvent::Completion(sign_id)).await;
+        if let Err(err) = ctx.sign_tx.send(Sign::Completion(sign_id)).await {
+            tracing::error!(
+                ?err,
+                ?sign_id,
+                "failed to send completion event into sign queue"
+            );
+        }
     }
 
     ctx.state_manager
@@ -225,21 +214,18 @@ where
     Ok(())
 }
 
-/// Spawn the NEAR contract-polling indexer. It polls the MPC contract for pending sign requests and invokes `on_event` for each observed request/completion.
+/// Spawn the NEAR contract-polling indexer.
+/// The indexer polls the MPC contract for pending sign requests and sends [`Sign`] messages
+/// on `sign_tx`.
 #[allow(clippy::too_many_arguments)]
-pub fn run<S, F, Fut>(
+pub fn run<S: StateManager>(
     options: &Options,
     mpc_contract_id: &AccountId,
     node_account_id: &AccountId,
-    on_event: F,
+    sign_tx: mpsc::Sender<Sign>,
     rpc_client: near_fetch::Client,
     state_manager: S,
-) -> anyhow::Result<JoinHandle<anyhow::Result<()>>>
-where
-    S: StateManager,
-    F: Fn(NearSignEvent) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
-{
+) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
     tracing::info!(
         %mpc_contract_id,
         %node_account_id,
@@ -249,7 +235,7 @@ where
     let indexer = NearIndexer::new(options);
     let mut context = Context {
         mpc_contract_id: mpc_contract_id.clone(),
-        on_event,
+        sign_tx,
         indexer,
         rpc_client,
         state_manager,

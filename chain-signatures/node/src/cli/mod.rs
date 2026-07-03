@@ -12,7 +12,7 @@ use crate::node_client::{self, NodeClient};
 use crate::protocol::contract::ProtocolState;
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
-use crate::protocol::request::{Sign, SignatureSpawnerTask};
+use crate::protocol::request::SignatureSpawnerTask;
 use crate::protocol::state::{Node, NodeStateWatcher};
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
@@ -24,7 +24,6 @@ use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::stream::run_stream;
 use crate::{logs, storage, web};
 pub use args::{canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, solana::SolArgs};
-use mpc_chain_near::{self, NearClient, NearSignEvent};
 
 use cait_sith::protocol::Participant;
 use clap::Parser;
@@ -35,9 +34,10 @@ use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonStream};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumStream};
 use mpc_chain_integration_core::ChainPublisher;
+use mpc_chain_near::NearClient;
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaStream};
 use mpc_keys::hpke;
-use mpc_primitives::{Chain, CheckpointDigest};
+use mpc_primitives::{Chain, CheckpointDigest, Sign};
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
@@ -257,27 +257,11 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             // TODO: Remove this once we have integration tests built on other chains
             if storage_options.env == "integration-tests" {
                 let rpc_client = setup_rpc_client(&near_rpc, client_header_referer);
-                let sign_tx_near = sign_tx.clone();
                 mpc_chain_near::run(
                     &indexer_options,
                     &mpc_contract_id,
                     &account_id,
-                    move |event| {
-                        let sign_tx = sign_tx_near.clone();
-                        async move {
-                            let result = match event {
-                                NearSignEvent::Request(request) => {
-                                    sign_tx.send(Sign::Request(request)).await
-                                }
-                                NearSignEvent::Completion(sign_id) => {
-                                    sign_tx.send(Sign::Completion(sign_id)).await
-                                }
-                            };
-                            if let Err(err) = result {
-                                tracing::error!(?err, "failed to forward near indexer event");
-                            }
-                        }
-                    },
+                    sign_tx.clone(),
                     rpc_client,
                     backlog.clone(),
                 )?;
