@@ -6,6 +6,7 @@ use crate::{execute, utils, NodeConfig};
 use crate::execute::executable;
 use anyhow::Context;
 use async_process::Child;
+use mpc_chain_near::Options as NearIndexerOptions;
 use mpc_keys::hpke;
 use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, SolArgs};
 use mpc_node::config::OverrideConfig;
@@ -63,7 +64,7 @@ impl Node {
         let sign_sk =
             near_crypto::SecretKey::from_seed(near_crypto::KeyType::ED25519, "integration-test");
 
-        let indexer_options = mpc_node::indexer::Options {
+        let indexer_options = NearIndexerOptions {
             running_threshold: 120,
         };
         let eth = EthArgs::from_config(cfg.eth.clone());
@@ -164,7 +165,7 @@ impl Node {
 
     pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
         let web_port = config.web_port;
-        let indexer_options = mpc_node::indexer::Options {
+        let indexer_options = NearIndexerOptions {
             running_threshold: 120,
         };
 
