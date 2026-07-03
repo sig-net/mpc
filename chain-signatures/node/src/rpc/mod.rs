@@ -1,25 +1,28 @@
 mod hydration;
-mod near;
+mod near_governance;
 
 use crate::config::Config;
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
 use enum_map::EnumMap;
-use mpc_chain_integration_core::{ChainPublisher, PublishAction};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 // TODO: move clients elsewhere
 pub use hydration::HydrationClient;
+pub use near_governance::NearGovernanceClient;
 
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
-use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
+use mpc_chain_integration_core::{
+    utils::retry::{retry_rpc, RetryConfig},
+    ChainPublisher, PublishAction,
+};
+use mpc_chain_near::NearClient;
 pub use mpc_contract::primitives::{Read, View};
 use mpc_primitives::{CheckpointDigest, Signature};
-pub use near::NearClient;
 
 use near_account_id::AccountId;
 use std::collections::HashMap;

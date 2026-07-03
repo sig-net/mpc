@@ -16,14 +16,15 @@ use crate::protocol::request::{Sign, SignatureSpawnerTask};
 use crate::protocol::state::{Node, NodeStateWatcher};
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
-use crate::rpc::{self, ContractStateWatcher, NearClient, RpcChannel, RpcExecutor};
+use crate::rpc::{self, ContractStateWatcher, NearGovernanceClient, RpcChannel, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::stream::run_stream;
-use crate::{indexer, logs, storage, web};
+use crate::{logs, storage, web};
 pub use args::{canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, solana::SolArgs};
+use mpc_chain_near::{self, NearClient, NearSignEvent};
 
 use cait_sith::protocol::Participant;
 use clap::Parser;
@@ -89,7 +90,7 @@ pub enum Cli {
         canton: CantonArgs,
         /// NEAR requests options
         #[clap(flatten)]
-        indexer_options: indexer::Options,
+        indexer_options: mpc_chain_near::Options,
         /// Local address that other peers can use to message this node.
         /// mainnet nodes: this should be set to their domain name
         /// testnet nodes: this should be set to their http://ip:web_port
@@ -256,11 +257,27 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             // TODO: Remove this once we have integration tests built on other chains
             if storage_options.env == "integration-tests" {
                 let rpc_client = setup_rpc_client(&near_rpc, client_header_referer);
-                indexer::run(
+                let sign_tx_near = sign_tx.clone();
+                mpc_chain_near::run(
                     &indexer_options,
                     &mpc_contract_id,
                     &account_id,
-                    sign_tx.clone(),
+                    move |event| {
+                        let sign_tx = sign_tx_near.clone();
+                        async move {
+                            let result = match event {
+                                NearSignEvent::Request(request) => {
+                                    sign_tx.send(Sign::Request(request)).await
+                                }
+                                NearSignEvent::Completion(sign_id) => {
+                                    sign_tx.send(Sign::Completion(sign_id)).await
+                                }
+                            };
+                            if let Err(err) = result {
+                                tracing::error!(?err, "failed to forward near indexer event");
+                            }
+                        }
+                    },
                     rpc_client,
                     backlog.clone(),
                 )?;
@@ -281,6 +298,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let RpcHandles {
                 near_client,
+                near_governance_client,
                 rpc_channel,
                 rpc_executor,
             } = RpcHandles::new(
@@ -345,7 +363,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let system_handle = spawn_system_metrics().await;
             let protocol_handle = tokio::spawn(protocol.run(
                 node,
-                near_client,
+                near_governance_client,
                 contract_watcher.clone(),
                 mesh_state.clone(),
             ));
@@ -597,6 +615,7 @@ impl MeshHandles {
 
 struct RpcHandles {
     near_client: NearClient,
+    near_governance_client: NearGovernanceClient,
     rpc_channel: RpcChannel,
     rpc_executor: RpcExecutor,
 }
@@ -613,16 +632,23 @@ impl RpcHandles {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
         let near_client = NearClient::new(
             near_rpc_url,
+            mpc_contract_id,
+            signer.clone(),
+            publisher_telemetry,
+        );
+        let near_governance_client = NearGovernanceClient::new(
+            near_rpc_url,
             my_address,
-            network,
+            &network.sign_sk,
+            &network.cipher_sk,
             mpc_contract_id,
             signer,
-            publisher_telemetry,
         );
         let publishers = chains.publishers(near_client.clone()).await;
         let (rpc_channel, rpc_executor) = RpcExecutor::new(near_client.clone(), publishers).await;
         Self {
             near_client,
+            near_governance_client,
             rpc_channel,
             rpc_executor,
         }
