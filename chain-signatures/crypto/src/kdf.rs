@@ -292,6 +292,44 @@ pub fn generate_signature(
         .expect("signature should validate")
 }
 
+/// Derives the delta tweak used to randomize a presignature for a specific request.
+///
+/// Only used off-chain by the node, so it (and its `hkdf`/`near-primitives`
+/// dependencies) is excluded from the wasm contract build.
+///
+/// In case there are multiple requests in the same block (hence same entropy), we need to ensure
+/// that we generate different random scalars as delta tweaks.
+/// Receipt ID should be unique inside of a block, so it serves us as the request identifier.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn derive_delta(
+    request_id: [u8; 32],
+    entropy: [u8; 32],
+    presignature_big_r: k256::AffinePoint,
+) -> Scalar {
+    use hkdf::Hkdf;
+    use near_primitives::hash::CryptoHash;
+
+    // Constant prefix that ensures delta derivation values are used specifically for
+    // near-mpc-recovery with key derivation protocol vX.Y.Z.
+    const DELTA_DERIVATION_PREFIX: &str = "near-mpc-recovery v0.1.0 delta derivation:";
+
+    let hk = Hkdf::<Sha3_256>::new(None, &entropy);
+    let info = format!("{DELTA_DERIVATION_PREFIX}:{}", CryptoHash(request_id));
+    let mut okm = [0u8; 32];
+    // Both the request identifier (`info`) and the presignature's `big_r` must feed the
+    // derivation. A single `expand` per input would overwrite the buffer each time, so we
+    // pass them together via `expand_multi_info`, which concatenates them into one HKDF call.
+    hk.expand_multi_info(
+        &[
+            info.as_bytes(),
+            presignature_big_r.to_encoded_point(true).as_bytes(),
+        ],
+        &mut okm,
+    )
+    .unwrap();
+    Scalar::from_non_biased(okm)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -748,6 +786,84 @@ mod tests {
         assert!(
             is_valid.is_ok(),
             "generate_signature should produce a mathematically valid signature"
+        );
+    }
+
+    // Within a single block every request shares the same entropy, so `derive_delta`
+    // must rely on the unique per-request `request_id` to produce distinct deltas.
+    // Otherwise all presignatures in that block would be tweaked identically.
+    #[test]
+    fn test_derive_delta_differs_by_request_id_within_same_block() {
+        let big_r: k256::AffinePoint = SecretKey::from_bytes((&[0x11; 32]).into())
+            .unwrap()
+            .public_key()
+            .into();
+
+        // Same block => same entropy and same presignature `big_r`.
+        let entropy = [0x44; 32];
+
+        let delta_a = derive_delta([0x01; 32], entropy, big_r);
+        let delta_b = derive_delta([0x02; 32], entropy, big_r);
+
+        assert_ne!(
+            delta_a, delta_b,
+            "distinct request_ids must yield distinct deltas even with identical entropy and big_r"
+        );
+
+        // Sanity: derivation is deterministic for identical inputs.
+        assert_eq!(delta_a, derive_delta([0x01; 32], entropy, big_r));
+    }
+
+    #[test]
+    fn test_derive_delta_stays_the_same() {
+        let big_r: k256::AffinePoint = SecretKey::from_bytes((&[0x11; 32]).into())
+            .unwrap()
+            .public_key()
+            .into();
+
+        let delta = derive_delta([0x01; 32], [0x44; 32], big_r);
+
+        let expected = [
+            201, 189, 221, 160, 229, 175, 219, 17, 168, 142, 248, 183, 27, 177, 126, 76, 212, 79,
+            213, 149, 121, 44, 193, 110, 192, 228, 97, 9, 64, 180, 196, 28,
+        ];
+        assert_eq!(delta.to_bytes().as_slice(), &expected);
+    }
+
+    #[test]
+    fn test_derive_delta_differs_by_big_r() {
+        let big_r_a: k256::AffinePoint = SecretKey::from_bytes((&[0x11; 32]).into())
+            .unwrap()
+            .public_key()
+            .into();
+        let big_r_b: k256::AffinePoint = SecretKey::from_bytes((&[0x22; 32]).into())
+            .unwrap()
+            .public_key()
+            .into();
+
+        let request_id = [0x01; 32];
+        let entropy = [0x44; 32];
+
+        assert_ne!(
+            derive_delta(request_id, entropy, big_r_a),
+            derive_delta(request_id, entropy, big_r_b),
+            "distinct presignature big_r must yield distinct deltas"
+        );
+    }
+
+    #[test]
+    fn test_derive_delta_differs_by_entropy() {
+        let big_r: k256::AffinePoint = SecretKey::from_bytes((&[0x11; 32]).into())
+            .unwrap()
+            .public_key()
+            .into();
+
+        let request_id = [0x01; 32];
+
+        assert_ne!(
+            derive_delta(request_id, [0x44; 32], big_r),
+            derive_delta(request_id, [0x55; 32], big_r),
+            "distinct entropy must yield distinct deltas"
         );
     }
 

@@ -28,6 +28,8 @@ use tokio::time::Duration;
 
 const MAX_LIVE_BLOCK_BUFFER: usize = 16384;
 const CATCHUP_BLOCK_BATCH_SIZE: u64 = 32;
+/// Limit of consecutive `get_block(Finalized)` total failures allowed before `wait_for_finalized_block` gives up.
+const MAX_FINALIZED_FAILURES: u32 = 20;
 
 fn live_blocks_channel() -> (mpsc::Sender<MaybeBlock>, mpsc::Receiver<MaybeBlock>) {
     mpsc::channel(MAX_LIVE_BLOCK_BUFFER)
@@ -869,9 +871,11 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         Ok(())
     }
 
+    /// Blocks until the specified block number has been finalized on the Ethereum chain.
     async fn wait_for_finalized_block(&self, block_number: BlockNumber) -> anyhow::Result<()> {
         let retry_interval = Duration::from_millis(self.eth.refresh_finalized_interval);
         let mut last_final_block_number: Option<BlockNumber> = None;
+        let mut consecutive_failures = 0u32;
 
         loop {
             let Some(finalized_block) = self
@@ -880,11 +884,23 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 .get_block(BlockId::Number(BlockNumberOrTag::Finalized))
                 .await
             else {
-                tracing::warn!(block_number, "finalized ethereum block not found; retrying");
+                consecutive_failures += 1;
+                if consecutive_failures >= MAX_FINALIZED_FAILURES {
+                    // Propagate error to the outer ChainIndexer loop to catch it,
+                    // sleep for RETRY_DELAY, and attempt the entire block process again.
+                    anyhow::bail!(
+                        "get_block(Finalized) failed {MAX_FINALIZED_FAILURES} times consecutively; aborting wait"
+                    );
+                }
+                tracing::warn!(
+                    block_number,
+                    "finalized ethereum block not found (failure {consecutive_failures}/{MAX_FINALIZED_FAILURES}); retrying"
+                );
                 tokio::time::sleep(retry_interval).await;
                 continue;
             };
 
+            consecutive_failures = 0;
             let new_final_block_number = finalized_block.header.number;
             let prev_final_block_number = last_final_block_number.replace(new_final_block_number);
 
@@ -1248,6 +1264,55 @@ mod tests {
 
         assert!(events_rx.try_recv().is_err());
         assert!(err.to_string().contains("still unavailable after refetch"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_finalized_block_fails_after_budget_exhaustion() {
+        let mut server = Server::new_async().await;
+        let (events_tx, _events_rx) = mpsc::channel(1);
+
+        // Mock eth_getBlockByNumber(finalized) to always return null (simulating repeated 429/failure)
+        // Should be called MAX_FINALIZED_FAILURES times
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::PartialJson(json!({
+                "method": "eth_getBlockByNumber",
+                "params": ["finalized", false]
+            })))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(missing_block_response(1).to_string())
+            .expect(super::MAX_FINALIZED_FAILURES as usize)
+            .create_async()
+            .await;
+
+        let indexer = EthereumIndexer {
+            eth: EthConfig {
+                account_sk: String::new(),
+                consensus_rpc_http_url: server.url(),
+                execution_rpc_http_url: server.url(),
+                contract_address: format!("{:x}", Address::ZERO),
+                network: "sepolia".to_string(),
+                helios_data_path: "/tmp/helios-test".to_string(),
+                refresh_finalized_interval: 1, // fast retry for test
+                optimistic_requests: false,
+                light_client: false,
+            },
+            state_manager: Backlog::new(),
+            telemetry: NoopChainTelemetry,
+            client: Arc::new(test_utils::create_test_ethereum_client(&server.url()).await),
+            events_tx,
+            contract_address: Address::ZERO,
+            catchup_complete: Arc::new(Notify::new()),
+            live_blocks_rx: None,
+        };
+
+        let err = indexer
+            .wait_for_finalized_block(100)
+            .await
+            .expect_err("should fail after budget exhaustion");
+
+        assert!(err.to_string().contains("failed 20 times consecutively"));
     }
 
     #[tokio::test]
