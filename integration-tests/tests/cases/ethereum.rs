@@ -6,7 +6,7 @@ use alloy::providers::ext::AnvilApi;
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::request::TransactionRequest;
 use alloy::rpc::types::Filter;
-use alloy::sol_types::{SolEvent, SolValue};
+use alloy::sol_types::SolEvent;
 use anyhow::{anyhow, Context, Result};
 use integration_tests::cluster::Cluster;
 use integration_tests::{actions, cluster, eth};
@@ -14,6 +14,7 @@ use k256::ecdsa::VerifyingKey;
 use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, PublicKey as K256PublicKey, Secp256k1};
+use mpc_chain_integration_core::utils::hashing::compute_bidirectional_request_id;
 use mpc_crypto::derive_key;
 use mpc_crypto::kdf::{check_ec_signature, derive_epsilon_eth};
 use mpc_node::respond_bidirectional::{
@@ -252,18 +253,16 @@ async fn test_ethereum_eth_bidirectional_flow() -> Result<()> {
         .context("missing block number in receipt")?;
 
     // Expected request id: packed scheme from signet-evm-program.
-    let encoded = (
-        requester,
-        unsigned_bytes.clone(),
-        Chain::Ethereum.caip2_chain_id().to_string(),
+    let expected_request_id = B256::from(compute_bidirectional_request_id(
+        requester.as_slice(),
+        &unsigned_bytes,
+        Chain::Ethereum.caip2_chain_id(),
         key_version,
-        path.to_string(),
-        algo.to_string(),
-        dest.to_string(),
-        params.to_string(),
-    )
-        .abi_encode_packed();
-    let expected_request_id = alloy::primitives::keccak256(&encoded);
+        path,
+        algo,
+        dest,
+        params,
+    ));
 
     // 1. Wait for the MPC to respond with the destination tx signature.
     let signature_responded_topic = alloy::primitives::keccak256(

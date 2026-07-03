@@ -2,7 +2,6 @@ use alloy::network::{Ethereum, TransactionBuilder};
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::request::TransactionRequest;
-use alloy::sol_types::SolValue;
 use anyhow::{Context, Result};
 use cait_sith::protocol::Participant;
 use integration_tests::cluster::spawner::ClusterSpawner;
@@ -10,6 +9,7 @@ use integration_tests::containers::EthereumSandbox;
 use integration_tests::eth::{self, ChainSignatures, SignRequest};
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
+use mpc_chain_integration_core::utils::hashing::compute_bidirectional_request_id;
 use mpc_chain_integration_core::{ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager};
 use mpc_crypto::kdf::generate_signature;
 use mpc_node::backlog::Backlog;
@@ -1261,18 +1261,16 @@ async fn test_ethereum_stream_parse_sign_bidirectional() -> Result<()> {
     assert_eq!(req.args.key_version, LATEST_MPC_KEY_VERSION);
 
     // Request id must follow the packed scheme from signet-evm-program.
-    let encoded = (
-        ctx.wallet,
-        serialized_transaction.clone(),
-        Chain::Ethereum.caip2_chain_id().to_string(),
+    let expected_request_id = compute_bidirectional_request_id(
+        ctx.wallet.as_slice(),
+        &serialized_transaction,
+        Chain::Ethereum.caip2_chain_id(),
         LATEST_MPC_KEY_VERSION,
-        path.to_string(),
-        "secp256k1".to_string(),
-        "ethereum".to_string(),
-        "{}".to_string(),
-    )
-        .abi_encode_packed();
-    let expected_request_id: [u8; 32] = alloy::primitives::keccak256(&encoded).into();
+        path,
+        "secp256k1",
+        "ethereum",
+        "{}",
+    );
     assert_eq!(req.id.request_id, expected_request_id);
 
     // Payload is keccak256 of the serialized destination transaction.

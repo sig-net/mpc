@@ -1,5 +1,6 @@
 use crate::indexer_eth::abi::ChainSignatures;
 use crate::indexer_eth::EthConfig;
+use alloy::contract::RawCallBuilder;
 use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::{
@@ -220,11 +221,13 @@ impl EthClient {
         )
     }
 
-    async fn send_responses(
+    /// Send a prepared contract call with retry, refetching the pending nonce
+    /// on every attempt.
+    async fn send_call(
         &self,
-        responses: Vec<ChainSignatures::Response>,
-        gas: u64,
+        call: RawCallBuilder<&EthContractFillProvider>,
         sign_ids: &[SignId],
+        op: &str,
     ) -> anyhow::Result<B256> {
         let send_retry = RetryConfig {
             max_times: ETH_SEND_MAX_ATTEMPTS,
@@ -240,7 +243,7 @@ impl EthClient {
                 tracing::warn!(
                     ?sign_ids,
                     attempt,
-                    "send eth tx failed: {err}, retrying in {sleep:?}"
+                    "send eth {op} tx failed: {err}, retrying in {sleep:?}"
                 );
             },
             {
@@ -256,13 +259,12 @@ impl EthClient {
 
                 tracing::info!(
                     nonce,
-                    "will send eth tx with nonce {nonce} for sign_ids: {:?}",
+                    "will send eth {op} tx with nonce {nonce} for sign_ids: {:?}",
                     sign_ids
                 );
 
-                self.contract
-                    .respond(responses.clone()) // Need to clone because closure has to implement `FnMut` (otherwise it's `FnOnce`)
-                    .gas(gas)
+                // Need to clone because closure has to implement `FnMut` (otherwise it's `FnOnce`)
+                call.clone()
                     .nonce(nonce)
                     .send()
                     .await
@@ -273,25 +275,36 @@ impl EthClient {
     }
 
     /// Shared logic to send the transaction, wait for the receipt, and verify success.
+    async fn send_call_and_verify(
+        &self,
+        call: RawCallBuilder<&EthContractFillProvider>,
+        sign_ids: &[SignId],
+        op: &str,
+    ) -> anyhow::Result<B256> {
+        let tx_hash = self.send_call(call, sign_ids, op).await?;
+        let receipt = self.wait_for_transaction_receipt(tx_hash, sign_ids).await?;
+
+        if !receipt.status() {
+            tracing::error!(?sign_ids, ?tx_hash, "ethereum {op} transaction failed");
+            anyhow::bail!("Ethereum {op} transaction reverted");
+        }
+
+        tracing::info!(
+            ?sign_ids,
+            ?tx_hash,
+            "ethereum {op} transaction published successfully"
+        );
+        Ok(tx_hash)
+    }
+
     async fn execute_publish(
         &self,
         responses: Vec<ChainSignatures::Response>,
         gas: u64,
         sign_ids: &[SignId],
     ) -> anyhow::Result<()> {
-        let tx_hash = self.send_responses(responses, gas, sign_ids).await?;
-        let receipt = self.wait_for_transaction_receipt(tx_hash, sign_ids).await?;
-
-        if !receipt.status() {
-            tracing::error!(?sign_ids, ?tx_hash, "ethereum transaction failed");
-            anyhow::bail!("Ethereum transaction reverted");
-        }
-
-        tracing::info!(
-            ?sign_ids,
-            ?tx_hash,
-            "ethereum transaction published successfully"
-        );
+        let call = self.contract.respond(responses).gas(gas).clear_decoder();
+        self.send_call_and_verify(call, sign_ids, "respond").await?;
         Ok(())
     }
 
@@ -336,67 +349,18 @@ impl EthClient {
         id: &SignId,
         serialized_output: Vec<u8>,
         signature: &Signature,
-    ) -> anyhow::Result<B256> {
-        let sign_ids = [*id];
-        let send_retry = RetryConfig {
-            max_times: ETH_SEND_MAX_ATTEMPTS,
-            min_delay: ETH_SEND_MIN_DELAY,
-            max_delay: ETH_SEND_MAX_DELAY,
-            jitter: true,
-        };
-
+    ) -> anyhow::Result<()> {
         let abi_signature: ChainSignatures::Signature = signature.into();
         let request_id: B256 = id.request_id.into();
         let output: alloy::primitives::Bytes = serialized_output.into();
 
-        let tx_hash = retry_rpc!(
-            ETH_SEND_TIMEOUT,
-            send_retry,
-            |attempt, err, sleep| {
-                tracing::warn!(
-                    ?sign_ids,
-                    attempt,
-                    "send eth respondBidirectional tx failed: {err}, retrying in {sleep:?}"
-                );
-            },
-            {
-                // Fetch nonce inside the retry loop, otherwise we may reuse a stale nonce.
-                let nonce = self
-                    .contract
-                    .provider()
-                    .get_transaction_count(self.contract.provider().default_signer_address())
-                    .pending()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to fetch nonce: {e}"))?;
-
-                self.contract
-                    .respondBidirectional(request_id, output.clone(), abi_signature.clone())
-                    .nonce(nonce)
-                    .send()
-                    .await
-                    .map(|pending| *pending.tx_hash())
-                    .map_err(|e| anyhow::anyhow!("RPC Error: {e}"))
-            }
-        )?;
-
-        let receipt = self
-            .wait_for_transaction_receipt(tx_hash, &sign_ids)
+        let call = self
+            .contract
+            .respondBidirectional(request_id, output, abi_signature)
+            .clear_decoder();
+        self.send_call_and_verify(call, &[*id], "respondBidirectional")
             .await?;
-        if !receipt.status() {
-            tracing::error!(
-                ?sign_ids,
-                ?tx_hash,
-                "ethereum respondBidirectional transaction failed"
-            );
-            anyhow::bail!("Ethereum respondBidirectional transaction reverted");
-        }
-
-        tracing::info!(
-            ?sign_ids,
-            ?tx_hash,
-            "ethereum respondBidirectional published successfully"
-        );
-        Ok(tx_hash)
+        Ok(())
     }
 }
 
@@ -647,8 +611,9 @@ mod tests {
         );
 
         // Attempt to send
+        let call = client.contract.respond(vec![]).gas(21000).clear_decoder();
         let result = client
-            .send_responses(vec![], 21000, &[SignId::new([3u8; 32])])
+            .send_call(call, &[SignId::new([3u8; 32])], "respond")
             .await;
 
         // Verify it failed completely

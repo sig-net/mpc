@@ -13,7 +13,7 @@ use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, U256};
 use alloy::rpc::types::{Block, BlockId, Log};
-use alloy::sol_types::{SolEvent, SolValue};
+use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
 pub use client::EthereumClient;
@@ -23,7 +23,8 @@ use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{
-    utils::hashing::hash_payload, ChainIndexer, ChainStream, ChainTelemetry, StateManager,
+    utils::hashing::{compute_bidirectional_request_id, hash_payload},
+    ChainIndexer, ChainStream, ChainTelemetry, StateManager,
 };
 use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{
@@ -283,12 +284,33 @@ fn sign_bidirectional_request_from_filtered_log(log: Log) -> Option<IndexedSignR
     };
     tracing::debug!("found eth bidirectional event: {:?}", event.caip2Id);
 
-    let sign_id = SignId::new(generate_bidirectional_request_id(&event));
+    let sign_id = SignId::new(compute_bidirectional_request_id(
+        event.sender.as_slice(),
+        &event.serializedTransaction,
+        &event.caip2Id,
+        event.keyVersion,
+        &event.path,
+        &event.algo,
+        &event.dest,
+        &event.params,
+    ));
 
     if event.deposit == U256::ZERO {
         tracing::warn!(?sign_id, "deposit is 0, skipping sign request");
         return None;
     }
+
+    // The shared event stores the deposit as u64; skip larger values instead
+    // of silently misrecording them (Hydration rejects oversized deposits the
+    // same way).
+    let Ok(deposit) = u64::try_from(event.deposit) else {
+        tracing::warn!(
+            ?sign_id,
+            deposit = %event.deposit,
+            "deposit exceeds u64::MAX, skipping sign request"
+        );
+        return None;
+    };
 
     if event.keyVersion > LATEST_MPC_KEY_VERSION {
         tracing::warn!(?sign_id, "unsupported key version: {}", event.keyVersion);
@@ -350,7 +372,7 @@ fn sign_bidirectional_request_from_filtered_log(log: Log) -> Option<IndexedSignR
             serialized_transaction: event.serializedTransaction.to_vec(),
             caip2_id: event.caip2Id,
             key_version: event.keyVersion,
-            deposit: event.deposit.saturating_to::<u64>(),
+            deposit,
             path: event.path,
             algo: event.algo,
             dest: event.dest,
@@ -527,25 +549,6 @@ impl SignatureRequestedEvent {
     }
 }
 
-/// Request id for the `signBidirectional` flow, mirroring the Solana program's
-/// packed scheme with the EVM address as the sender:
-/// keccak256(abi.encodePacked(sender, serializedTransaction, caip2Id, keyVersion, path, algo, dest, params))
-fn generate_bidirectional_request_id(event: &ChainSignatures::SignBidirectional) -> [u8; 32] {
-    let encoded = (
-        event.sender,
-        event.serializedTransaction.clone(),
-        event.caip2Id.clone(),
-        event.keyVersion,
-        event.path.clone(),
-        event.algo.clone(),
-        event.dest.clone(),
-        event.params.clone(),
-    )
-        .abi_encode_packed();
-
-    alloy::primitives::keccak256(encoded).into()
-}
-
 pub struct EthereumIndexer<S: StateManager, T: ChainTelemetry> {
     eth: EthConfig,
     state_manager: S,
@@ -695,35 +698,24 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             })
             .collect();
 
-        let (respond_logs, rest): (Vec<Log>, Vec<Log>) =
-            relevant_logs.into_iter().partition(|log| {
-                log.topic0().is_some_and(|topic| {
-                    *topic == ChainSignatures::SignatureResponded::SIGNATURE_HASH
-                })
-            });
-
-        let (respond_bidirectional_logs, rest): (Vec<Log>, Vec<Log>) =
-            rest.into_iter().partition(|log| {
-                log.topic0().is_some_and(|topic| {
-                    *topic == ChainSignatures::RespondBidirectional::SIGNATURE_HASH
-                })
-            });
-
-        let (bidirectional_request_logs, potential_request_logs): (Vec<Log>, Vec<Log>) =
-            rest.into_iter().partition(|log| {
-                log.topic0().is_some_and(|topic| {
-                    *topic == ChainSignatures::SignBidirectional::SIGNATURE_HASH
-                })
-            });
-
-        let request_logs: Vec<Log> = potential_request_logs
-            .into_iter()
-            .filter(|log| {
-                log.topic0().is_some_and(|topic| {
-                    *topic == ChainSignatures::SignatureRequested::SIGNATURE_HASH
-                })
-            })
-            .collect();
+        let mut respond_logs = Vec::new();
+        let mut respond_bidirectional_logs = Vec::new();
+        let mut bidirectional_request_logs = Vec::new();
+        let mut request_logs = Vec::new();
+        for log in relevant_logs {
+            let Some(topic) = log.topic0().copied() else {
+                continue;
+            };
+            if topic == ChainSignatures::SignatureResponded::SIGNATURE_HASH {
+                respond_logs.push(log);
+            } else if topic == ChainSignatures::RespondBidirectional::SIGNATURE_HASH {
+                respond_bidirectional_logs.push(log);
+            } else if topic == ChainSignatures::SignBidirectional::SIGNATURE_HASH {
+                bidirectional_request_logs.push(log);
+            } else if topic == ChainSignatures::SignatureRequested::SIGNATURE_HASH {
+                request_logs.push(log);
+            }
+        }
 
         if !request_logs.is_empty() {
             sign_requests.extend(parse_filtered_logs(request_logs));
@@ -1821,16 +1813,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn bidirectional_request_id_matches_signet_evm_program_golden() {
-        // Golden from signet-evm-program's generateBidirectionalRequestId (viem).
-        let event = golden_sign_bidirectional_event();
-        assert_eq!(
-            super::generate_bidirectional_request_id(&event),
-            b256!("10782cf96bc2f933dbd8a5fda49d31bf5a6b50027eba1aa9a115650cc261d498").0,
-        );
-    }
-
     fn rpc_log_from_sign_bidirectional(
         event: &super::abi::ChainSignatures::SignBidirectional,
         tx_hash: alloy::primitives::B256,
@@ -1922,6 +1904,14 @@ mod tests {
     fn skips_sign_bidirectional_with_invalid_caip2() {
         let mut event = golden_sign_bidirectional_event();
         event.caip2Id = "not-a-chain".to_string();
+        let log = rpc_log_from_sign_bidirectional(&event, alloy::primitives::B256::ZERO);
+        assert!(super::sign_bidirectional_request_from_filtered_log(log).is_none());
+    }
+
+    #[test]
+    fn skips_sign_bidirectional_with_deposit_above_u64() {
+        let mut event = golden_sign_bidirectional_event();
+        event.deposit = alloy::primitives::U256::from(u64::MAX) + alloy::primitives::U256::from(1);
         let log = rpc_log_from_sign_bidirectional(&event, alloy::primitives::B256::ZERO);
         assert!(super::sign_bidirectional_request_from_filtered_log(log).is_none());
     }

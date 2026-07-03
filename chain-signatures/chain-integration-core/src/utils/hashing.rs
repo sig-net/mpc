@@ -28,6 +28,39 @@ pub fn compute_request_id(
     keccak256(&encoded).0
 }
 
+/// Computes the request id for the `signBidirectional` flow, shared by every
+/// source chain that mirrors the Solana program's packed scheme:
+/// keccak256(abi.encodePacked(sender, serializedTransaction, caip2Id, keyVersion, path, algo, dest, params)).
+///
+/// `sender_bytes` is the chain's canonical sender representation packed as raw
+/// bytes: the 20-byte address on EVM chains, the base58 pubkey string on
+/// Solana, the ss58 address string on Hydration.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_bidirectional_request_id(
+    sender_bytes: &[u8],
+    serialized_transaction: &[u8],
+    caip2_id: &str,
+    key_version: u32,
+    path: &str,
+    algo: &str,
+    dest: &str,
+    params: &str,
+) -> [u8; 32] {
+    let encoded = (
+        sender_bytes.to_vec(),
+        serialized_transaction.to_vec(),
+        caip2_id,
+        key_version,
+        path,
+        algo,
+        dest,
+        params,
+    )
+        .abi_encode_packed();
+
+    keccak256(&encoded).0
+}
+
 /// Computes the Keccak256 hash of the given payload.
 pub fn hash_payload(data: &[u8]) -> [u8; 32] {
     keccak256(data).0
@@ -167,6 +200,66 @@ mod tests {
         // u32::MAX should not panic
         let id = compute_request_id(sender, &payload, path, u32::MAX, chain, algo, dest, params);
         assert_eq!(id.len(), 32);
+    }
+
+    /// Golden arguments matching signet-evm-program's `generateBidirectionalRequestId`
+    /// fixture (viem): 20-byte EVM sender address + the shared field set.
+    fn bidirectional_golden_args() -> ([u8; 20], Vec<u8>) {
+        (
+            [
+                0xf3, 0x9f, 0xd6, 0xe5, 0x1a, 0xad, 0x88, 0xf6, 0xf4, 0xce, 0x6a, 0xb8, 0x82, 0x72,
+                0x79, 0xcf, 0xff, 0xb9, 0x22, 0x66,
+            ],
+            vec![0x02, 0xde, 0xad, 0xbe, 0xef, 0x01],
+        )
+    }
+
+    #[test]
+    fn compute_bidirectional_request_id_matches_signet_evm_program_golden() {
+        let (sender, tx) = bidirectional_golden_args();
+        // Golden from signet-evm-program's generateBidirectionalRequestId (viem).
+        let expected: [u8; 32] = [
+            0x10, 0x78, 0x2c, 0xf9, 0x6b, 0xc2, 0xf9, 0x33, 0xdb, 0xd8, 0xa5, 0xfd, 0xa4, 0x9d,
+            0x31, 0xbf, 0x5a, 0x6b, 0x50, 0x02, 0x7e, 0xba, 0x1a, 0xa9, 0xa1, 0x15, 0x65, 0x0c,
+            0xc2, 0x61, 0xd4, 0x98,
+        ];
+        let id = compute_bidirectional_request_id(
+            &sender,
+            &tx,
+            "eip155:1",
+            1,
+            "test-bidirectional-path",
+            "secp256k1",
+            "ethereum",
+            "{}",
+        );
+        assert_eq!(id, expected);
+    }
+
+    #[test]
+    fn compute_bidirectional_request_id_differs_by_sender() {
+        let (sender, tx) = bidirectional_golden_args();
+        let id1 = compute_bidirectional_request_id(
+            &sender,
+            &tx,
+            "eip155:1",
+            1,
+            "path",
+            "secp256k1",
+            "ethereum",
+            "{}",
+        );
+        let id2 = compute_bidirectional_request_id(
+            b"other-sender",
+            &tx,
+            "eip155:1",
+            1,
+            "path",
+            "secp256k1",
+            "ethereum",
+            "{}",
+        );
+        assert_ne!(id1, id2);
     }
 
     #[test]
