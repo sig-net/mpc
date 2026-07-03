@@ -614,6 +614,9 @@ impl RpcHandles {
         chains: &ChainConfigs,
     ) -> Self {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
+        // `NearClient` (publishing) and `NearGovernanceClient` (governance + contract
+        // reads) each open their own `near_fetch::Client` to the same RPC endpoint.
+        // TODO: two connection are negligible here, but consider sharing a single client if necessary.
         let near_client = NearClient::new(
             near_rpc_url,
             mpc_contract_id,
