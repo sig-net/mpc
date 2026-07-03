@@ -20,7 +20,6 @@ use mpc_chain_integration_core::{
     utils::retry::{retry_rpc, RetryConfig},
     ChainPublisher, PublishAction,
 };
-use mpc_chain_near::NearClient;
 pub use mpc_contract::primitives::{Read, View};
 use mpc_primitives::{CheckpointDigest, Signature};
 
@@ -322,8 +321,8 @@ impl ContractStateWatcher {
 }
 
 pub struct RpcExecutor {
-    /// The NEAR client used to fetch contract state and config.
-    near: NearClient,
+    /// The NEAR governance client used to fetch contract state and config.
+    near: NearGovernanceClient,
     /// The publishers for each chain.
     publishers: HashMap<Chain, Arc<dyn ChainPublisher>>,
     /// The receiver for incoming RPC actions.
@@ -332,7 +331,7 @@ pub struct RpcExecutor {
 
 impl RpcExecutor {
     pub async fn new(
-        near: NearClient,
+        near: NearGovernanceClient,
         publishers: HashMap<Chain, Arc<dyn ChainPublisher>>,
     ) -> (RpcChannel, Self) {
         let (tx, action_rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
@@ -399,7 +398,7 @@ impl RpcExecutor {
 }
 
 async fn update_contract_data(
-    near: NearClient,
+    near: NearGovernanceClient,
     contract: watch::Sender<Option<ProtocolState>>,
     config: watch::Sender<Config>,
     checkpoints: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,

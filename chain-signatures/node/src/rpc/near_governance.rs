@@ -1,4 +1,5 @@
 use crate::protocol::Governance;
+pub use mpc_contract::primitives::{Read, View};
 use mpc_keys::hpke;
 
 use near_account_id::AccountId;
@@ -15,9 +16,9 @@ const NEAR_GOVERNANCE_MAX_RETRIES: usize = 5;
 /// NEAR [`Governance`] client.
 ///
 /// Owns the RPC connection and signer used to submit MPC governance transactions
-/// (`join`, `vote_pk`, `vote_reshared`) to the MPC contract. This is a node concern:
-/// the [`Governance`] trait lives in the node because the whole protocol layer depends
-/// on it, so its implementation stays here rather than in `mpc-chain-near`.
+/// and read MPC contract state (`read`) for the
+/// node's contract-state watcher.
+#[derive(Clone)]
 pub struct NearGovernanceClient {
     client: NearFetchClient,
     contract_id: AccountId,
@@ -44,6 +45,17 @@ impl NearGovernanceClient {
             cipher_pk: cipher_sk.public_key(),
             sign_pk: sign_sk.public_key(),
         }
+    }
+
+    /// Read views from the MPC contract.
+    pub async fn read(&self, reads: Vec<Read>) -> anyhow::Result<Vec<View>> {
+        let views: Vec<View> = self
+            .client
+            .view(&self.contract_id, "read")
+            .args_json(json!({ "reads": reads }))
+            .await?
+            .json()?;
+        Ok(views)
     }
 }
 

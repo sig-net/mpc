@@ -645,7 +645,8 @@ impl RpcHandles {
             signer,
         );
         let publishers = chains.publishers(near_client.clone()).await;
-        let (rpc_channel, rpc_executor) = RpcExecutor::new(near_client.clone(), publishers).await;
+        let (rpc_channel, rpc_executor) =
+            RpcExecutor::new(near_governance_client.clone(), publishers).await;
         Self {
             near_client,
             near_governance_client,

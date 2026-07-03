@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-pub use mpc_contract::primitives::{Read, View};
-
 use crate::util::affine_point_to_base58;
 
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
@@ -59,17 +57,6 @@ impl NearClient {
             .retry_exponential(NEAR_RETRY_BASE_DELAY_MS, NEAR_RESPOND_MAX_RETRIES)
             .transact()
             .await
-    }
-
-    /// Read views from the MPC contract.
-    pub async fn read(&self, reads: Vec<Read>) -> anyhow::Result<Vec<View>> {
-        let views: Vec<View> = self
-            .client
-            .view(&self.contract_id, "read")
-            .args_json(json!({ "reads": reads }))
-            .await?
-            .json()?;
-        Ok(views)
     }
 
     async fn call_respond_checkpoint(
