@@ -2,6 +2,7 @@ use super::metrics::PhaseDurations;
 use super::organize::SignOrganizer;
 use super::posit::SignPositor;
 use super::state::SignState;
+use super::work_queue::SignPositWorkQueue;
 use super::*;
 
 pub struct SignGenerating {
@@ -23,12 +24,12 @@ impl SignPhase {
         &mut self,
         ctx: &mut SignTask,
         state: &mut SignState,
-        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
+        posit_queue: &SignPositWorkQueue,
     ) -> SignPhase {
         match self {
             SignPhase::Organizing(phase) => phase.advance(ctx, state).await,
-            SignPhase::Posit(phase) => phase.advance(ctx, state, task_rx).await,
-            SignPhase::Generating(phase) => phase.advance(ctx, state, task_rx).await,
+            SignPhase::Posit(phase) => phase.advance(ctx, state, posit_queue).await,
+            SignPhase::Generating(phase) => phase.advance(ctx, state, posit_queue).await,
             SignPhase::Complete(result) => SignPhase::Complete(*result),
         }
     }
@@ -39,7 +40,7 @@ impl SignGenerating {
         &mut self,
         ctx: &SignTask,
         state: &mut SignState,
-        task_rx: &mut mpsc::Receiver<SignTaskMessage>,
+        posit_queue: &SignPositWorkQueue,
     ) -> SignPhase {
         // We successfully committed to generating; future rounds should be unrestricted.
         state.pause_proposing = None;
@@ -102,7 +103,7 @@ impl SignGenerating {
         // Track that we've created a generator
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS.inc();
 
-        match generator.run(&gen_ctx, task_rx).await {
+        match generator.run(&gen_ctx, posit_queue).await {
             Ok(()) => SignPhase::Complete(Ok(())),
             Err(err) => {
                 tracing::warn!(
@@ -143,7 +144,7 @@ impl SignTask {
         mut self,
         indexed: IndexedSignRequest,
         mesh_state: watch::Receiver<MeshState>,
-        mut task_rx: mpsc::Receiver<SignTaskMessage>,
+        posit_queue: Arc<SignPositWorkQueue>,
     ) -> Result<(), SignError> {
         let sign_id = self.sign_id;
         tracing::info!(?sign_id, governance = ?self.governance, "signature task starting...");
@@ -193,7 +194,7 @@ impl SignTask {
                 // This branch in tokio::select will get cancelled since the future for next contract
                 // state is reached first. This effectively pauses this branch from executing and
                 // further advancing the signature organization/positing/generation flow.
-                new_phase = phase.advance(&mut self, &mut state, &mut task_rx), if is_running => {
+                new_phase = phase.advance(&mut self, &mut state, &posit_queue), if is_running => {
                     if let Some(step) = current_phase_step {
                         durations.add(step, phase_start.elapsed());
                         if matches!(&new_phase, SignPhase::Organizing(_)) {

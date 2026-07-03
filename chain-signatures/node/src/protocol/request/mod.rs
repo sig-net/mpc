@@ -26,7 +26,7 @@ use mpc_primitives::{IndexedSignRequest, SignId, SignKind};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -40,9 +40,12 @@ mod organize;
 mod posit;
 mod state;
 mod task;
+mod work_queue;
 
 use limiter::SignLimiter;
 use task::SignTask;
+
+pub(crate) use work_queue::SignPositWorkQueue;
 
 /// The round interval to search for a proposer in the organizing phase.
 const ROUND_INTERVAL: usize = 512;
@@ -165,9 +168,22 @@ impl SignatureSpawner {
             .inboxes
             .entry(sign_id)
             .or_insert_with(|| Subscriber::unsubscribed(SIGN_POSIT_INBOX_LABEL));
-        let rx = inbox.subscribe();
+        let mut rx: mpsc::Receiver<SignTaskMessage> = inbox.subscribe();
         inbox.report_capacity();
         set_inbox_count(SIGN_POSIT_INBOX_LABEL, self.inboxes.len());
+
+        // Keep draining the channel as long as the Subscriber is alive and move
+        // the messages to a specialized work item queue.
+        // The spawned task is only woken up by tokio when a new message is sent
+        // or the channel closes.
+        let posit_queue = SignPositWorkQueue::new();
+        let drain_into = Arc::clone(&posit_queue);
+        tokio::spawn(async move {
+            // None was returned => the Subscriber was dropped
+            while let Some(msg) = rx.recv().await {
+                drain_into.push(msg);
+            }
+        });
 
         let task = SignTask {
             governance: governance.clone(),
@@ -184,8 +200,10 @@ impl SignatureSpawner {
         };
 
         // Spawn the async task with organizing loop
-        self.tasks
-            .spawn(sign_id, task.run(indexed, self.mesh_state.clone(), rx));
+        self.tasks.spawn(
+            sign_id,
+            task.run(indexed, self.mesh_state.clone(), posit_queue),
+        );
     }
 
     /// Handle a posit message - routes to existing task or buffers if task not yet created
