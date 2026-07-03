@@ -864,9 +864,9 @@ mod tests {
     use super::*;
     use crate::sign_bidirectional::{PublishState, SignStatus};
     use alloy::primitives::{Address, B256};
-    use anchor_lang::prelude::Pubkey;
     use cait_sith::protocol::Participant;
     use k256::{AffinePoint, Scalar};
+    use mpc_chain_solana::Pubkey;
     use mpc_primitives::{
         BidirectionalTx, BidirectionalTxId, RespondBidirectionalTx, SignArgs,
         SignBidirectionalEvent, SignId, SignKind,

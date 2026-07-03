@@ -1,8 +1,3 @@
-mod client;
-mod config;
-
-pub use client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
-pub use config::SolConfig;
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::NoopPublisherTelemetry;
 
@@ -48,6 +43,10 @@ use solana_transaction_status::{
     UiParsedInstruction,
 };
 use tokio::sync::{mpsc, oneshot};
+
+use crate::client::{SolanaCatchupBlock, MAX_CONCURRENT_CHUNK_SIZE};
+use crate::utils::current_unix_timestamp;
+use crate::{SolConfig, SolanaClient};
 
 const CPI_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: Sign",
@@ -406,7 +405,7 @@ impl SolanaSignEvent {
                         key_version: ev.key_version,
                     },
                     Chain::Solana,
-                    crate::util::current_unix_timestamp(),
+                    current_unix_timestamp(),
                 ))
             }
             SolanaSignEvent::SignBidirectional(ev) => {
@@ -430,7 +429,7 @@ impl SolanaSignEvent {
                         key_version: ev.key_version,
                     },
                     Chain::Solana,
-                    crate::util::current_unix_timestamp(),
+                    current_unix_timestamp(),
                     mpc_primitives::SignBidirectionalEvent {
                         sender: ev.sender.to_bytes(),
                         serialized_transaction: ev.serialized_transaction.clone(),

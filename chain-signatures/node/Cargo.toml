@@ -69,11 +69,6 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
-anchor-client.workspace = true
-anchor-lang.workspace = true
-solana-sdk.workspace = true
-solana-transaction-status.workspace = true
-solana-client.workspace = true
 futures-util.workspace = true
 parity-scale-codec.workspace = true
 
@@ -87,9 +82,9 @@ mpc-contract.workspace = true
 mpc-crypto.workspace = true
 mpc-chain-integration-core.workspace = true
 mpc-chain-canton.workspace = true
+mpc-chain-solana.workspace = true
 mpc-keys.workspace = true
 mpc-primitives.workspace = true
-signet-program.workspace = true
 
 alloy-dyn-abi.workspace = true
 alloy-json-abi.workspace = true
