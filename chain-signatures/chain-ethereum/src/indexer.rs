@@ -1091,59 +1091,14 @@ mod tests {
     use alloy::primitives::{address, b256, Address};
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
-    use mpc_chain_integration_core::{ChainIndexer, NoopChainTelemetry, StateManager};
+    use mpc_chain_integration_core::{ChainIndexer, MockStateManager, NoopChainTelemetry};
     use mpc_primitives::{
         BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
         LATEST_MPC_KEY_VERSION,
     };
     use serde_json::json;
-    use std::collections::HashMap;
     use std::sync::Arc;
-    use tokio::sync::{mpsc, Notify, RwLock};
-
-    /// Type alias to make clippy happy
-    type Watchers =
-        Arc<RwLock<HashMap<Chain, HashMap<BidirectionalTxId, (SignId, BidirectionalTx)>>>>;
-
-    #[derive(Clone, Default)]
-    struct MockStateManager {
-        processed_blocks: Arc<RwLock<HashMap<Chain, u64>>>,
-        watchers: Watchers,
-    }
-
-    #[async_trait::async_trait]
-    impl StateManager for MockStateManager {
-        async fn get_processed_block(&self, chain: Chain) -> Option<u64> {
-            self.processed_blocks.read().await.get(&chain).cloned()
-        }
-
-        async fn get_execution_watchers(
-            &self,
-            chain: Chain,
-        ) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)> {
-            self.watchers
-                .read()
-                .await
-                .get(&chain)
-                .cloned()
-                .unwrap_or_default()
-        }
-    }
-
-    impl MockStateManager {
-        fn new() -> Self {
-            Self::default()
-        }
-
-        async fn watch_execution(&self, chain: Chain, sign_id: SignId, tx: BidirectionalTx) {
-            self.watchers
-                .write()
-                .await
-                .entry(chain)
-                .or_default()
-                .insert(tx.id, (sign_id, tx));
-        }
-    }
+    use tokio::sync::{mpsc, Notify};
 
     fn missing_block_response(request_id: u64) -> serde_json::Value {
         json!({

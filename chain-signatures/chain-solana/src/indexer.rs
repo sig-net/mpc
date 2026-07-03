@@ -974,11 +974,8 @@ pub fn to_mpc_signature(
 mod tests {
     use std::collections::BTreeMap;
 
-    // TODO: test should rely on StateManager mock instead of Backlog
-    use crate::backlog::Backlog;
-
     use super::*;
-    use mpc_chain_integration_core::NoopChainTelemetry;
+    use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
     use solana_sdk::commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
     use solana_transaction_status::{
@@ -1137,7 +1134,7 @@ mod tests {
         let http_url = format!("https://solana-devnet.g.alchemy.com/v2/{api_key}");
         let ws_url = format!("wss://solana-devnet.g.alchemy.com/v2/{api_key}");
 
-        let state_manager = Backlog::new();
+        let state_manager = MockStateManager::new();
         let (events_tx, mut events_rx) = mpsc::channel(1_000_000);
 
         let client = SolanaClient::for_indexer(
@@ -1172,7 +1169,7 @@ mod tests {
 
         indexer
             .state_manager
-            .set_processed_block_interval(Chain::Solana, start_slot.saturating_sub(1), 1)
+            .set_processed_block(Chain::Solana, start_slot.saturating_sub(1))
             .await;
 
         // Run catchup range
