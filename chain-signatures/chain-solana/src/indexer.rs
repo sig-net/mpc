@@ -58,13 +58,6 @@ const CPI_RESPOND_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: RespondBidirectional",
 ];
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct SolSignRequest {
-    pub payload: [u8; 32],
-    pub path: String,
-    pub key_version: u32,
-}
-
 /// Solana stream that implements the new ChainStream abstraction
 pub struct SolanaStream<S: StateManager, T: ChainTelemetry> {
     rx: Option<mpsc::Receiver<ChainEvent>>,
