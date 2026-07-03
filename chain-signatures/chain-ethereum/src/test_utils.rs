@@ -1,4 +1,5 @@
-use super::{EthConfig, EthereumClient};
+use crate::client::EthereumClient;
+use crate::EthConfig;
 use mpc_chain_integration_core::utils::retry::RetryConfig;
 use std::time::Duration;
 

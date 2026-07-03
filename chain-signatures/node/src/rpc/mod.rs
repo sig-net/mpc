@@ -1,4 +1,3 @@
-mod ethereum;
 mod hydration;
 mod near;
 
@@ -12,7 +11,6 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 // TODO: move clients elsewhere
-pub use ethereum::EthClient;
 pub use hydration::HydrationClient;
 
 use cait_sith::protocol::Participant;
@@ -36,8 +34,6 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(10);
 // Publish retry constants
 const PUBLISH_MIN_DELAY: Duration = Duration::from_secs(5);
 const PUBLISH_MAX_DELAY: Duration = Duration::from_secs(60); // Cap to 1 min so backoff doesn't get too long for infinite retries
-const BATCH_PUBLISH_MIN_DELAY: Duration = Duration::from_secs(1);
-const BATCH_PUBLISH_MAX_DELAY: Duration = Duration::from_secs(10);
 
 pub enum RpcAction {
     Publish(PublishAction),

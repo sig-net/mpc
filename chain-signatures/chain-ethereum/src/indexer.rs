@@ -1,13 +1,6 @@
-pub mod abi;
-mod client;
-mod config;
-pub mod indexer_eth_direct_rpc;
-#[cfg(feature = "helios")]
-pub mod indexer_eth_helios;
-#[cfg(test)]
-pub mod test_utils;
-
-use crate::indexer_eth::abi::{ChainSignatures, SignatureRequestedEncoding};
+use crate::abi::{ChainSignatures, SignatureRequestedEncoding};
+use crate::client::EthereumClient;
+use crate::EthConfig;
 use alloy::consensus::Transaction;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
@@ -16,8 +9,6 @@ use alloy::rpc::types::{Block, BlockId, Log};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
-pub use client::EthereumClient;
-pub use config::EthConfig;
 use futures_util::stream;
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
@@ -29,7 +20,6 @@ use mpc_primitives::{
     SignArgs, SignId, Signature as MpcSignature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -45,7 +35,7 @@ fn live_blocks_channel() -> (mpsc::Sender<MaybeBlock>, mpsc::Receiver<MaybeBlock
     mpsc::channel(MAX_LIVE_BLOCK_BUFFER)
 }
 
-type BlockNumber = u64;
+pub type BlockNumber = u64;
 
 pub struct CatchupIter {
     client: Arc<EthereumClient>,
@@ -127,13 +117,6 @@ impl BlockAndRequests {
             execution_events,
         }
     }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct EthSignRequest {
-    pub payload: [u8; 32],
-    pub path: String,
-    pub key_version: u32,
 }
 
 /// Whether a transaction's calldata represents a contract call.
@@ -1100,23 +1083,67 @@ impl<S: StateManager, T: ChainTelemetry> ChainStream for EthereumStream<S, T> {
 }
 #[cfg(test)]
 mod tests {
-    use super::{test_utils, CatchupIter, EthConfig, EthereumClient, EthereumIndexer, MaybeBlock};
-    // TODO: test should rely on StateManager mock instead of Backlog
-    use crate::backlog::Backlog;
+    use super::{CatchupIter, EthConfig, EthereumClient, EthereumIndexer, MaybeBlock};
     #[cfg(feature = "helios")]
     use crate::indexer_eth::indexer_eth_helios;
+    use crate::test_utils;
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{address, b256, Address};
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
-    use mpc_chain_integration_core::{ChainIndexer, NoopChainTelemetry};
+    use mpc_chain_integration_core::{ChainIndexer, NoopChainTelemetry, StateManager};
     use mpc_primitives::{
         BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
         LATEST_MPC_KEY_VERSION,
     };
     use serde_json::json;
+    use std::collections::HashMap;
     use std::sync::Arc;
-    use tokio::sync::{mpsc, Notify};
+    use tokio::sync::{mpsc, Notify, RwLock};
+
+    /// Type alias to make clippy happy
+    type Watchers =
+        Arc<RwLock<HashMap<Chain, HashMap<BidirectionalTxId, (SignId, BidirectionalTx)>>>>;
+
+    #[derive(Clone, Default)]
+    struct MockStateManager {
+        processed_blocks: Arc<RwLock<HashMap<Chain, u64>>>,
+        watchers: Watchers,
+    }
+
+    #[async_trait::async_trait]
+    impl StateManager for MockStateManager {
+        async fn get_processed_block(&self, chain: Chain) -> Option<u64> {
+            self.processed_blocks.read().await.get(&chain).cloned()
+        }
+
+        async fn get_execution_watchers(
+            &self,
+            chain: Chain,
+        ) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)> {
+            self.watchers
+                .read()
+                .await
+                .get(&chain)
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    impl MockStateManager {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        async fn watch_execution(&self, chain: Chain, sign_id: SignId, tx: BidirectionalTx) {
+            self.watchers
+                .write()
+                .await
+                .entry(chain)
+                .or_default()
+                .insert(tx.id, (sign_id, tx));
+        }
+    }
 
     fn missing_block_response(request_id: u64) -> serde_json::Value {
         json!({
@@ -1142,7 +1169,7 @@ mod tests {
     #[tokio::test]
     async fn missing_catchup_block_is_refetched() {
         let mut server = Server::new_async().await;
-        let state_manager = Backlog::new();
+        let state_manager = MockStateManager::new();
         let (events_tx, mut events_rx) = mpsc::channel(1);
 
         server
@@ -1205,7 +1232,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_catchup_block_returns_error_when_refetch_fails() {
-        let state_manager = Backlog::new();
+        let state_manager = MockStateManager::new();
         let (events_tx, mut events_rx) = mpsc::channel(1);
         let mut indexer = EthereumIndexer {
             eth: EthConfig {
@@ -1271,7 +1298,7 @@ mod tests {
                 optimistic_requests: false,
                 light_client: false,
             },
-            state_manager: Backlog::new(),
+            state_manager: MockStateManager::new(),
             telemetry: NoopChainTelemetry,
             client: Arc::new(test_utils::create_test_ethereum_client(&server.url()).await),
             events_tx,
@@ -1574,7 +1601,7 @@ mod tests {
             .create_async()
             .await;
 
-        let state_manager = Backlog::new();
+        let state_manager = MockStateManager::new();
         let sign_id = SignId::new([0x55; 32]);
         let tx = BidirectionalTx {
             id: BidirectionalTxId(tx_hash.0),
