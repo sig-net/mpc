@@ -45,11 +45,12 @@ impl NearPublicKeyExt for near_crypto::PublicKey {
     }
 }
 
-pub trait AffinePointExt {
+/// Convert a secp256k1 `AffinePoint` into a NEAR public key.
+pub trait NearPublicKeyFromAffineExt {
     fn into_near_public_key(self) -> near_crypto::PublicKey;
 }
 
-impl AffinePointExt for AffinePoint {
+impl NearPublicKeyFromAffineExt for AffinePoint {
     fn into_near_public_key(self) -> near_crypto::PublicKey {
         near_crypto::PublicKey::SECP256K1(
             near_crypto::Secp256K1PublicKey::try_from(
