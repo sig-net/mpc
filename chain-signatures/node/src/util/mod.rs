@@ -47,7 +47,6 @@ impl NearPublicKeyExt for near_crypto::PublicKey {
 
 pub trait AffinePointExt {
     fn into_near_public_key(self) -> near_crypto::PublicKey;
-    fn to_base58(&self) -> String;
 }
 
 impl AffinePointExt for AffinePoint {
@@ -58,14 +57,6 @@ impl AffinePointExt for AffinePoint {
             )
             .unwrap(),
         )
-    }
-
-    fn to_base58(&self) -> String {
-        let key = near_crypto::Secp256K1PublicKey::try_from(
-            &self.to_encoded_point(false).as_bytes()[1..65],
-        )
-        .unwrap();
-        format!("{key:?}")
     }
 }
 

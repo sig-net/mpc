@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::util::affine_point_to_base58;
+use crate::util::AffinePointExt as _;
 
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{ConsensusCheckpointDigest, SignId, SignKind, Signature};
@@ -103,7 +103,7 @@ impl ChainPublisher for NearClient {
             .inspect_err(|err| {
                 tracing::error!(
                     sign_id = ?action.indexed.id,
-                    big_r = affine_point_to_base58(&signature.big_r),
+                    big_r = signature.big_r.to_base58(),
                     s = ?signature.s,
                     ?err,
                     "smart contract threw error",
@@ -112,7 +112,7 @@ impl ChainPublisher for NearClient {
 
         tracing::info!(
             sign_id = ?action.indexed.id,
-            big_r = affine_point_to_base58(&signature.big_r),
+            big_r = signature.big_r.to_base58(),
             s = ?signature.s,
             elapsed = ?timestamp.elapsed(),
             "published signature sucessfully",

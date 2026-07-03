@@ -6,3 +6,4 @@ mod util;
 
 pub use indexer::{run, NearIndexer, Options};
 pub use publisher::NearClient;
+pub use util::AffinePointExt;

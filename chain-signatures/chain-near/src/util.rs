@@ -1,11 +1,20 @@
 use k256::{elliptic_curve::sec1::ToEncodedPoint, AffinePoint};
 
-/// Format an `AffinePoint` as a NEAR secp256k1 public key in base58, for logging.
-pub fn affine_point_to_base58(point: &AffinePoint) -> String {
-    let key =
-        near_crypto::Secp256K1PublicKey::try_from(&point.to_encoded_point(false).as_bytes()[1..65])
-            .unwrap();
-    format!("{key:?}")
+/// Extension trait for formatting a secp256k1 `AffinePoint` as a NEAR public key.
+pub trait AffinePointExt {
+    /// Format the point as a NEAR secp256k1 public key in base58 (the body of
+    /// `secp256k1:<base58>`), for logging.
+    fn to_base58(&self) -> String;
+}
+
+impl AffinePointExt for AffinePoint {
+    fn to_base58(&self) -> String {
+        let key = near_crypto::Secp256K1PublicKey::try_from(
+            &self.to_encoded_point(false).as_bytes()[1..65],
+        )
+        .unwrap();
+        format!("{key:?}")
+    }
 }
 
 /// Current time in seconds since the UNIX epoch.
@@ -42,7 +51,7 @@ mod tests {
         let body = &full["secp256k1:".len()..];
         let point = point_from_near_str(full);
 
-        assert_eq!(affine_point_to_base58(&point), body);
+        assert_eq!(point.to_base58(), body);
     }
 
     #[test]
@@ -50,7 +59,7 @@ mod tests {
         let g2 = ProjectivePoint::GENERATOR * k256::Scalar::from(2u32);
         let point = g2.to_affine();
 
-        let body = affine_point_to_base58(&point);
+        let body = point.to_base58();
         let full = format!("secp256k1:{body}");
 
         assert_eq!(point_from_near_str(&full), point);
