@@ -1,6 +1,7 @@
 pub mod abi;
 mod client;
 mod config;
+mod event_parsing;
 mod indexer;
 mod indexer_eth_direct_rpc;
 #[cfg(feature = "helios")]
