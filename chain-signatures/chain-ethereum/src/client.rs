@@ -1,15 +1,83 @@
-use std::time::Duration;
-
+use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::Address;
 use alloy::rpc::types::{Block, BlockId};
+use std::sync::Arc;
+use std::time::Duration;
 
-use crate::indexer::{BlockNumber, MaybeBlock};
 use crate::indexer_eth_direct_rpc;
 use crate::EthConfig;
 use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
 
 #[cfg(feature = "helios")]
 use super::indexer_eth_helios;
+
+/// Catchup batch size for [`CatchupIter`]
+pub const CATCHUP_BLOCK_BATCH_SIZE: u64 = 32;
+
+/// Block number alias shared by the client and indexer.
+pub type BlockNumber = u64;
+
+/// Result of attempting to fetch a single block
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
+pub enum MaybeBlock {
+    Block(Block),
+    Missing(BlockId),
+}
+
+/// Lazy batching iterator over `[start_block, end_block)` range.
+pub struct CatchupIter {
+    client: Arc<EthereumClient>,
+    next_block: BlockNumber,
+    end_block: BlockNumber,
+    buffered_blocks: std::vec::IntoIter<MaybeBlock>,
+}
+
+impl CatchupIter {
+    pub fn new(
+        client: Arc<EthereumClient>,
+        start_block: BlockNumber,
+        end_block: BlockNumber,
+    ) -> Self {
+        Self {
+            client,
+            next_block: start_block,
+            end_block,
+            buffered_blocks: Vec::new().into_iter(),
+        }
+    }
+
+    async fn fetch_next_batch(&mut self) {
+        if self.next_block >= self.end_block {
+            return;
+        }
+
+        let batch_end = self
+            .next_block
+            .saturating_add(CATCHUP_BLOCK_BATCH_SIZE)
+            .min(self.end_block);
+        let batch_block_ids = (self.next_block..batch_end)
+            .map(|block_number| BlockId::Number(BlockNumberOrTag::Number(block_number)))
+            .collect::<Vec<_>>();
+
+        self.buffered_blocks = self.client.get_blocks(&batch_block_ids).await.into_iter();
+        self.next_block = batch_end;
+    }
+
+    pub async fn next(&mut self) -> Option<MaybeBlock> {
+        loop {
+            if let Some(block) = self.buffered_blocks.next() {
+                return Some(block);
+            }
+
+            if self.next_block >= self.end_block {
+                return None;
+            }
+
+            self.fetch_next_batch().await;
+        }
+    }
+}
 
 // Constants for Ethereum RPC client retry behavior
 const ETH_RPC_TIMEOUT: Duration = Duration::from_secs(2);
@@ -280,7 +348,6 @@ impl EthereumClient {
 mod tests {
     use super::*;
     use crate::test_utils;
-    use alloy::eips::BlockNumberOrTag;
     use mockito::{Matcher, Server};
     use serde_json::json;
 
@@ -385,6 +452,117 @@ mod tests {
             MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(21)))
         ));
         assert!(matches!(&blocks[2], MaybeBlock::Block(block) if block.header.number == 22));
+    }
+
+    #[tokio::test]
+    async fn catchup_iter_fetches_batches_lazily() {
+        let mut server = mockito::Server::new_async().await;
+
+        let first_batch = (10..42)
+            .enumerate()
+            .map(|(index, block_number)| test_utils::block_response(index as u64 + 1, block_number))
+            .collect::<Vec<_>>();
+        let second_batch = vec![test_utils::block_response(33, 42)];
+
+        let second_batch_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r#"\"0x2a\""#.to_string()))
+            .expect(1)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!(second_batch).to_string())
+            .create_async()
+            .await;
+
+        let first_batch_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r#"\"0xa\""#.to_string()))
+            .expect(1)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!(first_batch).to_string())
+            .create_async()
+            .await;
+
+        let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
+        let mut iter = CatchupIter::new(client, 10, 43);
+
+        for expected_number in 10..42 {
+            let next = iter.next().await;
+            assert!(matches!(
+                next,
+                Some(MaybeBlock::Block(block)) if block.header.number == expected_number
+            ));
+        }
+
+        assert!(first_batch_mock.matched_async().await);
+        assert!(!second_batch_mock.matched_async().await);
+
+        let next = iter.next().await;
+        assert!(matches!(next, Some(MaybeBlock::Block(block)) if block.header.number == 42));
+        assert!(second_batch_mock.matched_async().await);
+        assert!(iter.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn catchup_iter_splits_requests_into_32_32_1_batches() {
+        let mut server = mockito::Server::new_async().await;
+
+        let first_batch = (0..32)
+            .enumerate()
+            .map(|(idx, block_number)| test_utils::block_response(idx as u64 + 1, block_number))
+            .collect::<Vec<_>>();
+        let second_batch = (32..64)
+            .enumerate()
+            .map(|(idx, block_number)| test_utils::block_response((idx + 33) as u64, block_number))
+            .collect::<Vec<_>>();
+        let third_batch = vec![test_utils::block_response(65, 64)];
+
+        let first_batch_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r#"\"id\":32"#.to_string()))
+            .expect(1)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!(first_batch).to_string())
+            .create_async()
+            .await;
+
+        let second_batch_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r#"\"id\":64"#.to_string()))
+            .expect(1)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!(second_batch).to_string())
+            .create_async()
+            .await;
+
+        let third_batch_mock = server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex(r#"\"id\":65"#.to_string()))
+            .expect(1)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!(third_batch).to_string())
+            .create_async()
+            .await;
+
+        let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
+        let mut iter = CatchupIter::new(client, 0, 65);
+
+        for expected_number in 0..65 {
+            let next = iter.next().await;
+            assert!(matches!(
+                next,
+                Some(MaybeBlock::Block(block)) if block.header.number == expected_number
+            ));
+        }
+
+        assert!(iter.next().await.is_none());
+        assert!(first_batch_mock.matched_async().await);
+        assert!(second_batch_mock.matched_async().await);
+        assert!(third_batch_mock.matched_async().await);
     }
 
     #[tokio::test]
