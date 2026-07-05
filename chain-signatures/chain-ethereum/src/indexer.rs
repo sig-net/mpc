@@ -1109,7 +1109,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainStream for EthereumStream<S, T> {
 }
 #[cfg(test)]
 mod tests {
-    use super::{CatchupIter, EthereumClient, MaybeBlock};
+    use super::{CatchupIter, MaybeBlock};
     #[cfg(feature = "helios")]
     use crate::indexer_eth::indexer_eth_helios;
     use crate::test_utils;
