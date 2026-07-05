@@ -10,6 +10,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+#[cfg(feature = "bench")]
+use crate::bench;
+
 // This is more than likely limited by the RPC provider, but alchemy
 // supports archive nodes, so we effectively can go as far back as needed
 // for direct RPC client.
@@ -38,6 +41,26 @@ impl RpcEthereumClient {
     pub async fn get_blocks(&self, block_ids: &[BlockId]) -> anyhow::Result<Vec<MaybeBlock>> {
         if block_ids.is_empty() {
             return Ok(Vec::new());
+        }
+
+        // Bench: count the number of `eth_getBlockByNumber` vs `eth_getBlockByHash` calls in the batch
+        // Catchup should only request by number, keep by hash for completeness
+        #[cfg(feature = "bench")]
+        {
+            let n_number = block_ids
+                .iter()
+                .filter(|b| matches!(b, BlockId::Number(_)))
+                .count() as u64;
+            let n_hash = block_ids
+                .iter()
+                .filter(|b| matches!(b, BlockId::Hash(_)))
+                .count() as u64;
+            if n_number > 0 {
+                bench::rpc_inc_n("eth_getBlockByNumber(batch)", n_number);
+            }
+            if n_hash > 0 {
+                bench::rpc_inc_n("eth_getBlockByHash(batch)", n_hash);
+            }
         }
 
         let requests = block_ids
@@ -129,10 +152,16 @@ impl RpcEthereumClient {
         &self,
         block_id: BlockId,
     ) -> anyhow::Result<Option<Vec<TransactionReceipt>>> {
+        #[cfg(feature = "bench")]
+        bench::rpc_inc("eth_getBlockReceipts");
+
         self.block_receipts(block_id).await
     }
 
     pub async fn get_nonce(&self, address: Address, block_id: BlockId) -> anyhow::Result<u64> {
+        #[cfg(feature = "bench")]
+        bench::rpc_inc("eth_getTransactionCount");
+
         self.rpc_call::<String>(
             "eth_getTransactionCount",
             vec![
@@ -150,6 +179,9 @@ impl RpcEthereumClient {
         &self,
         tx_hash: B256,
     ) -> anyhow::Result<Option<Transaction>> {
+        #[cfg(feature = "bench")]
+        bench::rpc_inc("eth_getTransactionByHash");
+
         self.transaction_by_hash(tx_hash).await
     }
 
@@ -161,6 +193,9 @@ impl RpcEthereumClient {
         &self,
         tx_hash: alloy::primitives::B256,
     ) -> anyhow::Result<Bytes> {
+        #[cfg(feature = "bench")]
+        bench::rpc_inc("debug_traceTransaction");
+
         let call_frame: serde_json::Value = self
             .rpc_call(
                 "debug_traceTransaction",
@@ -211,6 +246,17 @@ impl RpcEthereumClient {
     }
 
     async fn block(&self, block_id: BlockId) -> anyhow::Result<Option<Block>> {
+        // Bench: distinguish `eth_getBlockByNumber(Finalized)` (used by
+        // `wait_for_finalized_block`) from `eth_getBlockByNumber(Number)` (catchup batch / single
+        // fetches).
+        #[cfg(feature = "bench")]
+        bench::rpc_inc(match &block_id {
+            BlockId::Number(BlockNumberOrTag::Number(_)) => "eth_getBlockByNumber(Number)",
+            BlockId::Number(BlockNumberOrTag::Finalized) => "eth_getBlockByNumber(Finalized)",
+            BlockId::Number(_) => "eth_getBlockByNumber(other)", // Latest, Earliest, Safe, Pending (all expected to be zero)
+            BlockId::Hash(_) => "eth_getBlockByHash", // Not expected in catchup, keep for completeness
+        });
+
         match block_id {
             BlockId::Number(_) => {
                 self.rpc_call(

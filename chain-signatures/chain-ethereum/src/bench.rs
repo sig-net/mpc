@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 /// `tracing` target used by all bench instrumentation for filtering / grep
 pub const TARGET: &str = "mpc_chain_ethereum::bench";
 
-/// Thread-local per-method RPC counter
+// Thread-local per-method RPC counter.
 thread_local! {
     static RPC_STATS: RefCell<HashMap<&'static str, u64>> =
         RefCell::new(HashMap::new());
