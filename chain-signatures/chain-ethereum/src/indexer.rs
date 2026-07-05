@@ -1125,27 +1125,6 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
 
-    fn missing_block_response(request_id: u64) -> serde_json::Value {
-        json!({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": null
-        })
-    }
-
-    #[test]
-    fn catchup_start_is_clamped_to_supported_window() {
-        let max_catchup_blocks = 8191;
-        let anchor_height = 10_000;
-        let catchup_end = anchor_height - 1;
-        let expected_oldest = catchup_end - max_catchup_blocks;
-
-        assert_eq!(
-            EthereumClient::clamp_oldest_supported_with(1, anchor_height, max_catchup_blocks),
-            expected_oldest,
-        );
-    }
-
     #[tokio::test]
     async fn missing_catchup_block_is_refetched() {
         let mut server = Server::new_async().await;
@@ -1242,94 +1221,6 @@ mod tests {
             .expect_err("should fail after budget exhaustion");
 
         assert!(err.to_string().contains("failed 20 times consecutively"));
-    }
-
-    #[tokio::test]
-    async fn ethereum_client_get_blocks_preserves_request_order() {
-        let mut server = Server::new_async().await;
-
-        server
-            .mock("POST", "/")
-            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
-            .expect(1)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                json!([
-                    test_utils::block_response(3, 9),
-                    test_utils::block_response(1, 7),
-                    missing_block_response(2),
-                ])
-                .to_string(),
-            )
-            .create_async()
-            .await;
-
-        let client = test_utils::create_test_ethereum_client(&server.url()).await;
-        let block_ids = vec![
-            BlockId::Number(BlockNumberOrTag::Number(7)),
-            BlockId::Number(BlockNumberOrTag::Number(8)),
-            BlockId::Number(BlockNumberOrTag::Number(9)),
-        ];
-
-        let blocks = client.get_blocks(&block_ids).await;
-
-        assert_eq!(blocks.len(), 3);
-        assert!(matches!(&blocks[0], MaybeBlock::Block(block) if block.header.number == 7));
-        assert!(matches!(
-            &blocks[1],
-            MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(8)))
-        ));
-        assert!(matches!(&blocks[2], MaybeBlock::Block(block) if block.header.number == 9));
-    }
-
-    #[tokio::test]
-    async fn ethereum_client_get_blocks_retries_and_keeps_positions() {
-        let mut server = Server::new_async().await;
-
-        server
-            .mock("POST", "/")
-            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
-            .expect(1)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(json!({ "jsonrpc": "2.0", "result": "invalid-shape" }).to_string())
-            .create_async()
-            .await;
-
-        server
-            .mock("POST", "/")
-            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
-            .expect(1)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                json!([
-                    test_utils::block_response(4, 20),
-                    missing_block_response(5),
-                    test_utils::block_response(6, 22),
-                ])
-                .to_string(),
-            )
-            .create_async()
-            .await;
-
-        let client = test_utils::create_test_ethereum_client(&server.url()).await;
-        let block_ids = vec![
-            BlockId::Number(BlockNumberOrTag::Number(20)),
-            BlockId::Number(BlockNumberOrTag::Number(21)),
-            BlockId::Number(BlockNumberOrTag::Number(22)),
-        ];
-
-        let blocks = client.get_blocks(&block_ids).await;
-
-        assert_eq!(blocks.len(), 3);
-        assert!(matches!(&blocks[0], MaybeBlock::Block(block) if block.header.number == 20));
-        assert!(matches!(
-            &blocks[1],
-            MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(21)))
-        ));
-        assert!(matches!(&blocks[2], MaybeBlock::Block(block) if block.header.number == 22));
     }
 
     #[tokio::test]

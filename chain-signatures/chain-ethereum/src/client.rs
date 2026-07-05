@@ -281,8 +281,111 @@ mod tests {
     use super::*;
     use crate::test_utils;
     use alloy::eips::BlockNumberOrTag;
+    use mockito::{Matcher, Server};
+    use serde_json::json;
 
     // TODO: add more tests for non HTTP-related functionality, e.g. clamp_oldest_supported_with
+
+    #[test]
+    fn catchup_start_is_clamped_to_supported_window() {
+        let max_catchup_blocks = 8191;
+        let anchor_height = 10_000;
+        let catchup_end = anchor_height - 1;
+        let expected_oldest = catchup_end - max_catchup_blocks;
+
+        assert_eq!(
+            EthereumClient::clamp_oldest_supported_with(1, anchor_height, max_catchup_blocks),
+            expected_oldest,
+        );
+    }
+
+    #[tokio::test]
+    async fn ethereum_client_get_blocks_preserves_request_order() {
+        let mut server = Server::new_async().await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
+            .expect(1)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!([
+                    test_utils::block_response(3, 9),
+                    test_utils::block_response(1, 7),
+                    test_utils::missing_block_response(2),
+                ])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = test_utils::create_test_ethereum_client(&server.url()).await;
+        let block_ids = vec![
+            BlockId::Number(BlockNumberOrTag::Number(7)),
+            BlockId::Number(BlockNumberOrTag::Number(8)),
+            BlockId::Number(BlockNumberOrTag::Number(9)),
+        ];
+
+        let blocks = client.get_blocks(&block_ids).await;
+
+        assert_eq!(blocks.len(), 3);
+        assert!(matches!(&blocks[0], MaybeBlock::Block(block) if block.header.number == 7));
+        assert!(matches!(
+            &blocks[1],
+            MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(8)))
+        ));
+        assert!(matches!(&blocks[2], MaybeBlock::Block(block) if block.header.number == 9));
+    }
+
+    #[tokio::test]
+    async fn ethereum_client_get_blocks_retries_and_keeps_positions() {
+        let mut server = Server::new_async().await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
+            .expect(1)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({ "jsonrpc": "2.0", "result": "invalid-shape" }).to_string())
+            .create_async()
+            .await;
+
+        server
+            .mock("POST", "/")
+            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
+            .expect(1)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                json!([
+                    test_utils::block_response(4, 20),
+                    test_utils::missing_block_response(5),
+                    test_utils::block_response(6, 22),
+                ])
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = test_utils::create_test_ethereum_client(&server.url()).await;
+        let block_ids = vec![
+            BlockId::Number(BlockNumberOrTag::Number(20)),
+            BlockId::Number(BlockNumberOrTag::Number(21)),
+            BlockId::Number(BlockNumberOrTag::Number(22)),
+        ];
+
+        let blocks = client.get_blocks(&block_ids).await;
+
+        assert_eq!(blocks.len(), 3);
+        assert!(matches!(&blocks[0], MaybeBlock::Block(block) if block.header.number == 20));
+        assert!(matches!(
+            &blocks[1],
+            MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(21)))
+        ));
+        assert!(matches!(&blocks[2], MaybeBlock::Block(block) if block.header.number == 22));
+    }
 
     #[tokio::test]
     async fn get_block_returns_block_on_200() {

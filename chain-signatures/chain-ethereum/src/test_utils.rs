@@ -124,7 +124,7 @@ impl TestIndexerBuilder {
     }
 
     /// Build the indexer and return it together with a receiver for the events
-    /// channel wired into it. Capacity is 1 to match the existing tests.
+    /// channel wired into it.
     pub async fn build_with_rx(
         self,
     ) -> (
