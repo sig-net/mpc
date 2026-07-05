@@ -75,7 +75,6 @@ impl CatchupIter {
         #[cfg(feature = "bench")]
         crate::bench::add_fetch_time(start.elapsed());
 
-
         self.next_block = batch_end;
     }
 
