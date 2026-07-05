@@ -1,4 +1,6 @@
 pub mod abi;
+#[cfg(feature = "bench")]
+pub mod bench;
 mod client;
 mod config;
 mod indexer;

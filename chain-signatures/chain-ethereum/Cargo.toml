@@ -27,6 +27,7 @@ tracing.workspace = true
 
 [features]
 helios = ["dep:helios"]
+bench = []
 
 [dev-dependencies]
 mockito.workspace = true
