@@ -396,6 +396,32 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         })
     }
 
+    /// Construct an `EthereumIndexer` for tests with a pre-built `EthereumClient`
+    /// (so a mockito URL can be injected) and a parsed `contract_address`.
+    ///
+    /// All other fields take sensible test defaults: a fresh `Notify` for
+    /// `catchup_complete` and `None` for `live_blocks_rx`.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        eth: EthConfig,
+        state_manager: S,
+        telemetry: T,
+        client: Arc<EthereumClient>,
+        events_tx: mpsc::Sender<ChainEvent>,
+        contract_address: Address,
+    ) -> Self {
+        Self {
+            eth,
+            state_manager,
+            telemetry,
+            client,
+            events_tx,
+            contract_address,
+            catchup_complete: Arc::new(Notify::new()),
+            live_blocks_rx: None,
+        }
+    }
+
     async fn index_live_blocks(
         client: Arc<EthereumClient>,
         catchup_complete: Arc<Notify>,
@@ -1083,22 +1109,21 @@ impl<S: StateManager, T: ChainTelemetry> ChainStream for EthereumStream<S, T> {
 }
 #[cfg(test)]
 mod tests {
-    use super::{CatchupIter, EthConfig, EthereumClient, EthereumIndexer, MaybeBlock};
+    use super::{CatchupIter, EthereumClient, MaybeBlock};
     #[cfg(feature = "helios")]
     use crate::indexer_eth::indexer_eth_helios;
     use crate::test_utils;
     use alloy::eips::BlockNumberOrTag;
-    use alloy::primitives::{address, b256, Address};
+    use alloy::primitives::{address, b256};
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
-    use mpc_chain_integration_core::{ChainIndexer, MockStateManager, NoopChainTelemetry};
+    use mpc_chain_integration_core::ChainIndexer;
     use mpc_primitives::{
         BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
         LATEST_MPC_KEY_VERSION,
     };
     use serde_json::json;
     use std::sync::Arc;
-    use tokio::sync::{mpsc, Notify};
 
     fn missing_block_response(request_id: u64) -> serde_json::Value {
         json!({
@@ -1124,8 +1149,6 @@ mod tests {
     #[tokio::test]
     async fn missing_catchup_block_is_refetched() {
         let mut server = Server::new_async().await;
-        let state_manager = MockStateManager::new();
-        let (events_tx, mut events_rx) = mpsc::channel(1);
 
         server
             .mock("POST", "/")
@@ -1147,30 +1170,13 @@ mod tests {
             })))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(missing_block_response(2).to_string())
+            .with_body(test_utils::missing_block_response(2).to_string())
             .create_async()
             .await;
 
-        let mut indexer = EthereumIndexer {
-            eth: EthConfig {
-                account_sk: String::new(),
-                consensus_rpc_http_url: server.url(),
-                execution_rpc_http_url: server.url(),
-                contract_address: format!("{:x}", Address::ZERO),
-                network: "sepolia".to_string(),
-                helios_data_path: "/tmp/helios-test".to_string(),
-                refresh_finalized_interval: 100,
-                optimistic_requests: true,
-                light_client: false,
-            },
-            state_manager,
-            telemetry: NoopChainTelemetry,
-            client: Arc::new(test_utils::create_test_ethereum_client(&server.url()).await),
-            events_tx,
-            contract_address: Address::ZERO,
-            catchup_complete: Arc::new(Notify::new()),
-            live_blocks_rx: None,
-        };
+        let (mut indexer, mut events_rx) = test_utils::TestIndexerBuilder::new(server.url())
+            .build_with_rx()
+            .await;
 
         indexer
             .process_catchup(&MaybeBlock::Missing(BlockId::Number(
@@ -1187,28 +1193,12 @@ mod tests {
 
     #[tokio::test]
     async fn missing_catchup_block_returns_error_when_refetch_fails() {
-        let state_manager = MockStateManager::new();
-        let (events_tx, mut events_rx) = mpsc::channel(1);
-        let mut indexer = EthereumIndexer {
-            eth: EthConfig {
-                account_sk: String::new(),
-                consensus_rpc_http_url: String::new(),
-                execution_rpc_http_url: String::new(),
-                contract_address: format!("{:x}", Address::ZERO),
-                network: "sepolia".to_string(),
-                helios_data_path: "/tmp/helios-test".to_string(),
-                refresh_finalized_interval: 100,
-                optimistic_requests: true,
-                light_client: false,
-            },
-            state_manager,
-            telemetry: NoopChainTelemetry,
-            client: Arc::new(test_utils::create_test_ethereum_client("http://127.0.0.1:1").await),
-            events_tx,
-            contract_address: Address::ZERO,
-            catchup_complete: Arc::new(Notify::new()),
-            live_blocks_rx: None,
-        };
+        let (mut indexer, mut events_rx) =
+            test_utils::TestIndexerBuilder::new("http://127.0.0.1:1")
+                .client_url("http://127.0.0.1:1")
+                .rpc_urls("", "")
+                .build_with_rx()
+                .await;
 
         let err = indexer
             .process_catchup(&MaybeBlock::Missing(BlockId::Number(
@@ -1224,7 +1214,6 @@ mod tests {
     #[tokio::test]
     async fn wait_for_finalized_block_fails_after_budget_exhaustion() {
         let mut server = Server::new_async().await;
-        let (events_tx, _events_rx) = mpsc::channel(1);
 
         // Mock eth_getBlockByNumber(finalized) to always return null (simulating repeated 429/failure)
         // Should be called MAX_FINALIZED_FAILURES times
@@ -1236,31 +1225,16 @@ mod tests {
             })))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(missing_block_response(1).to_string())
+            .with_body(test_utils::missing_block_response(1).to_string())
             .expect(super::MAX_FINALIZED_FAILURES as usize)
             .create_async()
             .await;
 
-        let indexer = EthereumIndexer {
-            eth: EthConfig {
-                account_sk: String::new(),
-                consensus_rpc_http_url: server.url(),
-                execution_rpc_http_url: server.url(),
-                contract_address: format!("{:x}", Address::ZERO),
-                network: "sepolia".to_string(),
-                helios_data_path: "/tmp/helios-test".to_string(),
-                refresh_finalized_interval: 1, // fast retry for test
-                optimistic_requests: false,
-                light_client: false,
-            },
-            state_manager: MockStateManager::new(),
-            telemetry: NoopChainTelemetry,
-            client: Arc::new(test_utils::create_test_ethereum_client(&server.url()).await),
-            events_tx,
-            contract_address: Address::ZERO,
-            catchup_complete: Arc::new(Notify::new()),
-            live_blocks_rx: None,
-        };
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .optimistic_requests(false)
+            .refresh_finalized_interval(1)
+            .build()
+            .await;
 
         let err = indexer
             .wait_for_finalized_block(100)
@@ -1556,7 +1530,6 @@ mod tests {
             .create_async()
             .await;
 
-        let state_manager = MockStateManager::new();
         let sign_id = SignId::new([0x55; 32]);
         let tx = BidirectionalTx {
             id: BidirectionalTxId(tx_hash.0),
@@ -1577,31 +1550,13 @@ mod tests {
             from_address: **from_address,
             nonce: 0,
         };
-        state_manager
+
+        let builder = test_utils::TestIndexerBuilder::new(server.url());
+        builder
+            .state_manager
             .watch_execution(Chain::Ethereum, sign_id, tx)
             .await;
-
-        let (events_tx, _events_rx) = mpsc::channel(1);
-        let indexer = EthereumIndexer {
-            eth: EthConfig {
-                account_sk: String::new(),
-                consensus_rpc_http_url: server.url(),
-                execution_rpc_http_url: server.url(),
-                contract_address: format!("{:x}", Address::ZERO),
-                network: "sepolia".to_string(),
-                helios_data_path: "/tmp/helios-test".to_string(),
-                refresh_finalized_interval: 100,
-                optimistic_requests: true,
-                light_client: false,
-            },
-            state_manager,
-            telemetry: NoopChainTelemetry,
-            client: Arc::new(test_utils::create_test_ethereum_client(&server.url()).await),
-            events_tx,
-            contract_address: Address::ZERO,
-            catchup_complete: Arc::new(Notify::new()),
-            live_blocks_rx: None,
-        };
+        let indexer = builder.build().await;
 
         let events = indexer
             .collect_execution_confirmations(5, Vec::new())
