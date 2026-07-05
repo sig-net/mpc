@@ -101,7 +101,7 @@ test-log = { version = "0.2.12", features = ["log", "trace"] }
 [features]
 default = []
 # utilized for benchmarking the node:
-bench = ["mpc-chain-ethereum/bench"]
+bench = []
 # utilized by "integration-tests" package:
 test-feature = []
 # Show a debug page
