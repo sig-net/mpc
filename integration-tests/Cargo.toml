@@ -103,4 +103,5 @@ harness = false
 [features]
 default = []
 docker-test = []
+bench = ["mpc-chain-ethereum/bench", "mpc-node/bench"]
 helios = ["mpc-chain-ethereum/helios", "mpc-node/helios"]
