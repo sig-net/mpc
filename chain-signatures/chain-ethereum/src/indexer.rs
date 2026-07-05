@@ -67,7 +67,15 @@ impl CatchupIter {
             .map(|block_number| BlockId::Number(BlockNumberOrTag::Number(block_number)))
             .collect::<Vec<_>>();
 
+        #[cfg(feature = "bench")]
+        let start = std::time::Instant::now();
+
         self.buffered_blocks = self.client.get_blocks(&batch_block_ids).await.into_iter();
+
+        #[cfg(feature = "bench")]
+        crate::bench::add_fetch_time(start.elapsed());
+
+
         self.next_block = batch_end;
     }
 
@@ -969,6 +977,9 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
     }
 
     async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
+        #[cfg(feature = "bench")]
+        crate::bench::rpc_reset();
+
         // TODO: start from genesis block of contract deployment instead of
         // anchor_height so that we can start from the very beginning of
         // the history of the network in case where we do not have a checkpoint.
@@ -1007,11 +1018,19 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
                     ?block_id,
                     "ethereum catchup block missing from batch; refetching"
                 );
+
+                #[cfg(feature = "bench")]
+                let start = std::time::Instant::now();
+
                 let Some(block) = self.client.get_block(*block_id).await else {
                     anyhow::bail!(
                         "ethereum catchup block {block_id:?} is still unavailable after refetch"
                     )
                 };
+
+                #[cfg(feature = "bench")]
+                crate::bench::add_fetch_time(start.elapsed());
+
                 _block = block;
                 &_block
             }
@@ -1022,7 +1041,20 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             tracing::info!(height, "processed ethereum catchup block attempt");
         }
 
-        self.process_block(block).await
+        #[cfg(feature = "bench")]
+        let start_process = std::time::Instant::now();
+
+        self.process_block(block).await?;
+
+        #[cfg(feature = "bench")]
+        {
+            crate::bench::add_process_time(start_process.elapsed());
+            if crate::bench::inc_block() % 100 == 0 {
+                crate::bench::report_metrics("catchup_progress");
+            }
+        }
+
+        Ok(())
     }
 
     async fn process(&mut self, block: &Self::Block) -> anyhow::Result<()> {
@@ -1035,6 +1067,9 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
     }
 
     async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
+        #[cfg(feature = "bench")]
+        crate::bench::report_metrics("catchup_completed");
+
         self.events_tx
             .send(ChainEvent::CatchupCompleted)
             .await
