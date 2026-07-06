@@ -28,20 +28,39 @@ impl RetryConfig {
     }
 }
 
+/// Returns true if `s` contains `code` as a standalone number, i.e. not
+/// embedded in a longer digit run. Prevents ports, slots, or request ids from
+/// being mistaken for HTTP status codes (e.g. "127.0.0.1:40329" contains "403").
+fn contains_status_code(s: &str, code: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut start = 0;
+    while let Some(pos) = s[start..].find(code) {
+        let i = start + pos;
+        let end = i + code.len();
+        let before_ok = i == 0 || !bytes[i - 1].is_ascii_digit();
+        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_digit();
+        if before_ok && after_ok {
+            return true;
+        }
+        start = i + 1;
+    }
+    false
+}
+
 /// Helper to identify whether an RPC error should be retried.
 /// Protects against endlessly retrying terminal client errors (4xx).
 pub fn is_retryable(e: &anyhow::Error) -> bool {
     let s = e.to_string();
     // 408 Request Timeout and 429 Too Many Requests are retryable.
-    if s.contains("408") || s.contains("429") {
+    if contains_status_code(&s, "408") || contains_status_code(&s, "429") {
         return true;
     }
     // Other 4xx errors are generally client errors and should not be retried.
-    if s.contains("400")
-        || s.contains("401")
-        || s.contains("403")
-        || s.contains("404")
-        || s.contains("405")
+    if contains_status_code(&s, "400")
+        || contains_status_code(&s, "401")
+        || contains_status_code(&s, "403")
+        || contains_status_code(&s, "404")
+        || contains_status_code(&s, "405")
     {
         return false;
     }
@@ -159,4 +178,35 @@ macro_rules! retry_rpc {
             .await
             .map_err(|e| anyhow::anyhow!("{e} (exhausted after {} attempts)", attempt_counter + 1))
     }};
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_errors_are_not_retryable() {
+        for code in ["400", "401", "403", "404", "405"] {
+            let e = anyhow::anyhow!(
+                "HTTP status client error ({code} Some Reason) for url (http://127.0.0.1:1234/)"
+            );
+            assert!(!is_retryable(&e), "{code} should not be retryable");
+        }
+    }
+
+    #[test]
+    fn retryable_errors() {
+        for msg in [
+            // Regression: port 40329 contains "403"; the 500 must still be retried.
+            "HTTP status server error (500 Internal Server Error) for url (http://127.0.0.1:40329/)",
+            // Digits embedded in longer numbers (ports, slots) are not status codes.
+            "server error (500) for url (http://host:14290/)",
+            "error at slot 14005",
+            // 408/429 are explicitly retryable.
+            "HTTP status client error (408 Request Timeout)",
+            "HTTP status client error (429 Too Many Requests)",
+        ] {
+            assert!(is_retryable(&anyhow::anyhow!(msg)), "{msg:?} should be retryable");
+        }
+    }
 }
