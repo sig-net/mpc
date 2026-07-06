@@ -1,13 +1,12 @@
 use crate::backlog::Backlog;
-use crate::protocol::{Chain, IndexedSignRequest, Sign};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::{SignBidirectionalEventExt, SignStatus};
 use mpc_chain_integration_core::ChainTelemetry;
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{
-    BidirectionalTx, BidirectionalTxId, ExecutionOutcome, RespondBidirectionalEvent, SignId,
-    SignKind, Signature, SignatureRespondedEvent,
+    BidirectionalTx, BidirectionalTxId, Chain, ExecutionOutcome, IndexedSignRequest,
+    RespondBidirectionalEvent, Sign, SignId, SignKind, Signature, SignatureRespondedEvent,
 };
 use tokio::sync::mpsc;
 

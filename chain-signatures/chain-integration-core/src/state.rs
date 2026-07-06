@@ -17,6 +17,9 @@ pub trait StateManager: Send + Sync + Clone + 'static {
         &self,
         chain: Chain,
     ) -> HashMap<BidirectionalTxId, (SignId, BidirectionalTx)>;
+
+    /// Set the processed block height for a specific chain.
+    async fn set_processed_block(&self, chain: Chain, height: u64);
 }
 
 /// Type alias to make clippy happy
@@ -49,16 +52,15 @@ impl StateManager for MockStateManager {
             .cloned()
             .unwrap_or_default()
     }
+
+    async fn set_processed_block(&self, chain: Chain, height: u64) {
+        self.processed_blocks.write().await.insert(chain, height);
+    }
 }
 
 impl MockStateManager {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Set the processed block height for a specific chain.
-    pub async fn set_processed_block(&self, chain: Chain, height: u64) {
-        self.processed_blocks.write().await.insert(chain, height);
     }
 
     /// Register a bidirectional transaction awaiting execution on `chain`.
