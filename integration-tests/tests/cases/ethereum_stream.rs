@@ -403,6 +403,20 @@ async fn stream_ethereum(
     );
     let indexer_task = tokio::spawn(pipeline.run());
 
+    // Wait until the pipeline completes Recovery → Catchup → Live so the
+    // anchor/subscription is established before callers submit transactions.
+    timeout(Duration::from_secs(30), async {
+        loop {
+            match stream.next_event().await {
+                Some(ChainEvent::CatchupCompleted) => return Ok(()),
+                Some(_) => continue,
+                None => anyhow::bail!("pipeline shut down before reaching Live state"),
+            }
+        }
+    })
+    .await
+    .context("timed out waiting for pipeline to reach Live state")??;
+
     Ok(StartedEthereumStream {
         stream,
         _indexer_task: indexer_task,
