@@ -210,7 +210,7 @@ impl<T, U> JoinMap<T, U> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.mapping.is_empty()
+        self.tasks.is_empty()
     }
 }
 

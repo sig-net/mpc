@@ -1,7 +1,7 @@
 use async_trait::async_trait;
+use mpc_indexer_core::{ChainIndexer, ChainStream};
 use mpc_node::protocol::IndexedSignRequest;
 use mpc_node::rpc::RpcAction;
-use mpc_node::stream::{ChainIndexer, ChainStream};
 use mpc_primitives::{Chain, ChainEvent, SignKind};
 use std::sync::Arc;
 use std::time::Duration;
@@ -136,7 +136,10 @@ impl InnerMockStream {
                 continue;
             }
 
-            block.push(ChainEvent::SignRequest(request.clone()))
+            block.push(ChainEvent::SignRequest {
+                request: request.clone(),
+                block_timestamp: None,
+            });
         }
 
         self.future_blocks.push(block);

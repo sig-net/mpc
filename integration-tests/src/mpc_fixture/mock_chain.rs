@@ -44,7 +44,10 @@ impl MockChain {
         let mut inner = self.inner.lock().await;
         let events: Vec<ChainEvent> = requests
             .iter()
-            .map(|r| ChainEvent::SignRequest(r.clone()))
+            .map(|r| ChainEvent::SignRequest {
+                request: r.clone(),
+                block_timestamp: None,
+            })
             .collect();
         inner.distribute_events(&events).await;
     }

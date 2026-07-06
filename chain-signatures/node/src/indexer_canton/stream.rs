@@ -1,14 +1,13 @@
 use crate::protocol::Chain;
 use crate::rpc::CantonClient;
-use crate::stream::{ChainIndexer, ChainStream};
 
 use alloy::primitives::keccak256;
 use async_trait::async_trait;
 use futures_util::stream::{self, SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use mpc_indexer_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
 use mpc_primitives::{
-    ChainEvent, ChainTelemetry, RespondBidirectionalEvent, ScalarExt, Signature,
-    SignatureRespondedEvent, StateManager,
+    ChainEvent, RespondBidirectionalEvent, ScalarExt, Signature, SignatureRespondedEvent,
 };
 use std::collections::HashSet;
 use std::ops::Range;
@@ -444,9 +443,12 @@ async fn process_canton_event(
                 let request_id = canton_event.generate_request_id();
                 let entropy: [u8; 32] = keccak256(request_id).into();
                 match canton_event.generate_sign_request(entropy) {
-                    Ok(indexed) => {
+                    Ok(request) => {
                         if events_tx
-                            .send(ChainEvent::SignRequest(indexed))
+                            .send(ChainEvent::SignRequest {
+                                request,
+                                block_timestamp: None,
+                            })
                             .await
                             .is_err()
                         {

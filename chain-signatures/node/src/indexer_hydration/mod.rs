@@ -14,8 +14,9 @@ use anyhow::{anyhow, Result};
 use k256::elliptic_curve::sec1::FromEncodedPoint;
 use k256::{AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_crypto::ScalarExt as _;
+use mpc_indexer_core::ChainTelemetry;
 use mpc_primitives::{
-    ChainTelemetry, CheckpointDigest, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
+    CheckpointDigest, IndexedSignRequest, RespondBidirectionalEvent, SignArgs,
     SignBidirectionalEvent, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
 };
