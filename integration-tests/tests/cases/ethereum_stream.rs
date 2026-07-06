@@ -27,6 +27,8 @@ use mpc_primitives::{
     SignId, SignKind, LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
@@ -397,6 +399,7 @@ async fn stream_ethereum(
         node_client,
         0,
         "test.near".parse().unwrap(),
+        Arc::new(AtomicBool::new(false)),
     );
     let indexer_task = tokio::spawn(pipeline.run());
 

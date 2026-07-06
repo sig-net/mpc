@@ -1,6 +1,9 @@
 pub mod ops;
 pub mod pipeline;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
@@ -53,6 +56,17 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
         }
     };
 
+    // Out-of-band flag shared with the pipeline to immediately veto forwarding
+    // during regression recovery. The pipeline sets this to `false` at the top
+    // of `handle_recovery()` — before any async work — so `run_stream` stops
+    // forwarding buffered events that may be from a diverged fork, even before
+    // the in-band `CatchupInProgress` marker is dequeued from the event channel.
+    // The pipeline sets it back to `true` when catchup completes.
+    //
+    // Reconnect does NOT clear this flag: buffered events during a reconnect
+    // are from valid blocks and safe to forward. Reconnect relies solely on the
+    // in-band `CatchupInProgress` marker for its caught-up gating.
+    let pipeline_caught_up = Arc::new(AtomicBool::new(false));
     let pipeline = ChainPipeline::new(
         indexer,
         checkpoints_rx.clone(),
@@ -62,6 +76,7 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
         node_client,
         threshold,
         contract_watcher.account_id().clone(),
+        pipeline_caught_up.clone(),
     );
     let indexer_task = tokio::spawn(pipeline.run());
 
@@ -72,6 +87,13 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
         let Some(event) = stream.next_event().await else {
             break;
         };
+        // Combine in-band marker (caught_up) with the pipeline's out-of-band
+        // flag. During regression recovery the pipeline sets the flag to false
+        // immediately, vetoing forwarding for any buffered events that may be
+        // from a diverged chain state — even before the in-band CatchupInProgress
+        // marker is dequeued. CatchupCompleted uses only the local caught_up to
+        // keep requeue/resume tied to marker ordering.
+        let effectively_caught_up = caught_up && pipeline_caught_up.load(Ordering::Acquire);
         match event {
             ChainEvent::CatchupInProgress => {
                 caught_up = false;
@@ -95,15 +117,26 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
                     telemetry.request_indexed();
                 }
 
-                if let Err(err) =
-                    process_sign_request(request, sign_tx.clone(), backlog.clone(), caught_up).await
+                if let Err(err) = process_sign_request(
+                    request,
+                    sign_tx.clone(),
+                    backlog.clone(),
+                    effectively_caught_up,
+                )
+                .await
                 {
                     tracing::error!(?err, %chain, "failed to process sign request");
                 }
             }
             ChainEvent::Respond(ev) => {
-                if let Err(err) =
-                    process_respond_event(ev, sign_tx.clone(), root_pk, &backlog, caught_up).await
+                if let Err(err) = process_respond_event(
+                    ev,
+                    sign_tx.clone(),
+                    root_pk,
+                    &backlog,
+                    effectively_caught_up,
+                )
+                .await
                 {
                     tracing::error!(?err, %chain, "failed to process respond event");
                 }
@@ -114,7 +147,7 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
                     sign_tx.clone(),
                     root_pk,
                     &backlog,
-                    caught_up,
+                    effectively_caught_up,
                 )
                 .await
                 {
@@ -122,7 +155,15 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
                 }
             }
             ChainEvent::Block(block) => {
-                process_block_event(chain, block, &backlog, &sign_tx, caught_up, &telemetry).await;
+                process_block_event(
+                    chain,
+                    block,
+                    &backlog,
+                    &sign_tx,
+                    effectively_caught_up,
+                    &telemetry,
+                )
+                .await;
             }
             ChainEvent::ExecutionConfirmed {
                 tx_id,
@@ -140,7 +181,7 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
                     &backlog,
                     sign_tx.clone(),
                     chain,
-                    caught_up,
+                    effectively_caught_up,
                 )
                 .await
                 {
@@ -175,6 +216,7 @@ mod tests {
     };
     use near_primitives::types::AccountId;
     use std::collections::HashMap;
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::sync::{mpsc, oneshot, watch};
@@ -417,6 +459,7 @@ mod tests {
             NodeClient::new(&Default::default()),
             0,
             "test.near".parse().unwrap(),
+            Arc::new(AtomicBool::new(false)),
         );
 
         pipeline.run().await;
@@ -458,6 +501,7 @@ mod tests {
             NodeClient::new(&Default::default()),
             0,
             "test.near".parse().unwrap(),
+            Arc::new(AtomicBool::new(false)),
         );
         pipeline.run().await;
 
@@ -1328,6 +1372,7 @@ mod tests {
             NodeClient::new(&Default::default()),
             0,
             "test.near".parse().unwrap(),
+            Arc::new(AtomicBool::new(false)),
         );
         let task_handle = tokio::spawn(pipeline.run());
 
@@ -1415,6 +1460,7 @@ mod tests {
             NodeClient::new(&Default::default()),
             0,
             "test.near".parse().unwrap(),
+            Arc::new(AtomicBool::new(false)),
         );
         let task_handle = tokio::spawn(pipeline.run());
 
@@ -1519,6 +1565,7 @@ mod tests {
             node_client,
             0,
             "test.near".parse().unwrap(),
+            Arc::new(AtomicBool::new(false)),
         );
         let handle = tokio::spawn(pipeline.run());
 
@@ -1690,6 +1737,7 @@ mod tests {
             NodeClient::new(&Default::default()),
             0,
             "test.near".parse().unwrap(),
+            Arc::new(AtomicBool::new(false)),
         );
 
         let task_handle = tokio::spawn(pipeline.run());
@@ -1752,6 +1800,7 @@ mod tests {
             NodeClient::new(&Default::default()),
             0,
             "test.near".parse().unwrap(),
+            Arc::new(AtomicBool::new(false)),
         );
 
         let task_handle = tokio::spawn(pipeline.run());
@@ -1799,6 +1848,7 @@ mod tests {
             NodeClient::new(&Default::default()),
             0,
             "test.near".parse().unwrap(),
+            Arc::new(AtomicBool::new(false)),
         );
 
         let task_handle = tokio::spawn(pipeline.run());

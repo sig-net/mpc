@@ -16,7 +16,17 @@ pub enum ChainEvent {
     Respond(SignatureRespondedEvent),
     RespondBidirectional(RespondBidirectionalEvent),
 
-    /// Catchup is starting; live events must be buffered until completion.
+    /// In-band marker: catchup is starting. When `run_stream` dequeues this it
+    /// sets its local `caught_up = false`, which prevents forwarding subsequent
+    /// events to signing and arms the requeue/resume logic for the next
+    /// `CatchupCompleted`. Sent at the start of both reconnect and recovery.
+    ///
+    /// For reconnect this is the *only* gate — buffered events before this
+    /// marker are from valid blocks and safe to forward. For recovery, the
+    /// out-of-band `pipeline_caught_up` AtomicBool provides an additional
+    /// immediate veto so that events buffered ahead of this marker (which may
+    /// be from a diverged fork) are not forwarded while waiting for this marker
+    /// to be dequeued.
     CatchupInProgress,
 
     /// Catchup has completed and live events may be forwarded to the signer.

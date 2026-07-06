@@ -1,3 +1,6 @@
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+
 use anyhow::{Context as _, Result};
 use integration_tests::canton::{
     test_evm_type2_anvil_cases, test_sign_request_event, CantonSandbox,
@@ -53,6 +56,7 @@ async fn stream_canton(
         node_client,
         0,
         "test.near".parse().unwrap(),
+        Arc::new(AtomicBool::new(false)),
     );
     tokio::spawn(pipeline.run());
     Ok((stream, cp_tx))

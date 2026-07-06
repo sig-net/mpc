@@ -6,6 +6,9 @@ use crate::protocol::request::Sign;
 use crate::protocol::Chain;
 use crate::types::CheckpointWatcher;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use futures_util::StreamExt;
 use mpc_chain_integration_core::{ChainIndexer, LiveStreamStatus};
 use near_account_id::AccountId;
@@ -25,6 +28,11 @@ pub struct ChainPipeline<I: ChainIndexer> {
     node_client: NodeClient,
     threshold: usize,
     my_account_id: AccountId,
+    /// Out-of-band flag that vetoes forwarding during regression recovery.
+    /// Set to `false` at the start of `handle_recovery()` so that `run_stream`
+    /// stops forwarding buffered live events to signing immediately, without
+    /// waiting for the in-band `CatchupInProgress` marker to be dequeued.
+    pipeline_caught_up: Arc<AtomicBool>,
 }
 
 impl<I: ChainIndexer> ChainPipeline<I> {
@@ -38,6 +46,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         node_client: NodeClient,
         threshold: usize,
         my_account_id: AccountId,
+        pipeline_caught_up: Arc<AtomicBool>,
     ) -> Self {
         Self::from_state(
             ChainStreaming::Recovery { load_local: true },
@@ -49,6 +58,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             node_client,
             threshold,
             my_account_id,
+            pipeline_caught_up,
         )
     }
 
@@ -63,6 +73,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         node_client: NodeClient,
         threshold: usize,
         my_account_id: AccountId,
+        pipeline_caught_up: Arc<AtomicBool>,
     ) -> Self {
         Self {
             indexer,
@@ -74,6 +85,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             node_client,
             threshold,
             my_account_id,
+            pipeline_caught_up,
         }
     }
 
@@ -120,8 +132,12 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         let chain = I::CHAIN;
         tracing::info!(%chain, load_local, "starting checkpoint recovery or regression");
 
-        // Signal catchup-in-progress immediately so run_stream stops forwarding
-        // buffered live events to signing while recovery is in progress.
+        // Out-of-band veto: immediately prevent run_stream from forwarding
+        // buffered events that may be from a diverged/forked chain state.
+        self.pipeline_caught_up.store(false, Ordering::Release);
+
+        // In-band marker: resets run_stream's local caught_up so the next
+        // CatchupCompleted triggers requeue/resume exactly once.
         if let Err(err) = self.indexer.notify_catchup_in_progress().await {
             tracing::warn!(?err, %chain, "failed to signal catchup in progress at recovery start");
         }
@@ -214,6 +230,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         }
 
         tracing::info!(%chain, "catchup completed => transitioning to livestream");
+        self.pipeline_caught_up.store(true, Ordering::Release);
         if let Err(err) = self.indexer.notify_catchup_completed().await {
             tracing::warn!(?err, %chain, "failed to signal catchup completion");
         }
@@ -271,6 +288,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                             return match anchor_height {
                                 Some(anchor_height) => self.transition_to_catchup(anchor_height).await,
                                 None => {
+                                    self.pipeline_caught_up.store(true, Ordering::Release);
                                     if let Err(err) = self.indexer.notify_catchup_completed().await {
                                         tracing::warn!(
                                             ?err,

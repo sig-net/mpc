@@ -1,3 +1,6 @@
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use cait_sith::protocol::Participant;
 use integration_tests::containers::Solana;
@@ -76,8 +79,23 @@ async fn stream_solana_with_backlog(
         node_client,
         0,
         "test.near".parse().unwrap(),
+        Arc::new(AtomicBool::new(false)),
     );
     tokio::spawn(pipeline.run());
+
+    // Wait until the pipeline completes Recovery → Catchup → Live so the WS
+    // subscription is established before callers begin submitting transactions.
+    timeout(Duration::from_secs(30), async {
+        loop {
+            match stream.next_event().await {
+                Some(ChainEvent::CatchupCompleted) => return Ok(()),
+                Some(_) => continue,
+                None => anyhow::bail!("pipeline shut down before reaching Live state"),
+            }
+        }
+    })
+    .await
+    .context("timed out waiting for pipeline to reach Live state")??;
 
     Ok((stream, cp_tx))
 }
