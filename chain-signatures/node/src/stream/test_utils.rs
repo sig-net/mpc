@@ -1,10 +1,4 @@
 //! Shared test fixtures for the `stream` module tests.
-//!
-//! These helpers encode the *fixture* values (deterministic seeds, well-known
-//! test addresses, schema bytes, etc.) that the stream tests repeatedly need.
-//! They are compiled only under `cfg(test)` and are re-exported up to the
-//! `stream` module so both `stream::tests` and `stream::ops::tests` can reach
-//! them via `crate::stream::test_utils`.
 
 use crate::backlog::Backlog;
 use crate::mesh::connection::NodeStatus;
@@ -60,9 +54,6 @@ pub fn test_bidirectional_tx(id: u8, source_chain: Chain, target_chain: Chain) -
 }
 
 /// A deterministic `SignArgs` fixture seeded by `id`.
-///
-/// `..Default::default()` absorbs any fields added to `SignArgs` in the future
-/// so this fixture stays forward-compatible without touching every call site.
 pub fn test_sign_args(id: u8) -> SignArgs {
     SignArgs {
         entropy: [id; 32],
@@ -125,8 +116,6 @@ pub fn signature_responded_event(
     }
 }
 
-/// A minimal `RpcChannel` backed by an `mpsc` channel, for tests that don't
-/// need to assert on RPC traffic.
 pub fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<RpcAction>) {
     let (tx, rx) = mpsc::channel(buffer);
     (RpcChannel { tx }, rx)
@@ -134,14 +123,6 @@ pub fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<RpcAction>
 
 /// Drive `run_stream` against a two-node mesh backed by in-memory Mockito HTTP
 /// servers (one per participant) that always serve an empty checkpoint map.
-///
-/// This centralizes the ~40 lines of identical setup shared by the Ethereum
-/// completion/requeue stream tests: `ContractStateWatcher`, the mock `/checkpoint`
-/// endpoints, `MeshState` with two active participants, the `NodeClient`, the
-/// `RpcChannel`, and the `run_stream` call itself.
-///
-/// `servers` are kept alive for the duration of `run_stream` because they are
-/// bound to the lifetime of this call, matching the previous inline behavior.
 pub async fn run_stream_with_two_node_mesh<S: ChainStream>(
     client: S,
     sign_tx: mpsc::Sender<SignCommand>,
