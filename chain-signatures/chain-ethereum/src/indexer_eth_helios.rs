@@ -1,5 +1,4 @@
-use crate::indexer::MaybeBlock;
-use crate::EthConfig;
+use crate::{EthConfig, MaybeBlock};
 use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::Address;
 use alloy::primitives::Bytes;

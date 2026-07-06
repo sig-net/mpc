@@ -1,6 +1,7 @@
 pub mod abi;
 mod client;
 mod config;
+mod event_parsing;
 mod indexer;
 mod indexer_eth_direct_rpc;
 #[cfg(feature = "helios")]
@@ -11,5 +12,6 @@ mod respond_bidirectional;
 mod test_utils;
 mod util;
 
+pub use client::MaybeBlock;
 pub use config::EthConfig;
 pub use indexer::EthereumStream;
