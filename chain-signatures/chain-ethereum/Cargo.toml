@@ -2,6 +2,7 @@
 name = "mpc-chain-ethereum"
 edition = "2021"
 version.workspace = true
+description = "Ethereum chain integration for MPC"
 
 [dependencies]
 alloy.workspace = true

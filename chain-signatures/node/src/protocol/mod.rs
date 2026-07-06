@@ -21,7 +21,6 @@ pub use message::{Message, MessageChannel};
 pub use mpc_primitives::{
     Chain, ConsensusCheckpointDigest, IndexedSignRequest, RespondBidirectionalTx,
 };
-pub use request::Sign;
 pub use state::{Node, NodeState};
 
 use crate::config::Config;

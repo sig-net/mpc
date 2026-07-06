@@ -22,7 +22,7 @@ use crate::util::{JoinMap, TimeoutBudget};
 use cait_sith::protocol::Participant;
 use lru::LruCache;
 use mpc_contract::config::ProtocolConfig;
-use mpc_primitives::{IndexedSignRequest, SignId, SignKind};
+use mpc_primitives::{IndexedSignRequest, Sign, SignId, SignKind};
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;
@@ -73,15 +73,6 @@ const SIGN_POSIT_INBOX_LABEL: &str = "sign_posit_inbox";
 /// Upper bound on the number of recently-completed/aborted sign IDs we remember
 /// so that late-arriving peer posit messages do not re-create orphan inboxes.
 const MAX_DEAD_IDS: usize = 4096;
-
-#[derive(Debug, Clone, PartialEq)]
-#[allow(clippy::large_enum_variant)]
-pub enum Sign {
-    Request(IndexedSignRequest),
-    Completion(SignId),
-    Checkpoint(IndexedSignRequest),
-    AbortChain(Chain),
-}
 
 pub struct SignatureSpawner {
     contract: ContractStateWatcher,

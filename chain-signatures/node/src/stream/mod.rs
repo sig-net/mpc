@@ -4,7 +4,6 @@ pub mod pipeline;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::Sign;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::stream::ops::{
     process_block_event, process_execution_confirmed, process_respond_bidirectional_event,
@@ -16,7 +15,7 @@ use crate::types::CheckpointWatcher;
 pub use crate::stream::pipeline::ChainPipeline;
 
 use mpc_chain_integration_core::{ChainIndexer, ChainStream, ChainTelemetry};
-use mpc_primitives::ChainEvent;
+use mpc_primitives::{ChainEvent, Sign};
 use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,7 +166,7 @@ mod tests {
     use crate::backlog::Backlog;
     use crate::mesh::{connection::NodeStatus, MeshState};
     use crate::node_client::NodeClient;
-    use crate::protocol::{ParticipantInfo, Sign};
+    use crate::protocol::ParticipantInfo;
     use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
     use crate::storage::checkpoint_storage::CheckpointStorage;
     use crate::util::current_unix_timestamp;
@@ -177,7 +176,7 @@ mod tests {
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
     use mpc_chain_solana::Pubkey;
     use mpc_primitives::{
-        Chain, CheckpointDigest, IndexedSignRequest, SignArgs, SignId, Signature,
+        Chain, CheckpointDigest, IndexedSignRequest, Sign, SignArgs, SignId, Signature,
         SignatureRespondedEvent,
     };
     use near_primitives::types::AccountId;
