@@ -45,14 +45,12 @@ impl SignState {
     pub fn bump_round(&mut self) {
         let prev_round = self.round;
         self.round = std::cmp::max(self.round + 1, self.highest_seen_round);
-        // Reset the budget for the new attempt
         self.budget.reset(ORGANIZE_POSIT_TIMEOUT);
         self.permit = None;
         tracing::debug!(prev_round, new_round = self.round, "bumped round");
     }
 
-    /// When receiving posit message for future rounds, store them away until
-    /// that round is reached.
+    /// Buffer a posit message for a future round until that round is reached.
     pub fn store_future_posit_message(&mut self, msg: SignTaskMessage) {
         let SignTaskMessage::PositMessage {
             round: peer_round,
@@ -71,8 +69,7 @@ impl SignState {
         self.buffered_messages.insert(from, msg);
     }
 
-    /// Remove a buffered message for processing, if there is one for the
-    /// current round.
+    /// Take a buffered message to process, if one exists for the current round.
     pub fn take_buffered_posit_message(&mut self) -> Option<SignTaskMessage> {
         if self.highest_seen_round == self.round {
             let key = self.buffered_messages.keys().next().copied()?;

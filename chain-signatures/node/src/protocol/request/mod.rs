@@ -53,10 +53,7 @@ const ROUND_INTERVAL: usize = 512;
 /// Max number of concurrent proposers, with unlimited deliberators.
 const MAX_CONCURRENT_PROPOSERS: usize = 4;
 
-/// The default timeout budget for organizing and posit phases.
-///
-/// Tests have stable network conditions and don't benefit from a longer
-/// timeout. It only makes them run for longer.
+/// Timeout budget for organizing and posit phases (shorter under test for speed).
 const ORGANIZE_POSIT_TIMEOUT: Duration = Duration::from_secs(if cfg!(feature = "test-feature") {
     5
 } else {
@@ -74,33 +71,36 @@ const SIGN_POSIT_INBOX_LABEL: &str = "sign_posit_inbox";
 /// so that late-arriving peer posit messages do not re-create orphan inboxes.
 const MAX_DEAD_IDS: usize = 4096;
 
+/// A command fed to the spawner
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Sign {
     Request(IndexedSignRequest),
     Completion(SignId),
     Checkpoint(IndexedSignRequest),
+    /// Chain-wide abort of all in-flight signature tasks.
     AbortChain(Chain),
 }
 
+/// Router and lifecycle owner for all in-flight sign tasks: one task per
+/// `sign_id`, plus the posit inboxes, delayed-response watchers, and dedup state
+/// that outlive individual tasks. (TODO: needs refactoring)
 pub struct SignatureSpawner {
     contract: ContractStateWatcher,
     /// Presignature storage that maintains all presignatures.
     presignatures: PresignatureStorage,
     /// Consolidated signature tasks - one per sign_id, each task is an async task handling complete lifecycle
     tasks: JoinMap<SignId, Result<(), SignError>>,
-    /// Buffered inboxes for posit messages, allowing us to queue before tasks spawn
+    /// Posit inboxes, buffering messages that arrive before a task spawns.
     inboxes: HashMap<SignId, Subscriber<SignTaskMessage>>,
-    /// Tracks delay watcher tasks that will increment the delayed metric when response time exceeds expected
+    /// Watchers that increment the delayed metric when response time exceeds expected.
     delayed_watchers: HashMap<SignId, JoinHandle<()>>,
     /// Maps in-flight tasks to their chain, enabling bulk abort on checkpoint regression.
     task_chains: HashMap<SignId, Chain>,
-    /// LRU cache of recently completed/aborted sign IDs. Prevents late-arriving
-    /// peer posit messages from re-creating orphan inboxes after a task is gone.
+    /// Recently completed/aborted sign IDs; prevents late peer posit messages from recreating orphan inboxes.
     dead_ids: LruCache<SignId, ()>,
     mesh_state: watch::Receiver<MeshState>,
-    /// Limiter that limits the amount of sign tasks from progressing and utilizing
-    /// too much compute otherwise the whole system will be flooded with requests.
+    /// Caps concurrent sign-task progress so requests don't flood the system's compute.
     limiter: SignLimiter,
 
     msg: MessageChannel,
@@ -114,8 +114,7 @@ impl SignatureSpawner {
         crate::metrics::requests::SIGN_QUEUE_SIZE.set(self.tasks.len() as i64);
     }
 
-    /// Creates a signature task for a new sign request
-    /// The task will handle organizing, posit, and generation internally
+    /// Spawn a signature task that internally handles the organize, posit, and generation phases.
     fn spawn_task(
         &mut self,
         governance: &GovernanceInfo,
@@ -129,8 +128,7 @@ impl SignatureSpawner {
         self.task_chains.insert(sign_id, indexed.chain);
         tracing::info!(?sign_id, "spawning signature task");
 
-        // Spawn a reactive watcher task that increments the delayed metric
-        // if the signature is not completed within the expected response time
+        // Watcher that increments the delayed metric if not completed within the expected response time.
         let chain = indexed.chain;
         let unix_timestamp_indexed = indexed.unix_timestamp_indexed;
         let expected_response_time_secs = chain.expected_response_time_secs();
@@ -179,7 +177,7 @@ impl SignatureSpawner {
         let posit_queue = SignPositWorkQueue::new();
         let drain_into = Arc::clone(&posit_queue);
         tokio::spawn(async move {
-            // None was returned => the Subscriber was dropped
+            // recv returns None when the Subscriber is dropped.
             while let Some(msg) = rx.recv().await {
                 drain_into.push(msg);
             }
@@ -242,6 +240,7 @@ impl SignatureSpawner {
         inbox.report_capacity();
     }
 
+    /// A peer/chain reported this signature done: tear down and abort our task.
     fn handle_completion(&mut self, sign_id: SignId) {
         self.retire_task(sign_id, "completion");
         if self.tasks.abort(sign_id) {
@@ -251,6 +250,7 @@ impl SignatureSpawner {
         }
     }
 
+    /// A task's `JoinMap` entry finished (or was cancelled): tear down and log.
     fn handle_task_exit(&mut self, result: Result<(SignId, Result<(), SignError>), SignId>) {
         self.observe_queue_size();
         let (sign_id, result) = match result {
@@ -279,6 +279,7 @@ impl SignatureSpawner {
         self.dead_ids.put(sign_id, ());
     }
 
+    /// Cancel the delayed-response watcher for a task that ended in time.
     fn abort_delayed_watcher(&mut self, sign_id: SignId, reason: &str) {
         if let Some(watcher) = self.delayed_watchers.remove(&sign_id) {
             tracing::info!(?sign_id, reason = %reason, "aborting delayed watcher");
@@ -347,6 +348,8 @@ impl SignatureSpawner {
         self.observe_queue_size();
     }
 
+    /// Main loop: multiplex incoming requests, posit messages, task exits, config
+    /// changes, and governance updates until the request channel closes.
     async fn run(mut self, mut sign_rx: mpsc::Receiver<Sign>, mut cfg: watch::Receiver<Config>) {
         let mut posits = self.msg.subscribe_signature_posit().await;
         let mut protocol = cfg.borrow().protocol.clone();

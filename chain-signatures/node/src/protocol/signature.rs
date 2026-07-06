@@ -1,6 +1,4 @@
-//! Signature generation protocol: the sibling of `triple` and `presignature`.
-//! Runs the cait-sith signing protocol once a posit round has agreed on a
-//! presignature and participant set.
+//! Signature generation: runs the cait-sith signing protocol once a posit round agrees on a presignature and participant set.
 
 use crate::backlog::Backlog;
 use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId, SignatureMessage};
@@ -31,9 +29,7 @@ pub(crate) enum SignError {
     Aborted,
 }
 
-/// Posit messages routed to a running signature task. Driven by the `request`
-/// layer; the generator also consumes them to reject late `Propose`s while
-/// generating.
+/// Posit messages routed to a running signature task; the generator consumes them to reject late `Propose`s while generating.
 pub(crate) enum SignTaskMessage {
     PositMessage {
         presignature_id: PresignatureId,
@@ -43,14 +39,15 @@ pub(crate) enum SignTaskMessage {
     },
 }
 
-/// The subset of `SignTask` the generator needs, so it never sees the
-/// request-fulfillment machinery (limiter, organizer, posit state).
 pub(crate) struct GenerateCtx {
     pub governance: GovernanceInfo,
     pub msg: MessageChannel,
+    /// Publishes the finished signature (proposer only).
     pub rpc: RpcChannel,
+    /// Marks the request as publishing once a signature is produced.
     pub backlog: Backlog,
     pub cfg: ProtocolConfig,
+    /// Only used to label the debug page.
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
     pub node_account_id: near_account_id::AccountId,
 }
@@ -58,20 +55,26 @@ pub(crate) struct GenerateCtx {
 /// An ongoing signature generator.
 pub(crate) struct SignGenerator {
     protocol: SignatureProtocol,
+    /// On drop, clears this (already consumed) presignature's in-memory `using`
+    /// reservation. Does not return it to the pool — commit already removed it.
     dropper: PresignatureTakenDropper,
     participants: Vec<Participant>,
+    /// Node that proposed this round (determines who publishes).
     proposer: Participant,
     indexed: IndexedSignRequest,
+    /// Start time, for the generation timeout and latency metrics.
     created: Instant,
     timeout: Duration,
     inbox: mpsc::Receiver<SignatureMessage>,
-    msg: MessageChannel, // Needed for Drop
+    /// Kept so `Drop` can unsubscribe and clear buffered messages.
+    msg: MessageChannel,
 
     #[cfg(feature = "debug-page")]
     debug_view: crate::web::debug::DebugPageTaskHandle,
 }
 
 impl SignGenerator {
+    /// Fetch the committed presignature, apply the delta, and build the cait-sith signing protocol.
     pub(crate) async fn new(
         ctx: &GenerateCtx,
         proposer: Participant,
@@ -133,7 +136,7 @@ impl SignGenerator {
         })
     }
 
-    /// Receive the next message for the signature protocol; error out on the timeout being reached
+    /// Receive the next protocol message, erroring out on timeout.
     async fn recv(&mut self) -> Result<SignatureMessage, SignError> {
         let sign_id = self.indexed.id;
         let presignature_id = self.dropper.id;
@@ -155,6 +158,7 @@ impl SignGenerator {
         }
     }
 
+    /// Poke-drive the protocol to completion: relay messages, reject late posits, and on `Return` publish the signature (proposer) and mark the request publishing.
     pub(crate) async fn run(
         mut self,
         ctx: &GenerateCtx,
@@ -200,7 +204,6 @@ impl SignGenerator {
 
             match action {
                 Action::Wait => {
-                    // Wait for the next set of messages to arrive.
                     tokio::select! {
                         result = self.recv() => {
                             let msg = result.inspect_err(|_| {
@@ -340,9 +343,7 @@ impl SignGenerator {
                     }
 
                     if let SignKind::SignBidirectional(event) = &self.indexed.kind {
-                        // Note: The promotion to Bidirectional will happen when we receive the
-                        // SignatureRespondedEvent in the Solana indexer, which has the signature data.
-                        // For now, we just complete the signature generation. The indexer will handle the promotion.
+                        // Promotion to Bidirectional happens later, when the Solana indexer sees the SignatureRespondedEvent.
                         tracing::info!(
                             ?sign_id,
                             source_chain = ?self.indexed.chain,
@@ -366,6 +367,7 @@ impl SignGenerator {
     }
 }
 
+/// Reconstruct the full signature into a [`PublishState`], or `None` if reconstruction fails.
 fn publish_status(
     public_key: mpc_crypto::PublicKey,
     indexed: &IndexedSignRequest,
@@ -391,6 +393,7 @@ fn publish_status(
 }
 
 impl Drop for SignGenerator {
+    /// Unsubscribe and drop any buffered messages for this signature.
     fn drop(&mut self) {
         let msg = self.msg.clone();
         let sign_id = self.indexed.id;
@@ -401,6 +404,8 @@ impl Drop for SignGenerator {
         });
     }
 }
+
+/// A presignature the generator will consume: already taken in memory, or still in storage (fetched with a timeout once generation starts).
 pub(crate) enum PendingPresignature {
     Available(Box<PresignatureTaken>),
     InStorage(PresignatureId, Participant, PresignatureStorage),
@@ -414,6 +419,7 @@ impl PendingPresignature {
         }
     }
 
+    /// Resolve to the taken presignature, polling storage up to `timeout` if not already in memory.
     pub async fn fetch(self, timeout: Duration) -> Option<PresignatureTaken> {
         let (id, storage, owner) = match self {
             PendingPresignature::Available(taken) => return Some(*taken),

@@ -4,6 +4,7 @@ use super::task::{SignGenerating, SignPhase};
 use super::work_queue::SignPositWorkQueue;
 use super::*;
 
+/// Posit phase — see [`super::task::SignPhase::Posit`].
 pub struct SignPositor {
     pub proposer: Participant,
     pub active: BTreeSet<Participant>,
@@ -12,7 +13,7 @@ pub struct SignPositor {
 }
 
 impl SignPositor {
-    /// Deliberator waits for the proposer to send a Propose message with a presignature_id.
+    /// Deliberator: wait for the proposer's Propose, reply Accept.
     async fn wait_propose(
         ctx: &mut SignTask,
         state: &mut SignState,
@@ -24,7 +25,7 @@ impl SignPositor {
         let remaining = state.budget.remaining();
         let outcome = tokio::time::timeout(remaining, async {
             loop {
-                // Prioritize buffered messages, if any for the current round
+                // Prioritize buffered messages for the current round.
                 let task_msg = match state.take_buffered_posit_message() {
                     Some(buffered) => buffered,
                     None => posit_queue.recv().await,
@@ -186,6 +187,8 @@ impl SignPositor {
         Ok(presignature_id)
     }
 
+    /// Run the posit round. Returns `Generating` with the accepted participants,
+    /// or `Organizing` on rejection/timeout.
     pub async fn advance(
         &mut self,
         ctx: &mut SignTask,
@@ -387,6 +390,7 @@ impl SignPositor {
         })
     }
 
+    /// Proposer-only: broadcast Start to all Accepters and return that set.
     async fn start_with_current_accepts(
         ctx: &SignTask,
         state: &mut SignState,

@@ -4,9 +4,11 @@ use super::state::SignState;
 use super::task::SignPhase;
 use super::*;
 
+/// Organizing phase — see [`super::task::SignPhase::Organizing`].
 pub struct SignOrganizer;
 
 impl SignOrganizer {
+    /// Seeded by request entropy so all nodes pick the same proposer.
     fn proposer_per_round(
         round: usize,
         participants: &[Participant],
@@ -52,6 +54,8 @@ impl SignOrganizer {
         }
     }
 
+    /// Returns `Posit` once a proposer is chosen, else loops back to
+    /// `Organizing` on timeout / missing presignature / no slot.
     pub async fn advance(&mut self, ctx: &mut SignTask, state: &mut SignState) -> SignPhase {
         let sign_id = ctx.sign_id;
         let threshold = ctx.governance.threshold;

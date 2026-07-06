@@ -1,3 +1,5 @@
+//! Concurrency limiter for in-flight sign tasks, backed by a resizable semaphore.
+
 use super::*;
 
 #[derive(Debug)]
