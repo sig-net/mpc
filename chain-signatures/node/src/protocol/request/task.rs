@@ -76,8 +76,7 @@ impl GeneratingPhase {
                         ?round,
                         "failed to commit presignature reservation, reorganizing"
                     );
-                    state.bump_round();
-                    return SignPhase::Organizing(OrganizingPhase);
+                    return state.reorganize();
                 }
             }
         } else {
@@ -107,8 +106,7 @@ impl GeneratingPhase {
                     ?err,
                     "failed to create generator, reorganizing"
                 );
-                state.bump_round();
-                return SignPhase::Organizing(OrganizingPhase);
+                return state.reorganize();
             }
         };
 
@@ -124,8 +122,7 @@ impl GeneratingPhase {
                     me=?ctx.governance.me,
                     "signature generation failed, reorganizing"
                 );
-                state.bump_round();
-                SignPhase::Organizing(OrganizingPhase)
+                state.reorganize()
             }
         }
     }
@@ -188,8 +185,9 @@ impl SignTask {
                     }
                     is_running = self.refresh_governance(&contract_state);
                     if is_running {
-                        // Back in running; reset to Organizing.
-                        phase = SignPhase::Organizing(OrganizingPhase);
+                        // Back in running; the interrupted attempt is abandoned and we
+                        // retry with a fresh round, like any other failed attempt.
+                        phase = state.reorganize();
                     } else {
                         tracing::info!(
                             ?sign_id,
