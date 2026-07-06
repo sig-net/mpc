@@ -6,9 +6,13 @@ use crate::protocol::contract::primitives::ParticipantInfo;
 use crate::sign_bidirectional::SignStatus;
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::ops::process_execution_confirmed;
+use crate::stream::test_utils::{
+    respond_event, test_bidirectional_tx, test_canton_sign_bidirectional_request,
+    test_indexed_request, test_sign_args,
+};
 use crate::util::current_unix_timestamp;
 
-use alloy::primitives::{Address, B256};
+use alloy::primitives::B256;
 use cait_sith::protocol::Participant;
 use k256::{ProjectivePoint, Scalar};
 use mpc_chain_canton::CantonChainCtx;
@@ -18,80 +22,6 @@ use near_primitives::types::AccountId;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::time::timeout;
-
-fn test_indexed_request(
-    sign_id: SignId,
-    chain: Chain,
-    args: SignArgs,
-    unix_timestamp_indexed: u64,
-    kind: SignKind,
-) -> IndexedSignRequest {
-    IndexedSignRequest::new(sign_id, args, chain, unix_timestamp_indexed, kind)
-}
-
-fn test_bidirectional_tx(id: u8, source_chain: Chain, target_chain: Chain) -> BidirectionalTx {
-    BidirectionalTx {
-        id: BidirectionalTxId(B256::from([id; 32]).0),
-        sender: [0u8; 32],
-        serialized_transaction: vec![1, 2, 3],
-        source_chain,
-        target_chain,
-        caip2_id: target_chain.caip2_chain_id().to_string(),
-        key_version: 1,
-        deposit: 1000,
-        path: "test_path".to_string(),
-        algo: "ECDSA".to_string(),
-        dest: "0x1234567890123456789012345678901234567890".to_string(),
-        params: "{}".to_string(),
-        output_deserialization_schema: vec![],
-        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-        request_id: [id; 32],
-        from_address: **Address::ZERO,
-        nonce: 0,
-    }
-}
-
-fn test_sign_args(id: u8) -> SignArgs {
-    SignArgs {
-        entropy: [id; 32],
-        epsilon: Scalar::from(1u64),
-        payload: Scalar::from(2u64),
-        path: "test".to_string(),
-        key_version: 1,
-    }
-}
-
-fn test_canton_sign_bidirectional_request(
-    sign_id: SignId,
-    sign_event_contract_id: &str,
-) -> IndexedSignRequest {
-    let ctx = CantonChainCtx {
-        sign_event_contract_id: sign_event_contract_id.to_string(),
-    };
-    let chain_ctx =
-        Some(borsh::to_vec(&ctx).expect("CantonChainCtx Borsh serialization is infallible"));
-    IndexedSignRequest::sign_bidirectional(
-        sign_id,
-        test_sign_args(sign_id.request_id[0]),
-        Chain::Canton,
-        current_unix_timestamp(),
-        SignBidirectionalEvent {
-            sender: [7u8; 32],
-            serialized_transaction: vec![1, 2, 3],
-            caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
-            key_version: 1,
-            deposit: 0,
-            path: "test_path".to_string(),
-            algo: "ECDSA".to_string(),
-            dest: "0x1234567890123456789012345678901234567890".to_string(),
-            params: "{}".to_string(),
-            output_deserialization_schema: vec![],
-            respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-            chain: Chain::Canton,
-            chain_ctx,
-        },
-    )
-}
 
 #[test]
 fn signature_respond_event_conversion() {
@@ -1187,14 +1117,6 @@ async fn requeue_pending_sign_requests_is_chain_scoped() {
         matches!(no_extra, Err(_) | Ok(None)),
         "expected no cross-chain requeue, got: {no_extra:?}"
     );
-}
-
-fn respond_event(sign_id: SignId, signature: Signature) -> RespondBidirectionalEvent {
-    RespondBidirectionalEvent {
-        request_id: sign_id.request_id,
-        signature,
-        chain: Chain::Solana,
-    }
 }
 
 #[tokio::test]

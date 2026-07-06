@@ -161,5 +161,9 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
 }
 
 #[cfg(test)]
+#[path = "test_utils.rs"]
+mod test_utils;
+
+#[cfg(test)]
 #[path = "stream_tests.rs"]
 mod stream_tests;

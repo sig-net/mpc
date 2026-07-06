@@ -5,16 +5,14 @@ use crate::node_client::NodeClient;
 use crate::protocol::ParticipantInfo;
 use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use crate::storage::checkpoint_storage::CheckpointStorage;
+use crate::stream::test_utils::{signature_responded_event, test_sign_args};
 use crate::util::current_unix_timestamp;
 use async_trait::async_trait;
 use k256::{AffinePoint, Scalar};
 use mockito::Server;
 use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
 use mpc_chain_solana::Pubkey;
-use mpc_primitives::{
-    Chain, CheckpointDigest, IndexedSignRequest, SignArgs, SignCommand, SignId, Signature,
-    SignatureRespondedEvent,
-};
+use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, SignCommand, SignId, Signature};
 use near_primitives::types::AccountId;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -324,13 +322,7 @@ async fn test_stream_handles_sign_and_respond() {
     let sign_id = SignId::new([1u8; 32]);
 
     // construct an IndexedSignRequest
-    let args = SignArgs {
-        entropy: [0u8; 32],
-        epsilon: Scalar::from(1u64),
-        payload: Scalar::from(2u64),
-        path: "test".to_string(),
-        key_version: 1,
-    };
+    let args = test_sign_args(0);
 
     let request = IndexedSignRequest::sign(
         sign_id,
@@ -344,11 +336,7 @@ async fn test_stream_handles_sign_and_respond() {
 
     // Prepare a respond event that matches the sign id
     let mpc_sig = mpc_crypto::generate_signature(&root_sk, &args);
-    let sig_responded = SignatureRespondedEvent {
-        request_id: sign_id.request_id,
-        signature: mpc_sig,
-        chain: Chain::Solana,
-    };
+    let sig_responded = signature_responded_event(sign_id, mpc_sig, Chain::Solana);
     let client = SolanaTestStream::new(vec![
         Some(ChainEvent::CatchupCompleted),
         Some(ChainEvent::SignRequest {
@@ -505,13 +493,7 @@ async fn test_stream_handles_sign_bidirectional_block_and_recover() {
 
     // prepare a SignBidirectional request
     let sign_id = SignId::new([42u8; 32]);
-    let args = SignArgs {
-        entropy: [0u8; 32],
-        epsilon: Scalar::from(1u64),
-        payload: Scalar::from(2u64),
-        path: "test".to_string(),
-        key_version: 1,
-    };
+    let args = test_sign_args(0);
     let program_id = Pubkey::new_unique();
     // Minimal legacy unsigned Ethereum tx encoded as RLP so sign_and_hash can parse it
     let mut rlp_s = rlp::RlpStream::new_list(9);
@@ -588,11 +570,7 @@ async fn test_stream_handles_sign_bidirectional_block_and_recover() {
         .await;
 
     // Prepare a SignatureRespondedEvent that will advance to bidirectional and register watcher
-    let sig_responded = SignatureRespondedEvent {
-        request_id: sign_id.request_id,
-        signature: mpc_sig,
-        chain: Chain::Solana,
-    };
+    let sig_responded = signature_responded_event(sign_id, mpc_sig, Chain::Solana);
     events_tx
         .send(ChainEvent::Respond(sig_responded))
         .await
@@ -734,13 +712,7 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
     let storage = CheckpointStorage::in_memory();
     let seeded_backlog = Backlog::persisted(storage.clone());
     let sign_id = SignId::new([99u8; 32]);
-    let args = SignArgs {
-        entropy: [9u8; 32],
-        epsilon: Scalar::from(1u64),
-        payload: Scalar::from(2u64),
-        path: "test".to_string(),
-        key_version: 1,
-    };
+    let args = test_sign_args(9);
 
     seeded_backlog
         .insert(IndexedSignRequest::sign(
@@ -759,11 +731,7 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
     let root_pk = root_sk.public_key().to_projective().to_affine();
     let mpc_sig = mpc_crypto::generate_signature(&root_sk, &args);
 
-    let respond = SignatureRespondedEvent {
-        request_id: sign_id.request_id,
-        signature: mpc_sig,
-        chain: Chain::Ethereum,
-    };
+    let respond = signature_responded_event(sign_id, mpc_sig, Chain::Ethereum);
 
     let client = EthereumTestStream::new(vec![
         Some(ChainEvent::Respond(respond)),
@@ -839,13 +807,7 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
     let storage = CheckpointStorage::in_memory();
     let seeded_backlog = Backlog::persisted(storage.clone());
     let sign_id = SignId::new([100u8; 32]);
-    let args = SignArgs {
-        entropy: [5u8; 32],
-        epsilon: Scalar::from(1u64),
-        payload: Scalar::from(2u64),
-        path: "test".to_string(),
-        key_version: 1,
-    };
+    let args = test_sign_args(5);
     let recovered_timestamp = current_unix_timestamp();
     let replayed_timestamp = recovered_timestamp.saturating_add(1);
 
@@ -959,13 +921,7 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
     backlog
         .insert(IndexedSignRequest::sign(
             sign_id,
-            SignArgs {
-                entropy: [9u8; 32],
-                epsilon: Scalar::from(1u64),
-                payload: Scalar::from(2u64),
-                path: "test".to_string(),
-                key_version: 1,
-            },
+            test_sign_args(9),
             Chain::Solana,
             current_unix_timestamp(),
         ))
@@ -1043,13 +999,7 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
     backlog
         .insert(IndexedSignRequest::sign(
             sign_id,
-            SignArgs {
-                entropy: [10u8; 32],
-                epsilon: Scalar::from(1u64),
-                payload: Scalar::from(2u64),
-                path: "test".to_string(),
-                key_version: 1,
-            },
+            test_sign_args(10),
             Chain::Solana,
             current_unix_timestamp(),
         ))
@@ -1139,13 +1089,7 @@ async fn test_recovery_transitions_to_catchup() {
     let storage = CheckpointStorage::in_memory();
     let backlog = Backlog::persisted(storage.clone());
     let sign_id = SignId::new([111u8; 32]);
-    let args = SignArgs {
-        entropy: [1u8; 32],
-        epsilon: Scalar::from(1u64),
-        payload: Scalar::from(2u64),
-        path: "test".to_string(),
-        key_version: 1,
-    };
+    let args = test_sign_args(1);
 
     backlog
         .insert(IndexedSignRequest::sign(
@@ -1224,13 +1168,7 @@ async fn test_runtime_regression_triggers_recovery() {
     let storage = CheckpointStorage::in_memory();
     let backlog = Backlog::persisted(storage.clone());
     let sign_id = SignId::new([222u8; 32]);
-    let args = SignArgs {
-        entropy: [2u8; 32],
-        epsilon: Scalar::from(1u64),
-        payload: Scalar::from(2u64),
-        path: "test".to_string(),
-        key_version: 1,
-    };
+    let args = test_sign_args(2);
 
     backlog
         .insert(IndexedSignRequest::sign(
