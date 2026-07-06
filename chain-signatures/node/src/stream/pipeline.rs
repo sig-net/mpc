@@ -119,6 +119,13 @@ impl<I: ChainIndexer> ChainPipeline<I> {
     async fn handle_recovery(&mut self, load_local: bool) -> Option<ChainStreaming> {
         let chain = I::CHAIN;
         tracing::info!(%chain, load_local, "starting checkpoint recovery or regression");
+
+        // Signal catchup-in-progress immediately so run_stream stops forwarding
+        // buffered live events to signing while recovery is in progress.
+        if let Err(err) = self.indexer.notify_catchup_in_progress().await {
+            tracing::warn!(?err, %chain, "failed to signal catchup in progress at recovery start");
+        }
+
         crate::mesh::wait_threshold_active(&mut self.mesh_state.clone(), self.threshold).await;
 
         if load_local {
@@ -250,6 +257,12 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         let chain = I::CHAIN;
         tracing::warn!(%chain, "livestream disconnected; reconnecting");
 
+        // Signal catchup-in-progress immediately so run_stream stops forwarding
+        // buffered live events to signing while reconnect is in progress.
+        if let Err(err) = self.indexer.notify_catchup_in_progress().await {
+            tracing::warn!(?err, %chain, "failed to signal catchup in progress at reconnect start");
+        }
+
         loop {
             let wait_before_retry = tokio::select! {
                 livestream_result = self.indexer.livestream() => {
@@ -322,6 +335,10 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         }
     }
 
+    // Callers (handle_recovery, handle_reconnect) already emit CatchupInProgress
+    // at their start to drain buffered live events. This second emission ensures
+    // any new caller of transition_to_catchup is safe without relying on the
+    // caller to signal first.
     async fn transition_to_catchup(&mut self, anchor_height: u64) -> Option<ChainStreaming> {
         let chain = I::CHAIN;
         if let Err(err) = self.indexer.notify_catchup_in_progress().await {

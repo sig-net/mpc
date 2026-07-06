@@ -1803,8 +1803,14 @@ mod tests {
 
         let task_handle = tokio::spawn(pipeline.run());
 
-        // Wait for CatchupCompleted on the event channel, which proves
-        // Reconnect → handle_reconnect → anchorless → notify_catchup_completed → Live.
+        // Reconnect → handle_reconnect emits CatchupInProgress immediately,
+        // then anchorless path emits CatchupCompleted → Live.
+        let event = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("should emit catchup-in-progress marker")
+            .expect("event channel should stay open");
+        assert!(matches!(event, ChainEvent::CatchupInProgress));
+
         let event = timeout(Duration::from_secs(2), rx.recv())
             .await
             .expect("should emit caught-up marker")
