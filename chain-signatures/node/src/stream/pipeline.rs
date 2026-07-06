@@ -15,8 +15,24 @@ use near_account_id::AccountId;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 
-/// Timeout for a single block processed in the live stream before the watchdog triggers a pipeline restart.
-const LIVE_BLOCK_TIMEOUT: Duration = Duration::from_secs(300);
+/// Per-chain watchdog timeout. Chains whose `process_next_block` synchronously
+/// waits for finality (Ethereum, ~12 min on mainnet) need a timeout that exceeds
+/// their finality cadence to avoid false restarts. We derive it from the chain's
+/// `expected_finality_time_secs` with a buffer, flooring at 300s for fast chains.
+///
+/// RPC rate-limiting is handled separately by `MAX_FINALIZED_FAILURES` in
+/// `wait_for_finalized_block`, which bails after ~200s — faster than this
+/// watchdog for any chain.
+fn live_block_timeout(chain: Chain) -> Duration {
+    const FLOOR_SECS: u64 = 300;
+    const BUFFER_SECS: u64 = 300;
+    Duration::from_secs(
+        chain
+            .expected_finality_time_secs()
+            .saturating_add(BUFFER_SECS)
+            .max(FLOOR_SECS),
+    )
+}
 
 pub struct ChainPipeline<I: ChainIndexer> {
     indexer: I,
@@ -239,6 +255,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
 
     async fn handle_live(&mut self) -> Option<ChainStreaming> {
         let chain = I::CHAIN;
+        let timeout = live_block_timeout(chain);
         loop {
             tokio::select! {
                 status = self.indexer.process_next_block(), if self.backlog.has_checkpoint_slot(chain).await => {
@@ -261,9 +278,10 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                         PipelineAction::Shutdown => return None,
                     }
                 }
-                // Watchdog timeout: if no block is processed within the timeout, restart the pipeline.
-                _ = tokio::time::sleep(LIVE_BLOCK_TIMEOUT) => {
-                    tracing::warn!(%chain, ?LIVE_BLOCK_TIMEOUT, "live block processing timed out; restarting pipeline");
+                // Watchdog: if no block is processed within the chain-specific timeout,
+                // the background producer is assumed stalled and the pipeline restarts.
+                _ = tokio::time::sleep(timeout) => {
+                    tracing::warn!(%chain, ?timeout, "live block processing timed out; restarting pipeline");
                     return Some(ChainStreaming::Recovery { load_local: false });
                 }
             }
