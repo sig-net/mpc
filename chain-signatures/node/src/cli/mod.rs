@@ -14,7 +14,7 @@ use crate::node_client::{self, NodeClient};
 use crate::protocol::contract::ProtocolState;
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
-use crate::protocol::request::{Sign, SignatureSpawnerTask};
+use crate::protocol::request::{SignCommand, SignatureSpawnerTask};
 use crate::protocol::state::{Node, NodeStateWatcher};
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
@@ -678,7 +678,7 @@ impl ProtocolHandles {
         account_id: &AccountId,
         override_config: Option<OverrideConfig>,
         network: NetworkConfig,
-        sign_rx: mpsc::Receiver<Sign>,
+        sign_rx: mpsc::Receiver<SignCommand>,
         node_client: &NodeClient,
         contract_watcher: &ContractStateWatcher,
         key_storage: SecretNodeStorageVariant,
@@ -743,7 +743,7 @@ impl ProtocolHandles {
 #[allow(clippy::too_many_arguments)]
 async fn spawn_indexers(
     chains: ChainConfigs,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
     rpc_channel: RpcChannel,
     backlog: Backlog,
     contract_watcher: ContractStateWatcher,

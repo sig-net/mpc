@@ -645,7 +645,7 @@ fn parse_schema_fields(schema_json_bytes: &[u8]) -> anyhow::Result<Vec<AbiField>
 #[derive(Clone)]
 pub struct SignBidirectionalSignature {
     pub public_key: mpc_crypto::PublicKey,
-    pub indexed: IndexedSignRequest,
+    pub request: IndexedSignRequest,
     pub signature: Signature,
 }
 

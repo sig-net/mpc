@@ -1,14 +1,14 @@
 //! Per-request driver: the `SignPhase` state machine and the `SignTask` that owns it.
 
 use super::metrics::PhaseDurations;
-use super::organize::SignOrganizer;
-use super::posit::SignPositor;
+use super::organize::OrganizingPhase;
+use super::posit::PositPhase;
 use super::state::SignState;
 use super::work_queue::SignPositWorkQueue;
 use super::*;
 
 /// Generating phase — see [`SignPhase::Generating`].
-pub struct SignGenerating {
+pub struct GeneratingPhase {
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
     pub presignature: Option<PresignatureReservation>,
@@ -20,12 +20,12 @@ pub struct SignGenerating {
 pub enum SignPhase {
     /// Wait for threshold active peers and elect the round's proposer; if that's
     /// us, take a concurrency slot, reserve a presignature, and broadcast Propose.
-    Organizing(SignOrganizer),
+    Organizing(OrganizingPhase),
     /// Agree on the presignature and participant set: the proposer collects
     /// Accepts and broadcasts Start; each deliberator does Propose -> Accept -> Start.
-    Posit(SignPositor),
+    Posit(PositPhase),
     /// Commit the reserved presignature and run the signing protocol to completion.
-    Generating(SignGenerating),
+    Generating(GeneratingPhase),
     /// Terminal: the request finished (`Ok`) or aborted (`Err`).
     Complete(Result<(), SignError>),
 }
@@ -46,7 +46,7 @@ impl SignPhase {
     }
 }
 
-impl SignGenerating {
+impl GeneratingPhase {
     async fn advance(
         &mut self,
         ctx: &SignTask,
@@ -54,7 +54,7 @@ impl SignGenerating {
         posit_queue: &SignPositWorkQueue,
     ) -> SignPhase {
         // We successfully committed to generating; future rounds should be unrestricted.
-        state.pause_proposing = None;
+        state.pause_proposing_until = None;
 
         let sign_id = ctx.sign_id;
         let round = state.round;
@@ -77,7 +77,7 @@ impl SignGenerating {
                         "failed to commit presignature reservation, reorganizing"
                     );
                     state.bump_round();
-                    return SignPhase::Organizing(SignOrganizer);
+                    return SignPhase::Organizing(OrganizingPhase);
                 }
             }
         } else {
@@ -93,7 +93,7 @@ impl SignGenerating {
         let generator = match SignGenerator::new(
             &gen_ctx,
             self.proposer,
-            state.indexed().clone(),
+            state.request().clone(),
             presignature_pending,
             self.accepted_participants.clone(),
         )
@@ -108,7 +108,7 @@ impl SignGenerating {
                     "failed to create generator, reorganizing"
                 );
                 state.bump_round();
-                return SignPhase::Organizing(SignOrganizer);
+                return SignPhase::Organizing(OrganizingPhase);
             }
         };
 
@@ -125,7 +125,7 @@ impl SignGenerating {
                     "signature generation failed, reorganizing"
                 );
                 state.bump_round();
-                SignPhase::Organizing(SignOrganizer)
+                SignPhase::Organizing(OrganizingPhase)
             }
         }
     }
@@ -150,15 +150,15 @@ impl SignTask {
     /// Drive the signature generation state machine to completion
     pub async fn run(
         mut self,
-        indexed: IndexedSignRequest,
+        request: IndexedSignRequest,
         mesh_state: watch::Receiver<MeshState>,
         posit_queue: Arc<SignPositWorkQueue>,
     ) -> Result<(), SignError> {
         let sign_id = self.sign_id;
         tracing::info!(?sign_id, governance = ?self.governance, "signature task starting...");
 
-        let mut state = SignState::new(indexed, mesh_state);
-        let mut phase = SignPhase::Organizing(SignOrganizer);
+        let mut state = SignState::new(request, mesh_state);
+        let mut phase = SignPhase::Organizing(OrganizingPhase);
         let mut contract_watcher = self.contract.clone();
 
         // If started during resharing, we won't advance until back in running state.
@@ -189,7 +189,7 @@ impl SignTask {
                     is_running = self.refresh_governance(&contract_state);
                     if is_running {
                         // Back in running; reset to Organizing.
-                        phase = SignPhase::Organizing(SignOrganizer);
+                        phase = SignPhase::Organizing(OrganizingPhase);
                     } else {
                         tracing::info!(
                             ?sign_id,
@@ -207,7 +207,7 @@ impl SignTask {
                         if matches!(&new_phase, SignPhase::Organizing(_)) {
                             SIGN_REQUEST_LOOPS
                                 .with_label_values(&[
-                                    state.indexed().chain.as_str(),
+                                    state.request().chain.as_str(),
                                     step.as_str(),
                                 ])
                                 .inc();
@@ -217,7 +217,7 @@ impl SignTask {
                     match new_phase {
                         SignPhase::Complete(result) => {
                             if result.is_ok() {
-                                durations.emit(state.indexed().chain);
+                                durations.emit(state.request().chain);
                             }
                             return result;
                         }

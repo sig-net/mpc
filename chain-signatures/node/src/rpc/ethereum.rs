@@ -141,7 +141,7 @@ impl EthClient {
     async fn execute_batch_publish(&self, actions: &mut Vec<PublishAction>) {
         let signatures: HashMap<SignId, Signature> = actions
             .iter()
-            .map(|action| (action.indexed.id, action.signature))
+            .map(|action| (action.request.id, action.signature))
             .collect();
 
         let retry_config = RetryConfig {
@@ -301,16 +301,16 @@ impl EthClient {
         signatures: &HashMap<SignId, Signature>,
     ) -> anyhow::Result<()> {
         let num_requests = actions.len();
-        let sign_ids: Vec<_> = actions.iter().map(|a| a.indexed.id).collect();
+        let sign_ids: Vec<_> = actions.iter().map(|a| a.request.id).collect();
 
         let responses: Vec<ChainSignatures::Response> = actions
             .iter()
             .map(|action| {
                 let mpc_sig = signatures
-                    .get(&action.indexed.id)
+                    .get(&action.request.id)
                     .expect("signature not found");
                 ChainSignatures::Response {
-                    requestId: action.indexed.id.request_id.into(),
+                    requestId: action.request.id.request_id.into(),
                     signature: mpc_sig.into(),
                 }
             })

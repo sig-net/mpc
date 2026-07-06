@@ -47,8 +47,8 @@ use task::SignTask;
 
 pub(crate) use work_queue::SignPositWorkQueue;
 
-/// The round interval to search for a proposer in the organizing phase.
-const ROUND_INTERVAL: usize = 512;
+/// How many rounds ahead the organizing phase searches for an active proposer.
+const PROPOSER_SEARCH_WINDOW: usize = 512;
 
 /// Max number of concurrent proposers, with unlimited deliberators.
 const MAX_CONCURRENT_PROPOSERS: usize = 4;
@@ -74,7 +74,7 @@ const MAX_DEAD_IDS: usize = 4096;
 /// A command fed to the spawner
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
-pub enum Sign {
+pub enum SignCommand {
     Request(IndexedSignRequest),
     Completion(SignId),
     Checkpoint(IndexedSignRequest),
@@ -118,19 +118,19 @@ impl SignatureSpawner {
     fn spawn_task(
         &mut self,
         governance: &GovernanceInfo,
-        indexed: IndexedSignRequest,
+        request: IndexedSignRequest,
         cfg: ProtocolConfig,
     ) {
-        let sign_id = indexed.id;
+        let sign_id = request.id;
         // Ensure we don't retain the dead tag from a prior incarnation of this
         // sign ID (e.g. after regression recovery re-queues a completed request).
         self.dead_ids.pop(&sign_id);
-        self.task_chains.insert(sign_id, indexed.chain);
+        self.task_chains.insert(sign_id, request.chain);
         tracing::info!(?sign_id, "spawning signature task");
 
         // Watcher that increments the delayed metric if not completed within the expected response time.
-        let chain = indexed.chain;
-        let unix_timestamp_indexed = indexed.unix_timestamp_indexed;
+        let chain = request.chain;
+        let unix_timestamp_indexed = request.unix_timestamp_indexed;
         let expected_response_time_secs = chain.expected_response_time_secs();
         let already_elapsed = crate::util::unix_elapsed(unix_timestamp_indexed);
         let remaining_time =
@@ -138,7 +138,7 @@ impl SignatureSpawner {
         let is_proposer = Arc::new(AtomicBool::new(false));
         // prevent incrementing delayed metric for already delayed requests
         if remaining_time > Duration::from_secs(0)
-            && !matches!(indexed.kind, SignKind::Checkpoint(_))
+            && !matches!(request.kind, SignKind::Checkpoint(_))
         {
             let is_proposer = Arc::clone(&is_proposer);
             let watcher = tokio::spawn(async move {
@@ -200,7 +200,7 @@ impl SignatureSpawner {
         // Spawn the async task with organizing loop
         self.tasks.spawn(
             sign_id,
-            task.run(indexed, self.mesh_state.clone(), posit_queue),
+            task.run(request, self.mesh_state.clone(), posit_queue),
         );
     }
 
@@ -301,12 +301,17 @@ impl SignatureSpawner {
         self.abort_delayed_watcher(sign_id, reason);
     }
 
-    fn handle_request(&mut self, governance: &GovernanceInfo, sign: Sign, cfg: &ProtocolConfig) {
+    fn handle_sign(
+        &mut self,
+        governance: &GovernanceInfo,
+        sign: SignCommand,
+        cfg: &ProtocolConfig,
+    ) {
         match sign {
-            Sign::Completion(sign_id) => {
+            SignCommand::Completion(sign_id) => {
                 self.handle_completion(sign_id);
             }
-            Sign::Request(request) | Sign::Checkpoint(request) => {
+            SignCommand::Request(request) | SignCommand::Checkpoint(request) => {
                 let sign_id = request.id;
 
                 // Skip if we already have a task handling this request.
@@ -327,7 +332,7 @@ impl SignatureSpawner {
 
                 self.spawn_task(governance, request, cfg.clone());
             }
-            Sign::AbortChain(chain) => {
+            SignCommand::AbortChain(chain) => {
                 tracing::warn!(
                     ?chain,
                     "aborting all in-flight signature tasks on chain regression"
@@ -350,7 +355,11 @@ impl SignatureSpawner {
 
     /// Main loop: multiplex incoming requests, posit messages, task exits, config
     /// changes, and governance updates until the request channel closes.
-    async fn run(mut self, mut sign_rx: mpsc::Receiver<Sign>, mut cfg: watch::Receiver<Config>) {
+    async fn run(
+        mut self,
+        mut sign_rx: mpsc::Receiver<SignCommand>,
+        mut cfg: watch::Receiver<Config>,
+    ) {
         let mut posits = self.msg.subscribe_signature_posit().await;
         let mut protocol = cfg.borrow().protocol.clone();
 
@@ -367,7 +376,7 @@ impl SignatureSpawner {
                         tracing::warn!("signature spawner sign_rx closed, terminating");
                         break;
                     };
-                    self.handle_request(&governance, sign, &protocol);
+                    self.handle_sign(&governance, sign, &protocol);
                 }
                 Some((sign_id, presignature_id, round, from, action)) = posits.recv() => {
                     self.handle_posit(governance.me, sign_id, presignature_id, round, from, action);
@@ -422,7 +431,7 @@ impl SignatureSpawnerTask {
     #[allow(clippy::too_many_arguments)]
     pub fn run(
         my_account_id: near_account_id::AccountId,
-        sign_rx: mpsc::Receiver<Sign>,
+        sign_rx: mpsc::Receiver<SignCommand>,
         contract: ContractStateWatcher,
         config: watch::Receiver<Config>,
         presignature_storage: PresignatureStorage,
@@ -544,7 +553,7 @@ mod tests {
         assert!(!spawner.test_dead_ids_contains(&sign_id));
 
         // Step 2: Abort chain → inbox removed, task_chains cleared, marked dead
-        spawner.handle_request(&governance, Sign::AbortChain(Chain::Solana), &cfg);
+        spawner.handle_sign(&governance, SignCommand::AbortChain(Chain::Solana), &cfg);
         assert!(!spawner.test_tasks_contains(sign_id));
         assert!(!spawner.test_inboxes_contains(&sign_id));
         assert!(!spawner.test_task_chains_contains(&sign_id));

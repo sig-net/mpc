@@ -3,7 +3,7 @@ use super::*;
 
 pub struct SignState {
     pub round: usize,
-    pub indexed: IndexedSignRequest,
+    pub request: IndexedSignRequest,
     pub mesh_state: watch::Receiver<MeshState>,
     /// Budget for the current organizing+posit attempt.
     pub budget: TimeoutBudget,
@@ -21,25 +21,25 @@ pub struct SignState {
     pub buffered_messages: HashMap<Participant, SignTaskMessage>,
     /// When Some, another group is already generating this signature.
     /// The timestamp is when proposing can be resumed.
-    pub pause_proposing: Option<std::time::Instant>,
+    pub pause_proposing_until: Option<std::time::Instant>,
 }
 
 impl SignState {
-    pub fn new(indexed: IndexedSignRequest, mesh_state: watch::Receiver<MeshState>) -> Self {
+    pub fn new(request: IndexedSignRequest, mesh_state: watch::Receiver<MeshState>) -> Self {
         Self {
             round: 0,
-            indexed,
+            request,
             mesh_state,
             budget: TimeoutBudget::new(ORGANIZE_POSIT_TIMEOUT),
             permit: None,
             highest_seen_round: 0,
             buffered_messages: HashMap::new(),
-            pause_proposing: None,
+            pause_proposing_until: None,
         }
     }
 
-    pub fn indexed(&self) -> &IndexedSignRequest {
-        &self.indexed
+    pub fn request(&self) -> &IndexedSignRequest {
+        &self.request
     }
 
     pub fn bump_round(&mut self) {
@@ -51,7 +51,7 @@ impl SignState {
     }
 
     /// Buffer a posit message for a future round until that round is reached.
-    pub fn store_future_posit_message(&mut self, msg: SignTaskMessage) {
+    pub fn buffer_future_posit_message(&mut self, msg: SignTaskMessage) {
         let SignTaskMessage::PositMessage {
             round: peer_round,
             from,

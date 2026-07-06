@@ -8,7 +8,7 @@ use mpc_node::protocol::message::SendMessage;
 use mpc_node::protocol::posit::{PositAction, PositRejectReason};
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::Message;
-use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState, Sign};
+use mpc_node::protocol::{Chain, IndexedSignRequest, ProtocolState, SignCommand};
 use mpc_node::storage::triple_storage::TriplePair;
 use mpc_primitives::SignId;
 use std::collections::BTreeMap;
@@ -295,8 +295,8 @@ async fn test_sign_request_during_resharing() {
     );
 }
 
-fn sign_request(seed: u8) -> Sign {
-    Sign::Request(IndexedSignRequest::sign(
+fn sign_request(seed: u8) -> SignCommand {
+    SignCommand::Request(IndexedSignRequest::sign(
         SignId::new([seed; 32]),
         super::helpers::test_sign_arg(seed),
         Chain::NEAR,
@@ -1076,7 +1076,7 @@ async fn test_sign_missing_presignature_after_posits() {
 /// generation pause after receiving enough AlreadyGenerating rejections.
 ///
 /// Setup:
-/// - Nodes 0 and 1 enter SignGenerating together, messages are gated to freeze their progress
+/// - Nodes 0 and 1 enter the Generating phase together, messages are gated to freeze their progress
 /// - Node 2 is excluded, one ORGANIZE_POSIT_TIMEOUT later, it tries to be a proposer
 /// - Nodes 0 and 1 reply with AlreadyGenerating.
 /// - The gate is released, signature messages flow, and the signature completes

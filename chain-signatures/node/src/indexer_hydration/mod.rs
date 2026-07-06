@@ -3,7 +3,7 @@ mod config;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::Sign;
+use crate::protocol::SignCommand;
 use crate::rpc::ContractStateWatcher;
 use crate::types::CheckpointWatcher;
 
@@ -314,7 +314,7 @@ pub(crate) fn ss58_address_from_account32(sender: [u8; 32]) -> String {
 #[allow(clippy::too_many_arguments)]
 pub async fn run<T: ChainTelemetry>(
     hydration: HydrationConfig,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
     backlog: Backlog,
     telemetry: T,
     mut contract_watcher: ContractStateWatcher,

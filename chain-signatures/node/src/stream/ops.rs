@@ -1,5 +1,5 @@
 use crate::backlog::Backlog;
-use crate::protocol::{Chain, IndexedSignRequest, Sign};
+use crate::protocol::{Chain, IndexedSignRequest, SignCommand};
 use crate::respond_bidirectional::CompletedTx;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::sign_bidirectional::{SignBidirectionalEventExt, SignStatus};
@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 pub(crate) async fn process_sign_request(
     sign_request: IndexedSignRequest,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
     backlog: Backlog,
     caught_up: bool,
 ) -> anyhow::Result<()> {
@@ -25,7 +25,7 @@ pub(crate) async fn process_sign_request(
 
     let chain = sign_request.chain;
     if caught_up {
-        if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
+        if let Err(err) = sign_tx.send(SignCommand::Request(sign_request)).await {
             tracing::error!(?err, %chain, "failed to send sign request into queue");
         }
     }
@@ -36,12 +36,12 @@ pub(crate) async fn process_sign_request(
 pub(crate) async fn requeue_pending_sign_requests(
     backlog: &Backlog,
     source_chain: Chain,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
 ) {
     for sign_request in backlog.take_requeueable_requests(source_chain).await {
         let sign_id = sign_request.id;
         let source_chain = sign_request.chain;
-        if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
+        if let Err(err) = sign_tx.send(SignCommand::Request(sign_request)).await {
             tracing::error!(
                 ?err,
                 ?sign_id,
@@ -105,7 +105,7 @@ fn verify_entry_signature(
 
 pub(crate) async fn process_respond_event(
     respond_event: SignatureRespondedEvent,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
     root_pk: mpc_primitives::PublicKey,
     backlog: &Backlog,
     caught_up: bool,
@@ -130,7 +130,7 @@ pub(crate) async fn process_respond_event(
             tracing::info!(?sign_id, "sign request completed successfully");
             backlog.remove(source_chain, &sign_id).await;
             if caught_up {
-                if let Err(err) = sign_tx.send(Sign::Completion(sign_id)).await {
+                if let Err(err) = sign_tx.send(SignCommand::Completion(sign_id)).await {
                     anyhow::bail!("failed to send completion for respond event: {err:?}");
                 }
             }
@@ -232,7 +232,7 @@ pub(crate) async fn process_respond_event(
 
 pub(crate) async fn process_respond_bidirectional_event(
     event: RespondBidirectionalEvent,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
     root_pk: mpc_primitives::PublicKey,
     backlog: &Backlog,
     caught_up: bool,
@@ -264,7 +264,7 @@ pub(crate) async fn process_respond_bidirectional_event(
 
     if caught_up {
         sign_tx
-            .send(Sign::Completion(sign_id))
+            .send(SignCommand::Completion(sign_id))
             .await
             .map_err(|err| anyhow::anyhow!("failed to send completion for respond bidirectional: {err:?} for sign id: {sign_id:?}"))?;
     }
@@ -282,7 +282,7 @@ pub async fn process_execution_confirmed(
     block_height: u64,
     result: ExecutionOutcome,
     backlog: &Backlog,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
     target_chain: Chain,
     caught_up: bool,
 ) -> anyhow::Result<()> {
@@ -368,7 +368,7 @@ pub async fn process_execution_confirmed(
     // request belongs to the source chain. Do not let the target chain's catchup
     // barrier strand that follow-up work.
     if caught_up || chain != target_chain {
-        if let Err(err) = sign_tx.send(Sign::Request(sign_request)).await {
+        if let Err(err) = sign_tx.send(SignCommand::Request(sign_request)).await {
             tracing::error!(?err, %chain, "failed to send sign request into queue");
         }
     }
@@ -380,7 +380,7 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
     chain: Chain,
     block: u64,
     backlog: &Backlog,
-    sign_tx: &mpsc::Sender<Sign>,
+    sign_tx: &mpsc::Sender<SignCommand>,
     caught_up: bool,
     telemetry: &T,
 ) {
@@ -400,7 +400,7 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
     tracing::info!(block, ?checkpoint, %chain, "created checkpoint");
     let digest = checkpoint.digest();
     let epsilon = mpc_crypto::derive_epsilon_checkpoint(chain, checkpoint.block_height);
-    let sign = Sign::Checkpoint(IndexedSignRequest::checkpoint(
+    let sign = SignCommand::Checkpoint(IndexedSignRequest::checkpoint(
         mpc_primitives::ConsensusCheckpointDigest {
             chain,
             height: checkpoint.block_height,
@@ -590,7 +590,7 @@ mod tests {
             .expect("recv should not timeout");
 
         match msg.expect("sign_rx should contain a message") {
-            Sign::Request(req) => {
+            SignCommand::Request(req) => {
                 assert_eq!(req.id, sign_id);
                 assert_eq!(req.args, args);
                 assert_eq!(req.chain, Chain::Solana);
@@ -680,14 +680,14 @@ mod tests {
             .unwrap()
             .unwrap();
         match msg {
-            Sign::Request(req) => {
+            SignCommand::Request(req) => {
                 if let mpc_primitives::SignKind::RespondBidirectional(res) = req.kind {
                     assert_eq!(res.tx_id, tx.id);
                 } else {
                     panic!("Expected RespondBidirectional request");
                 }
             }
-            _ => panic!("Expected Sign::Request"),
+            _ => panic!("Expected SignCommand::Request"),
         }
     }
 
@@ -751,7 +751,9 @@ mod tests {
             .unwrap()
             .unwrap();
         match first {
-            Sign::Request(req) => assert!(matches!(req.kind, SignKind::RespondBidirectional(_))),
+            SignCommand::Request(req) => {
+                assert!(matches!(req.kind, SignKind::RespondBidirectional(_)))
+            }
             other => panic!("expected one sign request, got {other:?}"),
         }
 
@@ -825,7 +827,7 @@ mod tests {
             .unwrap()
             .unwrap();
         match msg {
-            Sign::Request(req) => assert_eq!(req.id, sign_id),
+            SignCommand::Request(req) => assert_eq!(req.id, sign_id),
             other => panic!("expected sign request, got {other:?}"),
         }
     }
@@ -905,7 +907,7 @@ mod tests {
             .unwrap()
             .unwrap();
         match msg {
-            Sign::Request(req) => {
+            SignCommand::Request(req) => {
                 assert_eq!(req.id, sign_id);
                 assert!(matches!(req.kind, SignKind::RespondBidirectional(_)));
             }
@@ -1104,7 +1106,7 @@ mod tests {
             .unwrap()
             .unwrap();
         match first {
-            Sign::Completion(id) => assert_eq!(id, sign_id),
+            SignCommand::Completion(id) => assert_eq!(id, sign_id),
             other => panic!("expected completion, got {other:?}"),
         }
 
@@ -1192,7 +1194,7 @@ mod tests {
             .unwrap()
             .unwrap();
         match msg {
-            Sign::Completion(id) => assert_eq!(id, sign_id),
+            SignCommand::Completion(id) => assert_eq!(id, sign_id),
             _ => panic!("expected completion"),
         }
 
@@ -1396,7 +1398,7 @@ mod tests {
             .unwrap()
             .unwrap();
         match msg {
-            Sign::Request(req) => {
+            SignCommand::Request(req) => {
                 if let mpc_primitives::SignKind::RespondBidirectional(res) = req.kind {
                     assert_eq!(res.tx_id, tx.id);
                     // Expect the serialized output to begin with MAGIC_ERROR_PREFIX
@@ -1405,7 +1407,7 @@ mod tests {
                     panic!("Expected RespondBidirectional request");
                 }
             }
-            _ => panic!("Expected Sign::Request"),
+            _ => panic!("Expected SignCommand::Request"),
         }
     }
 
@@ -1477,7 +1479,7 @@ mod tests {
             .unwrap()
             .unwrap();
         match msg {
-            Sign::Request(req) => {
+            SignCommand::Request(req) => {
                 assert_eq!(req.chain, Chain::Solana);
                 assert!(matches!(
                     req.kind,
@@ -1552,7 +1554,7 @@ mod tests {
             .unwrap()
             .unwrap();
         match msg {
-            Sign::Request(req) => {
+            SignCommand::Request(req) => {
                 assert_eq!(req.id, sign_id);
                 assert_eq!(req.chain, tx.source_chain);
                 match req.kind {
@@ -1564,7 +1566,7 @@ mod tests {
                     other => panic!("Expected RespondBidirectional request, got {other:?}"),
                 }
             }
-            other => panic!("Expected Sign::Request, got {other:?}"),
+            other => panic!("Expected SignCommand::Request, got {other:?}"),
         }
     }
 
@@ -1609,7 +1611,7 @@ mod tests {
             .unwrap()
             .unwrap();
         match msg {
-            Sign::Request(req) => assert_eq!(req.id, solana_sign_id),
+            SignCommand::Request(req) => assert_eq!(req.id, solana_sign_id),
             other => panic!("unexpected message: {other:?}"),
         }
 

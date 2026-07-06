@@ -61,7 +61,7 @@ pub(crate) struct SignGenerator {
     participants: Vec<Participant>,
     /// Node that proposed this round (determines who publishes).
     proposer: Participant,
-    indexed: IndexedSignRequest,
+    request: IndexedSignRequest,
     /// Start time, for the generation timeout and latency metrics.
     created: Instant,
     timeout: Duration,
@@ -78,7 +78,7 @@ impl SignGenerator {
     pub(crate) async fn new(
         ctx: &GenerateCtx,
         proposer: Participant,
-        indexed: IndexedSignRequest,
+        request: IndexedSignRequest,
         presignature: PendingPresignature,
         participants: Vec<Participant>,
     ) -> Result<Self, InitializationError> {
@@ -92,7 +92,7 @@ impl SignGenerator {
                 ))
             })?;
 
-        let sign_id = indexed.id;
+        let sign_id = request.id;
         tracing::info!(
             me = ?ctx.governance.me,
             ?sign_id,
@@ -103,19 +103,19 @@ impl SignGenerator {
         let (presignature, dropper) = taken.take();
         let PresignOutput { big_r, k, sigma } = presignature.output;
         let delta =
-            mpc_crypto::kdf::derive_delta(indexed.id.request_id, indexed.args.entropy, big_r);
+            mpc_crypto::kdf::derive_delta(request.id.request_id, request.args.entropy, big_r);
         // TODO: Check whether it is okay to use invert_vartime instead
         let output: PresignOutput<Secp256k1> = PresignOutput {
             big_r: (big_r * delta).to_affine(),
             k: k * delta.invert().unwrap(),
-            sigma: (sigma + indexed.args.epsilon * k) * delta.invert().unwrap(),
+            sigma: (sigma + request.args.epsilon * k) * delta.invert().unwrap(),
         };
         let protocol = Box::new(cait_sith::sign(
             &participants,
             ctx.governance.me,
-            derive_key(ctx.governance.public_key, indexed.args.epsilon),
+            derive_key(ctx.governance.public_key, request.args.epsilon),
             output,
-            indexed.args.payload,
+            request.args.payload,
         )?);
         let inbox = ctx.msg.subscribe_signature(sign_id, presignature_id).await;
         Ok(Self {
@@ -123,7 +123,7 @@ impl SignGenerator {
             dropper,
             participants,
             proposer,
-            indexed,
+            request,
             created: Instant::now(),
             timeout: Duration::from_millis(ctx.cfg.signature.generation_timeout),
             inbox,
@@ -138,7 +138,7 @@ impl SignGenerator {
 
     /// Receive the next protocol message, erroring out on timeout.
     async fn recv(&mut self) -> Result<SignatureMessage, SignError> {
-        let sign_id = self.indexed.id;
+        let sign_id = self.request.id;
         let presignature_id = self.dropper.id;
         match tokio::time::timeout(
             self.timeout.saturating_sub(self.created.elapsed()),
@@ -167,7 +167,7 @@ impl SignGenerator {
         let me = ctx.governance.me;
         let epoch = ctx.governance.epoch;
 
-        let sign_id = self.indexed.id;
+        let sign_id = self.request.id;
         let presignature_id = self.dropper.id;
 
         let mut total_wait = Duration::from_millis(0);
@@ -310,17 +310,17 @@ impl SignGenerator {
                     crate::metrics::protocols::SIGNATURE_GENERATOR_SUCCESS.inc();
 
                     let is_proposer = self.proposer == me;
-                    if let Some(publish) = publish_status(
+                    if let Some(publish) = build_publish_state(
                         ctx.governance.public_key,
-                        &self.indexed,
+                        &self.request,
                         &output,
                         self.participants.clone(),
                         is_proposer,
                     ) {
-                        if !matches!(self.indexed.kind, SignKind::Checkpoint(_)) {
+                        if !matches!(self.request.kind, SignKind::Checkpoint(_)) {
                             if let Err(err) = ctx
                                 .backlog
-                                .mark_publishing(self.indexed.chain, &sign_id, publish)
+                                .mark_publishing(self.request.chain, &sign_id, publish)
                                 .await
                             {
                                 tracing::warn!(
@@ -336,17 +336,17 @@ impl SignGenerator {
                         crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS.inc();
                         ctx.rpc.publish(
                             ctx.governance.public_key,
-                            self.indexed.clone(),
+                            self.request.clone(),
                             output,
                             self.participants.clone(),
                         );
                     }
 
-                    if let SignKind::SignBidirectional(event) = &self.indexed.kind {
+                    if let SignKind::SignBidirectional(event) = &self.request.kind {
                         // Promotion to Bidirectional happens later, when the Solana indexer sees the SignatureRespondedEvent.
                         tracing::info!(
                             ?sign_id,
-                            source_chain = ?self.indexed.chain,
+                            source_chain = ?self.request.chain,
                             target_chain = ?event.target_chain().ok(),
                             "generated signature for bidirectional request, awaiting indexer to process"
                         );
@@ -368,19 +368,19 @@ impl SignGenerator {
 }
 
 /// Reconstruct the full signature into a [`PublishState`], or `None` if reconstruction fails.
-fn publish_status(
+fn build_publish_state(
     public_key: mpc_crypto::PublicKey,
-    indexed: &IndexedSignRequest,
+    request: &IndexedSignRequest,
     output: &cait_sith::FullSignature<Secp256k1>,
     participants: Vec<Participant>,
     is_proposer: bool,
 ) -> Option<PublishState> {
-    let expected_public_key = mpc_crypto::derive_key(public_key, indexed.args.epsilon);
+    let expected_public_key = mpc_crypto::derive_key(public_key, request.args.epsilon);
     let signature = mpc_crypto::reconstruct_signature(
         &expected_public_key,
         &output.big_r,
         &output.s,
-        indexed.args.payload,
+        request.args.payload,
     )
     .ok()?;
     let publish = PublishState {
@@ -396,7 +396,7 @@ impl Drop for SignGenerator {
     /// Unsubscribe and drop any buffered messages for this signature.
     fn drop(&mut self) {
         let msg = self.msg.clone();
-        let sign_id = self.indexed.id;
+        let sign_id = self.request.id;
         let presignature_id = self.dropper.id;
         tokio::spawn(async move {
             msg.unsubscribe_signature(sign_id, presignature_id).await;

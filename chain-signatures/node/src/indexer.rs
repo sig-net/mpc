@@ -1,6 +1,6 @@
 use crate::backlog::Backlog;
 
-use crate::protocol::Sign;
+use crate::protocol::SignCommand;
 
 use mpc_contract::primitives::PendingRequest;
 use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignId};
@@ -136,7 +136,7 @@ impl NearIndexer {
 
 struct Context {
     mpc_contract_id: AccountId,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
     indexer: NearIndexer,
     rpc_client: near_fetch::Client,
     backlog: Backlog,
@@ -189,14 +189,14 @@ async fn poll_pending_requests(ctx: &mut Context) -> anyhow::Result<()> {
             sign_id = ?request.id,
             "sending new sign request to processing queue"
         );
-        if let Err(err) = ctx.sign_tx.send(Sign::Request(request)).await {
+        if let Err(err) = ctx.sign_tx.send(SignCommand::Request(request)).await {
             tracing::error!(?err, "failed to send the sign request into sign queue");
         }
     }
 
     for sign_id in completed_requests {
         tracing::info!(?sign_id, "detected completed NEAR sign request");
-        if let Err(err) = ctx.sign_tx.send(Sign::Completion(sign_id)).await {
+        if let Err(err) = ctx.sign_tx.send(SignCommand::Completion(sign_id)).await {
             tracing::error!(
                 ?err,
                 ?sign_id,
@@ -219,7 +219,7 @@ pub fn run(
     options: &Options,
     mpc_contract_id: &AccountId,
     node_account_id: &AccountId,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
     rpc_client: near_fetch::Client,
     backlog: Backlog,
 ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
