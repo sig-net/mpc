@@ -96,7 +96,7 @@ impl SignId {
     }
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignArgs {
     #[serde(with = "serde_bytes")]
     pub entropy: [u8; 32],

@@ -70,7 +70,6 @@ pub fn test_sign_args(id: u8) -> SignArgs {
         payload: Scalar::from(2u64),
         path: "test".to_string(),
         key_version: 1,
-        ..Default::default()
     }
 }
 
