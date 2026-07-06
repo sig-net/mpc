@@ -712,6 +712,13 @@ impl StateManager for Backlog {
         self.pending(&chain).read().await.processed_block_height()
     }
 
+    async fn set_processed_block(&self, chain: Chain, height: u64) {
+        self.pending(&chain)
+            .write()
+            .await
+            .set_processed_block(height);
+    }
+
     async fn get_execution_watchers(
         &self,
         chain: Chain,
@@ -864,9 +871,9 @@ mod tests {
     use super::*;
     use crate::sign_bidirectional::{PublishState, SignStatus};
     use alloy::primitives::{Address, B256};
-    use anchor_lang::prelude::Pubkey;
     use cait_sith::protocol::Participant;
     use k256::{AffinePoint, Scalar};
+    use mpc_chain_solana::Pubkey;
     use mpc_primitives::{
         BidirectionalTx, BidirectionalTxId, RespondBidirectionalTx, SignArgs,
         SignBidirectionalEvent, SignId, SignKind,

@@ -1,5 +1,5 @@
-use crate::indexer_eth::abi::ChainSignatures;
-use crate::indexer_eth::EthConfig;
+use crate::abi::ChainSignatures;
+use crate::EthConfig;
 use alloy::network::EthereumWallet;
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::{
@@ -56,6 +56,12 @@ const ETH_RESPOND_BATCH_INTERVAL: Duration = Duration::from_millis(2000);
 /// The batch size for Ethereum responses
 const ETH_RESPOND_BATCH_SIZE: usize = 10;
 
+const BATCH_PUBLISH_MIN_DELAY: Duration = Duration::from_secs(1);
+const BATCH_PUBLISH_MAX_DELAY: Duration = Duration::from_secs(10);
+
+/// The maximum number of concurrent RPC requests the system can make
+const MAX_CONCURRENT_RPC_REQUESTS: usize = 1024;
+
 /// Convert MPC Signature to ChainSignatures::Signature
 impl From<&Signature> for ChainSignatures::Signature {
     fn from(mpc_sig: &Signature) -> Self {
@@ -96,7 +102,7 @@ impl EthClient {
         let address = Address::from_str(&format!("0x{}", eth.contract_address)).unwrap();
         let contract = ChainSignatures::new(address, provider);
 
-        let (batch_tx, batch_rx) = mpsc::channel(super::MAX_CONCURRENT_RPC_REQUESTS);
+        let (batch_tx, batch_rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
 
         let client = Self {
             contract,
@@ -146,8 +152,8 @@ impl EthClient {
 
         let retry_config = RetryConfig {
             max_times: usize::MAX,
-            min_delay: super::BATCH_PUBLISH_MIN_DELAY,
-            max_delay: super::BATCH_PUBLISH_MAX_DELAY,
+            min_delay: BATCH_PUBLISH_MIN_DELAY,
+            max_delay: BATCH_PUBLISH_MAX_DELAY,
             jitter: true,
         };
 

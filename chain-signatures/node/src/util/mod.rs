@@ -45,12 +45,12 @@ impl NearPublicKeyExt for near_crypto::PublicKey {
     }
 }
 
-pub trait AffinePointExt {
+/// Convert a secp256k1 `AffinePoint` into a NEAR public key.
+pub trait NearPublicKeyFromAffineExt {
     fn into_near_public_key(self) -> near_crypto::PublicKey;
-    fn to_base58(&self) -> String;
 }
 
-impl AffinePointExt for AffinePoint {
+impl NearPublicKeyFromAffineExt for AffinePoint {
     fn into_near_public_key(self) -> near_crypto::PublicKey {
         near_crypto::PublicKey::SECP256K1(
             near_crypto::Secp256K1PublicKey::try_from(
@@ -58,28 +58,6 @@ impl AffinePointExt for AffinePoint {
             )
             .unwrap(),
         )
-    }
-
-    fn to_base58(&self) -> String {
-        let key = near_crypto::Secp256K1PublicKey::try_from(
-            &self.to_encoded_point(false).as_bytes()[1..65],
-        )
-        .unwrap();
-        format!("{key:?}")
-    }
-}
-
-pub fn mpc_to_sol_signature(
-    signature: &mpc_primitives::Signature,
-    big_r: k256::EncodedPoint,
-) -> signet_program::Signature {
-    signet_program::Signature {
-        big_r: signet_program::AffinePoint {
-            x: big_r.as_bytes()[1..33].try_into().unwrap(),
-            y: big_r.as_bytes()[33..65].try_into().unwrap(),
-        },
-        s: signature.s.to_bytes().into(),
-        recovery_id: signature.recovery_id,
     }
 }
 

@@ -8,7 +8,7 @@ pub mod utils;
 
 pub use indexer::{ChainIndexer, ChainStream};
 pub use publish::{ChainPublisher, PublishAction};
-pub use state::StateManager;
+pub use state::{MockStateManager, StateManager};
 pub use telemetry::{
     ChainTelemetry, NoopChainTelemetry, NoopPublisherTelemetry, PublisherTelemetry,
 };

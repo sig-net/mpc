@@ -1,16 +1,15 @@
-use crate::backlog::Backlog;
-
-use crate::protocol::SignCommand;
-
+use mpc_chain_integration_core::StateManager;
 use mpc_contract::primitives::PendingRequest;
-use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignId};
+use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignCommand, SignId};
 use near_account_id::AccountId;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-/// Configures indexer.
+use crate::util::current_unix_timestamp;
+
+/// Configures the NEAR indexer.
 #[derive(Debug, Clone, clap::Parser)]
 #[group(id = "indexer_options")]
 pub struct Options {
@@ -121,7 +120,7 @@ impl NearIndexer {
                 key_version,
             },
             Chain::NEAR,
-            crate::util::current_unix_timestamp(),
+            current_unix_timestamp(),
         )
     }
 
@@ -134,15 +133,15 @@ impl NearIndexer {
     }
 }
 
-struct Context {
+struct Context<S: StateManager> {
     mpc_contract_id: AccountId,
     sign_tx: mpsc::Sender<SignCommand>,
     indexer: NearIndexer,
     rpc_client: near_fetch::Client,
-    backlog: Backlog,
+    state_manager: S,
 }
 
-async fn poll_pending_requests(ctx: &mut Context) -> anyhow::Result<()> {
+async fn poll_pending_requests<S: StateManager>(ctx: &mut Context<S>) -> anyhow::Result<()> {
     let latest_block = ctx.rpc_client.view_block().await?;
     let latest_height = latest_block.header.height;
 
@@ -205,7 +204,7 @@ async fn poll_pending_requests(ctx: &mut Context) -> anyhow::Result<()> {
         }
     }
 
-    ctx.backlog
+    ctx.state_manager
         .set_processed_block(Chain::NEAR, latest_height)
         .await;
 
@@ -215,13 +214,17 @@ async fn poll_pending_requests(ctx: &mut Context) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn run(
+/// Spawn the NEAR contract-polling indexer.
+/// The indexer polls the MPC contract for pending sign requests and sends [`Sign`] messages
+/// on `sign_tx`.
+#[allow(clippy::too_many_arguments)]
+pub fn run<S: StateManager>(
     options: &Options,
     mpc_contract_id: &AccountId,
     node_account_id: &AccountId,
     sign_tx: mpsc::Sender<SignCommand>,
     rpc_client: near_fetch::Client,
-    backlog: Backlog,
+    state_manager: S,
 ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {
     tracing::info!(
         %mpc_contract_id,
@@ -235,7 +238,7 @@ pub fn run(
         sign_tx,
         indexer,
         rpc_client,
-        backlog,
+        state_manager,
     };
 
     Ok(tokio::spawn(async move {

@@ -1,8 +1,3 @@
-mod client;
-mod config;
-
-pub use client::{SolanaCatchupBlock, SolanaClient, MAX_CONCURRENT_CHUNK_SIZE};
-pub use config::SolConfig;
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::NoopPublisherTelemetry;
 
@@ -32,7 +27,6 @@ use mpc_primitives::{
     Chain, ChainEvent, IndexedSignRequest, SignArgs, SignId, LATEST_MPC_KEY_VERSION,
     MAX_SECP256K1_SCALAR,
 };
-use serde::{Deserialize, Serialize};
 use signet_program::{
     RespondBidirectionalEvent, SignBidirectionalEvent, SignatureRequestedEvent,
     SignatureRespondedEvent,
@@ -49,6 +43,10 @@ use solana_transaction_status::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+use crate::client::{SolanaCatchupBlock, MAX_CONCURRENT_CHUNK_SIZE};
+use crate::utils::current_unix_timestamp;
+use crate::{SolConfig, SolanaClient};
+
 const CPI_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: Sign",
     "Program log: Instruction: SignBidirectional",
@@ -58,13 +56,6 @@ const CPI_RESPOND_EVENT_HINTS: &[&str] = &[
     "Program log: Instruction: Respond",
     "Program log: Instruction: RespondBidirectional",
 ];
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-pub struct SolSignRequest {
-    pub payload: [u8; 32],
-    pub path: String,
-    pub key_version: u32,
-}
 
 /// Solana stream that implements the new ChainStream abstraction
 pub struct SolanaStream<S: StateManager, T: ChainTelemetry> {
@@ -406,7 +397,7 @@ impl SolanaSignEvent {
                         key_version: ev.key_version,
                     },
                     Chain::Solana,
-                    crate::util::current_unix_timestamp(),
+                    current_unix_timestamp(),
                 ))
             }
             SolanaSignEvent::SignBidirectional(ev) => {
@@ -430,7 +421,7 @@ impl SolanaSignEvent {
                         key_version: ev.key_version,
                     },
                     Chain::Solana,
-                    crate::util::current_unix_timestamp(),
+                    current_unix_timestamp(),
                     mpc_primitives::SignBidirectionalEvent {
                         sender: ev.sender.to_bytes(),
                         serialized_transaction: ev.serialized_transaction.clone(),
@@ -975,11 +966,8 @@ pub fn to_mpc_signature(
 mod tests {
     use std::collections::BTreeMap;
 
-    // TODO: test should rely on StateManager mock instead of Backlog
-    use crate::backlog::Backlog;
-
     use super::*;
-    use mpc_chain_integration_core::NoopChainTelemetry;
+    use mpc_chain_integration_core::{MockStateManager, NoopChainTelemetry};
     use solana_sdk::commitment_config::CommitmentLevel;
     use solana_sdk::pubkey::Pubkey;
     use solana_transaction_status::{
@@ -1138,7 +1126,7 @@ mod tests {
         let http_url = format!("https://solana-devnet.g.alchemy.com/v2/{api_key}");
         let ws_url = format!("wss://solana-devnet.g.alchemy.com/v2/{api_key}");
 
-        let state_manager = Backlog::new();
+        let state_manager = MockStateManager::new();
         let (events_tx, mut events_rx) = mpsc::channel(1_000_000);
 
         let client = SolanaClient::for_indexer(
@@ -1173,7 +1161,7 @@ mod tests {
 
         indexer
             .state_manager
-            .set_processed_block_interval(Chain::Solana, start_slot.saturating_sub(1), 1)
+            .set_processed_block(Chain::Solana, start_slot.saturating_sub(1))
             .await;
 
         // Run catchup range

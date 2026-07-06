@@ -3,20 +3,20 @@ use cait_sith::protocol::Participant;
 use integration_tests::containers::Solana;
 use k256::{AffinePoint, Scalar};
 use mpc_chain_integration_core::{ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager};
+use mpc_chain_solana::{SolConfig, SolanaStream};
 use mpc_crypto::ScalarExt;
 use mpc_node::backlog::Backlog;
-use mpc_node::indexer_sol::{SolConfig, SolanaStream};
 use mpc_node::mesh::connection::NodeStatus;
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::contract::primitives::{ParticipantInfo, Participants};
-use mpc_node::protocol::{Chain, IndexedSignRequest, SignCommand};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{run_stream, ChainPipeline, ChainStreaming};
 use mpc_primitives::{
-    ChainEvent, CheckpointDigest, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION,
+    Chain, ChainEvent, CheckpointDigest, IndexedSignRequest, SignArgs, SignCommand, SignId,
+    Signature, LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;

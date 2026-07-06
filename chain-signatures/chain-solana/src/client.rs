@@ -1,4 +1,3 @@
-use super::SolConfig;
 use futures_util::StreamExt;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
 use mpc_chain_integration_core::{
@@ -29,6 +28,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+
+use crate::{config::SolConfig, utils::mpc_to_sol_signature};
 
 const MAX_SIGNATURES_FOR_FAST_CATCHUP: usize = 1000;
 
@@ -475,7 +476,7 @@ impl ChainPublisher for SolanaClient {
         let sign_id = action.request.id;
         let request_ids = vec![action.request.id.request_id];
         let big_r = mpc_sig.big_r.to_encoded_point(false);
-        let signature = crate::util::mpc_to_sol_signature(mpc_sig, big_r);
+        let signature = mpc_to_sol_signature(mpc_sig, big_r);
 
         tracing::debug!(
             ?sign_id,

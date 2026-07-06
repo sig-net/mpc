@@ -1,12 +1,13 @@
 [package]
-name = "mpc-chain-canton"
+name = "mpc-chain-solana"
 edition = "2021"
 version.workspace = true
-description = "Canton chain integration for MPC"
+description = "Solana chain integration for MPC"
 
 [dependencies]
-alloy.workspace = true
 alloy-sol-types.workspace = true
+anchor-client.workspace = true
+anchor-lang.workspace = true
 # TODO: replace with thiserror
 anyhow.workspace = true
 async-trait.workspace = true
@@ -17,14 +18,16 @@ k256.workspace = true
 mpc-chain-integration-core.workspace = true
 mpc-crypto.workspace = true
 mpc-primitives.workspace = true
-oauth2 = { version = "4.4.2", default-features = false, features = ["reqwest"] }
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde-aux = { version = "4", default-features = false }
+signet-program.workspace = true
+solana-sdk.workspace = true
+solana-transaction-status.workspace = true
+solana-client.workspace = true
 tokio.workspace = true
-tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
 tracing.workspace = true
 
 [dev-dependencies]
 mockito.workspace = true
+tracing-subscriber.workspace = true

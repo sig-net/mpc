@@ -6,24 +6,26 @@ use anyhow::{Context, Result};
 use cait_sith::protocol::Participant;
 use integration_tests::cluster::spawner::ClusterSpawner;
 use integration_tests::containers::EthereumSandbox;
-use integration_tests::eth::{self, ChainSignatures, SignRequest};
+use integration_tests::eth;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::{AffinePoint, Scalar};
+use mpc_chain_ethereum::abi::ChainSignatures::{self, SignRequest};
+use mpc_chain_ethereum::{EthConfig, EthereumStream};
 use mpc_chain_integration_core::{ChainStream, ChainTelemetry, NoopChainTelemetry, StateManager};
 use mpc_crypto::kdf::generate_signature;
 use mpc_node::backlog::Backlog;
-use mpc_node::indexer_eth::{EthConfig, EthereumStream};
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
-use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, SignCommand};
+use mpc_node::protocol::ParticipantInfo;
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{run_stream, ChainPipeline, ChainStreaming};
 use mpc_node::util::current_unix_timestamp;
 use mpc_primitives::{
-    ChainEvent, CheckpointDigest, SignArgs, SignBidirectionalEvent as NodeSignBidirectionalEvent,
-    SignId, SignKind, LATEST_MPC_KEY_VERSION,
+    Chain, ChainEvent, CheckpointDigest, IndexedSignRequest, SignArgs,
+    SignBidirectionalEvent as NodeSignBidirectionalEvent, SignCommand, SignId, SignKind,
+    LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
 use std::time::Duration;

@@ -6022,7 +6022,10 @@ dependencies = [
  "hyper 0.14.32",
  "k256",
  "mpc-chain-canton",
+ "mpc-chain-ethereum",
  "mpc-chain-integration-core",
+ "mpc-chain-near",
+ "mpc-chain-solana",
  "mpc-contract",
  "mpc-crypto",
  "mpc-keys",
@@ -7339,6 +7342,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-chain-ethereum"
+version = "1.16.4"
+dependencies = [
+ "alloy",
+ "alloy-dyn-abi",
+ "alloy-signer-local",
+ "alloy-sol-types",
+ "anyhow",
+ "async-trait",
+ "borsh 1.5.7",
+ "futures-util",
+ "helios",
+ "hex",
+ "k256",
+ "mockito",
+ "mpc-chain-integration-core",
+ "mpc-crypto",
+ "mpc-primitives",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "mpc-chain-integration-core"
 version = "1.16.4"
 dependencies = [
@@ -7355,6 +7384,55 @@ dependencies = [
  "rand 0.8.5",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "mpc-chain-near"
+version = "1.16.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "hex",
+ "k256",
+ "mpc-chain-integration-core",
+ "mpc-contract",
+ "mpc-primitives",
+ "near-account-id",
+ "near-crypto",
+ "near-fetch",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "mpc-chain-solana"
+version = "1.16.4"
+dependencies = [
+ "alloy-sol-types",
+ "anchor-client",
+ "anchor-lang",
+ "anyhow",
+ "async-trait",
+ "borsh 1.5.7",
+ "futures-util",
+ "hex",
+ "k256",
+ "mockito",
+ "mpc-chain-integration-core",
+ "mpc-crypto",
+ "mpc-primitives",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "signet-program",
+ "solana-client",
+ "solana-sdk",
+ "solana-transaction-status",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
@@ -7414,10 +7492,7 @@ dependencies = [
  "alloy-dyn-abi",
  "alloy-json-abi",
  "alloy-primitives",
- "alloy-signer-local",
  "alloy-sol-types",
- "anchor-client",
- "anchor-lang",
  "anyhow",
  "async-trait",
  "axum",
@@ -7434,7 +7509,6 @@ dependencies = [
  "futures-util",
  "google-datastore1",
  "google-secretmanager1",
- "helios",
  "hex",
  "highway",
  "http 1.3.1",
@@ -7447,7 +7521,10 @@ dependencies = [
  "mime",
  "mockito",
  "mpc-chain-canton",
+ "mpc-chain-ethereum",
  "mpc-chain-integration-core",
+ "mpc-chain-near",
+ "mpc-chain-solana",
  "mpc-contract",
  "mpc-crypto",
  "mpc-keys",
@@ -7473,10 +7550,6 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha3",
- "signet-program",
- "solana-client",
- "solana-sdk",
- "solana-transaction-status",
  "sp-core",
  "sp-runtime",
  "sp-state-machine",

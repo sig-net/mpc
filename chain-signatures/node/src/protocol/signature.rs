@@ -10,7 +10,7 @@ use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt};
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
-use crate::util::AffinePointExt;
+use mpc_chain_near::AffinePointExt as _;
 
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::PresignOutput;

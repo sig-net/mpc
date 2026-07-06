@@ -4,7 +4,6 @@ pub mod pipeline;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::SignCommand;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::stream::ops::{
     process_block_event, process_execution_confirmed, process_respond_bidirectional_event,
@@ -16,7 +15,7 @@ use crate::types::CheckpointWatcher;
 pub use crate::stream::pipeline::ChainPipeline;
 
 use mpc_chain_integration_core::{ChainIndexer, ChainStream, ChainTelemetry};
-use mpc_primitives::ChainEvent;
+use mpc_primitives::{ChainEvent, SignCommand};
 use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,7 +166,7 @@ mod tests {
     use crate::backlog::Backlog;
     use crate::mesh::{connection::NodeStatus, MeshState};
     use crate::node_client::NodeClient;
-    use crate::protocol::{ParticipantInfo, SignCommand};
+    use crate::protocol::ParticipantInfo;
     use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
     use crate::storage::checkpoint_storage::CheckpointStorage;
     use crate::util::current_unix_timestamp;
@@ -175,8 +174,9 @@ mod tests {
     use k256::{AffinePoint, Scalar};
     use mockito::Server;
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
+    use mpc_chain_solana::Pubkey;
     use mpc_primitives::{
-        Chain, CheckpointDigest, IndexedSignRequest, SignArgs, SignId, Signature,
+        Chain, CheckpointDigest, IndexedSignRequest, SignArgs, SignCommand, SignId, Signature,
         SignatureRespondedEvent,
     };
     use near_primitives::types::AccountId;
@@ -676,7 +676,7 @@ mod tests {
             path: "test".to_string(),
             key_version: 1,
         };
-        let program_id = solana_sdk::pubkey::Pubkey::new_unique();
+        let program_id = Pubkey::new_unique();
         // Minimal legacy unsigned Ethereum tx encoded as RLP so sign_and_hash can parse it
         let mut rlp_s = rlp::RlpStream::new_list(9);
         rlp_s.append(&0u64); // nonce
