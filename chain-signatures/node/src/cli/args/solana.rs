@@ -1,4 +1,4 @@
-use crate::indexer_sol::SolConfig;
+use mpc_chain_solana::SolConfig;
 
 /// Configures Solana indexer.
 #[derive(Debug, Clone, clap::Parser)]

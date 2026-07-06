@@ -6021,9 +6021,12 @@ dependencies = [
  "hex",
  "hyper 0.14.32",
  "k256",
+ "mpc-chain-canton",
+ "mpc-chain-ethereum",
+ "mpc-chain-integration-core",
+ "mpc-chain-solana",
  "mpc-contract",
  "mpc-crypto",
- "mpc-indexer-core",
  "mpc-keys",
  "mpc-node",
  "mpc-primitives",
@@ -7312,6 +7315,106 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fafa6961cabd9c63bcd77a45d7e3b7f3b552b70417831fb0f56db717e72407e"
 
 [[package]]
+name = "mpc-chain-canton"
+version = "1.16.4"
+dependencies = [
+ "alloy",
+ "alloy-sol-types",
+ "anyhow",
+ "async-trait",
+ "borsh 1.5.7",
+ "futures-util",
+ "hex",
+ "k256",
+ "mockito",
+ "mpc-chain-integration-core",
+ "mpc-crypto",
+ "mpc-primitives",
+ "oauth2",
+ "reqwest 0.11.27",
+ "serde",
+ "serde-aux",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tracing",
+]
+
+[[package]]
+name = "mpc-chain-ethereum"
+version = "1.16.4"
+dependencies = [
+ "alloy",
+ "alloy-dyn-abi",
+ "alloy-signer-local",
+ "alloy-sol-types",
+ "anyhow",
+ "async-trait",
+ "borsh 1.5.7",
+ "futures-util",
+ "helios",
+ "hex",
+ "k256",
+ "mockito",
+ "mpc-chain-integration-core",
+ "mpc-crypto",
+ "mpc-primitives",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "mpc-chain-integration-core"
+version = "1.16.4"
+dependencies = [
+ "alloy-primitives",
+ "alloy-sol-types",
+ "anyhow",
+ "async-trait",
+ "backon",
+ "cait-sith",
+ "futures-util",
+ "k256",
+ "mpc-crypto",
+ "mpc-primitives",
+ "rand 0.8.5",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "mpc-chain-solana"
+version = "1.16.4"
+dependencies = [
+ "alloy-sol-types",
+ "anchor-client",
+ "anchor-lang",
+ "anyhow",
+ "async-trait",
+ "borsh 1.5.7",
+ "futures-util",
+ "hex",
+ "k256",
+ "mockito",
+ "mpc-chain-integration-core",
+ "mpc-crypto",
+ "mpc-primitives",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "signet-program",
+ "solana-client",
+ "solana-sdk",
+ "solana-transaction-status",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.20",
+]
+
+[[package]]
 name = "mpc-contract"
 version = "1.16.4"
 dependencies = [
@@ -7340,26 +7443,13 @@ dependencies = [
  "alloy",
  "anyhow",
  "getrandom 0.2.16",
+ "hkdf",
  "k256",
  "mpc-primitives",
  "near-account-id",
+ "near-primitives",
  "near-sdk",
  "sha3",
-]
-
-[[package]]
-name = "mpc-indexer-core"
-version = "1.16.4"
-dependencies = [
- "alloy-primitives",
- "alloy-sol-types",
- "anyhow",
- "async-trait",
- "backon",
- "futures-util",
- "mpc-primitives",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -7381,10 +7471,7 @@ dependencies = [
  "alloy-dyn-abi",
  "alloy-json-abi",
  "alloy-primitives",
- "alloy-signer-local",
  "alloy-sol-types",
- "anchor-client",
- "anchor-lang",
  "anyhow",
  "async-trait",
  "axum",
@@ -7401,10 +7488,8 @@ dependencies = [
  "futures-util",
  "google-datastore1",
  "google-secretmanager1",
- "helios",
  "hex",
  "highway",
- "hkdf",
  "http 1.3.1",
  "hyper 0.14.32",
  "hyper-rustls 0.24.2",
@@ -7414,9 +7499,12 @@ dependencies = [
  "maud",
  "mime",
  "mockito",
+ "mpc-chain-canton",
+ "mpc-chain-ethereum",
+ "mpc-chain-integration-core",
+ "mpc-chain-solana",
  "mpc-contract",
  "mpc-crypto",
- "mpc-indexer-core",
  "mpc-keys",
  "mpc-primitives",
  "near-account-id",
@@ -7424,7 +7512,6 @@ dependencies = [
  "near-fetch",
  "near-primitives",
  "near-sdk",
- "oauth2",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
@@ -7438,14 +7525,9 @@ dependencies = [
  "secrecy 0.10.3",
  "semver 1.0.26",
  "serde",
- "serde-aux",
  "serde_bytes",
  "serde_json",
  "sha3",
- "signet-program",
- "solana-client",
- "solana-sdk",
- "solana-transaction-status",
  "sp-core",
  "sp-runtime",
  "sp-state-machine",
@@ -7457,7 +7539,6 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
- "tokio-tungstenite 0.29.0",
  "tracing",
  "tracing-opentelemetry",
  "tracing-stackdriver",

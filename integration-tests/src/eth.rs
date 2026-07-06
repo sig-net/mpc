@@ -7,7 +7,10 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::Signer;
 use alloy::sol_types::SolValue;
 use anyhow::{Context, Result};
-use mpc_node::indexer_eth::abi::ChainSignaturesConstructor;
+use mpc_chain_ethereum::abi::{
+    ChainSignatures::{self, SignRequest},
+    ChainSignaturesConstructor,
+};
 use mpc_primitives::LATEST_MPC_KEY_VERSION;
 use serde_json::Value;
 use std::time::Duration;
@@ -231,9 +234,6 @@ where
 
     Ok(())
 }
-
-pub use mpc_node::indexer_eth::abi::ChainSignatures;
-pub use mpc_node::indexer_eth::abi::ChainSignatures::{SignRequest, SignatureResponded};
 
 #[cfg(test)]
 mod tests {

@@ -1,0 +1,21 @@
+[package]
+name = "mpc-chain-integration-core"
+edition = "2021"
+version.workspace = true
+description = "Core traits and types for the MPC chain integration including signature publishing and indexing."
+
+[dependencies]
+alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
+backon.workspace = true
+# TODO: replace anyhow with thiserror
+anyhow.workspace = true
+async-trait.workspace = true
+cait-sith.workspace = true
+futures-util.workspace = true
+k256.workspace = true
+mpc-crypto.workspace = true
+mpc-primitives.workspace = true
+rand.workspace = true
+tracing.workspace = true
+tokio.workspace = true

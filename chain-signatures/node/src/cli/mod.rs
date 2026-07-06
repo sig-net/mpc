@@ -5,21 +5,18 @@ use std::{collections::HashMap, sync::Arc};
 use crate::backlog::Backlog;
 use crate::config::{Config, LocalConfig, NetworkConfig, OverrideConfig};
 use crate::gcp::GcpService;
-use crate::indexer_canton::{CantonConfig, CantonStream};
-use crate::indexer_eth::{EthConfig, EthereumStream};
 use crate::indexer_hydration::{self, HydrationConfig};
-use crate::indexer_sol::{SolConfig, SolanaClient, SolanaStream};
 use crate::mesh::{self, Mesh, MeshState};
-use crate::metrics::indexers::PrometheusChainTelemetry;
+use crate::metrics::telemetry::NodeTelemetry;
 use crate::node_client::{self, NodeClient};
 use crate::protocol::contract::ProtocolState;
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
-use crate::protocol::signature::{Sign, SignatureSpawnerTask};
+use crate::protocol::request::{Sign, SignatureSpawnerTask};
 use crate::protocol::state::{Node, NodeStateWatcher};
 use crate::protocol::sync::SyncTask;
-use crate::protocol::{spawn_system_metrics, Chain, MpcSignProtocol};
-use crate::rpc::{self, ChainPublisher, ContractStateWatcher, NearClient, RpcChannel, RpcExecutor};
+use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
+use crate::rpc::{self, ContractStateWatcher, NearClient, RpcChannel, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
@@ -34,8 +31,12 @@ use deadpool_redis::Runtime;
 use enum_map::EnumMap;
 use k256::sha2::Sha256;
 use local_ip_address::local_ip;
+use mpc_chain_canton::{CantonClient, CantonConfig, CantonStream};
+use mpc_chain_ethereum::{publisher, EthConfig, EthereumStream};
+use mpc_chain_integration_core::ChainPublisher;
+use mpc_chain_solana::{SolConfig, SolanaClient, SolanaStream};
 use mpc_keys::hpke;
-use mpc_primitives::CheckpointDigest;
+use mpc_primitives::{Chain, CheckpointDigest};
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
@@ -477,13 +478,18 @@ impl ChainConfigs {
         publishers.insert(Chain::NEAR, Arc::new(near));
 
         if let Some(eth) = &self.eth {
-            publishers.insert(Chain::Ethereum, Arc::new(rpc::EthClient::new(eth)));
+            let telemetry = Arc::new(NodeTelemetry::new(Chain::Ethereum));
+            let client = Arc::new(publisher::EthClient::new(eth, telemetry));
+            publishers.insert(Chain::Ethereum, client);
         }
         if let Some(sol) = &self.sol {
-            publishers.insert(Chain::Solana, Arc::new(SolanaClient::from_config(sol)));
+            let telemetry = Arc::new(NodeTelemetry::new(Chain::Solana));
+            let client = Arc::new(SolanaClient::from_config(sol, telemetry));
+            publishers.insert(Chain::Solana, client);
         }
         if let Some(hydration) = &self.hydration {
-            match rpc::HydrationClient::new(hydration).await {
+            let telemetry = Arc::new(NodeTelemetry::new(Chain::Hydration));
+            match rpc::HydrationClient::new(hydration, telemetry).await {
                 Ok(client) => {
                     publishers.insert(Chain::Hydration, Arc::new(client));
                 }
@@ -491,7 +497,8 @@ impl ChainConfigs {
             }
         }
         if let Some(canton) = &self.canton {
-            match rpc::CantonClient::new(canton).await {
+            let telemetry = Arc::new(NodeTelemetry::new(Chain::Canton));
+            match CantonClient::new(canton, telemetry).await {
                 Ok(client) => {
                     publishers.insert(Chain::Canton, Arc::new(client));
                 }
@@ -603,8 +610,15 @@ impl RpcHandles {
         signer: InMemorySigner,
         chains: &ChainConfigs,
     ) -> Self {
-        let near_client =
-            NearClient::new(near_rpc_url, my_address, network, mpc_contract_id, signer);
+        let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
+        let near_client = NearClient::new(
+            near_rpc_url,
+            my_address,
+            network,
+            mpc_contract_id,
+            signer,
+            publisher_telemetry,
+        );
         let publishers = chains.publishers(near_client.clone()).await;
         let (rpc_channel, rpc_executor) = RpcExecutor::new(near_client.clone(), publishers).await;
         Self {
@@ -753,7 +767,7 @@ async fn spawn_indexers(
     );
 
     if let Some(eth_config) = eth {
-        let eth_telemetry = PrometheusChainTelemetry::new(Chain::Ethereum);
+        let eth_telemetry = NodeTelemetry::new(Chain::Ethereum);
         match EthereumStream::new(eth_config, backlog.clone(), eth_telemetry.clone()).await {
             Ok(eth_stream) => {
                 tracing::info!("ethereum indexer stream created successfully");
@@ -776,7 +790,7 @@ async fn spawn_indexers(
     }
 
     if let Some(sol_config) = sol {
-        let sol_telemetry = PrometheusChainTelemetry::new(Chain::Solana);
+        let sol_telemetry = NodeTelemetry::new(Chain::Solana);
         match SolanaStream::new(sol_config, backlog.clone(), sol_telemetry.clone()) {
             Ok(sol_stream) => {
                 tracing::info!("solana indexer stream created successfully");
@@ -799,7 +813,7 @@ async fn spawn_indexers(
     }
 
     if let Some(hydration_config) = hydration {
-        let hydration_telemetry = PrometheusChainTelemetry::new(Chain::Hydration);
+        let hydration_telemetry = NodeTelemetry::new(Chain::Hydration);
         tokio::spawn(indexer_hydration::run(
             hydration_config,
             sign_tx.clone(),
@@ -813,7 +827,7 @@ async fn spawn_indexers(
     }
 
     if let Some(canton_config) = canton {
-        let canton_telemetry = PrometheusChainTelemetry::new(Chain::Canton);
+        let canton_telemetry = NodeTelemetry::new(Chain::Canton);
         match CantonStream::new(canton_config, backlog.clone(), canton_telemetry.clone()).await {
             Ok(canton_stream) => {
                 tracing::info!("canton indexer stream created successfully");

@@ -1,9 +1,11 @@
-use super::{ChainPublisher, PublishAction};
+use std::sync::Arc;
+
 use crate::config::NetworkConfig;
 use crate::protocol::Governance;
 use crate::util::AffinePointExt as _;
 pub use mpc_contract::primitives::{Read, View};
 
+use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_keys::hpke;
 use mpc_primitives::{ConsensusCheckpointDigest, SignId, SignKind, Signature};
 
@@ -28,6 +30,7 @@ pub struct NearClient {
     signer: InMemorySigner,
     cipher_pk: hpke::PublicKey,
     sign_pk: near_crypto::PublicKey,
+    telemetry: Arc<dyn PublisherTelemetry>,
 }
 
 impl Governance for NearClient {
@@ -51,6 +54,7 @@ impl NearClient {
         network: &NetworkConfig,
         contract_id: &AccountId,
         signer: InMemorySigner,
+        telemetry: Arc<dyn PublisherTelemetry>,
     ) -> Self {
         Self {
             client: near_fetch::Client::new(near_rpc),
@@ -59,6 +63,7 @@ impl NearClient {
             signer,
             cipher_pk: network.cipher_sk.public_key(),
             sign_pk: network.sign_sk.public_key(),
+            telemetry,
         }
     }
 
@@ -210,7 +215,7 @@ impl ChainPublisher for NearClient {
             "published signature sucessfully",
         );
 
-        super::record_publish_metrics(action);
+        self.telemetry.record_publish_metrics(action);
 
         Ok(())
     }

@@ -5,7 +5,7 @@ use crate::mpc_fixture::fixture_interface::SharedOutput;
 use crate::mpc_fixture::mock_chain::MockChain;
 use crate::mpc_fixture::mock_stream::MockStream;
 use cait_sith::protocol::Participant;
-use mpc_indexer_core::NoopChainTelemetry;
+use mpc_chain_integration_core::NoopChainTelemetry;
 use mpc_keys::hpke::Ciphered;
 use mpc_node::backlog::Backlog;
 use mpc_node::config::Config;

@@ -1233,7 +1233,7 @@ async fn test_non_participants_pause_posits() {
     // Node 2 still hasn't seen the signature. Wait until it proposes again.
     // After the pause, node 2 may need up to (num_nodes+1) more rounds to get
     // its turn as proposer. Each round lasts ORGANIZE_POSIT_TIMEOUT.
-    let organize_timeout = mpc_node::protocol::signature::organize_posit_timeout();
+    let organize_timeout = mpc_node::protocol::request::organize_posit_timeout();
     let second_wait = Duration::from_millis(signature_timeout_ms) + 4 * organize_timeout;
     tokio::time::timeout(second_wait, async {
         loop {

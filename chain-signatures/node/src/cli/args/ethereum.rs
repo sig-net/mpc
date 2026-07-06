@@ -1,4 +1,4 @@
-use crate::indexer_eth::EthConfig;
+use mpc_chain_ethereum::EthConfig;
 use secrecy::{ExposeSecret, SecretString};
 
 // Configures Ethereum indexer.

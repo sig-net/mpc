@@ -2,14 +2,18 @@ use super::ChainStreaming;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::signature::Sign;
+use crate::protocol::request::Sign;
 use crate::protocol::Chain;
 use crate::types::CheckpointWatcher;
 
 use futures_util::StreamExt;
-use mpc_indexer_core::{ChainIndexer, LiveStreamStatus};
+use mpc_chain_integration_core::{ChainIndexer, LiveStreamStatus};
 use near_account_id::AccountId;
 use tokio::sync::{mpsc, watch};
+use tokio::time::Duration;
+
+/// Timeout for a single block processed in the live stream before the watchdog triggers a pipeline restart.
+const LIVE_BLOCK_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct ChainPipeline<I: ChainIndexer> {
     indexer: I,
@@ -240,6 +244,13 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                         PipelineAction::Transition(state) => return Some(state),
                         PipelineAction::Shutdown => return None,
                     }
+                }
+                // Watchdog timeout: if no block is processed within the timeout, restart the pipeline.
+                _ = tokio::time::sleep(LIVE_BLOCK_TIMEOUT) => {
+                    tracing::warn!(%chain, ?LIVE_BLOCK_TIMEOUT, "live block processing timed out; restarting pipeline");
+                    let new_state = ChainStreaming::Recovery { load_local: false };
+                    let _ = self.state_tx.send(new_state);
+                    return Some(new_state);
                 }
             }
         }
