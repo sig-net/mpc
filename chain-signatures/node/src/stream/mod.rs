@@ -63,6 +63,9 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
     // the in-band `CatchupInProgress` marker is dequeued from the event channel.
     // The pipeline sets it back to `true` when catchup completes.
     //
+    // Starts as `false` because the pipeline always begins in Recovery state —
+    // it will store `true` once the initial catchup completes.
+    //
     // Reconnect does NOT clear this flag: buffered events during a reconnect
     // are from valid blocks and safe to forward. Reconnect relies solely on the
     // in-band `CatchupInProgress` marker for its caught-up gating.
@@ -230,6 +233,11 @@ mod tests {
     struct VecEventStreamState {
         started: bool,
         events: Vec<Option<ChainEvent>>,
+        /// Receives pipeline markers (CatchupInProgress, CatchupCompleted)
+        /// from the indexer that the pipeline drives. In production, pipeline
+        /// markers and live events flow through the same channel; this
+        /// separate channel reproduces that interleaving for test mocks.
+        pipeline_rx: Option<mpsc::Receiver<ChainEvent>>,
     }
 
     impl VecEventStreamState {
@@ -237,6 +245,7 @@ mod tests {
             Self {
                 started: false,
                 events,
+                pipeline_rx: None,
             }
         }
     }
@@ -252,13 +261,7 @@ mod tests {
             }
 
             struct $indexer {
-                events_tx: Option<mpsc::Sender<ChainEvent>>,
-            }
-
-            impl $indexer {
-                pub fn silent() -> Self {
-                    Self { events_tx: None }
-                }
+                events_tx: mpsc::Sender<ChainEvent>,
             }
 
             #[async_trait]
@@ -276,11 +279,13 @@ mod tests {
                     futures_util::stream::empty()
                 }
 
-                async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
-                    if let Some(events_tx) = &self.events_tx {
-                        events_tx.send(ChainEvent::CatchupCompleted).await?;
-                    }
+                async fn notify_catchup_in_progress(&mut self) -> anyhow::Result<()> {
+                    self.events_tx.send(ChainEvent::CatchupInProgress).await?;
+                    Ok(())
+                }
 
+                async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
+                    self.events_tx.send(ChainEvent::CatchupCompleted).await?;
                     Ok(())
                 }
             }
@@ -291,10 +296,31 @@ mod tests {
 
                 async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
                     self.0.started = true;
-                    Ok($indexer::silent())
+                    let (tx, rx) = mpsc::channel(8);
+                    self.0.pipeline_rx = Some(rx);
+                    Ok($indexer { events_tx: tx })
                 }
 
                 async fn next_event(&mut self) -> Option<ChainEvent> {
+                    // Block on pipeline markers until the initial
+                    // CatchupCompleted is seen, then switch exclusively to
+                    // test events. This only reproduces the initial
+                    // Recovery → Catchup → Live readiness; later pipeline
+                    // markers (from reconnect/regression) are ignored. Tests
+                    // that need to exercise those cycles should keep both
+                    // channels live.
+                    if let Some(rx) = &mut self.0.pipeline_rx {
+                        match rx.recv().await {
+                            Some(event) => {
+                                if matches!(event, ChainEvent::CatchupCompleted) {
+                                    self.0.pipeline_rx = None;
+                                }
+                                return Some(event);
+                            }
+                            None => self.0.pipeline_rx = None,
+                        }
+                    }
+
                     if self.0.events.is_empty() {
                         return None;
                     }
@@ -552,7 +578,6 @@ mod tests {
             chain: Chain::Solana,
         };
         let client = SolanaTestStream::new(vec![
-            Some(ChainEvent::CatchupCompleted),
             Some(ChainEvent::SignRequest {
                 request: indexed.clone(),
                 block_timestamp: None,
@@ -618,9 +643,16 @@ mod tests {
         let storage = crate::storage::checkpoint_storage::CheckpointStorage::in_memory();
         let backlog = Backlog::persisted(storage.clone());
 
-        // client implemented with a channel so the test can control pacing
+        // client implemented with a channel so the test can control pacing.
+        // next_event() blocks on pipeline_rx until the initial CatchupCompleted
+        // is seen (ensuring pipeline_caught_up = true), then switches
+        // exclusively to the test channel. ready_tx fires so the test knows
+        // it's safe to send. Later pipeline markers (reconnect/regression)
+        // are ignored; tests needing those should keep both channels live.
         struct LocalStream {
             rx: mpsc::Receiver<ChainEvent>,
+            pipeline_rx: Option<mpsc::Receiver<ChainEvent>>,
+            ready_tx: Option<oneshot::Sender<()>>,
         }
 
         #[async_trait]
@@ -628,20 +660,34 @@ mod tests {
             type Indexer = DisabledChainIndexer;
 
             async fn start(&mut self) -> anyhow::Result<Self::Indexer> {
-                Ok(DisabledChainIndexer::silent())
+                let (tx, rx) = mpsc::channel(8);
+                self.pipeline_rx = Some(rx);
+                Ok(DisabledChainIndexer { events_tx: tx })
             }
 
             async fn next_event(&mut self) -> Option<ChainEvent> {
+                if let Some(pipeline_rx) = &mut self.pipeline_rx {
+                    match pipeline_rx.recv().await {
+                        Some(event) => {
+                            if matches!(event, ChainEvent::CatchupCompleted) {
+                                self.pipeline_rx = None;
+                                if let Some(tx) = self.ready_tx.take() {
+                                    let _ = tx.send(());
+                                }
+                            }
+                            return Some(event);
+                        }
+                        None => {
+                            self.pipeline_rx = None;
+                        }
+                    }
+                }
                 self.rx.recv().await
             }
         }
 
-        pub struct DisabledChainIndexer;
-
-        impl DisabledChainIndexer {
-            pub fn silent() -> Self {
-                Self
-            }
+        pub struct DisabledChainIndexer {
+            events_tx: mpsc::Sender<ChainEvent>,
         }
 
         #[async_trait]
@@ -657,10 +703,25 @@ mod tests {
             async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
                 futures_util::stream::empty()
             }
+
+            async fn notify_catchup_in_progress(&mut self) -> anyhow::Result<()> {
+                self.events_tx.send(ChainEvent::CatchupInProgress).await?;
+                Ok(())
+            }
+
+            async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
+                self.events_tx.send(ChainEvent::CatchupCompleted).await?;
+                Ok(())
+            }
         }
 
         let (events_tx, rx) = mpsc::channel(8);
-        let client = LocalStream { rx };
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let client = LocalStream {
+            rx,
+            pipeline_rx: None,
+            ready_tx: Some(ready_tx),
+        };
 
         let (sign_tx, mut sign_rx) = mpsc::channel(8);
 
@@ -743,7 +804,13 @@ mod tests {
             sign_bidir,
         );
 
-        events_tx.send(ChainEvent::CatchupCompleted).await.unwrap();
+        // Wait for the pipeline's initial Recovery → Catchup → Live cycle to
+        // complete so pipeline_caught_up is true and caught_up is true before
+        // test events are sent.
+        timeout(Duration::from_secs(5), ready_rx)
+            .await
+            .expect("pipeline should reach Live state within timeout")
+            .expect("ready signal should be sent");
 
         // push SignRequest
         events_tx
