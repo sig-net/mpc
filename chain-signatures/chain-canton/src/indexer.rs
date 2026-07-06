@@ -375,11 +375,6 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for CantonIndexer<S, T> {
         Ok(())
     }
 
-    async fn notify_not_caught_up(&mut self) -> anyhow::Result<()> {
-        self.events_tx.send(ChainEvent::NotCaughtUp).await?;
-        Ok(())
-    }
-
     async fn process_next_block(&mut self) -> LiveStreamStatus {
         let Some(update) = self.next_update().await else {
             return LiveStreamStatus::Shutdown;

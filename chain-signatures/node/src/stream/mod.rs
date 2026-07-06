@@ -70,6 +70,13 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
     let mut caught_up = false;
     loop {
         tokio::select! {
+            biased;
+            _ = state_rx.changed() => {
+                let state = *state_rx.borrow_and_update();
+                if matches!(state, ChainStreaming::Recovery { .. } | ChainStreaming::Catchup { .. } | ChainStreaming::Reconnect) {
+                    caught_up = false;
+                }
+            }
             event = stream.next_event() => {
                 let Some(event) = event else {
                     break;
@@ -83,9 +90,6 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
 
                         requeue_pending_sign_requests(&backlog, chain, sign_tx.clone()).await;
                         resume_pending_publish_requests(&backlog, chain, &contract_watcher, &rpc).await;
-                    }
-                    ChainEvent::NotCaughtUp => {
-                        caught_up = false;
                     }
                     ChainEvent::SignRequest { request, block_timestamp } => {
                         // Handle metrics reporting for the sign request event
@@ -150,12 +154,6 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
                             tracing::error!(?err, %chain, "failed to process execution confirmation");
                         }
                     }
-                }
-            }
-            _ = state_rx.changed() => {
-                let state = *state_rx.borrow_and_update();
-                if matches!(state, ChainStreaming::Recovery { .. } | ChainStreaming::Catchup { .. } | ChainStreaming::Reconnect) {
-                    caught_up = false;
                 }
             }
         }
@@ -248,14 +246,6 @@ mod tests {
                 async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
                     if let Some(events_tx) = &self.events_tx {
                         events_tx.send(ChainEvent::CatchupCompleted).await?;
-                    }
-
-                    Ok(())
-                }
-
-                async fn notify_not_caught_up(&mut self) -> anyhow::Result<()> {
-                    if let Some(events_tx) = &self.events_tx {
-                        events_tx.send(ChainEvent::NotCaughtUp).await?;
                     }
 
                     Ok(())
@@ -384,11 +374,6 @@ mod tests {
                 anyhow::bail!("synthetic catchup failure at height {height}");
             }
             self.tx.send(ChainEvent::Block(height)).await?;
-            Ok(())
-        }
-
-        async fn notify_not_caught_up(&mut self) -> anyhow::Result<()> {
-            self.tx.send(ChainEvent::NotCaughtUp).await?;
             Ok(())
         }
 
@@ -589,58 +574,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_not_caught_up_event_prevents_live_signing_before_watch_state() {
-        let backlog = Backlog::new();
-        let sign_id = SignId::new([12u8; 32]);
-        let args = SignArgs {
-            entropy: [0u8; 32],
-            epsilon: Scalar::from(1u64),
-            payload: Scalar::from(2u64),
-            path: "test".to_string(),
-            key_version: 1,
-        };
-
-        let indexed =
-            IndexedSignRequest::sign(sign_id, args, Chain::Solana, current_unix_timestamp());
-        let client = SolanaTestStream::new(vec![
-            Some(ChainEvent::CatchupCompleted),
-            Some(ChainEvent::NotCaughtUp),
-            Some(ChainEvent::SignRequest {
-                request: indexed,
-                block_timestamp: None,
-            }),
-            None,
-        ]);
-        let (sign_tx, mut sign_rx) = mpsc::channel(4);
-        let (contract_watcher, _tx) = ContractStateWatcher::with_running(
-            &"test.near".parse::<AccountId>().unwrap(),
-            k256::ProjectivePoint::GENERATOR.to_affine(),
-            0,
-            Default::default(),
-        );
-        let (_mesh_state_tx, mesh_state_rx) = watch::channel(MeshState::default());
-        let (_cp_tx, cp_rx) = watch::channel(None::<CheckpointDigest>);
-        let node_client = NodeClient::new(&Default::default());
-        let (rpc, _rpc_rx) = test_rpc_channel(4);
-
-        run_stream(
-            client,
-            sign_tx,
-            rpc,
-            backlog,
-            NoopChainTelemetry,
-            contract_watcher,
-            mesh_state_rx,
-            node_client,
-            cp_rx,
-        )
-        .await;
-
-        let no_sign = timeout(Duration::from_millis(100), sign_rx.recv()).await;
-        assert!(matches!(no_sign, Err(_) | Ok(None)));
-    }
-
-    #[tokio::test]
     async fn test_stream_handles_sign_bidirectional_block_and_recover() {
         let _ = tracing_subscriber::fmt::try_init();
         use crate::sign_bidirectional::SignStatus;
@@ -668,13 +601,11 @@ mod tests {
             }
         }
 
-        pub struct DisabledChainIndexer {
-            events_tx: Option<mpsc::Sender<ChainEvent>>,
-        }
+        pub struct DisabledChainIndexer;
 
         impl DisabledChainIndexer {
             pub fn silent() -> Self {
-                Self { events_tx: None }
+                Self
             }
         }
 
@@ -685,25 +616,11 @@ mod tests {
             type Iter = futures_util::stream::Empty<Self::Block>;
 
             async fn next(&mut self) -> Option<Self::Block> {
-                None
+                std::future::pending().await
             }
 
             async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
                 futures_util::stream::empty()
-            }
-
-            async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
-                if let Some(events_tx) = &self.events_tx {
-                    events_tx.send(ChainEvent::CatchupCompleted).await?;
-                }
-                Ok(())
-            }
-
-            async fn notify_not_caught_up(&mut self) -> anyhow::Result<()> {
-                if let Some(events_tx) = &self.events_tx {
-                    events_tx.send(ChainEvent::NotCaughtUp).await?;
-                }
-                Ok(())
             }
         }
 
@@ -1375,10 +1292,6 @@ mod tests {
                 std::future::pending::<()>().await;
                 Ok(())
             }
-
-            async fn notify_not_caught_up(&mut self) -> anyhow::Result<()> {
-                Ok(())
-            }
         }
 
         let storage = CheckpointStorage::in_memory();
@@ -1463,10 +1376,6 @@ mod tests {
 
             async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
                 futures_util::stream::iter(vec![].into_iter())
-            }
-
-            async fn notify_not_caught_up(&mut self) -> anyhow::Result<()> {
-                Ok(())
             }
         }
 
@@ -1563,10 +1472,6 @@ mod tests {
 
             async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
                 futures_util::stream::empty()
-            }
-
-            async fn notify_not_caught_up(&mut self) -> anyhow::Result<()> {
-                Ok(())
             }
         }
 
@@ -1731,11 +1636,6 @@ mod tests {
             Ok(())
         }
 
-        async fn notify_not_caught_up(&mut self) -> anyhow::Result<()> {
-            self.tx.send(ChainEvent::NotCaughtUp).await?;
-            Ok(())
-        }
-
         async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
             self.tx.send(ChainEvent::CatchupCompleted).await?;
             Ok(())
@@ -1791,12 +1691,8 @@ mod tests {
         // should then process the gap block 199.
         barrier.notify_one();
 
-        // Verify catchup first marks the consumer as not caught up, then emits
-        // the replayed gap block (199).
+        // Verify catchup emits the replayed gap block (199).
         timeout(Duration::from_secs(2), async {
-            let event = rx.recv().await.expect("event channel closed");
-            assert!(matches!(event, ChainEvent::NotCaughtUp));
-
             loop {
                 let event = rx.recv().await.expect("event channel closed");
                 if matches!(event, ChainEvent::Block(199)) {
@@ -1847,9 +1743,6 @@ mod tests {
         let task_handle = tokio::spawn(pipeline.run());
 
         timeout(Duration::from_secs(2), async {
-            let event = rx.recv().await.expect("event channel closed");
-            assert!(matches!(event, ChainEvent::NotCaughtUp));
-
             loop {
                 let event = rx.recv().await.expect("event channel closed");
                 if matches!(event, ChainEvent::Block(299)) {
@@ -1905,12 +1798,6 @@ mod tests {
         })
         .await
         .expect("should return to Live state");
-
-        let event = timeout(Duration::from_secs(2), rx.recv())
-            .await
-            .expect("should emit not-caught-up marker")
-            .expect("event channel should stay open");
-        assert!(matches!(event, ChainEvent::NotCaughtUp));
 
         let event = timeout(Duration::from_secs(2), rx.recv())
             .await

@@ -293,11 +293,6 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
         self.events_tx.send(ChainEvent::CatchupCompleted).await?;
         Ok(())
     }
-
-    async fn notify_not_caught_up(&mut self) -> anyhow::Result<()> {
-        self.events_tx.send(ChainEvent::NotCaughtUp).await?;
-        Ok(())
-    }
 }
 
 impl<S: StateManager, T: ChainTelemetry> Drop for SolanaIndexer<S, T> {

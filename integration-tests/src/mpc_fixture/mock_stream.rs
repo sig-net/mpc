@@ -52,15 +52,6 @@ impl ChainIndexer for MockIndexer {
             .push_back(ChainEvent::CatchupCompleted);
         Ok(())
     }
-
-    async fn notify_not_caught_up(&mut self) -> anyhow::Result<()> {
-        self.inner
-            .lock()
-            .await
-            .control_events
-            .push_back(ChainEvent::NotCaughtUp);
-        Ok(())
-    }
 }
 
 #[async_trait]
