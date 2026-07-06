@@ -812,26 +812,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
 async fn process_execution_confirmed_failed_creates_error_respond_request() {
     let backlog = Backlog::new();
 
-    use alloy::primitives::{Address, B256};
-    let tx = BidirectionalTx {
-        id: BidirectionalTxId(B256::from([2u8; 32]).0),
-        sender: [0u8; 32],
-        serialized_transaction: vec![1, 2, 3],
-        source_chain: Chain::Solana,
-        target_chain: Chain::Ethereum,
-        caip2_id: Chain::Ethereum.caip2_chain_id().to_string(),
-        key_version: 1,
-        deposit: 1000,
-        path: "test_path".to_string(),
-        algo: "ECDSA".to_string(),
-        dest: "0x1234567890123456789012345678901234567890".to_string(),
-        params: "{}".to_string(),
-        output_deserialization_schema: vec![],
-        respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
-        request_id: [2u8; 32],
-        from_address: **Address::ZERO,
-        nonce: 0,
-    };
+    let tx = test_bidirectional_tx(2, Chain::Solana, Chain::Ethereum);
     let sign_id = SignId::new(tx.request_id);
 
     // Insert pending Sign request on source chain
