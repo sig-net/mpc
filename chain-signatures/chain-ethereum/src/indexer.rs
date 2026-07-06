@@ -1034,6 +1034,14 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         Ok(())
     }
 
+    async fn notify_catchup_in_progress(&mut self) -> anyhow::Result<()> {
+        self.events_tx
+            .send(ChainEvent::CatchupInProgress)
+            .await
+            .context("failed to send catchup in progress event")?;
+        Ok(())
+    }
+
     async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
         self.events_tx
             .send(ChainEvent::CatchupCompleted)

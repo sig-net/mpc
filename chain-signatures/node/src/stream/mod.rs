@@ -53,7 +53,7 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
         }
     };
 
-    let (pipeline, mut state_rx) = ChainPipeline::new(
+    let pipeline = ChainPipeline::new(
         indexer,
         checkpoints_rx.clone(),
         backlog.clone(),
@@ -69,91 +69,82 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
 
     let mut caught_up = false;
     loop {
-        tokio::select! {
-            biased;
-            _ = state_rx.changed() => {
-                let state = *state_rx.borrow_and_update();
-                if matches!(state, ChainStreaming::Recovery { .. } | ChainStreaming::Catchup { .. } | ChainStreaming::Reconnect) {
-                    caught_up = false;
+        let Some(event) = stream.next_event().await else {
+            break;
+        };
+        match event {
+            ChainEvent::CatchupInProgress => {
+                caught_up = false;
+            }
+            ChainEvent::CatchupCompleted => {
+                if caught_up {
+                    continue;
+                }
+                caught_up = true;
+
+                requeue_pending_sign_requests(&backlog, chain, sign_tx.clone()).await;
+                resume_pending_publish_requests(&backlog, chain, &contract_watcher, &rpc).await;
+            }
+            ChainEvent::SignRequest {
+                request,
+                block_timestamp,
+            } => {
+                if let Some(ts) = block_timestamp {
+                    telemetry.request_indexed_at(ts);
+                } else {
+                    telemetry.request_indexed();
+                }
+
+                if let Err(err) =
+                    process_sign_request(request, sign_tx.clone(), backlog.clone(), caught_up).await
+                {
+                    tracing::error!(?err, %chain, "failed to process sign request");
                 }
             }
-            event = stream.next_event() => {
-                let Some(event) = event else {
-                    break;
-                };
-                match event {
-                    ChainEvent::CatchupCompleted => {
-                        if caught_up {
-                            continue;
-                        }
-                        caught_up = true;
-
-                        requeue_pending_sign_requests(&backlog, chain, sign_tx.clone()).await;
-                        resume_pending_publish_requests(&backlog, chain, &contract_watcher, &rpc).await;
-                    }
-                    ChainEvent::SignRequest { request, block_timestamp } => {
-                        // Handle metrics reporting for the sign request event
-                        if let Some(ts) = block_timestamp {
-                            // Report the request was indexed at the given block timestamp is currently used for Ethereum due to ~15 min finality delay
-                            telemetry.request_indexed_at(ts);
-                        } else {
-                            // Other faster chains (e.g. for Solana, Canton, or Hydration) report that a request was indexed without a block timestamp
-                            telemetry.request_indexed();
-                        }
-
-                        if let Err(err) =
-                            process_sign_request(request, sign_tx.clone(), backlog.clone(), caught_up).await
-                        {
-                            tracing::error!(?err, %chain, "failed to process sign request");
-                        }
-                    }
-                    ChainEvent::Respond(ev) => {
-                        if let Err(err) = process_respond_event(
-                            ev,
-                            sign_tx.clone(),
-                            root_pk,
-                            &backlog,
-                            caught_up,
-                        )
-                        .await
-                        {
-                            tracing::error!(?err, %chain, "failed to process respond event");
-                        }
-                    }
-                    ChainEvent::RespondBidirectional(ev) => {
-                        if let Err(err) =
-                            process_respond_bidirectional_event(ev, sign_tx.clone(), root_pk, &backlog, caught_up)
-                                .await
-                        {
-                            tracing::error!(?err, %chain, "failed to process respond bidirectional event");
-                        }
-                    }
-                    ChainEvent::Block(block) => {
-                        process_block_event(chain, block, &backlog, &sign_tx, caught_up, &telemetry).await;
-                    }
-                    ChainEvent::ExecutionConfirmed {
-                        tx_id,
-                        sign_id,
-                        source_chain,
-                        block_height,
-                        result,
-                    } => {
-                        if let Err(err) = process_execution_confirmed(
-                            tx_id,
-                            sign_id,
-                            source_chain,
-                            block_height,
-                            result,
-                            &backlog,
-                            sign_tx.clone(),
-                            chain,
-                            caught_up,
-                        )
-                        .await
-                        {
-                            tracing::error!(?err, %chain, "failed to process execution confirmation");
-                        }
-                    }
+            ChainEvent::Respond(ev) => {
+                if let Err(err) =
+                    process_respond_event(ev, sign_tx.clone(), root_pk, &backlog, caught_up).await
+                {
+                    tracing::error!(?err, %chain, "failed to process respond event");
+                }
+            }
+            ChainEvent::RespondBidirectional(ev) => {
+                if let Err(err) = process_respond_bidirectional_event(
+                    ev,
+                    sign_tx.clone(),
+                    root_pk,
+                    &backlog,
+                    caught_up,
+                )
+                .await
+                {
+                    tracing::error!(?err, %chain, "failed to process respond bidirectional event");
+                }
+            }
+            ChainEvent::Block(block) => {
+                process_block_event(chain, block, &backlog, &sign_tx, caught_up, &telemetry).await;
+            }
+            ChainEvent::ExecutionConfirmed {
+                tx_id,
+                sign_id,
+                source_chain,
+                block_height,
+                result,
+            } => {
+                if let Err(err) = process_execution_confirmed(
+                    tx_id,
+                    sign_id,
+                    source_chain,
+                    block_height,
+                    result,
+                    &backlog,
+                    sign_tx.clone(),
+                    chain,
+                    caught_up,
+                )
+                .await
+                {
+                    tracing::error!(?err, %chain, "failed to process execution confirmation");
                 }
             }
         }
@@ -416,7 +407,7 @@ mod tests {
         let (_cp_tx, cp_rx) = watch::channel(None);
         let (_m_tx, m_rx) = watch::channel(MeshState::default());
         let (_sign_tx, _sign_rx) = mpsc::channel(1);
-        let (pipeline, _state_rx) = ChainPipeline::from_state(
+        let pipeline = ChainPipeline::from_state(
             ChainStreaming::Catchup { anchor_height: 4 },
             indexer,
             cp_rx,
@@ -457,7 +448,7 @@ mod tests {
         let (_cp_tx, cp_rx) = watch::channel(None);
         let (_m_tx, m_rx) = watch::channel(MeshState::default());
         let (_stx, _srx) = mpsc::channel(1);
-        let (pipeline, _state_rx) = ChainPipeline::from_state(
+        let pipeline = ChainPipeline::from_state(
             ChainStreaming::Catchup { anchor_height: 4 },
             indexer,
             cp_rx,
@@ -1328,7 +1319,7 @@ mod tests {
             catchup_started_tx: Arc::new(Mutex::new(Some(catchup_tx))),
         };
 
-        let (pipeline, state_rx) = ChainPipeline::new(
+        let pipeline = ChainPipeline::new(
             indexer,
             cp_rx,
             backlog,
@@ -1345,8 +1336,6 @@ mod tests {
             .expect("should reach catchup processing")
             .unwrap();
 
-        let state = *state_rx.borrow();
-        assert_eq!(state, ChainStreaming::Catchup { anchor_height: 10 });
         task_handle.abort();
     }
 
@@ -1354,6 +1343,7 @@ mod tests {
     async fn test_runtime_regression_triggers_recovery() {
         struct MockLiveIndexer {
             next_called_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+            livestream_called_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
         }
 
         #[async_trait]
@@ -1364,6 +1354,9 @@ mod tests {
             const RETRY_DELAY: Duration = Duration::from_millis(1);
 
             async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
+                if let Some(tx) = self.livestream_called_tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
                 Ok(Some(10))
             }
 
@@ -1405,12 +1398,14 @@ mod tests {
         let (cp_tx, cp_rx) = watch::channel(Some(CheckpointDigest { height: 10, digest }));
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
         let (next_called_tx, next_called_rx) = oneshot::channel();
+        let (livestream_called_tx, livestream_called_rx) = oneshot::channel();
         let (_stx, _srx) = mpsc::channel(1);
         let indexer = MockLiveIndexer {
             next_called_tx: Arc::new(Mutex::new(Some(next_called_tx))),
+            livestream_called_tx: Arc::new(Mutex::new(Some(livestream_called_tx))),
         };
 
-        let (pipeline, mut state_rx) = ChainPipeline::from_state(
+        let pipeline = ChainPipeline::from_state(
             ChainStreaming::Live,
             indexer,
             cp_rx,
@@ -1418,7 +1413,7 @@ mod tests {
             _stx,
             mesh_rx,
             NodeClient::new(&Default::default()),
-            1,
+            0,
             "test.near".parse().unwrap(),
         );
         let task_handle = tokio::spawn(pipeline.run());
@@ -1436,24 +1431,33 @@ mod tests {
             }))
             .unwrap();
 
-        timeout(Duration::from_secs(1), async {
-            loop {
-                let s = *state_rx.borrow_and_update();
-                if matches!(s, ChainStreaming::Recovery { .. }) {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("should transition back to Recovery state upon regression");
+        // Give the pipeline time to observe the mismatched digest in
+        // wait_detected_regression before we restore the matching one.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Restore matching digest so align_backlog_with_consensus in Recovery
+        // can complete. find_consensus_checkpoint with 0 peers retries every
+        // 3s, so the abort via consensus_rx.changed() may take a few seconds.
+        cp_tx
+            .send(Some(CheckpointDigest { height: 10, digest }))
+            .unwrap();
+
+        timeout(Duration::from_secs(5), livestream_called_rx)
+            .await
+            .expect("regression should trigger Recovery which calls livestream()")
+            .unwrap();
 
         task_handle.abort();
     }
 
     #[tokio::test]
     async fn test_regression_triggers_full_recovery_cycle() {
-        struct E2EIndexer;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct E2EIndexer {
+            tx: mpsc::Sender<ChainEvent>,
+            livestream_count: Arc<AtomicU32>,
+        }
 
         #[async_trait]
         impl ChainIndexer for E2EIndexer {
@@ -1463,6 +1467,7 @@ mod tests {
             const RETRY_DELAY: Duration = Duration::from_millis(1);
 
             async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
+                self.livestream_count.fetch_add(1, Ordering::SeqCst);
                 Ok(Some(10))
             }
 
@@ -1472,6 +1477,16 @@ mod tests {
 
             async fn catchup_range(&self, _anchor_height: u64) -> Self::Iter {
                 futures_util::stream::empty()
+            }
+
+            async fn notify_catchup_in_progress(&mut self) -> anyhow::Result<()> {
+                self.tx.send(ChainEvent::CatchupInProgress).await?;
+                Ok(())
+            }
+
+            async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
+                self.tx.send(ChainEvent::CatchupCompleted).await?;
+                Ok(())
             }
         }
 
@@ -1486,11 +1501,16 @@ mod tests {
             digest: matching_digest,
         }));
         let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
-        let indexer = E2EIndexer;
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let livestream_count = Arc::new(AtomicU32::new(0));
+        let indexer = E2EIndexer {
+            tx: events_tx,
+            livestream_count: livestream_count.clone(),
+        };
         let (sign_tx, _sign_rx) = mpsc::channel(1);
         let node_client = NodeClient::new(&Default::default());
 
-        let (pipeline, mut state_rx) = ChainPipeline::new(
+        let pipeline = ChainPipeline::new(
             indexer,
             cp_rx,
             backlog,
@@ -1502,20 +1522,19 @@ mod tests {
         );
         let handle = tokio::spawn(pipeline.run());
 
-        // 1st cycle: Recovery (load_local: true) → Catchup → Live
+        // 1st cycle: Recovery → Catchup → Live
+        // Wait for CatchupCompleted which means the pipeline reached Live.
         timeout(Duration::from_secs(5), async {
-            loop {
-                if *state_rx.borrow() == ChainStreaming::Live {
+            while let Some(event) = events_rx.recv().await {
+                if matches!(event, ChainEvent::CatchupCompleted) {
                     break;
                 }
-                let _ = state_rx.changed().await;
             }
         })
         .await
-        .expect("should reach Live after 1st Recovery → Catchup");
+        .expect("should complete 1st Recovery → Catchup → Live");
 
         // Trigger regression: send a digest that doesn't match local.
-        // This causes wait_detected_regression → Recovery { load_local: false }.
         cp_tx
             .send(Some(CheckpointDigest {
                 height: 100,
@@ -1523,22 +1542,12 @@ mod tests {
             }))
             .unwrap();
 
-        timeout(Duration::from_secs(5), async {
-            loop {
-                let s = *state_rx.borrow_and_update();
-                if matches!(s, ChainStreaming::Recovery { load_local: false }) {
-                    break;
-                }
-                let _ = state_rx.changed().await;
-            }
-        })
-        .await
-        .expect("should transition to Recovery { load_local: false } upon regression");
-
-        // Restore matching digest so the 2nd Recovery passes alignment.
-        // If align_backlog_with_consensus already read the mismatched value,
-        // find_consensus_checkpoint will abort via consensus_rx.changed() when
-        // it sees the digest change (may take ~3s due to no-peer retry sleep).
+        // Restore matching digest so align_backlog_with_consensus in Recovery
+        // can complete (with 0 peers, find_consensus_checkpoint loops forever
+        // unless the consensus digest changes, which triggers an early abort).
+        // yield_now() gives the pipeline a chance to observe the mismatched digest
+        // in wait_detected_regression before we overwrite it.
+        tokio::task::yield_now().await;
         cp_tx
             .send(Some(CheckpointDigest {
                 height: 10,
@@ -1546,17 +1555,16 @@ mod tests {
             }))
             .unwrap();
 
-        // 2nd cycle: Recovery (load_local: false) → Catchup → Live
+        // 2nd cycle: Recovery → Catchup → Live
         timeout(Duration::from_secs(6), async {
-            loop {
-                if *state_rx.borrow() == ChainStreaming::Live {
+            while let Some(event) = events_rx.recv().await {
+                if matches!(event, ChainEvent::CatchupCompleted) {
                     break;
                 }
-                let _ = state_rx.changed().await;
             }
         })
         .await
-        .expect("should reach Live after 2nd Recovery → Catchup (load_local: false)");
+        .expect("should complete 2nd Recovery → Catchup → Live");
 
         handle.abort();
     }
@@ -1571,6 +1579,7 @@ mod tests {
         live_call_count: Arc<Mutex<u32>>,
         livestream_results: Arc<Mutex<Vec<anyhow::Result<Option<u64>>>>>,
         livestream_barrier: Arc<Mutex<Option<Arc<Notify>>>>,
+        livestream_entered: Option<Arc<Notify>>,
         reconnects_remaining: Arc<Mutex<usize>>,
         persisted_height: Option<u64>,
     }
@@ -1583,6 +1592,10 @@ mod tests {
         const RETRY_DELAY: Duration = Duration::from_millis(1);
 
         async fn livestream(&mut self) -> anyhow::Result<Option<u64>> {
+            if let Some(n) = &self.livestream_entered {
+                n.notify_one();
+            }
+
             let barrier = {
                 let mut barrier = self.livestream_barrier.lock().unwrap();
                 barrier.take()
@@ -1636,6 +1649,11 @@ mod tests {
             Ok(())
         }
 
+        async fn notify_catchup_in_progress(&mut self) -> anyhow::Result<()> {
+            self.tx.send(ChainEvent::CatchupInProgress).await?;
+            Ok(())
+        }
+
         async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
             self.tx.send(ChainEvent::CatchupCompleted).await?;
             Ok(())
@@ -1647,12 +1665,14 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let live_call_count = Arc::new(Mutex::new(0u32));
         let barrier = Arc::new(Notify::new());
+        let livestream_entered = Arc::new(Notify::new());
 
         let indexer = ReconnectIndexer {
             tx,
             live_call_count: live_call_count.clone(),
             livestream_results: Arc::new(Mutex::new(vec![Ok(Some(200))])),
             livestream_barrier: Arc::new(Mutex::new(Some(barrier.clone()))),
+            livestream_entered: Some(livestream_entered.clone()),
             reconnects_remaining: Arc::new(Mutex::new(1)),
             persisted_height: Some(198),
         };
@@ -1660,7 +1680,7 @@ mod tests {
         let (_cp_tx, cp_rx) = watch::channel(None::<CheckpointDigest>);
         let (_m_tx, m_rx) = watch::channel(MeshState::default());
         let (_stx, _srx) = mpsc::channel(1);
-        let (pipeline, mut state_rx) = ChainPipeline::from_state(
+        let pipeline = ChainPipeline::from_state(
             ChainStreaming::Live,
             indexer,
             cp_rx,
@@ -1674,18 +1694,11 @@ mod tests {
 
         let task_handle = tokio::spawn(pipeline.run());
 
-        // Pipeline: Live → process_next_block returns Reconnect → sends Reconnect state
-        // handle_reconnect calls livestream() which blocks on barrier
-        timeout(Duration::from_secs(2), async {
-            loop {
-                state_rx.changed().await.unwrap();
-                if matches!(*state_rx.borrow_and_update(), ChainStreaming::Reconnect) {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("should reach Reconnect state");
+        // Wait for handle_reconnect to enter livestream() (blocked on barrier).
+        // This proves: Live → process_next_block returned Reconnect → handle_reconnect entered.
+        timeout(Duration::from_secs(2), livestream_entered.notified())
+            .await
+            .expect("should enter livestream() from Reconnect state");
 
         // Release barrier so livestream() returns Ok(Some(200)); reconnect catchup
         // should then process the gap block 199.
@@ -1721,6 +1734,7 @@ mod tests {
                 Ok(Some(300)),
             ])),
             livestream_barrier: Arc::new(Mutex::new(None)),
+            livestream_entered: None,
             reconnects_remaining: Arc::new(Mutex::new(1)),
             persisted_height: Some(298),
         };
@@ -1728,7 +1742,7 @@ mod tests {
         let (_cp_tx, cp_rx) = watch::channel(None::<CheckpointDigest>);
         let (_m_tx, m_rx) = watch::channel(MeshState::default());
         let (_stx, _srx) = mpsc::channel(1);
-        let (pipeline, _) = ChainPipeline::from_state(
+        let pipeline = ChainPipeline::from_state(
             ChainStreaming::Live,
             indexer,
             cp_rx,
@@ -1767,6 +1781,7 @@ mod tests {
             live_call_count: live_call_count.clone(),
             livestream_results: Arc::new(Mutex::new(vec![Ok(None)])),
             livestream_barrier: Arc::new(Mutex::new(None)),
+            livestream_entered: None,
             reconnects_remaining: Arc::new(Mutex::new(1)),
             persisted_height: Some(298),
         };
@@ -1774,7 +1789,7 @@ mod tests {
         let (_cp_tx, cp_rx) = watch::channel(None::<CheckpointDigest>);
         let (_m_tx, m_rx) = watch::channel(MeshState::default());
         let (_stx, _srx) = mpsc::channel(1);
-        let (pipeline, mut state_rx) = ChainPipeline::from_state(
+        let pipeline = ChainPipeline::from_state(
             ChainStreaming::Live,
             indexer,
             cp_rx,
@@ -1788,17 +1803,8 @@ mod tests {
 
         let task_handle = tokio::spawn(pipeline.run());
 
-        timeout(Duration::from_secs(2), async {
-            loop {
-                state_rx.changed().await.unwrap();
-                if matches!(*state_rx.borrow_and_update(), ChainStreaming::Live) {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("should return to Live state");
-
+        // Wait for CatchupCompleted on the event channel, which proves
+        // Reconnect → handle_reconnect → anchorless → notify_catchup_completed → Live.
         let event = timeout(Duration::from_secs(2), rx.recv())
             .await
             .expect("should emit caught-up marker")

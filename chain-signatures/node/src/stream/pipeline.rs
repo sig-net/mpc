@@ -9,7 +9,7 @@ use crate::types::CheckpointWatcher;
 use futures_util::StreamExt;
 use mpc_chain_integration_core::{ChainIndexer, LiveStreamStatus};
 use near_account_id::AccountId;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio::time::Duration;
 
 /// Timeout for a single block processed in the live stream before the watchdog triggers a pipeline restart.
@@ -17,12 +17,11 @@ const LIVE_BLOCK_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct ChainPipeline<I: ChainIndexer> {
     indexer: I,
-    state_tx: watch::Sender<ChainStreaming>,
-    state_rx: watch::Receiver<ChainStreaming>,
+    initial_state: ChainStreaming,
     checkpoints_rx: CheckpointWatcher,
     backlog: Backlog,
     sign_tx: mpsc::Sender<Sign>,
-    mesh_state: watch::Receiver<MeshState>,
+    mesh_state: tokio::sync::watch::Receiver<MeshState>,
     node_client: NodeClient,
     threshold: usize,
     my_account_id: AccountId,
@@ -35,11 +34,11 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         checkpoints_rx: CheckpointWatcher,
         backlog: Backlog,
         sign_tx: mpsc::Sender<Sign>,
-        mesh_state: watch::Receiver<MeshState>,
+        mesh_state: tokio::sync::watch::Receiver<MeshState>,
         node_client: NodeClient,
         threshold: usize,
         my_account_id: AccountId,
-    ) -> (Self, watch::Receiver<ChainStreaming>) {
+    ) -> Self {
         Self::from_state(
             ChainStreaming::Recovery { load_local: true },
             indexer,
@@ -60,16 +59,14 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         checkpoints_rx: CheckpointWatcher,
         backlog: Backlog,
         sign_tx: mpsc::Sender<Sign>,
-        mesh_state: watch::Receiver<MeshState>,
+        mesh_state: tokio::sync::watch::Receiver<MeshState>,
         node_client: NodeClient,
         threshold: usize,
         my_account_id: AccountId,
-    ) -> (Self, watch::Receiver<ChainStreaming>) {
-        let (state_tx, state_rx) = watch::channel(state);
-        let this = Self {
+    ) -> Self {
+        Self {
             indexer,
-            state_tx,
-            state_rx: state_rx.clone(),
+            initial_state: state,
             backlog,
             checkpoints_rx,
             sign_tx,
@@ -77,14 +74,13 @@ impl<I: ChainIndexer> ChainPipeline<I> {
             node_client,
             threshold,
             my_account_id,
-        };
-        (this, state_rx)
+        }
     }
 
     pub async fn run(mut self) {
         let chain = I::CHAIN;
         tracing::info!(%chain, "starting ChainStream pipeline");
-        let mut current_state = *self.state_rx.borrow_and_update();
+        let mut current_state = self.initial_state;
 
         loop {
             match current_state {
@@ -214,9 +210,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         if let Err(err) = self.indexer.notify_catchup_completed().await {
             tracing::warn!(?err, %chain, "failed to signal catchup completion");
         }
-        let final_state = ChainStreaming::Live;
-        let _ = self.state_tx.send(final_state);
-        Some(final_state)
+        Some(ChainStreaming::Live)
     }
 
     async fn handle_live(&mut self) -> Option<ChainStreaming> {
@@ -227,9 +221,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                     match status {
                         LiveStreamStatus::Continue => {}
                         LiveStreamStatus::Reconnect => {
-                            let next_state = ChainStreaming::Reconnect;
-                            let _ = self.state_tx.send(next_state);
-                            return Some(next_state);
+                            return Some(ChainStreaming::Reconnect);
                         }
                         LiveStreamStatus::Shutdown => return None,
                     }
@@ -248,9 +240,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                 // Watchdog timeout: if no block is processed within the timeout, restart the pipeline.
                 _ = tokio::time::sleep(LIVE_BLOCK_TIMEOUT) => {
                     tracing::warn!(%chain, ?LIVE_BLOCK_TIMEOUT, "live block processing timed out; restarting pipeline");
-                    let new_state = ChainStreaming::Recovery { load_local: false };
-                    let _ = self.state_tx.send(new_state);
-                    return Some(new_state);
+                    return Some(ChainStreaming::Recovery { load_local: false });
                 }
             }
         }
@@ -277,9 +267,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
                                         return None;
                                     }
 
-                                    let next_state = ChainStreaming::Live;
-                                    let _ = self.state_tx.send(next_state);
-                                    Some(next_state)
+                                    Some(ChainStreaming::Live)
                                 }
                             };
                         }
@@ -327,9 +315,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
     fn handle_regression_outcome(&self, outcome: RegressionOutcome) -> PipelineAction {
         match outcome {
             RegressionOutcome::Recovery => {
-                let new_state = ChainStreaming::Recovery { load_local: false };
-                let _ = self.state_tx.send(new_state);
-                PipelineAction::Transition(new_state)
+                PipelineAction::Transition(ChainStreaming::Recovery { load_local: false })
             }
             RegressionOutcome::Aligned => PipelineAction::Continue,
             RegressionOutcome::Shutdown => PipelineAction::Shutdown,
@@ -337,9 +323,11 @@ impl<I: ChainIndexer> ChainPipeline<I> {
     }
 
     async fn transition_to_catchup(&mut self, anchor_height: u64) -> Option<ChainStreaming> {
-        let next_state = ChainStreaming::Catchup { anchor_height };
-        let _ = self.state_tx.send(next_state);
-        Some(next_state)
+        let chain = I::CHAIN;
+        if let Err(err) = self.indexer.notify_catchup_in_progress().await {
+            tracing::warn!(?err, %chain, "failed to signal catchup in progress");
+        }
+        Some(ChainStreaming::Catchup { anchor_height })
     }
 }
 
@@ -435,6 +423,7 @@ mod tests {
     use crate::backlog::Backlog;
     use mpc_primitives::CheckpointDigest;
     use std::time::Duration;
+    use tokio::sync::watch;
 
     fn make_digest(
         height: u64,

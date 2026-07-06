@@ -24,6 +24,10 @@ pub trait ChainIndexer: Send + 'static {
         Ok(None)
     }
 
+    async fn notify_catchup_in_progress(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
         Ok(())
     }

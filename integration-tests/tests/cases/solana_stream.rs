@@ -14,7 +14,7 @@ use mpc_node::protocol::{Chain, IndexedSignRequest, Sign};
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{run_stream, ChainPipeline, ChainStreaming};
+use mpc_node::stream::{run_stream, ChainPipeline};
 use mpc_primitives::{
     ChainEvent, CheckpointDigest, SignArgs, SignId, Signature, LATEST_MPC_KEY_VERSION,
 };
@@ -67,7 +67,7 @@ async fn stream_solana_with_backlog(
     // spawns the live event subscription and initializes the live_rx channel.
     // Starting in Live would skip this initialization and produce no events.
     let (sign_tx, _sign_rx) = mpsc::channel(1);
-    let (pipeline, mut state_rx) = ChainPipeline::new(
+    let pipeline = ChainPipeline::new(
         indexer,
         cp_rx,
         backlog,
@@ -78,21 +78,6 @@ async fn stream_solana_with_backlog(
         "test.near".parse().unwrap(),
     );
     tokio::spawn(pipeline.run());
-
-    // Wait until the pipeline is live so the WS subscription and anchor are established
-    // before callers begin submitting transactions.
-    timeout(Duration::from_secs(30), async {
-        loop {
-            if *state_rx.borrow() == ChainStreaming::Live {
-                return Ok(());
-            }
-            if state_rx.changed().await.is_err() {
-                anyhow::bail!("pipeline shut down before reaching Live state");
-            }
-        }
-    })
-    .await
-    .context("timed out waiting for pipeline to reach Live state")??;
 
     Ok((stream, cp_tx))
 }
@@ -105,6 +90,10 @@ async fn wait_for_sign_request<S: StateManager, T: ChainTelemetry>(
         match timeout(Duration::from_secs(6), stream.next_event()).await {
             Ok(Some(ChainEvent::SignRequest { request, .. })) => return Ok(request),
             Ok(Some(ChainEvent::Block(_))) => continue,
+            Ok(Some(ChainEvent::CatchupInProgress)) => {
+                tracing::info!("received CatchupInProgress event while waiting for SignRequest");
+                continue;
+            }
             Ok(Some(ChainEvent::CatchupCompleted)) => {
                 tracing::info!("received CatchupCompleted event while waiting for SignRequest");
                 continue;

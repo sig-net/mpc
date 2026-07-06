@@ -44,6 +44,15 @@ impl ChainIndexer for MockIndexer {
         futures_util::stream::empty()
     }
 
+    async fn notify_catchup_in_progress(&mut self) -> anyhow::Result<()> {
+        self.inner
+            .lock()
+            .await
+            .control_events
+            .push_back(ChainEvent::CatchupInProgress);
+        Ok(())
+    }
+
     async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
         self.inner
             .lock()

@@ -16,6 +16,9 @@ pub enum ChainEvent {
     Respond(SignatureRespondedEvent),
     RespondBidirectional(RespondBidirectionalEvent),
 
+    /// Catchup is starting; live events must be buffered until completion.
+    CatchupInProgress,
+
     /// Catchup has completed and live events may be forwarded to the signer.
     CatchupCompleted,
 
@@ -56,6 +59,7 @@ impl std::fmt::Debug for ChainEvent {
                 .field(&ev.request_id)
                 .field(&ev.chain.as_str())
                 .finish(),
+            ChainEvent::CatchupInProgress => write!(f, "CatchupInProgress"),
             ChainEvent::CatchupCompleted => write!(f, "CatchupCompleted"),
             ChainEvent::Block(b) => write!(f, "Block({b})"),
             ChainEvent::ExecutionConfirmed {

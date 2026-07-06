@@ -289,6 +289,11 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for SolanaIndexer<S, T> {
         LiveStreamStatus::Continue
     }
 
+    async fn notify_catchup_in_progress(&mut self) -> anyhow::Result<()> {
+        self.events_tx.send(ChainEvent::CatchupInProgress).await?;
+        Ok(())
+    }
+
     async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
         self.events_tx.send(ChainEvent::CatchupCompleted).await?;
         Ok(())
