@@ -12,5 +12,6 @@ mod respond_bidirectional;
 mod test_utils;
 mod util;
 
+pub use client::MaybeBlock;
 pub use config::EthConfig;
 pub use indexer::EthereumStream;

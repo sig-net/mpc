@@ -816,8 +816,6 @@ impl<S: StateManager, T: ChainTelemetry> ChainStream for EthereumStream<S, T> {
 #[cfg(test)]
 mod tests {
     use crate::client::MaybeBlock;
-    #[cfg(feature = "helios")]
-    use crate::indexer_eth::indexer_eth_helios;
     use crate::test_utils;
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::{address, b256};
