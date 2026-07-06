@@ -1,15 +1,15 @@
 use super::*;
 use crate::backlog::Backlog;
-use crate::mesh::{connection::NodeStatus, MeshState};
+use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::ParticipantInfo;
-use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
+use crate::rpc::{ContractStateWatcher, RpcAction};
 use crate::storage::checkpoint_storage::CheckpointStorage;
-use crate::stream::test_utils::{signature_responded_event, test_sign_args};
+use crate::stream::test_utils::{
+    run_stream_with_two_node_mesh, signature_responded_event, test_rpc_channel, test_sign_args,
+};
 use crate::util::current_unix_timestamp;
 use async_trait::async_trait;
 use k256::{AffinePoint, Scalar};
-use mockito::Server;
 use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
 use mpc_chain_solana::Pubkey;
 use mpc_primitives::{Chain, CheckpointDigest, IndexedSignRequest, SignCommand, SignId, Signature};
@@ -19,11 +19,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::timeout;
-
-fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<RpcAction>) {
-    let (tx, rx) = mpsc::channel(buffer);
-    (RpcChannel { tx }, rx)
-}
 
 struct VecEventStreamState {
     started: bool,
@@ -742,58 +737,7 @@ async fn test_stream_suppresses_pre_catchup_ethereum_completion() {
     let backlog = Backlog::persisted(storage);
     let (sign_tx, mut sign_rx) = mpsc::channel(8);
 
-    let (contract_watcher, _tx) = ContractStateWatcher::with_running(
-        &"test.near".parse::<AccountId>().unwrap(),
-        root_pk,
-        2,
-        Default::default(),
-    );
-
-    let mut servers = Vec::new();
-    for _ in 0..2 {
-        let mut server = Server::new_async().await;
-        let mut body = Vec::new();
-        ciborium::ser::into_writer(
-            &std::collections::HashMap::<Chain, crate::backlog::Checkpoint>::new(),
-            &mut body,
-        )
-        .unwrap();
-        server
-            .mock("GET", "/checkpoint")
-            .with_status(200)
-            .with_body(body)
-            .create_async()
-            .await;
-        servers.push(server);
-    }
-
-    let mut mesh_state = MeshState::default();
-    for (index, server) in servers.iter().enumerate() {
-        let mut info = ParticipantInfo::new(index as u32);
-        info.url = server.url();
-        mesh_state.update(
-            cait_sith::protocol::Participant::from(index as u32),
-            NodeStatus::Active,
-            info,
-        );
-    }
-    let (_mesh_state_tx, mesh_state_rx) = watch::channel(mesh_state);
-    let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
-    let (rpc, _rpc_rx) = test_rpc_channel(8);
-
-    run_stream(
-        client,
-        sign_tx,
-        rpc,
-        backlog.clone(),
-        NoopChainTelemetry,
-        contract_watcher,
-        mesh_state_rx,
-        node_client,
-        cp_rx,
-    )
-    .await;
+    run_stream_with_two_node_mesh(client, sign_tx, backlog.clone(), root_pk).await;
 
     match timeout(Duration::from_millis(100), sign_rx.recv()).await {
         Err(_) | Ok(None) => {}
@@ -838,56 +782,11 @@ async fn test_stream_requeues_replaced_ethereum_recovery_entry_after_catchup() {
     let backlog = Backlog::persisted(storage);
     let (sign_tx, mut sign_rx) = mpsc::channel(8);
 
-    let (contract_watcher, _tx) = ContractStateWatcher::with_running(
-        &"test.near".parse::<AccountId>().unwrap(),
-        k256::ProjectivePoint::GENERATOR.to_affine(),
-        2,
-        Default::default(),
-    );
-
-    let mut servers = Vec::new();
-    for _ in 0..2 {
-        let mut server = Server::new_async().await;
-        let mut body = Vec::new();
-        ciborium::ser::into_writer(
-            &std::collections::HashMap::<Chain, crate::backlog::Checkpoint>::new(),
-            &mut body,
-        )
-        .unwrap();
-        server
-            .mock("GET", "/checkpoint")
-            .with_status(200)
-            .with_body(body)
-            .create_async()
-            .await;
-        servers.push(server);
-    }
-
-    let mut mesh_state = MeshState::default();
-    for (index, server) in servers.iter().enumerate() {
-        let mut info = ParticipantInfo::new(index as u32);
-        info.url = server.url();
-        mesh_state.update(
-            cait_sith::protocol::Participant::from(index as u32),
-            NodeStatus::Active,
-            info,
-        );
-    }
-    let (_mesh_state_tx, mesh_state_rx) = watch::channel(mesh_state);
-    let (_cp_tx, cp_rx) = watch::channel(None);
-    let node_client = NodeClient::new(&Default::default());
-    let (rpc, _rpc_rx) = test_rpc_channel(8);
-
-    run_stream(
+    run_stream_with_two_node_mesh(
         client,
         sign_tx,
-        rpc,
         backlog.clone(),
-        NoopChainTelemetry,
-        contract_watcher,
-        mesh_state_rx,
-        node_client,
-        cp_rx,
+        k256::ProjectivePoint::GENERATOR.to_affine(),
     )
     .await;
 

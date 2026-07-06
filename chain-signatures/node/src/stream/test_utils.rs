@@ -6,14 +6,26 @@
 //! `stream` module so both `stream::tests` and `stream::ops::tests` can reach
 //! them via `crate::stream::test_utils`.
 
+use crate::backlog::Backlog;
+use crate::mesh::connection::NodeStatus;
+use crate::mesh::MeshState;
+use crate::node_client::NodeClient;
+use crate::protocol::ParticipantInfo;
+use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
+use crate::stream::run_stream;
 use crate::util::current_unix_timestamp;
 use alloy::primitives::{Address, B256};
-use k256::Scalar;
+use k256::{AffinePoint, Scalar};
+use mockito::Server;
 use mpc_chain_canton::CantonChainCtx;
+use mpc_chain_integration_core::{ChainStream, NoopChainTelemetry};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, IndexedSignRequest, RespondBidirectionalEvent,
-    SignArgs, SignBidirectionalEvent, SignId, SignKind, Signature, SignatureRespondedEvent,
+    SignArgs, SignBidirectionalEvent, SignCommand, SignId, SignKind, Signature,
+    SignatureRespondedEvent,
 };
+use near_primitives::types::AccountId;
+use tokio::sync::{mpsc, watch};
 
 pub fn test_indexed_request(
     sign_id: SignId,
@@ -112,4 +124,81 @@ pub fn signature_responded_event(
         signature,
         chain,
     }
+}
+
+/// A minimal `RpcChannel` backed by an `mpsc` channel, for tests that don't
+/// need to assert on RPC traffic.
+pub fn test_rpc_channel(buffer: usize) -> (RpcChannel, mpsc::Receiver<RpcAction>) {
+    let (tx, rx) = mpsc::channel(buffer);
+    (RpcChannel { tx }, rx)
+}
+
+/// Drive `run_stream` against a two-node mesh backed by in-memory Mockito HTTP
+/// servers (one per participant) that always serve an empty checkpoint map.
+///
+/// This centralizes the ~40 lines of identical setup shared by the Ethereum
+/// completion/requeue stream tests: `ContractStateWatcher`, the mock `/checkpoint`
+/// endpoints, `MeshState` with two active participants, the `NodeClient`, the
+/// `RpcChannel`, and the `run_stream` call itself.
+///
+/// `servers` are kept alive for the duration of `run_stream` because they are
+/// bound to the lifetime of this call, matching the previous inline behavior.
+pub async fn run_stream_with_two_node_mesh<S: ChainStream>(
+    client: S,
+    sign_tx: mpsc::Sender<SignCommand>,
+    backlog: Backlog,
+    root_pk: AffinePoint,
+) {
+    let (contract_watcher, _tx) = ContractStateWatcher::with_running(
+        &"test.near".parse::<AccountId>().unwrap(),
+        root_pk,
+        2,
+        Default::default(),
+    );
+
+    let mut servers = Vec::new();
+    for _ in 0..2 {
+        let mut server = Server::new_async().await;
+        let mut body = Vec::new();
+        ciborium::ser::into_writer(
+            &std::collections::HashMap::<Chain, crate::backlog::Checkpoint>::new(),
+            &mut body,
+        )
+        .unwrap();
+        server
+            .mock("GET", "/checkpoint")
+            .with_status(200)
+            .with_body(body)
+            .create_async()
+            .await;
+        servers.push(server);
+    }
+
+    let mut mesh_state = MeshState::default();
+    for (index, server) in servers.iter().enumerate() {
+        let mut info = ParticipantInfo::new(index as u32);
+        info.url = server.url();
+        mesh_state.update(
+            cait_sith::protocol::Participant::from(index as u32),
+            NodeStatus::Active,
+            info,
+        );
+    }
+    let (_mesh_state_tx, mesh_state_rx) = watch::channel(mesh_state);
+    let (_cp_tx, cp_rx) = watch::channel(None);
+    let node_client = NodeClient::new(&Default::default());
+    let (rpc, _rpc_rx) = test_rpc_channel(8);
+
+    run_stream(
+        client,
+        sign_tx,
+        rpc,
+        backlog,
+        NoopChainTelemetry,
+        contract_watcher,
+        mesh_state_rx,
+        node_client,
+        cp_rx,
+    )
+    .await;
 }
