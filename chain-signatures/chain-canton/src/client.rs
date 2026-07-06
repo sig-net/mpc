@@ -275,14 +275,14 @@ async fn check_response(
 #[async_trait::async_trait]
 impl ChainPublisher for CantonClient {
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        let sign_id = action.indexed.id;
-        let request_id_hex = hex::encode(action.indexed.id.request_id);
+        let sign_id = action.request.id;
+        let request_id_hex = hex::encode(action.request.id.request_id);
         let timestamp = action.timestamp;
         let signature = &action.signature;
 
         tracing::info!(
             ?sign_id,
-            chain = ?action.indexed.chain,
+            chain = ?action.request.chain,
             elapsed = ?timestamp.elapsed(),
             request_id = %request_id_hex,
             "canton: publishing signature"
@@ -294,7 +294,7 @@ impl ChainPublisher for CantonClient {
             recovery_id: signature.recovery_id,
         }))?;
 
-        let (choice, command_id, choice_argument) = match &action.indexed.kind {
+        let (choice, command_id, choice_argument) = match &action.request.kind {
             SignKind::SignBidirectional(event) if event.chain == Chain::Canton => {
                 let chain_ctx_bytes = event
                     .chain_ctx

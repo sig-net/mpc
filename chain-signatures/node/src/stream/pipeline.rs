@@ -6,7 +6,7 @@ use crate::types::CheckpointWatcher;
 
 use futures_util::StreamExt;
 use mpc_chain_integration_core::ChainIndexer;
-use mpc_primitives::{Chain, Sign};
+use mpc_primitives::{Chain, SignCommand};
 use near_account_id::AccountId;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Duration;
@@ -36,7 +36,7 @@ pub struct ChainPipeline<I: ChainIndexer> {
     state_rx: watch::Receiver<ChainStreaming>,
     checkpoints_rx: CheckpointWatcher,
     backlog: Backlog,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
     mesh_state: watch::Receiver<MeshState>,
     node_client: NodeClient,
     threshold: usize,
@@ -49,7 +49,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         indexer: I,
         checkpoints_rx: CheckpointWatcher,
         backlog: Backlog,
-        sign_tx: mpsc::Sender<Sign>,
+        sign_tx: mpsc::Sender<SignCommand>,
         mesh_state: watch::Receiver<MeshState>,
         node_client: NodeClient,
         threshold: usize,
@@ -74,7 +74,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         indexer: I,
         checkpoints_rx: CheckpointWatcher,
         backlog: Backlog,
-        sign_tx: mpsc::Sender<Sign>,
+        sign_tx: mpsc::Sender<SignCommand>,
         mesh_state: watch::Receiver<MeshState>,
         node_client: NodeClient,
         threshold: usize,
@@ -171,7 +171,7 @@ impl<I: ChainIndexer> ChainPipeline<I> {
         .is_some()
         {
             tracing::warn!(%chain, "backlog regressed via consensus checkpoint; aborting in-flight tasks");
-            let _ = self.sign_tx.send(Sign::AbortChain(chain)).await;
+            let _ = self.sign_tx.send(SignCommand::AbortChain(chain)).await;
         }
 
         // Determine anchor height

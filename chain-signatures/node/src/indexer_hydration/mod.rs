@@ -18,8 +18,9 @@ use mpc_chain_integration_core::{
 };
 use mpc_crypto::ScalarExt as _;
 use mpc_primitives::{
-    Chain, IndexedSignRequest, RespondBidirectionalEvent, Sign, SignArgs, SignBidirectionalEvent,
-    SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION, MAX_SECP256K1_SCALAR,
+    Chain, IndexedSignRequest, RespondBidirectionalEvent, SignArgs, SignBidirectionalEvent,
+    SignCommand, SignId, Signature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
+    MAX_SECP256K1_SCALAR,
 };
 use sp_core::crypto::{AccountId32 as SpAccountId32, Ss58AddressFormatRegistry, Ss58Codec};
 use sp_core::{twox_128, H256};
@@ -313,7 +314,7 @@ pub(crate) fn ss58_address_from_account32(sender: [u8; 32]) -> String {
 #[allow(clippy::too_many_arguments)]
 pub async fn run<T: ChainTelemetry>(
     hydration: HydrationConfig,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
     backlog: Backlog,
     telemetry: T,
     mut contract_watcher: ContractStateWatcher,

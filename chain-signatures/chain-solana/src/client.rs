@@ -473,18 +473,18 @@ impl ChainPublisher for SolanaClient {
         let mpc_sig = &action.signature;
         let program = self.client.program(self.program_id)?;
 
-        let sign_id = action.indexed.id;
-        let request_ids = vec![action.indexed.id.request_id];
+        let sign_id = action.request.id;
+        let request_ids = vec![action.request.id.request_id];
         let big_r = mpc_sig.big_r.to_encoded_point(false);
         let signature = mpc_to_sol_signature(mpc_sig, big_r);
 
         tracing::debug!(
             ?sign_id,
-            request_type = ?action.indexed.kind,
+            request_type = ?action.request.kind,
             "Solana publish signature: dispatching request"
         );
 
-        match &action.indexed.kind {
+        match &action.request.kind {
             SignKind::Sign | SignKind::SignBidirectional(_) => {
                 let (event_authority, _) =
                     Pubkey::find_program_address(&[b"__event_authority"], &self.program_id);
@@ -504,7 +504,7 @@ impl ChainPublisher for SolanaClient {
                     .await
                     .inspect_err(|err| {
                         tracing::error!(
-                            sign_id = ?action.indexed.id,
+                            sign_id = ?action.request.id,
                             error = ?err,
                             "failed to publish solana signature"
                         );

@@ -37,7 +37,7 @@ use mpc_chain_integration_core::ChainPublisher;
 use mpc_chain_near::NearClient;
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaStream};
 use mpc_keys::hpke;
-use mpc_primitives::{Chain, CheckpointDigest, Sign};
+use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
@@ -692,7 +692,7 @@ impl ProtocolHandles {
         account_id: &AccountId,
         override_config: Option<OverrideConfig>,
         network: NetworkConfig,
-        sign_rx: mpsc::Receiver<Sign>,
+        sign_rx: mpsc::Receiver<SignCommand>,
         node_client: &NodeClient,
         contract_watcher: &ContractStateWatcher,
         key_storage: SecretNodeStorageVariant,
@@ -757,7 +757,7 @@ impl ProtocolHandles {
 #[allow(clippy::too_many_arguments)]
 async fn spawn_indexers(
     chains: ChainConfigs,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
     rpc_channel: RpcChannel,
     backlog: Backlog,
     contract_watcher: ContractStateWatcher,

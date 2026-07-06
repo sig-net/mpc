@@ -32,6 +32,8 @@ impl SignPositWorkQueue {
         })
     }
 
+    /// Buffer `msg` in its sender's slot, overwriting when its round is `>=` the
+    /// buffered one, then wake one consumer.
     pub(crate) fn push(&self, msg: SignTaskMessage) {
         let SignTaskMessage::PositMessage {
             from,

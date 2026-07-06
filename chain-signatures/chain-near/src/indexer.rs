@@ -1,6 +1,6 @@
 use mpc_chain_integration_core::StateManager;
 use mpc_contract::primitives::PendingRequest;
-use mpc_primitives::{Chain, IndexedSignRequest, Sign, SignArgs, SignId};
+use mpc_primitives::{Chain, IndexedSignRequest, SignArgs, SignCommand, SignId};
 use near_account_id::AccountId;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -135,7 +135,7 @@ impl NearIndexer {
 
 struct Context<S: StateManager> {
     mpc_contract_id: AccountId,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
     indexer: NearIndexer,
     rpc_client: near_fetch::Client,
     state_manager: S,
@@ -188,14 +188,14 @@ async fn poll_pending_requests<S: StateManager>(ctx: &mut Context<S>) -> anyhow:
             sign_id = ?request.id,
             "sending new sign request to processing queue"
         );
-        if let Err(err) = ctx.sign_tx.send(Sign::Request(request)).await {
+        if let Err(err) = ctx.sign_tx.send(SignCommand::Request(request)).await {
             tracing::error!(?err, "failed to send the sign request into sign queue");
         }
     }
 
     for sign_id in completed_requests {
         tracing::info!(?sign_id, "detected completed NEAR sign request");
-        if let Err(err) = ctx.sign_tx.send(Sign::Completion(sign_id)).await {
+        if let Err(err) = ctx.sign_tx.send(SignCommand::Completion(sign_id)).await {
             tracing::error!(
                 ?err,
                 ?sign_id,
@@ -222,7 +222,7 @@ pub fn run<S: StateManager>(
     options: &Options,
     mpc_contract_id: &AccountId,
     node_account_id: &AccountId,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
     rpc_client: near_fetch::Client,
     state_manager: S,
 ) -> anyhow::Result<JoinHandle<anyhow::Result<()>>> {

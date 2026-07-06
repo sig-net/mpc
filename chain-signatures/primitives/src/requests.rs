@@ -15,7 +15,7 @@ pub enum SignKind {
 /// Messages sent into the node's sign-request processing queue.
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
-pub enum Sign {
+pub enum SignCommand {
     Request(IndexedSignRequest),
     Completion(SignId),
     Checkpoint(IndexedSignRequest),

@@ -82,16 +82,16 @@ impl ChainPublisher for NearClient {
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
         let timestamp = action.timestamp;
         let signature = &action.signature;
-        let outcome = match &action.indexed.kind {
+        let outcome = match &action.request.kind {
             SignKind::Checkpoint(checkpoint) => {
                 self.call_respond_checkpoint(checkpoint, signature).await
             }
-            _ => self.call_respond(&action.indexed.id, signature).await,
+            _ => self.call_respond(&action.request.id, signature).await,
         }
         .map_err(|e| anyhow::anyhow!("near rpc error: {e}"))
         .inspect_err(|err| {
             tracing::error!(
-                sign_id = ?action.indexed.id,
+                sign_id = ?action.request.id,
                 ?err,
                 "failed to publish signature",
             );
@@ -102,7 +102,7 @@ impl ChainPublisher for NearClient {
             .map_err(|e| anyhow::anyhow!("contract rejected response: {e}"))
             .inspect_err(|err| {
                 tracing::error!(
-                    sign_id = ?action.indexed.id,
+                    sign_id = ?action.request.id,
                     big_r = signature.big_r.to_base58(),
                     s = ?signature.s,
                     ?err,
@@ -111,7 +111,7 @@ impl ChainPublisher for NearClient {
             })?;
 
         tracing::info!(
-            sign_id = ?action.indexed.id,
+            sign_id = ?action.request.id,
             big_r = signature.big_r.to_base58(),
             s = ?signature.s,
             elapsed = ?timestamp.elapsed(),

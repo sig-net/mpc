@@ -20,7 +20,7 @@ pub struct PublishAction {
     /// The public key associated with the signature.
     pub public_key: PublicKey,
     /// The indexed sign request that this signature corresponds to.
-    pub indexed: IndexedSignRequest,
+    pub request: IndexedSignRequest,
     /// The actual signature to be published.
     pub signature: Signature,
     /// The participants involved in the signing process.
@@ -32,21 +32,21 @@ pub struct PublishAction {
 impl PublishAction {
     pub fn new(
         public_key: PublicKey,
-        indexed: IndexedSignRequest,
+        request: IndexedSignRequest,
         output: FullSignature<Secp256k1>,
         participants: Vec<Participant>,
     ) -> Option<Self> {
-        let expected_public_key = mpc_crypto::derive_key(public_key, indexed.args.epsilon);
+        let expected_public_key = mpc_crypto::derive_key(public_key, request.args.epsilon);
         let signature = mpc_crypto::reconstruct_signature(
             &expected_public_key,
             &output.big_r,
             &output.s,
-            indexed.args.payload,
+            request.args.payload,
         )
         .ok()?;
         Some(Self {
             public_key,
-            indexed,
+            request,
             signature,
             participants,
             timestamp: Instant::now(),
@@ -69,9 +69,9 @@ mod tests {
         let payload = scalar(&[42u8; 32]);
 
         let output = make_signature(&sk, epsilon, payload);
-        let indexed = make_indexed(Chain::NEAR, epsilon, payload, SignKind::Sign);
+        let request = make_indexed(Chain::NEAR, epsilon, payload, SignKind::Sign);
 
-        assert!(PublishAction::new(pk, indexed, output, vec![]).is_some());
+        assert!(PublishAction::new(pk, request, output, vec![]).is_some());
     }
 
     #[test]
@@ -83,8 +83,8 @@ mod tests {
 
         let mut output = make_signature(&sk, epsilon, payload);
         output.s += k256::Scalar::ONE;
-        let indexed = make_indexed(Chain::NEAR, epsilon, payload, SignKind::Sign);
+        let request = make_indexed(Chain::NEAR, epsilon, payload, SignKind::Sign);
 
-        assert!(PublishAction::new(pk, indexed, output, vec![]).is_none());
+        assert!(PublishAction::new(pk, request, output, vec![]).is_none());
     }
 }

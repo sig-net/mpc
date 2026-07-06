@@ -16,7 +16,7 @@ pub struct TestProtocolStorage {
 }
 
 pub struct TestProtocolChannels {
-    pub sign_rx: mpsc::Receiver<mpc_primitives::Sign>,
+    pub sign_rx: mpsc::Receiver<mpc_primitives::SignCommand>,
     pub msg_channel: MessageChannel,
     pub rpc_channel: RpcChannel,
     pub config: watch::Receiver<Config>,

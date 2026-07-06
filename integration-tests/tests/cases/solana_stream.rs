@@ -15,8 +15,8 @@ use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
 use mpc_node::stream::{run_stream, ChainPipeline, ChainStreaming};
 use mpc_primitives::{
-    Chain, ChainEvent, CheckpointDigest, IndexedSignRequest, Sign, SignArgs, SignId, Signature,
-    LATEST_MPC_KEY_VERSION,
+    Chain, ChainEvent, CheckpointDigest, IndexedSignRequest, SignArgs, SignCommand, SignId,
+    Signature, LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
 use solana_sdk::signer::Signer;
@@ -493,7 +493,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
     let stream = SolanaStream::new(config, recovered_backlog.clone(), NoopChainTelemetry)
         .context("failed to create SolanaStream")?;
 
-    let (sign_tx, mut sign_rx) = mpsc::channel::<Sign>(4);
+    let (sign_tx, mut sign_rx) = mpsc::channel::<SignCommand>(4);
     let (rpc_tx, mut rpc_rx) = mpsc::channel::<RpcAction>(4);
     let rpc = RpcChannel { tx: rpc_tx };
 
@@ -547,7 +547,7 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
         .context("rpc channel closed before publish action")?;
 
     while let Ok(Some(message)) = timeout(Duration::from_millis(50), sign_rx.recv()).await {
-        if let Sign::Request(req) = &message {
+        if let SignCommand::Request(req) = &message {
             if req.id == sign_id {
                 anyhow::bail!("recovered publish request was incorrectly requeued for signing");
             }
@@ -556,8 +556,8 @@ async fn test_solana_stream_republishes_pending_publish_after_checkpoint_recover
 
     match action {
         RpcAction::Publish(action) => {
-            assert_eq!(action.indexed.id, sign_id);
-            assert_eq!(action.indexed.chain, Chain::Solana);
+            assert_eq!(action.request.id, sign_id);
+            assert_eq!(action.request.chain, Chain::Solana);
             assert_eq!(action.signature, signature);
             assert_eq!(action.participants, vec![Participant::from(0u32)]);
         }
