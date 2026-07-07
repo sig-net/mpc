@@ -38,38 +38,51 @@ config, not constructed by hand.
 
 ## Benchmarking catchup
 
-The `bench` feature (`cargo run --features bench`) instruments the direct-RPC
-catchup path with global counters: attempt-level RPC call counts per method
-(including retries), time spent batch-fetching, and time spent in per-block
-`process_block`. The numbers are surfaced as tracing events under the
-`mpc_chain_ethereum::bench` target via [`bench::report_metrics`](src/bench.rs),
-which fires once at the end of catchup.
+The `bench` feature instruments the direct-RPC catchup path with global RPC
+counters and timing. The report is emitted under the `mpc_chain_ethereum::bench`
+tracing target via `bench::report_metrics`.
 
-Use the `bench_catchup` example to drive it over a real historical range:
+### eRPC cache (recommended)
+
+Run against a cached RPC so results are reproducible and don't rate-limit. The
+`bench/` directory has a docker-compose bringing up <https://erpc.cloud> (eRPC) + Redis fronting
+four public Sepolia endpoints. First run populates the cache; subsequent runs
+over the same `[START, END)` range read from Redis.
+
+```sh
+docker compose -f bench/docker-compose.bench.yml up -d
+
+RPC_URL=http://localhost:4000/sepolia/evm/11155111 \
+CONTRACT_ADDRESS=0x69C6b28Fdc74618817fa380De29a653060e14009 \
+START=11214938 END=11215038 \
+RUST_LOG=mpc_chain_ethereum::bench=info \
+cargo run --example bench_catchup --features bench
+
+docker compose -f bench/docker-compose.bench.yml down -v   # clear cache
+```
+
+Alternatively point `RPC_URL` directly at a public Sepolia endpoint (slower,
+noisier):
 
 ```sh
 RPC_URL=https://eth-sepolia.api.onfinality.io/public \
 CONTRACT_ADDRESS=0x69C6b28Fdc74618817fa380De29a653060e14009 \
-START=11214938 \
-END=11215038 \
+START=11214938 END=11215038 \
 RUST_LOG=mpc_chain_ethereum::bench=info \
 cargo run --example bench_catchup --features bench
 ```
 
-Environment variables:
+### Environment variables
 
 | var              | required? | description |
 |------------------|-----------|-------------|
-| `RPC_URL`        | yes       | execution-layer RPC endpoint |
+| `RPC_URL`        | yes       | execution-layer RPC endpoint (eRPC URL or direct) |
 | `CONTRACT_ADDRESS` | yes     | contract to watch (with/without `0x`) |
-| `END`            | yes       | exclusive end of the range (the anchor height) |
-| `START`          | no        | inclusive start; if omitted only `END-1` is processed ("live-anchor" smoke test) |
-| `NETWORK`       | no        | default `sepolia` |
+| `END`            | yes       | exclusive end of the range |
+| `START`          | no        | inclusive start; if omitted only `END-1` is processed |
+| `NETWORK`        | no        | default `sepolia` |
 | `OPTIMISTIC`     | no        | `1` (default) enables optimistic requests; `0` exercises finality polling |
-| `RUST_LOG`       | no        | tracing filter — set to `mpc_chain_ethereum::bench=info` for just the report, or `info` for full indexer logs |
-
-The example sets `processed_block = START - 1` so that `catchup_range(END)`
-processes exactly `[START, END)`.
+| `RUST_LOG`       | no        | tracing filter — `mpc_chain_ethereum::bench=info` for just the report |
 
 ## Features
 
