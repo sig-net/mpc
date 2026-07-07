@@ -23,7 +23,10 @@ use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
 use crate::stream::run_stream;
 use crate::{logs, storage, web};
-pub use args::{canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, solana::SolArgs};
+pub use args::{
+    canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, midnight::MidnightArgs,
+    solana::SolArgs,
+};
 
 use cait_sith::protocol::Participant;
 use clap::Parser;
@@ -34,6 +37,7 @@ use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonStream};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumStream};
 use mpc_chain_integration_core::ChainPublisher;
+use mpc_chain_midnight::{MidnightClient, MidnightConfig, MidnightStream};
 use mpc_chain_near::NearClient;
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaStream};
 use mpc_keys::hpke;
@@ -88,6 +92,9 @@ pub enum Cli {
         /// Canton Indexer options
         #[clap(flatten)]
         canton: CantonArgs,
+        /// Midnight Indexer options
+        #[clap(flatten)]
+        midnight: MidnightArgs,
         /// NEAR requests options
         #[clap(flatten)]
         indexer_options: mpc_chain_near::Options,
@@ -132,6 +139,7 @@ impl Cli {
                 sol,
                 hydration,
                 canton,
+                midnight,
                 indexer_options,
                 my_address,
                 storage_options,
@@ -180,6 +188,7 @@ impl Cli {
                 args.extend(sol.into_str_args());
                 args.extend(hydration.into_str_args());
                 args.extend(canton.into_str_args());
+                args.extend(midnight.into_str_args());
                 args.extend(indexer_options.into_str_args());
                 args.extend(storage_options.into_str_args());
                 args.extend(log_options.into_str_args());
@@ -205,6 +214,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             sol,
             hydration,
             canton,
+            midnight,
             indexer_options,
             my_address,
             storage_options,
@@ -276,7 +286,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
                 synced_peer_tx,
             } = MeshHandles::new(message_options, mesh_options, &account_id);
 
-            let chains = ChainConfigs::from_args(eth, sol, hydration, canton);
+            let chains = ChainConfigs::from_args(eth, sol, hydration, canton, midnight);
             let network = NetworkConfig { cipher_sk, sign_sk };
             let signer = InMemorySigner::from_secret_key(account_id.clone(), account_sk);
 
@@ -460,15 +470,23 @@ struct ChainConfigs {
     sol: Option<SolConfig>,
     hydration: Option<HydrationConfig>,
     canton: Option<CantonConfig>,
+    midnight: Option<MidnightConfig>,
 }
 
 impl ChainConfigs {
-    fn from_args(eth: EthArgs, sol: SolArgs, hydration: HydrationArgs, canton: CantonArgs) -> Self {
+    fn from_args(
+        eth: EthArgs,
+        sol: SolArgs,
+        hydration: HydrationArgs,
+        canton: CantonArgs,
+        midnight: MidnightArgs,
+    ) -> Self {
         Self {
             eth: eth.into_config(),
             sol: sol.into_config(),
             hydration: hydration.into_config(),
             canton: canton.into_config(),
+            midnight: midnight.into_config(),
         }
     }
 
@@ -506,6 +524,11 @@ impl ChainConfigs {
                 }
                 Err(e) => tracing::error!(%e, "failed to create canton client"),
             }
+        }
+        if let Some(midnight) = &self.midnight {
+            let telemetry = Arc::new(NodeTelemetry::new(Chain::Midnight));
+            let client = Arc::new(MidnightClient::new(midnight, telemetry));
+            publishers.insert(Chain::Midnight, client);
         }
 
         publishers
@@ -547,6 +570,7 @@ fn log_startup(
         hydration_rpc_url = %chains.hydration.as_ref().map(|c| c.rpc_ws_url.as_str()).unwrap_or("None"),
         hydration_signer_address = %hydration_signer_address.as_deref().unwrap_or("None"),
         canton_json_api_url = %chains.canton.as_ref().map(|c| c.json_api_url.as_str()).unwrap_or("None"),
+        midnight_contract_address = %chains.midnight.as_ref().map(|c| c.contract_address.as_str()).unwrap_or("None"),
         "starting node",
     );
 }
@@ -770,6 +794,7 @@ async fn spawn_indexers(
         sol,
         hydration,
         canton,
+        midnight,
     } = chains;
 
     tracing::info!(
@@ -777,6 +802,7 @@ async fn spawn_indexers(
         solana = sol.is_some(),
         hydration = hydration.is_some(),
         canton = canton.is_some(),
+        midnight = midnight.is_some(),
         "spawning chain indexers"
     );
 
@@ -847,18 +873,41 @@ async fn spawn_indexers(
                 tracing::info!("canton indexer stream created successfully");
                 tokio::spawn(run_stream(
                     canton_stream,
-                    sign_tx,
-                    rpc_channel,
-                    backlog,
+                    sign_tx.clone(),
+                    rpc_channel.clone(),
+                    backlog.clone(),
                     canton_telemetry,
-                    contract_watcher,
-                    mesh_state,
-                    node_client,
+                    contract_watcher.clone(),
+                    mesh_state.clone(),
+                    node_client.clone(),
                     checkpoints_rx[Chain::Canton].clone(),
                 ));
             }
             Err(err) => {
                 tracing::error!(?err, "failed to create canton indexer stream");
+            }
+        }
+    }
+
+    if let Some(midnight_config) = midnight {
+        let midnight_telemetry = NodeTelemetry::new(Chain::Midnight);
+        match MidnightStream::new(midnight_config, backlog.clone(), midnight_telemetry.clone()) {
+            Ok(midnight_stream) => {
+                tracing::info!("midnight indexer stream created successfully");
+                tokio::spawn(run_stream(
+                    midnight_stream,
+                    sign_tx,
+                    rpc_channel,
+                    backlog,
+                    midnight_telemetry,
+                    contract_watcher,
+                    mesh_state,
+                    node_client,
+                    checkpoints_rx[Chain::Midnight].clone(),
+                ));
+            }
+            Err(err) => {
+                tracing::error!(?err, "failed to create midnight indexer stream");
             }
         }
     }
