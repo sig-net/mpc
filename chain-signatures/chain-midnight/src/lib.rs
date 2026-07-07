@@ -5,8 +5,8 @@
 //! requests over HTTP to the isolated `midnight-publisher` service (that service owns
 //! the heavy `midnight-node-toolkit` dependency universe — see the pins doc).
 //!
-//! Wire format: `midnight-erc20-vault/docs/signet-midnight-events.md` (SGN1),
-//! pinned by the golden vectors in `tests/goldens/`.
+//! Wire format: `doc/signet-midnight-events.md` (SGN1), pinned by the golden
+//! vectors in `tests/goldens/` (generated in the midnight-erc20-vault repo).
 
 mod client;
 mod config;
