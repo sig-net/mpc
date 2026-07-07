@@ -1,0 +1,75 @@
+{
+  "description": "signet-signer `sign` circuit: single SGN1:SIGN event. Payload layout, requestId, epsilon v2 and derived key vectors.",
+  "format": "All byte fields are lowercase hex without 0x (event name = 32B, event payload = 256B, both zero-padded), except EVM addresses (0x-prefixed, checksummed where applicable). Integers are decimal strings.",
+  "fixtures": {
+    "callerSecretKey": "1111111111111111111111111111111111111111111111111111111111111111",
+    "commitment": "e093949750afc5ff6d25764fe81ea991c7cd7659d1aa802eaa651a48aa436859",
+    "path": "e093949750afc5ff6d25764fe81ea991c7cd7659d1aa802eaa651a48aa436859",
+    "contractAddress": "4c39f6fe5c9625abb55dc443eb859dd539b9ee7e7bc26b4250d331ed10e391b2",
+    "caip2": "midnight:mainnet",
+    "rootSecretKey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "rootPublicKeyUncompressed": "046a04ab98d9e4774ad806e302dddeb63bea16b5cb5f223ee77478e861bb583eb336b6fbcb60b5b3d4f1551ac45e5ffc4936466e7d98f6c7c0ec736539f74691a6"
+  },
+  "cases": [
+    {
+      "name": "sign nonce=0",
+      "inputs": {
+        "payload": "8b275b04a2c8dcf5bbcaa31205a052c4b34ea2fb0a161485b682a768170666a5",
+        "keyVersion": "1",
+        "nonce": "0"
+      },
+      "commitment": "e093949750afc5ff6d25764fe81ea991c7cd7659d1aa802eaa651a48aa436859",
+      "events": [
+        {
+          "name": "53474e313a5349474e0000000000000000000000000000000000000000000000",
+          "nameAscii": "SGN1:SIGN",
+          "payload": "cca92908be86c5c618109f3811ee550cdf026a2387fa49b9d4db6fe73c5078740000000000000000e093949750afc5ff6d25764fe81ea991c7cd7659d1aa802eaa651a48aa4368598b275b04a2c8dcf5bbcaa31205a052c4b34ea2fb0a161485b682a768170666a50100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "requestId": "cca92908be86c5c618109f3811ee550cdf026a2387fa49b9d4db6fe73c507874",
+      "indexed": {
+        "entropy": "210195ae45100cfed65368f29ba35cdc8f0002a9bd1d2326c308e40c177deda6",
+        "payloadScalar": "8b275b04a2c8dcf5bbcaa31205a052c4b34ea2fb0a161485b682a768170666a5",
+        "path": "e093949750afc5ff6d25764fe81ea991c7cd7659d1aa802eaa651a48aa436859",
+        "keyVersion": "1",
+        "epsilon": "618ee77a356ad97d806eb73723c52f326e734d122c57ae878363c9f6fb14274e"
+      },
+      "derivation": {
+        "derivationString": "sig.network v2.0.0 epsilon derivation:midnight:mainnet:4c39f6fe5c9625abb55dc443eb859dd539b9ee7e7bc26b4250d331ed10e391b2:e093949750afc5ff6d25764fe81ea991c7cd7659d1aa802eaa651a48aa436859",
+        "epsilon": "618ee77a356ad97d806eb73723c52f326e734d122c57ae878363c9f6fb14274e",
+        "publicKeyUncompressed": "04396b67f1f0e11b2f7fcaca55fbeab0fb155f0cbfd9010ee4566032f2c2cd5752925277566ad747d9204c3ff1b28f7fa32cea69ce25138a7b46f21aca8d22cb21",
+        "evmAddress": "0x5f94e7c5bf441a750af18f36029c16d8c96910a7"
+      }
+    },
+    {
+      "name": "sign nonce=1",
+      "inputs": {
+        "payload": "c855c55c51ea7140701c32fed8e666d7e887f2c08c1dfd2a272aa27039c2f776",
+        "keyVersion": "1",
+        "nonce": "1"
+      },
+      "commitment": "e093949750afc5ff6d25764fe81ea991c7cd7659d1aa802eaa651a48aa436859",
+      "events": [
+        {
+          "name": "53474e313a5349474e0000000000000000000000000000000000000000000000",
+          "nameAscii": "SGN1:SIGN",
+          "payload": "eb3305ac09d4b1692d3f14e9c1450dc5d314811076019afd5acb7e4018e17dcd0100000000000000e093949750afc5ff6d25764fe81ea991c7cd7659d1aa802eaa651a48aa436859c855c55c51ea7140701c32fed8e666d7e887f2c08c1dfd2a272aa27039c2f7760100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "requestId": "eb3305ac09d4b1692d3f14e9c1450dc5d314811076019afd5acb7e4018e17dcd",
+      "indexed": {
+        "entropy": "b6eb30a26039b447c4d4fd36c8aaa13d949aa4d2760d0d4877e0d6fa2fd491bb",
+        "payloadScalar": "c855c55c51ea7140701c32fed8e666d7e887f2c08c1dfd2a272aa27039c2f776",
+        "path": "e093949750afc5ff6d25764fe81ea991c7cd7659d1aa802eaa651a48aa436859",
+        "keyVersion": "1",
+        "epsilon": "618ee77a356ad97d806eb73723c52f326e734d122c57ae878363c9f6fb14274e"
+      },
+      "derivation": {
+        "derivationString": "sig.network v2.0.0 epsilon derivation:midnight:mainnet:4c39f6fe5c9625abb55dc443eb859dd539b9ee7e7bc26b4250d331ed10e391b2:e093949750afc5ff6d25764fe81ea991c7cd7659d1aa802eaa651a48aa436859",
+        "epsilon": "618ee77a356ad97d806eb73723c52f326e734d122c57ae878363c9f6fb14274e",
+        "publicKeyUncompressed": "04396b67f1f0e11b2f7fcaca55fbeab0fb155f0cbfd9010ee4566032f2c2cd5752925277566ad747d9204c3ff1b28f7fa32cea69ce25138a7b46f21aca8d22cb21",
+        "evmAddress": "0x5f94e7c5bf441a750af18f36029c16d8c96910a7"
+      }
+    }
+  ]
+}

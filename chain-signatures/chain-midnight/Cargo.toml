@@ -1,0 +1,32 @@
+[package]
+name = "mpc-chain-midnight"
+version.workspace = true
+edition = "2021"
+
+# Light deps ONLY. The heavy midnight-node-toolkit universe is quarantined in the
+# sibling `midnight-publisher` isolated workspace; this crate reaches it over HTTP.
+[dependencies]
+mpc-chain-integration-core = { workspace = true }
+mpc-primitives = { workspace = true }
+mpc-crypto = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures-util = { workspace = true }
+tracing = { workspace = true }
+hex = { workspace = true }
+k256 = { workspace = true }
+sha2 = "0.10"
+sha3 = { workspace = true }
+alloy-consensus = { workspace = true }
+alloy-primitives = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+mockito = { workspace = true }
