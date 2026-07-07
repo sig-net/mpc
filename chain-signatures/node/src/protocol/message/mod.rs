@@ -343,7 +343,7 @@ impl MessageInbox {
                     self.ready.clear_capacity_global();
                 }
             },
-            SubscribeId::Triples => match sub.action {
+            SubscribeId::TriplePosit => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
                     let rx = self.triple_posit.subscribe();
                     let _ = resp.send(SubscribeResponse::TriplePosit(rx));
@@ -352,7 +352,7 @@ impl MessageInbox {
                     self.triple_posit.unsubscribe();
                 }
             },
-            SubscribeId::Presignatures => match sub.action {
+            SubscribeId::PresignaturePosit => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
                     let rx = self.presignature_posit.subscribe();
                     let _ = resp.send(SubscribeResponse::PresignaturePosit(rx));
@@ -361,7 +361,7 @@ impl MessageInbox {
                     self.presignature_posit.unsubscribe();
                 }
             },
-            SubscribeId::Signatures => match sub.action {
+            SubscribeId::SignaturePosit => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
                     let rx = self.signature_posit.subscribe();
                     let _ = resp.send(SubscribeResponse::SignaturePosit(rx));
@@ -554,7 +554,7 @@ impl MessageChannel {
     pub async fn subscribe_triple_posit(
         &self,
     ) -> mpsc::Receiver<(TripleId, Participant, PositAction)> {
-        let Some(subscription) = self.subscribe(SubscribeId::Triples).await else {
+        let Some(subscription) = self.subscribe(SubscribeId::TriplePosit).await else {
             tracing::warn!("failed to subscribe for triple posits");
             return mpsc::channel(1).1;
         };
@@ -570,7 +570,7 @@ impl MessageChannel {
     pub async fn unsubscribe_triple_posit(self) {
         if self
             .subscribe
-            .send(SubscribeRequest::unsubscribe(SubscribeId::Triples))
+            .send(SubscribeRequest::unsubscribe(SubscribeId::TriplePosit))
             .await
             .is_err()
         {
@@ -616,7 +616,7 @@ impl MessageChannel {
     pub async fn subscribe_presignature_posit(
         &self,
     ) -> mpsc::Receiver<(FullPresignatureId, Participant, PositAction)> {
-        let Some(subscription) = self.subscribe(SubscribeId::Presignatures).await else {
+        let Some(subscription) = self.subscribe(SubscribeId::PresignaturePosit).await else {
             tracing::warn!("failed to subscribe for presignature posits");
             return mpsc::channel(1).1;
         };
@@ -632,7 +632,9 @@ impl MessageChannel {
     pub async fn unsubscribe_presignature_posit(self) {
         if self
             .subscribe
-            .send(SubscribeRequest::unsubscribe(SubscribeId::Presignatures))
+            .send(SubscribeRequest::unsubscribe(
+                SubscribeId::PresignaturePosit,
+            ))
             .await
             .is_err()
         {
@@ -694,7 +696,7 @@ impl MessageChannel {
     pub async fn subscribe_signature_posit(
         &self,
     ) -> mpsc::Receiver<(SignId, PresignatureId, Round, Participant, PositAction)> {
-        let Some(subscription) = self.subscribe(SubscribeId::Signatures).await else {
+        let Some(subscription) = self.subscribe(SubscribeId::SignaturePosit).await else {
             tracing::warn!("failed to subscribe for signature posit");
             return mpsc::channel(1).1;
         };
@@ -711,7 +713,7 @@ impl MessageChannel {
     pub async fn unsubscribe_signature_posit(self) {
         if self
             .subscribe
-            .send(SubscribeRequest::unsubscribe(SubscribeId::Signatures))
+            .send(SubscribeRequest::unsubscribe(SubscribeId::SignaturePosit))
             .await
             .is_err()
         {
@@ -1581,7 +1583,7 @@ mod tests {
         inbox.signature_posit = sub::Subscriber::unsubscribed_with_capacity("signature_posit", 1);
 
         let (signature_req, signature_resp) =
-            sub::SubscribeRequest::subscribe(sub::SubscribeId::Signatures);
+            sub::SubscribeRequest::subscribe(sub::SubscribeId::SignaturePosit);
         inbox.process_subscribe(signature_req);
         let mut signature_posit_rx = match signature_resp.await.unwrap() {
             sub::SubscribeResponse::SignaturePosit(rx) => rx,
