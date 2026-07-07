@@ -4,7 +4,6 @@ pub mod pipeline;
 use crate::backlog::Backlog;
 use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
-use crate::protocol::Sign;
 use crate::rpc::{ContractStateWatcher, RpcChannel};
 use crate::stream::ops::{
     process_block_event, process_execution_confirmed, process_respond_bidirectional_event,
@@ -16,7 +15,7 @@ use crate::types::CheckpointWatcher;
 pub use crate::stream::pipeline::ChainPipeline;
 
 use mpc_chain_integration_core::{ChainIndexer, ChainStream, ChainTelemetry};
-use mpc_primitives::ChainEvent;
+use mpc_primitives::{ChainEvent, SignCommand};
 use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +29,7 @@ pub enum ChainStreaming {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
     mut stream: S,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
     rpc: RpcChannel,
     backlog: Backlog,
     telemetry: T,
@@ -167,7 +166,7 @@ mod tests {
     use crate::backlog::Backlog;
     use crate::mesh::{connection::NodeStatus, MeshState};
     use crate::node_client::NodeClient;
-    use crate::protocol::{ParticipantInfo, Sign};
+    use crate::protocol::ParticipantInfo;
     use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
     use crate::storage::checkpoint_storage::CheckpointStorage;
     use crate::util::current_unix_timestamp;
@@ -177,7 +176,7 @@ mod tests {
     use mpc_chain_integration_core::{NoopChainTelemetry, StateManager};
     use mpc_chain_solana::Pubkey;
     use mpc_primitives::{
-        Chain, CheckpointDigest, IndexedSignRequest, SignArgs, SignId, Signature,
+        Chain, CheckpointDigest, IndexedSignRequest, SignArgs, SignCommand, SignId, Signature,
         SignatureRespondedEvent,
     };
     use near_primitives::types::AccountId;
@@ -497,7 +496,7 @@ mod tests {
             key_version: 1,
         };
 
-        let indexed = IndexedSignRequest::sign(
+        let request = IndexedSignRequest::sign(
             sign_id,
             args.clone(),
             Chain::Solana,
@@ -517,7 +516,7 @@ mod tests {
         let client = SolanaTestStream::new(vec![
             Some(ChainEvent::CatchupCompleted),
             Some(ChainEvent::SignRequest {
-                request: indexed.clone(),
+                request: request.clone(),
                 block_timestamp: None,
             }),
             Some(ChainEvent::Respond(sig_responded)),
@@ -557,7 +556,7 @@ mod tests {
             .unwrap()
             .unwrap();
         match msg1 {
-            Sign::Request(req) => assert_eq!(req.id, sign_id),
+            SignCommand::Request(req) => assert_eq!(req.id, sign_id),
             _ => panic!("expected request"),
         }
 
@@ -566,7 +565,7 @@ mod tests {
             .unwrap()
             .unwrap();
         match msg2 {
-            Sign::Completion(id) => assert_eq!(id, sign_id),
+            SignCommand::Completion(id) => assert_eq!(id, sign_id),
             _ => panic!("expected completion"),
         }
     }
@@ -707,7 +706,7 @@ mod tests {
             respond_serialization_schema: br#"[{"name":"output","type":"bool"}]"#.to_vec(),
         };
 
-        let indexed = IndexedSignRequest::sign_bidirectional(
+        let request = IndexedSignRequest::sign_bidirectional(
             sign_id,
             args.clone(),
             Chain::Solana,
@@ -720,19 +719,19 @@ mod tests {
         // push SignRequest
         events_tx
             .send(ChainEvent::SignRequest {
-                request: indexed.clone(),
+                request: request.clone(),
                 block_timestamp: None,
             })
             .await
             .unwrap();
 
-        // we should receive a Sign::Request
+        // we should receive a SignCommand::Request
         let msg = timeout(Duration::from_secs(1), sign_rx.recv())
             .await
             .unwrap()
             .unwrap();
         match msg {
-            Sign::Request(req) => assert_eq!(req.id, sign_id),
+            SignCommand::Request(req) => assert_eq!(req.id, sign_id),
             _ => panic!("expected sign request"),
         }
 
@@ -836,18 +835,18 @@ mod tests {
         .await
         .unwrap();
 
-        // we should receive a Sign::Request because of the execution being confirmed
+        // we should receive a SignCommand::Request because of the execution being confirmed
         let check = tokio::time::sleep(Duration::from_secs(1));
         tokio::pin!(check);
         loop {
             tokio::select! {
                 _ = &mut check => panic!("expected sign request for RespondBidirectional"),
                 msg_req = sign_rx.recv() => match msg_req {
-                    Some(Sign::Request(req)) => {
+                    Some(SignCommand::Request(req)) => {
                         assert_eq!(req.id, sign_id);
                         break;
                     }
-                    Some(Sign::Checkpoint(_)) => continue,
+                    Some(SignCommand::Checkpoint(_)) => continue,
                     _ => panic!("expected sign request for RespondBidirectional"),
                 }
             }
@@ -875,14 +874,14 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        while matches!(msg2, Sign::Checkpoint(_)) {
+        while matches!(msg2, SignCommand::Checkpoint(_)) {
             msg2 = timeout(Duration::from_secs(1), sign_rx.recv())
                 .await
                 .unwrap()
                 .unwrap();
         }
         match msg2 {
-            Sign::Completion(id) => assert_eq!(id, sign_id),
+            SignCommand::Completion(id) => assert_eq!(id, sign_id),
             _ => panic!("expected completion"),
         }
 
@@ -1099,7 +1098,7 @@ mod tests {
             .expect("recv should not timeout")
             .expect("replacement request should be requeued");
         match msg {
-            Sign::Request(req) => {
+            SignCommand::Request(req) => {
                 assert_eq!(req.id, sign_id);
                 assert_eq!(req.unix_timestamp_indexed, replayed_timestamp);
             }
@@ -1188,8 +1187,8 @@ mod tests {
             .expect("publish resume should enqueue an RPC action");
         match action {
             RpcAction::Publish(action) => {
-                assert_eq!(action.indexed.id, sign_id);
-                assert_eq!(action.indexed.chain, Chain::Solana);
+                assert_eq!(action.request.id, sign_id);
+                assert_eq!(action.request.chain, Chain::Solana);
                 assert_eq!(action.signature, signature);
             }
         }

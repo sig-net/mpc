@@ -23,6 +23,7 @@ use elliptic_curve::rand_core::OsRng;
 use futures::StreamExt as _;
 use k256::elliptic_curve::sec1::ToEncodedPoint as _;
 use k256::Secp256k1;
+use mpc_chain_near::Options as NearIndexerOptions;
 use mpc_chain_solana::SolConfig;
 use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
@@ -158,7 +159,7 @@ impl Node {
     }
 
     pub async fn spawn(ctx: &super::Context, config: NodeEnvConfig) -> anyhow::Result<Self> {
-        let indexer_options = mpc_node::indexer::Options {
+        let indexer_options = NearIndexerOptions {
             running_threshold: 120,
         };
         let eth_args = EthArgs::from_config(config.cfg.eth.clone());

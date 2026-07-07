@@ -1,3 +1,5 @@
+//! Concurrency limiter for in-flight sign tasks, backed by a resizable semaphore.
+
 use super::*;
 
 #[derive(Debug)]
@@ -32,9 +34,9 @@ impl SignLimiter {
         }
     }
 
-    /// Updates the limits for concurrent slots
+    /// Sets a new limit for concurrent slots.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn update(&self, new_limit: usize) {
+    pub fn set_limit(&self, new_limit: usize) {
         let mut state = match self.state.write() {
             Ok(state) => state,
             Err(err) => {
@@ -85,11 +87,11 @@ impl SignLimiter {
         })
     }
 
-    pub fn limits(&self) -> usize {
+    pub fn limit(&self) -> usize {
         match self.state.read() {
             Ok(state) => state.limit,
             Err(err) => {
-                tracing::error!(?err, "failed to acquire lock in SignLimiter::limits");
+                tracing::error!(?err, "failed to acquire lock in SignLimiter::limit");
                 0
             }
         }
@@ -121,43 +123,43 @@ mod tests {
 
     #[tokio::test]
     async fn sign_limiter_times_out_at_limit() {
-        let semaphore = SignLimiter::new(1);
-        let permit = semaphore
+        let limiter = SignLimiter::new(1);
+        let permit = limiter
             .acquire(Duration::from_millis(10))
             .await
             .expect("first acquire should succeed");
 
-        let second = semaphore.acquire(Duration::from_millis(10)).await;
+        let second = limiter.acquire(Duration::from_millis(10)).await;
         assert!(matches!(second, Err(SignLimitError::Timeout)));
 
         drop(permit);
 
-        let third = semaphore.acquire(Duration::from_millis(10)).await;
+        let third = limiter.acquire(Duration::from_millis(10)).await;
         assert!(third.is_ok());
     }
 
     #[tokio::test]
     async fn sign_limiter_applies_reduced_limit_on_release() {
-        let semaphore = SignLimiter::new(2);
-        let first = semaphore
+        let limiter = SignLimiter::new(2);
+        let first = limiter
             .acquire(Duration::from_millis(10))
             .await
             .expect("first acquire should succeed");
-        let second = semaphore
+        let second = limiter
             .acquire(Duration::from_millis(10))
             .await
             .expect("second acquire should succeed");
 
-        semaphore.update(1);
+        limiter.set_limit(1);
 
         drop(first);
 
-        let third = semaphore.acquire(Duration::from_millis(10)).await;
+        let third = limiter.acquire(Duration::from_millis(10)).await;
         assert!(matches!(third, Err(SignLimitError::Timeout)));
 
         drop(second);
 
-        let fourth = semaphore.acquire(Duration::from_millis(10)).await;
+        let fourth = limiter.acquire(Duration::from_millis(10)).await;
         assert!(fourth.is_ok());
     }
 }

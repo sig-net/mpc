@@ -1,4 +1,3 @@
-use crate::indexer::MaybeBlock;
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::hex::{self, ToHexExt};
 use alloy::primitives::{Address, Bytes, B256};
@@ -12,6 +11,7 @@ use std::sync::Arc;
 
 #[cfg(feature = "bench")]
 use crate::bench;
+use crate::client::MaybeBlock;
 
 // This is more than likely limited by the RPC provider, but alchemy
 // supports archive nodes, so we effectively can go as far back as needed
@@ -411,7 +411,6 @@ fn to_hex_block_id(block_id: BlockId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer::MaybeBlock;
     use alloy::eips::BlockNumberOrTag;
     use alloy::primitives::B256;
     use alloy::rpc::types::BlockId;

@@ -1,21 +1,32 @@
+//! Per-request driver: the `SignPhase` state machine and the `SignTask` that owns it.
+
 use super::metrics::PhaseDurations;
-use super::organize::SignOrganizer;
-use super::posit::SignPositor;
+use super::organize::OrganizingPhase;
+use super::posit::PositPhase;
 use super::state::SignState;
 use super::work_queue::SignPositWorkQueue;
 use super::*;
 
-pub struct SignGenerating {
+/// Generating phase — see [`SignPhase::Generating`].
+pub struct GeneratingPhase {
     pub proposer: Participant,
     pub presignature_id: PresignatureId,
     pub presignature: Option<PresignatureReservation>,
     pub accepted_participants: Vec<Participant>,
 }
 
+/// State machine for one sign request. Each phase advances to the next or loops
+/// back to `Organizing` (a new round) on any recoverable failure.
 pub enum SignPhase {
-    Organizing(SignOrganizer),
-    Posit(SignPositor),
-    Generating(SignGenerating),
+    /// Wait for threshold active peers and elect the round's proposer; if that's
+    /// us, take a concurrency slot, reserve a presignature, and broadcast Propose.
+    Organizing(OrganizingPhase),
+    /// Agree on the presignature and participant set: the proposer collects
+    /// Accepts and broadcasts Start; each deliberator does Propose -> Accept -> Start.
+    Posit(PositPhase),
+    /// Commit the reserved presignature and run the signing protocol to completion.
+    Generating(GeneratingPhase),
+    /// Terminal: the request finished (`Ok`) or aborted (`Err`).
     Complete(Result<(), SignError>),
 }
 
@@ -35,7 +46,7 @@ impl SignPhase {
     }
 }
 
-impl SignGenerating {
+impl GeneratingPhase {
     async fn advance(
         &mut self,
         ctx: &SignTask,
@@ -43,7 +54,7 @@ impl SignGenerating {
         posit_queue: &SignPositWorkQueue,
     ) -> SignPhase {
         // We successfully committed to generating; future rounds should be unrestricted.
-        state.pause_proposing = None;
+        state.pause_proposing_until = None;
 
         let sign_id = ctx.sign_id;
         let round = state.round;
@@ -66,7 +77,7 @@ impl SignGenerating {
                         "failed to commit presignature reservation, reorganizing"
                     );
                     state.bump_round();
-                    return SignPhase::Organizing(SignOrganizer);
+                    return SignPhase::Organizing(OrganizingPhase);
                 }
             }
         } else {
@@ -77,11 +88,12 @@ impl SignGenerating {
             )
         };
 
+        // Create and run signature generator, which will drive the protocol to completion.
         let gen_ctx = ctx.generate_ctx();
         let generator = match SignGenerator::new(
             &gen_ctx,
             self.proposer,
-            state.indexed().clone(),
+            state.request().clone(),
             presignature_pending,
             self.accepted_participants.clone(),
         )
@@ -96,11 +108,10 @@ impl SignGenerating {
                     "failed to create generator, reorganizing"
                 );
                 state.bump_round();
-                return SignPhase::Organizing(SignOrganizer);
+                return SignPhase::Organizing(OrganizingPhase);
             }
         };
 
-        // Track that we've created a generator
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS.inc();
 
         match generator.run(&gen_ctx, posit_queue).await {
@@ -114,24 +125,20 @@ impl SignGenerating {
                     "signature generation failed, reorganizing"
                 );
                 state.bump_round();
-                SignPhase::Organizing(SignOrganizer)
+                SignPhase::Organizing(OrganizingPhase)
             }
         }
     }
 }
 
+/// Owns everything needed to fulfil one sign request; the context passed between phases of the state machine.
 pub struct SignTask {
     pub governance: GovernanceInfo,
     pub sign_id: SignId,
     pub presignatures: PresignatureStorage,
     pub msg: MessageChannel,
     pub rpc: RpcChannel,
-
-    // TODO: will be used in the future when we move requests channels
-    // into the backlog.
-    #[allow(dead_code)]
     pub backlog: Backlog,
-
     pub cfg: ProtocolConfig,
     pub contract: ContractStateWatcher,
     pub is_proposer: Arc<AtomicBool>,
@@ -140,21 +147,21 @@ pub struct SignTask {
 }
 
 impl SignTask {
+    /// Drive the signature generation state machine to completion
     pub async fn run(
         mut self,
-        indexed: IndexedSignRequest,
+        request: IndexedSignRequest,
         mesh_state: watch::Receiver<MeshState>,
         posit_queue: Arc<SignPositWorkQueue>,
     ) -> Result<(), SignError> {
         let sign_id = self.sign_id;
         tracing::info!(?sign_id, governance = ?self.governance, "signature task starting...");
 
-        let mut state = SignState::new(indexed, mesh_state);
-        let mut phase = SignPhase::Organizing(SignOrganizer);
+        let mut state = SignState::new(request, mesh_state);
+        let mut phase = SignPhase::Organizing(OrganizingPhase);
         let mut contract_watcher = self.contract.clone();
 
-        // NOTE: even if we start the SignTask while in resharing, we will not advance
-        // since we won't in the running state
+        // If started during resharing, we won't advance until back in running state.
         let mut is_running = self.governance.is_running;
 
         // Sum per-phase time across loop attempts; emit on Complete(Ok) only.
@@ -181,8 +188,8 @@ impl SignTask {
                     }
                     is_running = self.refresh_governance(&contract_state);
                     if is_running {
-                        // we're back into running, reset to SignOrganizer
-                        phase = SignPhase::Organizing(SignOrganizer);
+                        // Back in running; reset to Organizing.
+                        phase = SignPhase::Organizing(OrganizingPhase);
                     } else {
                         tracing::info!(
                             ?sign_id,
@@ -200,7 +207,7 @@ impl SignTask {
                         if matches!(&new_phase, SignPhase::Organizing(_)) {
                             SIGN_REQUEST_LOOPS
                                 .with_label_values(&[
-                                    state.indexed().chain.as_str(),
+                                    state.request().chain.as_str(),
                                     step.as_str(),
                                 ])
                                 .inc();
@@ -210,7 +217,7 @@ impl SignTask {
                     match new_phase {
                         SignPhase::Complete(result) => {
                             if result.is_ok() {
-                                durations.emit(state.indexed().chain);
+                                durations.emit(state.request().chain);
                             }
                             return result;
                         }

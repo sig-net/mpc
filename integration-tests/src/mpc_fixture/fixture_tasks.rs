@@ -12,9 +12,9 @@ use mpc_node::config::Config;
 use mpc_node::mesh::MeshState;
 use mpc_node::node_client::NodeClient;
 use mpc_node::protocol::message::{MessageOutbox, SendMessage, SignedMessage};
-use mpc_node::protocol::Sign;
 use mpc_node::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
 use mpc_node::stream::run_stream;
+use mpc_primitives::SignCommand;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, Receiver, Sender};
@@ -80,7 +80,7 @@ pub(super) fn test_mock_network(
                         RpcAction::Publish(publish_action) => {
                             format!(
                                 "RpcAction::Publish({:?})",
-                                publish_action.indexed,
+                                publish_action.request,
                             )
                         },
                     };
@@ -106,7 +106,7 @@ pub(super) fn test_mock_network(
 
 pub(super) fn start_mock_stream_tasks(
     mock_streams: &[MockStream],
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
     rpc: RpcChannel,
     backlog: Backlog,
     contract_watcher: ContractStateWatcher,

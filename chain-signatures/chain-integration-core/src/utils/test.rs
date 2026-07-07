@@ -61,7 +61,7 @@ pub fn make_publish_action(chain: Chain, kind: SignKind) -> PublishAction {
     let epsilon = scalar(&[1u8; 32]);
     let payload = scalar(&[42u8; 32]);
     let output = make_signature(&sk, epsilon, payload);
-    let indexed = make_indexed(chain, epsilon, payload, kind);
-    PublishAction::new(pk, indexed, output, vec![])
+    let request = make_indexed(chain, epsilon, payload, kind);
+    PublishAction::new(pk, request, output, vec![])
         .expect("valid signature should produce a publish action")
 }

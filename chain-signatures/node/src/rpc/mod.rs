@@ -1,25 +1,27 @@
 mod hydration;
-mod near;
+mod near_governance;
 
 use crate::config::Config;
 use crate::protocol::contract::primitives::{ParticipantMap, Participants};
 use crate::protocol::contract::RunningContractState;
 use crate::protocol::{Chain, IndexedSignRequest, ProtocolState};
 use enum_map::EnumMap;
-use mpc_chain_integration_core::{ChainPublisher, PublishAction};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 // TODO: move clients elsewhere
 pub use hydration::HydrationClient;
+pub use near_governance::NearGovernanceClient;
 
 use cait_sith::protocol::Participant;
 use cait_sith::FullSignature;
 use k256::{AffinePoint, Secp256k1};
-use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
+use mpc_chain_integration_core::{
+    utils::retry::{retry_rpc, RetryConfig},
+    ChainPublisher, PublishAction,
+};
 pub use mpc_contract::primitives::{Read, View};
 use mpc_primitives::{CheckpointDigest, Signature};
-pub use near::NearClient;
 
 use near_account_id::AccountId;
 use std::collections::HashMap;
@@ -58,12 +60,12 @@ impl RpcChannel {
     pub fn publish(
         &self,
         public_key: mpc_crypto::PublicKey,
-        indexed: IndexedSignRequest,
+        request: IndexedSignRequest,
         output: FullSignature<Secp256k1>,
         participants: Vec<Participant>,
     ) {
-        let sign_id = indexed.id;
-        let Some(action) = PublishAction::new(public_key, indexed, output, participants) else {
+        let sign_id = request.id;
+        let Some(action) = PublishAction::new(public_key, request, output, participants) else {
             tracing::error!(
                 ?sign_id,
                 "failed to validate signature; trashing publish request",
@@ -81,7 +83,7 @@ impl RpcChannel {
     pub fn publish_signature(
         &self,
         public_key: mpc_crypto::PublicKey,
-        indexed: IndexedSignRequest,
+        request: IndexedSignRequest,
         signature: Signature,
         participants: Vec<Participant>,
     ) {
@@ -91,7 +93,7 @@ impl RpcChannel {
                 .tx
                 .send(RpcAction::Publish(PublishAction {
                     public_key,
-                    indexed,
+                    request,
                     signature,
                     participants,
                     timestamp: Instant::now(),
@@ -319,8 +321,8 @@ impl ContractStateWatcher {
 }
 
 pub struct RpcExecutor {
-    /// The NEAR client used to fetch contract state and config.
-    near: NearClient,
+    /// The NEAR governance client used to fetch contract state and config.
+    near: NearGovernanceClient,
     /// The publishers for each chain.
     publishers: HashMap<Chain, Arc<dyn ChainPublisher>>,
     /// The receiver for incoming RPC actions.
@@ -329,7 +331,7 @@ pub struct RpcExecutor {
 
 impl RpcExecutor {
     pub async fn new(
-        near: NearClient,
+        near: NearGovernanceClient,
         publishers: HashMap<Chain, Arc<dyn ChainPublisher>>,
     ) -> (RpcChannel, Self) {
         let (tx, action_rx) = mpsc::channel(MAX_CONCURRENT_RPC_REQUESTS);
@@ -378,7 +380,7 @@ impl RpcExecutor {
                 return;
             };
 
-            let chain = action.indexed.chain;
+            let chain = action.request.chain;
 
             // Check if a publisher is configured for the chain. If not, log a warning and continue to the next action.
             let Some(publisher) = publishers.get(&chain) else {
@@ -396,7 +398,7 @@ impl RpcExecutor {
 }
 
 async fn update_contract_data(
-    near: NearClient,
+    near: NearGovernanceClient,
     contract: watch::Sender<Option<ProtocolState>>,
     config: watch::Sender<Config>,
     checkpoints: EnumMap<Chain, watch::Sender<Option<CheckpointDigest>>>,
@@ -465,8 +467,8 @@ async fn update_contract_data(
 
 /// Publish the signature and retry if it fails, logging the error and retry attempt. Shared by all chain publishers.
 pub async fn execute_publish(publisher: Arc<dyn ChainPublisher>, action: PublishAction) {
-    let chain = action.indexed.chain;
-    let sign_id = action.indexed.id;
+    let chain = action.request.chain;
+    let sign_id = action.request.id;
 
     tracing::info!(
         ?sign_id,

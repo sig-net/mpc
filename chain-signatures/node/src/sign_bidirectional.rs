@@ -362,7 +362,7 @@ mod derive_tests {
 #[derive(Clone)]
 pub struct SignBidirectionalSignature {
     pub public_key: mpc_crypto::PublicKey,
-    pub indexed: IndexedSignRequest,
+    pub request: IndexedSignRequest,
     pub signature: Signature,
 }
 

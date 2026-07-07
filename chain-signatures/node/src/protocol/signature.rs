@@ -1,6 +1,4 @@
-//! Signature generation protocol: the sibling of `triple` and `presignature`.
-//! Runs the cait-sith signing protocol once a posit round has agreed on a
-//! presignature and participant set.
+//! Signature generation: runs the cait-sith signing protocol once a posit round agrees on a presignature and participant set.
 
 use crate::backlog::Backlog;
 use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId, SignatureMessage};
@@ -12,7 +10,7 @@ use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt};
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
-use crate::util::AffinePointExt;
+use mpc_chain_near::AffinePointExt as _;
 
 use cait_sith::protocol::{Action, InitializationError, Participant};
 use cait_sith::PresignOutput;
@@ -31,9 +29,7 @@ pub(crate) enum SignError {
     Aborted,
 }
 
-/// Posit messages routed to a running signature task. Driven by the `request`
-/// layer; the generator also consumes them to reject late `Propose`s while
-/// generating.
+/// Posit messages routed to a running signature task; the generator consumes them to reject late `Propose`s while generating.
 pub(crate) enum SignTaskMessage {
     PositMessage {
         presignature_id: PresignatureId,
@@ -43,14 +39,15 @@ pub(crate) enum SignTaskMessage {
     },
 }
 
-/// The subset of `SignTask` the generator needs, so it never sees the
-/// request-fulfillment machinery (limiter, organizer, posit state).
 pub(crate) struct GenerateCtx {
     pub governance: GovernanceInfo,
     pub msg: MessageChannel,
+    /// Publishes the finished signature (proposer only).
     pub rpc: RpcChannel,
+    /// Marks the request as publishing once a signature is produced.
     pub backlog: Backlog,
     pub cfg: ProtocolConfig,
+    /// Only used to label the debug page.
     #[cfg_attr(not(feature = "debug-page"), allow(dead_code))]
     pub node_account_id: near_account_id::AccountId,
 }
@@ -58,24 +55,30 @@ pub(crate) struct GenerateCtx {
 /// An ongoing signature generator.
 pub(crate) struct SignGenerator {
     protocol: SignatureProtocol,
+    /// On drop, clears this (already consumed) presignature's in-memory `using`
+    /// reservation. Does not return it to the pool — commit already removed it.
     dropper: PresignatureTakenDropper,
     participants: Vec<Participant>,
+    /// Node that proposed this round (determines who publishes).
     proposer: Participant,
-    indexed: IndexedSignRequest,
+    request: IndexedSignRequest,
+    /// Start time, for the generation timeout and latency metrics.
     created: Instant,
     timeout: Duration,
     inbox: mpsc::Receiver<SignatureMessage>,
-    msg: MessageChannel, // Needed for Drop
+    /// Kept so `Drop` can unsubscribe and clear buffered messages.
+    msg: MessageChannel,
 
     #[cfg(feature = "debug-page")]
     debug_view: crate::web::debug::DebugPageTaskHandle,
 }
 
 impl SignGenerator {
+    /// Fetch the committed presignature, apply the delta, and build the cait-sith signing protocol.
     pub(crate) async fn new(
         ctx: &GenerateCtx,
         proposer: Participant,
-        indexed: IndexedSignRequest,
+        request: IndexedSignRequest,
         presignature: PendingPresignature,
         participants: Vec<Participant>,
     ) -> Result<Self, InitializationError> {
@@ -89,7 +92,7 @@ impl SignGenerator {
                 ))
             })?;
 
-        let sign_id = indexed.id;
+        let sign_id = request.id;
         tracing::info!(
             me = ?ctx.governance.me,
             ?sign_id,
@@ -100,19 +103,19 @@ impl SignGenerator {
         let (presignature, dropper) = taken.take();
         let PresignOutput { big_r, k, sigma } = presignature.output;
         let delta =
-            mpc_crypto::kdf::derive_delta(indexed.id.request_id, indexed.args.entropy, big_r);
+            mpc_crypto::kdf::derive_delta(request.id.request_id, request.args.entropy, big_r);
         // TODO: Check whether it is okay to use invert_vartime instead
         let output: PresignOutput<Secp256k1> = PresignOutput {
             big_r: (big_r * delta).to_affine(),
             k: k * delta.invert().unwrap(),
-            sigma: (sigma + indexed.args.epsilon * k) * delta.invert().unwrap(),
+            sigma: (sigma + request.args.epsilon * k) * delta.invert().unwrap(),
         };
         let protocol = Box::new(cait_sith::sign(
             &participants,
             ctx.governance.me,
-            derive_key(ctx.governance.public_key, indexed.args.epsilon),
+            derive_key(ctx.governance.public_key, request.args.epsilon),
             output,
-            indexed.args.payload,
+            request.args.payload,
         )?);
         let inbox = ctx.msg.subscribe_signature(sign_id, presignature_id).await;
         Ok(Self {
@@ -120,7 +123,7 @@ impl SignGenerator {
             dropper,
             participants,
             proposer,
-            indexed,
+            request,
             created: Instant::now(),
             timeout: Duration::from_millis(ctx.cfg.signature.generation_timeout),
             inbox,
@@ -133,9 +136,9 @@ impl SignGenerator {
         })
     }
 
-    /// Receive the next message for the signature protocol; error out on the timeout being reached
+    /// Receive the next protocol message, erroring out on timeout.
     async fn recv(&mut self) -> Result<SignatureMessage, SignError> {
-        let sign_id = self.indexed.id;
+        let sign_id = self.request.id;
         let presignature_id = self.dropper.id;
         match tokio::time::timeout(
             self.timeout.saturating_sub(self.created.elapsed()),
@@ -155,6 +158,7 @@ impl SignGenerator {
         }
     }
 
+    /// Poke-drive the protocol to completion: relay messages, reject late posits, and on `Return` publish the signature (proposer) and mark the request publishing.
     pub(crate) async fn run(
         mut self,
         ctx: &GenerateCtx,
@@ -163,7 +167,7 @@ impl SignGenerator {
         let me = ctx.governance.me;
         let epoch = ctx.governance.epoch;
 
-        let sign_id = self.indexed.id;
+        let sign_id = self.request.id;
         let presignature_id = self.dropper.id;
 
         let mut total_wait = Duration::from_millis(0);
@@ -200,7 +204,6 @@ impl SignGenerator {
 
             match action {
                 Action::Wait => {
-                    // Wait for the next set of messages to arrive.
                     tokio::select! {
                         result = self.recv() => {
                             let msg = result.inspect_err(|_| {
@@ -307,17 +310,17 @@ impl SignGenerator {
                     crate::metrics::protocols::SIGNATURE_GENERATOR_SUCCESS.inc();
 
                     let is_proposer = self.proposer == me;
-                    if let Some(publish) = publish_status(
+                    if let Some(publish) = build_publish_state(
                         ctx.governance.public_key,
-                        &self.indexed,
+                        &self.request,
                         &output,
                         self.participants.clone(),
                         is_proposer,
                     ) {
-                        if !matches!(self.indexed.kind, SignKind::Checkpoint(_)) {
+                        if !matches!(self.request.kind, SignKind::Checkpoint(_)) {
                             if let Err(err) = ctx
                                 .backlog
-                                .mark_publishing(self.indexed.chain, &sign_id, publish)
+                                .mark_publishing(self.request.chain, &sign_id, publish)
                                 .await
                             {
                                 tracing::warn!(
@@ -333,19 +336,17 @@ impl SignGenerator {
                         crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_SUCCESS.inc();
                         ctx.rpc.publish(
                             ctx.governance.public_key,
-                            self.indexed.clone(),
+                            self.request.clone(),
                             output,
                             self.participants.clone(),
                         );
                     }
 
-                    if let SignKind::SignBidirectional(event) = &self.indexed.kind {
-                        // Note: The promotion to Bidirectional will happen when we receive the
-                        // SignatureRespondedEvent in the Solana indexer, which has the signature data.
-                        // For now, we just complete the signature generation. The indexer will handle the promotion.
+                    if let SignKind::SignBidirectional(event) = &self.request.kind {
+                        // Promotion to Bidirectional happens later, when the Solana indexer sees the SignatureRespondedEvent.
                         tracing::info!(
                             ?sign_id,
-                            source_chain = ?self.indexed.chain,
+                            source_chain = ?self.request.chain,
                             target_chain = ?event.target_chain().ok(),
                             "generated signature for bidirectional request, awaiting indexer to process"
                         );
@@ -366,19 +367,20 @@ impl SignGenerator {
     }
 }
 
-fn publish_status(
+/// Reconstruct the full signature into a [`PublishState`], or `None` if reconstruction fails.
+fn build_publish_state(
     public_key: mpc_crypto::PublicKey,
-    indexed: &IndexedSignRequest,
+    request: &IndexedSignRequest,
     output: &cait_sith::FullSignature<Secp256k1>,
     participants: Vec<Participant>,
     is_proposer: bool,
 ) -> Option<PublishState> {
-    let expected_public_key = mpc_crypto::derive_key(public_key, indexed.args.epsilon);
+    let expected_public_key = mpc_crypto::derive_key(public_key, request.args.epsilon);
     let signature = mpc_crypto::reconstruct_signature(
         &expected_public_key,
         &output.big_r,
         &output.s,
-        indexed.args.payload,
+        request.args.payload,
     )
     .ok()?;
     let publish = PublishState {
@@ -391,9 +393,10 @@ fn publish_status(
 }
 
 impl Drop for SignGenerator {
+    /// Unsubscribe and drop any buffered messages for this signature.
     fn drop(&mut self) {
         let msg = self.msg.clone();
-        let sign_id = self.indexed.id;
+        let sign_id = self.request.id;
         let presignature_id = self.dropper.id;
         tokio::spawn(async move {
             msg.unsubscribe_signature(sign_id, presignature_id).await;
@@ -401,6 +404,8 @@ impl Drop for SignGenerator {
         });
     }
 }
+
+/// A presignature the generator will consume: already taken in memory, or still in storage (fetched with a timeout once generation starts).
 pub(crate) enum PendingPresignature {
     Available(Box<PresignatureTaken>),
     InStorage(PresignatureId, Participant, PresignatureStorage),
@@ -414,6 +419,7 @@ impl PendingPresignature {
         }
     }
 
+    /// Resolve to the taken presignature, polling storage up to `timeout` if not already in memory.
     pub async fn fetch(self, timeout: Duration) -> Option<PresignatureTaken> {
         let (id, storage, owner) = match self {
             PendingPresignature::Available(taken) => return Some(*taken),

@@ -6024,6 +6024,7 @@ dependencies = [
  "mpc-chain-canton",
  "mpc-chain-ethereum",
  "mpc-chain-integration-core",
+ "mpc-chain-near",
  "mpc-chain-solana",
  "mpc-contract",
  "mpc-crypto",
@@ -7387,6 +7388,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "mpc-chain-near"
+version = "1.16.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "hex",
+ "k256",
+ "mpc-chain-integration-core",
+ "mpc-contract",
+ "mpc-primitives",
+ "near-account-id",
+ "near-crypto",
+ "near-fetch",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "mpc-chain-solana"
 version = "1.16.4"
 dependencies = [
@@ -7503,6 +7524,7 @@ dependencies = [
  "mpc-chain-canton",
  "mpc-chain-ethereum",
  "mpc-chain-integration-core",
+ "mpc-chain-near",
  "mpc-chain-solana",
  "mpc-contract",
  "mpc-crypto",
