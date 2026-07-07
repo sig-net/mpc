@@ -32,7 +32,9 @@
 use anyhow::anyhow;
 use futures_util::StreamExt;
 use mpc_chain_ethereum::{EthConfig, EthereumStream};
-use mpc_chain_integration_core::{ChainIndexer, ChainStream, MockStateManager, NoopChainTelemetry};
+use mpc_chain_integration_core::{
+    ChainIndexer, ChainStream, MockStateManager, NoopChainTelemetry, StateManager,
+};
 use mpc_primitives::Chain;
 
 /// Helper to read an environment variable and return an error if it's not set.
