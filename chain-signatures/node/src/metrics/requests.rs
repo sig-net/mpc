@@ -134,3 +134,12 @@ pub(crate) static BACKLOG_SIZE: LazyLock<prometheus::IntGaugeVec> = LazyLock::ne
     )
     .unwrap()
 });
+
+pub(crate) static PENDING_CHECKPOINTS: LazyLock<prometheus::IntGaugeVec> = LazyLock::new(|| {
+    super::try_create_int_gauge_vec_with_node_account_id(
+        "multichain_pending_checkpoints",
+        "number of locally accumulated pending checkpoints by chain",
+        &["chain"],
+    )
+    .unwrap()
+});
