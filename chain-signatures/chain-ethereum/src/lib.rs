@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 pub mod abi;
 #[cfg(feature = "bench")]
 pub mod bench;
