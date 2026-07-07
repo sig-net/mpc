@@ -423,6 +423,9 @@ pub(crate) fn sender_string(sender: [u8; 32], source_chain: Chain) -> anyhow::Re
         Chain::Hydration => Ok(crate::indexer_hydration::ss58_address_from_account32(
             sender,
         )),
+        // Raw signer contract address bytes → untagged lowercase hex, the
+        // normative epsilon sender form for Midnight (Canton precedent).
+        Chain::Midnight => Ok(hex::encode(sender)),
         _ => anyhow::bail!("Unsupported chain: {source_chain}"),
     }
 }

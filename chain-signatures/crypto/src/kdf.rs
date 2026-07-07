@@ -151,6 +151,22 @@ pub fn derive_epsilon_bitcoin(key_version: KeyVersion, address: &str, path: &str
     ))
 }
 
+/// `contract_address` is the signer contract address as untagged lowercase hex
+/// (64 chars, no 0x) — the sender identity for all Midnight requests; the user
+/// identity travels in `path` (lowercase hex of the caller commitment).
+pub fn derive_epsilon_midnight(
+    key_version: KeyVersion,
+    contract_address: &str,
+    path: &str,
+) -> Scalar {
+    derive_epsilon(&DerivationParams::UserAccount(
+        key_version,
+        Chain::Midnight,
+        contract_address.to_string(),
+        path.to_string(),
+    ))
+}
+
 pub fn derive_key(public_key: PublicKey, epsilon: Scalar) -> PublicKey {
     (<Secp256k1 as CurveArithmetic>::ProjectivePoint::GENERATOR * epsilon + public_key).to_affine()
 }

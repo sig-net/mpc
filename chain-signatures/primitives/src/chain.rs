@@ -32,6 +32,7 @@ pub enum Chain {
     Bitcoin,
     Hydration,
     Canton,
+    Midnight,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, thiserror::Error)]
@@ -59,10 +60,11 @@ impl Chain {
             Chain::Bitcoin => "Bitcoin",
             Chain::Hydration => "Hydration",
             Chain::Canton => "Canton",
+            Chain::Midnight => "Midnight",
         }
     }
 
-    pub const fn iter() -> [Chain; 6] {
+    pub const fn iter() -> [Chain; 7] {
         [
             Chain::NEAR,
             Chain::Ethereum,
@@ -70,6 +72,7 @@ impl Chain {
             Chain::Bitcoin,
             Chain::Hydration,
             Chain::Canton,
+            Chain::Midnight,
         ]
     }
 
@@ -81,6 +84,7 @@ impl Chain {
             Chain::Bitcoin => "bip122:000000000019d6689c085ae165831e93",
             Chain::Hydration => "polkadot:2034",
             Chain::Canton => "canton:global",
+            Chain::Midnight => "midnight:mainnet",
         }
     }
 
@@ -95,6 +99,9 @@ impl Chain {
             // ChainAgnostic/namespaces. "canton:global" follows the
             // namespace:reference format as a project-local identifier.
             Chain::Canton => "canton:global",
+            // Synthetic — Midnight has no registered CAIP-2 namespace either
+            // (same precedent as Canton above).
+            Chain::Midnight => "midnight:mainnet",
         }
     }
 
@@ -105,6 +112,9 @@ impl Chain {
             Chain::Solana => ("CHECKPOINT_INTERVAL_SOLANA", 120),
             Chain::Hydration => ("CHECKPOINT_INTERVAL_HYDRATION", 240),
             Chain::Canton => ("CHECKPOINT_INTERVAL_CANTON", 50),
+            // Midnight "heights" are contract-event ids, so this means
+            // "every 120 observed events" (Canton offset precedent).
+            Chain::Midnight => ("CHECKPOINT_INTERVAL_MIDNIGHT", 120),
         };
 
         let interval = std::env::var(key)
@@ -120,6 +130,7 @@ impl Chain {
             ("CHECKPOINT_INTERVAL_SOLANA", "5"),
             ("CHECKPOINT_INTERVAL_HYDRATION", "5"),
             ("CHECKPOINT_INTERVAL_CANTON", "5"),
+            ("CHECKPOINT_INTERVAL_MIDNIGHT", "5"),
         ]
     }
 
@@ -131,6 +142,7 @@ impl Chain {
             Chain::Bitcoin => 60 * 60 + 20 * 60, // 6 confirmations at 10 minutes each, plus some buffer
             Chain::Hydration => 12,
             Chain::Canton => 15,
+            Chain::Midnight => 15,
         }
     }
 
@@ -141,8 +153,10 @@ impl Chain {
 
     pub fn respond_serialization_format(&self) -> SerDeserFormat {
         match self {
-            Chain::Canton => SerDeserFormat::Abi,
-            // Solana and Hydration use Borsh for bidirectional responses.
+            // Canton and Midnight consume ABI-shaped respond outputs (the SGN1
+            // goldens pin a 32-byte ABI bool word and hash it into the phase-2
+            // message), Solana and Hydration use Borsh.
+            Chain::Canton | Chain::Midnight => SerDeserFormat::Abi,
             _ => SerDeserFormat::Borsh,
         }
     }
@@ -172,6 +186,7 @@ impl FromStr for Chain {
             "bitcoin" | "btc" => Ok(Chain::Bitcoin),
             "hydration" | "hyd" => Ok(Chain::Hydration),
             "canton" | "ctn" => Ok(Chain::Canton),
+            "midnight" | "mn" => Ok(Chain::Midnight),
             other => Err(format!("unknown or unsupported chain {other}")),
         }
     }

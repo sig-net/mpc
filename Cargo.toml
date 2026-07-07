@@ -12,8 +12,9 @@ members = [
     "chain-signatures/chain-solana",
     "chain-signatures/chain-ethereum",
     "chain-signatures/chain-near",
+    "chain-signatures/chain-midnight",
 ]
-exclude = ["infra/scripts/generate_keys"]
+exclude = ["infra/scripts/generate_keys", "chain-signatures/midnight-publisher"]
 resolver = "2"
 
 [workspace.package]
@@ -87,6 +88,7 @@ mpc-chain-integration-core = { path = "./chain-signatures/chain-integration-core
 mpc-chain-canton = { path = "./chain-signatures/chain-canton" }
 mpc-chain-ethereum = { path = "./chain-signatures/chain-ethereum" }
 mpc-chain-solana = { path = "./chain-signatures/chain-solana" }
+mpc-chain-midnight = { path = "./chain-signatures/chain-midnight" }
 mpc-chain-near = { path = "./chain-signatures/chain-near" }
 mpc-keys = { path = "./chain-signatures/keys" }
 mpc-node = { path = "./chain-signatures/node" }

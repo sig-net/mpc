@@ -11,6 +11,7 @@ const MAGIC_ERROR_PREFIX: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 const SOLANA_RESPOND_BIDIRECTIONAL_PATH: &str = "solana response key";
 const HYDRATION_RESPOND_BIDIRECTIONAL_PATH: &str = "hydration response key";
 pub const CANTON_RESPOND_BIDIRECTIONAL_PATH: &str = "canton response key";
+pub const MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH: &str = "midnight response key";
 
 pub struct CompletedTx {
     tx: BidirectionalTx,
@@ -92,6 +93,7 @@ impl CompletedTx {
             Chain::Solana => SOLANA_RESPOND_BIDIRECTIONAL_PATH.to_string(),
             Chain::Hydration => HYDRATION_RESPOND_BIDIRECTIONAL_PATH.to_string(),
             Chain::Canton => CANTON_RESPOND_BIDIRECTIONAL_PATH.to_string(),
+            Chain::Midnight => MIDNIGHT_RESPOND_BIDIRECTIONAL_PATH.to_string(),
             _ => anyhow::bail!("Unsupported chain: {}", chain),
         };
         let epsilon = self.tx.epsilon(&path)?;
@@ -181,6 +183,24 @@ mod tests {
         let SignKind::RespondBidirectional(respond) = abi.kind else {
             panic!("expected RespondBidirectional kind");
         };
+        let mut expected = MAGIC_ERROR_PREFIX.to_vec();
+        expected.extend_from_slice(&[0u8; 32]);
+        *expected.last_mut().unwrap() = 1;
+        assert_eq!(respond.output, expected);
+    }
+
+    #[tokio::test]
+    async fn midnight_failed_sign_request_uses_abi_error_encoding() {
+        let completed = CompletedTx::new(sample_bidirectional_tx());
+        let req = completed
+            .create_failed_sign_request(Chain::Midnight, None)
+            .await
+            .unwrap();
+        let SignKind::RespondBidirectional(respond) = req.kind else {
+            panic!("expected RespondBidirectional kind");
+        };
+        // Midnight responds are ABI-encoded (goldens pin a 32-byte bool word),
+        // so the failure output is 0xdeadbeef || abi(true).
         let mut expected = MAGIC_ERROR_PREFIX.to_vec();
         expected.extend_from_slice(&[0u8; 32]);
         *expected.last_mut().unwrap() = 1;
