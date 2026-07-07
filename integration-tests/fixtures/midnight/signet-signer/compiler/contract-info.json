@@ -1,0 +1,290 @@
+{
+  "compiler-version": "0.33.0",
+  "language-version": "0.25.0",
+  "runtime-version": "0.18.0-rc.0",
+  "circuits": [
+    {
+      "name": "sign",
+      "pure": false,
+      "proof": true,
+      "arguments": [
+        {
+          "name": "payload",
+          "type": {
+            "type-name": "Bytes",
+            "length": 32
+          }
+        },
+        {
+          "name": "keyVersion",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 4294967295
+          }
+        }
+      ],
+      "result-type": {
+        "type-name": "Tuple",
+        "types": [
+        ]
+      }
+    },
+    {
+      "name": "sign_bidirectional",
+      "pure": false,
+      "proof": true,
+      "arguments": [
+        {
+          "name": "evmTo",
+          "type": {
+            "type-name": "Bytes",
+            "length": 20
+          }
+        },
+        {
+          "name": "evmChainId",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 18446744073709551615
+          }
+        },
+        {
+          "name": "evmNonce",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 18446744073709551615
+          }
+        },
+        {
+          "name": "evmGasLimit",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 18446744073709551615
+          }
+        },
+        {
+          "name": "evmMaxFee",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 340282366920938463463374607431768211455
+          }
+        },
+        {
+          "name": "evmPriorityFee",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 340282366920938463463374607431768211455
+          }
+        },
+        {
+          "name": "evmValue",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 340282366920938463463374607431768211455
+          }
+        },
+        {
+          "name": "funcSig",
+          "type": {
+            "type-name": "Bytes",
+            "length": 64
+          }
+        },
+        {
+          "name": "args",
+          "type": {
+            "type-name": "Vector",
+            "length": 4,
+            "type": {
+              "type-name": "Bytes",
+              "length": 32
+            }
+          }
+        },
+        {
+          "name": "argCount",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 255
+          }
+        },
+        {
+          "name": "caip2Id",
+          "type": {
+            "type-name": "Bytes",
+            "length": 32
+          }
+        },
+        {
+          "name": "keyVersion",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 4294967295
+          }
+        },
+        {
+          "name": "dest",
+          "type": {
+            "type-name": "Bytes",
+            "length": 32
+          }
+        },
+        {
+          "name": "params",
+          "type": {
+            "type-name": "Bytes",
+            "length": 64
+          }
+        },
+        {
+          "name": "outputSchema",
+          "type": {
+            "type-name": "Bytes",
+            "length": 128
+          }
+        },
+        {
+          "name": "respondSchema",
+          "type": {
+            "type-name": "Bytes",
+            "length": 128
+          }
+        }
+      ],
+      "result-type": {
+        "type-name": "Tuple",
+        "types": [
+        ]
+      }
+    },
+    {
+      "name": "respond",
+      "pure": false,
+      "proof": true,
+      "arguments": [
+        {
+          "name": "requestId",
+          "type": {
+            "type-name": "Bytes",
+            "length": 32
+          }
+        },
+        {
+          "name": "bigRx",
+          "type": {
+            "type-name": "Bytes",
+            "length": 32
+          }
+        },
+        {
+          "name": "bigRy",
+          "type": {
+            "type-name": "Bytes",
+            "length": 32
+          }
+        },
+        {
+          "name": "s",
+          "type": {
+            "type-name": "Bytes",
+            "length": 32
+          }
+        },
+        {
+          "name": "recoveryId",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 255
+          }
+        }
+      ],
+      "result-type": {
+        "type-name": "Tuple",
+        "types": [
+        ]
+      }
+    },
+    {
+      "name": "respond_bidirectional",
+      "pure": false,
+      "proof": true,
+      "arguments": [
+        {
+          "name": "requestId",
+          "type": {
+            "type-name": "Bytes",
+            "length": 32
+          }
+        },
+        {
+          "name": "serializedOutput",
+          "type": {
+            "type-name": "Bytes",
+            "length": 128
+          }
+        },
+        {
+          "name": "outputLen",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 255
+          }
+        },
+        {
+          "name": "bigRx",
+          "type": {
+            "type-name": "Bytes",
+            "length": 32
+          }
+        },
+        {
+          "name": "bigRy",
+          "type": {
+            "type-name": "Bytes",
+            "length": 32
+          }
+        },
+        {
+          "name": "s",
+          "type": {
+            "type-name": "Bytes",
+            "length": 32
+          }
+        },
+        {
+          "name": "recoveryId",
+          "type": {
+            "type-name": "Uint",
+            "maxval": 255
+          }
+        }
+      ],
+      "result-type": {
+        "type-name": "Tuple",
+        "types": [
+        ]
+      }
+    }
+  ],
+  "witnesses": [
+    {
+      "name": "callerSecretKey",
+      "arguments": [
+      ],
+      "result type": {
+        "type-name": "Bytes",
+        "length": 32
+      }
+    }
+  ],
+  "contracts": [
+  ],
+  "ledger": [
+    {
+      "name": "signetNonce",
+      "index": 0,
+      "exported": true,
+      "storage": "Counter"
+    }
+  ]
+}

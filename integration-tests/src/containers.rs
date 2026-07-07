@@ -27,7 +27,7 @@ use mpc_chain_near::Options as NearIndexerOptions;
 use mpc_chain_solana::SolConfig;
 use mpc_contract::primitives::Participants;
 use mpc_keys::hpke;
-use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, SolArgs};
+use mpc_node::cli::{CantonArgs, Cli, EthArgs, HydrationArgs, MidnightArgs, SolArgs};
 use mpc_node::config::OverrideConfig;
 use mpc_node::protocol::presignature::Presignature;
 use mpc_node::protocol::triple::Triple;
@@ -166,6 +166,7 @@ impl Node {
         let sol_args = SolArgs::from_config(config.cfg.sol.clone());
         let hydration_args = HydrationArgs::from_config(config.cfg.hydration.clone());
         let canton_args = CantonArgs::from_config(config.cfg.canton.clone());
+        let midnight_args = MidnightArgs::from_config(config.cfg.midnight.clone());
         let args = Cli::Start {
             near_rpc: config.near_rpc.clone(),
             mpc_contract_id: ctx.mpc_contract.id().clone(),
@@ -178,6 +179,7 @@ impl Node {
             sol: sol_args,
             hydration: hydration_args,
             canton: canton_args,
+            midnight: midnight_args,
             my_address: None,
             storage_options: ctx.storage_options.clone(),
             log_options: ctx.log_options.clone(),
@@ -1461,4 +1463,94 @@ struct RespondBidirectionalSignature {
 struct RespondBidirectionalAffinePoint {
     x: [u8; 32],
     y: [u8; 32],
+}
+
+/// Midnight ledger-9 stack: node + pinned contract-events indexer, both on the
+/// test docker network. The proof server is not needed — the toolkit proves
+/// locally (native binary) in both the sandbox and the publisher service.
+pub struct MidnightStack {
+    pub node: Container,
+    pub indexer: Container,
+    /// In-network node URL (for toolkit-js containers on the same network).
+    pub node_internal_ws: String,
+    /// Host-mapped node URL (for the native toolkit + publisher service).
+    pub node_external_ws: String,
+    /// Host-mapped node URL over HTTP (finality gate + readiness polling).
+    pub node_external_http: String,
+    /// Host-mapped indexer GraphQL v4 endpoints.
+    pub indexer_graphql_url: String,
+    pub indexer_graphql_ws_url: String,
+}
+
+impl MidnightStack {
+    const NODE_PORT: u16 = 9944;
+    const INDEXER_PORT: u16 = 8088;
+    pub const NODE_IMAGE: (&'static str, &'static str) =
+        ("midnightntwrk/midnight-node", "2.0.0-rc.3");
+    /// Built locally from the pinned contract-events-e2e commit — see
+    /// chain-signatures/contract-midnight/stack/build-indexer-image.sh.
+    pub const INDEXER_IMAGE: (&'static str, &'static str) =
+        ("midnightntwrk/indexer-standalone", "c7c267cc");
+
+    pub async fn run(docker: &DockerClient, network: &str) -> anyhow::Result<Self> {
+        tracing::info!("starting midnight node container...");
+        let node = start_container_with_network_retry(
+            || {
+                GenericImage::new(Self::NODE_IMAGE.0, Self::NODE_IMAGE.1)
+                    .with_exposed_port(Self::NODE_PORT.tcp())
+                    .with_network(network)
+                    .with_env_var("CFG_PRESET", "dev")
+                    .with_env_var("THRESHOLD", "0")
+                    .with_env_var("SHOW_CONFIG", "false")
+                    .with_env_var(
+                        "SIDECHAIN_BLOCK_BENEFICIARY",
+                        "04bcf7ad3be7a5c790460be82a713af570f22e0f801f6659ab8e84a52be6969e",
+                    )
+                    .with_env_var("RUST_BACKTRACE", "1")
+            },
+            network,
+        )
+        .await
+        .context("starting midnight node container")?;
+        let node_ip = docker.get_network_ip_address(&node, network).await?;
+        let node_host_port = node.get_host_port_ipv4(Self::NODE_PORT).await?;
+        let node_internal_ws = format!("ws://{}:{}", node_ip, Self::NODE_PORT);
+
+        tracing::info!("starting midnight indexer container...");
+        let node_url_for_indexer = node_internal_ws.clone();
+        let indexer = start_container_with_network_retry(
+            || {
+                GenericImage::new(Self::INDEXER_IMAGE.0, Self::INDEXER_IMAGE.1)
+                    .with_exposed_port(Self::INDEXER_PORT.tcp())
+                    .with_network(network)
+                    .with_env_var(
+                        "RUST_LOG",
+                        "indexer_standalone=info,chain_indexer=info,indexer_api=info,info",
+                    )
+                    // Random 32-byte hex secret required by the config schema —
+                    // not for secure use.
+                    .with_env_var(
+                        "APP__INFRA__SECRET",
+                        "303132333435363738393031323334353637383930313233343536373839303132",
+                    )
+                    .with_env_var("APP__INFRA__NODE__URL", &node_url_for_indexer)
+                    .with_env_var("APP__INFRA__SPO_NODE__URL", &node_url_for_indexer)
+                    .with_env_var("APP__INFRA__SPO_NODE__BLOCKFROST_ID", "dummy-not-using-spo")
+            },
+            network,
+        )
+        .await
+        .context("starting midnight indexer container")?;
+        let indexer_host_port = indexer.get_host_port_ipv4(Self::INDEXER_PORT).await?;
+
+        Ok(Self {
+            node_internal_ws,
+            node_external_ws: format!("ws://127.0.0.1:{node_host_port}"),
+            node_external_http: format!("http://127.0.0.1:{node_host_port}"),
+            indexer_graphql_url: format!("http://127.0.0.1:{indexer_host_port}/api/v4/graphql"),
+            indexer_graphql_ws_url: format!("ws://127.0.0.1:{indexer_host_port}/api/v4/graphql/ws"),
+            node,
+            indexer,
+        })
+    }
 }

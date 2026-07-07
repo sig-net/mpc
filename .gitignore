@@ -25,3 +25,13 @@ chain-signatures/contract-eth/cache
 chain-signatures/contract-eth/ignition/deployments/chain-31337
 chain-signatures/contract-eth/deployments/localhost.json
 chain-signatures/contract-eth/scripts/params.json
+
+# midnight fixtures: committed = small compiled artifacts (contract JS,
+# verifier keys, zkir) + toolkit config; generated/oversized stay out —
+# prover keys (~1 GB) are regenerable in midnight-erc20-vault (Canton-DAR style).
+integration-tests/fixtures/midnight/signet-signer/keys/*.prover
+integration-tests/fixtures/midnight/node_modules/
+integration-tests/fixtures/midnight/package-lock.json
+integration-tests/fixtures/midnight/.run/
+integration-tests/fixtures/midnight/.cache/
+integration-tests/fixtures/midnight/.cache-native/

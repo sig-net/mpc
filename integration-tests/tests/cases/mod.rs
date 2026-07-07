@@ -25,6 +25,8 @@ pub mod compat;
 pub mod ethereum;
 pub mod ethereum_stream;
 pub mod helpers;
+pub mod midnight;
+pub mod midnight_stream;
 pub mod mpc;
 pub mod mpc_with_stream;
 pub mod nightly;

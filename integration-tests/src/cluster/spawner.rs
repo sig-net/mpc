@@ -165,6 +165,7 @@ pub struct ClusterSpawner {
     pub worker: Option<Worker<Sandbox>>,
     pub solana: Option<containers::Solana>,
     pub canton: Option<crate::canton::CantonSandbox>,
+    pub midnight: Option<crate::midnight::MidnightSandbox>,
     pub program_address: Option<String>,
     prestockpile: Option<Prestockpile>,
     pub pregenerated_keys: PregeneratedKeys,
@@ -206,6 +207,7 @@ impl Default for ClusterSpawner {
             worker: None,
             solana: None,
             canton: None,
+            midnight: None,
             program_address: None,
             prestockpile: Some(Prestockpile { multiplier: 4 }),
             pregenerated_keys: PregeneratedKeys::load(nodes, threshold).unwrap(),
@@ -360,6 +362,21 @@ impl ClusterSpawner {
         self
     }
 
+    pub fn midnight(mut self) -> Self {
+        if self.cfg.midnight.is_none() {
+            // Placeholder — filled from the sandbox in into_future.
+            self.cfg.midnight = Some(mpc_chain_midnight::MidnightConfig {
+                indexer_graphql_url: String::new(),
+                indexer_graphql_ws_url: String::new(),
+                node_rpc_url: String::new(),
+                publisher_url: String::new(),
+                contract_address: String::new(),
+                network_id: String::new(),
+            });
+        }
+        self
+    }
+
     pub fn debug_node(&mut self) -> &mut Self {
         self.release = false;
         self
@@ -490,6 +507,13 @@ impl IntoFuture for ClusterSpawner {
                 self.canton = Some(sandbox);
             }
 
+            if self.cfg.midnight.is_some() && self.midnight.is_none() {
+                let sandbox =
+                    crate::midnight::MidnightSandbox::run(&self.docker, &self.network).await?;
+                self.cfg.midnight = Some(sandbox.get_config());
+                self.midnight = Some(sandbox);
+            }
+
             let nodes = self.run().await?;
             let connector = near_jsonrpc_client::JsonRpcClient::new_client();
             let jsonrpc_client = connector.connect(nodes.ctx().worker.rpc_addr());
@@ -503,6 +527,7 @@ impl IntoFuture for ClusterSpawner {
                 account_idx: nodes.len(),
                 solana: self.solana.take(),
                 canton: self.canton.take(),
+                midnight: self.midnight.take(),
                 nodes,
             };
 

@@ -1,0 +1,10 @@
+{
+  "name": "midnight-fixtures",
+  "private": true,
+  "type": "module",
+  "description": "Type-resolution deps for signer.config.ts — midnight-node-toolkit's toolkit-js compiles the config with tsc and needs @midnight-ntwrk/compact-js resolvable next to it.",
+  "devDependencies": {
+    "@midnight-ntwrk/compact-js": "2.5.5-rc.5",
+    "@types/node": "^22.0.0"
+  }
+}

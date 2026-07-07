@@ -17,6 +17,13 @@ static ALLOCATED_PORTS: Mutex<Option<HashSet<u16>>> = Mutex::new(None);
 static INIT: Once = Once::new();
 
 /// Call at least once in every test to see tracing output
+/// Decode a 64-char hex string into a fixed 32-byte array (test fixtures).
+pub fn hex32(s: &str) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    hex::decode_to_slice(s, &mut out).expect("hex32");
+    out
+}
+
 pub fn init_tracing_log() {
     INIT.call_once(|| {
         let subscriber = tracing_subscriber::fmt()
