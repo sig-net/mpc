@@ -85,7 +85,7 @@ pub fn inc_block() -> u64 {
     BLOCKS_PROCESSED.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-/// Report the current benchmarking metrics to the tracing log.
+/// Report the current benchmarking metrics
 pub fn report_metrics(stage: &str) {
     let rpcs: Vec<_> = RPC_STATS
         .lock()
@@ -99,8 +99,9 @@ pub fn report_metrics(stage: &str) {
         .unwrap_or_default();
 
     let total_rpc: u64 = rpcs.iter().map(|(_, v)| v).sum();
-    let batch_fetch_ns = FETCH_TIME_NS.load(Ordering::Relaxed);
-    let per_block_process_ns = PROCESS_TIME_NS.load(Ordering::Relaxed);
+    let batch_fetch_ms = (FETCH_TIME_NS.load(Ordering::Relaxed) as f64 / 1e6).round() as u64;
+    let per_block_process_ms =
+        (PROCESS_TIME_NS.load(Ordering::Relaxed) as f64 / 1e6).round() as u64;
     let blocks = BLOCKS_PROCESSED.load(Ordering::Relaxed);
 
     let elapsed_sec = CATCHUP_START
@@ -111,16 +112,19 @@ pub fn report_metrics(stage: &str) {
         .as_secs_f64()
         .max(0.001);
 
+    let blocks_per_sec = blocks as f64 / elapsed_sec;
+    let rpc_per_sec = total_rpc as f64 / elapsed_sec;
+
+    let breakdown = rpcs
+        .iter()
+        .map(|(method, count)| format!("  {method:<32} {count:>4}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let label = format!("{stage}: {blocks} blocks in {elapsed_sec:.2}s");
+
     tracing::info!(
         target: TARGET,
-        stage,
-        blocks,
-        batch_fetch_ns,
-        per_block_process_ns,
-        total_rpc,
-        blocks_per_sec = blocks as f64 / elapsed_sec,
-        rpc_per_sec = total_rpc as f64 / elapsed_sec,
-        rpc_breakdown = ?rpcs,
-        "Catchup Benchmark Report"
+        "Catchup Benchmark Report\n{label}\n  blocks_per_sec  {blocks_per_sec:.1}\n  rpc_per_sec    {rpc_per_sec:.1}\n  total_rpc      {total_rpc}\n  batch_fetch_ms {batch_fetch_ms}\n  process_ms     {per_block_process_ms}\n  rpc_breakdown:\n{breakdown}"
     );
 }
