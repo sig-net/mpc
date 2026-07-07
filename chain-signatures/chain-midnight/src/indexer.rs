@@ -1,5 +1,13 @@
 //! Midnight stream + indexer: contractEvents subscription → reassembly →
 //! finality gate → ChainEvents, driven by the generic `run_stream` pipeline.
+//!
+//! Pattern deviation: the progress token is the indexer's contract-event `id`,
+//! not a block height — `ChainEvent::Block(event_id)` is what checkpoints
+//! persist, and `CHECKPOINT_INTERVAL_MIDNIGHT` counts observed events (Canton
+//! offset precedent). Catchup targets a single anchor (`maxId`) instead of
+//! iterating heights: ids are globally shared across contracts and the
+//! subscription emits nothing between our events. See
+//! doc/midnight-integration.md.
 
 use crate::config::MidnightConfig;
 use crate::convert::group_to_chain_event;

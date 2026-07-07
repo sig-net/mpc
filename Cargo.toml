@@ -14,6 +14,10 @@ members = [
     "chain-signatures/chain-near",
     "chain-signatures/chain-midnight",
 ]
+# midnight-publisher is a nested workspace with its own lockfile: the
+# midnight-node-toolkit dep universe (polkadot-sdk/subxt/midnight-ledger)
+# cannot co-resolve with this workspace's helios/libp2p subtree — see
+# doc/midnight-integration.md.
 exclude = ["infra/scripts/generate_keys", "chain-signatures/midnight-publisher"]
 resolver = "2"
 

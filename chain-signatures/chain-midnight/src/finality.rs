@@ -2,6 +2,12 @@
 //! finalized, checked directly against the operator's own node RPC (never the
 //! indexer's claim). Once the MPC signs, the signature exists off-chain
 //! forever — a request that reorgs away still got its signature.
+//!
+//! Trust tier (SECURITY-CRITICAL caveat): this gate + an operator-owned
+//! node/indexer is the current authenticity story — there is no
+//! proof-of-inclusion for the served events yet (Hydration-parity Merkle
+//! proofs are deferred). That hardening must land before real value depends
+//! on Midnight-derived keys. See doc/midnight-integration.md.
 
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
