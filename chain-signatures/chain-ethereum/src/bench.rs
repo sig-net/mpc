@@ -12,41 +12,53 @@ use std::time::{Duration, Instant};
 /// Target for tracing logs emitted by the benchmarking helpers.
 pub const TARGET: &str = "mpc_chain_ethereum::bench";
 
+/// Per-method RPC counters.
+/// `logical` is the number of JSON-RPC requests issued for that method;
+/// `http` is the number of HTTP round-trips they went in.
+#[derive(Default, Clone, Copy)]
+struct RpcCount {
+    logical: u64,
+    http: u64,
+}
+
 // Global state for benchmarking.
 //
 // TODO: this single global set of counters assumes at most one catchup is
 // in flight at a time. When concurrent catchups land, consider moving this state onto
 // `EthereumIndexer` (per-instance) so each catchup reports independently
-static RPC_STATS: Mutex<Option<HashMap<&'static str, u64>>> = Mutex::new(None);
+static RPC_STATS: Mutex<Option<HashMap<&'static str, RpcCount>>> = Mutex::new(None);
 static BATCH_FETCH_NS: AtomicU64 = AtomicU64::new(0);
 static REFETCH_NS: AtomicU64 = AtomicU64::new(0);
 static PROCESS_TIME_NS: AtomicU64 = AtomicU64::new(0);
 static BLOCKS_PROCESSED: AtomicU64 = AtomicU64::new(0);
 static CATCHUP_START: Mutex<Option<Instant>> = Mutex::new(None);
 
-/// Increment the count of RPC calls for a given method.
-/// The reported `total_rpc` reflects **attempted HTTP requests**, not logical
-/// operations nor successful ones. This is intentional for the optimization
-/// goal (we pay for retries)
+/// Increment the logical and HTTP count for a single (non-batched) RPC method
+/// by one. One logical request == one HTTP POST.
 pub fn rpc_inc(method: &'static str) {
     let mut guard = RPC_STATS.lock().unwrap();
-    *guard
+    let c = guard
         .get_or_insert_with(HashMap::new)
         .entry(method)
-        .or_default() += 1;
+        .or_default();
+    c.logical += 1;
+    c.http += 1;
 }
 
-/// Increment the count of RPC calls for a given method by `n` (batch calls).
-/// Counters reflect attempted HTTP requests, not logical operations
+/// Increment the logical count for a batched RPC method by `n` and the HTTP
+/// count by one (all `n` JSON-RPC entries travel in a single batch POST).
+/// Counters reflect attempted requests, not successful ones.
 pub fn rpc_inc_n(method: &'static str, n: u64) {
     if n == 0 {
         return;
     }
     let mut guard = RPC_STATS.lock().unwrap();
-    *guard
+    let c = guard
         .get_or_insert_with(HashMap::new)
         .entry(method)
-        .or_default() += n;
+        .or_default();
+    c.logical += n;
+    c.http += 1;
 }
 
 /// Reset all benchmarking metrics to zero (restarting the catchup benchmark).
@@ -106,7 +118,8 @@ pub fn report_metrics(stage: &str) {
         })
         .unwrap_or_default();
 
-    let total_rpc: u64 = rpcs.iter().map(|(_, v)| v).sum();
+    let total_rpc: u64 = rpcs.iter().map(|(_, c)| c.logical).sum();
+    let total_http: u64 = rpcs.iter().map(|(_, c)| c.http).sum();
     let batch_fetch_ms = (BATCH_FETCH_NS.load(Ordering::Relaxed) as f64 / 1e6).round() as u64;
     let refetch_ms = (REFETCH_NS.load(Ordering::Relaxed) as f64 / 1e6).round() as u64;
     let per_block_process_ms =
@@ -123,10 +136,17 @@ pub fn report_metrics(stage: &str) {
 
     let blocks_per_sec = blocks as f64 / elapsed_sec;
     let rpc_per_sec = total_rpc as f64 / elapsed_sec;
+    let http_per_sec = total_http as f64 / elapsed_sec;
 
     let breakdown = rpcs
         .iter()
-        .map(|(method, count)| format!("  {method:<32} {count:>4}"))
+        .map(|(method, c)| {
+            format!(
+                "  {method:<36} {logical:>6} ({http} http)",
+                logical = c.logical,
+                http = c.http
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -134,6 +154,6 @@ pub fn report_metrics(stage: &str) {
 
     tracing::info!(
         target: TARGET,
-        "Catchup Benchmark Report\n{label}\n  blocks_per_sec  {blocks_per_sec:.1}\n  rpc_per_sec    {rpc_per_sec:.1}\n  total_rpc      {total_rpc}\n  batch_fetch_ms  {batch_fetch_ms}\n  refetch_ms     {refetch_ms}\n  process_ms     {per_block_process_ms}\n  rpc_breakdown:\n{breakdown}"
+        "Catchup Benchmark Report\n{label}\n  blocks_per_sec  {blocks_per_sec:.1}\n  rpc_per_sec    {rpc_per_sec:.1}  (http_per_sec {http_per_sec:.1})\n  total_rpc      {total_rpc}  (total_http {total_http})\n  batch_fetch_ms {batch_fetch_ms}\n  refetch_ms     {refetch_ms}\n  process_ms     {per_block_process_ms}\n  rpc_breakdown (logical, http round-trips):\n{breakdown}"
     );
 }
