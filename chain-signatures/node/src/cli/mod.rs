@@ -21,7 +21,7 @@ use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
-use crate::stream::run_stream;
+use crate::stream::{run_stream, StreamContext};
 use crate::{logs, storage, web};
 pub use args::{canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, solana::SolArgs};
 
@@ -787,14 +787,16 @@ async fn spawn_indexers(
                 tracing::info!("ethereum indexer stream created successfully");
                 tokio::spawn(run_stream(
                     eth_stream,
-                    sign_tx.clone(),
-                    rpc_channel.clone(),
-                    backlog.clone(),
+                    StreamContext::new(
+                        backlog.clone(),
+                        sign_tx.clone(),
+                        rpc_channel.clone(),
+                        contract_watcher.clone(),
+                        mesh_state.clone(),
+                        node_client.clone(),
+                        checkpoints_rx[Chain::Ethereum].clone(),
+                    ),
                     eth_telemetry,
-                    contract_watcher.clone(),
-                    mesh_state.clone(),
-                    node_client.clone(),
-                    checkpoints_rx[Chain::Ethereum].clone(),
                 ));
             }
             Err(err) => {
@@ -810,14 +812,16 @@ async fn spawn_indexers(
                 tracing::info!("solana indexer stream created successfully");
                 tokio::spawn(run_stream(
                     sol_stream,
-                    sign_tx.clone(),
-                    rpc_channel.clone(),
-                    backlog.clone(),
+                    StreamContext::new(
+                        backlog.clone(),
+                        sign_tx.clone(),
+                        rpc_channel.clone(),
+                        contract_watcher.clone(),
+                        mesh_state.clone(),
+                        node_client.clone(),
+                        checkpoints_rx[Chain::Solana].clone(),
+                    ),
                     sol_telemetry,
-                    contract_watcher.clone(),
-                    mesh_state.clone(),
-                    node_client.clone(),
-                    checkpoints_rx[Chain::Solana].clone(),
                 ));
             }
             Err(err) => {
@@ -847,14 +851,16 @@ async fn spawn_indexers(
                 tracing::info!("canton indexer stream created successfully");
                 tokio::spawn(run_stream(
                     canton_stream,
-                    sign_tx,
-                    rpc_channel,
-                    backlog,
+                    StreamContext::new(
+                        backlog,
+                        sign_tx,
+                        rpc_channel,
+                        contract_watcher,
+                        mesh_state,
+                        node_client,
+                        checkpoints_rx[Chain::Canton].clone(),
+                    ),
                     canton_telemetry,
-                    contract_watcher,
-                    mesh_state,
-                    node_client,
-                    checkpoints_rx[Chain::Canton].clone(),
                 ));
             }
             Err(err) => {

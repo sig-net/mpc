@@ -6,7 +6,7 @@ use crate::mesh::MeshState;
 use crate::node_client::NodeClient;
 use crate::protocol::ParticipantInfo;
 use crate::rpc::{ContractStateWatcher, RpcAction, RpcChannel};
-use crate::stream::run_stream;
+use crate::stream::{run_stream, StreamContext};
 use crate::util::current_unix_timestamp;
 use alloy::primitives::{Address, B256};
 use k256::{AffinePoint, Scalar};
@@ -171,14 +171,16 @@ pub async fn run_stream_with_two_node_mesh<S: ChainStream>(
 
     run_stream(
         client,
-        sign_tx,
-        rpc,
-        backlog,
+        StreamContext::new(
+            backlog,
+            sign_tx,
+            rpc,
+            contract_watcher,
+            mesh_state_rx,
+            node_client,
+            cp_rx,
+        ),
         NoopChainTelemetry,
-        contract_watcher,
-        mesh_state_rx,
-        node_client,
-        cp_rx,
     )
     .await;
 }
