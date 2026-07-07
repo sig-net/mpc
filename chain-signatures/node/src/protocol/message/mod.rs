@@ -67,11 +67,11 @@ pub struct MessageInbox {
     resharing: Subscriber<ResharingMessage>,
     ready: Subscriber<ReadyMessage>,
     triple: HashMap<TripleId, Subscriber<TripleMessage>>,
-    triple_init: Subscriber<(TripleId, Participant, PositAction)>,
+    triple_posit: Subscriber<(TripleId, Participant, PositAction)>,
     presignature: HashMap<PresignatureId, Subscriber<PresignatureMessage>>,
-    presignature_init: Subscriber<(FullPresignatureId, Participant, PositAction)>,
+    presignature_posit: Subscriber<(FullPresignatureId, Participant, PositAction)>,
     signature: HashMap<(SignId, PresignatureId), Subscriber<SignatureMessage>>,
-    signature_init: Subscriber<(SignId, PresignatureId, Round, Participant, PositAction)>,
+    signature_posit: Subscriber<(SignId, PresignatureId, Round, Participant, PositAction)>,
 }
 
 impl MessageInbox {
@@ -95,17 +95,17 @@ impl MessageInbox {
             resharing: Subscriber::unsubscribed("resharing"),
             ready: Subscriber::unsubscribed("ready"),
             triple: HashMap::new(),
-            triple_init: Subscriber::unsubscribed_with_capacity(
+            triple_posit: Subscriber::unsubscribed_with_capacity(
                 "triple_posit",
                 sub::MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE,
             ),
             presignature: HashMap::new(),
-            presignature_init: Subscriber::unsubscribed_with_capacity(
+            presignature_posit: Subscriber::unsubscribed_with_capacity(
                 "presignature_posit",
                 sub::MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE,
             ),
             signature: HashMap::new(),
-            signature_init: Subscriber::unsubscribed_with_capacity(
+            signature_posit: Subscriber::unsubscribed_with_capacity(
                 "signature_posit",
                 sub::MAX_MESSAGE_POSIT_SUB_CHANNEL_SIZE,
             ),
@@ -117,25 +117,25 @@ impl MessageInbox {
             Message::Posit(message) => match message.id {
                 PositProtocolId::Triple(id) => {
                     let _ = self
-                        .triple_init
+                        .triple_posit
                         .try_send_lossy((id, message.from, message.action));
-                    self.triple_init.report_capacity_global();
+                    self.triple_posit.report_capacity_global();
                 }
                 PositProtocolId::Presignature(id) => {
                     let _ =
-                        self.presignature_init
+                        self.presignature_posit
                             .try_send_lossy((id, message.from, message.action));
-                    self.presignature_init.report_capacity_global();
+                    self.presignature_posit.report_capacity_global();
                 }
                 PositProtocolId::Signature(sign_id, presignature_id, round) => {
-                    let _ = self.signature_init.try_send_lossy((
+                    let _ = self.signature_posit.try_send_lossy((
                         sign_id,
                         presignature_id,
                         round,
                         message.from,
                         message.action,
                     ));
-                    self.signature_init.report_capacity_global();
+                    self.signature_posit.report_capacity_global();
                 }
             },
             Message::Generating(message) => {
@@ -345,29 +345,29 @@ impl MessageInbox {
             },
             SubscribeId::Triples => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self.triple_init.subscribe();
+                    let rx = self.triple_posit.subscribe();
                     let _ = resp.send(SubscribeResponse::TriplePosit(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
-                    self.triple_init.unsubscribe();
+                    self.triple_posit.unsubscribe();
                 }
             },
             SubscribeId::Presignatures => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self.presignature_init.subscribe();
+                    let rx = self.presignature_posit.subscribe();
                     let _ = resp.send(SubscribeResponse::PresignaturePosit(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
-                    self.presignature_init.unsubscribe();
+                    self.presignature_posit.unsubscribe();
                 }
             },
             SubscribeId::Signatures => match sub.action {
                 SubscribeRequestAction::Subscribe(resp) => {
-                    let rx = self.signature_init.subscribe();
+                    let rx = self.signature_posit.subscribe();
                     let _ = resp.send(SubscribeResponse::SignaturePosit(rx));
                 }
                 SubscribeRequestAction::Unsubscribe => {
-                    self.signature_init.unsubscribe();
+                    self.signature_posit.unsubscribe();
                 }
             },
         }
@@ -1578,7 +1578,7 @@ mod tests {
         );
 
         // Override to a small capacity so we can easily fill it
-        inbox.signature_init = sub::Subscriber::unsubscribed_with_capacity("signature_posit", 1);
+        inbox.signature_posit = sub::Subscriber::unsubscribed_with_capacity("signature_posit", 1);
 
         let (signature_req, signature_resp) =
             sub::SubscribeRequest::subscribe(sub::SubscribeId::Signatures);
