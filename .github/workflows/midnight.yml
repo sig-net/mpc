@@ -1,0 +1,60 @@
+name: Midnight Integration
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - chain-signatures/**
+      - integration-tests/**
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+env:
+  RUSTFLAGS: -D warnings
+
+jobs:
+  chain-midnight-unit:
+    name: chain-midnight golden/unit tests
+    runs-on: warp-ubuntu-latest-x64-4x
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust (1.81.0)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.81.0
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - run: echo "OPENSSL_NO_VENDOR=1" >> $GITHUB_ENV
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: midnight-unit
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+      - name: Unit + golden tests
+        run: cargo test -p mpc-chain-midnight
+      - name: Node wiring compiles and midnight args round-trip
+        run: cargo test -p mpc-node midnight
+      - name: Main lockfile stays toolkit-free
+        run: test "$(grep -c polkadot Cargo.lock)" = "0"
+
+  midnight-publisher-locked:
+    name: isolated publisher builds --locked
+    runs-on: warp-ubuntu-latest-x64-4x
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust (1.81.0)
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: 1.81.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: midnight-publisher
+          workspaces: chain-signatures/midnight-publisher
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
+      - name: Build + test with the seeded lockfile
+        working-directory: chain-signatures/midnight-publisher
+        run: |
+          cargo build --locked
+          cargo test --locked
