@@ -18,7 +18,8 @@ pub const TARGET: &str = "mpc_chain_ethereum::bench";
 // in flight at a time. When concurrent catchups land, consider moving this state onto
 // `EthereumIndexer` (per-instance) so each catchup reports independently
 static RPC_STATS: Mutex<Option<HashMap<&'static str, u64>>> = Mutex::new(None);
-static FETCH_TIME_NS: AtomicU64 = AtomicU64::new(0);
+static BATCH_FETCH_NS: AtomicU64 = AtomicU64::new(0);
+static REFETCH_NS: AtomicU64 = AtomicU64::new(0);
 static PROCESS_TIME_NS: AtomicU64 = AtomicU64::new(0);
 static BLOCKS_PROCESSED: AtomicU64 = AtomicU64::new(0);
 static CATCHUP_START: Mutex<Option<Instant>> = Mutex::new(None);
@@ -54,21 +55,28 @@ pub fn rpc_reset() {
     if let Some(m) = stats.as_mut() {
         m.clear();
     }
-    FETCH_TIME_NS.store(0, Ordering::Relaxed);
+    BATCH_FETCH_NS.store(0, Ordering::Relaxed);
+    REFETCH_NS.store(0, Ordering::Relaxed);
     PROCESS_TIME_NS.store(0, Ordering::Relaxed);
     BLOCKS_PROCESSED.store(0, Ordering::Relaxed);
     *CATCHUP_START.lock().unwrap() = Some(Instant::now());
     drop(stats);
 }
 
-/// Accumulate time spent batch-fetching blocks via `CatchupIter::fetch_next_batch`
-/// (and the single-block refetch path in `EthereumIndexer::process_catchup`).
-///
-/// This wraps only the `get_blocks` / `get_block` call itself — not the
-/// per-block `process_block` work. Stored in nanoseconds to preserve
-/// sub-millisecond precision for fast batches and empty blocks.
-pub fn add_fetch_time(d: Duration) {
-    FETCH_TIME_NS.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
+/// Accumulate time spent in `CatchupIter::fetch_next_batch` — the batched
+/// `get_blocks` HTTP POST that pulls the next up-to-32-block chunk from the
+/// upstream. This is the main historical-block fetch path. Stored in
+/// nanoseconds to preserve sub-millisecond precision.
+pub fn add_batch_fetch_time(d: Duration) {
+    BATCH_FETCH_NS.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
+}
+
+/// Accumulate time spent in the per-block single-block refetch path inside
+/// `EthereumIndexer::process_catchup` — fired only when a batch returns
+/// `MaybeBlock::Missing` for a block id and the indexer re-asks for that one
+/// block via `get_block`. Stored in nanoseconds.
+pub fn add_refetch_time(d: Duration) {
+    REFETCH_NS.fetch_add(d.as_nanos() as u64, Ordering::Relaxed);
 }
 
 /// Accumulate time spent in `EthereumIndexer::process_block` (the per-block
@@ -99,7 +107,8 @@ pub fn report_metrics(stage: &str) {
         .unwrap_or_default();
 
     let total_rpc: u64 = rpcs.iter().map(|(_, v)| v).sum();
-    let batch_fetch_ms = (FETCH_TIME_NS.load(Ordering::Relaxed) as f64 / 1e6).round() as u64;
+    let batch_fetch_ms = (BATCH_FETCH_NS.load(Ordering::Relaxed) as f64 / 1e6).round() as u64;
+    let refetch_ms = (REFETCH_NS.load(Ordering::Relaxed) as f64 / 1e6).round() as u64;
     let per_block_process_ms =
         (PROCESS_TIME_NS.load(Ordering::Relaxed) as f64 / 1e6).round() as u64;
     let blocks = BLOCKS_PROCESSED.load(Ordering::Relaxed);
@@ -125,6 +134,6 @@ pub fn report_metrics(stage: &str) {
 
     tracing::info!(
         target: TARGET,
-        "Catchup Benchmark Report\n{label}\n  blocks_per_sec  {blocks_per_sec:.1}\n  rpc_per_sec    {rpc_per_sec:.1}\n  total_rpc      {total_rpc}\n  batch_fetch_ms {batch_fetch_ms}\n  process_ms     {per_block_process_ms}\n  rpc_breakdown:\n{breakdown}"
+        "Catchup Benchmark Report\n{label}\n  blocks_per_sec  {blocks_per_sec:.1}\n  rpc_per_sec    {rpc_per_sec:.1}\n  total_rpc      {total_rpc}\n  batch_fetch_ms  {batch_fetch_ms}\n  refetch_ms     {refetch_ms}\n  process_ms     {per_block_process_ms}\n  rpc_breakdown:\n{breakdown}"
     );
 }

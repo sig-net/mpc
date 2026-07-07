@@ -753,7 +753,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
                 };
 
                 #[cfg(feature = "bench")]
-                crate::bench::add_fetch_time(start.elapsed());
+                crate::bench::add_refetch_time(start.elapsed());
 
                 _block = block;
                 &_block
