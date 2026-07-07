@@ -4,7 +4,7 @@ use crate::backlog::Backlog;
 use crate::protocol::message::{MessageChannel, SignatureMessage};
 use crate::protocol::presignature::PresignatureId;
 use crate::rpc::{GovernanceInfo, RpcChannel};
-use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt};
+use crate::sign_bidirectional::PublishState;
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
@@ -286,16 +286,6 @@ impl SignGenerator {
                             self.request.clone(),
                             output,
                             self.participants.clone(),
-                        );
-                    }
-
-                    if let SignKind::SignBidirectional(event) = &self.request.kind {
-                        // Promotion to Bidirectional happens later, when the Solana indexer sees the SignatureRespondedEvent.
-                        tracing::info!(
-                            ?sign_id,
-                            source_chain = ?self.request.chain,
-                            target_chain = ?event.target_chain().ok(),
-                            "generated signature for bidirectional request, awaiting indexer to process"
                         );
                     }
 
