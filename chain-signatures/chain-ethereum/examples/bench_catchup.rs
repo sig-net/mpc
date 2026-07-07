@@ -77,6 +77,12 @@ fn make_config() -> anyhow::Result<EthConfig> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Enable tracing logs
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_target(false)
+        .init();
+
     let config = make_config()?;
     let end = env_u64("END")?;
 
