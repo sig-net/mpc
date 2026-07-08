@@ -81,7 +81,9 @@ async fn recover_backlog_requeues_pending_signs() {
     backlog.recover_by_checkpoint(checkpoint).await.unwrap();
 
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
-    requeue_pending_sign_requests(&ctx, Chain::Solana).await;
+    requeue_pending_sign_requests(&ctx, Chain::Solana)
+        .await
+        .unwrap();
 
     // We should receive the recovered sign request
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -368,7 +370,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
         tx.target_chain,
     )
     .await
-    .unwrap();
+    .expect_err("send failure should surface as an error");
 
     ctx.backlog.set_processed_block(tx.source_chain, 10).await;
     let checkpoint = ctx.backlog.checkpoint(tx.source_chain).await.unwrap();
@@ -396,7 +398,9 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
     recovered.recover_by_checkpoint(checkpoint).await.unwrap();
 
     let recovered_ctx = make_test_stream_context_with_generator_pk(recovered, sign_tx, false);
-    requeue_pending_sign_requests(&recovered_ctx, tx.source_chain).await;
+    requeue_pending_sign_requests(&recovered_ctx, tx.source_chain)
+        .await
+        .unwrap();
 
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
         .await
@@ -1083,7 +1087,9 @@ async fn requeue_pending_sign_requests_is_chain_scoped() {
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
 
-    requeue_pending_sign_requests(&ctx, Chain::Solana).await;
+    requeue_pending_sign_requests(&ctx, Chain::Solana)
+        .await
+        .unwrap();
 
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
         .await
@@ -1115,7 +1121,9 @@ async fn catchup_blocks_do_not_consume_checkpoint_slots() {
     // Process 33 checkpoint intervals at caught_up=false
     let interval = chain.checkpoint_interval().unwrap(); // 100 for Ethereum
     for i in 1..=33 {
-        process_block_event(chain, i * interval, &ctx, &telemetry).await;
+        process_block_event(chain, i * interval, &ctx, &telemetry)
+            .await
+            .unwrap();
     }
 
     // Slots should still be available — no pending checkpoints created

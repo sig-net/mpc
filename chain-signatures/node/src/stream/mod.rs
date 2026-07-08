@@ -134,7 +134,9 @@ async fn handle_chain_event<T: ChainTelemetry>(
             }
             ctx.caught_up = true;
 
-            requeue_pending_sign_requests(ctx, chain).await;
+            requeue_pending_sign_requests(ctx, chain)
+                .await
+                .context("failed to requeue pending sign requests")?;
             resume_pending_publish_requests(ctx, chain).await;
         }
         ChainEvent::SignRequest {
@@ -165,7 +167,9 @@ async fn handle_chain_event<T: ChainTelemetry>(
                 .context("failed to process respond bidirectional event")?;
         }
         ChainEvent::Block(block) => {
-            process_block_event(chain, block, ctx, telemetry).await;
+            process_block_event(chain, block, ctx, telemetry)
+                .await
+                .context("failed to process block event")?;
         }
         ChainEvent::ExecutionConfirmed {
             tx_id,

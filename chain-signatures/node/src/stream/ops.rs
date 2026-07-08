@@ -18,29 +18,36 @@ pub(crate) async fn process_sign_request(
 
     ctx.backlog.insert(sign_request.clone()).await;
 
-    let chain = sign_request.chain;
     if ctx.caught_up {
-        if let Err(err) = ctx.sign_tx.send(SignCommand::Request(sign_request)).await {
-            tracing::error!(?err, %chain, "failed to send sign request into queue");
-        }
+        let chain = sign_request.chain;
+        ctx.sign_tx
+            .send(SignCommand::Request(sign_request))
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!("failed to send sign request into queue for chain {chain}: {err:?}")
+            })?;
     }
 
     Ok(())
 }
 
-pub(crate) async fn requeue_pending_sign_requests(ctx: &StreamContext, source_chain: Chain) {
+pub(crate) async fn requeue_pending_sign_requests(
+    ctx: &StreamContext,
+    source_chain: Chain,
+) -> anyhow::Result<()> {
     for sign_request in ctx.backlog.take_requeueable_requests(source_chain).await {
         let sign_id = sign_request.id;
         let source_chain = sign_request.chain;
-        if let Err(err) = ctx.sign_tx.send(SignCommand::Request(sign_request)).await {
-            tracing::error!(
-                ?err,
-                ?sign_id,
-                ?source_chain,
-                "failed to requeue sign request after catchup"
-            );
-        }
+        ctx.sign_tx
+            .send(SignCommand::Request(sign_request))
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "failed to requeue sign request after catchup for sign id {sign_id:?} on chain {source_chain}: {err:?}"
+                )
+            })?;
     }
+    Ok(())
 }
 
 pub(crate) async fn resume_pending_publish_requests(ctx: &StreamContext, source_chain: Chain) {
@@ -188,29 +195,21 @@ pub(crate) async fn process_respond_event(
         "bidirectional tx details before advancement",
     );
 
-    match ctx
+    if let Err(err) = ctx
         .backlog
         .advance(source_chain, sign_id, bidirectional_tx)
         .await
     {
-        Ok(_) => {
-            tracing::info!(
-                ?sign_id,
-                ?tx_id,
-                ?target_chain,
-                "advance bidirectional tx to execution successful"
-            );
-        }
-        Err(err) => {
-            tracing::error!(
-                ?sign_id,
-                ?tx_id,
-                ?target_chain,
-                ?err,
-                "advance bidirectional tx to execution failed"
-            );
-        }
+        anyhow::bail!(
+            "advance bidirectional tx to execution failed for sign id {sign_id:?}, tx_id {tx_id:?}, target_chain {target_chain:?}: {err:?}"
+        );
     }
+    tracing::info!(
+        ?sign_id,
+        ?tx_id,
+        ?target_chain,
+        "advance bidirectional tx to execution successful"
+    );
 
     Ok(())
 }
@@ -319,14 +318,9 @@ pub async fn process_execution_confirmed(
         )
         .await
     {
-        tracing::error!(
-            ?tx_id,
-            ?unwatched_sign_id,
-            ?source_chain,
-            ?err,
-            "failed to persist completion request on pending tx"
+        anyhow::bail!(
+            "failed to persist completion request on pending tx for sign id {unwatched_sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}: {err:?}"
         );
-        anyhow::bail!("failed to persist completion request for sign id: {unwatched_sign_id:?}");
     }
 
     let set_res = ctx
@@ -337,13 +331,12 @@ pub async fn process_execution_confirmed(
             SignStatus::PendingGenerationBidirectional,
         )
         .await;
-    let updated_tx = match set_res {
-        Some(tx) => tx,
-        None => {
-            tracing::error!(?tx_id, ?unwatched_sign_id, source_chain = ?pending_tx.source_chain, "failed to set status on pending tx");
-            anyhow::bail!("failed to set status for sign id: {unwatched_sign_id:?}");
-        }
-    };
+    let updated_tx = set_res.ok_or_else(|| {
+        anyhow::anyhow!(
+            "failed to set status on pending tx for sign id {unwatched_sign_id:?}, tx_id {tx_id:?}, source_chain {:?}",
+            pending_tx.source_chain
+        )
+    })?;
     tracing::info!(?tx_id, ?unwatched_sign_id, updated_status = ?updated_tx.status(), "set_status returned transaction");
 
     let chain = sign_request.chain;
@@ -351,9 +344,12 @@ pub async fn process_execution_confirmed(
     // request belongs to the source chain. Do not let the target chain's catchup
     // barrier strand that follow-up work.
     if ctx.caught_up || chain != target_chain {
-        if let Err(err) = ctx.sign_tx.send(SignCommand::Request(sign_request)).await {
-            tracing::error!(?err, %chain, "failed to send sign request into queue");
-        }
+        ctx.sign_tx
+            .send(SignCommand::Request(sign_request))
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!("failed to send sign request into queue for chain {chain}: {err:?}")
+            })?;
     }
 
     Ok(())
@@ -364,16 +360,16 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
     block: u64,
     ctx: &StreamContext,
     telemetry: &T,
-) {
+) -> anyhow::Result<()> {
     telemetry.block_finalized(block);
 
     // should not create checkpoint for blocks that are not caught up, as that would
     // try to create signatures for checkpoints where we are not live.
     if !ctx.caught_up {
-        return;
+        return Ok(());
     }
     let Some(checkpoint) = ctx.backlog.set_processed_block(chain, block).await else {
-        return;
+        return Ok(());
     };
 
     telemetry.checkpoint_created(checkpoint.block_height);
@@ -388,9 +384,11 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
     let sign_id = checkpoint_digest.sign_id();
     tracing::info!(block, ?checkpoint, %chain, ?sign_id, "created checkpoint");
     let sign = SignCommand::Checkpoint(IndexedSignRequest::checkpoint(checkpoint_digest, epsilon));
-    if let Err(err) = ctx.sign_tx.send(sign).await {
-        tracing::error!(?err, %chain, "failed to enqueue checkpoint sign request");
-    }
+    ctx.sign_tx.send(sign).await.map_err(|err| {
+        anyhow::anyhow!("failed to enqueue checkpoint sign request for chain {chain}: {err:?}")
+    })?;
+
+    Ok(())
 }
 
 /// Decode a [u8; 32] sender into its canonical on-chain address string.
