@@ -134,9 +134,8 @@ async fn handle_chain_event<T: ChainTelemetry>(
             }
             ctx.caught_up = true;
 
-            requeue_pending_sign_requests(&ctx.backlog, chain, ctx.sign_tx.clone()).await;
-            resume_pending_publish_requests(&ctx.backlog, chain, &ctx.contract_watcher, &ctx.rpc)
-                .await;
+            requeue_pending_sign_requests(ctx, chain).await;
+            resume_pending_publish_requests(ctx, chain).await;
         }
         ChainEvent::SignRequest {
             request,
@@ -151,47 +150,22 @@ async fn handle_chain_event<T: ChainTelemetry>(
                 telemetry.request_indexed();
             }
 
-            process_sign_request(
-                request,
-                ctx.sign_tx.clone(),
-                ctx.backlog.clone(),
-                ctx.caught_up,
-            )
-            .await
-            .context("failed to process sign request")?;
+            process_sign_request(request, ctx)
+                .await
+                .context("failed to process sign request")?;
         }
         ChainEvent::Respond(ev) => {
-            process_respond_event(
-                ev,
-                ctx.sign_tx.clone(),
-                root_pk,
-                &ctx.backlog,
-                ctx.caught_up,
-            )
-            .await
-            .context("failed to process respond event")?;
+            process_respond_event(ev, ctx, root_pk)
+                .await
+                .context("failed to process respond event")?;
         }
         ChainEvent::RespondBidirectional(ev) => {
-            process_respond_bidirectional_event(
-                ev,
-                ctx.sign_tx.clone(),
-                root_pk,
-                &ctx.backlog,
-                ctx.caught_up,
-            )
-            .await
-            .context("failed to process respond bidirectional event")?;
+            process_respond_bidirectional_event(ev, ctx, root_pk)
+                .await
+                .context("failed to process respond bidirectional event")?;
         }
         ChainEvent::Block(block) => {
-            process_block_event(
-                chain,
-                block,
-                &ctx.backlog,
-                &ctx.sign_tx,
-                ctx.caught_up,
-                telemetry,
-            )
-            .await;
+            process_block_event(chain, block, ctx, telemetry).await;
         }
         ChainEvent::ExecutionConfirmed {
             tx_id,
@@ -206,10 +180,8 @@ async fn handle_chain_event<T: ChainTelemetry>(
                 source_chain,
                 block_height,
                 result,
-                &ctx.backlog,
-                ctx.sign_tx.clone(),
+                ctx,
                 chain,
-                ctx.caught_up,
             )
             .await
             .context("failed to process execution confirmation")?;

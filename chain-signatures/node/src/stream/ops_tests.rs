@@ -3,12 +3,13 @@ use crate::backlog::Backlog;
 use crate::mesh::connection::NodeStatus;
 use crate::mesh::{wait_threshold_active, MeshState};
 use crate::protocol::contract::primitives::ParticipantInfo;
+use crate::rpc::ContractStateWatcher;
 use crate::sign_bidirectional::SignStatus;
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::stream::ops::process_execution_confirmed;
 use crate::stream::test_utils::{
-    respond_event, test_bidirectional_tx, test_canton_sign_bidirectional_request,
-    test_indexed_request, test_sign_args,
+    make_test_stream_context_with_generator_pk, respond_event, test_bidirectional_tx,
+    test_canton_sign_bidirectional_request, test_indexed_request, test_sign_args,
 };
 use crate::util::current_unix_timestamp;
 
@@ -79,7 +80,8 @@ async fn recover_backlog_requeues_pending_signs() {
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
     backlog.recover_by_checkpoint(checkpoint).await.unwrap();
 
-    requeue_pending_sign_requests(&backlog, Chain::Solana, sign_tx).await;
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
+    requeue_pending_sign_requests(&ctx, Chain::Solana).await;
 
     // We should receive the recovered sign request
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
@@ -136,28 +138,27 @@ async fn process_execution_confirmed_success_creates_respond_request() {
     // ensure watcher exists before processing
     let before_watchers = backlog.get_execution_watchers(tx.target_chain).await;
     assert!(before_watchers.contains_key(&tx.id));
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
     process_execution_confirmed(
         tx_id,
         sign_id,
         tx.source_chain,
         123u64,
         ExecutionOutcome::Success { output: vec![] },
-        &backlog,
-        sign_tx,
+        &ctx,
         tx.target_chain,
-        true,
     )
     .await
     .unwrap();
 
     // Watcher should be removed
-    let watchers = backlog.get_execution_watchers(tx.target_chain).await;
+    let watchers = ctx.backlog.get_execution_watchers(tx.target_chain).await;
     tracing::info!(?watchers, "watchers after execution confirmed");
     assert!(watchers.is_empty());
 
     // Source chain request should now wait for final bidirectional response.
     // inspect the transaction to provide more debugging info on failure
-    let maybe_tx = backlog.get(tx.source_chain, &sign_id).await;
+    let maybe_tx = ctx.backlog.get(tx.source_chain, &sign_id).await;
     assert!(maybe_tx.is_some(), "expected sign tx to still exist");
     let tx_after = maybe_tx.unwrap();
     assert_eq!(
@@ -214,6 +215,7 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
     process_execution_confirmed(
         tx.id,
@@ -221,10 +223,8 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
         tx.source_chain,
         123u64,
         ExecutionOutcome::Success { output: vec![] },
-        &backlog,
-        sign_tx.clone(),
+        &ctx,
         tx.target_chain,
-        true,
     )
     .await
     .unwrap();
@@ -235,10 +235,8 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
         tx.source_chain,
         124u64,
         ExecutionOutcome::Success { output: vec![] },
-        &backlog,
-        sign_tx,
+        &ctx,
         tx.target_chain,
-        true,
     )
     .await
     .unwrap();
@@ -257,7 +255,8 @@ async fn process_execution_confirmed_is_idempotent_after_first_processing() {
     let no_second = timeout(Duration::from_millis(100), sign_rx.recv()).await;
     assert!(matches!(no_second, Err(_) | Ok(None)));
 
-    assert!(backlog
+    assert!(ctx
+        .backlog
         .get_execution_watchers(tx.target_chain)
         .await
         .is_empty());
@@ -290,6 +289,7 @@ async fn process_execution_confirmed_warns_but_still_uses_watcher_sign_id() {
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
     process_execution_confirmed(
         tx.id,
@@ -297,15 +297,13 @@ async fn process_execution_confirmed_warns_but_still_uses_watcher_sign_id() {
         tx.source_chain,
         321u64,
         ExecutionOutcome::Failed,
-        &backlog,
-        sign_tx,
+        &ctx,
         tx.target_chain,
-        true,
     )
     .await
     .unwrap();
 
-    let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
+    let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
     assert_eq!(
         tx_after.status(),
         SignStatus::PendingGenerationBidirectional
@@ -314,7 +312,8 @@ async fn process_execution_confirmed_warns_but_still_uses_watcher_sign_id() {
         tx_after.request.kind,
         SignKind::RespondBidirectional(_)
     ));
-    assert!(backlog
+    assert!(ctx
+        .backlog
         .get_execution_watchers(tx.target_chain)
         .await
         .is_empty());
@@ -357,6 +356,7 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
 
     let (sign_tx, sign_rx) = mpsc::channel(4);
     drop(sign_rx);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
     process_execution_confirmed(
         tx.id,
@@ -364,19 +364,17 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
         tx.source_chain,
         444u64,
         ExecutionOutcome::Success { output: vec![] },
-        &backlog,
-        sign_tx,
+        &ctx,
         tx.target_chain,
-        true,
     )
     .await
     .unwrap();
 
-    backlog.set_processed_block(tx.source_chain, 10).await;
-    let checkpoint = backlog.checkpoint(tx.source_chain).await.unwrap();
+    ctx.backlog.set_processed_block(tx.source_chain, 10).await;
+    let checkpoint = ctx.backlog.checkpoint(tx.source_chain).await.unwrap();
 
     // Simulate consensus confirmation so storage has the checkpoint
-    backlog
+    ctx.backlog
         .on_consensus_confirmed(tx.source_chain, &checkpoint)
         .await;
 
@@ -397,7 +395,8 @@ async fn process_execution_confirmed_recovery_requeues_final_respond_after_send_
         .unwrap();
     recovered.recover_by_checkpoint(checkpoint).await.unwrap();
 
-    requeue_pending_sign_requests(&recovered, tx.source_chain, sign_tx).await;
+    let recovered_ctx = make_test_stream_context_with_generator_pk(recovered, sign_tx, false);
+    requeue_pending_sign_requests(&recovered_ctx, tx.source_chain).await;
 
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
         .await
@@ -473,8 +472,9 @@ async fn process_respond_event_rejects_invalid_bidirectional_target_chain() {
         ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
-    let err = process_respond_event(event, sign_tx, public_key, &backlog, true)
+    let err = process_respond_event(event, &ctx, public_key)
         .await
         .expect_err("invalid chain should fail");
     assert!(err.to_string().contains("UnknownCaip2Id(\"not-a-chain\")"));
@@ -505,7 +505,8 @@ async fn process_sign_request_rejects_respond_bidirectional_kind() {
     );
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
-    let err = process_sign_request(request, sign_tx, backlog, true)
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
+    let err = process_sign_request(request, &ctx)
         .await
         .expect_err("RespondBidirectional should be rejected from the sign queue path");
     assert!(err.to_string().contains("Unexpected sign request kind"));
@@ -543,12 +544,13 @@ async fn process_respond_event_rejects_invalid_signature() {
         ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
-    let err = process_respond_event(event, sign_tx, public_key, &backlog, true)
+    let err = process_respond_event(event, &ctx, public_key)
         .await
         .expect_err("invalid signature should be rejected");
     assert!(err.to_string().contains("invalid signature"));
-    assert!(backlog.get(Chain::Ethereum, &sign_id).await.is_some());
+    assert!(ctx.backlog.get(Chain::Ethereum, &sign_id).await.is_some());
 }
 
 #[tokio::test]
@@ -583,18 +585,13 @@ async fn process_respond_bidirectional_event_duplicate_is_idempotent() {
         ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
-    process_respond_bidirectional_event(
-        duplicate_event0,
-        sign_tx.clone(),
-        public_key,
-        &backlog,
-        true,
-    )
-    .await
-    .expect("first completion should succeed");
+    process_respond_bidirectional_event(duplicate_event0, &ctx, public_key)
+        .await
+        .expect("first completion should succeed");
 
-    process_respond_bidirectional_event(duplicate_event1, sign_tx, public_key, &backlog, true)
+    process_respond_bidirectional_event(duplicate_event1, &ctx, public_key)
         .await
         .expect("duplicate completion should be ignored");
 
@@ -643,12 +640,13 @@ async fn process_respond_bidirectional_event_rejects_invalid_signature() {
         ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
-    let err = process_respond_bidirectional_event(event, sign_tx, public_key, &backlog, true)
+    let err = process_respond_bidirectional_event(event, &ctx, public_key)
         .await
         .expect_err("invalid signature should be rejected");
     assert!(err.to_string().contains("invalid signature"));
-    assert!(backlog.get(Chain::Solana, &sign_id).await.is_some());
+    assert!(ctx.backlog.get(Chain::Solana, &sign_id).await.is_some());
 }
 
 #[tokio::test]
@@ -680,9 +678,10 @@ async fn process_respond_event_duplicate_ethereum_is_idempotent() {
         ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
     // First event should complete the request.
-    process_respond_event(event.clone(), sign_tx.clone(), public_key, &backlog, true)
+    process_respond_event(event.clone(), &ctx, public_key)
         .await
         .expect("first respond event should succeed");
 
@@ -699,7 +698,7 @@ async fn process_respond_event_duplicate_ethereum_is_idempotent() {
     // This mirrors production behavior where the same respond log can be
     // emitted repeatedly by the Ethereum indexer pipeline.
     for _ in 0..16 {
-        process_respond_event(event.clone(), sign_tx.clone(), public_key, &backlog, true)
+        process_respond_event(event.clone(), &ctx, public_key)
             .await
             .expect("duplicate respond event should be idempotent");
     }
@@ -785,12 +784,14 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
         ContractStateWatcher::with_running(&account_id, public_key, 1, Default::default());
 
     let (sign_tx, _sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
 
-    process_respond_event(event, sign_tx, public_key, &backlog, false)
+    process_respond_event(event, &ctx, public_key)
         .await
         .expect("respond event should advance pending publish bidirectional entries");
 
-    let entry = backlog
+    let entry = ctx
+        .backlog
         .get(Chain::Ethereum, &sign_id)
         .await
         .expect("entry should remain in backlog");
@@ -803,7 +804,7 @@ async fn process_respond_event_advances_bidirectional_from_pending_publish() {
         .expect("pending execution entries should store the execution transaction")
         .id;
 
-    let watchers = backlog.get_execution_watchers(Chain::Solana).await;
+    let watchers = ctx.backlog.get_execution_watchers(Chain::Solana).await;
     assert_eq!(watchers.len(), 1);
     assert!(watchers.contains_key(&execution_tx_id));
 }
@@ -839,6 +840,7 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
     process_execution_confirmed(
         tx.id,
@@ -846,25 +848,24 @@ async fn process_execution_confirmed_failed_creates_error_respond_request() {
         tx.source_chain,
         456u64,
         ExecutionOutcome::Failed,
-        &backlog,
-        sign_tx,
+        &ctx,
         tx.target_chain,
-        true,
     )
     .await
     .unwrap();
 
     // Watcher removed
-    let watchers = backlog.get_execution_watchers(tx.target_chain).await;
+    let watchers = ctx.backlog.get_execution_watchers(tx.target_chain).await;
     assert!(watchers.is_empty());
 
     // Source chain should now wait for final bidirectional response.
-    let waiting = backlog
+    let waiting = ctx
+        .backlog
         .pending_generation_bidirectionals(tx.source_chain)
         .await;
     assert!(waiting.contains_key(&sign_id));
 
-    let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
+    let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
     assert!(matches!(
         tx_after.request.kind,
         SignKind::RespondBidirectional(_)
@@ -938,16 +939,15 @@ async fn process_execution_confirmed_cross_chain_emits_before_target_catchup() {
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
     process_execution_confirmed(
         tx.id,
         sign_id,
         tx.source_chain,
         789u64,
         ExecutionOutcome::Failed,
-        &backlog,
-        sign_tx,
+        &ctx,
         tx.target_chain,
-        false,
     )
     .await
     .unwrap();
@@ -988,6 +988,7 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, true);
 
     process_execution_confirmed(
         tx.id,
@@ -995,10 +996,8 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
         tx.source_chain,
         456u64,
         ExecutionOutcome::Success { output: vec![1] },
-        &backlog,
-        sign_tx,
+        &ctx,
         tx.target_chain,
-        true,
     )
     .await
     .unwrap();
@@ -1009,11 +1008,12 @@ async fn process_execution_confirmed_carries_canton_chain_ctx_to_final_request()
         assert_eq!(decoded.sign_event_contract_id, sign_event_contract_id);
     };
 
-    assert!(backlog
+    assert!(ctx
+        .backlog
         .get_execution_watchers(tx.target_chain)
         .await
         .is_empty());
-    let tx_after = backlog.get(tx.source_chain, &sign_id).await.unwrap();
+    let tx_after = ctx.backlog.get(tx.source_chain, &sign_id).await.unwrap();
     assert_eq!(
         tx_after.status(),
         SignStatus::PendingGenerationBidirectional
@@ -1081,8 +1081,9 @@ async fn requeue_pending_sign_requests_is_chain_scoped() {
         .await;
 
     let (sign_tx, mut sign_rx) = mpsc::channel(4);
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
 
-    requeue_pending_sign_requests(&backlog, Chain::Solana, sign_tx).await;
+    requeue_pending_sign_requests(&ctx, Chain::Solana).await;
 
     let msg = timeout(Duration::from_secs(1), sign_rx.recv())
         .await
@@ -1109,24 +1110,17 @@ async fn catchup_blocks_do_not_consume_checkpoint_slots() {
     let backlog = Backlog::new();
     let (sign_tx, _sign_rx) = mpsc::channel(4);
     let telemetry = NoopChainTelemetry;
+    let ctx = make_test_stream_context_with_generator_pk(backlog, sign_tx, false);
 
     // Process 33 checkpoint intervals at caught_up=false
     let interval = chain.checkpoint_interval().unwrap(); // 100 for Ethereum
     for i in 1..=33 {
-        process_block_event(
-            chain,
-            i * interval,
-            &backlog,
-            &sign_tx,
-            false, // caught_up
-            &telemetry,
-        )
-        .await;
+        process_block_event(chain, i * interval, &ctx, &telemetry).await;
     }
 
     // Slots should still be available — no pending checkpoints created
     assert!(
-        backlog.has_checkpoint_slot(chain).await,
+        ctx.backlog.has_checkpoint_slot(chain).await,
         "catchup should not consume checkpoint slots; 33 intervals without caught_up \
          would fill the 32-slot cap and cause a permanent stall"
     );

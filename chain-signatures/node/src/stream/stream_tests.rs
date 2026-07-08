@@ -634,16 +634,19 @@ async fn test_stream_handles_sign_bidirectional_block_and_recover() {
     }
 
     // now send an execution confirmation event to advance to RespondBidirectional
+    let ctx = crate::stream::test_utils::make_test_stream_context_with_generator_pk(
+        backlog.clone(),
+        sign_tx.clone(),
+        true,
+    );
     crate::stream::ops::process_execution_confirmed(
         execution_id,
         sign_id,
         Chain::Solana,
         block,
         mpc_primitives::ExecutionOutcome::Success { output: vec![] },
-        &backlog,
-        sign_tx.clone(),
+        &ctx,
         Chain::Ethereum,
-        true,
     )
     .await
     .unwrap();
