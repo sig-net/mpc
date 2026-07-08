@@ -358,14 +358,16 @@ async fn test_stream_handles_sign_and_respond() {
     // Run the indexer
     run_stream(
         client,
-        sign_tx.clone(),
-        rpc,
-        backlog.clone(),
+        StreamContext::new(
+            backlog.clone(),
+            sign_tx.clone(),
+            rpc,
+            contract_watcher,
+            mesh_state_rx,
+            node_client,
+            cp_rx,
+        ),
         NoopChainTelemetry,
-        contract_watcher,
-        mesh_state_rx,
-        node_client,
-        cp_rx,
     )
     .await;
 
@@ -474,14 +476,16 @@ async fn test_stream_handles_sign_bidirectional_block_and_recover() {
     let run_handle = tokio::spawn(async move {
         run_stream(
             client,
-            sign_tx_for_run,
-            rpc,
-            backlog_for_run,
+            StreamContext::new(
+                backlog_for_run,
+                sign_tx_for_run,
+                rpc,
+                contract_watcher,
+                mesh_state_rx,
+                node_client,
+                cp_rx,
+            ),
             NoopChainTelemetry,
-            contract_watcher,
-            mesh_state_rx,
-            node_client,
-            cp_rx,
         )
         .await;
     });
@@ -855,14 +859,16 @@ async fn test_stream_resumes_pending_publish_after_catchup() {
     let run_handle = tokio::spawn(async move {
         run_stream(
             client,
-            sign_tx,
-            rpc,
-            backlog,
+            StreamContext::new(
+                backlog,
+                sign_tx,
+                rpc,
+                contract_watcher,
+                mesh_state_rx,
+                node_client,
+                cp_rx,
+            ),
             NoopChainTelemetry,
-            contract_watcher,
-            mesh_state_rx,
-            node_client,
-            cp_rx,
         )
         .await;
     });
@@ -933,14 +939,16 @@ async fn test_stream_does_not_resume_non_proposer_pending_publish_after_catchup(
     let run_handle = tokio::spawn(async move {
         run_stream(
             client,
-            sign_tx,
-            rpc,
-            backlog,
+            StreamContext::new(
+                backlog,
+                sign_tx,
+                rpc,
+                contract_watcher,
+                mesh_state_rx,
+                node_client,
+                cp_rx,
+            ),
             NoopChainTelemetry,
-            contract_watcher,
-            mesh_state_rx,
-            node_client,
-            cp_rx,
         )
         .await;
     });

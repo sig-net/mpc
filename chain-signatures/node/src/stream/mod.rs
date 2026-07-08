@@ -25,23 +25,51 @@ pub enum ChainStreaming {
     Live,
 }
 
+/// Shared, per-chain dependencies
+pub struct StreamContext {
+    pub backlog: Backlog,
+    pub sign_tx: mpsc::Sender<SignCommand>,
+    pub rpc: RpcChannel,
+    pub contract_watcher: ContractStateWatcher,
+    pub mesh_state: watch::Receiver<MeshState>,
+    pub node_client: NodeClient,
+    pub checkpoints_rx: CheckpointWatcher,
+    pub caught_up: bool,
+}
+
+impl StreamContext {
+    pub fn new(
+        backlog: Backlog,
+        sign_tx: mpsc::Sender<SignCommand>,
+        rpc: RpcChannel,
+        contract_watcher: ContractStateWatcher,
+        mesh_state: watch::Receiver<MeshState>,
+        node_client: NodeClient,
+        checkpoints_rx: CheckpointWatcher,
+    ) -> Self {
+        Self {
+            backlog,
+            sign_tx,
+            rpc,
+            contract_watcher,
+            mesh_state,
+            node_client,
+            checkpoints_rx,
+            caught_up: false,
+        }
+    }
+}
+
 /// Shared indexer loop: recovers backlog then processes events from the stream
-#[allow(clippy::too_many_arguments)]
 pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
     mut stream: S,
-    sign_tx: mpsc::Sender<SignCommand>,
-    rpc: RpcChannel,
-    backlog: Backlog,
+    mut ctx: StreamContext,
     telemetry: T,
-    mut contract_watcher: ContractStateWatcher,
-    mesh_state: watch::Receiver<MeshState>,
-    node_client: NodeClient,
-    checkpoints_rx: CheckpointWatcher,
 ) {
     let chain = S::Indexer::CHAIN;
     tracing::info!(%chain, "starting stream");
 
-    let threshold = contract_watcher.wait_threshold().await;
+    let threshold = ctx.contract_watcher.wait_threshold().await;
 
     let indexer = match stream.start().await {
         Ok(indexer) => indexer,
@@ -53,19 +81,18 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
 
     let (pipeline, mut state_rx) = ChainPipeline::new(
         indexer,
-        checkpoints_rx.clone(),
-        backlog.clone(),
-        sign_tx.clone(),
-        mesh_state.clone(),
-        node_client,
+        ctx.checkpoints_rx.clone(),
+        ctx.backlog.clone(),
+        ctx.sign_tx.clone(),
+        ctx.mesh_state.clone(),
+        ctx.node_client.clone(),
         threshold,
-        contract_watcher.account_id().clone(),
+        ctx.contract_watcher.account_id().clone(),
     );
     let indexer_task = tokio::spawn(pipeline.run());
 
-    let root_pk = contract_watcher.wait_public_key().await;
+    let root_pk = ctx.contract_watcher.wait_public_key().await;
 
-    let mut caught_up = false;
     loop {
         tokio::select! {
             event = stream.next_event() => {
@@ -74,13 +101,13 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
                 };
                 match event {
                     ChainEvent::CatchupCompleted => {
-                        if caught_up {
+                        if ctx.caught_up {
                             continue;
                         }
-                        caught_up = true;
+                        ctx.caught_up = true;
 
-                        requeue_pending_sign_requests(&backlog, chain, sign_tx.clone()).await;
-                        resume_pending_publish_requests(&backlog, chain, &contract_watcher, &rpc).await;
+                        requeue_pending_sign_requests(&ctx.backlog, chain, ctx.sign_tx.clone()).await;
+                        resume_pending_publish_requests(&ctx.backlog, chain, &ctx.contract_watcher, &ctx.rpc).await;
                     }
                     ChainEvent::SignRequest { request, block_timestamp } => {
                         // Handle metrics reporting for the sign request event
@@ -93,7 +120,7 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
                         }
 
                         if let Err(err) =
-                            process_sign_request(request, sign_tx.clone(), backlog.clone(), caught_up).await
+                            process_sign_request(request, ctx.sign_tx.clone(), ctx.backlog.clone(), ctx.caught_up).await
                         {
                             tracing::error!(?err, %chain, "failed to process sign request");
                         }
@@ -101,10 +128,10 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
                     ChainEvent::Respond(ev) => {
                         if let Err(err) = process_respond_event(
                             ev,
-                            sign_tx.clone(),
+                            ctx.sign_tx.clone(),
                             root_pk,
-                            &backlog,
-                            caught_up,
+                            &ctx.backlog,
+                            ctx.caught_up,
                         )
                         .await
                         {
@@ -113,14 +140,14 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
                     }
                     ChainEvent::RespondBidirectional(ev) => {
                         if let Err(err) =
-                            process_respond_bidirectional_event(ev, sign_tx.clone(), root_pk, &backlog, caught_up)
+                            process_respond_bidirectional_event(ev, ctx.sign_tx.clone(), root_pk, &ctx.backlog, ctx.caught_up)
                                 .await
                         {
                             tracing::error!(?err, %chain, "failed to process respond bidirectional event");
                         }
                     }
                     ChainEvent::Block(block) => {
-                        process_block_event(chain, block, &backlog, &sign_tx, caught_up, &telemetry).await;
+                        process_block_event(chain, block, &ctx.backlog, &ctx.sign_tx, ctx.caught_up, &telemetry).await;
                     }
                     ChainEvent::ExecutionConfirmed {
                         tx_id,
@@ -135,10 +162,10 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
                             source_chain,
                             block_height,
                             result,
-                            &backlog,
-                            sign_tx.clone(),
+                            &ctx.backlog,
+                            ctx.sign_tx.clone(),
                             chain,
-                            caught_up,
+                            ctx.caught_up,
                         )
                         .await
                         {
@@ -150,7 +177,7 @@ pub async fn run_stream<S: ChainStream, T: ChainTelemetry>(
             _ = state_rx.changed() => {
                 let state = *state_rx.borrow_and_update();
                 if matches!(state, ChainStreaming::Recovery { .. } | ChainStreaming::Catchup { .. }) {
-                    caught_up = false;
+                    ctx.caught_up = false;
                 }
             }
         }
