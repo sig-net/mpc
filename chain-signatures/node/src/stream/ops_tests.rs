@@ -481,7 +481,13 @@ async fn process_respond_event_rejects_invalid_bidirectional_target_chain() {
     let err = process_respond_event(event, &ctx, public_key)
         .await
         .expect_err("invalid chain should fail");
-    assert!(err.to_string().contains("UnknownCaip2Id(\"not-a-chain\")"));
+    // The underlying `UnknownCaip2Id` cause is carried in the error's source chain.
+    let cause = err
+        .chain()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(cause.contains("unknown CAIP-2 chain ID: not-a-chain"));
 }
 
 #[tokio::test]
