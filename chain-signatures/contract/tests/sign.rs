@@ -457,10 +457,9 @@ async fn test_contract_checkpoint_verification() -> anyhow::Result<()> {
 }
 
 /// Verifies that checkpoints written via `respond_checkpoint` are readable
-/// via the `read` view endpoint in a **separate** transaction. This catches
-/// IterableMap iteration bugs where `.get()` works but `.iter()` does not
-/// after a contract migration, which is the same code path that
-/// `update_contract_data` uses to feed the node's checkpoint watcher.
+/// through the external `read` view endpoint. The lower-level regression test
+/// in `src/lib.rs` covers the broken storage shape where `.get()` works but
+/// iterable keys are missing.
 #[tokio::test]
 async fn test_checkpoint_read_after_respond() -> anyhow::Result<()> {
     let (_, contract, _, sk) = init_env().await;
@@ -496,7 +495,7 @@ async fn test_checkpoint_read_after_respond() -> anyhow::Result<()> {
         recovery_id,
     };
 
-    // Write checkpoint in one transaction
+    // Write checkpoint in one transaction.
     let respond = contract
         .call("respond_checkpoint")
         .args_json(serde_json::json!({
@@ -532,6 +531,15 @@ async fn test_checkpoint_read_after_respond() -> anyhow::Result<()> {
         .expect("Solana checkpoint must be present after respond_checkpoint");
     assert_eq!(stored.checkpoint.height, 120);
     assert_eq!(stored.checkpoint.digest, checkpoint.digest);
+
+    // Also verify the per-chain view path.
+    let latest: Option<SignedCheckpoint> = contract
+        .view("latest_checkpoint")
+        .args_json(serde_json::json!({ "chain": Chain::Solana }))
+        .await?
+        .json()?;
+    let latest = latest.expect("latest_checkpoint should return the checkpoint");
+    assert_eq!(latest.checkpoint.height, 120);
 
     Ok(())
 }
