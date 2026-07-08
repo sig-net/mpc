@@ -60,7 +60,12 @@ impl CatchupIter {
             .map(|block_number| BlockId::Number(BlockNumberOrTag::Number(block_number)))
             .collect::<Vec<_>>();
 
+        #[cfg(feature = "bench")]
+        let start = std::time::Instant::now();
         self.buffered_blocks = self.client.get_blocks(&batch_block_ids).await.into_iter();
+        #[cfg(feature = "bench")]
+        crate::bench::add_batch_fetch_time(start.elapsed());
+
         self.next_block = batch_end;
     }
 

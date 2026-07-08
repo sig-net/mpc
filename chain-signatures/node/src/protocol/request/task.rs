@@ -114,7 +114,21 @@ impl GeneratingPhase {
 
         crate::metrics::protocols::NUM_TOTAL_HISTORICAL_SIGNATURE_GENERATORS.inc();
 
-        match generator.run(&gen_ctx, posit_queue).await {
+        // Drive generation while answering posit traffic: peers proposing this
+        // signature get a Reject so they don't wait for us. The generator itself
+        // knows nothing about posits.
+        let generation = generator.run(&gen_ctx);
+        tokio::pin!(generation);
+        let result = loop {
+            tokio::select! {
+                result = &mut generation => break result,
+                task_msg = posit_queue.recv() => {
+                    Self::reject_late_propose(ctx, task_msg).await;
+                }
+            }
+        };
+
+        match result {
             Ok(()) => SignPhase::Complete(Ok(())),
             Err(err) => {
                 tracing::warn!(
@@ -128,6 +142,38 @@ impl GeneratingPhase {
                 SignPhase::Organizing(OrganizingPhase)
             }
         }
+    }
+
+    /// Reject a `Propose` that arrives while we are already generating; drop
+    /// stale Accept/Reject/Start messages.
+    async fn reject_late_propose(ctx: &SignTask, task_msg: SignTaskMessage) {
+        let SignTaskMessage::PositMessage {
+            presignature_id,
+            round,
+            from,
+            action,
+        } = task_msg;
+        if !matches!(action, PositAction::Propose) {
+            return;
+        }
+        let me = ctx.governance.me;
+        tracing::info!(
+            sign_id = ?ctx.sign_id,
+            ?from,
+            round,
+            "received Propose while already generating, rejecting"
+        );
+        ctx.msg
+            .send(
+                me,
+                from,
+                PositMessage {
+                    id: PositProtocolId::Signature(ctx.sign_id, presignature_id, round),
+                    from: me,
+                    action: PositAction::RejectWithReason(PositRejectReason::AlreadyGenerating),
+                },
+            )
+            .await;
     }
 }
 
