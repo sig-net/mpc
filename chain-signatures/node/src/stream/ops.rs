@@ -396,17 +396,16 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
 
     telemetry.checkpoint_created(checkpoint.block_height);
 
-    tracing::info!(block, ?checkpoint, %chain, "created checkpoint");
     let digest = checkpoint.digest();
     let epsilon = mpc_crypto::derive_epsilon_checkpoint(chain, checkpoint.block_height);
-    let sign = SignCommand::Checkpoint(IndexedSignRequest::checkpoint(
-        mpc_primitives::ConsensusCheckpointDigest {
-            chain,
-            height: checkpoint.block_height,
-            digest,
-        },
-        epsilon,
-    ));
+    let checkpoint_digest = mpc_primitives::ConsensusCheckpointDigest {
+        chain,
+        height: checkpoint.block_height,
+        digest,
+    };
+    let sign_id = checkpoint_digest.sign_id();
+    tracing::info!(block, ?checkpoint, %chain, ?sign_id, "created checkpoint");
+    let sign = SignCommand::Checkpoint(IndexedSignRequest::checkpoint(checkpoint_digest, epsilon));
     if let Err(err) = sign_tx.send(sign).await {
         tracing::error!(?err, %chain, "failed to enqueue checkpoint sign request");
     }
