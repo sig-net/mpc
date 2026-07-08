@@ -1,12 +1,10 @@
 //! Signature generation: runs the cait-sith signing protocol once a posit round agrees on a presignature and participant set.
 
 use crate::backlog::Backlog;
-use crate::protocol::message::{MessageChannel, PositMessage, PositProtocolId, SignatureMessage};
-use crate::protocol::posit::{PositAction, PositRejectReason};
+use crate::protocol::message::{MessageChannel, SignatureMessage};
 use crate::protocol::presignature::PresignatureId;
-use crate::protocol::request::SignPositWorkQueue;
 use crate::rpc::{GovernanceInfo, RpcChannel};
-use crate::sign_bidirectional::{PublishState, SignBidirectionalEventExt};
+use crate::sign_bidirectional::PublishState;
 use crate::storage::presignature_storage::{PresignatureTaken, PresignatureTakenDropper};
 use crate::storage::PresignatureStorage;
 use crate::types::SignatureProtocol;
@@ -27,16 +25,6 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum SignError {
     Aborted,
-}
-
-/// Posit messages routed to a running signature task; the generator consumes them to reject late `Propose`s while generating.
-pub(crate) enum SignTaskMessage {
-    PositMessage {
-        presignature_id: PresignatureId,
-        round: usize,
-        from: Participant,
-        action: PositAction,
-    },
 }
 
 pub(crate) struct GenerateCtx {
@@ -158,12 +146,9 @@ impl SignGenerator {
         }
     }
 
-    /// Poke-drive the protocol to completion: relay messages, reject late posits, and on `Return` publish the signature (proposer) and mark the request publishing.
-    pub(crate) async fn run(
-        mut self,
-        ctx: &GenerateCtx,
-        posit_queue: &SignPositWorkQueue,
-    ) -> Result<(), SignError> {
+    /// Poke-drive the protocol to completion: relay messages, and on `Return`
+    /// publish the signature (proposer) and mark the request publishing.
+    pub(crate) async fn run(mut self, ctx: &GenerateCtx) -> Result<(), SignError> {
         let me = ctx.governance.me;
         let epoch = ctx.governance.epoch;
 
@@ -204,51 +189,13 @@ impl SignGenerator {
 
             match action {
                 Action::Wait => {
-                    tokio::select! {
-                        result = self.recv() => {
-                            let msg = result.inspect_err(|_| {
-                                crate::metrics::protocols::SIGNATURE_GENERATOR_FAILURES.inc();
-                                if self.proposer == me {
-                                    crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_FAILURES.inc();
-                                }
-                            })?;
-                            self.protocol.message(msg.from, msg.data);
+                    let msg = self.recv().await.inspect_err(|_| {
+                        crate::metrics::protocols::SIGNATURE_GENERATOR_FAILURES.inc();
+                        if self.proposer == me {
+                            crate::metrics::protocols::SIGNATURE_GENERATOR_MINE_FAILURES.inc();
                         }
-                        task_msg = posit_queue.recv() => {
-                            let SignTaskMessage::PositMessage {
-                                presignature_id: posit_presig_id,
-                                round: posit_round,
-                                from,
-                                action,
-                            } = task_msg;
-                            if matches!(action, PositAction::Propose) {
-                                tracing::info!(
-                                    ?sign_id,
-                                    ?from,
-                                    posit_round,
-                                    "received Propose while already generating, rejecting"
-                                );
-                                ctx.msg
-                                    .send(
-                                        me,
-                                        from,
-                                        PositMessage {
-                                            id: PositProtocolId::Signature(
-                                                sign_id,
-                                                posit_presig_id,
-                                                posit_round,
-                                            ),
-                                            from: me,
-                                            action: PositAction::RejectWithReason(
-                                                PositRejectReason::AlreadyGenerating
-                                            ),
-                                        },
-                                    )
-                                    .await;
-                            }
-                            // Other variants (stale Accept/Reject/Start) are silently dropped.
-                        }
-                    }
+                    })?;
+                    self.protocol.message(msg.from, msg.data);
                 }
                 Action::SendMany(data) => {
                     for &to in self.participants.iter() {
@@ -339,16 +286,6 @@ impl SignGenerator {
                             self.request.clone(),
                             output,
                             self.participants.clone(),
-                        );
-                    }
-
-                    if let SignKind::SignBidirectional(event) = &self.request.kind {
-                        // Promotion to Bidirectional happens later, when the Solana indexer sees the SignatureRespondedEvent.
-                        tracing::info!(
-                            ?sign_id,
-                            source_chain = ?self.request.chain,
-                            target_chain = ?event.target_chain().ok(),
-                            "generated signature for bidirectional request, awaiting indexer to process"
                         );
                     }
 
