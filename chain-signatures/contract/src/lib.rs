@@ -811,9 +811,11 @@ impl VersionedMpcContract {
                 Read::State => View::State(self.state().clone()),
                 Read::Config => View::Config(self.config().clone()),
                 Read::Checkpoints => View::Checkpoints(
-                    self.checkpoints()
-                        .iter()
-                        .map(|(chain, checkpoint)| (*chain, checkpoint.clone()))
+                    Chain::iter()
+                        .into_iter()
+                        .filter_map(|chain| {
+                            self.checkpoints().get(&chain).map(|cp| (chain, cp.clone()))
+                        })
                         .collect(),
                 ),
             };
