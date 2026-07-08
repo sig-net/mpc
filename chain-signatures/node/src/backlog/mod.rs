@@ -633,6 +633,11 @@ impl Backlog {
         pending.len() < MAX_PENDING_CHECKPOINTS
     }
 
+    /// Number of pending checkpoints for a chain.
+    pub async fn pending_checkpoint_count(&self, chain: Chain) -> usize {
+        self.pending_checkpoints(&chain).read().await.len()
+    }
+
     /// Find a checkpoint by its consensus digest.
     pub async fn find_checkpoint_by_digest(
         &self,

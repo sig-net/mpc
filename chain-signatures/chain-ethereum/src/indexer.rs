@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
-use tokio::time::Duration;
+use tokio::time::{sleep, Duration, Instant};
 
 const MAX_LIVE_BLOCK_BUFFER: usize = 16384;
 /// Limit of consecutive `get_block(Finalized)` total failures allowed before `wait_for_finalized_block` gives up.
@@ -609,6 +609,13 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         let mut last_final_block_number: Option<BlockNumber> = None;
         let mut consecutive_failures = 0u32;
 
+        // Warn if the finalized block number has not advanced for this long
+        let stall_warn_secs = Chain::Ethereum.expected_finality_time_secs();
+        // Re-warn on this heartbeat interval if the finalized block number has not advanced
+        const STALL_REWARN_SECS: u64 = 300;
+        let mut last_advanced_at = Instant::now();
+        let mut last_stall_warn_at = Instant::now();
+
         loop {
             let Some(finalized_block) = self
                 .client
@@ -628,7 +635,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                     block_number,
                     "finalized ethereum block not found (failure {consecutive_failures}/{MAX_FINALIZED_FAILURES}); retrying"
                 );
-                tokio::time::sleep(retry_interval).await;
+                sleep(retry_interval).await;
                 continue;
             };
 
@@ -637,6 +644,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             let prev_final_block_number = last_final_block_number.replace(new_final_block_number);
 
             if prev_final_block_number.is_none_or(|n| new_final_block_number > n) {
+                last_advanced_at = Instant::now();
                 tracing::debug!(
                     new_final_block_number,
                     prev_final_block_number,
@@ -654,6 +662,23 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 }
 
                 if new_final_block_number == prev_final_block_number {
+                    // Warn if the finalized block number has not advanced for `stall_warn_secs`
+                    let now = Instant::now();
+                    let secs_since_advance = now.duration_since(last_advanced_at).as_secs();
+                    if secs_since_advance >= stall_warn_secs
+                        && now.duration_since(last_stall_warn_at).as_secs() >= STALL_REWARN_SECS
+                    {
+                        tracing::warn!(
+                            block_number,
+                            new_final_block_number,
+                            secs_since_advance,
+                            stall_warn_secs,
+                            "finalized ethereum head has not advanced; \
+                             block will not be emitted until finality catches up. \
+                             If this persists the stream watchdog will restart the pipeline"
+                        );
+                        last_stall_warn_at = now;
+                    }
                     tracing::debug!(new_final_block_number, "no new finalized block");
                 }
             }
@@ -664,7 +689,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 return Ok(());
             };
 
-            tokio::time::sleep(retry_interval).await;
+            sleep(retry_interval).await;
         }
     }
 }
@@ -680,7 +705,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             if let Some(block_number) = self.client.get_latest_block_number().await {
                 break block_number.saturating_add(1);
             };
-            tokio::time::sleep(Self::RETRY_DELAY).await;
+            sleep(Self::RETRY_DELAY).await;
         };
 
         let (live_blocks_tx, live_blocks_rx) = live_blocks_channel();
