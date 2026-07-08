@@ -1,6 +1,4 @@
-use crate::protocol::signature::{
-    GenerateCtx, PendingPresignature, SignError, SignGenerator, SignTaskMessage,
-};
+use crate::protocol::signature::{GenerateCtx, PendingPresignature, SignError, SignGenerator};
 
 use crate::backlog::Backlog;
 use crate::config::Config;
@@ -29,7 +27,7 @@ use rand::SeedableRng;
 use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
@@ -45,7 +43,7 @@ mod work_queue;
 use limiter::SignLimiter;
 use task::SignTask;
 
-pub(crate) use work_queue::SignPositWorkQueue;
+pub(crate) use work_queue::{SignPositWorkQueue, SignTaskMessage};
 
 /// How many rounds ahead the organizing phase searches for an active proposer.
 const PROPOSER_SEARCH_WINDOW: usize = 512;

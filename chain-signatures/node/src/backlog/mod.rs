@@ -321,6 +321,12 @@ impl Backlog {
             .set(len as i64);
     }
 
+    fn observe_pending_checkpoints(&self, chain: Chain, len: usize) {
+        crate::metrics::requests::PENDING_CHECKPOINTS
+            .with_label_values(&[chain.as_str()])
+            .set(len as i64);
+    }
+
     /// Returns backlog requests for a chain that are still eligible to be
     /// enqueued for processing after catchup completes.
     pub async fn take_requeueable_requests(&self, chain: Chain) -> Vec<IndexedSignRequest> {
@@ -577,10 +583,12 @@ impl Backlog {
 
         let checkpoint = self.pending(&chain).read().await.checkpoint(chain);
 
-        self.pending_checkpoints(&chain)
-            .write()
-            .await
-            .insert(checkpoint.block_height, checkpoint.clone());
+        let len = {
+            let mut pending = self.pending_checkpoints(&chain).write().await;
+            pending.insert(checkpoint.block_height, checkpoint.clone());
+            pending.len()
+        };
+        self.observe_pending_checkpoints(chain, len);
 
         Some(checkpoint)
     }
@@ -589,10 +597,12 @@ impl Backlog {
     /// Removes it from pending and persists to storage as the latest consensus checkpoint.
     pub async fn on_consensus_confirmed(&self, chain: Chain, checkpoint: &Checkpoint) {
         // Remove from pending checkpoints (frees a slot for future checkpoints)
-        {
+        let len = {
             let mut pending = self.pending_checkpoints(&chain).write().await;
             pending.retain(|&height, _| height > checkpoint.block_height);
-        }
+            pending.len()
+        };
+        self.observe_pending_checkpoints(chain, len);
 
         // Persist as the latest consensus checkpoint
         if let Err(err) = self.storage.persist(checkpoint).await {
@@ -665,6 +675,7 @@ impl Backlog {
         // Clear all pending (unconfirmed) checkpoints for this chain.
         // Any checkpoint that was waiting for consensus is now obsolete.
         self.pending_checkpoints(&chain).write().await.clear();
+        self.observe_pending_checkpoints(chain, 0);
 
         let execution_to_watch = {
             let mut pending = self.pending(&checkpoint.chain).write().await;
