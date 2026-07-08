@@ -610,7 +610,9 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         let mut consecutive_failures = 0u32;
 
         // Warn if the finalized block number has not advanced for this long
-        const STALL_WARN_SECS: u64 = 600;
+        let stall_warn_secs = Chain::Ethereum.expected_finality_time_secs();
+        // Re-warn on this heartbeat interval if the finalized block number has not advanced
+        const STALL_REWARN_SECS: u64 = 300;
         let mut last_advanced_at = Instant::now();
         let mut last_stall_warn_at = Instant::now();
 
@@ -660,16 +662,17 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 }
 
                 if new_final_block_number == prev_final_block_number {
-                    // Warn if the finalized block number has not advanced for STALL_WARN_SECS seconds
+                    // Warn if the finalized block number has not advanced for `stall_warn_secs`
                     let now = Instant::now();
                     let secs_since_advance = now.duration_since(last_advanced_at).as_secs();
-                    if secs_since_advance >= STALL_WARN_SECS
-                        && now.duration_since(last_stall_warn_at).as_secs() >= STALL_WARN_SECS
+                    if secs_since_advance >= stall_warn_secs
+                        && now.duration_since(last_stall_warn_at).as_secs() >= STALL_REWARN_SECS
                     {
                         tracing::warn!(
                             block_number,
                             new_final_block_number,
                             secs_since_advance,
+                            stall_warn_secs,
                             "finalized ethereum head has not advanced; \
                              block will not be emitted until finality catches up. \
                              If this persists the stream watchdog will restart the pipeline"
