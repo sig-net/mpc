@@ -1144,6 +1144,9 @@ mod tests {
         key_index: u32,
     }
 
+    // Mirrors near-sdk's `IterableMap::with_hasher` layout for the map half:
+    // `LatestCheckpoints` is split into a vector of iterable keys under
+    // `<prefix>v` and a lookup map under `<prefix>m`.
     fn latest_checkpoints_map_prefix() -> Vec<u8> {
         let mut prefix = Vec::new();
         StorageKey::LatestCheckpoints
@@ -1152,6 +1155,10 @@ mod tests {
         [prefix.as_slice(), b"m"].concat()
     }
 
+    // Seed only the lookup-map entry and intentionally do not seed the vector
+    // key entry. This reproduces the observed devnet state where
+    // `latest_checkpoint(chain)` works because it uses `.get()`, while
+    // `IterableMap::iter()` returns no checkpoints.
     fn seed_checkpoint_lookup_without_iterable_key(chain: Chain, checkpoint: SignedCheckpoint) {
         let mut key_bytes = latest_checkpoints_map_prefix();
         chain.serialize(&mut key_bytes).unwrap();
@@ -1239,6 +1246,8 @@ mod tests {
 
         seed_checkpoint_lookup_without_iterable_key(Chain::Solana, signed_checkpoint.clone());
 
+        // Construct a contract whose `latest_checkpoints` map points at the
+        // seeded storage. The map itself has an empty iterable key vector.
         let contract = VersionedMpcContract::V0(MpcContract {
             protocol_state: ProtocolContractState::NotInitialized,
             pending_requests: IterableMap::new(StorageKey::PendingRequests),
@@ -1247,6 +1256,8 @@ mod tests {
             latest_checkpoints: IterableMap::new(StorageKey::LatestCheckpoints),
         });
 
+        // Prove the test setup matches production: direct lookup sees the
+        // checkpoint, but iteration over the same map does not.
         assert!(
             contract.latest_checkpoint(Chain::Solana).is_some(),
             "direct checkpoint lookup should reproduce production .get() behavior"
@@ -1256,6 +1267,8 @@ mod tests {
             "test setup should reproduce the broken iterable index"
         );
 
+        // `read(Checkpoints)` is the path nodes use to learn confirmed
+        // checkpoints. It must not rely on `IterableMap::iter()` here.
         let checkpoints = contract
             .read(vec![Read::Checkpoints])
             .into_iter()
