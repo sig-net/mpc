@@ -1,3 +1,5 @@
+use anyhow::Context;
+
 use crate::respond_bidirectional::CompletedTx;
 use crate::sign_bidirectional::{SignBidirectionalEventExt, SignStatus};
 use crate::stream::StreamContext;
@@ -23,9 +25,7 @@ pub(crate) async fn process_sign_request(
         ctx.sign_tx
             .send(SignCommand::Request(sign_request))
             .await
-            .map_err(|err| {
-                anyhow::anyhow!("failed to send sign request into queue for chain {chain}: {err:?}")
-            })?;
+            .with_context(|| format!("failed to send sign request into queue for chain {chain}"))?;
     }
 
     Ok(())
@@ -41,9 +41,9 @@ pub(crate) async fn requeue_pending_sign_requests(
         ctx.sign_tx
             .send(SignCommand::Request(sign_request))
             .await
-            .map_err(|err| {
-                anyhow::anyhow!(
-                    "failed to requeue sign request after catchup for sign id {sign_id:?} on chain {source_chain}: {err:?}"
+            .with_context(|| {
+                format!(
+                    "failed to requeue sign request after catchup for sign id {sign_id:?} on chain {source_chain}"
                 )
             })?;
     }
@@ -88,12 +88,7 @@ fn verify_entry_signature(
         entry.request.args.payload,
         signature,
     )
-    .map_err(|err| {
-        anyhow::anyhow!(
-            "respond event carried invalid signature for sign id {:?}: {err}",
-            sign_id
-        )
-    })
+    .with_context(|| format!("respond event carried invalid signature for sign id {sign_id:?}"))
 }
 
 pub(crate) async fn process_respond_event(
@@ -121,9 +116,10 @@ pub(crate) async fn process_respond_event(
             tracing::info!(?sign_id, "sign request completed successfully");
             ctx.backlog.remove(source_chain, &sign_id).await;
             if ctx.caught_up {
-                if let Err(err) = ctx.sign_tx.send(SignCommand::Completion(sign_id)).await {
-                    anyhow::bail!("failed to send completion for respond event: {err:?}");
-                }
+                ctx.sign_tx
+                    .send(SignCommand::Completion(sign_id))
+                    .await
+                    .context("failed to send completion for respond event")?;
             }
             return Ok(());
         }
@@ -149,9 +145,9 @@ pub(crate) async fn process_respond_event(
     }
 
     tracing::info!(?sign_id, "bidirectional processing initial respond event");
-    let target_chain = event.target_chain().map_err(|err| {
-        anyhow::anyhow!("failed to process respond event: {err:?} for sign id: {sign_id:?}")
-    })?;
+    let target_chain = event
+        .target_chain()
+        .with_context(|| format!("failed to process respond event for sign id: {sign_id:?}"))?;
 
     // Get the MPC public key and derive the from_address.
     let epsilon = event.epsilon()?;
@@ -195,15 +191,14 @@ pub(crate) async fn process_respond_event(
         "bidirectional tx details before advancement",
     );
 
-    if let Err(err) = ctx
-        .backlog
+    ctx.backlog
         .advance(source_chain, sign_id, bidirectional_tx)
         .await
-    {
-        anyhow::bail!(
-            "advance bidirectional tx to execution failed for sign id {sign_id:?}, tx_id {tx_id:?}, target_chain {target_chain:?}: {err:?}"
-        );
-    }
+        .with_context(|| {
+            format!(
+                "advance bidirectional tx to execution failed for sign id {sign_id:?}, tx_id {tx_id:?}, target_chain {target_chain:?}"
+            )
+        })?;
     tracing::info!(
         ?sign_id,
         ?tx_id,
@@ -248,7 +243,11 @@ pub(crate) async fn process_respond_bidirectional_event(
         ctx.sign_tx
             .send(SignCommand::Completion(sign_id))
             .await
-            .map_err(|err| anyhow::anyhow!("failed to send completion for respond bidirectional: {err:?} for sign id: {sign_id:?}"))?;
+            .with_context(|| {
+                format!(
+                    "failed to send completion for respond bidirectional for sign id {sign_id:?}"
+                )
+            })?;
     }
 
     Ok(())
@@ -309,19 +308,18 @@ pub async fn process_execution_confirmed(
         }
     };
 
-    if let Err(err) = ctx
-        .backlog
+    ctx.backlog
         .set_request(
             pending_tx.source_chain,
             &unwatched_sign_id,
             sign_request.clone(),
         )
         .await
-    {
-        anyhow::bail!(
-            "failed to persist completion request on pending tx for sign id {unwatched_sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}: {err:?}"
-        );
-    }
+        .with_context(|| {
+            format!(
+                "failed to persist completion request on pending tx for sign id {unwatched_sign_id:?}, tx_id {tx_id:?}, source_chain {source_chain}"
+            )
+        })?;
 
     let set_res = ctx
         .backlog
@@ -347,9 +345,7 @@ pub async fn process_execution_confirmed(
         ctx.sign_tx
             .send(SignCommand::Request(sign_request))
             .await
-            .map_err(|err| {
-                anyhow::anyhow!("failed to send sign request into queue for chain {chain}: {err:?}")
-            })?;
+            .with_context(|| format!("failed to send sign request into queue for chain {chain}"))?;
     }
 
     Ok(())
@@ -384,9 +380,10 @@ pub(crate) async fn process_block_event<T: ChainTelemetry>(
     let sign_id = checkpoint_digest.sign_id();
     tracing::info!(block, ?checkpoint, %chain, ?sign_id, "created checkpoint");
     let sign = SignCommand::Checkpoint(IndexedSignRequest::checkpoint(checkpoint_digest, epsilon));
-    ctx.sign_tx.send(sign).await.map_err(|err| {
-        anyhow::anyhow!("failed to enqueue checkpoint sign request for chain {chain}: {err:?}")
-    })?;
+    ctx.sign_tx
+        .send(sign)
+        .await
+        .with_context(|| format!("failed to enqueue checkpoint sign request for chain {chain}"))?;
 
     Ok(())
 }
