@@ -33,6 +33,9 @@ fn live_blocks_channel() -> (mpsc::Sender<MaybeBlock>, mpsc::Receiver<MaybeBlock
 pub struct BlockAndRequests {
     block_number: u64,
     block_hash: alloy::primitives::B256,
+    /// Block timestamp captured from the block we already fetched, so
+    /// it doesn't need to be re-fetched.
+    block_timestamp: u64,
     indexed_requests: Vec<IndexedSignRequest>,
     respond_logs: Vec<Log>,
     execution_events: Vec<ChainEvent>,
@@ -42,6 +45,7 @@ impl BlockAndRequests {
     fn new(
         block_number: u64,
         block_hash: alloy::primitives::B256,
+        block_timestamp: u64,
         indexed_requests: Vec<IndexedSignRequest>,
         respond_logs: Vec<Log>,
         execution_events: Vec<ChainEvent>,
@@ -49,6 +53,7 @@ impl BlockAndRequests {
         Self {
             block_number,
             block_hash,
+            block_timestamp,
             indexed_requests,
             respond_logs,
             execution_events,
@@ -180,11 +185,15 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     }
 
     /// Process the block and emit relevant ChainEvents from the block.
-    async fn process_block(&self, block: &Block) -> anyhow::Result<()> {
+    ///
+    /// `is_finalized` parameter indicates the block is already finalized (true for the
+    /// catchup path over historical history). When set, `emit_processed_block`
+    /// skips the per-block re-fetch + reorg hash check.
+    async fn process_block(&self, block: &Block, is_finalized: bool) -> anyhow::Result<()> {
         // Emit telemetry for the indexed block number
         self.telemetry.block_indexed(block.header.number);
         let processed = self.parse_block(block).await?;
-        self.emit_processed_block(processed).await?;
+        self.emit_processed_block(processed, is_finalized).await?;
 
         Ok(())
     }
@@ -261,6 +270,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         Ok(BlockAndRequests::new(
             block_number,
             block_hash,
+            block.header.timestamp,
             sign_requests,
             respond_logs,
             exec_events,
@@ -543,35 +553,44 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
     }
 
     /// Emits the processed block in-order once we reach finality for it.
+    ///
+    /// `is_finalized` blocks skip the per-block re-fetch + reorg hash check.
+    /// For non-finalized (live) blocks we still re-fetch the canonical block
+    /// at that number and compare its hash to detect reorgs.
     async fn emit_processed_block(
         &self,
         BlockAndRequests {
             block_number,
             block_hash,
+            block_timestamp,
             indexed_requests,
             respond_logs,
             execution_events,
         }: BlockAndRequests,
+        is_finalized: bool,
     ) -> anyhow::Result<()> {
         if !self.eth.optimistic_requests {
             self.wait_for_finalized_block(block_number).await?;
         }
 
-        let Some(block) = self
-            .client
-            .as_ref()
-            .get_block(BlockId::Number(BlockNumberOrTag::Number(block_number)))
-            .await
-        else {
-            anyhow::bail!("ethereum block {block_number} not found during emission");
-        };
+        // For non-finalized blocks, re-fetch the canonical block at that number and compare its hash to detect reorgs.
+        if !is_finalized {
+            let Some(block) = self
+                .client
+                .as_ref()
+                .get_block(BlockId::Number(BlockNumberOrTag::Number(block_number)))
+                .await
+            else {
+                anyhow::bail!("ethereum block {block_number} not found during emission");
+            };
 
-        if block.header.hash != block_hash {
-            // The block was reorged after `process_block` produced this payload.
-            // Do not emit stale events for a different canonical block, but also do
-            // not return an error that would cause the catchup path to retry this
-            // same stale payload forever.
-            return Ok(());
+            if block.header.hash != block_hash {
+                // The block was reorged after `process_block` produced this payload.
+                // Do not emit stale events for a different canonical block, but also do
+                // not return an error that would cause the catchup path to retry this
+                // same stale payload forever.
+                return Ok(());
+            }
         }
 
         for event in execution_events {
@@ -585,7 +604,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             self.events_tx
                 .send(ChainEvent::SignRequest {
                     request,
-                    block_timestamp: Some(block.header.timestamp),
+                    block_timestamp: Some(block_timestamp),
                 })
                 .await
                 .context("failed to emit SignRequest event")?;
@@ -793,7 +812,9 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
         #[cfg(feature = "bench")]
         let start_process = std::time::Instant::now();
 
-        self.process_block(block).await?;
+        // Catchup runs over historical/finalized history, so the per-block
+        // re-fetch + reorg hash check is dropped
+        self.process_block(block, true).await?;
 
         #[cfg(feature = "bench")]
         {
@@ -811,7 +832,8 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             anyhow::bail!("ethereum live stream yielded missing block")
         };
 
-        self.process_block(block).await?;
+        // Live blocks are not yet finalized - keep the reorg hash check.
+        self.process_block(block, false).await?;
         Ok(())
     }
 
