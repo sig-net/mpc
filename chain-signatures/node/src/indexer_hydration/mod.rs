@@ -360,6 +360,7 @@ pub async fn run<T: ChainTelemetry>(
 
     let ws_url: &str = hydration.rpc_ws_url.as_str();
     const RECONNECT_DELAY: Duration = Duration::from_secs(5);
+    const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
     const STALL_TIMEOUT: Duration = Duration::from_secs(60);
     let mut runtime_updater_handle: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -370,36 +371,66 @@ pub async fn run<T: ChainTelemetry>(
 
         tracing::info!("connecting to hydration rpc at {ws_url}");
 
-        let hydration_api = match OnlineClient::<SubstrateConfig>::from_url(ws_url).await {
-            Ok(api) => api,
-            Err(e) => {
+        let hydration_api = match tokio::time::timeout(
+            CONNECTION_TIMEOUT,
+            OnlineClient::<SubstrateConfig>::from_url(ws_url),
+        )
+        .await
+        {
+            Ok(Ok(api)) => api,
+            Ok(Err(e)) => {
                 tracing::error!(
                     "failed to connect to hydration rpc: {e}; retrying in {RECONNECT_DELAY:?}"
                 );
                 tokio::time::sleep(RECONNECT_DELAY).await;
                 continue;
             }
+            Err(_) => {
+                tracing::error!(
+                    "timed out connecting to hydration rpc after {CONNECTION_TIMEOUT:?}; retrying"
+                );
+                continue;
+            }
         };
 
-        let rpc_client = match RpcClient::from_url(ws_url).await {
-            Ok(client) => client,
-            Err(e) => {
+        let rpc_client = match tokio::time::timeout(CONNECTION_TIMEOUT, RpcClient::from_url(ws_url))
+            .await
+        {
+            Ok(Ok(client)) => client,
+            Ok(Err(e)) => {
                 tracing::error!(
                     "failed to connect to hydration rpc client: {e}; retrying in {RECONNECT_DELAY:?}"
                 );
                 tokio::time::sleep(RECONNECT_DELAY).await;
                 continue;
             }
+            Err(_) => {
+                tracing::error!(
+                    "timed out connecting to hydration rpc client after {CONNECTION_TIMEOUT:?}; retrying"
+                );
+                continue;
+            }
         };
         let legacy_rpc = LegacyRpcMethods::<SubstrateConfig>::new(rpc_client);
 
-        let mut blocks = match hydration_api.blocks().subscribe_finalized().await {
-            Ok(blocks) => blocks,
-            Err(e) => {
+        let mut blocks = match tokio::time::timeout(
+            CONNECTION_TIMEOUT,
+            hydration_api.blocks().subscribe_finalized(),
+        )
+        .await
+        {
+            Ok(Ok(blocks)) => blocks,
+            Ok(Err(e)) => {
                 tracing::error!(
                     "failed to subscribe to finalized blocks: {e}; retrying in {RECONNECT_DELAY:?}"
                 );
                 tokio::time::sleep(RECONNECT_DELAY).await;
+                continue;
+            }
+            Err(_) => {
+                tracing::error!(
+                    "timed out subscribing to finalized blocks after {CONNECTION_TIMEOUT:?}; retrying"
+                );
                 continue;
             }
         };
