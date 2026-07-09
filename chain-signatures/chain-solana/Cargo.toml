@@ -2,6 +2,7 @@
 name = "mpc-chain-solana"
 edition = "2021"
 version.workspace = true
+description = "Solana chain integration for MPC"
 
 [dependencies]
 alloy-sol-types.workspace = true

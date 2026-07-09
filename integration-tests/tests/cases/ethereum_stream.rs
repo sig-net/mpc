@@ -16,15 +16,16 @@ use mpc_crypto::kdf::generate_signature;
 use mpc_node::backlog::Backlog;
 use mpc_node::mesh::{connection::NodeStatus, MeshState};
 use mpc_node::node_client::NodeClient;
-use mpc_node::protocol::{Chain, IndexedSignRequest, ParticipantInfo, Sign};
+use mpc_node::protocol::ParticipantInfo;
 use mpc_node::rpc::{ContractStateWatcher, RpcChannel};
 use mpc_node::sign_bidirectional::{PublishState, SignStatus};
 use mpc_node::storage::checkpoint_storage::CheckpointStorage;
-use mpc_node::stream::{run_stream, ChainPipeline};
+use mpc_node::stream::{run_stream, ChainPipeline, StreamContext};
 use mpc_node::util::current_unix_timestamp;
 use mpc_primitives::{
-    ChainEvent, CheckpointDigest, SignArgs, SignBidirectionalEvent as NodeSignBidirectionalEvent,
-    SignId, SignKind, LATEST_MPC_KEY_VERSION,
+    Chain, ChainEvent, CheckpointDigest, IndexedSignRequest, SignArgs,
+    SignBidirectionalEvent as NodeSignBidirectionalEvent, SignCommand, SignId, SignKind,
+    LATEST_MPC_KEY_VERSION,
 };
 use near_primitives::types::AccountId;
 use std::sync::atomic::AtomicBool;
@@ -294,9 +295,9 @@ where
 }
 
 async fn next_sign_message_within(
-    rx: &mut mpsc::Receiver<Sign>,
+    rx: &mut mpsc::Receiver<SignCommand>,
     duration: Duration,
-) -> Result<Sign> {
+) -> Result<SignCommand> {
     timeout(duration, rx.recv())
         .await
         .context("timed out waiting for sign message")?
@@ -390,7 +391,7 @@ async fn stream_ethereum(
     let (_mesh_tx, mesh_rx) = watch::channel(MeshState::default());
     let node_client = NodeClient::new(&Default::default());
     let (sign_tx, _sign_rx) = tokio::sync::mpsc::channel(1);
-    let pipeline = ChainPipeline::new(
+    let (pipeline, _state_rx) = ChainPipeline::new(
         indexer,
         cp_rx,
         backlog,
@@ -473,21 +474,23 @@ async fn test_ethereum_stream_resume_starts_after_checkpoint_height() -> Result<
     let (_cp_tx, checkpoints_rx) = watch::channel(None);
     let run_handle = tokio::spawn(run_stream(
         stream,
-        sign_tx,
-        rpc,
-        backlog,
+        StreamContext::new(
+            backlog.clone(),
+            sign_tx.clone(),
+            rpc.clone(),
+            contract_watcher.clone(),
+            mesh_rx.clone(),
+            NodeClient::new(&Default::default()),
+            checkpoints_rx.clone(),
+        ),
         NoopChainTelemetry,
-        contract_watcher,
-        mesh_rx,
-        NodeClient::new(&Default::default()),
-        checkpoints_rx,
     ));
 
     let mut saw_replayed_payload = false;
     let mut saw_expected_payload = false;
     for _ in 0..12 {
         match next_sign_message_within(&mut sign_rx, Duration::from_secs(10)).await? {
-            Sign::Request(req) => {
+            SignCommand::Request(req) => {
                 let payload: [u8; 32] = req.args.payload.to_bytes().into();
                 if payload == replayed_payload {
                     saw_replayed_payload = true;
@@ -654,14 +657,16 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
     let (_cp_tx, checkpoints_rx) = watch::channel(None);
     let run_handle = tokio::spawn(run_stream(
         stream,
-        sign_tx,
-        rpc,
-        backlog.clone(),
+        StreamContext::new(
+            backlog.clone(),
+            sign_tx.clone(),
+            rpc.clone(),
+            contract_watcher.clone(),
+            mesh_rx.clone(),
+            NodeClient::new(&Default::default()),
+            checkpoints_rx.clone(),
+        ),
         NoopChainTelemetry,
-        contract_watcher,
-        mesh_rx,
-        NodeClient::new(&Default::default()),
-        checkpoints_rx,
     ));
 
     let mut saw_execution_follow_up = false;
@@ -670,21 +675,21 @@ async fn test_ethereum_stream_linear_catchup_from_checkpoint() -> Result<()> {
 
     for _ in 0..8 {
         match next_sign_message_within(&mut sign_rx, Duration::from_secs(20)).await? {
-            Sign::Completion(sign_id) => {
+            SignCommand::Completion(sign_id) => {
                 assert_ne!(
                     sign_id, resolved_sign_id,
                     "pre-catchup resolved request should not emit a completion"
                 );
             }
-            Sign::Request(req) if req.id == execution_sign_id => {
+            SignCommand::Request(req) if req.id == execution_sign_id => {
                 assert!(matches!(req.kind, SignKind::RespondBidirectional(_)));
                 assert_eq!(req.chain, Chain::Solana);
                 saw_execution_follow_up = true;
             }
-            Sign::Request(req) if req.id == requeued_sign_id => {
+            SignCommand::Request(req) if req.id == requeued_sign_id => {
                 saw_requeued_request = true;
             }
-            Sign::Request(req) if req.chain == Chain::Ethereum => {
+            SignCommand::Request(req) if req.chain == Chain::Ethereum => {
                 assert_eq!(req.args.payload.to_bytes(), catchup_payload.into());
                 saw_catchup_request = true;
             }
@@ -842,20 +847,22 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
     let (_cp_tx, checkpoints_rx) = watch::channel(None);
     let run_handle = tokio::spawn(run_stream(
         stream,
-        sign_tx,
-        rpc,
-        backlog.clone(),
+        StreamContext::new(
+            backlog.clone(),
+            sign_tx.clone(),
+            rpc.clone(),
+            contract_watcher.clone(),
+            mesh_rx.clone(),
+            NodeClient::new(&Default::default()),
+            checkpoints_rx.clone(),
+        ),
         NoopChainTelemetry,
-        contract_watcher,
-        mesh_rx,
-        NodeClient::new(&Default::default()),
-        checkpoints_rx,
     ));
 
     let mut saw_catchup_flush = false;
     for _ in 0..20 {
         match next_sign_message_within(&mut sign_rx, Duration::from_secs(10)).await? {
-            Sign::Request(req) if req.id == dummy_sign_id => {
+            SignCommand::Request(req) if req.id == dummy_sign_id => {
                 saw_catchup_flush = true;
                 break;
             }
@@ -940,7 +947,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
 
     let msg = next_sign_message_within(&mut sign_rx, Duration::from_secs(20)).await?;
     match msg {
-        Sign::Request(req) => {
+        SignCommand::Request(req) => {
             assert_eq!(req.id, sign_id);
             assert_eq!(req.chain, Chain::Solana);
             match req.kind {
@@ -954,7 +961,7 @@ async fn test_ethereum_stream_backfills_late_execution_watcher_after_catchup() -
                 other => panic!("expected RespondBidirectional request, got {other:?}"),
             }
         }
-        other => panic!("expected Sign::Request from late watcher backfill, got {other:?}"),
+        other => panic!("expected SignCommand::Request from late watcher backfill, got {other:?}"),
     }
 
     let watchers = backlog.get_execution_watchers(Chain::Ethereum).await;

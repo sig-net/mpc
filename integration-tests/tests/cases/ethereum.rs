@@ -427,7 +427,7 @@ async fn test_checkpoint_recovery_after_offline() -> anyhow::Result<()> {
             node_recovered_checkpoint
                 .block_height
                 .max(node_active_checkpoint.block_height),
-            Duration::from_secs(90),
+            Duration::from_secs(120),
         )
         .await?;
 

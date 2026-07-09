@@ -1,12 +1,14 @@
 use super::limiter::SignLimitError;
-use super::posit::SignPositor;
+use super::posit::PositPhase;
 use super::state::SignState;
 use super::task::SignPhase;
 use super::*;
 
-pub struct SignOrganizer;
+/// Organizing phase — see [`super::task::SignPhase::Organizing`].
+pub struct OrganizingPhase;
 
-impl SignOrganizer {
+impl OrganizingPhase {
+    /// Seeded by request entropy so all nodes pick the same proposer.
     fn proposer_per_round(
         round: usize,
         participants: &[Participant],
@@ -17,7 +19,7 @@ impl SignOrganizer {
     }
 
     /// Waits for threshold active participants to be present.
-    async fn wait_active(
+    async fn wait_for_active_participants(
         &self,
         ctx: &mut SignTask,
         state: &mut SignState,
@@ -52,11 +54,13 @@ impl SignOrganizer {
         }
     }
 
+    /// Returns `Posit` once a proposer is chosen, else loops back to
+    /// `Organizing` on timeout / missing presignature / no slot.
     pub async fn advance(&mut self, ctx: &mut SignTask, state: &mut SignState) -> SignPhase {
         let sign_id = ctx.sign_id;
         let threshold = ctx.governance.threshold;
         let me = ctx.governance.me;
-        let entropy = state.indexed.args.entropy;
+        let entropy = state.request.args.entropy;
         let participants = ctx
             .governance
             .participants
@@ -68,13 +72,16 @@ impl SignOrganizer {
 
         tracing::info!(?sign_id, round = ?state.round, "entering organizing phase");
         let (active, proposer, is_proposer) = {
-            let Some(active) = self.wait_active(ctx, state, threshold).await else {
+            let Some(active) = self
+                .wait_for_active_participants(ctx, state, threshold)
+                .await
+            else {
                 tracing::warn!(?sign_id, round = ?state.round, "no active participants, reorganizing");
                 state.bump_round();
-                return SignPhase::Organizing(SignOrganizer);
+                return SignPhase::Organizing(OrganizingPhase);
             };
 
-            let max_rounds = state.round + ROUND_INTERVAL;
+            let max_rounds = state.round + PROPOSER_SEARCH_WINDOW;
             let (selected_round, proposer) = (state.round..max_rounds)
                 .map(|r| (r, Self::proposer_per_round(r, &participants, &entropy)))
                 .find(|(_, potential_proposer)| active.contains(potential_proposer))
@@ -92,7 +99,7 @@ impl SignOrganizer {
 
             // If proposing is paused (generating already ongoing), we act as if we weren't a proposer.
             let skip_proposing = state
-                .pause_proposing
+                .pause_proposing_until
                 .is_some_and(|until| until > std::time::Instant::now());
             let is_proposer = proposer == me && !skip_proposing;
             ctx.is_proposer.store(is_proposer, Ordering::Relaxed);
@@ -117,7 +124,7 @@ impl SignOrganizer {
                 ?sign_id,
                 round = ?state.round,
                 timeout = ?remaining,
-                limit = ctx.limiter.limits(),
+                limit = ctx.limiter.limit(),
                 "proposer waiting for concurrency slot"
             );
 
@@ -130,7 +137,7 @@ impl SignOrganizer {
                         "proposer timeout waiting for concurrency slot, reorganizing"
                     );
                     state.bump_round();
-                    return SignPhase::Organizing(SignOrganizer);
+                    return SignPhase::Organizing(OrganizingPhase);
                 }
                 Err(SignLimitError::Closed) => {
                     tracing::error!(?sign_id, "proposer semaphore closed");
@@ -183,7 +190,7 @@ impl SignOrganizer {
                         "proposer timeout waiting for presignature, reorganizing"
                     );
                     state.bump_round();
-                    return SignPhase::Organizing(SignOrganizer);
+                    return SignPhase::Organizing(OrganizingPhase);
                 }
             };
 
@@ -216,7 +223,7 @@ impl SignOrganizer {
             (PresignatureId::default(), None, active)
         };
 
-        SignPhase::Posit(SignPositor {
+        SignPhase::Posit(PositPhase {
             proposer,
             active,
             presignature_id,
@@ -243,15 +250,15 @@ mod tests {
         let mut entropy = [0u8; 32];
         entropy[0] = 0xdf;
         assert_eq!(
-            SignOrganizer::proposer_per_round(0, &participants, &entropy),
+            OrganizingPhase::proposer_per_round(0, &participants, &entropy),
             Participant::from(1)
         );
         assert_eq!(
-            SignOrganizer::proposer_per_round(1, &participants, &entropy),
+            OrganizingPhase::proposer_per_round(1, &participants, &entropy),
             Participant::from(2)
         );
         assert_eq!(
-            SignOrganizer::proposer_per_round(2, &participants, &entropy),
+            OrganizingPhase::proposer_per_round(2, &participants, &entropy),
             Participant::from(0)
         );
     }

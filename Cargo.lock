@@ -3069,9 +3069,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-deque"
-version = "0.8.6"
+version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dd111b7b7f7d55b72c0a6ae361660ee5853c9af73f70c3c2ef6858b950e2e51"
+checksum = "5181e0de7b61eb03a81e347d6dd8797bae9da5146707b51077e2d71a54ec0ceb"
 dependencies = [
  "crossbeam-epoch",
  "crossbeam-utils",
@@ -3079,9 +3079,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -6024,6 +6024,7 @@ dependencies = [
  "mpc-chain-canton",
  "mpc-chain-ethereum",
  "mpc-chain-integration-core",
+ "mpc-chain-near",
  "mpc-chain-solana",
  "mpc-contract",
  "mpc-crypto",
@@ -7364,6 +7365,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "tracing-subscriber 0.3.20",
 ]
 
 [[package]]
@@ -7381,6 +7383,26 @@ dependencies = [
  "mpc-crypto",
  "mpc-primitives",
  "rand 0.8.5",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "mpc-chain-near"
+version = "1.16.4"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "hex",
+ "k256",
+ "mpc-chain-integration-core",
+ "mpc-contract",
+ "mpc-primitives",
+ "near-account-id",
+ "near-crypto",
+ "near-fetch",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -7502,6 +7524,7 @@ dependencies = [
  "mpc-chain-canton",
  "mpc-chain-ethereum",
  "mpc-chain-integration-core",
+ "mpc-chain-near",
  "mpc-chain-solana",
  "mpc-contract",
  "mpc-crypto",

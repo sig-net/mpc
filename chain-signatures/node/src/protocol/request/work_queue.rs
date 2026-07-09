@@ -1,4 +1,5 @@
-use crate::protocol::signature::SignTaskMessage;
+use crate::protocol::posit::PositAction;
+use crate::protocol::presignature::PresignatureId;
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -6,6 +7,16 @@ use std::sync::Arc;
 
 use cait_sith::protocol::Participant;
 use tokio::sync::Notify;
+
+/// Posit messages routed to a running signature task.
+pub(crate) enum SignTaskMessage {
+    PositMessage {
+        presignature_id: PresignatureId,
+        round: usize,
+        from: Participant,
+        action: PositAction,
+    },
+}
 
 /// Work queue for posit messages, keyed by sending participant.
 ///
@@ -32,6 +43,8 @@ impl SignPositWorkQueue {
         })
     }
 
+    /// Buffer `msg` in its sender's slot, overwriting when its round is `>=` the
+    /// buffered one, then wake one consumer.
     pub(crate) fn push(&self, msg: SignTaskMessage) {
         let SignTaskMessage::PositMessage {
             from,

@@ -12,17 +12,17 @@ use crate::node_client::{self, NodeClient};
 use crate::protocol::contract::ProtocolState;
 use crate::protocol::message::MessageChannel;
 use crate::protocol::presignature::Presignature;
-use crate::protocol::request::{Sign, SignatureSpawnerTask};
+use crate::protocol::request::SignatureSpawnerTask;
 use crate::protocol::state::{Node, NodeStateWatcher};
 use crate::protocol::sync::SyncTask;
 use crate::protocol::{spawn_system_metrics, MpcSignProtocol};
-use crate::rpc::{self, ContractStateWatcher, NearClient, RpcChannel, RpcExecutor};
+use crate::rpc::{self, ContractStateWatcher, NearGovernanceClient, RpcChannel, RpcExecutor};
 use crate::storage::checkpoint_storage::CheckpointStorage;
 use crate::storage::presignature_storage::PresignatureStorage;
 use crate::storage::secret_storage::SecretNodeStorageVariant;
 use crate::storage::triple_storage::{TriplePair, TripleStorage};
-use crate::stream::run_stream;
-use crate::{indexer, logs, storage, web};
+use crate::stream::{run_stream, StreamContext};
+use crate::{logs, storage, web};
 pub use args::{canton::CantonArgs, ethereum::EthArgs, hydration::HydrationArgs, solana::SolArgs};
 
 use cait_sith::protocol::Participant;
@@ -34,9 +34,10 @@ use local_ip_address::local_ip;
 use mpc_chain_canton::{CantonClient, CantonConfig, CantonStream};
 use mpc_chain_ethereum::{publisher, EthConfig, EthereumStream};
 use mpc_chain_integration_core::ChainPublisher;
+use mpc_chain_near::NearClient;
 use mpc_chain_solana::{SolConfig, SolanaClient, SolanaStream};
 use mpc_keys::hpke;
-use mpc_primitives::{Chain, CheckpointDigest};
+use mpc_primitives::{Chain, CheckpointDigest, SignCommand};
 use near_account_id::AccountId;
 use near_crypto::{InMemorySigner, PublicKey, SecretKey};
 use sha3::Digest;
@@ -89,7 +90,7 @@ pub enum Cli {
         canton: CantonArgs,
         /// NEAR requests options
         #[clap(flatten)]
-        indexer_options: indexer::Options,
+        indexer_options: mpc_chain_near::Options,
         /// Local address that other peers can use to message this node.
         /// mainnet nodes: this should be set to their domain name
         /// testnet nodes: this should be set to their http://ip:web_port
@@ -256,7 +257,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             // TODO: Remove this once we have integration tests built on other chains
             if storage_options.env == "integration-tests" {
                 let rpc_client = setup_rpc_client(&near_rpc, client_header_referer);
-                indexer::run(
+                mpc_chain_near::run(
                     &indexer_options,
                     &mpc_contract_id,
                     &account_id,
@@ -281,6 +282,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
 
             let RpcHandles {
                 near_client,
+                near_governance_client,
                 rpc_channel,
                 rpc_executor,
             } = RpcHandles::new(
@@ -345,7 +347,7 @@ pub async fn run(cmd: Cli) -> anyhow::Result<()> {
             let system_handle = spawn_system_metrics().await;
             let protocol_handle = tokio::spawn(protocol.run(
                 node,
-                near_client,
+                near_governance_client,
                 contract_watcher.clone(),
                 mesh_state.clone(),
             ));
@@ -597,6 +599,7 @@ impl MeshHandles {
 
 struct RpcHandles {
     near_client: NearClient,
+    near_governance_client: NearGovernanceClient,
     rpc_channel: RpcChannel,
     rpc_executor: RpcExecutor,
 }
@@ -611,18 +614,29 @@ impl RpcHandles {
         chains: &ChainConfigs,
     ) -> Self {
         let publisher_telemetry = Arc::new(NodeTelemetry::new(Chain::NEAR));
+        // `NearClient` (publishing) and `NearGovernanceClient` (governance + contract
+        // reads) each open their own `near_fetch::Client` to the same RPC endpoint.
+        // TODO: two connection are negligible here, but consider sharing a single client if necessary.
         let near_client = NearClient::new(
             near_rpc_url,
-            my_address,
-            network,
             mpc_contract_id,
-            signer,
+            signer.clone(),
             publisher_telemetry,
         );
+        let near_governance_client = NearGovernanceClient::new(
+            near_rpc_url,
+            my_address,
+            &network.sign_sk,
+            &network.cipher_sk,
+            mpc_contract_id,
+            signer,
+        );
         let publishers = chains.publishers(near_client.clone()).await;
-        let (rpc_channel, rpc_executor) = RpcExecutor::new(near_client.clone(), publishers).await;
+        let (rpc_channel, rpc_executor) =
+            RpcExecutor::new(near_governance_client.clone(), publishers).await;
         Self {
             near_client,
+            near_governance_client,
             rpc_channel,
             rpc_executor,
         }
@@ -678,7 +692,7 @@ impl ProtocolHandles {
         account_id: &AccountId,
         override_config: Option<OverrideConfig>,
         network: NetworkConfig,
-        sign_rx: mpsc::Receiver<Sign>,
+        sign_rx: mpsc::Receiver<SignCommand>,
         node_client: &NodeClient,
         contract_watcher: &ContractStateWatcher,
         key_storage: SecretNodeStorageVariant,
@@ -743,7 +757,7 @@ impl ProtocolHandles {
 #[allow(clippy::too_many_arguments)]
 async fn spawn_indexers(
     chains: ChainConfigs,
-    sign_tx: mpsc::Sender<Sign>,
+    sign_tx: mpsc::Sender<SignCommand>,
     rpc_channel: RpcChannel,
     backlog: Backlog,
     contract_watcher: ContractStateWatcher,
@@ -773,14 +787,16 @@ async fn spawn_indexers(
                 tracing::info!("ethereum indexer stream created successfully");
                 tokio::spawn(run_stream(
                     eth_stream,
-                    sign_tx.clone(),
-                    rpc_channel.clone(),
-                    backlog.clone(),
+                    StreamContext::new(
+                        backlog.clone(),
+                        sign_tx.clone(),
+                        rpc_channel.clone(),
+                        contract_watcher.clone(),
+                        mesh_state.clone(),
+                        node_client.clone(),
+                        checkpoints_rx[Chain::Ethereum].clone(),
+                    ),
                     eth_telemetry,
-                    contract_watcher.clone(),
-                    mesh_state.clone(),
-                    node_client.clone(),
-                    checkpoints_rx[Chain::Ethereum].clone(),
                 ));
             }
             Err(err) => {
@@ -796,14 +812,16 @@ async fn spawn_indexers(
                 tracing::info!("solana indexer stream created successfully");
                 tokio::spawn(run_stream(
                     sol_stream,
-                    sign_tx.clone(),
-                    rpc_channel.clone(),
-                    backlog.clone(),
+                    StreamContext::new(
+                        backlog.clone(),
+                        sign_tx.clone(),
+                        rpc_channel.clone(),
+                        contract_watcher.clone(),
+                        mesh_state.clone(),
+                        node_client.clone(),
+                        checkpoints_rx[Chain::Solana].clone(),
+                    ),
                     sol_telemetry,
-                    contract_watcher.clone(),
-                    mesh_state.clone(),
-                    node_client.clone(),
-                    checkpoints_rx[Chain::Solana].clone(),
                 ));
             }
             Err(err) => {
@@ -833,14 +851,16 @@ async fn spawn_indexers(
                 tracing::info!("canton indexer stream created successfully");
                 tokio::spawn(run_stream(
                     canton_stream,
-                    sign_tx,
-                    rpc_channel,
-                    backlog,
+                    StreamContext::new(
+                        backlog,
+                        sign_tx,
+                        rpc_channel,
+                        contract_watcher,
+                        mesh_state,
+                        node_client,
+                        checkpoints_rx[Chain::Canton].clone(),
+                    ),
                     canton_telemetry,
-                    contract_watcher,
-                    mesh_state,
-                    node_client,
-                    checkpoints_rx[Chain::Canton].clone(),
                 ));
             }
             Err(err) => {

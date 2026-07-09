@@ -1,19 +1,20 @@
-use super::organize::SignOrganizer;
+use super::organize::OrganizingPhase;
 use super::state::SignState;
-use super::task::{SignGenerating, SignPhase};
+use super::task::{GeneratingPhase, SignPhase};
 use super::work_queue::SignPositWorkQueue;
 use super::*;
 
-pub struct SignPositor {
+/// Posit phase — see [`super::task::SignPhase::Posit`].
+pub struct PositPhase {
     pub proposer: Participant,
     pub active: BTreeSet<Participant>,
     pub presignature_id: PresignatureId,
     pub presignature: Option<PresignatureReservation>,
 }
 
-impl SignPositor {
-    /// Deliberator waits for the proposer to send a Propose message with a presignature_id.
-    async fn wait_propose(
+impl PositPhase {
+    /// Deliberator: wait for the proposer's Propose, reply Accept.
+    async fn wait_for_propose(
         ctx: &mut SignTask,
         state: &mut SignState,
         posit_queue: &SignPositWorkQueue,
@@ -24,7 +25,7 @@ impl SignPositor {
         let remaining = state.budget.remaining();
         let outcome = tokio::time::timeout(remaining, async {
             loop {
-                // Prioritize buffered messages, if any for the current round
+                // Prioritize buffered messages for the current round.
                 let task_msg = match state.take_buffered_posit_message() {
                     Some(buffered) => buffered,
                     None => posit_queue.recv().await,
@@ -75,7 +76,7 @@ impl SignPositor {
                         my_round = state.round,
                         "Storing message for future round, as deliberator",
                     );
-                    state.store_future_posit_message(task_msg);
+                    state.buffer_future_posit_message(task_msg);
                     continue;
                 }
 
@@ -166,7 +167,7 @@ impl SignPositor {
                     "deliberator timeout waiting for Propose, reorganizing"
                 );
                 state.bump_round();
-                return Err(SignPhase::Organizing(SignOrganizer));
+                return Err(SignPhase::Organizing(OrganizingPhase));
             }
         };
 
@@ -186,6 +187,8 @@ impl SignPositor {
         Ok(presignature_id)
     }
 
+    /// Run the posit round. Returns `Generating` with the accepted participants,
+    /// or `Organizing` on rejection/timeout.
     pub async fn advance(
         &mut self,
         ctx: &mut SignTask,
@@ -218,7 +221,8 @@ impl SignPositor {
                 "deliberator waiting for Propose"
             );
 
-            presignature_id = match Self::wait_propose(ctx, state, posit_queue, proposer).await {
+            presignature_id = match Self::wait_for_propose(ctx, state, posit_queue, proposer).await
+            {
                 Ok(id) => id,
                 Err(phase) => return phase,
             }
@@ -265,7 +269,7 @@ impl SignPositor {
                             my_round = state.round,
                             "Storing message for future round",
                         );
-                        state.store_future_posit_message(task_msg);
+                        state.buffer_future_posit_message(task_msg);
                         continue;
                     }
 
@@ -285,7 +289,7 @@ impl SignPositor {
                                     "not enough start participants"
                                 );
                                 state.bump_round();
-                                return SignPhase::Organizing(SignOrganizer);
+                                return SignPhase::Organizing(OrganizingPhase);
                             }
 
                             tracing::info!(?sign_id, participant = ?ctx.governance.me, ?participants, "deliberator received Start");
@@ -299,11 +303,11 @@ impl SignPositor {
                         if counter.enough_rejects(ctx.governance.threshold) {
                             let num_ongoing = counter.num_peers_with_ongoing_generation();
                             if ctx.governance.participants.len().saturating_sub(num_ongoing) < ctx.governance.threshold {
-                                state.pause_proposing = Some(Instant::now() + Duration::from_millis(ctx.cfg.signature.generation_timeout));
+                                state.pause_proposing_until = Some(Instant::now() + Duration::from_millis(ctx.cfg.signature.generation_timeout));
                                 tracing::info!(
                                     ?sign_id,
                                     ?round,
-                                    resume=?state.pause_proposing,
+                                    resume=?state.pause_proposing_until,
                                     "pausing proposer: peers already generating this signature"
                                 );
                             } else {
@@ -318,7 +322,7 @@ impl SignPositor {
                                 tracing::warn!(?sign_id, "returning presignature to pool due to REJECTs");
                             }
                             state.bump_round();
-                            return SignPhase::Organizing(SignOrganizer);
+                            return SignPhase::Organizing(OrganizingPhase);
                         }
 
                         // Starting as soon as we have enough accepts leaves
@@ -360,7 +364,7 @@ impl SignPositor {
                     }
 
                     state.bump_round();
-                    return SignPhase::Organizing(SignOrganizer);
+                    return SignPhase::Organizing(OrganizingPhase);
                 }
                 _ = &mut accept_deadline, if is_proposer && !accept_deadline_reached => {
                     accept_deadline_reached = true;
@@ -379,7 +383,7 @@ impl SignPositor {
             }
         };
 
-        SignPhase::Generating(SignGenerating {
+        SignPhase::Generating(GeneratingPhase {
             proposer,
             presignature_id,
             presignature,
@@ -387,6 +391,7 @@ impl SignPositor {
         })
     }
 
+    /// Proposer-only: broadcast Start to all Accepters and return that set.
     async fn start_with_current_accepts(
         ctx: &SignTask,
         state: &mut SignState,

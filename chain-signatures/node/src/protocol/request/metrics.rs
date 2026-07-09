@@ -1,3 +1,5 @@
+//! Per-request latency accounting for the signature state machine.
+
 use super::*;
 
 /// Per-request accumulator for the three looping phases in `SignTask::run`:
@@ -17,13 +19,13 @@ pub struct PhaseDurations {
 }
 
 impl PhaseDurations {
+    /// Accumulate `elapsed` into the bucket for `step` (no-op for non-phase steps).
     pub fn add(&mut self, step: SignRequestStep, elapsed: Duration) {
         match step {
             SignRequestStep::Organizing => self.organizing += elapsed,
             SignRequestStep::Posit => self.posit += elapsed,
             SignRequestStep::Generating => self.generating += elapsed,
-            // Emitted elsewhere; listed explicitly so adding a new variant
-            // forces a deliberate decision here.
+            // Emitted elsewhere; listed explicitly so new variants force a decision here.
             SignRequestStep::Indexing
             | SignRequestStep::AwaitingGeneration
             | SignRequestStep::Responding
@@ -31,6 +33,7 @@ impl PhaseDurations {
         }
     }
 
+    /// Record per-phase totals as latency histograms. Call once on success.
     pub fn emit(self, chain: Chain) {
         record_request_latency(chain, SignRequestStep::Organizing, "ok", self.organizing);
         record_request_latency(chain, SignRequestStep::Posit, "ok", self.posit);
@@ -44,9 +47,7 @@ mod tests {
 
     #[test]
     fn phase_durations_sum_per_phase_across_attempts() {
-        // Simulates a request that loops Organizing -> Posit -> Organizing ->
-        // Posit -> Generating before completing. Each `add` mirrors one
-        // iteration of the SignTask::run phase loop.
+        // Request that loops Organizing -> Posit -> Organizing -> Posit -> Generating.
         let mut d = PhaseDurations::default();
         d.add(SignRequestStep::Organizing, Duration::from_millis(100));
         d.add(SignRequestStep::Posit, Duration::from_millis(200));
@@ -62,11 +63,7 @@ mod tests {
 
     #[test]
     fn phase_durations_ignore_steps_not_part_of_sign_task() {
-        // These variants are not part of SignTask: Indexing is emitted by
-        // the indexer modules, AwaitingGeneration by SignatureSpawner::
-        // handle_request, and Responding/Total by rpc.rs. Passing any to
-        // `add` must be a no-op or they would be double-counted on
-        // multichain_sign_request_latency_sec.
+        // Non-SignTask variants must be no-ops in `add`, else they double-count.
         let mut d = PhaseDurations::default();
         d.add(SignRequestStep::Indexing, Duration::from_millis(100));
         d.add(
@@ -81,8 +78,7 @@ mod tests {
 
     #[test]
     fn phase_durations_preserve_additivity_invariant() {
-        // This represents the case where we have 2 attempts:
-        // 1st one fails at posit, then starts from organizing again and finishes
+        // 2 attempts: first fails at posit, then restarts from organizing and finishes.
         let inputs = [
             (SignRequestStep::Organizing, Duration::from_millis(40)),
             (SignRequestStep::Posit, Duration::from_millis(120)),

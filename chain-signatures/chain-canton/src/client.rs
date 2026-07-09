@@ -11,9 +11,26 @@ use crate::{
     signing::der_encode_signature,
     CantonChainCtx,
 };
+use mpc_chain_integration_core::utils::retry::{retry_rpc, RetryConfig};
 use mpc_chain_integration_core::{ChainPublisher, PublishAction, PublisherTelemetry};
 use mpc_primitives::{Chain, SignKind};
 use std::{sync::Arc, time::Duration};
+
+// Constants for Canton JSON Ledger API RPC retry behavior.
+const CANTON_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+const CANTON_RPC_MIN_DELAY: Duration = Duration::from_millis(500);
+const CANTON_RPC_MAX_DELAY: Duration = Duration::from_secs(10);
+const CANTON_RPC_MAX_RETRIES: usize = 5;
+
+/// Default retry strategy for Canton JSON Ledger API RPC calls.
+fn default_canton_rpc_retry_strategy() -> RetryConfig {
+    RetryConfig {
+        min_delay: CANTON_RPC_MIN_DELAY,
+        max_delay: CANTON_RPC_MAX_DELAY,
+        max_times: CANTON_RPC_MAX_RETRIES,
+        jitter: true,
+    }
+}
 
 #[derive(Clone)]
 pub struct CantonClient {
@@ -21,6 +38,7 @@ pub struct CantonClient {
     http_client: reqwest::Client,
     auth_provider: CantonAuthProvider,
     telemetry: Arc<dyn PublisherTelemetry>,
+    retry_strategy: RetryConfig,
 }
 
 impl std::fmt::Debug for CantonClient {
@@ -51,12 +69,39 @@ impl CantonClient {
             );
         }
 
-        Ok(Self {
+        Ok(Self::new_with_strategy(
+            config,
+            telemetry,
+            default_canton_rpc_retry_strategy(),
+            http_client,
+            auth_provider,
+        ))
+    }
+
+    /// Sets a custom retry strategy. Used in tests to swap in a fast retry policy.
+    #[cfg(test)]
+    pub(crate) fn with_retry_strategy(mut self, retry_strategy: RetryConfig) -> Self {
+        self.retry_strategy = retry_strategy;
+        self
+    }
+
+    /// Creates a new Canton client with an explicit retry strategy for the JSON
+    /// Ledger API RPC calls.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_strategy(
+        config: &CantonConfig,
+        telemetry: Arc<dyn PublisherTelemetry>,
+        retry_strategy: RetryConfig,
+        http_client: reqwest::Client,
+        auth_provider: CantonAuthProvider,
+    ) -> Self {
+        Self {
             config: config.clone(),
             http_client,
             auth_provider,
             telemetry,
-        })
+            retry_strategy,
+        }
     }
 
     // TODO: this method is only used in integration tests, cosider hiding it behind a feature flag or get api user from config directly
@@ -90,10 +135,17 @@ impl CantonClient {
     }
 
     pub async fn fetch_ledger_end(&self) -> anyhow::Result<u64> {
-        let resp = self.auth_get("/v2/state/ledger-end").await?.send().await?;
-        let resp = check_response(resp, "ledger-end").await?;
-        let body: LedgerEndResponse = resp.json().await?;
-        Ok(body.offset)
+        retry_rpc!(
+            CANTON_RPC_TIMEOUT,
+            self.retry_strategy,
+            "fetch_ledger_end",
+            {
+                let resp = self.auth_get("/v2/state/ledger-end").await?.send().await?;
+                let resp = check_response(resp, "ledger-end").await?;
+                let body: LedgerEndResponse = resp.json().await?;
+                Ok(body.offset)
+            }
+        )
     }
 
     // TODO: this method is only used in integration tests, cosider hiding it behind a feature flag
@@ -131,15 +183,21 @@ impl CantonClient {
             },
         };
 
-        let resp = self
-            .auth_post("/v2/state/active-contracts")
-            .await?
-            .json(&req)
-            .send()
-            .await?;
-
-        let resp = check_response(resp, "active-contracts query").await?;
-        Ok(resp.json().await?)
+        retry_rpc!(
+            CANTON_RPC_TIMEOUT,
+            self.retry_strategy,
+            "fetch_active_contracts",
+            {
+                let resp = self
+                    .auth_post("/v2/state/active-contracts")
+                    .await?
+                    .json(&req)
+                    .send()
+                    .await?;
+                let resp = check_response(resp, "active-contracts query").await?;
+                Ok::<Vec<ActiveContractEntry>, anyhow::Error>(resp.json().await?)
+            }
+        )
     }
 
     // TODO: this method is only used in integration tests, cosider hiding it behind a feature flag
@@ -148,14 +206,33 @@ impl CantonClient {
         commands: JsCommands,
         context: &str,
     ) -> anyhow::Result<SubmitAndWaitForTransactionResponse> {
-        let resp = self
-            .auth_post("/v2/commands/submit-and-wait-for-transaction")
-            .await?
-            .json(&SubmitAndWaitForTransactionRequest { commands })
-            .send()
-            .await?;
-        let resp = check_response(resp, context).await?;
-        Ok(resp.json().await?)
+        let max_attempts = self.retry_strategy.max_times;
+        retry_rpc!(
+            CANTON_RPC_TIMEOUT,
+            self.retry_strategy,
+            |attempt, err, sleep| {
+                tracing::warn!(
+                    context,
+                    attempt,
+                    max_attempts,
+                    error = %err,
+                    retry_in = ?sleep,
+                    "canton submit_and_wait failed, retrying"
+                );
+            },
+            {
+                let resp = self
+                    .auth_post("/v2/commands/submit-and-wait-for-transaction")
+                    .await?
+                    .json(&SubmitAndWaitForTransactionRequest {
+                        commands: commands.clone(),
+                    })
+                    .send()
+                    .await?;
+                let resp = check_response(resp, context).await?;
+                Ok(resp.json().await?)
+            }
+        )
     }
 
     async fn exercise_choice(
@@ -198,14 +275,14 @@ async fn check_response(
 #[async_trait::async_trait]
 impl ChainPublisher for CantonClient {
     async fn publish_signature(&self, action: &PublishAction) -> anyhow::Result<()> {
-        let sign_id = action.indexed.id;
-        let request_id_hex = hex::encode(action.indexed.id.request_id);
+        let sign_id = action.request.id;
+        let request_id_hex = hex::encode(action.request.id.request_id);
         let timestamp = action.timestamp;
         let signature = &action.signature;
 
         tracing::info!(
             ?sign_id,
-            chain = ?action.indexed.chain,
+            chain = ?action.request.chain,
             elapsed = ?timestamp.elapsed(),
             request_id = %request_id_hex,
             "canton: publishing signature"
@@ -217,7 +294,7 @@ impl ChainPublisher for CantonClient {
             recovery_id: signature.recovery_id,
         }))?;
 
-        let (choice, command_id, choice_argument) = match &action.indexed.kind {
+        let (choice, command_id, choice_argument) = match &action.request.kind {
             SignKind::SignBidirectional(event) if event.chain == Chain::Canton => {
                 let chain_ctx_bytes = event
                     .chain_ctx
@@ -292,6 +369,16 @@ mod tests {
     use mpc_primitives::{Chain, RespondBidirectionalTx, SignBidirectionalEvent, SignKind};
     use serde_json::json;
 
+    /// Fast retry strategy for testing
+    fn fast_retry_strategy() -> RetryConfig {
+        RetryConfig {
+            min_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(10),
+            max_times: 2,
+            jitter: false,
+        }
+    }
+
     fn mock_canton_config(url: &str) -> CantonConfig {
         CantonConfig {
             json_api_url: url.to_string(),
@@ -343,7 +430,8 @@ mod tests {
             Arc::new(NoopPublisherTelemetry),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
         let chain_ctx = borsh::to_vec(&CantonChainCtx {
             sign_event_contract_id: "cid".to_string(),
         })
@@ -387,7 +475,8 @@ mod tests {
             Arc::new(NoopPublisherTelemetry),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
         let chain_ctx = borsh::to_vec(&CantonChainCtx {
             sign_event_contract_id: "cid".to_string(),
         })
@@ -412,7 +501,8 @@ mod tests {
             Arc::new(NoopPublisherTelemetry),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
 
         let tx = RespondBidirectionalTx {
             tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
@@ -428,11 +518,12 @@ mod tests {
     #[tokio::test]
     async fn test_publish_canton_api_error() {
         let mut server = setup_mock_server_with_auth().await;
+        // Fast retry strategy uses max_times: 2 → 3 total attempts on a persistent 500.
         let submit_mock = server
             .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
             .with_status(500)
             .with_body("Internal Server Error")
-            .expect(1)
+            .expect(3) // 1 attempt + 2 retries
             .create_async()
             .await;
 
@@ -441,7 +532,8 @@ mod tests {
             Arc::new(NoopPublisherTelemetry),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
         let chain_ctx = borsh::to_vec(&CantonChainCtx {
             sign_event_contract_id: "cid".to_string(),
         })
@@ -455,6 +547,84 @@ mod tests {
 
         let err = client.publish_signature(&action).await.unwrap_err();
         assert!(err.to_string().contains("500"));
+        assert!(err.to_string().contains("exhausted"));
+        submit_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_publish_canton_retries_on_500_then_succeeds() {
+        let mut server = setup_mock_server_with_auth().await;
+        // First submit attempt → 500, second → success. The retry_rpc! wrapper
+        // should transparently retry the failing call and recover.
+        let _fail = server
+            .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .expect(1)
+            .create_async()
+            .await;
+        let ok = server
+            .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
+            .with_status(200)
+            .with_body(json!({"transaction": {"offset": 1, "events": []}}).to_string())
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = CantonClient::new(
+            &mock_canton_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        )
+        .await
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
+        let chain_ctx = borsh::to_vec(&CantonChainCtx {
+            sign_event_contract_id: "cid".to_string(),
+        })
+        .unwrap();
+        let tx = RespondBidirectionalTx {
+            tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
+            output: vec![],
+            chain_ctx: Some(chain_ctx),
+        };
+        let action = make_publish_action(Chain::Canton, SignKind::RespondBidirectional(tx));
+
+        assert!(client.publish_signature(&action).await.is_ok());
+        ok.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_publish_canton_does_not_retry_on_4xx() {
+        let mut server = setup_mock_server_with_auth().await;
+        // A 4xx client error is terminal — should not be retried.
+        let submit_mock = server
+            .mock("POST", "/v2/commands/submit-and-wait-for-transaction")
+            .with_status(400)
+            .with_body("Bad Request")
+            .expect(1) // should not retry
+            .create_async()
+            .await;
+
+        let client = CantonClient::new(
+            &mock_canton_config(&server.url()),
+            Arc::new(NoopPublisherTelemetry),
+        )
+        .await
+        .unwrap()
+        .with_retry_strategy(fast_retry_strategy());
+        let chain_ctx = borsh::to_vec(&CantonChainCtx {
+            sign_event_contract_id: "cid".to_string(),
+        })
+        .unwrap();
+        let tx = RespondBidirectionalTx {
+            tx_id: mpc_primitives::BidirectionalTxId([0; 32]),
+            output: vec![],
+            chain_ctx: Some(chain_ctx),
+        };
+        let action = make_publish_action(Chain::Canton, SignKind::RespondBidirectional(tx));
+
+        let err = client.publish_signature(&action).await.unwrap_err();
+        assert!(err.to_string().contains("400"));
         submit_mock.assert_async().await;
     }
 }

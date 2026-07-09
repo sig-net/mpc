@@ -1,96 +1,33 @@
-use crate::abi::{ChainSignatures, SignatureRequestedEncoding};
-use crate::client::EthereumClient;
+use crate::abi::ChainSignatures;
+use crate::client::{BlockNumber, CatchupIter, EthereumClient, MaybeBlock};
+use crate::event_parsing::{emit_respond_events, is_contract_call, parse_filtered_logs};
 use crate::EthConfig;
 use alloy::consensus::Transaction;
 use alloy::eips::BlockNumberOrTag;
-use alloy::primitives::hex::{self, ToHexExt};
-use alloy::primitives::{Address, Bytes, U256};
+use alloy::primitives::Address;
 use alloy::rpc::types::{Block, BlockId, Log};
 use alloy::sol_types::SolEvent;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::stream;
-use k256::elliptic_curve::sec1::FromEncodedPoint;
-use k256::{AffinePoint as K256AffinePoint, EncodedPoint, FieldBytes, Scalar};
 use mpc_chain_integration_core::utils::stream::chain_event_channel;
 use mpc_chain_integration_core::{ChainIndexer, ChainStream, ChainTelemetry, StateManager};
-use mpc_crypto::{kdf::derive_epsilon_eth, ScalarExt as _};
 use mpc_primitives::{
     BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, IndexedSignRequest,
-    SignArgs, SignId, Signature as MpcSignature, SignatureRespondedEvent, LATEST_MPC_KEY_VERSION,
-    MAX_SECP256K1_SCALAR,
+    SignId,
 };
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Notify};
-use tokio::time::Duration;
+use tokio::time::{sleep, Duration, Instant};
 
 const MAX_LIVE_BLOCK_BUFFER: usize = 16384;
-const CATCHUP_BLOCK_BATCH_SIZE: u64 = 32;
 /// Limit of consecutive `get_block(Finalized)` total failures allowed before `wait_for_finalized_block` gives up.
 const MAX_FINALIZED_FAILURES: u32 = 20;
 
 fn live_blocks_channel() -> (mpsc::Sender<MaybeBlock>, mpsc::Receiver<MaybeBlock>) {
     mpsc::channel(MAX_LIVE_BLOCK_BUFFER)
-}
-
-pub type BlockNumber = u64;
-
-pub struct CatchupIter {
-    client: Arc<EthereumClient>,
-    next_block: BlockNumber,
-    end_block: BlockNumber,
-    buffered_blocks: std::vec::IntoIter<MaybeBlock>,
-}
-
-impl CatchupIter {
-    fn new(client: Arc<EthereumClient>, start_block: BlockNumber, end_block: BlockNumber) -> Self {
-        Self {
-            client,
-            next_block: start_block,
-            end_block,
-            buffered_blocks: Vec::new().into_iter(),
-        }
-    }
-
-    async fn fetch_next_batch(&mut self) {
-        if self.next_block >= self.end_block {
-            return;
-        }
-
-        let batch_end = self
-            .next_block
-            .saturating_add(CATCHUP_BLOCK_BATCH_SIZE)
-            .min(self.end_block);
-        let batch_block_ids = (self.next_block..batch_end)
-            .map(|block_number| BlockId::Number(BlockNumberOrTag::Number(block_number)))
-            .collect::<Vec<_>>();
-
-        self.buffered_blocks = self.client.get_blocks(&batch_block_ids).await.into_iter();
-        self.next_block = batch_end;
-    }
-
-    pub async fn next(&mut self) -> Option<MaybeBlock> {
-        loop {
-            if let Some(block) = self.buffered_blocks.next() {
-                return Some(block);
-            }
-
-            if self.next_block >= self.end_block {
-                return None;
-            }
-
-            self.fetch_next_batch().await;
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-#[allow(clippy::large_enum_variant)]
-pub enum MaybeBlock {
-    Block(Block),
-    Missing(BlockId),
 }
 
 pub struct BlockAndRequests {
@@ -116,237 +53,6 @@ impl BlockAndRequests {
             respond_logs,
             execution_events,
         }
-    }
-}
-
-/// Whether a transaction's calldata represents a contract call.
-fn is_contract_call(input: &Bytes) -> bool {
-    input.len() > 2 && input != &Bytes::from("0x")
-}
-
-fn sign_request_from_filtered_log(log: Log) -> Option<IndexedSignRequest> {
-    let event = parse_event(&log);
-    tracing::debug!("found eth event: {:?}", event);
-    if event.deposit == U256::ZERO {
-        tracing::warn!("deposit is 0, skipping sign request");
-        return None;
-    }
-
-    if event.key_version > LATEST_MPC_KEY_VERSION {
-        tracing::warn!("unsupported key version: {}", event.key_version);
-        return None;
-    }
-
-    // Create sign request from event
-    let Some(payload) = Scalar::from_bytes(event.payload_hash) else {
-        tracing::warn!(
-            "eth `sign` did not produce payload hash correctly: {:?}",
-            event.payload_hash,
-        );
-        return None;
-    };
-
-    if payload > *MAX_SECP256K1_SCALAR {
-        tracing::warn!("payload exceeds secp256k1 curve order: {payload:?}");
-        return None;
-    }
-
-    let epsilon = derive_epsilon_eth(
-        event.key_version,
-        format!("0x{}", event.requester.encode_hex()).as_str(),
-        &event.path,
-    );
-
-    // Use transaction hash as entropy
-    let entropy = log.transaction_hash.unwrap_or_default();
-
-    let sign_id = SignId::new(event.generate_request_id());
-    tracing::info!(?sign_id, "eth signature requested");
-
-    Some(IndexedSignRequest::sign(
-        sign_id,
-        SignArgs {
-            entropy: entropy.into(),
-            epsilon,
-            payload,
-            path: event.path,
-            key_version: event.key_version,
-        },
-        Chain::Ethereum,
-        crate::util::current_unix_timestamp(),
-    ))
-}
-
-// Helper function to parse event logs
-fn parse_event(log: &Log) -> SignatureRequestedEvent {
-    // Parse data fields
-    let data = log.data().data.clone();
-
-    // Parse requester address (20 bytes)
-    let requester = Address::from_slice(&data[12..32]);
-
-    // Parse payload hash (32 bytes)
-    let mut payload_hash = [0u8; 32];
-    payload_hash.copy_from_slice(&data[32..64]);
-
-    let key_version: u32 = U256::from_be_slice(&data[64..96]).to::<u32>();
-
-    let deposit = U256::from_be_slice(&data[96..128]);
-
-    let chain_id = U256::from_be_slice(&data[128..160]);
-
-    let path = parse_string_args(&data, 160);
-
-    let algo = parse_string_args(&data, 192);
-
-    let dest = parse_string_args(&data, 224);
-
-    let params = parse_string_args(&data, 256);
-
-    tracing::info!(
-        "Parsed event: requester={}, payload_hash={}, path={}, deposit={}, chain_id={}, algo={}, dest={}, params={}",
-        requester,
-        hex::encode(payload_hash),
-        path,
-        deposit,
-        chain_id,
-        algo,
-        dest,
-        params
-    );
-
-    SignatureRequestedEvent {
-        requester,
-        payload_hash,
-        path,
-        key_version,
-        deposit,
-        chain_id,
-        algo,
-        dest,
-        params,
-    }
-}
-
-fn parse_string_args(data: &Bytes, offset_start: usize) -> String {
-    let offset: usize = U256::from_be_slice(&data[offset_start..offset_start + 32]).to::<usize>();
-    let length: usize = U256::from_be_slice(&data[offset..offset + 32]).to::<usize>();
-    if length == 0 {
-        return String::new();
-    }
-    let bytes = &data[offset + 32..offset + 32 + length];
-    String::from_utf8(bytes.to_vec()).unwrap_or_default()
-}
-
-fn parse_filtered_logs(logs: Vec<Log>) -> Vec<IndexedSignRequest> {
-    let mut indexed_requests = Vec::new();
-    for log in logs {
-        tracing::debug!("Parsing Ethereum log: {:?}", log);
-        match sign_request_from_filtered_log(log.clone()) {
-            Some(request) => indexed_requests.push(request),
-            None => tracing::warn!("Failed to parse Ethereum log: {:?}", log),
-        }
-    }
-    if indexed_requests.is_empty() {
-        tracing::warn!("No valid Ethereum sign requests found in logs");
-    }
-    indexed_requests
-}
-
-async fn emit_respond_events(logs: &[Log], events_tx: mpsc::Sender<ChainEvent>) {
-    for log in logs {
-        let Some(sign_id) = sign_id_from_signature_responded_log(log) else {
-            continue;
-        };
-
-        let data = &log.data().data;
-        if data.len() < 160 {
-            tracing::warn!(
-                ?sign_id,
-                data_len = data.len(),
-                "signature event data too short to parse full signature: skipping..."
-            );
-            continue;
-        }
-
-        // signature struct encoding layout:
-        // bigR.x at 32..64, bigR.y at 64..96, s at 96..128, recoveryId at 159
-        let big_r_x = &data[32..64];
-        let big_r_y = &data[64..96];
-        let s_bytes: [u8; 32] = data[96..128].try_into().unwrap();
-        let recovery_id = data[159];
-
-        let x_field = FieldBytes::from_slice(big_r_x);
-        let y_field = FieldBytes::from_slice(big_r_y);
-        let encoded_r = EncodedPoint::from_affine_coordinates(x_field, y_field, false);
-        let Some(big_r) = K256AffinePoint::from_encoded_point(&encoded_r).into_option() else {
-            tracing::warn!(?sign_id, "ethereum respond event, invalid big_r point");
-            continue;
-        };
-
-        let Some(s) = Scalar::from_bytes(s_bytes) else {
-            tracing::warn!(?sign_id, "ethereum respond event, invalid s scalar");
-            continue;
-        };
-
-        let signature = MpcSignature::new(big_r, s, recovery_id);
-
-        let respond_event = SignatureRespondedEvent {
-            request_id: sign_id.request_id,
-            signature,
-            chain: Chain::Ethereum,
-        };
-        tracing::info!(?sign_id, "emitting SignatureResponded event");
-        if let Err(err) = events_tx.send(ChainEvent::Respond(respond_event)).await {
-            tracing::error!(?err, "failed to emit Respond event");
-        }
-    }
-}
-
-fn sign_id_from_signature_responded_log(log: &Log) -> Option<SignId> {
-    if log
-        .topic0()
-        .is_none_or(|topic| *topic != ChainSignatures::SignatureResponded::SIGNATURE_HASH)
-    {
-        return None;
-    }
-
-    let request_topic = log.topics().get(1)?;
-    let request_id: [u8; 32] = (*request_topic).into();
-    Some(SignId { request_id })
-}
-
-#[derive(Debug)]
-struct SignatureRequestedEvent {
-    requester: Address,
-    payload_hash: [u8; 32],
-    path: String,
-    key_version: u32,
-    deposit: U256,
-    chain_id: U256,
-    algo: String,
-    dest: String,
-    params: String,
-}
-
-impl SignatureRequestedEvent {
-    fn encode_abi(&self) -> Vec<u8> {
-        let signature_requested_event_encoding = SignatureRequestedEncoding {
-            sender: self.requester,
-            payload: self.payload_hash.into(),
-            path: self.path.clone(),
-            keyVersion: self.key_version,
-            chainId: self.chain_id,
-            algo: self.algo.clone(),
-            dest: self.dest.clone(),
-            params: self.params.clone(),
-        };
-        signature_requested_event_encoding.encode_data()
-    }
-
-    pub fn generate_request_id(&self) -> [u8; 32] {
-        let abi_encoded = self.encode_abi();
-        alloy::primitives::keccak256(abi_encoded).into()
     }
 }
 
@@ -394,6 +100,32 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             catchup_complete: Arc::new(Notify::new()),
             live_blocks_rx: None,
         })
+    }
+
+    /// Construct an `EthereumIndexer` for tests with a pre-built `EthereumClient`
+    /// (so a mockito URL can be injected) and a parsed `contract_address`.
+    ///
+    /// All other fields take sensible test defaults: a fresh `Notify` for
+    /// `catchup_complete` and `None` for `live_blocks_rx`.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        eth: EthConfig,
+        state_manager: S,
+        telemetry: T,
+        client: Arc<EthereumClient>,
+        events_tx: mpsc::Sender<ChainEvent>,
+        contract_address: Address,
+    ) -> Self {
+        Self {
+            eth,
+            state_manager,
+            telemetry,
+            client,
+            events_tx,
+            contract_address,
+            catchup_complete: Arc::new(Notify::new()),
+            live_blocks_rx: None,
+        }
     }
 
     async fn index_live_blocks(
@@ -877,6 +609,13 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
         let mut last_final_block_number: Option<BlockNumber> = None;
         let mut consecutive_failures = 0u32;
 
+        // Warn if the finalized block number has not advanced for this long
+        let stall_warn_secs = Chain::Ethereum.expected_finality_time_secs();
+        // Re-warn on this heartbeat interval if the finalized block number has not advanced
+        const STALL_REWARN_SECS: u64 = 300;
+        let mut last_advanced_at = Instant::now();
+        let mut last_stall_warn_at = Instant::now();
+
         loop {
             let Some(finalized_block) = self
                 .client
@@ -896,7 +635,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                     block_number,
                     "finalized ethereum block not found (failure {consecutive_failures}/{MAX_FINALIZED_FAILURES}); retrying"
                 );
-                tokio::time::sleep(retry_interval).await;
+                sleep(retry_interval).await;
                 continue;
             };
 
@@ -905,6 +644,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
             let prev_final_block_number = last_final_block_number.replace(new_final_block_number);
 
             if prev_final_block_number.is_none_or(|n| new_final_block_number > n) {
+                last_advanced_at = Instant::now();
                 tracing::debug!(
                     new_final_block_number,
                     prev_final_block_number,
@@ -922,6 +662,23 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 }
 
                 if new_final_block_number == prev_final_block_number {
+                    // Warn if the finalized block number has not advanced for `stall_warn_secs`
+                    let now = Instant::now();
+                    let secs_since_advance = now.duration_since(last_advanced_at).as_secs();
+                    if secs_since_advance >= stall_warn_secs
+                        && now.duration_since(last_stall_warn_at).as_secs() >= STALL_REWARN_SECS
+                    {
+                        tracing::warn!(
+                            block_number,
+                            new_final_block_number,
+                            secs_since_advance,
+                            stall_warn_secs,
+                            "finalized ethereum head has not advanced; \
+                             block will not be emitted until finality catches up. \
+                             If this persists the stream watchdog will restart the pipeline"
+                        );
+                        last_stall_warn_at = now;
+                    }
                     tracing::debug!(new_final_block_number, "no new finalized block");
                 }
             }
@@ -932,7 +689,7 @@ impl<S: StateManager, T: ChainTelemetry> EthereumIndexer<S, T> {
                 return Ok(());
             };
 
-            tokio::time::sleep(retry_interval).await;
+            sleep(retry_interval).await;
         }
     }
 }
@@ -948,7 +705,7 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             if let Some(block_number) = self.client.get_latest_block_number().await {
                 break block_number.saturating_add(1);
             };
-            tokio::time::sleep(Self::RETRY_DELAY).await;
+            sleep(Self::RETRY_DELAY).await;
         };
 
         let (live_blocks_tx, live_blocks_rx) = live_blocks_channel();
@@ -969,6 +726,9 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
     }
 
     async fn catchup_range(&self, anchor_height: u64) -> Self::Iter {
+        #[cfg(feature = "bench")]
+        crate::bench::rpc_reset();
+
         // TODO: start from genesis block of contract deployment instead of
         // anchor_height so that we can start from the very beginning of
         // the history of the network in case where we do not have a checkpoint.
@@ -1007,11 +767,19 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
                     ?block_id,
                     "ethereum catchup block missing from batch; refetching"
                 );
+
+                #[cfg(feature = "bench")]
+                let start = std::time::Instant::now();
+
                 let Some(block) = self.client.get_block(*block_id).await else {
                     anyhow::bail!(
                         "ethereum catchup block {block_id:?} is still unavailable after refetch"
                     )
                 };
+
+                #[cfg(feature = "bench")]
+                crate::bench::add_refetch_time(start.elapsed());
+
                 _block = block;
                 &_block
             }
@@ -1022,7 +790,20 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
             tracing::info!(height, "processed ethereum catchup block attempt");
         }
 
-        self.process_block(block).await
+        #[cfg(feature = "bench")]
+        let start_process = std::time::Instant::now();
+
+        self.process_block(block).await?;
+
+        #[cfg(feature = "bench")]
+        {
+            crate::bench::add_process_time(start_process.elapsed());
+            if crate::bench::inc_block() % 100 == 0 {
+                crate::bench::report_metrics("catchup_progress");
+            }
+        }
+
+        Ok(())
     }
 
     async fn process(&mut self, block: &Self::Block) -> anyhow::Result<()> {
@@ -1043,6 +824,9 @@ impl<S: StateManager, T: ChainTelemetry> ChainIndexer for EthereumIndexer<S, T> 
     }
 
     async fn notify_catchup_completed(&mut self) -> anyhow::Result<()> {
+        #[cfg(feature = "bench")]
+        crate::bench::report_metrics("catchup_completed");
+
         self.events_tx
             .send(ChainEvent::CatchupCompleted)
             .await
@@ -1091,49 +875,22 @@ impl<S: StateManager, T: ChainTelemetry> ChainStream for EthereumStream<S, T> {
 }
 #[cfg(test)]
 mod tests {
-    use super::{CatchupIter, EthConfig, EthereumClient, EthereumIndexer, MaybeBlock};
-    #[cfg(feature = "helios")]
-    use crate::indexer_eth::indexer_eth_helios;
+    use crate::client::MaybeBlock;
     use crate::test_utils;
     use alloy::eips::BlockNumberOrTag;
-    use alloy::primitives::{address, b256, Address};
+    use alloy::primitives::{address, b256};
     use alloy::rpc::types::BlockId;
     use mockito::{Matcher, Server};
-    use mpc_chain_integration_core::{ChainIndexer, MockStateManager, NoopChainTelemetry};
+    use mpc_chain_integration_core::ChainIndexer;
     use mpc_primitives::{
         BidirectionalTx, BidirectionalTxId, Chain, ChainEvent, ExecutionOutcome, SignId,
         LATEST_MPC_KEY_VERSION,
     };
     use serde_json::json;
-    use std::sync::Arc;
-    use tokio::sync::{mpsc, Notify};
-
-    fn missing_block_response(request_id: u64) -> serde_json::Value {
-        json!({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": null
-        })
-    }
-
-    #[test]
-    fn catchup_start_is_clamped_to_supported_window() {
-        let max_catchup_blocks = 8191;
-        let anchor_height = 10_000;
-        let catchup_end = anchor_height - 1;
-        let expected_oldest = catchup_end - max_catchup_blocks;
-
-        assert_eq!(
-            EthereumClient::clamp_oldest_supported_with(1, anchor_height, max_catchup_blocks),
-            expected_oldest,
-        );
-    }
 
     #[tokio::test]
     async fn missing_catchup_block_is_refetched() {
         let mut server = Server::new_async().await;
-        let state_manager = MockStateManager::new();
-        let (events_tx, mut events_rx) = mpsc::channel(1);
 
         server
             .mock("POST", "/")
@@ -1155,30 +912,13 @@ mod tests {
             })))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(missing_block_response(2).to_string())
+            .with_body(test_utils::missing_block_response(2).to_string())
             .create_async()
             .await;
 
-        let mut indexer = EthereumIndexer {
-            eth: EthConfig {
-                account_sk: String::new(),
-                consensus_rpc_http_url: server.url(),
-                execution_rpc_http_url: server.url(),
-                contract_address: format!("{:x}", Address::ZERO),
-                network: "sepolia".to_string(),
-                helios_data_path: "/tmp/helios-test".to_string(),
-                refresh_finalized_interval: 100,
-                optimistic_requests: true,
-                light_client: false,
-            },
-            state_manager,
-            telemetry: NoopChainTelemetry,
-            client: Arc::new(test_utils::create_test_ethereum_client(&server.url()).await),
-            events_tx,
-            contract_address: Address::ZERO,
-            catchup_complete: Arc::new(Notify::new()),
-            live_blocks_rx: None,
-        };
+        let (mut indexer, mut events_rx) = test_utils::TestIndexerBuilder::new(server.url())
+            .build_with_rx()
+            .await;
 
         indexer
             .process_catchup(&MaybeBlock::Missing(BlockId::Number(
@@ -1195,28 +935,12 @@ mod tests {
 
     #[tokio::test]
     async fn missing_catchup_block_returns_error_when_refetch_fails() {
-        let state_manager = MockStateManager::new();
-        let (events_tx, mut events_rx) = mpsc::channel(1);
-        let mut indexer = EthereumIndexer {
-            eth: EthConfig {
-                account_sk: String::new(),
-                consensus_rpc_http_url: String::new(),
-                execution_rpc_http_url: String::new(),
-                contract_address: format!("{:x}", Address::ZERO),
-                network: "sepolia".to_string(),
-                helios_data_path: "/tmp/helios-test".to_string(),
-                refresh_finalized_interval: 100,
-                optimistic_requests: true,
-                light_client: false,
-            },
-            state_manager,
-            telemetry: NoopChainTelemetry,
-            client: Arc::new(test_utils::create_test_ethereum_client("http://127.0.0.1:1").await),
-            events_tx,
-            contract_address: Address::ZERO,
-            catchup_complete: Arc::new(Notify::new()),
-            live_blocks_rx: None,
-        };
+        let (mut indexer, mut events_rx) =
+            test_utils::TestIndexerBuilder::new("http://127.0.0.1:1")
+                .client_url("http://127.0.0.1:1")
+                .rpc_urls("", "")
+                .build_with_rx()
+                .await;
 
         let err = indexer
             .process_catchup(&MaybeBlock::Missing(BlockId::Number(
@@ -1232,7 +956,6 @@ mod tests {
     #[tokio::test]
     async fn wait_for_finalized_block_fails_after_budget_exhaustion() {
         let mut server = Server::new_async().await;
-        let (events_tx, _events_rx) = mpsc::channel(1);
 
         // Mock eth_getBlockByNumber(finalized) to always return null (simulating repeated 429/failure)
         // Should be called MAX_FINALIZED_FAILURES times
@@ -1244,31 +967,16 @@ mod tests {
             })))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(missing_block_response(1).to_string())
+            .with_body(test_utils::missing_block_response(1).to_string())
             .expect(super::MAX_FINALIZED_FAILURES as usize)
             .create_async()
             .await;
 
-        let indexer = EthereumIndexer {
-            eth: EthConfig {
-                account_sk: String::new(),
-                consensus_rpc_http_url: server.url(),
-                execution_rpc_http_url: server.url(),
-                contract_address: format!("{:x}", Address::ZERO),
-                network: "sepolia".to_string(),
-                helios_data_path: "/tmp/helios-test".to_string(),
-                refresh_finalized_interval: 1, // fast retry for test
-                optimistic_requests: false,
-                light_client: false,
-            },
-            state_manager: MockStateManager::new(),
-            telemetry: NoopChainTelemetry,
-            client: Arc::new(test_utils::create_test_ethereum_client(&server.url()).await),
-            events_tx,
-            contract_address: Address::ZERO,
-            catchup_complete: Arc::new(Notify::new()),
-            live_blocks_rx: None,
-        };
+        let indexer = test_utils::TestIndexerBuilder::new(server.url())
+            .optimistic_requests(false)
+            .refresh_finalized_interval(1)
+            .build()
+            .await;
 
         let err = indexer
             .wait_for_finalized_block(100)
@@ -1276,205 +984,6 @@ mod tests {
             .expect_err("should fail after budget exhaustion");
 
         assert!(err.to_string().contains("failed 20 times consecutively"));
-    }
-
-    #[tokio::test]
-    async fn ethereum_client_get_blocks_preserves_request_order() {
-        let mut server = Server::new_async().await;
-
-        server
-            .mock("POST", "/")
-            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
-            .expect(1)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                json!([
-                    test_utils::block_response(3, 9),
-                    test_utils::block_response(1, 7),
-                    missing_block_response(2),
-                ])
-                .to_string(),
-            )
-            .create_async()
-            .await;
-
-        let client = test_utils::create_test_ethereum_client(&server.url()).await;
-        let block_ids = vec![
-            BlockId::Number(BlockNumberOrTag::Number(7)),
-            BlockId::Number(BlockNumberOrTag::Number(8)),
-            BlockId::Number(BlockNumberOrTag::Number(9)),
-        ];
-
-        let blocks = client.get_blocks(&block_ids).await;
-
-        assert_eq!(blocks.len(), 3);
-        assert!(matches!(&blocks[0], MaybeBlock::Block(block) if block.header.number == 7));
-        assert!(matches!(
-            &blocks[1],
-            MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(8)))
-        ));
-        assert!(matches!(&blocks[2], MaybeBlock::Block(block) if block.header.number == 9));
-    }
-
-    #[tokio::test]
-    async fn ethereum_client_get_blocks_retries_and_keeps_positions() {
-        let mut server = Server::new_async().await;
-
-        server
-            .mock("POST", "/")
-            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
-            .expect(1)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(json!({ "jsonrpc": "2.0", "result": "invalid-shape" }).to_string())
-            .create_async()
-            .await;
-
-        server
-            .mock("POST", "/")
-            .match_body(Matcher::Regex("eth_getBlockByNumber".to_string()))
-            .expect(1)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(
-                json!([
-                    test_utils::block_response(4, 20),
-                    missing_block_response(5),
-                    test_utils::block_response(6, 22),
-                ])
-                .to_string(),
-            )
-            .create_async()
-            .await;
-
-        let client = test_utils::create_test_ethereum_client(&server.url()).await;
-        let block_ids = vec![
-            BlockId::Number(BlockNumberOrTag::Number(20)),
-            BlockId::Number(BlockNumberOrTag::Number(21)),
-            BlockId::Number(BlockNumberOrTag::Number(22)),
-        ];
-
-        let blocks = client.get_blocks(&block_ids).await;
-
-        assert_eq!(blocks.len(), 3);
-        assert!(matches!(&blocks[0], MaybeBlock::Block(block) if block.header.number == 20));
-        assert!(matches!(
-            &blocks[1],
-            MaybeBlock::Missing(BlockId::Number(BlockNumberOrTag::Number(21)))
-        ));
-        assert!(matches!(&blocks[2], MaybeBlock::Block(block) if block.header.number == 22));
-    }
-
-    #[tokio::test]
-    async fn catchup_iter_fetches_batches_lazily() {
-        let mut server = Server::new_async().await;
-
-        let first_batch = (10..42)
-            .enumerate()
-            .map(|(index, block_number)| test_utils::block_response(index as u64 + 1, block_number))
-            .collect::<Vec<_>>();
-        let second_batch = vec![test_utils::block_response(33, 42)];
-
-        let second_batch_mock = server
-            .mock("POST", "/")
-            .match_body(Matcher::Regex(r#"\"0x2a\""#.to_string()))
-            .expect(1)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(json!(second_batch).to_string())
-            .create_async()
-            .await;
-
-        let first_batch_mock = server
-            .mock("POST", "/")
-            .match_body(Matcher::Regex(r#"\"0xa\""#.to_string()))
-            .expect(1)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(json!(first_batch).to_string())
-            .create_async()
-            .await;
-
-        let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
-        let mut iter = CatchupIter::new(client, 10, 43);
-
-        for expected_number in 10..42 {
-            let next = iter.next().await;
-            assert!(matches!(
-                next,
-                Some(MaybeBlock::Block(block)) if block.header.number == expected_number
-            ));
-        }
-
-        assert!(first_batch_mock.matched_async().await);
-        assert!(!second_batch_mock.matched_async().await);
-
-        let next = iter.next().await;
-        assert!(matches!(next, Some(MaybeBlock::Block(block)) if block.header.number == 42));
-        assert!(second_batch_mock.matched_async().await);
-        assert!(iter.next().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn catchup_iter_splits_requests_into_32_32_1_batches() {
-        let mut server = Server::new_async().await;
-
-        let first_batch = (0..32)
-            .enumerate()
-            .map(|(idx, block_number)| test_utils::block_response(idx as u64 + 1, block_number))
-            .collect::<Vec<_>>();
-        let second_batch = (32..64)
-            .enumerate()
-            .map(|(idx, block_number)| test_utils::block_response((idx + 33) as u64, block_number))
-            .collect::<Vec<_>>();
-        let third_batch = vec![test_utils::block_response(65, 64)];
-
-        let first_batch_mock = server
-            .mock("POST", "/")
-            .match_body(Matcher::Regex(r#"\"id\":32"#.to_string()))
-            .expect(1)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(json!(first_batch).to_string())
-            .create_async()
-            .await;
-
-        let second_batch_mock = server
-            .mock("POST", "/")
-            .match_body(Matcher::Regex(r#"\"id\":64"#.to_string()))
-            .expect(1)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(json!(second_batch).to_string())
-            .create_async()
-            .await;
-
-        let third_batch_mock = server
-            .mock("POST", "/")
-            .match_body(Matcher::Regex(r#"\"id\":65"#.to_string()))
-            .expect(1)
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(json!(third_batch).to_string())
-            .create_async()
-            .await;
-
-        let client = Arc::new(test_utils::create_test_ethereum_client(&server.url()).await);
-        let mut iter = CatchupIter::new(client, 0, 65);
-
-        for expected_number in 0..65 {
-            let next = iter.next().await;
-            assert!(matches!(
-                next,
-                Some(MaybeBlock::Block(block)) if block.header.number == expected_number
-            ));
-        }
-
-        assert!(iter.next().await.is_none());
-        assert!(first_batch_mock.matched_async().await);
-        assert!(second_batch_mock.matched_async().await);
-        assert!(third_batch_mock.matched_async().await);
     }
 
     #[tokio::test]
@@ -1564,7 +1073,6 @@ mod tests {
             .create_async()
             .await;
 
-        let state_manager = MockStateManager::new();
         let sign_id = SignId::new([0x55; 32]);
         let tx = BidirectionalTx {
             id: BidirectionalTxId(tx_hash.0),
@@ -1585,31 +1093,13 @@ mod tests {
             from_address: **from_address,
             nonce: 0,
         };
-        state_manager
+
+        let builder = test_utils::TestIndexerBuilder::new(server.url());
+        builder
+            .state_manager
             .watch_execution(Chain::Ethereum, sign_id, tx)
             .await;
-
-        let (events_tx, _events_rx) = mpsc::channel(1);
-        let indexer = EthereumIndexer {
-            eth: EthConfig {
-                account_sk: String::new(),
-                consensus_rpc_http_url: server.url(),
-                execution_rpc_http_url: server.url(),
-                contract_address: format!("{:x}", Address::ZERO),
-                network: "sepolia".to_string(),
-                helios_data_path: "/tmp/helios-test".to_string(),
-                refresh_finalized_interval: 100,
-                optimistic_requests: true,
-                light_client: false,
-            },
-            state_manager,
-            telemetry: NoopChainTelemetry,
-            client: Arc::new(test_utils::create_test_ethereum_client(&server.url()).await),
-            events_tx,
-            contract_address: Address::ZERO,
-            catchup_complete: Arc::new(Notify::new()),
-            live_blocks_rx: None,
-        };
+        let indexer = builder.build().await;
 
         let events = indexer
             .collect_execution_confirmations(5, Vec::new())
@@ -1633,16 +1123,5 @@ mod tests {
             }
             other => panic!("expected ExecutionConfirmed, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn is_contract_call_detects_calldata() {
-        use super::is_contract_call;
-        use alloy::primitives::Bytes;
-        assert!(!is_contract_call(&Bytes::new()));
-        assert!(!is_contract_call(&Bytes::from(vec![0u8; 2])));
-        assert!(is_contract_call(&Bytes::from(vec![
-            0xa9, 0x05, 0x9c, 0xbb, 0x00
-        ])));
     }
 }
