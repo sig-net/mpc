@@ -182,3 +182,17 @@ pub fn block_response(request_id: u64, number: u64) -> serde_json::Value {
         }
     })
 }
+
+/// Build a deserialized `Block` for a given block `number`, suitable for
+/// feeding directly into `process_catchup` / `process` as `MaybeBlock::Block`.
+/// The hash is `0x{number:064x}` and the timestamp is `0x1`.
+pub fn block(number: u64) -> crate::client::MaybeBlock {
+    use crate::client::MaybeBlock;
+    let value = block_response(1, number)
+        .get("result")
+        .expect("block_response has a result envelope")
+        .clone();
+    let block: alloy::rpc::types::Block =
+        serde_json::from_value(value).expect("block fixture should deserialize");
+    MaybeBlock::Block(block)
+}
