@@ -81,9 +81,14 @@ impl CatchupIter {
         #[cfg(feature = "bench")]
         let start = std::time::Instant::now();
 
-        let blocks = self.client.get_blocks(&batch_block_ids).await;
-        let receipts = self.client.get_block_receipts_batch(&batch_block_ids).await;
+        // Fetch blocks and receipts in parallel
+        let (blocks, receipts) = tokio::join!(
+            self.client.get_blocks(&batch_block_ids),
+            self.client.get_block_receipts_batch(&batch_block_ids)
+        );
 
+        // If receipts fetch fails, treat all blocks as missing receipts.
+        // Consistent with the behavior of get_blocks, which returns MaybeBlock::Missing for all blocks if the batch fails.
         let items: Vec<CatchupItem> = if let Ok(receipts) = receipts {
             blocks
                 .into_iter()
