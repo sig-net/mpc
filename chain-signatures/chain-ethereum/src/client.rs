@@ -1,6 +1,6 @@
 use alloy::eips::BlockNumberOrTag;
 use alloy::primitives::Address;
-use alloy::rpc::types::{Block, BlockId};
+use alloy::rpc::types::{Block, BlockId, TransactionReceipt};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,6 +23,24 @@ pub type BlockNumber = u64;
 pub enum MaybeBlock {
     Block(Block),
     Missing(BlockId),
+}
+
+/// Catchup item yielded by [`CatchupIter`] and consumed by `process_catchup`.
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
+pub enum CatchupItem {
+    /// A block fetched as part of a catchup batch, plus receipts. 
+    /// `receipts` is `Vec::new()` for blocks with no transactions.
+    BatchBlock {
+        block: Block,
+        receipts: Vec<TransactionReceipt>,
+    },
+    /// A block that was missing from the catchup batch response.
+    /// `process_catchup` refetches both block and receipts individually.
+    Missing(BlockId),
+    /// A block from the live stream. Receipts are fetched lazily in
+    /// `process`.
+    LiveBlock(Block),
 }
 
 /// Lazy batching iterator over `[start_block, end_block)` range.
@@ -247,6 +265,35 @@ impl EthereumClient {
                     }
                     EthereumClientInner::DirectRpc(client) => {
                         client.get_block_receipts(block_id).await
+                    }
+                }
+            }
+        )
+    }
+
+    /// Fetch receipts for multiple blocks in a single JSON-RPC batch POST.
+    /// 
+    /// Returns one `Option<Vec<TransactionReceipt>>` per input `block_id`,
+    /// in the same order as `block_ids`
+    /// 
+    /// On permanent failure the whole batch fails (consistent with
+    /// `get_blocks`). The retry wrapper retries the entire batch.
+    pub async fn get_block_receipts_batch(
+        &self,
+        block_ids: &[BlockId],
+    ) -> anyhow::Result<Vec<Option<Vec<alloy::rpc::types::TransactionReceipt>>>> {
+        retry_rpc!(
+            ETH_RPC_BATCH_TIMEOUT,
+            self.retry_strategy,
+            "get_block_receipts_batch",
+            {
+                match &self.inner {
+                    #[cfg(feature = "helios")]
+                    EthereumClientInner::Helios(client) => {
+                        client.get_block_receipts_batch(block_ids).await
+                    }
+                    EthereumClientInner::DirectRpc(client) => {
+                        client.get_block_receipts_batch(block_ids).await
                     }
                 }
             }

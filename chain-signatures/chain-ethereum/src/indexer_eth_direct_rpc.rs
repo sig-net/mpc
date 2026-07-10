@@ -158,6 +158,86 @@ impl RpcEthereumClient {
         self.block_receipts(block_id).await
     }
 
+    /// Fetch receipts for multiple blocks in batch.
+    /// Order-preserving: result `i` corresponds to `block_ids[i]`, regardless
+    /// of response ordering (uses response `id` mapping, mirroring `get_blocks`).
+    /// A `null` result maps to `None` (block has no transactions).
+    pub async fn get_block_receipts_batch(
+        &self,
+        block_ids: &[BlockId],
+    ) -> anyhow::Result<Vec<Option<Vec<TransactionReceipt>>>> {
+        if block_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        #[cfg(feature = "bench")]
+        bench::rpc_inc_n("eth_getBlockReceipts(batch)", block_ids.len() as u64);
+
+        let requests = block_ids
+            .iter()
+            .map(|block_id| {
+                let request_id = self.next_id();
+                (
+                    request_id,
+                    *block_id,
+                    json!({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "method": "eth_getBlockReceipts",
+                        "params": [to_hex_block_id(*block_id)],
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let request_ids = requests
+            .iter()
+            .map(|(request_id, block_id, _)| (*request_id, *block_id))
+            .collect::<Vec<_>>();
+        let payload = requests
+            .into_iter()
+            .map(|(_, _, request)| request)
+            .collect::<Vec<_>>();
+
+        let response = self.http.post(&self.url).json(&payload).send().await?;
+        let value: serde_json::Value = response.json().await?;
+        let items = if let serde_json::Value::Array(items) = value {
+            items
+        } else {
+            anyhow::bail!("batch rpc response was not an array: {value}");
+        };
+
+        #[derive(serde::Deserialize)]
+        struct BatchResponse<T> {
+            id: u64,
+            result: Option<Vec<T>>,
+            error: Option<serde_json::Value>,
+        }
+
+        let requested_ids = request_ids
+            .iter()
+            .copied()
+            .collect::<HashMap<_, _>>();
+        let mut receipts_by_id: HashMap<u64, Option<Vec<TransactionReceipt>>> =
+            HashMap::with_capacity(request_ids.len());
+        for item in items {
+            let response: BatchResponse<TransactionReceipt> = serde_json::from_value(item)?;
+            if let Some(error) = response.error {
+                anyhow::bail!("batch rpc call failed for id {}: {error}", response.id);
+            }
+            if !requested_ids.contains_key(&response.id) {
+                anyhow::bail!("batch rpc response contained unknown id {}", response.id);
+            }
+            receipts_by_id.insert(response.id, response.result);
+        }
+
+        let receipts = request_ids
+            .into_iter()
+            .map(|(request_id, _)| receipts_by_id.remove(&request_id).flatten())
+            .collect();
+        Ok(receipts)
+    }
+
     pub async fn get_nonce(&self, address: Address, block_id: BlockId) -> anyhow::Result<u64> {
         #[cfg(feature = "bench")]
         bench::rpc_inc("eth_getTransactionCount");
